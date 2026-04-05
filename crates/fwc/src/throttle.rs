@@ -1640,7 +1640,7 @@ mod tests {
     #[test]
     fn decision_display_wait_shows_countdown() {
         let d = ThrottleDecision::WaitForReset {
-            wait_ms: 120000,
+            wait_ms: 120_000,
             pool: "api".to_string(),
             countdown: "2m".to_string(),
         };
@@ -2419,7 +2419,7 @@ mod tests {
             pool_costs: vec![],
             fits_in_quota: false,
             resets_needed: 3,
-            estimated_duration_ms: 180000,
+            estimated_duration_ms: 180_000,
         };
         let cloned = est.clone();
         assert_eq!(cloned.resets_needed, 3);

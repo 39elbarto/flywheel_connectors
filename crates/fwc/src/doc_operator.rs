@@ -1271,7 +1271,7 @@ mod tests {
     fn format_playbook_toon_contains_commands() {
         let pb = &get_operator_playbooks()[0];
         let out = format_playbook_toon(pb);
-        assert!(out.contains("$"));
+        assert!(out.contains('$'));
     }
 
     #[test]

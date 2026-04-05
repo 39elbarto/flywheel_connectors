@@ -552,7 +552,7 @@ mod tests {
         let c = ConnectorHealth::healthy("github");
         assert_eq!(c.connector_id, "github");
         assert_eq!(c.state, ConnectorState::Healthy);
-        assert_eq!(c.error_rate, 0.0);
+        assert!(c.error_rate.abs() < f64::EPSILON);
         assert!(c.uptime > 0);
     }
 
@@ -567,7 +567,7 @@ mod tests {
     fn failed_constructor_defaults() {
         let c = ConnectorHealth::failed("pagerduty");
         assert_eq!(c.state, ConnectorState::Failed);
-        assert_eq!(c.error_rate, 1.0);
+        assert!((c.error_rate - 1.0).abs() < f64::EPSILON);
         assert_eq!(c.uptime, 0);
     }
 

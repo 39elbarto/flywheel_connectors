@@ -4910,7 +4910,7 @@ mod tests {
         let avail = &payload["availability"];
         assert_eq!(avail["availability"], "unavailable");
         assert!(avail["recoverable"].as_bool().unwrap());
-        assert!(avail["next_actions"].as_array().unwrap().len() > 0);
+        assert!(!avail["next_actions"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -4962,7 +4962,7 @@ mod tests {
             CommandAvailability::Unknown,
         ];
         for variant in &all {
-            let env = CommandEnvelope::new(variant.clone(), "test-cmd");
+            let env = CommandEnvelope::new(*variant, "test-cmd");
             let json = serde_json::to_value(&env).unwrap();
             // Every envelope must have these fields
             assert!(
@@ -7581,9 +7581,7 @@ mod tests {
         assert_eq!(json_count, 0);
     }
 
-    #[test]
-    fn discovery_normalization_supports_legacy_manifest_shapes() {
-        let raw = r#"
+    const LEGACY_DISCOVERY_MANIFEST: &str = r#"
 [manifest]
 format = "fcp-connector-manifest"
 schema_version = "2.1"
@@ -7656,8 +7654,10 @@ max_per_minute = 60
 burst = 5
 "#;
 
-        let normalized =
-            normalize_manifest_for_discovery(raw).expect("normalization should succeed");
+    #[test]
+    fn discovery_normalization_supports_legacy_manifest_shapes() {
+        let normalized = normalize_manifest_for_discovery(LEGACY_DISCOVERY_MANIFEST)
+            .expect("normalization should succeed");
         let normalized = normalized.expect("legacy manifest should need normalization");
 
         let archetypes = normalized
@@ -8267,8 +8267,7 @@ output_schema = { type = "object" }
         for avail in &non_authoritative {
             assert!(
                 !avail.is_authoritative(),
-                "{:?} should not be authoritative",
-                avail
+                "{avail:?} should not be authoritative"
             );
         }
         assert!(CommandAvailability::LiveRuntime.is_authoritative());
@@ -8339,11 +8338,10 @@ output_schema = { type = "object" }
             CommandAvailability::Unknown,
         ];
         for avail in &degraded {
-            let envelope = CommandEnvelope::new(avail.clone(), "test-cmd");
+            let envelope = CommandEnvelope::new(*avail, "test-cmd");
             assert!(
                 !envelope.next_actions.is_empty(),
-                "{:?} should suggest remediation actions",
-                avail
+                "{avail:?} should suggest remediation actions",
             );
         }
     }
@@ -8482,8 +8480,7 @@ output_schema = { type = "object" }
         for variant in &variants {
             assert!(
                 !variant.explanation().is_empty(),
-                "{:?} has empty explanation",
-                variant
+                "{variant:?} has empty explanation",
             );
         }
     }
@@ -8939,7 +8936,10 @@ output_schema = { type = "object" }
 
     #[test]
     fn compact_label_all_seven_variants_are_distinct() {
-        let labels: Vec<&str> = ALL_AVAILABILITY.iter().map(|a| a.compact_label()).collect();
+        let labels: Vec<&str> = ALL_AVAILABILITY
+            .iter()
+            .map(CommandAvailability::compact_label)
+            .collect();
         let unique: std::collections::HashSet<&str> = labels.iter().copied().collect();
         assert_eq!(labels.len(), unique.len(), "Duplicate compact labels");
     }
@@ -8966,9 +8966,7 @@ output_schema = { type = "object" }
                 let label = avail.compact_label();
                 assert!(
                     label.contains('['),
-                    "{:?} is recoverable but compact_label '{}' has no bracket action",
-                    avail,
-                    label,
+                    "{avail:?} is recoverable but compact_label '{label}' has no bracket action",
                 );
             }
         }
@@ -9018,9 +9016,7 @@ output_schema = { type = "object" }
             let text = avail.help_text("my-test-cmd");
             assert!(
                 text.contains("my-test-cmd"),
-                "{:?} help_text does not embed command name: {}",
-                avail,
-                text,
+                "{avail:?} help_text does not embed command name: {text}",
             );
         }
     }
@@ -9029,7 +9025,7 @@ output_schema = { type = "object" }
     fn help_text_all_variants_non_empty() {
         for avail in &ALL_AVAILABILITY {
             let text = avail.help_text("cmd");
-            assert!(!text.is_empty(), "{:?} has empty help_text", avail);
+            assert!(!text.is_empty(), "{avail:?} has empty help_text");
         }
     }
 
@@ -9086,7 +9082,10 @@ output_schema = { type = "object" }
 
     #[test]
     fn cli_symbol_all_seven_variants_are_distinct() {
-        let symbols: Vec<&str> = ALL_AVAILABILITY.iter().map(|a| a.cli_symbol()).collect();
+        let symbols: Vec<&str> = ALL_AVAILABILITY
+            .iter()
+            .map(CommandAvailability::cli_symbol)
+            .collect();
         let unique: std::collections::HashSet<&str> = symbols.iter().copied().collect();
         assert_eq!(symbols.len(), unique.len(), "Duplicate CLI symbols");
     }
@@ -9097,9 +9096,7 @@ output_schema = { type = "object" }
             let sym = avail.cli_symbol();
             assert!(
                 sym.starts_with('[') && sym.ends_with(']'),
-                "{:?} has unbracketed symbol: {}",
-                avail,
-                sym
+                "{avail:?} has unbracketed symbol: {sym}"
             );
         }
     }
@@ -9128,7 +9125,10 @@ output_schema = { type = "object" }
 
     #[test]
     fn severity_rank_all_variants_are_distinct() {
-        let ranks: Vec<u8> = ALL_AVAILABILITY.iter().map(|a| a.severity_rank()).collect();
+        let ranks: Vec<u8> = ALL_AVAILABILITY
+            .iter()
+            .map(CommandAvailability::severity_rank)
+            .collect();
         let unique: std::collections::HashSet<u8> = ranks.iter().copied().collect();
         assert_eq!(ranks.len(), unique.len(), "Duplicate severity ranks");
     }
@@ -9183,15 +9183,10 @@ output_schema = { type = "object" }
     #[test]
     fn envelope_display_all_variants() {
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "test-cmd");
+            let env = CommandEnvelope::new(*avail, "test-cmd");
             let display = format!("{env}");
-            assert!(display.contains("test-cmd"), "{:?}: {}", avail, display);
-            assert!(
-                display.contains(avail.cli_symbol()),
-                "{:?}: {}",
-                avail,
-                display
-            );
+            assert!(display.contains("test-cmd"), "{avail:?}: {display}");
+            assert!(display.contains(avail.cli_symbol()), "{avail:?}: {display}");
         }
     }
 
@@ -9209,8 +9204,8 @@ output_schema = { type = "object" }
     #[test]
     fn envelope_compact_line_all_variants_non_empty() {
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "cmd");
-            assert!(!env.compact_line().is_empty(), "{:?}", avail);
+            let env = CommandEnvelope::new(*avail, "cmd");
+            assert!(!env.compact_line().is_empty(), "{avail:?}");
         }
     }
 
@@ -9240,15 +9235,13 @@ output_schema = { type = "object" }
             "symbol",
         ];
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "test-cmd");
+            let env = CommandEnvelope::new(*avail, "test-cmd");
             let entry = env.transcript_entry();
             let obj = entry.as_object().unwrap();
             for key in &required_keys {
                 assert!(
                     obj.contains_key(*key),
-                    "{:?} transcript missing key: {}",
-                    avail,
-                    key
+                    "{avail:?} transcript missing key: {key}"
                 );
             }
         }
@@ -9264,7 +9257,7 @@ output_schema = { type = "object" }
     #[test]
     fn transcript_entry_state_matches_tag() {
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            let env = CommandEnvelope::new(*avail, "cmd");
             let entry = env.transcript_entry();
             assert_eq!(entry["state"].as_str().unwrap(), avail.tag());
         }
@@ -9273,7 +9266,7 @@ output_schema = { type = "object" }
     #[test]
     fn transcript_entry_exit_code_matches_availability() {
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            let env = CommandEnvelope::new(*avail, "cmd");
             let entry = env.transcript_entry();
             assert_eq!(
                 entry["exit_code"].as_u64().unwrap(),
@@ -9285,27 +9278,27 @@ output_schema = { type = "object" }
     #[test]
     fn transcript_entry_authoritative_only_for_live() {
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            let env = CommandEnvelope::new(*avail, "cmd");
             let entry = env.transcript_entry();
             let auth = entry["authoritative"].as_bool().unwrap();
-            assert_eq!(auth, avail.is_authoritative(), "{:?}", avail);
+            assert_eq!(auth, avail.is_authoritative(), "{avail:?}");
         }
     }
 
     #[test]
     fn transcript_entry_recoverable_matches_availability() {
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            let env = CommandEnvelope::new(*avail, "cmd");
             let entry = env.transcript_entry();
             let rec = entry["recoverable"].as_bool().unwrap();
-            assert_eq!(rec, avail.is_recoverable(), "{:?}", avail);
+            assert_eq!(rec, avail.is_recoverable(), "{avail:?}");
         }
     }
 
     #[test]
     fn transcript_entry_severity_rank_matches() {
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            let env = CommandEnvelope::new(*avail, "cmd");
             let entry = env.transcript_entry();
             assert_eq!(
                 entry["severity_rank"].as_u64().unwrap(),
@@ -9317,7 +9310,7 @@ output_schema = { type = "object" }
     #[test]
     fn transcript_entry_compact_label_matches() {
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            let env = CommandEnvelope::new(*avail, "cmd");
             let entry = env.transcript_entry();
             assert_eq!(entry["compact"].as_str().unwrap(), avail.compact_label());
         }
@@ -9326,7 +9319,7 @@ output_schema = { type = "object" }
     #[test]
     fn transcript_entry_symbol_matches() {
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            let env = CommandEnvelope::new(*avail, "cmd");
             let entry = env.transcript_entry();
             assert_eq!(entry["symbol"].as_str().unwrap(), avail.cli_symbol());
         }
@@ -9335,9 +9328,9 @@ output_schema = { type = "object" }
     #[test]
     fn transcript_entry_next_actions_is_array() {
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            let env = CommandEnvelope::new(*avail, "cmd");
             let entry = env.transcript_entry();
-            assert!(entry["next_actions"].is_array(), "{:?}", avail);
+            assert!(entry["next_actions"].is_array(), "{avail:?}");
         }
     }
 
@@ -9353,7 +9346,7 @@ output_schema = { type = "object" }
     #[test]
     fn envelope_help_banner_matches_availability_help_text() {
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "test-cmd");
+            let env = CommandEnvelope::new(*avail, "test-cmd");
             assert_eq!(env.help_banner(), avail.help_text("test-cmd"));
         }
     }
@@ -9369,7 +9362,7 @@ output_schema = { type = "object" }
     #[test]
     fn envelope_exit_code_matches_availability() {
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "cmd");
+            let env = CommandEnvelope::new(*avail, "cmd");
             assert_eq!(env.exit_code(), avail.exit_code_u8());
         }
     }
@@ -9395,11 +9388,7 @@ output_schema = { type = "object" }
         for (i, a) in tuples.iter().enumerate() {
             for (j, b) in tuples.iter().enumerate() {
                 if i != j {
-                    assert_ne!(
-                        a, b,
-                        "Variants {} and {} have identical output tuples",
-                        i, j
-                    );
+                    assert_ne!(a, b, "Variants {i} and {j} have identical output tuples");
                 }
             }
         }
@@ -9416,15 +9405,13 @@ output_schema = { type = "object" }
             "next_actions",
         ];
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "test");
+            let env = CommandEnvelope::new(*avail, "test");
             let json = serde_json::to_value(&env).unwrap();
             let obj = json.as_object().unwrap();
             for key in &required_keys {
                 assert!(
                     obj.contains_key(*key),
-                    "{:?} envelope JSON missing key: {}",
-                    avail,
-                    key
+                    "{avail:?} envelope JSON missing key: {key}"
                 );
             }
         }
@@ -9435,7 +9422,7 @@ output_schema = { type = "object" }
         // Verify that inject_into produces data that can be deserialized
         // back into a CommandEnvelope-like structure.
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "round-trip");
+            let env = CommandEnvelope::new(*avail, "round-trip");
             let mut payload = json!({"data": "test"});
             env.inject_into(&mut payload);
 
@@ -9493,14 +9480,14 @@ output_schema = { type = "object" }
     #[test]
     fn snapshot_transcript_entries_are_valid_json_for_all_variants() {
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "test");
+            let env = CommandEnvelope::new(*avail, "test");
             let entry = env.transcript_entry();
             // Must be a valid JSON object (not null, not array)
-            assert!(entry.is_object(), "{:?} transcript is not an object", avail);
+            assert!(entry.is_object(), "{avail:?} transcript is not an object");
             // Must round-trip through serialization
             let serialized = serde_json::to_string(&entry).unwrap();
             let parsed: Value = serde_json::from_str(&serialized).unwrap();
-            assert_eq!(entry, parsed, "{:?} transcript round-trip failed", avail);
+            assert_eq!(entry, parsed, "{avail:?} transcript round-trip failed");
         }
     }
 
@@ -9512,9 +9499,7 @@ output_schema = { type = "object" }
             let first_char = label.chars().next().unwrap();
             assert!(
                 first_char.is_uppercase(),
-                "{:?} compact_label '{}' doesn't start uppercase",
-                avail,
-                label,
+                "{avail:?} compact_label '{label}' doesn't start uppercase",
             );
         }
     }
@@ -9561,13 +9546,13 @@ output_schema = { type = "object" }
             "planned-only",
         ];
         for (mode, tag) in ALL_TRUTH_MODES.iter().zip(expected.iter()) {
-            assert_eq!(mode.tag(), *tag, "{:?}", mode);
+            assert_eq!(mode.tag(), *tag, "{mode:?}");
         }
     }
 
     #[test]
     fn truth_mode_tags_are_all_unique() {
-        let tags: Vec<&str> = ALL_TRUTH_MODES.iter().map(|m| m.tag()).collect();
+        let tags: Vec<&str> = ALL_TRUTH_MODES.iter().map(CommandTruthMode::tag).collect();
         let unique: std::collections::HashSet<&str> = tags.iter().copied().collect();
         assert_eq!(tags.len(), unique.len());
     }
@@ -9575,13 +9560,16 @@ output_schema = { type = "object" }
     #[test]
     fn truth_mode_descriptions_are_all_non_empty() {
         for mode in &ALL_TRUTH_MODES {
-            assert!(!mode.description().is_empty(), "{:?}", mode);
+            assert!(!mode.description().is_empty(), "{mode:?}");
         }
     }
 
     #[test]
     fn truth_mode_descriptions_are_all_unique() {
-        let descs: Vec<&str> = ALL_TRUTH_MODES.iter().map(|m| m.description()).collect();
+        let descs: Vec<&str> = ALL_TRUTH_MODES
+            .iter()
+            .map(CommandTruthMode::description)
+            .collect();
         let unique: std::collections::HashSet<&str> = descs.iter().copied().collect();
         assert_eq!(descs.len(), unique.len());
     }
@@ -9600,7 +9588,7 @@ output_schema = { type = "object" }
         for mode in &ALL_TRUTH_MODES {
             let json = serde_json::to_string(mode).unwrap();
             let back: CommandTruthMode = serde_json::from_str(&json).unwrap();
-            assert_eq!(*mode, back, "round-trip failed for {:?}", mode);
+            assert_eq!(*mode, back, "round-trip failed for {mode:?}");
         }
     }
 
@@ -9834,7 +9822,7 @@ output_schema = { type = "object" }
     #[test]
     fn family_entry_debug_shows_name_and_mode() {
         let entry = classify_command("invoke").unwrap();
-        let dbg = format!("{:?}", entry);
+        let dbg = format!("{entry:?}");
         assert!(dbg.contains("invoke"));
         assert!(dbg.contains("LiveOnly"));
     }
@@ -9916,8 +9904,7 @@ output_schema = { type = "object" }
         for mode in &modes {
             assert!(
                 !mode.description().is_empty(),
-                "{:?} has empty description",
-                mode
+                "{mode:?} has empty description"
             );
         }
     }
@@ -10786,8 +10773,7 @@ output_schema = { type = "object" }
         for cmd in &expected {
             assert!(
                 classify_command(cmd).is_some(),
-                "Command '{}' is not in COMMAND_FAMILY_CLASSIFICATION",
-                cmd
+                "Command '{cmd}' is not in COMMAND_FAMILY_CLASSIFICATION"
             );
         }
     }
@@ -10807,8 +10793,7 @@ output_schema = { type = "object" }
         let overlap: Vec<&&str> = live.intersection(&offline).collect();
         assert!(
             overlap.is_empty(),
-            "Commands classified as both live-only and offline-only: {:?}",
-            overlap,
+            "Commands classified as both live-only and offline-only: {overlap:?}",
         );
     }
 
@@ -10834,9 +10819,10 @@ output_schema = { type = "object" }
         let cmd = "list";
         let lines: Vec<String> = ALL_AVAILABILITY
             .iter()
-            .map(|a| CommandEnvelope::new(a.clone(), cmd).compact_line())
+            .map(|a| CommandEnvelope::new(*a, cmd).compact_line())
             .collect();
-        let unique: std::collections::HashSet<&str> = lines.iter().map(|s| s.as_str()).collect();
+        let unique: std::collections::HashSet<&str> =
+            lines.iter().map(std::string::String::as_str).collect();
         assert_eq!(
             lines.len(),
             unique.len(),
@@ -10848,7 +10834,8 @@ output_schema = { type = "object" }
     fn output_semantics_help_texts_are_distinct_per_state() {
         let cmd = "show";
         let texts: Vec<String> = ALL_AVAILABILITY.iter().map(|a| a.help_text(cmd)).collect();
-        let unique: std::collections::HashSet<&str> = texts.iter().map(|s| s.as_str()).collect();
+        let unique: std::collections::HashSet<&str> =
+            texts.iter().map(std::string::String::as_str).collect();
         assert_eq!(
             texts.len(),
             unique.len(),
@@ -10861,7 +10848,7 @@ output_schema = { type = "object" }
         let cmd = "ops";
         let mut states = Vec::new();
         for avail in &ALL_AVAILABILITY {
-            let envelope = CommandEnvelope::new(avail.clone(), cmd);
+            let envelope = CommandEnvelope::new(*avail, cmd);
             let mut payload = serde_json::json!({"data": 1});
             envelope.inject_into(&mut payload);
             let state = payload["availability"]["availability"]
@@ -10870,7 +10857,8 @@ output_schema = { type = "object" }
                 .to_owned();
             states.push(state);
         }
-        let unique: std::collections::HashSet<&str> = states.iter().map(|s| s.as_str()).collect();
+        let unique: std::collections::HashSet<&str> =
+            states.iter().map(std::string::String::as_str).collect();
         assert_eq!(
             states.len(),
             unique.len(),
@@ -10960,7 +10948,7 @@ output_schema = { type = "object" }
             "unknown",
         ];
         for (avail, tag) in ALL_AVAILABILITY.iter().zip(expected_tags.iter()) {
-            assert_eq!(avail.tag(), *tag, "{:?} tag should be '{}'", avail, tag,);
+            assert_eq!(avail.tag(), *tag, "{avail:?} tag should be '{tag}'");
         }
     }
 
@@ -11003,8 +10991,7 @@ output_schema = { type = "object" }
             let actions = avail.next_actions("test-cmd");
             assert!(
                 !actions.is_empty(),
-                "{:?} should have non-empty next_actions",
-                avail,
+                "{avail:?} should have non-empty next_actions"
             );
         }
     }
@@ -11054,8 +11041,7 @@ output_schema = { type = "object" }
             MetadataProvenance::InferredFromPolicy,
             MetadataProvenance::Unattributed,
         ];
-        let authoritative: Vec<_> = all.iter().filter(|p| p.is_authoritative()).collect();
-        assert_eq!(authoritative.len(), 2);
+        assert_eq!(all.iter().filter(|p| p.is_authoritative()).count(), 2);
         assert!(MetadataProvenance::ObservedByHost.is_authoritative());
         assert!(MetadataProvenance::MeasuredAtRuntime.is_authoritative());
     }
@@ -11077,9 +11063,9 @@ output_schema = { type = "object" }
             (MetadataProvenance::Unattributed, "unattributed"),
         ];
         for (prov, expected) in &all {
-            assert_eq!(prov.tag(), *expected, "Tag mismatch for {:?}", prov);
+            assert_eq!(prov.tag(), *expected, "Tag mismatch for {prov:?}");
             let json = serde_json::to_string(prov).unwrap();
-            assert_eq!(json, format!("\"{}\"", expected));
+            assert_eq!(json, format!("\"{expected}\""));
         }
     }
 
@@ -11170,8 +11156,7 @@ output_schema = { type = "object" }
         let label = CommandAvailability::OfflineArtifact.compact_label();
         assert!(
             label.to_uppercase().contains("OFFLINE"),
-            "OfflineArtifact label '{}' must explicitly say OFFLINE",
-            label,
+            "OfflineArtifact label '{label}' must explicitly say OFFLINE",
         );
     }
 
@@ -11181,8 +11166,7 @@ output_schema = { type = "object" }
         let lower = help.to_lowercase();
         assert!(
             lower.contains("offline") || lower.contains("artifact") || lower.contains("local"),
-            "OfflineArtifact help_text should mention offline/artifact/local: {}",
-            help,
+            "OfflineArtifact help_text should mention offline/artifact/local: {help}",
         );
     }
 
@@ -11191,8 +11175,7 @@ output_schema = { type = "object" }
         let label = CommandAvailability::LiveRuntime.compact_label();
         assert!(
             !label.to_uppercase().contains("OFFLINE"),
-            "LiveRuntime should not mention OFFLINE: {}",
-            label,
+            "LiveRuntime should not mention OFFLINE: {label}",
         );
     }
 
@@ -11334,8 +11317,7 @@ output_schema = { type = "object" }
         for name in &must_exist {
             assert!(
                 classify_command(name).is_some(),
-                "Major command '{}' is not in COMMAND_FAMILY_CLASSIFICATION",
-                name,
+                "Major command '{name}' is not in COMMAND_FAMILY_CLASSIFICATION",
             );
         }
     }
@@ -11347,9 +11329,8 @@ output_schema = { type = "object" }
             let json = serde_json::to_string(mode).unwrap();
             assert_eq!(
                 json,
-                format!("\"{}\"", tag),
-                "Serde vs tag mismatch for {:?}",
-                mode
+                format!("\"{tag}\""),
+                "Serde vs tag mismatch for {mode:?}",
             );
         }
     }
@@ -11360,20 +11341,18 @@ output_schema = { type = "object" }
     fn invariant_envelope_json_never_contains_raw_credentials() {
         // Transcript entries must be safe to log.
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "invoke --token SECRET");
+            let env = CommandEnvelope::new(*avail, "invoke --token SECRET");
             let entry = env.transcript_entry();
             let text = serde_json::to_string(&entry).unwrap();
             // The command field should be present but transcript
             // shouldn't introduce any credential-like fields.
             assert!(
                 !text.contains("password"),
-                "Transcript for {:?} contains 'password'",
-                avail,
+                "Transcript for {avail:?} contains 'password'",
             );
             assert!(
                 !text.contains("secret_key"),
-                "Transcript for {:?} contains 'secret_key'",
-                avail,
+                "Transcript for {avail:?} contains 'secret_key'",
             );
         }
     }
@@ -11383,14 +11362,12 @@ output_schema = { type = "object" }
         // All transcript entries must have the same top-level keys.
         let required_keys = ["type", "state", "exit_code", "authoritative", "recoverable"];
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "test");
+            let env = CommandEnvelope::new(*avail, "test");
             let entry = env.transcript_entry();
             for key in &required_keys {
                 assert!(
                     entry.get(key).is_some(),
-                    "Transcript for {:?} missing required key '{}'",
-                    avail,
-                    key,
+                    "Transcript for {avail:?} missing required key '{key}'",
                 );
             }
         }
@@ -11399,13 +11376,11 @@ output_schema = { type = "object" }
     #[test]
     fn invariant_envelope_compact_line_is_single_line() {
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "test");
+            let env = CommandEnvelope::new(*avail, "test");
             let line = env.compact_line();
             assert!(
                 !line.contains('\n'),
-                "compact_line for {:?} should be single-line: {}",
-                avail,
-                line,
+                "compact_line for {avail:?} should be single-line: {line}",
             );
         }
     }
@@ -11413,13 +11388,11 @@ output_schema = { type = "object" }
     #[test]
     fn invariant_envelope_display_is_single_line() {
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "test");
+            let env = CommandEnvelope::new(*avail, "test");
             let display = format!("{env}");
             assert!(
                 !display.contains('\n'),
-                "Display for {:?} should be single-line: {}",
-                avail,
-                display,
+                "Display for {avail:?} should be single-line: {display}",
             );
         }
     }
@@ -11480,7 +11453,7 @@ output_schema = { type = "object" }
 
     #[test]
     fn golden_metadata_field_status_tags() {
-        let json = serde_json::to_value(&MetadataField::Known("v")).unwrap();
+        let json = serde_json::to_value(MetadataField::Known("v")).unwrap();
         assert_eq!(json["status"], "known");
         let json = serde_json::to_value(&MetadataField::<()>::Unknown).unwrap();
         assert_eq!(json["status"], "unknown");
@@ -11547,7 +11520,7 @@ output_schema = { type = "object" }
     #[test]
     fn invariant_envelope_exit_code_matches_availability() {
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "test");
+            let env = CommandEnvelope::new(*avail, "test");
             assert_eq!(env.exit_code(), avail.exit_code_u8());
         }
     }
@@ -11555,11 +11528,10 @@ output_schema = { type = "object" }
     #[test]
     fn invariant_envelope_help_banner_is_non_empty_for_all_variants() {
         for avail in &ALL_AVAILABILITY {
-            let env = CommandEnvelope::new(avail.clone(), "test");
+            let env = CommandEnvelope::new(*avail, "test");
             assert!(
                 !env.help_banner().is_empty(),
-                "help_banner for {:?} should not be empty",
-                avail,
+                "help_banner for {avail:?} should not be empty",
             );
         }
     }

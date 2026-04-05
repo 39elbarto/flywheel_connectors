@@ -1368,7 +1368,7 @@ mod tests {
         };
         let json_str = event.format_json();
         let back: ConnectorEvent = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(back.data.as_f64().unwrap(), 42.5);
+        assert!((back.data.as_f64().unwrap() - 42.5).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1398,7 +1398,7 @@ mod tests {
         };
         let json_str = event.format_json();
         let back: ConnectorEvent = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(back.data.as_bool().unwrap(), true);
+        assert!(back.data.as_bool().unwrap());
     }
 
     #[test]
@@ -1872,7 +1872,7 @@ mod tests {
         let cloned = config.clone();
         assert_eq!(config.connectors.len(), 2);
         assert_eq!(cloned.connectors.len(), 2);
-        assert_eq!(cloned.all, true);
+        assert!(cloned.all);
         assert_eq!(cloned.since_seconds, Some(600));
         assert_eq!(cloned.event_type.as_deref(), Some("health-check"));
         assert_eq!(cloned.cursor.as_deref(), Some("evt-42"));
@@ -2043,7 +2043,7 @@ mod tests {
 
     #[test]
     fn stream_status_inequality_all_pairs() {
-        let variants = vec![
+        let variants = [
             StreamStatus::Active,
             StreamStatus::Waiting,
             StreamStatus::Error,

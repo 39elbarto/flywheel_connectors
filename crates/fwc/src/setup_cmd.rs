@@ -1436,7 +1436,7 @@ mod tests {
 
     #[test]
     fn component_ord_is_consistent() {
-        let mut v = vec![
+        let mut v = [
             SetupComponent::Mesh,
             SetupComponent::Host,
             SetupComponent::Context,

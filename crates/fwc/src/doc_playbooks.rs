@@ -1643,7 +1643,7 @@ mod tests {
     fn builtin_playbooks_unique_ids() {
         let pbs = get_builtin_playbooks();
         let mut ids: Vec<&str> = pbs.iter().map(|p| p.id.as_str()).collect();
-        ids.sort();
+        ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), pbs.len(), "duplicate playbook IDs found");
     }

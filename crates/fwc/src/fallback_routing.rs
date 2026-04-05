@@ -1142,7 +1142,7 @@ mod tests {
         reg.record_success("conn-c");
 
         let mut open = reg.open_circuits();
-        open.sort();
+        open.sort_unstable();
         assert_eq!(open, vec!["conn-a", "conn-b"]);
     }
 
@@ -1329,7 +1329,7 @@ mod tests {
         };
         let c2 = c.clone();
         assert_eq!(c2.connector_id, "conn-x");
-        assert_eq!(c2.score, 0.5);
+        assert!((c2.score - 0.5).abs() < f64::EPSILON);
         assert!(!c2.circuit_healthy);
     }
 
@@ -1889,7 +1889,7 @@ mod tests {
         match &decision {
             FallbackDecision::AutoFallback { fallback, .. } => {
                 assert_eq!(fallback.connector_id, "conn-e");
-                assert_eq!(fallback.score, 0.8);
+                assert!((fallback.score - 0.8).abs() < f64::EPSILON);
             }
             other => panic!("Expected AutoFallback, got {other:?}"),
         }

@@ -1060,7 +1060,7 @@ mod tests {
     #[test]
     fn pool_status_clone_is_equal() {
         let s = PoolStatus::Warning;
-        let cloned = s.clone();
+        let cloned = s;
         assert_eq!(s, cloned);
     }
 

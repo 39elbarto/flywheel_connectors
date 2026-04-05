@@ -2022,7 +2022,7 @@ mod tests {
     fn library_with_builtins_not_empty() {
         let lib = RecipeLibrary::with_builtins();
         assert!(!lib.is_empty());
-        assert!(lib.len() > 0);
+        assert!(!lib.is_empty());
     }
 
     // ── Built-in recipe deep inspections ────────────────────────

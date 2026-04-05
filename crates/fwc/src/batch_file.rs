@@ -2162,7 +2162,7 @@ mod tests {
         assert_eq!(plan.connectors.len(), 3);
 
         // Simulate results
-        let results = vec![
+        let results = [
             OpResult {
                 id: "fetch".to_owned(),
                 operation: "github.list_issues".to_owned(),
@@ -2649,7 +2649,7 @@ mod tests {
 
     #[test]
     fn partial_failure_first_wave_fails() {
-        let results = vec![
+        let results = [
             OpResult {
                 id: "a".to_owned(),
                 operation: "g.list".to_owned(),
@@ -2681,7 +2681,7 @@ mod tests {
 
     #[test]
     fn partial_failure_mixed_across_waves() {
-        let results = vec![
+        let results = [
             OpResult {
                 id: "w0a".to_owned(),
                 operation: "g.o".to_owned(),
@@ -2821,7 +2821,7 @@ mod tests {
 
     #[test]
     fn toon_format_results_all_success() {
-        let results = vec![
+        let results = [
             OpResult {
                 id: "a".to_owned(),
                 operation: "g.list".to_owned(),
@@ -3140,7 +3140,7 @@ mod tests {
 
     #[test]
     fn partial_failure_all_four_statuses_present() {
-        let results = vec![
+        let results = [
             OpResult {
                 id: "r1".to_owned(),
                 operation: "g.o".to_owned(),

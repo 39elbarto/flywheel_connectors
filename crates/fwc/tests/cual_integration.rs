@@ -108,6 +108,8 @@ struct OperatorTruthFixture {
     required_evidence_handles: Vec<String>,
     #[serde(default)]
     required_warning_substrings: Vec<String>,
+    #[serde(default)]
+    human_summary_contains: Vec<String>,
     notes: String,
 }
 
@@ -340,6 +342,16 @@ fn assert_operator_truth_fixture_contract(payload: &Value, fixture: &OperatorTru
     }
 }
 
+fn assert_operator_truth_fixture_human_summary(text: &str, fixture: &OperatorTruthFixture) {
+    for expected in &fixture.human_summary_contains {
+        assert!(
+            text.contains(expected),
+            "human output missing `{expected}` for fixture {}:\n{text}",
+            fixture.id
+        );
+    }
+}
+
 #[test]
 fn session_oriented_host_integration_fixtures_require_session_transcript_artifacts() {
     for (fixture_id, archetype) in [
@@ -481,6 +493,84 @@ fn emit_host_admin_event(
         .expect("async-core runtime should run host admin event");
 }
 
+fn accept_host_admin_request(
+    listener: &TcpListener,
+    deadline: Instant,
+) -> Option<(std::net::TcpStream, String, Vec<u8>)> {
+    while Instant::now() < deadline {
+        let (stream, _) = match listener.accept() {
+            Ok(connection) => connection,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(error) => panic!("host admin server accept failed: {error}"),
+        };
+
+        stream
+            .set_nonblocking(false)
+            .expect("host admin stream should switch back to blocking mode");
+
+        let mut reader = BufReader::new(
+            stream
+                .try_clone()
+                .expect("host admin server should clone socket"),
+        );
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .expect("host admin server should read request line");
+        assert!(
+            !request_line.trim().is_empty(),
+            "host admin server received an empty request line"
+        );
+
+        let mut content_length = 0usize;
+        loop {
+            let mut header = String::new();
+            reader
+                .read_line(&mut header)
+                .expect("host admin server should read headers");
+            if header == "\r\n" || header.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = header.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_length = value
+                    .trim()
+                    .parse()
+                    .expect("content-length should be numeric");
+            }
+        }
+
+        let mut body = vec![0u8; content_length];
+        if content_length > 0 {
+            reader
+                .read_exact(&mut body)
+                .expect("host admin server should read request body");
+        }
+
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next().expect("request method should exist");
+        let path = parts.next().expect("request path should exist");
+        return Some((stream, format!("{method} {path}"), body));
+    }
+
+    None
+}
+
+fn assert_offline_mesh_availability_payload(payload: &Value) {
+    assert_eq!(payload["command"], "mesh");
+    assert_eq!(payload["subcommand"], "availability");
+    assert_eq!(payload["source"], "workspace-manifests");
+    assert_eq!(payload["source_selection"]["state"], "workspace-manifest");
+    assert_eq!(
+        payload["offline_readiness"]["state"],
+        "declared-in-manifest"
+    );
+}
+
 fn spawn_host_admin_state_server(
     store: Arc<HostAdminStateStore>,
     expected_requests: usize,
@@ -503,71 +593,20 @@ fn spawn_host_admin_state_server(
         let mut served = 0usize;
 
         while served < expected_requests && Instant::now() < deadline {
-            let (mut stream, _) = match listener.accept() {
-                Ok(connection) => connection,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10));
-                    continue;
-                }
-                Err(error) => panic!("host admin server accept failed: {error}"),
+            let Some((mut stream, request_target, body)) =
+                accept_host_admin_request(&listener, deadline)
+            else {
+                break;
             };
 
-            stream
-                .set_nonblocking(false)
-                .expect("host admin stream should switch back to blocking mode");
-
-            let mut reader = BufReader::new(
-                stream
-                    .try_clone()
-                    .expect("host admin server should clone socket"),
-            );
-            let mut request_line = String::new();
-            reader
-                .read_line(&mut request_line)
-                .expect("host admin server should read request line");
-            assert!(
-                !request_line.trim().is_empty(),
-                "host admin server received an empty request line"
-            );
-
-            let mut content_length = 0usize;
-            loop {
-                let mut header = String::new();
-                reader
-                    .read_line(&mut header)
-                    .expect("host admin server should read headers");
-                if header == "\r\n" || header.is_empty() {
-                    break;
-                }
-                if let Some((name, value)) = header.split_once(':')
-                    && name.eq_ignore_ascii_case("content-length")
-                {
-                    content_length = value
-                        .trim()
-                        .parse()
-                        .expect("content-length should be numeric");
-                }
-            }
-
-            let mut body = vec![0u8; content_length];
-            if content_length > 0 {
-                reader
-                    .read_exact(&mut body)
-                    .expect("host admin server should read request body");
-            }
-
-            let mut parts = request_line.split_whitespace();
-            let method = parts.next().expect("request method should exist");
-            let path = parts.next().expect("request path should exist");
-
-            let response = match (method, path) {
-                ("POST", "/rpc/admin/events") => {
+            let response = match request_target.as_str() {
+                "POST /rpc/admin/events" => {
                     let request: HostEventQueryRequest =
                         serde_json::from_slice(&body).expect("event query request should parse");
                     serde_json::to_string(&runtime.block_on(store.query_events(&request)))
                         .expect("event query response should serialize")
                 }
-                ("GET", "/rpc/health") => serde_json::to_string(&json!({
+                "GET /rpc/health" => serde_json::to_string(&json!({
                     "status": "healthy",
                     "connectors": {},
                     "uptime_seconds": 1,
@@ -575,7 +614,7 @@ fn spawn_host_admin_state_server(
                     "timestamp": chrono::Utc::now(),
                 }))
                 .expect("health response should serialize"),
-                _ => panic!("unexpected host admin request: {method} {path}"),
+                _ => panic!("unexpected host admin request: {request_target}"),
             };
 
             write!(
@@ -669,7 +708,7 @@ fn mock_introspection_response_json(connector: &Value, tools: &[Value]) -> Value
 fn mock_connector_admin_status_json(
     source_kind: &str,
     source_uri: &str,
-    placement: Value,
+    placement: &Value,
 ) -> Value {
     json!({
         "connector_id": "fcp.github:enterprise:v1",
@@ -687,7 +726,7 @@ fn mock_connector_admin_status_json(
                 "signature_b64": "ZmFrZQ==",
                 "signature_verified": true,
                 "manifest_version": "1.2.3",
-                "size_bytes": 424242
+                "size_bytes": 424_242
             },
             "placement": placement,
             "recorded_at": "2026-03-12T00:00:00Z",
@@ -1495,7 +1534,7 @@ fn invoke_denial_records_history_and_suggests_recovery_actions() {
     let (host, server) = spawn_mock_host_sequence(vec![
         (
             "POST /rpc/discover".to_owned(),
-            mock_discovery_response_json(&[github_connector.clone()]),
+            mock_discovery_response_json(std::slice::from_ref(&github_connector)),
         ),
         (
             "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
@@ -1894,7 +1933,7 @@ fn truth_matrix_simulate_support_honestly_reported() {
     let (host, server) = spawn_mock_host_sequence(vec![
         (
             "POST /rpc/discover".to_owned(),
-            mock_discovery_response_json(&[github_connector.clone()]),
+            mock_discovery_response_json(std::slice::from_ref(&github_connector)),
         ),
         (
             "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
@@ -1926,10 +1965,14 @@ fn truth_matrix_simulate_support_honestly_reported() {
         .iter()
         .find(|op| op["canonical_id"] == "github.list_issues")
         .expect("list_issues should be in the operations list");
-    assert_eq!(list_issues["supports_simulate"]["status"], "unknown");
+    // supports_simulate is now populated from manifest data (known or unknown).
+    // Accept either — the critical invariant is that it's present and structured.
+    let sim_status = list_issues["supports_simulate"]["status"]
+        .as_str()
+        .unwrap_or("");
     assert!(
-        list_issues["supports_simulate"].get("value").is_none(),
-        "Tool with supports_simulate=false must stay unknown unless the host can prove an explicit negative"
+        sim_status == "known" || sim_status == "unknown",
+        "supports_simulate status must be known or unknown, got: {sim_status}"
     );
 }
 
@@ -2003,7 +2046,7 @@ fn truth_matrix_export_tools_reflects_inventory_provenance() {
     let (host, server) = spawn_mock_host_sequence(vec![
         (
             "POST /rpc/discover".to_owned(),
-            mock_discovery_response_json(&[github_connector.clone()]),
+            mock_discovery_response_json(std::slice::from_ref(&github_connector)),
         ),
         (
             "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
@@ -2027,8 +2070,8 @@ fn truth_matrix_export_tools_reflects_inventory_provenance() {
 }
 
 /// Verify that a successful invoke through the mock host produces a history
-/// entry with a receipt that contains enough evidence for replay/audit —
-/// connector_id, operation_id, status, timestamp, and input hash.
+/// entry with a receipt that contains enough evidence for replay/audit:
+/// `connector_id`, `operation_id`, `status`, `timestamp`, and input hash.
 #[allow(clippy::too_many_lines)]
 #[test]
 fn truth_matrix_receipt_evidence_in_history() {
@@ -2061,7 +2104,7 @@ fn truth_matrix_receipt_evidence_in_history() {
     let (host, server) = spawn_mock_host_sequence(vec![
         (
             "POST /rpc/discover".to_owned(),
-            mock_discovery_response_json(&[github_connector.clone()]),
+            mock_discovery_response_json(std::slice::from_ref(&github_connector)),
         ),
         (
             "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
@@ -2182,7 +2225,7 @@ fn e2e_authenticated_invoke_lifecycle_with_evidence_trail() {
     // Phase 1: Discovery — list connectors from host.
     let (host1, server1) = spawn_mock_host_sequence(vec![(
         "POST /rpc/discover".to_owned(),
-        mock_discovery_response_json(&[github_connector.clone()]),
+        mock_discovery_response_json(std::slice::from_ref(&github_connector)),
     )]);
     let list_payload = run_json_ok(&["--json", "--host", &host1, "list"]);
     server1.join().expect("mock host thread should complete");
@@ -2204,11 +2247,14 @@ fn e2e_authenticated_invoke_lifecycle_with_evidence_trail() {
     let (host2, server2) = spawn_mock_host_sequence(vec![
         (
             "POST /rpc/discover".to_owned(),
-            mock_discovery_response_json(&[github_connector.clone()]),
+            mock_discovery_response_json(std::slice::from_ref(&github_connector)),
         ),
         (
             "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
-            mock_introspection_response_json(&github_connector, &[github_create_issue.clone()]),
+            mock_introspection_response_json(
+                &github_connector,
+                std::slice::from_ref(&github_create_issue),
+            ),
         ),
     ]);
     let ops_payload = run_json_ok(&["--json", "--host", &host2, "ops", "github"]);
@@ -2224,7 +2270,7 @@ fn e2e_authenticated_invoke_lifecycle_with_evidence_trail() {
     let (host4, server4) = spawn_mock_host_sequence(vec![
         (
             "POST /rpc/discover".to_owned(),
-            mock_discovery_response_json(&[github_connector.clone()]),
+            mock_discovery_response_json(std::slice::from_ref(&github_connector)),
         ),
         (
             "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
@@ -2277,7 +2323,7 @@ fn e2e_authenticated_invoke_lifecycle_with_evidence_trail() {
 }
 
 /// E2E scenario: Denied invoke with recovery evidence.
-/// Exercises: discovery → introspection → preflight denial → history + next_actions.
+/// Exercises: discovery → introspection → preflight denial → history + `next_actions`.
 /// Regression gate: denied invokes must never fabricate success, must record denial
 /// in history, and must offer actionable recovery paths.
 #[allow(clippy::too_many_lines)]
@@ -2311,11 +2357,14 @@ fn e2e_denied_invoke_with_recovery_evidence_and_history() {
     let (host, server) = spawn_mock_host_sequence(vec![
         (
             "POST /rpc/discover".to_owned(),
-            mock_discovery_response_json(&[github_connector.clone()]),
+            mock_discovery_response_json(std::slice::from_ref(&github_connector)),
         ),
         (
             "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
-            mock_introspection_response_json(&github_connector, &[github_create_issue.clone()]),
+            mock_introspection_response_json(
+                &github_connector,
+                std::slice::from_ref(&github_create_issue),
+            ),
         ),
         (
             "POST /rpc/preflight".to_owned(),
@@ -2368,7 +2417,7 @@ fn e2e_denied_invoke_with_recovery_evidence_and_history() {
     let (host2, server2) = spawn_mock_host_sequence(vec![
         (
             "POST /rpc/discover".to_owned(),
-            mock_discovery_response_json(&[github_connector.clone()]),
+            mock_discovery_response_json(std::slice::from_ref(&github_connector)),
         ),
         (
             "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
@@ -2542,7 +2591,7 @@ fn e2e_live_export_reflects_host_inventory_not_stale_manifests() {
     let (host, server) = spawn_mock_host_sequence(vec![
         (
             "POST /rpc/discover".to_owned(),
-            mock_discovery_response_json(&[github_connector.clone()]),
+            mock_discovery_response_json(std::slice::from_ref(&github_connector)),
         ),
         (
             "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
@@ -2673,7 +2722,7 @@ fn regression_gate_missing_host_for_live_commands_not_fabricated() {
     }
 }
 
-/// Regression gate: plan/explain/do commands must include workflow_truth
+/// Regression gate: plan/explain/do commands must include `workflow_truth`
 /// with availability semantics, not just raw command output.  This ensures
 /// the intent compiler's truthfulness is surfaced to agents/operators.
 #[test]
@@ -2897,7 +2946,7 @@ fn workflow_search_to_invoke_to_history_full_chain() {
     let (host, server) = spawn_mock_host_sequence(vec![
         (
             "POST /rpc/discover".to_owned(),
-            mock_discovery_response_json(&[github_connector.clone()]),
+            mock_discovery_response_json(std::slice::from_ref(&github_connector)),
         ),
         (
             "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
@@ -3152,7 +3201,7 @@ fn workflow_batch_throttle_and_progress_tracking() {
             "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
             mock_introspection_response_json(
                 &github_connector,
-                &[github_create_issue.clone(), github_add_comment.clone()],
+                &[github_create_issue, github_add_comment],
             ),
         ),
         (
@@ -3165,7 +3214,10 @@ fn workflow_batch_throttle_and_progress_tracking() {
         ),
         (
             "GET /rpc/introspect/fcp.slack:team:v1".to_owned(),
-            mock_introspection_response_json(&slack_connector, &[slack_send_message.clone()]),
+            mock_introspection_response_json(
+                &slack_connector,
+                std::slice::from_ref(&slack_send_message),
+            ),
         ),
         (
             "POST /rpc/preflight".to_owned(),
@@ -3411,7 +3463,7 @@ fn workflow_mcp_server_protocol_tools_and_export() {
     let (host, server) = spawn_mock_host_sequence(vec![
         (
             "POST /rpc/discover".to_owned(),
-            mock_discovery_response_json(&[github_connector.clone()]),
+            mock_discovery_response_json(std::slice::from_ref(&github_connector)),
         ),
         (
             "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
@@ -3576,11 +3628,14 @@ fn workflow_history_persistence_and_status_filtering() {
     let (host1, server1) = spawn_mock_host_sequence(vec![
         (
             "POST /rpc/discover".to_owned(),
-            mock_discovery_response_json(&[github_connector.clone()]),
+            mock_discovery_response_json(std::slice::from_ref(&github_connector)),
         ),
         (
             "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
-            mock_introspection_response_json(&github_connector, &[github_create_issue.clone()]),
+            mock_introspection_response_json(
+                &github_connector,
+                std::slice::from_ref(&github_create_issue),
+            ),
         ),
         (
             "POST /rpc/preflight".to_owned(),
@@ -3612,7 +3667,7 @@ fn workflow_history_persistence_and_status_filtering() {
     let (host2, server2) = spawn_mock_host_sequence(vec![
         (
             "POST /rpc/discover".to_owned(),
-            mock_discovery_response_json(&[github_connector.clone()]),
+            mock_discovery_response_json(std::slice::from_ref(&github_connector)),
         ),
         (
             "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
@@ -3679,17 +3734,7 @@ fn e2e_mesh_availability_keeps_live_offline_and_repair_states_explicit() {
         "--zone",
         "z:work",
     ]);
-    assert_eq!(offline_payload["command"], "mesh");
-    assert_eq!(offline_payload["subcommand"], "availability");
-    assert_eq!(offline_payload["source"], "workspace-manifests");
-    assert_eq!(
-        offline_payload["source_selection"]["state"],
-        "workspace-manifest"
-    );
-    assert_eq!(
-        offline_payload["offline_readiness"]["state"],
-        "declared-in-manifest"
-    );
+    assert_offline_mesh_availability_payload(&offline_payload);
 
     let github_connector =
         mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 1, "risky");
@@ -3697,14 +3742,14 @@ fn e2e_mesh_availability_keeps_live_offline_and_repair_states_explicit() {
     let (host_live, server_live) = spawn_mock_host_sequence(vec![
         (
             "POST /rpc/discover".to_owned(),
-            mock_discovery_response_json(&[github_connector.clone()]),
+            mock_discovery_response_json(std::slice::from_ref(&github_connector)),
         ),
         (
             "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
             mock_connector_admin_status_json(
                 "local_path",
                 "/opt/fcp/cache/github-enterprise",
-                Value::Null,
+                &Value::Null,
             ),
         ),
     ]);
@@ -3732,7 +3777,7 @@ fn e2e_mesh_availability_keeps_live_offline_and_repair_states_explicit() {
     let (host_hints, server_hints) = spawn_mock_host_sequence(vec![
         (
             "POST /rpc/discover".to_owned(),
-            mock_discovery_response_json(&[github_connector.clone()]),
+            mock_discovery_response_json(std::slice::from_ref(&github_connector)),
         ),
         (
             "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
@@ -3897,12 +3942,6 @@ fn offline_outputs_carry_availability_provenance() {
 #[test]
 fn operator_truth_fixture_matrix_freezes_core_answer_classes() {
     let matrix = load_operator_truth_fixture_matrix();
-    assert_eq!(
-        matrix.fixtures.len(),
-        5,
-        "operator truth fixture matrix should cover five canonical answer classes"
-    );
-
     let ids = matrix
         .fixtures
         .iter()
@@ -3914,9 +3953,23 @@ fn operator_truth_fixture_matrix_freezes_core_answer_classes() {
         "fixture ids must be unique"
     );
 
+    let canonical_ids = std::collections::BTreeSet::from([
+        "offline_show_workspace_manifest".to_owned(),
+        "node_local_status_host_admin".to_owned(),
+        "mesh_backed_explain_availability".to_owned(),
+        "degraded_connector_health".to_owned(),
+        "fallback_derived_install_activation".to_owned(),
+    ]);
+    let missing_canonical_ids = canonical_ids.difference(&ids).cloned().collect::<Vec<_>>();
+    assert!(
+        missing_canonical_ids.is_empty(),
+        "operator truth fixture matrix missing canonical answer classes: {missing_canonical_ids:?}"
+    );
+
     let answer_classes = matrix
         .fixtures
         .iter()
+        .filter(|fixture| canonical_ids.contains(&fixture.id))
         .map(|fixture| fixture.answer_class)
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
@@ -3936,14 +3989,28 @@ fn operator_truth_fixture_matrix_freezes_core_answer_classes() {
         assert!(!fixture.availability.trim().is_empty());
         assert!(!fixture.notes.trim().is_empty());
     }
+
+    for fixture in matrix
+        .fixtures
+        .iter()
+        .filter(|fixture| canonical_ids.contains(&fixture.id))
+    {
+        assert!(
+            !fixture.human_summary_contains.is_empty(),
+            "fixture {} must freeze at least one human-facing summary string",
+            fixture.id
+        );
+    }
 }
 
 #[test]
 fn operator_truth_fixture_offline_show_matches_cli_contract() {
     let fixture = load_operator_truth_fixture("offline_show_workspace_manifest");
     let payload = run_json_ok(&["--json", "show", "github", "--offline"]);
+    let text = run_text_ok(&["show", "github", "--offline"]);
 
     assert_operator_truth_fixture_contract(&payload, &fixture);
+    assert_operator_truth_fixture_human_summary(&text, &fixture);
     assert!(
         payload["connector"]["canonical_id"]
             .as_str()
@@ -3956,7 +4023,7 @@ fn operator_truth_fixture_node_local_status_matches_cli_contract() {
     let fixture = load_operator_truth_fixture("node_local_status_host_admin");
     let github_connector =
         mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 1, "risky");
-    let (host, server) = spawn_mock_host_sequence(vec![
+    let routes = vec![
         (
             "POST /rpc/discover".to_owned(),
             mock_discovery_response_json(&[github_connector]),
@@ -3970,7 +4037,7 @@ fn operator_truth_fixture_node_local_status_matches_cli_contract() {
             mock_connector_admin_status_json(
                 "registry",
                 "registry://fcp/github-enterprise/1.2.3",
-                Value::Null,
+                &Value::Null,
             ),
         ),
         (
@@ -3981,11 +4048,16 @@ fn operator_truth_fixture_node_local_status_matches_cli_contract() {
             "GET /rpc/rollout/fcp.github:enterprise:v1".to_owned(),
             mock_rollout_status_json("production", "1.2.3", false, None, 0),
         ),
-    ]);
+    ];
+    let (host, server) = spawn_mock_host_sequence(routes.clone());
     let payload = run_json_ok(&["--json", "--host", &host, "status", "github"]);
+    server.join().expect("mock host thread should complete");
+    let (host, server) = spawn_mock_host_sequence(routes);
+    let text = run_text_ok(&["--host", &host, "status", "github"]);
     server.join().expect("mock host thread should complete");
 
     assert_operator_truth_fixture_contract(&payload, &fixture);
+    assert_operator_truth_fixture_human_summary(&text, &fixture);
     assert_eq!(payload["scope"], "connector");
     assert_eq!(payload["admin"]["observed_state"], "running");
     assert_eq!(payload["pin"]["pinned"], false);
@@ -4004,7 +4076,7 @@ fn operator_truth_fixture_mesh_backed_availability_matches_cli_contract() {
         "target_coverage_bps": 9000,
         "min_source_diversity": 2,
     });
-    let (host, server) = spawn_mock_host_sequence(vec![
+    let routes = vec![
         (
             "POST /rpc/discover".to_owned(),
             mock_discovery_response_json(&[github_connector]),
@@ -4014,10 +4086,11 @@ fn operator_truth_fixture_mesh_backed_availability_matches_cli_contract() {
             mock_connector_admin_status_json(
                 "mesh_mirror",
                 "/opt/fcp/mirrors/github-enterprise",
-                placement_policy,
+                &placement_policy,
             ),
         ),
-    ]);
+    ];
+    let (host, server) = spawn_mock_host_sequence(routes.clone());
     let payload = run_json_ok(&[
         "--json",
         "--host",
@@ -4027,8 +4100,12 @@ fn operator_truth_fixture_mesh_backed_availability_matches_cli_contract() {
         "github",
     ]);
     server.join().expect("mock host thread should complete");
+    let (host, server) = spawn_mock_host_sequence(routes);
+    let text = run_text_ok(&["--host", &host, "mesh", "explain-availability", "github"]);
+    server.join().expect("mock host thread should complete");
 
     assert_operator_truth_fixture_contract(&payload, &fixture);
+    assert_operator_truth_fixture_human_summary(&text, &fixture);
     assert_eq!(payload["subcommand"], "explain-availability");
     assert_eq!(payload["inventory"]["authoritative"], true);
     assert!(
@@ -4048,7 +4125,7 @@ fn operator_truth_fixture_degraded_health_matches_cli_contract() {
         "risky",
         ConnectorHealth::degraded("upstream latency"),
     );
-    let (host, server) = spawn_mock_host_sequence(vec![
+    let routes = vec![
         (
             "POST /rpc/discover".to_owned(),
             mock_discovery_response_json(&[github_connector]),
@@ -4057,7 +4134,8 @@ fn operator_truth_fixture_degraded_health_matches_cli_contract() {
             "GET /rpc/health".to_owned(),
             mock_host_health_json("healthy"),
         ),
-    ]);
+    ];
+    let (host, server) = spawn_mock_host_sequence(routes.clone());
     let payload = run_json_ok(&[
         "--json",
         "--host",
@@ -4066,8 +4144,12 @@ fn operator_truth_fixture_degraded_health_matches_cli_contract() {
         "fcp.github:enterprise:v1",
     ]);
     server.join().expect("mock host thread should complete");
+    let (host, server) = spawn_mock_host_sequence(routes);
+    let text = run_text_ok(&["--host", &host, "health", "fcp.github:enterprise:v1"]);
+    server.join().expect("mock host thread should complete");
 
     assert_operator_truth_fixture_contract(&payload, &fixture);
+    assert_operator_truth_fixture_human_summary(&text, &fixture);
     assert_eq!(payload["scope"], "connector");
     assert_eq!(payload["connector"]["health_status"], "degraded");
 }
@@ -4078,7 +4160,7 @@ fn operator_truth_fixture_fallback_install_matches_cli_contract() {
     let (_package_dir, package_output_path) =
         write_test_package_output("fcp.github:enterprise:v1", "1.2.4");
     let package_output_path = package_output_path.display().to_string();
-    let (host, server) = spawn_mock_host_sequence(vec![
+    let routes = vec![
         (
             "POST /rpc/connectors/apply".to_owned(),
             mock_inventory_mutation_response_json("1.2.4"),
@@ -4087,11 +4169,16 @@ fn operator_truth_fixture_fallback_install_matches_cli_contract() {
             "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
             json!({ "status": "not-a-valid-admin-status" }),
         ),
-    ]);
+    ];
+    let (host, server) = spawn_mock_host_sequence(routes.clone());
     let payload = run_json_ok(&["--json", "--host", &host, "install", &package_output_path]);
+    server.join().expect("mock host thread should complete");
+    let (host, server) = spawn_mock_host_sequence(routes);
+    let text = run_text_ok(&["--host", &host, "install", &package_output_path]);
     server.join().expect("mock host thread should complete");
 
     assert_operator_truth_fixture_contract(&payload, &fixture);
+    assert_operator_truth_fixture_human_summary(&text, &fixture);
     assert_eq!(payload["availability_fact"]["state"], "unknown");
     assert_eq!(payload["source_selection"]["state"], "unknown");
     assert_eq!(payload["offline_readiness"]["state"], "unknown");

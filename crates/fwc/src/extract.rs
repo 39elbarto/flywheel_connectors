@@ -1339,10 +1339,10 @@ mod tests {
 
     #[test]
     fn apply_pipe_tonumber_float() {
-        let v = json!("3.14");
+        let v = json!("2.5");
         let expr = parse_extract(". | tonumber").unwrap();
         let result = apply_extract(&v, &expr).unwrap();
-        assert_eq!(result.as_f64().unwrap(), 3.14);
+        assert!((result.as_f64().unwrap() - 2.5).abs() < f64::EPSILON);
     }
 
     #[test]

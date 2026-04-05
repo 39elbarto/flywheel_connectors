@@ -1992,8 +1992,8 @@ mod tests {
 
     #[test]
     fn field_filter_equality_number_float() {
-        let f = parse_field_filter("score=3.14").expect("parse");
-        let e = event_with_data("s", "x", 1, json!({"score": 3.14}));
+        let f = parse_field_filter("score=2.5").expect("parse");
+        let e = event_with_data("s", "x", 1, json!({"score": 2.5}));
         assert!(f.matches(&e));
     }
 

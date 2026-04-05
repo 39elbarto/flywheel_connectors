@@ -1,0 +1,238 @@
+{
+  "fixtures": [
+    {
+      "id": "offline_show_workspace_manifest",
+      "answer_class": "offline",
+      "command": "show",
+      "mode": "offline-artifact",
+      "source": "workspace-manifests",
+      "availability": "offline-artifact",
+      "connector_status": "ready",
+      "connector_state": "unknown",
+      "provenance": {
+        "source": "workspace_manifest",
+        "authoritative": false
+      },
+      "human_summary_contains": [
+        "Loaded connector detail from the workspace manifest.",
+        "workspace_manifest",
+        "offline-artifact"
+      ],
+      "notes": "Offline show answers must stay explicitly manifest-backed and non-authoritative, preserving manifest lifecycle status while leaving runtime state unknown."
+    },
+    {
+      "id": "node_local_status_host_admin",
+      "answer_class": "node_local",
+      "command": "status",
+      "source": "host-admin-api",
+      "availability": "live-runtime",
+      "response_scope": "connector",
+      "provenance": {
+        "source": "host-admin-api",
+        "authoritative": true,
+        "transport": "node-local-root-app",
+        "scope": "connector-status",
+        "mesh_backed": false,
+        "degraded": false,
+        "fallback_derived": false
+      },
+      "required_evidence_handles": [
+        "connector-status",
+        "host-health-snapshot"
+      ],
+      "human_summary_contains": [
+        "Loaded live connector admin status for `github` from `fcp-host`.",
+        "node-local-root-app",
+        "connector-status"
+      ],
+      "notes": "Node-local status answers must identify the host-admin route and preserve connector-status evidence handles."
+    },
+    {
+      "id": "mesh_backed_explain_availability",
+      "answer_class": "mesh_backed",
+      "command": "mesh",
+      "subcommand": "explain-availability",
+      "mode": "live-inventory",
+      "source": "host-admin-api",
+      "availability": "live-runtime",
+      "provenance": {
+        "source": "live_host_inventory",
+        "authoritative": true
+      },
+      "source_selection_state": "mesh-mirror",
+      "source_selection_kind": "mesh-mirror",
+      "availability_fact_state": "available",
+      "offline_readiness_state": "tracked-by-placement-policy",
+      "required_evidence_handles": [
+        "mesh-live-availability",
+        "host-artifact-provenance",
+        "mesh-placement-policy"
+      ],
+      "human_summary_contains": [
+        "Explained live availability for `github` from `fcp-host` status and artifact metadata.",
+        "mesh-live-availability",
+        "mesh-placement-policy"
+      ],
+      "notes": "Mesh explain-availability answers must freeze live host inventory provenance plus placement-backed offline-readiness fields."
+    },
+    {
+      "id": "degraded_connector_health",
+      "answer_class": "degraded",
+      "command": "health",
+      "source": "host-admin-api",
+      "availability": "live-runtime",
+      "response_scope": "connector",
+      "provenance": {
+        "source": "host-admin-api",
+        "authoritative": true,
+        "transport": "node-local-root-app",
+        "scope": "connector-health",
+        "mesh_backed": false,
+        "degraded": true,
+        "fallback_derived": false
+      },
+      "required_evidence_handles": [
+        "connector-health",
+        "host-health-snapshot"
+      ],
+      "human_summary_contains": [
+        "Health detail for `fcp.github:enterprise:v1`.",
+        "connector-health",
+        "degraded"
+      ],
+      "notes": "Degraded health answers must remain live-runtime while making the degraded contract explicit in provenance."
+    },
+    {
+      "id": "fallback_derived_install_activation",
+      "answer_class": "fallback_derived",
+      "command": "install",
+      "source": "host-admin-api",
+      "availability": "live-runtime",
+      "provenance": {
+        "source": "host-admin-api",
+        "authoritative": true,
+        "transport": "node-local-root-app",
+        "scope": "install-activation",
+        "mesh_backed": false,
+        "degraded": true,
+        "fallback_derived": true
+      },
+      "source_selection_state": "unknown",
+      "availability_fact_state": "unknown",
+      "offline_readiness_state": "unknown",
+      "required_evidence_handles": [
+        "package-output",
+        "host-inventory-apply",
+        "post-install-status-unavailable"
+      ],
+      "required_warning_substrings": [
+        "post-install connector status"
+      ],
+      "human_summary_contains": [
+        "Installed `fcp.github:enterprise:v1` into the live host connector inventory and applied it immediately.",
+        "post-install-status-unavailable",
+        "post-install connector status"
+      ],
+      "notes": "Fallback-derived install answers must admit that live mutation succeeded while post-install truth remains degraded until host status can be read back."
+    },
+    {
+      "id": "offline_doctor_manifest_checks",
+      "answer_class": "offline",
+      "command": "doctor",
+      "mode": "offline-artifact",
+      "source": "workspace-manifests",
+      "availability": "offline-artifact",
+      "provenance": {
+        "source": "workspace_manifest",
+        "authoritative": false
+      },
+      "required_evidence_handles": [
+        "manifest-parse-status",
+        "connector-checks"
+      ],
+      "notes": "Offline doctor answers must run manifest parsing and local configuration checks without requiring a running host, producing structured diagnostics that later live-host doctor can extend."
+    },
+    {
+      "id": "node_local_config_get",
+      "answer_class": "node_local",
+      "command": "config",
+      "subcommand": "get",
+      "source": "host-admin-api",
+      "availability": "live-runtime",
+      "provenance": {
+        "source": "host-admin-api",
+        "authoritative": true,
+        "transport": "node-local-root-app",
+        "scope": "connector-config",
+        "mesh_backed": false,
+        "degraded": false,
+        "fallback_derived": false
+      },
+      "required_evidence_handles": [
+        "connector-config",
+        "config-schema"
+      ],
+      "notes": "Config get answers are node-local and authoritative for the current host configuration state. Schema metadata accompanies the response for validation."
+    },
+    {
+      "id": "node_local_auth_verify",
+      "answer_class": "node_local",
+      "command": "auth",
+      "subcommand": "verify",
+      "source": "host-admin-api",
+      "availability": "live-runtime",
+      "provenance": {
+        "source": "host-admin-api",
+        "authoritative": true,
+        "transport": "node-local-root-app",
+        "scope": "auth-verification",
+        "mesh_backed": false,
+        "degraded": false,
+        "fallback_derived": false
+      },
+      "required_evidence_handles": [
+        "auth-status",
+        "credential-validity"
+      ],
+      "notes": "Auth verify answers must expose credential validity without leaking credential values. The provenance must be explicit about node-local scope since credentials are per-host."
+    },
+    {
+      "id": "mesh_backed_history_with_audit_trail",
+      "answer_class": "mesh_backed",
+      "command": "history",
+      "source": "host-admin-api",
+      "availability": "live-runtime",
+      "provenance": {
+        "source": "live_host_audit_chain",
+        "authoritative": true,
+        "mesh_backed": true
+      },
+      "required_evidence_handles": [
+        "audit-chain-head",
+        "operation-receipts"
+      ],
+      "notes": "History answers backed by the audit chain must include evidence handles for the chain head and individual operation receipts, making the audit trail mechanically verifiable."
+    },
+    {
+      "id": "degraded_readiness_probe",
+      "answer_class": "degraded",
+      "command": "readiness",
+      "source": "host-admin-api",
+      "availability": "live-runtime",
+      "provenance": {
+        "source": "host-admin-api",
+        "authoritative": true,
+        "transport": "node-local-root-app",
+        "scope": "readiness-probe",
+        "mesh_backed": false,
+        "degraded": true,
+        "fallback_derived": false
+      },
+      "required_evidence_handles": [
+        "readiness-status",
+        "degraded-components"
+      ],
+      "notes": "Degraded readiness probes must identify which components are degraded and expose the specific subsystem health states that caused the overall degradation."
+    }
+  ]
+}

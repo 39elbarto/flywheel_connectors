@@ -1377,7 +1377,6 @@ mod tests {
         assert!(!se.code.is_empty());
         assert!(!se.category.is_empty());
         assert!(!se.message.is_empty());
-        assert!(se.exit_code > 0 || se.exit_code == 0); // valid u8
         assert!(!se.recovery.action.is_empty());
     }
 

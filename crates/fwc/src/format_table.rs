@@ -974,7 +974,7 @@ mod tests {
     #[test]
     fn tabular_format_clone() {
         let f = TabularFormat::Markdown;
-        let g = f.clone();
+        let g = f;
         assert_eq!(f, g);
     }
 
@@ -1113,7 +1113,7 @@ mod tests {
 
     #[test]
     fn format_cell_float_number() {
-        assert_eq!(format_cell(&json!(3.14)), "3.14");
+        assert_eq!(format_cell(&json!(2.5)), "2.5");
     }
 
     #[test]
@@ -1367,7 +1367,7 @@ mod tests {
         };
         let result = render_tabular(&data, TabularFormat::Markdown, &opts).unwrap();
         assert!(result.starts_with("| "));
-        assert!(result.contains("1"));
+        assert!(result.contains('1'));
     }
 
     #[test]

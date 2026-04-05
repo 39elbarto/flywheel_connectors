@@ -1796,8 +1796,10 @@ mod tests {
     #[test]
     fn dashboard_summary_ne() {
         let a = DashboardSummary::default();
-        let mut b = DashboardSummary::default();
-        b.total = 1;
+        let b = DashboardSummary {
+            total: 1,
+            ..DashboardSummary::default()
+        };
         assert_ne!(a, b);
     }
 
@@ -1884,7 +1886,7 @@ mod tests {
             connector_id: Some("test".to_owned()),
         };
         let cloned = f.clone();
-        assert_eq!(cloned.unhealthy_only, true);
+        assert!(cloned.unhealthy_only);
         assert_eq!(cloned.connector_id.as_deref(), Some("test"));
     }
 
@@ -1896,7 +1898,7 @@ mod tests {
         };
         let json = serde_json::to_string(&f).unwrap();
         let back: HealthFilter = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.unhealthy_only, true);
+        assert!(back.unhealthy_only);
         assert_eq!(back.connector_id.as_deref(), Some("github"));
     }
 

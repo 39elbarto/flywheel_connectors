@@ -1562,7 +1562,7 @@ mod tests {
     fn health_state_clone_and_copy() {
         let h = HealthState::Degraded;
         let h2 = h;
-        let h3 = h.clone();
+        let h3 = h;
         assert_eq!(h, h2);
         assert_eq!(h, h3);
     }
@@ -1610,7 +1610,7 @@ mod tests {
     fn safety_rank_clone_and_copy() {
         let r = SafetyRank::Critical;
         let r2 = r;
-        let r3 = r.clone();
+        let r3 = r;
         assert_eq!(r, r2);
         assert_eq!(r, r3);
     }
@@ -1799,7 +1799,7 @@ mod tests {
         let result = rank_candidates(&[c], &default_config());
         let cloned = result[0].clone();
         assert_eq!(result[0].connector_id, cloned.connector_id);
-        assert_eq!(result[0].score, cloned.score);
+        assert!((result[0].score - cloned.score).abs() < f64::EPSILON);
         assert_eq!(result[0].recommended, cloned.recommended);
     }
 

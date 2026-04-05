@@ -2680,7 +2680,7 @@ fn test_error_mapping_rate_limit() {{
 
     let err = {struct_name}Error::RateLimited {{ retry_after_ms: 5000 }};
     assert!(err.is_retryable(), "rate limit should be retryable");
-    assert_eq!(err.retry_after(), Some(std::time::Duration::from_millis(5000)));
+    assert_eq!(err.retry_after(), Some(std::time::Duration::from_secs(5)));
 
     let fcp_err = ConnectorErrorMapping::to_fcp_error(&err);
     assert!(matches!(fcp_err, FcpError::RateLimited {{ .. }}));

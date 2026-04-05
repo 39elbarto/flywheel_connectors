@@ -1983,7 +1983,7 @@ mod tests {
         let t = &get_debug_techniques()[0];
         let out = format_technique_toon(t);
         assert!(out.contains("Commands:"));
-        assert!(out.contains("$"));
+        assert!(out.contains('$'));
     }
 
     #[test]

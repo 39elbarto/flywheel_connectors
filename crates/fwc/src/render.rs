@@ -1975,7 +1975,7 @@ mod tests {
         let template =
             TemplateRender::inline("total={{total}} active={{active}} ratio={{ratio}}").unwrap();
         let text = render_with_options(
-            json!({"total": 7, "active": true, "ratio": 3.14}),
+            json!({"total": 7, "active": true, "ratio": 2.5}),
             OutputFormat::Json,
             &RenderOptions {
                 template: Some(template),
@@ -1983,7 +1983,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(text.trim(), "total=7 active=true ratio=3.14");
+        assert_eq!(text.trim(), "total=7 active=true ratio=2.5");
     }
 
     #[test]

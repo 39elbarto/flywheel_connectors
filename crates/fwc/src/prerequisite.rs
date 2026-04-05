@@ -1568,12 +1568,14 @@ mod tests {
     #[test]
     fn check_messages_per_status() {
         let d = api_key_desc("tok");
-        let checks =
-            check_prerequisites(&[d.clone()], NOW, |_| (PrerequisiteStatus::Missing, None));
+        let checks = check_prerequisites(std::slice::from_ref(&d), NOW, |_| {
+            (PrerequisiteStatus::Missing, None)
+        });
         assert!(checks[0].message.contains("not configured"));
 
-        let checks =
-            check_prerequisites(&[d.clone()], NOW, |_| (PrerequisiteStatus::Expired, None));
+        let checks = check_prerequisites(std::slice::from_ref(&d), NOW, |_| {
+            (PrerequisiteStatus::Expired, None)
+        });
         assert!(checks[0].message.contains("expired"));
 
         let checks = check_prerequisites(&[d], NOW, |_| (PrerequisiteStatus::Satisfied, None));
@@ -2982,7 +2984,7 @@ mod tests {
         let report = detect_drift("myconn", &checks, NOW);
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["connector"], "myconn");
-        assert!(json["entries"].as_array().unwrap().len() > 0);
+        assert!(!json["entries"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -3033,7 +3035,7 @@ mod tests {
             PrerequisiteStatus::Degraded,
             PrerequisiteStatus::Unknown,
         ] {
-            let checks = check_prerequisites(&[desc.clone()], NOW, |_| (status, None));
+            let checks = check_prerequisites(std::slice::from_ref(&desc), NOW, |_| (status, None));
             let state = build_ready_state("test", checks);
             if status == PrerequisiteStatus::Satisfied {
                 assert!(state.overall_ready);

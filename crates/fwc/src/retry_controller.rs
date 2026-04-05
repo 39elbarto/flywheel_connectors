@@ -553,23 +553,29 @@ mod tests {
 
     #[test]
     fn never_retry_overrides_taxonomy() {
-        let mut p = RetryPolicy::default();
-        p.never_retry = vec!["rate_limit".to_string()];
+        let p = RetryPolicy {
+            never_retry: vec!["rate_limit".to_string()],
+            ..RetryPolicy::default()
+        };
         assert!(!p.is_retryable(FcpErrorCode::FcpErrRateLimited));
     }
 
     #[test]
     fn extra_retryable_adds_categories() {
-        let mut p = RetryPolicy::default();
-        p.extra_retryable = vec!["auth".to_string()];
+        let p = RetryPolicy {
+            extra_retryable: vec!["auth".to_string()],
+            ..RetryPolicy::default()
+        };
         assert!(p.is_retryable(FcpErrorCode::FcpErrUnauthorized));
     }
 
     #[test]
     fn never_retry_takes_precedence_over_extra() {
-        let mut p = RetryPolicy::default();
-        p.extra_retryable = vec!["auth".to_string()];
-        p.never_retry = vec!["auth".to_string()];
+        let p = RetryPolicy {
+            extra_retryable: vec!["auth".to_string()],
+            never_retry: vec!["auth".to_string()],
+            ..RetryPolicy::default()
+        };
         assert!(!p.is_retryable(FcpErrorCode::FcpErrUnauthorized));
     }
 
@@ -1251,39 +1257,49 @@ mod tests {
 
     #[test]
     fn never_retry_overrides_transport_category() {
-        let mut p = RetryPolicy::default();
-        p.never_retry = vec!["transport".to_string()];
+        let p = RetryPolicy {
+            never_retry: vec!["transport".to_string()],
+            ..RetryPolicy::default()
+        };
         assert!(!p.is_retryable(FcpErrorCode::FcpErrTransportFailed));
         assert!(!p.is_retryable(FcpErrorCode::FcpErrUpstreamTimeout));
     }
 
     #[test]
     fn never_retry_overrides_connector_category() {
-        let mut p = RetryPolicy::default();
-        p.never_retry = vec!["connector".to_string()];
+        let p = RetryPolicy {
+            never_retry: vec!["connector".to_string()],
+            ..RetryPolicy::default()
+        };
         assert!(!p.is_retryable(FcpErrorCode::FcpErrCircuitOpen));
         assert!(!p.is_retryable(FcpErrorCode::FcpErrConnectorUnavailable));
     }
 
     #[test]
     fn extra_retryable_adds_validation_category() {
-        let mut p = RetryPolicy::default();
-        p.extra_retryable = vec!["validation".to_string()];
+        let p = RetryPolicy {
+            extra_retryable: vec!["validation".to_string()],
+            ..RetryPolicy::default()
+        };
         assert!(p.is_retryable(FcpErrorCode::FcpErrValidationFailed));
         assert!(p.is_retryable(FcpErrorCode::FcpErrInvalidInput));
     }
 
     #[test]
     fn extra_retryable_adds_policy_category() {
-        let mut p = RetryPolicy::default();
-        p.extra_retryable = vec!["policy".to_string()];
+        let p = RetryPolicy {
+            extra_retryable: vec!["policy".to_string()],
+            ..RetryPolicy::default()
+        };
         assert!(p.is_retryable(FcpErrorCode::FcpErrPolicyDenied));
     }
 
     #[test]
     fn extra_retryable_adds_internal_category() {
-        let mut p = RetryPolicy::default();
-        p.extra_retryable = vec!["internal".to_string()];
+        let p = RetryPolicy {
+            extra_retryable: vec!["internal".to_string()],
+            ..RetryPolicy::default()
+        };
         assert!(p.is_retryable(FcpErrorCode::FcpErrInternal));
     }
 

@@ -1400,9 +1400,10 @@ mod tests {
     fn replay_mode_clone_from_checkpoint() {
         let mode = ReplayMode::FromCheckpoint(PathBuf::from("/some/path"));
         let cloned = mode.clone();
-        assert!(
-            matches!(cloned, ReplayMode::FromCheckpoint(p) if p == PathBuf::from("/some/path"))
-        );
+        assert!(matches!(
+            cloned,
+            ReplayMode::FromCheckpoint(p) if p.as_path() == std::path::Path::new("/some/path")
+        ));
     }
 
     #[test]

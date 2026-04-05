@@ -1037,10 +1037,10 @@ mod tests {
 
     #[test]
     fn parse_json_array_float_values() {
-        let inputs = BatchInputs::from_json_array("[3.14, 2.718, 1.0]").unwrap();
+        let inputs = BatchInputs::from_json_array("[2.5, 2.718, 1.0]").unwrap();
         assert_eq!(inputs.len(), 3);
         let first = inputs.items[0].as_f64().unwrap();
-        assert!((first - 3.14).abs() < f64::EPSILON);
+        assert!((first - 2.5).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1164,10 +1164,10 @@ mod tests {
 
     #[test]
     fn template_float_numbers() {
-        let inputs = BatchInputs::from_template(r#"{"value":{{item}}}"#, "1.5,2.7,3.14").unwrap();
+        let inputs = BatchInputs::from_template(r#"{"value":{{item}}}"#, "1.5,2.7,2.5").unwrap();
         assert_eq!(inputs.len(), 3);
         let v = inputs.items[2]["value"].as_f64().unwrap();
-        assert!((v - 3.14).abs() < f64::EPSILON);
+        assert!((v - 2.5).abs() < f64::EPSILON);
     }
 
     #[test]

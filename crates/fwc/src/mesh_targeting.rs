@@ -2163,14 +2163,14 @@ mod tests {
         assert!(lines.iter().any(|l| l.contains("Rollout Cohort")));
         assert!(lines.iter().any(|l| l.contains("rollout-1")));
         assert!(lines.iter().any(|l| l.contains("canary")));
-        assert!(lines.iter().any(|l| l.contains("3")));
+        assert!(lines.iter().any(|l| l.contains('3')));
     }
 
     #[test]
     fn toon_rollout_empty() {
         let cohort = plan_rollout("empty", vec![], RolloutStrategy::AllAtOnce);
         let lines = format_rollout_toon(&cohort);
-        assert!(lines.iter().any(|l| l.contains("0")));
+        assert!(lines.iter().any(|l| l.contains('0')));
     }
 
     #[test]

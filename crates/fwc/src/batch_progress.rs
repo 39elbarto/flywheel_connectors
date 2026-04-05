@@ -1628,12 +1628,12 @@ mod tests {
             index: 0,
             id: "num".to_owned(),
             success: true,
-            payload: json!(3.14),
+            payload: json!(2.5),
             completed_at: 100,
         };
         let json = serde_json::to_value(&r).unwrap();
         let val = json["payload"].as_f64().unwrap();
-        assert!((val - 3.14).abs() < f64::EPSILON);
+        assert!((val - 2.5).abs() < f64::EPSILON);
     }
 
     #[test]

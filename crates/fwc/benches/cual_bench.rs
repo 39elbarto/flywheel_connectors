@@ -3,6 +3,7 @@
 //! Establishes baselines and detects regressions for search, schema validation,
 //! pipeline planning, and MCP server state construction.
 
+use std::fmt::Write as _;
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -249,14 +250,16 @@ channel = "#dev"
     // 10-step pipeline
     let mut ten_step = String::from("name = \"ten-step\"\n");
     for i in 0..10 {
-        ten_step.push_str(&format!(
+        write!(
+            &mut ten_step,
             r#"[[steps]]
 connector = "conn_{i}"
 operation = "op_{i}"
 [steps.input]
 key = "value_{i}"
 "#,
-        ));
+        )
+        .expect("writing benchmark fixture should not fail");
     }
 
     group.bench_function("parse_10_step", |b| {
@@ -266,14 +269,16 @@ key = "value_{i}"
     // 20-step pipeline
     let mut twenty_step = String::from("name = \"twenty-step\"\n");
     for i in 0..20 {
-        twenty_step.push_str(&format!(
+        write!(
+            &mut twenty_step,
             r#"[[steps]]
 connector = "conn_{i}"
 operation = "op_{i}"
 [steps.input]
 key = "value_{i}"
 "#,
-        ));
+        )
+        .expect("writing benchmark fixture should not fail");
     }
 
     group.bench_function("parse_20_step", |b| {

@@ -916,7 +916,7 @@ mod tests {
         let fixtures = get_archetype_fixtures();
         let mut ids: Vec<&str> = fixtures.iter().map(|f| f.connector_id.as_str()).collect();
         let orig = ids.len();
-        ids.sort();
+        ids.sort_unstable();
         ids.dedup();
         assert_eq!(orig, ids.len());
     }
@@ -1111,7 +1111,7 @@ mod tests {
             let cases = generate_test_cases(f);
             let mut names: Vec<&str> = cases.iter().map(|c| c.name.as_str()).collect();
             let orig = names.len();
-            names.sort();
+            names.sort_unstable();
             names.dedup();
             assert_eq!(
                 orig,

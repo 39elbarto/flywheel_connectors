@@ -1089,8 +1089,8 @@ mod tests {
         let report = sample_report(true, true, None);
         let json = serde_json::to_string(&report).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v["changed"].as_bool().unwrap(), true);
-        assert_eq!(v["wrote"].as_bool().unwrap(), true);
+        assert!(v["changed"].as_bool().unwrap());
+        assert!(v["wrote"].as_bool().unwrap());
     }
 
     #[test]
@@ -1098,8 +1098,8 @@ mod tests {
         let report = sample_report(false, false, None);
         let json = serde_json::to_string(&report).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(v["changed"].as_bool().unwrap(), false);
-        assert_eq!(v["wrote"].as_bool().unwrap(), false);
+        assert!(!v["changed"].as_bool().unwrap());
+        assert!(!v["wrote"].as_bool().unwrap());
     }
 
     #[test]

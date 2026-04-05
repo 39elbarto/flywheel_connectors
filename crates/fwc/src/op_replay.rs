@@ -1306,7 +1306,7 @@ mod tests {
         let formatted = format_preview(&p);
         assert!(formatted.contains("Changes (1)"));
         assert!(formatted.contains("title"));
-        assert!(formatted.contains("~"));
+        assert!(formatted.contains('~'));
     }
 
     #[test]
@@ -1319,7 +1319,7 @@ mod tests {
             change_type: ChangeType::Added,
         }];
         let formatted = format_preview(&p);
-        assert!(formatted.contains("+"));
+        assert!(formatted.contains('+'));
     }
 
     #[test]
@@ -1332,7 +1332,7 @@ mod tests {
             change_type: ChangeType::Removed,
         }];
         let formatted = format_preview(&p);
-        assert!(formatted.contains("-"));
+        assert!(formatted.contains('-'));
         assert!(formatted.contains("was"));
     }
 

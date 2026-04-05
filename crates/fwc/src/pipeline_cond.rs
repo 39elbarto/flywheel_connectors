@@ -2043,11 +2043,11 @@ mod tests {
     #[test]
     fn pipeline_cond_compare_number_eq_exact() {
         let mut ctx = PipelineContext::new();
-        ctx.set_output("s", json!({"val": 3.14}));
+        ctx.set_output("s", json!({"val": 2.5}));
         let expr = ConditionExpr::Comparison {
             left: "steps.s.output.val".to_owned(),
             op: CompareOp::Eq,
-            right: ConditionValue::Number(3.14),
+            right: ConditionValue::Number(2.5),
         };
         assert!(evaluate_condition(&expr, &ctx).unwrap());
     }
@@ -2249,13 +2249,13 @@ mod tests {
 
     #[test]
     fn pipeline_cond_parse_comparison_float() {
-        let c = parse_condition("{{steps.x.output.val}} == 3.14").unwrap();
+        let c = parse_condition("{{steps.x.output.val}} == 2.5").unwrap();
         assert_eq!(
             c.parsed,
             ConditionExpr::Comparison {
                 left: "steps.x.output.val".to_owned(),
                 op: CompareOp::Eq,
-                right: ConditionValue::Number(3.14),
+                right: ConditionValue::Number(2.5),
             }
         );
     }

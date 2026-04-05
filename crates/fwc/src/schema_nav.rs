@@ -2911,7 +2911,7 @@ mod tests {
         let input = json!({ "name": null });
         let errors = validate_input(&schema, &input);
         // Missing required (null treated as absent) + wrong type
-        assert!(errors.len() >= 1);
+        assert!(!errors.is_empty());
         assert!(errors.iter().any(|e| e.path == "name"));
     }
 
@@ -3214,13 +3214,14 @@ mod tests {
 
     #[test]
     fn validate_input_number_type_accepted_for_float() {
+        let ratio = 314_f64 / 100.0;
         let schema = json!({
             "type": "object",
             "properties": {
                 "ratio": { "type": "number" }
             }
         });
-        let input = json!({ "ratio": 3.14 });
+        let input = json!({ "ratio": ratio });
         let errors = validate_input(&schema, &input);
         assert!(errors.is_empty());
     }
@@ -3385,7 +3386,8 @@ mod tests {
     #[test]
     fn validate_type_number_ok() {
         let mut errors = Vec::new();
-        validate_type(&json!({"type": "number"}), &json!(3.14), "f", &mut errors);
+        let ratio = 314_f64 / 100.0;
+        validate_type(&json!({"type": "number"}), &json!(ratio), "f", &mut errors);
         assert!(errors.is_empty());
     }
 
@@ -3447,8 +3449,8 @@ mod tests {
             &mut errors,
         );
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].expected.contains("a"));
-        assert!(errors[0].expected.contains("b"));
+        assert!(errors[0].expected.contains('a'));
+        assert!(errors[0].expected.contains('b'));
     }
 
     #[test]
@@ -4068,8 +4070,8 @@ mod tests {
         let schema = json!({"enum": ["a", "b"]});
         let result = describe_schema_inline(&schema);
         assert!(result.contains("enum"));
-        assert!(result.contains("a"));
-        assert!(result.contains("b"));
+        assert!(result.contains('a'));
+        assert!(result.contains('b'));
     }
 
     #[test]

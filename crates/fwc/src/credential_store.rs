@@ -2081,7 +2081,7 @@ mod tests {
     fn store_path_is_accessible() {
         let store = temp_store();
         let p = store.path();
-        assert!(p.to_str().unwrap().len() > 0);
+        assert!(!p.to_str().unwrap().is_empty());
         assert!(p.ends_with("credentials.enc"));
     }
 

@@ -1105,9 +1105,9 @@ mod tests {
             capability_filter: Some("github".to_string()),
         };
         let cloned = opts.clone();
-        assert_eq!(cloned.include_safety_metadata, false);
-        assert_eq!(cloned.include_ai_hints, false);
-        assert_eq!(cloned.include_examples, false);
+        assert!(!cloned.include_safety_metadata);
+        assert!(!cloned.include_ai_hints);
+        assert!(!cloned.include_examples);
         assert_eq!(cloned.strip_prefix, Some("ns.".to_string()));
         assert_eq!(cloned.risk_max, Some("high".to_string()));
         assert_eq!(cloned.capability_filter, Some("github".to_string()));

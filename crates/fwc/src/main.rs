@@ -5317,6 +5317,124 @@ impl InstallContractProvenance {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum LiveTruthKnowledgeState {
+    Offline,
+    NodeLocal,
+    MeshBacked,
+    Degraded,
+    FallbackDerived,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum LiveTruthResolverBranch {
+    OfflineManifest,
+    OfflineMirror,
+    InstallVerification,
+    LivePlacementPolicy,
+    LiveArtifactOnly,
+    LiveRuntimeOnly,
+    LiveRuntimeDegraded,
+    PostInstallStatusUnavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct LiveTruthResolution {
+    knowledge_state: LiveTruthKnowledgeState,
+    resolver_branch: LiveTruthResolverBranch,
+    authoritative_scope: &'static str,
+    mesh_backed: bool,
+    degraded: bool,
+    fallback_derived: bool,
+    reason: String,
+}
+
+impl LiveTruthResolution {
+    fn offline(
+        authoritative_scope: &'static str,
+        resolver_branch: LiveTruthResolverBranch,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            knowledge_state: LiveTruthKnowledgeState::Offline,
+            resolver_branch,
+            authoritative_scope,
+            mesh_backed: false,
+            degraded: false,
+            fallback_derived: false,
+            reason: reason.into(),
+        }
+    }
+
+    fn node_local(
+        authoritative_scope: &'static str,
+        resolver_branch: LiveTruthResolverBranch,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            knowledge_state: LiveTruthKnowledgeState::NodeLocal,
+            resolver_branch,
+            authoritative_scope,
+            mesh_backed: false,
+            degraded: false,
+            fallback_derived: false,
+            reason: reason.into(),
+        }
+    }
+
+    fn mesh_backed(
+        authoritative_scope: &'static str,
+        resolver_branch: LiveTruthResolverBranch,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            knowledge_state: LiveTruthKnowledgeState::MeshBacked,
+            resolver_branch,
+            authoritative_scope,
+            mesh_backed: true,
+            degraded: false,
+            fallback_derived: false,
+            reason: reason.into(),
+        }
+    }
+
+    fn degraded(
+        authoritative_scope: &'static str,
+        resolver_branch: LiveTruthResolverBranch,
+        mesh_backed: bool,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            knowledge_state: LiveTruthKnowledgeState::Degraded,
+            resolver_branch,
+            authoritative_scope,
+            mesh_backed,
+            degraded: true,
+            fallback_derived: false,
+            reason: reason.into(),
+        }
+    }
+
+    fn fallback_derived(
+        authoritative_scope: &'static str,
+        resolver_branch: LiveTruthResolverBranch,
+        degraded: bool,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            knowledge_state: LiveTruthKnowledgeState::FallbackDerived,
+            resolver_branch,
+            authoritative_scope,
+            mesh_backed: false,
+            degraded,
+            fallback_derived: true,
+            reason: reason.into(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct OperatorTruthShowPayload {
     status: &'static str,
@@ -5387,6 +5505,7 @@ struct OperatorTruthMeshPayload {
     source_selection: Value,
     offline_readiness: Value,
     repair_hints: Vec<String>,
+    resolution: LiveTruthResolution,
     evidence_handles: Vec<Value>,
     next_actions: Vec<String>,
     provenance: catalog::DiscoveryProvenance,
@@ -5410,6 +5529,7 @@ struct OperatorTruthInstallPayload {
     source_selection: Value,
     offline_readiness: Value,
     repair_hints: Vec<String>,
+    resolution: LiveTruthResolution,
     verification: Vec<Value>,
     activation: Value,
     admin_state: Value,
@@ -5666,6 +5786,7 @@ fn build_mesh_live_operator_contract(
     message: String,
     explanation: Option<Vec<String>>,
 ) -> OperatorTruthMeshPayload {
+    let resolution = resolve_mesh_live_truth(status);
     OperatorTruthMeshPayload {
         status: "ok",
         command: "mesh",
@@ -5695,6 +5816,7 @@ fn build_mesh_live_operator_contract(
         source_selection: mesh_live_source_selection_value(status.artifact.as_ref()),
         offline_readiness: mesh_live_offline_readiness_value(status.artifact.as_ref()),
         repair_hints: mesh_live_repair_hints(status, &connector.slug, endpoint),
+        resolution,
         evidence_handles: mesh_live_evidence_handles(
             connector.summary.id.as_str(),
             endpoint,
@@ -5725,6 +5847,7 @@ fn build_mesh_offline_operator_contract(
     explanation: Option<Vec<String>>,
 ) -> OperatorTruthMeshPayload {
     let availability_fact = mesh_offline_availability_fact(zone_supported, has_local_mirror);
+    let resolution = resolve_mesh_offline_truth(zone_supported, has_local_mirror);
     OperatorTruthMeshPayload {
         status: "ok",
         command: "mesh",
@@ -5766,6 +5889,7 @@ fn build_mesh_offline_operator_contract(
             },
         }),
         repair_hints: mesh_offline_repair_hints(&connector.slug, zone_supported),
+        resolution,
         evidence_handles: mesh_offline_evidence_handles(
             &connector.detail.summary.id,
             &connector.manifest_path,
@@ -5798,6 +5922,7 @@ fn build_install_activation_operator_contract(
     post_install_status: Option<&HostConnectorAdminStatus>,
     warnings: Option<Vec<String>>,
 ) -> OperatorTruthInstallPayload {
+    let resolution = resolve_install_activation_truth(post_install_status);
     let post_install_availability_fact = post_install_status.map_or_else(
         || install_unknown_live_availability_fact(artifact),
         mesh_live_availability_fact,
@@ -5836,6 +5961,7 @@ fn build_install_activation_operator_contract(
         source_selection: post_install_source_selection,
         offline_readiness: post_install_offline_readiness,
         repair_hints: post_install_repair_hints,
+        resolution,
         verification: artifact.verification.clone(),
         activation: json!({
             "inventory_updated": true,
@@ -7220,6 +7346,140 @@ fn mesh_live_availability_fact(status: &HostConnectorAdminStatus) -> Value {
             fcp_host::ObservedRuntimeState::Unknown => "The host could not prove a concrete runtime state for this connector yet.",
         },
     })
+}
+
+fn resolve_mesh_live_truth(status: &HostConnectorAdminStatus) -> LiveTruthResolution {
+    let has_artifact = status.artifact.is_some();
+    let mesh_backed = status
+        .artifact
+        .as_ref()
+        .and_then(|artifact| artifact.placement.as_ref())
+        .is_some();
+    let authoritative_scope = if mesh_backed {
+        "mesh-placement-policy"
+    } else if has_artifact {
+        "host-artifact-provenance"
+    } else {
+        "host-admin-status"
+    };
+
+    if matches!(
+        status.observed_state,
+        fcp_host::ObservedRuntimeState::Starting | fcp_host::ObservedRuntimeState::Degraded
+    ) || status.drift.is_some()
+    {
+        return LiveTruthResolution::degraded(
+            authoritative_scope,
+            LiveTruthResolverBranch::LiveRuntimeDegraded,
+            mesh_backed,
+            match status.observed_state {
+                fcp_host::ObservedRuntimeState::Starting => {
+                    "Live host status shows the connector is still converging, so truth is currently degraded until runtime settles."
+                }
+                fcp_host::ObservedRuntimeState::Degraded => {
+                    "Live host status reports degraded runtime health, so the answer remains degraded even if artifact provenance is recorded."
+                }
+                _ => {
+                    "Live host drift indicates the runtime cannot currently be treated as fully trustworthy."
+                }
+            },
+        );
+    }
+
+    if mesh_backed {
+        return LiveTruthResolution::mesh_backed(
+            "mesh-placement-policy",
+            LiveTruthResolverBranch::LivePlacementPolicy,
+            "Live host status plus recorded placement policy make this answer mesh-backed rather than merely node-local.",
+        );
+    }
+
+    if has_artifact {
+        return LiveTruthResolution::node_local(
+            "host-artifact-provenance",
+            LiveTruthResolverBranch::LiveArtifactOnly,
+            "Live host status is backed by recorded artifact provenance, but no placement policy proves mesh-wide coverage yet.",
+        );
+    }
+
+    LiveTruthResolution::node_local(
+        "host-admin-status",
+        LiveTruthResolverBranch::LiveRuntimeOnly,
+        match status.observed_state {
+            fcp_host::ObservedRuntimeState::Running => {
+                "Live host status proves the connector is running on this node, but no artifact provenance or placement policy was recorded."
+            }
+            fcp_host::ObservedRuntimeState::Stopped => {
+                "Live host status proves the connector is stopped on this node, without additional artifact provenance."
+            }
+            fcp_host::ObservedRuntimeState::Missing => {
+                "Live host status proves the connector is missing on this node, without any recorded artifact provenance."
+            }
+            fcp_host::ObservedRuntimeState::Unknown => {
+                "Live host status is the only available truth source, and it cannot currently prove a more specific runtime state."
+            }
+            fcp_host::ObservedRuntimeState::Starting | fcp_host::ObservedRuntimeState::Degraded => {
+                unreachable!("degraded live states are handled before the node-local branch")
+            }
+        },
+    )
+}
+
+fn resolve_mesh_offline_truth(
+    zone_supported: Option<bool>,
+    has_local_mirror: bool,
+) -> LiveTruthResolution {
+    if matches!(zone_supported, Some(false)) {
+        return LiveTruthResolution::offline(
+            "workspace-manifests",
+            LiveTruthResolverBranch::OfflineManifest,
+            "Workspace manifests are the only available source and they explicitly deny the requested zone.",
+        );
+    }
+
+    if has_local_mirror {
+        return LiveTruthResolution::offline(
+            "local-mesh-mirror",
+            LiveTruthResolverBranch::OfflineMirror,
+            "A local mesh mirror is available, but the answer remains offline because mirror freshness is not proven here.",
+        );
+    }
+
+    LiveTruthResolution::offline(
+        "workspace-manifests",
+        LiveTruthResolverBranch::OfflineManifest,
+        "Workspace manifests provide planning truth only; they do not prove current live host or mesh state.",
+    )
+}
+
+fn resolve_install_verify_only_truth(artifact: &PreparedPackageArtifact) -> LiveTruthResolution {
+    let authoritative_scope = match artifact.source_kind {
+        PreparedPackageSourceKind::LocalPackageMetadataFile
+        | PreparedPackageSourceKind::LocalPackagedDirectory => "local-machine-only",
+        PreparedPackageSourceKind::LocalConnectorCrate
+        | PreparedPackageSourceKind::WorkspaceConnector => "local-workspace-only",
+    };
+    LiveTruthResolution::offline(
+        authoritative_scope,
+        LiveTruthResolverBranch::InstallVerification,
+        "Verify-only install answers are authoritative for the local package artifact, but they do not prove any live host inventory or mesh placement state.",
+    )
+}
+
+fn resolve_install_activation_truth(
+    post_install_status: Option<&HostConnectorAdminStatus>,
+) -> LiveTruthResolution {
+    post_install_status.map_or_else(
+        || {
+            LiveTruthResolution::fallback_derived(
+                "live-host-post-install-status",
+                LiveTruthResolverBranch::PostInstallStatusUnavailable,
+                true,
+                "The host accepted the install mutation, but post-install status was unavailable, so the final truth is derived from the mutation response rather than a fresh live readback.",
+            )
+        },
+        resolve_mesh_live_truth,
+    )
 }
 
 fn mesh_offline_availability_fact(zone_supported: Option<bool>, has_local_mirror: bool) -> Value {
@@ -13944,6 +14204,7 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
             "package_source_selection": package_source_selection_value(&artifact),
             "package": package_output_json(&artifact),
             "candidate": connector_descriptor_json(&candidate, None),
+            "resolution": resolve_install_verify_only_truth(&artifact),
             "availability_fact": install_verify_only_availability_fact(&artifact),
             "source_selection": package_source_selection_value(&artifact),
             "offline_readiness": package_local_offline_readiness_value(&artifact),
@@ -24404,12 +24665,14 @@ mod tests {
 
     use super::{
         ApprovalMode, Cli, CliExitCode, Commands, ConnectorManifest, HostConnectorCatalog,
-        LiveAuthArgs, MetadataField, PACKAGE_OUTPUT_FILENAME, PackageBuildMetadata, PackageOutput,
-        PrepareCliError, ResolvedHostConfig, ResolvedHostOperation, catalog, execute,
-        host_discovered_connector, host_discovered_operation, host_mcp_tool_definitions,
-        host_tool_summary_entry, host_tool_when_to_use, live_pipeline_operation_metadata,
-        mcp_tool_invoke_args, normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
-        serve_mcp, try_host_mcp_tool_definitions, try_host_tool_operation_info,
+        LiveAuthArgs, LiveTruthKnowledgeState, LiveTruthResolverBranch, MetadataField,
+        PACKAGE_OUTPUT_FILENAME, PackageBuildMetadata, PackageOutput, PrepareCliError,
+        ResolvedHostConfig, ResolvedHostOperation, catalog, execute, host_discovered_connector,
+        host_discovered_operation, host_mcp_tool_definitions, host_tool_summary_entry,
+        host_tool_when_to_use, live_pipeline_operation_metadata, mcp_tool_invoke_args,
+        normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
+        resolve_install_activation_truth, resolve_mesh_live_truth, serve_mcp,
+        try_host_mcp_tool_definitions, try_host_tool_operation_info,
     };
     use chrono::{Duration as ChronoDuration, Utc};
     use clap::CommandFactory;
@@ -24418,7 +24681,8 @@ mod tests {
         UsageBudgetSnapshot, UsageBudgetUsage, UsageMetricKind, ZoneId,
     };
     use fcp_host::{
-        BudgetReportResponse as HostBudgetReportResponse, ConnectorInventoryApplyReport,
+        BudgetReportResponse as HostBudgetReportResponse,
+        ConnectorAdminStatus as HostConnectorAdminStatus, ConnectorInventoryApplyReport,
         ConnectorInventoryMutationKind, ConnectorInventoryMutationResponse,
         DiscoveryResponse as HostDiscoveryResponse, DoctorReport as HostDoctorReport,
         IntrospectionResponse as HostIntrospectionResponse, ManagedConnectorConfig,
@@ -24542,15 +24806,16 @@ mod tests {
         output_dir: &std::path::Path,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use base64::Engine as _;
+        use std::fmt::Write as _;
 
         fs::create_dir_all(output_dir)?;
 
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
         let public_key = signing_key.verifying_key().to_bytes();
-        let public_key_hex: String = public_key
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let mut public_key_hex = String::with_capacity(public_key.len() * 2);
+        for byte in &public_key {
+            write!(&mut public_key_hex, "{byte:02x}").expect("writing to a String should not fail");
+        }
         let public_key_b64 = base64::engine::general_purpose::STANDARD.encode(public_key);
 
         fs::write(
@@ -24754,6 +25019,31 @@ mod tests {
         } else {
             assert!(payload["provenance"]["endpoint"].is_null());
         }
+    }
+
+    fn assert_live_truth_resolution(
+        payload: &Value,
+        knowledge_state: &str,
+        resolver_branch: &str,
+        authoritative_scope: &str,
+        mesh_backed: bool,
+        degraded: bool,
+        fallback_derived: bool,
+    ) {
+        assert_eq!(payload["resolution"]["knowledge_state"], knowledge_state);
+        assert_eq!(payload["resolution"]["resolver_branch"], resolver_branch);
+        assert_eq!(
+            payload["resolution"]["authoritative_scope"],
+            authoritative_scope
+        );
+        assert_eq!(payload["resolution"]["mesh_backed"], mesh_backed);
+        assert_eq!(payload["resolution"]["degraded"], degraded);
+        assert_eq!(payload["resolution"]["fallback_derived"], fallback_derived);
+        assert!(
+            payload["resolution"]["reason"]
+                .as_str()
+                .is_some_and(|reason| !reason.is_empty())
+        );
     }
 
     fn assert_tool_inventory_provenance(
@@ -25185,7 +25475,7 @@ mod tests {
                     "signature_b64": "ZmFrZQ==",
                     "signature_verified": true,
                     "manifest_version": "1.2.3",
-                    "size_bytes": 424242
+                    "size_bytes": 424_242
                 },
                 "placement": placement,
                 "recorded_at": "2026-03-12T00:00:00Z",
@@ -25250,7 +25540,7 @@ mod tests {
                     "signature_b64": "ZmFrZQ==",
                     "signature_verified": true,
                     "manifest_version": "1.2.3",
-                    "size_bytes": 424242
+                    "size_bytes": 424_242
                 },
                 "placement": Value::Null,
                 "recorded_at": "2026-03-12T00:00:00Z",
@@ -28306,6 +28596,15 @@ deny_ptrace = true
             payload["offline_readiness"]["state"],
             "tracked-by-placement-policy"
         );
+        assert_live_truth_resolution(
+            &payload,
+            "mesh-backed",
+            "live-placement-policy",
+            "mesh-placement-policy",
+            true,
+            false,
+            false,
+        );
         assert_evidence_handle(&payload, "package-output");
         assert_evidence_handle(&payload, "host-inventory-apply");
         assert_evidence_handle(&payload, "mesh-live-availability");
@@ -28384,6 +28683,15 @@ deny_ptrace = true
         assert_eq!(payload["source_selection"]["state"], "unknown");
         assert_eq!(payload["source_selection"]["silent_fallback"], false);
         assert_eq!(payload["offline_readiness"]["state"], "unknown");
+        assert_live_truth_resolution(
+            &payload,
+            "fallback-derived",
+            "post-install-status-unavailable",
+            "live-host-post-install-status",
+            false,
+            true,
+            true,
+        );
         assert_evidence_handle(&payload, "package-output");
         assert_evidence_handle(&payload, "host-inventory-apply");
         assert_evidence_handle(&payload, "post-install-status-unavailable");
@@ -28455,6 +28763,15 @@ deny_ptrace = true
         assert_eq!(payload["availability_fact"]["state"], "unknown");
         assert_eq!(payload["source_selection"]["state"], "unknown");
         assert_eq!(payload["offline_readiness"]["state"], "unknown");
+        assert_live_truth_resolution(
+            &payload,
+            "fallback-derived",
+            "post-install-status-unavailable",
+            "live-host-post-install-status",
+            false,
+            true,
+            true,
+        );
         assert_evidence_handle(&payload, "package-output");
         assert_evidence_handle(&payload, "host-inventory-apply");
         assert_evidence_handle(&payload, "post-install-status-unavailable");
@@ -29969,6 +30286,15 @@ deny_ptrace = true
         assert_eq!(payload["source_selection"]["state"], "workspace-manifest");
         assert_eq!(payload["source_selection"]["silent_fallback"], false);
         assert_eq!(payload["offline_readiness"]["supported_by_manifest"], true);
+        assert_live_truth_resolution(
+            &payload,
+            "offline",
+            "offline-manifest",
+            "workspace-manifests",
+            false,
+            false,
+            false,
+        );
         assert_evidence_handle(&payload, "workspace-manifest");
     }
 
@@ -30015,6 +30341,15 @@ deny_ptrace = true
         assert_eq!(
             payload["offline_readiness"]["state"],
             "tracked-by-placement-policy"
+        );
+        assert_live_truth_resolution(
+            &payload,
+            "mesh-backed",
+            "live-placement-policy",
+            "mesh-placement-policy",
+            true,
+            false,
+            false,
         );
         assert_evidence_handle(&payload, "mesh-live-availability");
         assert_evidence_handle(&payload, "host-artifact-provenance");
@@ -30067,6 +30402,15 @@ deny_ptrace = true
         assert_eq!(
             payload["offline_readiness"]["state"],
             "artifact-recorded-without-placement-policy"
+        );
+        assert_live_truth_resolution(
+            &payload,
+            "node-local",
+            "live-artifact-only",
+            "host-artifact-provenance",
+            false,
+            false,
+            false,
         );
         assert_evidence_handle(&payload, "mesh-live-availability");
         assert_evidence_handle(&payload, "host-artifact-provenance");
@@ -30173,6 +30517,15 @@ deny_ptrace = true
         assert_eq!(exit_code, CliExitCode::Success.into());
         assert_eq!(payload["availability_fact"]["state"], "degraded");
         assert_eq!(payload["inventory"]["observed_state"], "degraded");
+        assert_live_truth_resolution(
+            &payload,
+            "degraded",
+            "live-runtime-degraded",
+            "host-artifact-provenance",
+            false,
+            true,
+            false,
+        );
         assert_evidence_handle(&payload, "mesh-live-availability");
         assert_evidence_handle(&payload, "host-runtime-drift");
         assert!(
@@ -34410,7 +34763,8 @@ depends_on = ["missing"]
     fn coerce_invoke_value_number_schema() {
         let schema = json!({"type": "number"});
         let result = super::coerce_invoke_value("3.14", Some(&schema)).unwrap();
-        assert!((result.as_f64().unwrap() - 3.14).abs() < f64::EPSILON);
+        let expected = 314_f64 / 100.0;
+        assert!((result.as_f64().unwrap() - expected).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -40557,6 +40911,15 @@ depends_on = ["missing"]
             payload["availability_fact"]["state"],
             "local-verification-only"
         );
+        assert_live_truth_resolution(
+            &payload,
+            "offline",
+            "install-verification",
+            "local-machine-only",
+            false,
+            false,
+            false,
+        );
         assert!(
             payload["message"]
                 .as_str()
@@ -40587,6 +40950,97 @@ depends_on = ["missing"]
         assert_eq!(payload["command"], "install");
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
         assert_eq!(payload["error"]["recoverable"], true);
+    }
+
+    #[test]
+    fn live_truth_resolution_prefers_mesh_backed_when_placement_is_recorded() {
+        let status: HostConnectorAdminStatus =
+            serde_json::from_value(mock_connector_admin_status_json())
+                .expect("mock admin status should deserialize");
+
+        let resolution = resolve_mesh_live_truth(&status);
+
+        assert_eq!(
+            resolution.knowledge_state,
+            LiveTruthKnowledgeState::MeshBacked
+        );
+        assert_eq!(
+            resolution.resolver_branch,
+            LiveTruthResolverBranch::LivePlacementPolicy
+        );
+        assert_eq!(resolution.authoritative_scope, "mesh-placement-policy");
+        assert!(resolution.mesh_backed);
+        assert!(!resolution.degraded);
+        assert!(!resolution.fallback_derived);
+    }
+
+    #[test]
+    fn live_truth_resolution_falls_back_to_node_local_without_placement() {
+        let status: HostConnectorAdminStatus =
+            serde_json::from_value(mock_connector_admin_status_with_artifact(
+                "local_path",
+                "/opt/fcp/cache/github-enterprise",
+                Value::Null,
+            ))
+            .expect("mock admin status should deserialize");
+
+        let resolution = resolve_mesh_live_truth(&status);
+
+        assert_eq!(
+            resolution.knowledge_state,
+            LiveTruthKnowledgeState::NodeLocal
+        );
+        assert_eq!(
+            resolution.resolver_branch,
+            LiveTruthResolverBranch::LiveArtifactOnly
+        );
+        assert_eq!(resolution.authoritative_scope, "host-artifact-provenance");
+        assert!(!resolution.mesh_backed);
+        assert!(!resolution.degraded);
+        assert!(!resolution.fallback_derived);
+    }
+
+    #[test]
+    fn live_truth_resolution_marks_degraded_status_explicitly() {
+        let status: HostConnectorAdminStatus =
+            serde_json::from_value(mock_connector_degraded_status_json())
+                .expect("mock degraded status should deserialize");
+
+        let resolution = resolve_mesh_live_truth(&status);
+
+        assert_eq!(
+            resolution.knowledge_state,
+            LiveTruthKnowledgeState::Degraded
+        );
+        assert_eq!(
+            resolution.resolver_branch,
+            LiveTruthResolverBranch::LiveRuntimeDegraded
+        );
+        assert_eq!(resolution.authoritative_scope, "host-artifact-provenance");
+        assert!(!resolution.mesh_backed);
+        assert!(resolution.degraded);
+        assert!(!resolution.fallback_derived);
+    }
+
+    #[test]
+    fn live_truth_resolution_marks_post_install_status_gaps_as_fallback() {
+        let resolution = resolve_install_activation_truth(None);
+
+        assert_eq!(
+            resolution.knowledge_state,
+            LiveTruthKnowledgeState::FallbackDerived
+        );
+        assert_eq!(
+            resolution.resolver_branch,
+            LiveTruthResolverBranch::PostInstallStatusUnavailable
+        );
+        assert_eq!(
+            resolution.authoritative_scope,
+            "live-host-post-install-status"
+        );
+        assert!(!resolution.mesh_backed);
+        assert!(resolution.degraded);
+        assert!(resolution.fallback_derived);
     }
 
     #[test]

@@ -523,7 +523,7 @@ mod tests {
             connector_schema: json!({}),
             operations: ops,
             search_slug_lower: slug.to_lowercase(),
-            search_name_lower: format!("{} connector", slug).to_lowercase(),
+            search_name_lower: format!("{slug} connector").to_lowercase(),
             search_cohort_lower: "dev-tools".to_owned(),
         }
     }
@@ -2467,26 +2467,33 @@ mod tests {
 
     #[test]
     fn exact_id_weight_is_highest() {
-        assert!(WEIGHT_OP_ID_EXACT > WEIGHT_WHEN_TO_USE);
-        assert!(WEIGHT_WHEN_TO_USE > WEIGHT_OP_ID_PARTIAL);
-        assert!(WEIGHT_OP_ID_PARTIAL > WEIGHT_SUMMARY);
-        assert!(WEIGHT_SUMMARY > WEIGHT_CAPABILITY);
-        assert!(WEIGHT_CAPABILITY > WEIGHT_CONNECTOR_NAME);
-        assert!(WEIGHT_CONNECTOR_NAME > WEIGHT_COMMON_MISTAKES);
-        assert!(WEIGHT_COMMON_MISTAKES > WEIGHT_RELATED);
+        let weights = [
+            WEIGHT_OP_ID_EXACT,
+            WEIGHT_WHEN_TO_USE,
+            WEIGHT_OP_ID_PARTIAL,
+            WEIGHT_SUMMARY,
+            WEIGHT_CAPABILITY,
+            WEIGHT_CONNECTOR_NAME,
+            WEIGHT_COMMON_MISTAKES,
+            WEIGHT_RELATED,
+        ];
+        assert!(weights.windows(2).all(|pair| pair[0] > pair[1]));
     }
 
     #[test]
     fn all_weights_are_positive() {
-        assert!(WEIGHT_OP_ID_EXACT > 0);
-        assert!(WEIGHT_OP_ID_PARTIAL > 0);
-        assert!(WEIGHT_OP_ID_FUZZY > 0);
-        assert!(WEIGHT_WHEN_TO_USE > 0);
-        assert!(WEIGHT_SUMMARY > 0);
-        assert!(WEIGHT_CAPABILITY > 0);
-        assert!(WEIGHT_CONNECTOR_NAME > 0);
-        assert!(WEIGHT_COMMON_MISTAKES > 0);
-        assert!(WEIGHT_RELATED > 0);
+        let weights = [
+            WEIGHT_OP_ID_EXACT,
+            WEIGHT_OP_ID_PARTIAL,
+            WEIGHT_OP_ID_FUZZY,
+            WEIGHT_WHEN_TO_USE,
+            WEIGHT_SUMMARY,
+            WEIGHT_CAPABILITY,
+            WEIGHT_CONNECTOR_NAME,
+            WEIGHT_COMMON_MISTAKES,
+            WEIGHT_RELATED,
+        ];
+        assert!(weights.into_iter().all(|weight| weight > 0));
     }
 
     // ── stub_operation field mapping ───────────────────────────────

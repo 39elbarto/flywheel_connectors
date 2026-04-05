@@ -2354,7 +2354,7 @@ mod tests {
             ..Default::default()
         };
         let lines = format_summary_toon(&s);
-        assert!(lines.iter().any(|l| l.contains("10") && l.contains("5")));
+        assert!(lines.iter().any(|l| l.contains("10") && l.contains('5')));
     }
 
     #[test]
@@ -2371,7 +2371,7 @@ mod tests {
     fn toon_summary_zero_result() {
         let s = AuditSummary::default();
         let lines = format_summary_toon(&s);
-        assert!(lines.iter().any(|l| l.contains("0")));
+        assert!(lines.iter().any(|l| l.contains('0')));
     }
 
     #[test]

@@ -798,7 +798,7 @@ mod tests {
         };
         let outcome = simulate_resume(&req, &[]);
         assert!(!outcome.success);
-        assert_eq!(outcome.data_loss, 100.0);
+        assert!((outcome.data_loss - 100.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -1285,7 +1285,7 @@ mod tests {
 
     #[test]
     fn multiple_checkpoints_same_computation() {
-        let ckpts = vec![
+        let ckpts = [
             make_checkpoint("ck1", "c1", ComputationPhase::Processing, 25.0),
             make_checkpoint("ck2", "c1", ComputationPhase::Processing, 50.0),
             make_checkpoint("ck3", "c1", ComputationPhase::Processing, 75.0),
@@ -1321,7 +1321,7 @@ mod tests {
         let state = make_state("c1", ComputationPhase::Processing, 50.0);
         let loss = estimate_data_loss(&ckpt, &state);
         // delta=1, current=50 => 1/50*100 = 2%
-        assert!(loss >= 1.0 && loss <= 3.0, "loss = {loss}");
+        assert!((1.0..=3.0).contains(&loss), "loss = {loss}");
     }
 
     #[test]

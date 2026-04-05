@@ -1546,7 +1546,7 @@ mod tests {
     #[test]
     fn compact_number() {
         assert_eq!(compact_value(&json!(42)), "42");
-        assert_eq!(compact_value(&json!(3.14)), "3.14");
+        assert_eq!(compact_value(&json!(2.5)), "2.5");
     }
 
     #[test]
@@ -1581,8 +1581,8 @@ mod tests {
     fn compact_small_object() {
         let v = json!({"a": 1, "b": 2});
         let result = compact_value(&v);
-        assert!(result.contains("a"));
-        assert!(result.contains("b"));
+        assert!(result.contains('a'));
+        assert!(result.contains('b'));
     }
 
     #[test]

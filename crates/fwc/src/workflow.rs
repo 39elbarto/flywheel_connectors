@@ -3041,7 +3041,7 @@ mod tests {
         for (tag, expected) in &tags {
             assert_eq!(
                 parse_command_availability(tag),
-                Some(expected.clone()),
+                Some(*expected),
                 "Failed to parse tag '{tag}'",
             );
         }

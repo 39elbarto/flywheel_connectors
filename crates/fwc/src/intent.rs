@@ -12,6 +12,108 @@ use crate::readiness::CommandAvailability;
 const EXECUTION_NOTICE: &str = "The plan compiler emits concrete `fwc` primitives. A step only succeeds if that primitive is actually implemented and the live host or local state it needs is configured; `fwc` does not fabricate success.";
 const WORKFLOW_TRUTH_COMPILER_SOURCE: &str = "local-intent-compiler";
 
+/// Classification of where a compiled intent answer draws its truth.
+///
+/// Every compiled plan carries a provenance tag so downstream consumers
+/// (and humans reading transcripts) can tell whether the answer came
+/// from a live host, offline artifacts, a mesh query, or a degraded
+/// fallback — without parsing prose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IntentProvenance {
+    /// Answer backed by a live host admin API call.
+    HostBacked,
+    /// Answer derived from local offline artifacts (manifests, registry cache).
+    Offline,
+    /// Answer derived from mesh-backed evidence (future).
+    MeshBacked,
+    /// Host or mesh was queried but returned partial or stale data.
+    Degraded,
+    /// The requested action is not supported by any real primitive.
+    Unsupported,
+}
+
+impl IntentProvenance {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::HostBacked => "host-backed",
+            Self::Offline => "offline",
+            Self::MeshBacked => "mesh-backed",
+            Self::Degraded => "degraded",
+            Self::Unsupported => "unsupported",
+        }
+    }
+}
+
+/// Why an intent was refused or could not be compiled into a real workflow.
+///
+/// Provides a structured taxonomy instead of ad-hoc prose so that
+/// acceptance tests and operator tooling can pattern-match on the
+/// refusal class.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IntentRefusalReason {
+    /// The host endpoint is not reachable or not configured.
+    HostUnavailable,
+    /// The requested lifecycle transition is invalid for the current state.
+    InvalidTransition,
+    /// The connector does not exist or could not be resolved.
+    ConnectorUnresolved,
+    /// The action requires approval that has not been granted.
+    ApprovalRequired,
+    /// The intent does not map to any known real primitive.
+    NoMatchingPrimitive,
+    /// A required parameter (connector, version, etc.) is missing.
+    MissingParameter,
+}
+
+impl IntentRefusalReason {
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::HostUnavailable => "host-unavailable",
+            Self::InvalidTransition => "invalid-transition",
+            Self::ConnectorUnresolved => "connector-unresolved",
+            Self::ApprovalRequired => "approval-required",
+            Self::NoMatchingPrimitive => "no-matching-primitive",
+            Self::MissingParameter => "missing-parameter",
+        }
+    }
+}
+
+/// Contract surface for intent log-tail operations.
+///
+/// Represents the typed request that the intent compiler produces
+/// when it recognizes log/tail/stream verbs. Maps to `fwc tail`
+/// backed by `POST /rpc/admin/logs` and `POST /rpc/admin/events`
+/// on the host.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LogTailContract {
+    pub connector_id: Option<String>,
+    pub since_duration: Option<String>,
+    pub event_type_filter: Option<String>,
+    pub limit: usize,
+    pub provenance: IntentProvenance,
+    pub refusal: Option<IntentRefusalReason>,
+}
+
+/// Contract surface for intent lifecycle operations.
+///
+/// Represents the typed request that the intent compiler produces
+/// when it recognizes lifecycle verbs (enable, disable, start, stop,
+/// restart). Maps to `fwc lifecycle <connector> --action <verb>`
+/// backed by `POST /rpc/lifecycle/{connector_id}` on the host.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LifecycleIntentContract {
+    pub connector_id: String,
+    pub action: String,
+    pub preflight: bool,
+    pub dry_run: bool,
+    pub provenance: IntentProvenance,
+    pub refusal: Option<IntentRefusalReason>,
+}
+
 fn default_execution_notice() -> String {
     EXECUTION_NOTICE.to_owned()
 }
@@ -406,6 +508,7 @@ fn build_plan(
         "lifecycle" => {
             build_lifecycle_plan(request, zone, payload_literal, chosen_connector, action)
         }
+        "log-tail" => build_log_tail_plan(request, zone, chosen_connector, action),
         "config" => build_config_plan(request, zone, payload_literal, chosen_connector, action),
         "unsupported" => build_unsupported_plan(zone, chosen_connector, action),
         "discovery" => build_discovery_plan(request, zone, normalized_intent, chosen_connector),
@@ -421,6 +524,9 @@ fn build_plan(
         ),
     }
 }
+
+/// Host-backed lifecycle verbs that map to `fwc lifecycle --action <verb>`.
+const HOST_LIFECYCLE_VERBS: &[&str] = &["disable", "enable", "restart", "start", "stop"];
 
 fn build_lifecycle_plan(
     request: &IntentRequest,
@@ -442,46 +548,139 @@ fn build_lifecycle_plan(
         return plan;
     };
 
+    // Host-backed lifecycle transitions route through `fwc lifecycle --action <verb>`
+    // backed by POST /rpc/lifecycle/{connector_id} on the host admin API.
+    let is_host_lifecycle = HOST_LIFECYCLE_VERBS.contains(&action.verb);
+
     plan.summary = format!(
         "Plan a {} workflow for the `{}` connector.",
         action.verb, connector.id
     );
-    plan.template_reasoning.push(
-        "Supported lifecycle verbs map onto real `fwc` lifecycle primitives plus a status verification pass."
-            .to_owned(),
-    );
-    plan.steps.push(step(
-        1,
-        "preflight",
-        "Capture the connector's current desired and observed state before changing it."
-            .to_string(),
-        vec!["fwc".to_owned(), "status".to_owned(), connector.id.clone()],
-        false,
-        false,
-        vec![],
-    ));
-    plan.steps.push(step(
-        2,
-        "mutate",
-        format!("Apply the requested `{}` lifecycle action.", action.verb),
-        vec![
-            "fwc".to_owned(),
-            action.verb.to_owned(),
-            connector.id.clone(),
-        ],
-        true,
-        true,
-        vec![],
-    ));
-    plan.steps.push(step(
-        3,
-        "verify",
-        "Re-read status after the change to confirm convergence.".to_owned(),
-        vec!["fwc".to_owned(), "status".to_owned(), connector.id.clone()],
-        false,
-        false,
-        vec![],
-    ));
+
+    if is_host_lifecycle {
+        plan.template_reasoning.push(format!(
+            "The `{}` verb maps to `fwc lifecycle --action {}`, backed by the host admin API lifecycle endpoint (POST /rpc/lifecycle/{{connector_id}}).",
+            action.verb, action.verb
+        ));
+
+        // Step 1: preflight — check valid actions for current state
+        plan.steps.push(step(
+            1,
+            "preflight",
+            "Query valid lifecycle actions for the connector's current state.".to_owned(),
+            vec![
+                "fwc".to_owned(),
+                "lifecycle".to_owned(),
+                connector.id.clone(),
+                "--valid-actions".to_owned(),
+            ],
+            false,
+            false,
+            vec![
+                "Provenance: host-backed. This step queries the live host admin API.".to_owned(),
+            ],
+        ));
+
+        // Step 2: preflight safety check for the specific action
+        plan.steps.push(step(
+            2,
+            "preflight",
+            format!(
+                "Run a preflight safety check for the `{}` lifecycle transition.",
+                action.verb
+            ),
+            vec![
+                "fwc".to_owned(),
+                "lifecycle".to_owned(),
+                connector.id.clone(),
+                "--action".to_owned(),
+                action.verb.to_owned(),
+                "--preflight".to_owned(),
+            ],
+            false,
+            false,
+            vec![
+                "Provenance: host-backed. Validates the transition is legal for the current state."
+                    .to_owned(),
+            ],
+        ));
+
+        // Step 3: execute the lifecycle transition
+        plan.steps.push(step(
+            3,
+            "mutate",
+            format!(
+                "Execute the `{}` lifecycle transition via the host admin API.",
+                action.verb
+            ),
+            vec![
+                "fwc".to_owned(),
+                "lifecycle".to_owned(),
+                connector.id.clone(),
+                "--action".to_owned(),
+                action.verb.to_owned(),
+            ],
+            true,
+            true,
+            vec![
+                "Provenance: host-backed. Calls POST /rpc/lifecycle/{connector_id} on the host."
+                    .to_owned(),
+                format!(
+                    "Refusal taxonomy: host-unavailable if no host configured, invalid-transition if the connector's current state does not permit `{}`.",
+                    action.verb
+                ),
+            ],
+        ));
+
+        // Step 4: verify convergence
+        plan.steps.push(step(
+            4,
+            "verify",
+            "Re-read status after the transition to confirm convergence.".to_owned(),
+            vec!["fwc".to_owned(), "status".to_owned(), connector.id.clone()],
+            false,
+            false,
+            vec![],
+        ));
+    } else {
+        // Original install/update/pin/unpin/status path
+        plan.template_reasoning.push(
+            "Supported lifecycle verbs map onto real `fwc` lifecycle primitives plus a status verification pass."
+                .to_owned(),
+        );
+        plan.steps.push(step(
+            1,
+            "preflight",
+            "Capture the connector's current desired and observed state before changing it."
+                .to_string(),
+            vec!["fwc".to_owned(), "status".to_owned(), connector.id.clone()],
+            false,
+            false,
+            vec![],
+        ));
+        plan.steps.push(step(
+            2,
+            "mutate",
+            format!("Apply the requested `{}` lifecycle action.", action.verb),
+            vec![
+                "fwc".to_owned(),
+                action.verb.to_owned(),
+                connector.id.clone(),
+            ],
+            true,
+            true,
+            vec![],
+        ));
+        plan.steps.push(step(
+            3,
+            "verify",
+            "Re-read status after the change to confirm convergence.".to_owned(),
+            vec!["fwc".to_owned(), "status".to_owned(), connector.id.clone()],
+            false,
+            false,
+            vec![],
+        ));
+    }
 
     if zone.is_some() {
         plan.assumptions.push(
@@ -507,6 +706,110 @@ fn build_lifecycle_plan(
     if matches!(request.mode, IntentMode::DoApprove) {
         plan.assumptions.push(
             "Approval is explicit, so `fwc do --approve` will attempt the real mutating lifecycle primitive."
+                .to_owned(),
+        );
+    }
+
+    plan
+}
+
+fn build_log_tail_plan(
+    request: &IntentRequest,
+    zone: Option<&str>,
+    chosen_connector: Option<&ConnectorCandidate>,
+    action: &ActionSignals,
+) -> PlanBuild {
+    let mut plan = PlanBuild::default();
+
+    plan.template_reasoning.push(
+        "Log/tail/stream verbs map to `fwc tail`, backed by the host admin API log and event endpoints (POST /rpc/admin/logs, POST /rpc/admin/events)."
+            .to_owned(),
+    );
+
+    let connector_label = chosen_connector
+        .map(|c| c.id.as_str())
+        .unwrap_or("all connectors");
+
+    plan.summary = format!(
+        "Plan a log-tail workflow for {}.",
+        connector_label
+    );
+
+    // Step 1: status check to confirm the connector exists and is reachable
+    if let Some(connector) = chosen_connector {
+        plan.steps.push(step(
+            1,
+            "preflight",
+            "Confirm the connector is known and its current state.".to_owned(),
+            vec!["fwc".to_owned(), "status".to_owned(), connector.id.clone()],
+            false,
+            false,
+            vec![
+                "Provenance: host-backed. Validates the connector exists before tailing.".to_owned(),
+            ],
+        ));
+    }
+
+    // Step 2: tail events/logs
+    let next_ordinal = if chosen_connector.is_some() { 2 } else { 1 };
+    let mut tail_argv = vec!["fwc".to_owned(), "tail".to_owned()];
+    if let Some(connector) = chosen_connector {
+        tail_argv.push(connector.id.clone());
+    }
+    // Default --since and --limit for a reasonable snapshot
+    tail_argv.push("--since".to_owned());
+    tail_argv.push("5m".to_owned());
+    tail_argv.push("--limit".to_owned());
+    tail_argv.push("50".to_owned());
+
+    plan.steps.push(step(
+        next_ordinal,
+        "inspect",
+        format!(
+            "Tail recent events and logs for {}.",
+            connector_label
+        ),
+        tail_argv,
+        false,
+        false,
+        vec![
+            "Provenance: host-backed. Queries POST /rpc/admin/logs and POST /rpc/admin/events on the host."
+                .to_owned(),
+            "Refusal taxonomy: host-unavailable if no host configured, connector-unresolved if the connector does not exist."
+                .to_owned(),
+        ],
+    ));
+
+    // Step 3: also show recent operation receipts for richer context
+    if let Some(connector) = chosen_connector {
+        plan.steps.push(step(
+            next_ordinal + 1,
+            "inspect",
+            "Show recent operation receipts for additional execution context.".to_owned(),
+            vec![
+                "fwc".to_owned(),
+                "history".to_owned(),
+                "--connector".to_owned(),
+                connector.id.clone(),
+                "--limit".to_owned(),
+                "10".to_owned(),
+            ],
+            false,
+            false,
+            vec![],
+        ));
+    }
+
+    if zone.is_some() {
+        plan.assumptions.push(
+            "A zone hint was captured, but the tail command does not yet filter by zone."
+                .to_owned(),
+        );
+    }
+
+    if matches!(request.mode, IntentMode::DoApprove | IntentMode::DoSimulate) {
+        plan.assumptions.push(
+            "Log tailing is read-only; approval and simulation modes have no additional effect on these steps."
                 .to_owned(),
         );
     }
@@ -641,16 +944,9 @@ fn build_unsupported_plan(
     action: &ActionSignals,
 ) -> PlanBuild {
     let mut plan = PlanBuild::default();
-    let unsupported_reason = match action.verb {
-        "logs" => {
-            "Connector log tailing is not implemented as a real `fwc` primitive yet. Use the closest real evidence surfaces instead."
-        }
-        "disable" | "enable" | "restart" | "start" | "stop" => {
-            "That lifecycle transition is not implemented as a real `fwc` primitive because the host does not yet expose a truthful endpoint for it."
-        }
-        _ => "That intent does not map to a supported real `fwc` primitive.",
-    };
-    plan.unsupported_reasons.push(unsupported_reason.to_owned());
+    plan.unsupported_reasons.push(
+        "That intent does not map to a supported real `fwc` primitive.".to_owned(),
+    );
     plan.template_reasoning.push(
         "The intent matched a verb that does not currently have a truthful `fwc` primitive, so the compiler switched to an unsupported-intent explanation instead of inventing a command."
             .to_owned(),
@@ -668,16 +964,10 @@ fn build_unsupported_plan(
         return plan;
     };
 
-    plan.summary = match action.verb {
-        "logs" => format!(
-            "Connector log tailing is unavailable for `{}`; use the closest real inspection surfaces instead.",
-            connector.id
-        ),
-        _ => format!(
-            "`fwc {}` is unavailable for `{}`; inspect current state and choose a supported lifecycle command instead.",
-            action.verb, connector.id
-        ),
-    };
+    plan.summary = format!(
+        "`fwc {}` is unavailable for `{}`; inspect current state and choose a supported command instead.",
+        action.verb, connector.id
+    );
 
     plan.steps.push(step(
         1,
@@ -688,35 +978,15 @@ fn build_unsupported_plan(
         false,
         vec![],
     ));
-
-    if action.verb == "logs" {
-        plan.steps.push(step(
-            2,
-            "inspect",
-            "Inspect recent operation receipts for the connector.".to_owned(),
-            vec![
-                "fwc".to_owned(),
-                "history".to_owned(),
-                "--connector".to_owned(),
-                connector.id.clone(),
-                "--limit".to_owned(),
-                "20".to_owned(),
-            ],
-            false,
-            false,
-            vec![],
-        ));
-    } else {
-        plan.steps.push(step(
-            2,
-            "inspect",
-            "Inspect connector detail before choosing a supported lifecycle action.".to_owned(),
-            vec!["fwc".to_owned(), "show".to_owned(), connector.id.clone()],
-            false,
-            false,
-            vec![],
-        ));
-    }
+    plan.steps.push(step(
+        2,
+        "inspect",
+        "Inspect connector detail before choosing a supported action.".to_owned(),
+        vec!["fwc".to_owned(), "show".to_owned(), connector.id.clone()],
+        false,
+        false,
+        vec![],
+    ));
 
     if let Some(zone) = zone {
         plan.assumptions.push(format!(
@@ -1084,13 +1354,17 @@ fn infer_action(normalized_intent: &str) -> ActionSignals {
         ("pin", "pin"),
         ("unpin", "unpin"),
         ("status", "status"),
-    ];
-    static UNSUPPORTED_LIFECYCLE: &[(&str, &str)] = &[
         ("disable", "disable"),
         ("enable", "enable"),
         ("restart", "restart"),
         ("start", "start"),
         ("stop", "stop"),
+    ];
+    static LOG_TAIL: &[(&str, &str)] = &[
+        ("logs", "tail"),
+        ("log", "tail"),
+        ("tail", "tail"),
+        ("stream", "tail"),
     ];
     static CONFIG: &[(&str, &str)] = &[
         ("configure", "set"),
@@ -1125,41 +1399,27 @@ fn infer_action(normalized_intent: &str) -> ActionSignals {
         ("inspect", "get"),
         ("fetch", "get"),
     ];
-    static UNSUPPORTED_LOGS: &[(&str, &str)] = &[
-        ("logs", "logs"),
-        ("log", "logs"),
-        ("tail", "logs"),
-        ("stream", "logs"),
-    ];
-
     if let Some((matched, verb)) = match_first(normalized_intent, LIFECYCLE) {
         return ActionSignals {
             family: "lifecycle",
             verb,
             resource: Some("connector"),
-            risk: if verb == "status" { "low" } else { "high" },
+            risk: match verb {
+                "status" => "low",
+                "install" | "update" | "pin" | "unpin" => "high",
+                // Host-backed lifecycle transitions: enable/disable/start/stop/restart
+                _ => "high",
+            },
             mutating: verb != "status",
             matched_terms: vec![matched.to_owned()],
             needs_lookup: false,
         };
     }
 
-    if let Some((matched, verb)) = match_first(normalized_intent, UNSUPPORTED_LIFECYCLE) {
+    if let Some((matched, verb)) = match_first(normalized_intent, LOG_TAIL) {
         return ActionSignals {
-            family: "unsupported",
+            family: "log-tail",
             verb,
-            resource: Some("connector"),
-            risk: "high",
-            mutating: true,
-            matched_terms: vec![matched.to_owned()],
-            needs_lookup: false,
-        };
-    }
-
-    if let Some((matched, _)) = match_first(normalized_intent, UNSUPPORTED_LOGS) {
-        return ActionSignals {
-            family: "unsupported",
-            verb: "logs",
             resource: Some("connector"),
             risk: "low",
             mutating: false,
@@ -2210,7 +2470,7 @@ mod tests {
     #[test]
     fn infer_action_lifecycle_disable() {
         let action = infer_action("disable the slack connector");
-        assert_eq!(action.family, "unsupported");
+        assert_eq!(action.family, "lifecycle");
         assert_eq!(action.verb, "disable");
         assert!(action.mutating);
         assert_eq!(action.risk, "high");
@@ -2228,7 +2488,7 @@ mod tests {
     #[test]
     fn infer_action_lifecycle_enable() {
         let action = infer_action("enable the discord connector");
-        assert_eq!(action.family, "unsupported");
+        assert_eq!(action.family, "lifecycle");
         assert_eq!(action.verb, "enable");
         assert!(action.mutating);
     }
@@ -2236,7 +2496,7 @@ mod tests {
     #[test]
     fn infer_action_lifecycle_restart() {
         let action = infer_action("restart the slack connector");
-        assert_eq!(action.family, "unsupported");
+        assert_eq!(action.family, "lifecycle");
         assert_eq!(action.verb, "restart");
         assert!(action.mutating);
     }
@@ -2258,16 +2518,16 @@ mod tests {
     #[test]
     fn infer_action_logs() {
         let action = infer_action("show logs for the github connector");
-        assert_eq!(action.family, "unsupported");
-        assert_eq!(action.verb, "logs");
+        assert_eq!(action.family, "log-tail");
+        assert_eq!(action.verb, "tail");
         assert!(!action.mutating);
     }
 
     #[test]
     fn infer_action_logs_tail() {
         let action = infer_action("tail slack connector output");
-        assert_eq!(action.family, "unsupported");
-        assert_eq!(action.verb, "logs");
+        assert_eq!(action.family, "log-tail");
+        assert_eq!(action.verb, "tail");
     }
 
     #[test]
@@ -2949,16 +3209,19 @@ mod tests {
     }
 
     #[test]
-    fn compiler_marks_disable_as_unsupported() {
+    fn compiler_routes_disable_to_lifecycle() {
         let plan = compile(&request("disable the slack connector in z:work"));
-        assert_eq!(plan.template, "unsupported");
-        assert_eq!(plan.status, "unsupported");
-        assert_eq!(
-            plan.workflow_truth.availability,
-            CommandAvailability::Unsupported
-        );
-        assert_eq!(plan.steps[0].command_line, "fwc status slack");
-        assert_eq!(plan.steps[1].command_line, "fwc show slack");
+        assert_eq!(plan.template, "lifecycle");
+        assert_ne!(plan.status, "unsupported");
+        // Host-backed lifecycle: preflight valid-actions, preflight action, mutate, verify
+        assert!(plan
+            .steps
+            .iter()
+            .any(|s| s.command_line.contains("lifecycle") && s.command_line.contains("--action")));
+        assert!(plan
+            .steps
+            .iter()
+            .any(|s| s.command_line.contains("disable")));
         assert_eq!(plan.zone.as_deref(), Some("z:work"));
     }
 
@@ -2977,14 +3240,16 @@ mod tests {
     }
 
     #[test]
-    fn compiler_marks_logs_as_unsupported() {
+    fn compiler_routes_logs_to_tail() {
         let plan = compile(&request("tail the github connector logs"));
-        assert_eq!(plan.template, "unsupported");
-        assert_eq!(plan.status, "unsupported");
-        assert_eq!(
-            plan.steps[1].command_line,
-            "fwc history --connector github --limit 20"
-        );
+        assert_eq!(plan.template, "log-tail");
+        assert_ne!(plan.status, "unsupported");
+        // Log-tail plan should use `fwc tail` with the connector
+        assert!(plan.steps.iter().any(|s| s.command_line.contains("fwc tail")));
+        assert!(plan
+            .steps
+            .iter()
+            .any(|s| s.command_line.contains("github")));
     }
 
     #[test]
@@ -3018,19 +3283,34 @@ mod tests {
     }
 
     #[test]
-    fn compiler_unsupported_restart_plan_has_status_preflight() {
+    fn compiler_restart_routes_to_lifecycle_with_preflight() {
         let plan = compile(&request("restart the github connector"));
-        assert_eq!(plan.template, "unsupported");
-        assert_eq!(plan.status, "unsupported");
-        assert!(plan.steps.first().is_some_and(|s| s.command == "status"));
+        assert_eq!(plan.template, "lifecycle");
+        assert_ne!(plan.status, "unsupported");
+        // Host-backed lifecycle plans include a valid-actions preflight step
+        assert!(plan
+            .steps
+            .iter()
+            .any(|s| s.command_line.contains("--valid-actions")));
+        assert!(plan
+            .steps
+            .iter()
+            .any(|s| s.command_line.contains("--action") && s.command_line.contains("restart")));
     }
 
     #[test]
-    fn compiler_unsupported_enable_plan_has_show_step() {
+    fn compiler_enable_routes_to_lifecycle() {
         let plan = compile(&request("enable the slack connector"));
-        assert_eq!(plan.template, "unsupported");
-        assert_eq!(plan.status, "unsupported");
-        assert!(plan.steps.iter().any(|s| s.command == "show"));
+        assert_eq!(plan.template, "lifecycle");
+        assert_ne!(plan.status, "unsupported");
+        assert!(plan
+            .steps
+            .iter()
+            .any(|s| s.command_line.contains("lifecycle")));
+        assert!(plan
+            .steps
+            .iter()
+            .any(|s| s.command_line.contains("enable")));
     }
 
     #[test]
@@ -3058,9 +3338,16 @@ mod tests {
     }
 
     #[test]
-    fn compiler_no_connector_unsupported_when_primitive_is_missing() {
+    fn compiler_no_connector_lifecycle_needs_clarification() {
         let plan = compile(&request("restart some connector"));
-        assert_eq!(plan.status, "unsupported");
+        // Without a resolvable connector, the lifecycle plan asks for clarification
+        assert_eq!(plan.template, "lifecycle");
+        assert!(
+            plan.status == "needs-clarification" || !plan.missing_information.is_empty(),
+            "Expected needs-clarification or missing info, got status={}, missing={:?}",
+            plan.status,
+            plan.missing_information,
+        );
         assert!(plan.chosen_connector.is_none());
     }
 
@@ -3976,5 +4263,308 @@ mod tests {
             "Empty steps should yield Unknown, got {:?}",
             truth.availability,
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Bead 24llg.6.2.1: Intent contract surfaces — provenance,
+    // refusal taxonomy, log-tail, and host-backed lifecycle
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ── IntentProvenance ─────────────────────────────────────
+
+    #[test]
+    fn provenance_labels_are_distinct() {
+        let labels: Vec<&str> = [
+            IntentProvenance::HostBacked,
+            IntentProvenance::Offline,
+            IntentProvenance::MeshBacked,
+            IntentProvenance::Degraded,
+            IntentProvenance::Unsupported,
+        ]
+        .iter()
+        .map(|p| p.label())
+        .collect();
+        let unique: std::collections::HashSet<&&str> = labels.iter().collect();
+        assert_eq!(labels.len(), unique.len(), "Provenance labels must be unique");
+    }
+
+    #[test]
+    fn provenance_serializes_kebab_case() {
+        let json = serde_json::to_string(&IntentProvenance::HostBacked).unwrap();
+        assert_eq!(json, r#""host-backed""#);
+        let json = serde_json::to_string(&IntentProvenance::MeshBacked).unwrap();
+        assert_eq!(json, r#""mesh-backed""#);
+    }
+
+    #[test]
+    fn provenance_round_trips() {
+        for variant in &[
+            IntentProvenance::HostBacked,
+            IntentProvenance::Offline,
+            IntentProvenance::MeshBacked,
+            IntentProvenance::Degraded,
+            IntentProvenance::Unsupported,
+        ] {
+            let json = serde_json::to_string(variant).unwrap();
+            let back: IntentProvenance = serde_json::from_str(&json).unwrap();
+            assert_eq!(*variant, back);
+        }
+    }
+
+    // ── IntentRefusalReason ─────────────────────────────────
+
+    #[test]
+    fn refusal_reason_labels_are_distinct() {
+        let labels: Vec<&str> = [
+            IntentRefusalReason::HostUnavailable,
+            IntentRefusalReason::InvalidTransition,
+            IntentRefusalReason::ConnectorUnresolved,
+            IntentRefusalReason::ApprovalRequired,
+            IntentRefusalReason::NoMatchingPrimitive,
+            IntentRefusalReason::MissingParameter,
+        ]
+        .iter()
+        .map(|r| r.label())
+        .collect();
+        let unique: std::collections::HashSet<&&str> = labels.iter().collect();
+        assert_eq!(labels.len(), unique.len(), "Refusal labels must be unique");
+    }
+
+    #[test]
+    fn refusal_reason_serializes_kebab_case() {
+        let json = serde_json::to_string(&IntentRefusalReason::HostUnavailable).unwrap();
+        assert_eq!(json, r#""host-unavailable""#);
+    }
+
+    #[test]
+    fn refusal_reason_round_trips() {
+        for variant in &[
+            IntentRefusalReason::HostUnavailable,
+            IntentRefusalReason::InvalidTransition,
+            IntentRefusalReason::ConnectorUnresolved,
+            IntentRefusalReason::ApprovalRequired,
+            IntentRefusalReason::NoMatchingPrimitive,
+            IntentRefusalReason::MissingParameter,
+        ] {
+            let json = serde_json::to_string(variant).unwrap();
+            let back: IntentRefusalReason = serde_json::from_str(&json).unwrap();
+            assert_eq!(*variant, back);
+        }
+    }
+
+    // ── LogTailContract ─────────────────────────────────────
+
+    #[test]
+    fn log_tail_contract_serializes() {
+        let contract = LogTailContract {
+            connector_id: Some("github".to_owned()),
+            since_duration: Some("5m".to_owned()),
+            event_type_filter: None,
+            limit: 50,
+            provenance: IntentProvenance::HostBacked,
+            refusal: None,
+        };
+        let json = serde_json::to_value(&contract).unwrap();
+        assert_eq!(json["connector_id"], "github");
+        assert_eq!(json["provenance"], "host-backed");
+        assert!(json["refusal"].is_null());
+    }
+
+    #[test]
+    fn log_tail_contract_with_refusal() {
+        let contract = LogTailContract {
+            connector_id: None,
+            since_duration: None,
+            event_type_filter: None,
+            limit: 50,
+            provenance: IntentProvenance::Unsupported,
+            refusal: Some(IntentRefusalReason::HostUnavailable),
+        };
+        let json = serde_json::to_value(&contract).unwrap();
+        assert_eq!(json["provenance"], "unsupported");
+        assert_eq!(json["refusal"], "host-unavailable");
+    }
+
+    // ── LifecycleIntentContract ──────────────────────────────
+
+    #[test]
+    fn lifecycle_contract_serializes() {
+        let contract = LifecycleIntentContract {
+            connector_id: "slack".to_owned(),
+            action: "disable".to_owned(),
+            preflight: true,
+            dry_run: false,
+            provenance: IntentProvenance::HostBacked,
+            refusal: None,
+        };
+        let json = serde_json::to_value(&contract).unwrap();
+        assert_eq!(json["connector_id"], "slack");
+        assert_eq!(json["action"], "disable");
+        assert_eq!(json["provenance"], "host-backed");
+    }
+
+    #[test]
+    fn lifecycle_contract_with_invalid_transition_refusal() {
+        let contract = LifecycleIntentContract {
+            connector_id: "github".to_owned(),
+            action: "stop".to_owned(),
+            preflight: false,
+            dry_run: false,
+            provenance: IntentProvenance::HostBacked,
+            refusal: Some(IntentRefusalReason::InvalidTransition),
+        };
+        let json = serde_json::to_value(&contract).unwrap();
+        assert_eq!(json["refusal"], "invalid-transition");
+    }
+
+    // ── Compiler integration: log-tail plans ────────────────
+
+    #[test]
+    fn compiler_log_tail_plan_uses_fwc_tail() {
+        let plan = compile(&request("show logs for the github connector"));
+        assert_eq!(plan.template, "log-tail");
+        assert!(plan
+            .steps
+            .iter()
+            .any(|s| s.command_line.contains("fwc tail")));
+    }
+
+    #[test]
+    fn compiler_log_tail_plan_includes_since_default() {
+        let plan = compile(&request("tail github logs"));
+        assert!(plan
+            .steps
+            .iter()
+            .any(|s| s.command_line.contains("--since") && s.command_line.contains("5m")));
+    }
+
+    #[test]
+    fn compiler_log_tail_includes_history_step() {
+        let plan = compile(&request("stream the github connector logs"));
+        // Log-tail plans include a history step for operation receipts
+        assert!(plan.steps.iter().any(|s| s.command_line.contains("history")));
+    }
+
+    #[test]
+    fn compiler_log_tail_no_connector_still_tails() {
+        let plan = compile(&request("tail all connector logs"));
+        assert_eq!(plan.template, "log-tail");
+        assert!(plan.steps.iter().any(|s| s.command_line.contains("fwc tail")));
+    }
+
+    #[test]
+    fn compiler_log_tail_is_read_only() {
+        let plan = compile(&request("tail the slack connector logs"));
+        assert!(plan.steps.iter().all(|s| !s.side_effecting));
+        assert!(plan.steps.iter().all(|s| !s.approval_required));
+    }
+
+    // ── Compiler integration: host-backed lifecycle plans ───��
+
+    #[test]
+    fn compiler_stop_routes_to_lifecycle() {
+        let plan = compile(&request("stop the github connector"));
+        assert_eq!(plan.template, "lifecycle");
+        assert!(plan
+            .steps
+            .iter()
+            .any(|s| s.command_line.contains("--action") && s.command_line.contains("stop")));
+    }
+
+    #[test]
+    fn compiler_start_routes_to_lifecycle() {
+        let plan = compile(&request("start the telegram connector"));
+        assert_eq!(plan.template, "lifecycle");
+        assert!(plan
+            .steps
+            .iter()
+            .any(|s| s.command_line.contains("--action") && s.command_line.contains("start")));
+    }
+
+    #[test]
+    fn compiler_lifecycle_plan_has_four_steps() {
+        let plan = compile(&request("disable the slack connector"));
+        // Host-backed lifecycle: valid-actions, preflight, mutate, verify
+        assert_eq!(
+            plan.steps.len(),
+            4,
+            "Host-backed lifecycle plan should have 4 steps, got: {:?}",
+            plan.steps.iter().map(|s| &s.phase).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn compiler_lifecycle_mutate_step_requires_approval() {
+        let plan = compile(&request("restart the github connector"));
+        let mutate = plan
+            .steps
+            .iter()
+            .find(|s| s.phase == "mutate")
+            .expect("lifecycle plan should have a mutate step");
+        assert!(mutate.approval_required);
+        assert!(mutate.side_effecting);
+    }
+
+    #[test]
+    fn compiler_lifecycle_preflight_steps_are_safe() {
+        let plan = compile(&request("enable the discord connector"));
+        let preflights: Vec<_> = plan.steps.iter().filter(|s| s.phase == "preflight").collect();
+        assert!(
+            !preflights.is_empty(),
+            "lifecycle plan should have preflight steps"
+        );
+        for s in preflights {
+            assert!(!s.side_effecting, "preflight step should not be side-effecting");
+            assert!(!s.approval_required, "preflight step should not require approval");
+        }
+    }
+
+    #[test]
+    fn compiler_lifecycle_notes_contain_provenance() {
+        let plan = compile(&request("stop the github connector"));
+        let has_provenance = plan.steps.iter().any(|s| {
+            s.notes
+                .iter()
+                .any(|n| n.contains("Provenance: host-backed"))
+        });
+        assert!(
+            has_provenance,
+            "Host-backed lifecycle steps should annotate provenance"
+        );
+    }
+
+    #[test]
+    fn compiler_lifecycle_notes_contain_refusal_taxonomy() {
+        let plan = compile(&request("disable the slack connector"));
+        let has_refusal = plan.steps.iter().any(|s| {
+            s.notes
+                .iter()
+                .any(|n| n.contains("Refusal taxonomy"))
+        });
+        assert!(
+            has_refusal,
+            "Host-backed lifecycle steps should annotate refusal taxonomy"
+        );
+    }
+
+    // ── Original lifecycle verbs still work ──────────────────
+
+    #[test]
+    fn compiler_install_still_uses_direct_primitive() {
+        let plan = compile(&request("install the github connector"));
+        assert_eq!(plan.template, "lifecycle");
+        // Install uses direct `fwc install`, not `fwc lifecycle --action`
+        assert!(plan.steps.iter().any(|s| s.command == "install"));
+        assert!(!plan
+            .steps
+            .iter()
+            .any(|s| s.command_line.contains("--action")));
+    }
+
+    #[test]
+    fn compiler_status_still_uses_direct_primitive() {
+        let plan = compile(&request("status of the slack connector"));
+        assert_eq!(plan.template, "lifecycle");
+        assert!(plan.steps.iter().any(|s| s.command == "status"));
     }
 }

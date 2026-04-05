@@ -1403,7 +1403,7 @@ mod tests {
     fn builtin_names_are_unique() {
         let playbooks = get_builtin_playbooks();
         let mut names: Vec<&str> = playbooks.iter().map(|p| p.name.as_str()).collect();
-        names.sort();
+        names.sort_unstable();
         let orig_len = names.len();
         names.dedup();
         assert_eq!(orig_len, names.len(), "Duplicate playbook names found");
@@ -1434,7 +1434,7 @@ mod tests {
         for pb in get_builtin_playbooks() {
             let mut ids: Vec<&str> = pb.steps.iter().map(|s| s.id.as_str()).collect();
             let orig = ids.len();
-            ids.sort();
+            ids.sort_unstable();
             ids.dedup();
             assert_eq!(
                 orig,

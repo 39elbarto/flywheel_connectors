@@ -963,7 +963,7 @@ mod tests {
         };
         let dbg = format!("{change:?}");
         assert!(dbg.contains("Added"));
-        assert!(dbg.contains("x"));
+        assert!(dbg.contains('x'));
     }
 
     #[test]
@@ -976,7 +976,7 @@ mod tests {
     #[test]
     fn change_kind_clone() {
         let k = ChangeKind::Removed;
-        let k2 = k.clone();
+        let k2 = k;
         assert_eq!(k, k2);
     }
 
@@ -1111,7 +1111,7 @@ mod tests {
 
     #[test]
     fn compact_float_number() {
-        assert_eq!(format_value_compact(Some(&json!(3.14))), "3.14");
+        assert_eq!(format_value_compact(Some(&json!(2.5))), "2.5");
     }
 
     #[test]
@@ -1546,7 +1546,7 @@ mod tests {
 
     #[test]
     fn identical_floats_no_diff() {
-        let v = json!({"v": 3.14});
+        let v = json!({"v": 2.5});
         assert!(diff(&v, &v).is_empty());
     }
 

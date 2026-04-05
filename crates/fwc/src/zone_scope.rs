@@ -2194,7 +2194,7 @@ mod tests {
 
     #[test]
     fn zone_id_ord_multiple() {
-        let mut zones = vec![
+        let mut zones = [
             ZoneId::new("z:work"),
             ZoneId::new("z:alpha"),
             ZoneId::new("z:public"),
@@ -2344,14 +2344,14 @@ mod tests {
             .with_connector("1password")
             .with_denied_operation("delete_all")
             .with_denied_operation("purge")
-            .with_expiry(9999999);
+            .with_expiry(9_999_999);
         let json = serde_json::to_string(&t).unwrap();
         let t2: CapabilityToken = serde_json::from_str(&json).unwrap();
         assert_eq!(t2.zone, zone_private());
         assert_eq!(t2.principal, "admin-agent");
         assert_eq!(t2.allowed_connectors.len(), 2);
         assert_eq!(t2.denied_operations.len(), 2);
-        assert_eq!(t2.expires_at, 9999999);
+        assert_eq!(t2.expires_at, 9_999_999);
     }
 
     #[test]
@@ -3763,13 +3763,13 @@ mod tests {
     #[test]
     fn migrate_happy_path() {
         let source = sample_source_config();
-        let mut source_mut = source.clone();
+        let source_config = source.clone();
         let mut target = sample_target_config();
         let plan = plan_migration("github", &source, "z:public", Some(&target));
         // No policy conflicts between different bindings → safe=false
         // Actually the current logic: conflicts exist when target has bindings not in source
         // target has "open_access" not in source → policy conflict → safe=false
-        let result = execute_migration(&plan, &mut source_mut, &mut target, true);
+        let result = execute_migration(&plan, &source_config, &mut target, true);
         assert!(result.success);
         assert!(result.fields_transferred > 0);
         assert!(!result.rolled_back);
@@ -3802,9 +3802,9 @@ mod tests {
         assert!(!plan.safe);
         assert!(!plan.policy_conflicts.is_empty());
 
-        let mut source_mut = source.clone();
+        let source_config = source.clone();
         let mut target_mut = target;
-        let result = execute_migration(&plan, &mut source_mut, &mut target_mut, false);
+        let result = execute_migration(&plan, &source_config, &mut target_mut, false);
         assert!(!result.success);
         assert!(result.error.is_some());
         assert!(result.error.unwrap().contains("Policy conflicts"));
@@ -3832,8 +3832,8 @@ mod tests {
         };
         let original_target_config = target.config.clone();
         let plan = plan_migration("fail_connector", &source, "z:public", Some(&target));
-        let mut source_mut = source;
-        let result = execute_migration(&plan, &mut source_mut, &mut target, true);
+        let source_config = source;
+        let result = execute_migration(&plan, &source_config, &mut target, true);
         assert!(!result.success);
         assert!(result.rolled_back);
         // Target config should be restored

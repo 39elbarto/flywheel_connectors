@@ -1520,9 +1520,9 @@ mod tests {
             evidence,
         };
         let cloned = eval.clone();
-        assert_eq!(cloned.policy.require_attestation, true);
+        assert!(cloned.policy.require_attestation);
         assert_eq!(cloned.policy.min_slsa_level, 3);
-        assert_eq!(cloned.policy.require_digest_match, true);
+        assert!(cloned.policy.require_digest_match);
         assert_eq!(cloned.policy.trusted_builders.len(), 1);
     }
 
@@ -1942,7 +1942,8 @@ mod tests {
 
     #[test]
     fn json_string_value_rejects_float() {
-        assert!(json_string_value(&3.14).is_err());
+        let ratio = 314_f64 / 100.0;
+        assert!(json_string_value(&ratio).is_err());
     }
 
     #[test]

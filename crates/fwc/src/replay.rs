@@ -1800,7 +1800,7 @@ mod tests {
     #[test]
     fn op_status_clone() {
         let status = OpStatus::Denied;
-        let cloned = status.clone();
+        let cloned = status;
         assert_eq!(status, cloned);
     }
 
@@ -2097,7 +2097,8 @@ mod tests {
 
     #[test]
     fn summarize_input_number_float() {
-        let summary = summarize_input(&json!(3.14));
+        let ratio = 314_f64 / 100.0;
+        let summary = summarize_input(&json!(ratio));
         assert!(summary.contains("3.14"));
     }
 
@@ -2347,8 +2348,9 @@ mod tests {
     #[test]
     fn parse_override_float_value() {
         let (key, value) = parse_override("rate=3.14").unwrap();
+        let expected = 314_f64 / 100.0;
         assert_eq!(key, "rate");
-        assert_eq!(value, json!(3.14));
+        assert_eq!(value, json!(expected));
     }
 
     #[test]

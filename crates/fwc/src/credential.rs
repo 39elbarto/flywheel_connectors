@@ -1610,7 +1610,7 @@ mod tests {
     #[test]
     fn auth_type_clone_semantics() {
         let t = AuthType::OAuth;
-        let t2 = t.clone();
+        let t2 = t;
         assert_eq!(t, t2);
     }
 
@@ -2008,7 +2008,7 @@ mod tests {
         let entry = store.get("conn").unwrap().unwrap();
         assert_eq!(entry.auth_type, AuthType::OAuth);
         // Old fields should be gone since it was an overwrite.
-        assert!(entry.fields.get("token").is_none());
+        assert!(!entry.fields.contains_key("token"));
     }
 
     // ── Additional file backend tests ───────────────────────────────────
@@ -2270,7 +2270,7 @@ mod tests {
     #[test]
     fn auth_status_clone() {
         let s = AuthStatus::Valid;
-        let s2 = s.clone();
+        let s2 = s;
         assert_eq!(s, s2);
     }
 
@@ -2498,7 +2498,7 @@ mod tests {
             (Utc::now() - chrono::Duration::days(7)).to_rfc3339_opts(SecondsFormat::Secs, true);
         let entry = CredentialEntry::new("google", AuthType::OAuth, oauth_fields(&past));
         let result = verify_credential(&entry);
-        assert!(result.message.contains("7"));
+        assert!(result.message.contains('7'));
         assert!(result.message.contains("expired"));
     }
 

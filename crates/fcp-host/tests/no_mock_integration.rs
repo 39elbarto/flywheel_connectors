@@ -2654,8 +2654,8 @@ fn execution_form_doctor_report_schema_stable() {
     let json = serde_json::to_value(&report).unwrap();
 
     // Doctor report schema is the same regardless of execution form.
-    assert!(json.get("status").is_some());
-    assert!(json.get("version").is_some());
+    assert!(json.get("overall_status").is_some());
+    assert!(json.get("schema_version").is_some());
     assert!(json.get("zone_id").is_some());
     assert!(json.get("checkpoint").is_some());
     assert!(json.get("revocation").is_some());

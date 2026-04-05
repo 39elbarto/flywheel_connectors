@@ -1288,8 +1288,11 @@ mod tests {
 
     #[test]
     fn host_result_unwrap_or_else_callback() {
-        let r: HostResult<u32> = Err(HostError::CacheError("miss".into()));
-        let val = r.unwrap_or_else(|_| 999);
+        fn cache_miss() -> HostResult<u32> {
+            Err(HostError::CacheError("miss".into()))
+        }
+
+        let val = cache_miss().unwrap_or(999);
         assert_eq!(val, 999);
     }
 
@@ -1506,7 +1509,7 @@ mod tests {
     #[test]
     fn format_positional_display() {
         let err = HostError::Internal("pos".into());
-        let formatted = format!("error was: {}", err);
+        let formatted = format!("error was: {err}");
         assert!(formatted.starts_with("error was: internal error: pos"));
     }
 
@@ -1543,8 +1546,8 @@ mod tests {
 
     #[test]
     fn chained_host_result_operations() {
-        fn step1() -> HostResult<u32> {
-            Ok(10)
+        fn step1() -> u32 {
+            10
         }
         fn step2(val: u32) -> HostResult<u32> {
             if val > 5 {
@@ -1553,21 +1556,17 @@ mod tests {
                 Err(HostError::PreflightFailed("too low".into()))
             }
         }
-        fn step3(val: u32) -> HostResult<String> {
-            if val > 25 {
-                Ok(format!("result={val}"))
-            } else {
-                Err(HostError::Internal("unexpected".into()))
-            }
+        fn step3(val: u32) -> String {
+            format!("result={val}")
         }
-        let result = step1().and_then(step2).and_then(step3);
+        let result = Ok(step1()).and_then(step2).map(step3);
         assert_eq!(result.unwrap(), "result=30");
     }
 
     #[test]
     fn chained_host_result_fails_midway() {
-        fn step1() -> HostResult<u32> {
-            Ok(2)
+        fn step1() -> u32 {
+            2
         }
         fn step2(val: u32) -> HostResult<u32> {
             if val > 5 {
@@ -1576,10 +1575,10 @@ mod tests {
                 Err(HostError::PreflightFailed("too low".into()))
             }
         }
-        fn step3(val: u32) -> HostResult<String> {
-            Ok(format!("result={val}"))
+        fn step3(val: u32) -> String {
+            format!("result={val}")
         }
-        let result = step1().and_then(step2).and_then(step3);
+        let result = Ok(step1()).and_then(step2).map(step3);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), HostError::PreflightFailed(_)));
     }

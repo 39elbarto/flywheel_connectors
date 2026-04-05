@@ -1719,7 +1719,7 @@ mod tests {
         node_private.zones = vec![private_zone.clone()];
 
         let mut node_both = make_node_info("both-node", 4096, true, "1.0.0", vec![]);
-        node_both.zones = vec![work_zone.clone(), private_zone.clone()];
+        node_both.zones = vec![work_zone.clone(), private_zone];
 
         let input = PlannerInput::new(vec![node_work, node_private, node_both], 1000);
         let ctx = PlannerContext::new(test_connector_id());

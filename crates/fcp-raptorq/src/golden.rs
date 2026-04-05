@@ -1747,7 +1747,7 @@ mod tests {
         assert!(decoder.time_remaining() > Duration::ZERO);
     }
 
-    /// Verify encoder intermediate symbols match InactivationDecoder output with erasure.
+    /// Verify encoder intermediate symbols match `InactivationDecoder` output with erasure.
     #[test]
     fn encoder_decoder_intermediate_consistency_with_erasure() {
         use crate::codec::decoder::{InactivationDecoder, ReceivedSymbol};
@@ -1778,14 +1778,18 @@ mod tests {
             .collect();
 
         // Generate symbols
-        let mut all_symbols: Vec<(u32, Vec<u8>)> = Vec::new();
-        for i in 0..k {
-            all_symbols.push((i as u32, source_data[i].clone()));
-        }
-        let repair_count =
-            (u64::from(k as u32) * u64::from(repair_ratio_bps) / 10000).max(1) as u32;
+        let mut all_symbols: Vec<(u32, Vec<u8>)> = source_data
+            .iter()
+            .enumerate()
+            .take(k)
+            .map(|(i, data)| (u32::try_from(i).unwrap(), data.clone()))
+            .collect();
+        let repair_count = u32::try_from(
+            (u64::from(u32::try_from(k).unwrap()) * u64::from(repair_ratio_bps) / 10000).max(1),
+        )
+        .unwrap();
         for i in 0..repair_count {
-            let esi = k_prime as u32 + i;
+            let esi = u32::try_from(k_prime).unwrap() + i;
             all_symbols.push((esi, encoder.repair_symbol(esi)));
         }
 
@@ -1806,7 +1810,7 @@ mod tests {
 
         // Received symbols
         for &(esi, ref data) in &received {
-            let sym = if (esi as usize) < k {
+            let sym = if usize::try_from(esi).unwrap() < k {
                 ReceivedSymbol::source(esi, data.clone())
             } else {
                 let (columns, coefficients) = decoder.repair_equation_rfc6330(esi);
@@ -1817,36 +1821,50 @@ mod tests {
 
         // Padding
         for esi in k..k_prime {
-            symbols.push(ReceivedSymbol::source(esi as u32, vec![0u8; symbol_size]));
+            symbols.push(ReceivedSymbol::source(
+                u32::try_from(esi).unwrap(),
+                vec![0u8; symbol_size],
+            ));
         }
 
         // Decode using InactivationDecoder
         let result = decoder.decode(symbols);
         match result {
-            Ok(decoded) => {
+            Ok(reconstructed) => {
                 // Compare intermediate symbols
                 let mut mismatches = 0;
-                for i in 0..l {
-                    if decoded.intermediate[i] != encoder_intermediate[i] {
+                for (i, (decoded_symbol, expected_symbol)) in reconstructed
+                    .intermediate
+                    .iter()
+                    .zip(&encoder_intermediate)
+                    .enumerate()
+                    .take(l)
+                {
+                    if decoded_symbol != expected_symbol {
                         mismatches += 1;
                         if mismatches <= 3 {
                             eprintln!(
                                 "intermediate[{i}] mismatch: encoder={:?}... decoder={:?}...",
-                                &encoder_intermediate[i][..8.min(symbol_size)],
-                                &decoded.intermediate[i][..8.min(symbol_size)]
+                                &expected_symbol[..8.min(symbol_size)],
+                                &decoded_symbol[..8.min(symbol_size)]
                             );
                         }
                     }
                 }
-                if mismatches > 0 {
-                    panic!(
-                        "{mismatches}/{l} intermediate symbols differ between encoder and decoder"
-                    );
-                }
+                assert_eq!(
+                    mismatches, 0,
+                    "{mismatches}/{l} intermediate symbols differ between encoder and decoder"
+                );
 
                 // Also verify source reconstruction
-                for i in 0..k {
-                    assert_eq!(decoded.source[i], source_data[i], "source[{i}] mismatch");
+                for (i, (decoded_source, expected_source)) in reconstructed
+                    .source
+                    .iter()
+                    .zip(&source_data)
+                    .enumerate()
+                    .take(k)
+                {
+                    assert_eq!(decoded_source, expected_source, "source[{i}] mismatch");
                 }
             }
             Err(e) => panic!("decode failed: {e:?}"),

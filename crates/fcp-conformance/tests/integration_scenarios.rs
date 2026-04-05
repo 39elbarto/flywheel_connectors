@@ -31,7 +31,13 @@
 //! }
 //! ```
 
-#![allow(clippy::too_many_lines)]
+#![allow(
+    clippy::fn_params_excessive_bools,
+    clippy::struct_excessive_bools,
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "scenario witness builders intentionally mirror explicit artifact schemas"
+)]
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -309,8 +315,8 @@ fn build_partition_heal_artifact_bundle(
     zone: &ZoneId,
     isolated_node_id: &NodeId,
     node_ids: [&NodeId; 3],
-    object_a_id: &ObjectId,
-    object_b_id: &ObjectId,
+    source_object_id: &ObjectId,
+    healed_object_id: &ObjectId,
     partition_duration_secs: u64,
     converged: bool,
     pending_messages: usize,
@@ -345,8 +351,8 @@ fn build_partition_heal_artifact_bundle(
             seed: 0xDEAD_BEEF,
             zone_id: zone.to_string(),
             isolated_node_id: isolated_node_id.as_str().to_string(),
-            object_a_id: object_a_id.to_string(),
-            object_b_id: object_b_id.to_string(),
+            object_a_id: source_object_id.to_string(),
+            object_b_id: healed_object_id.to_string(),
             partition_duration_secs,
         },
         state: PartitionHealStateEvidence {
@@ -480,10 +486,10 @@ struct StateForkArtifactBundle {
 fn build_state_fork_artifact_bundle(
     logs: &[LogEntry],
     zone: &ZoneId,
-    node_a_id: &NodeId,
-    node_b_id: &NodeId,
-    object_a_id: &ObjectId,
-    object_b_id: &ObjectId,
+    primary_node_id: &NodeId,
+    secondary_node_id: &NodeId,
+    primary_object_id: &ObjectId,
+    secondary_object_id: &ObjectId,
     a_has_b_before_gossip: bool,
     b_has_a_before_gossip: bool,
     divergent_before_gossip: bool,
@@ -498,10 +504,10 @@ fn build_state_fork_artifact_bundle(
         replay: StateForkReplayEvidence {
             seed: 0xF0F0_F0F0,
             zone_id: zone.to_string(),
-            node_a_id: node_a_id.as_str().to_string(),
-            node_b_id: node_b_id.as_str().to_string(),
-            object_a_id: object_a_id.to_string(),
-            object_b_id: object_b_id.to_string(),
+            node_a_id: primary_node_id.as_str().to_string(),
+            node_b_id: secondary_node_id.as_str().to_string(),
+            object_a_id: primary_object_id.to_string(),
+            object_b_id: secondary_object_id.to_string(),
         },
         state: StateForkStateEvidence {
             a_has_b_before_gossip,
@@ -2177,7 +2183,7 @@ async fn scenario_multi_node_failure_within_tolerance() {
         json!({
             "crashed_nodes": crashed_node_ids
                 .iter()
-                .map(|node_id| node_id.as_str())
+                .map(fcp_tailscale::NodeId::as_str)
                 .collect::<Vec<_>>(),
             "running_nodes": running_count,
             "gossip_propagation": {
@@ -2333,7 +2339,7 @@ async fn scenario_quorum_loss() {
         json!({
             "crashed_nodes": crashed_node_ids
                 .iter()
-                .map(|node_id| node_id.as_str())
+                .map(fcp_tailscale::NodeId::as_str)
                 .collect::<Vec<_>>(),
             "running_nodes": running_count,
             "survivor_peer_count": survivor_peer_count,

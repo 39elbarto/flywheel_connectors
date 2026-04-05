@@ -1130,6 +1130,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn external_transcript_records_all_phases_and_checkpoint_evidence() {
         let mut runner = SessionE2eRunner::new(SessionE2eConfig {

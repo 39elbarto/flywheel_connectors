@@ -8,7 +8,10 @@ use crate::ceremony::{
 };
 use crate::error::{BootstrapError, BootstrapResult};
 use crate::genesis::GenesisState;
-use crate::hardware_token::{DetectedToken, TokenDetectionReport, TokenDetector};
+use crate::hardware_token::{
+    DetectedToken, HardwareTokenPin, HardwareTokenSessionDriver, Pkcs11SessionDriver,
+    TokenDetectionReport, TokenDetector, TokenError, authenticate_bootstrap_session_with_driver,
+};
 use crate::phase::{BootstrapPhase, detect_partial_state, remove_phase_lock, write_phase_lock};
 use crate::recovery_phrase::RecoveryPhrase;
 use crate::time_validation::{TimeValidation, TimeValidationResult};
@@ -68,6 +71,9 @@ pub struct BootstrapConfig {
     /// Bootstrap mode.
     pub mode: BootstrapMode,
 
+    /// Optional PIN used for hardware-token bootstrap login.
+    pub hardware_token_pin: Option<HardwareTokenPin>,
+
     /// Skip time validation (not recommended).
     pub skip_time_validation: bool,
 
@@ -91,6 +97,7 @@ impl BootstrapConfig {
 pub struct BootstrapConfigBuilder {
     data_dir: Option<PathBuf>,
     mode: Option<BootstrapMode>,
+    hardware_token_pin: Option<HardwareTokenPin>,
     skip_time_validation: bool,
     allow_time_drift_warning: bool,
     force_overwrite: bool,
@@ -108,6 +115,13 @@ impl BootstrapConfigBuilder {
     #[must_use]
     pub fn mode(mut self, mode: BootstrapMode) -> Self {
         self.mode = Some(mode);
+        self
+    }
+
+    /// Provide the PIN used to authenticate hardware-token bootstrap sessions.
+    #[must_use]
+    pub fn hardware_token_pin(mut self, pin: impl Into<String>) -> Self {
+        self.hardware_token_pin = Some(HardwareTokenPin::new(pin));
         self
     }
 
@@ -149,6 +163,7 @@ impl BootstrapConfigBuilder {
         Ok(BootstrapConfig {
             data_dir,
             mode,
+            hardware_token_pin: self.hardware_token_pin,
             skip_time_validation: self.skip_time_validation,
             allow_time_drift_warning: self.allow_time_drift_warning,
             force_overwrite: self.force_overwrite,
@@ -416,20 +431,68 @@ impl BootstrapWorkflow {
         &mut self,
         token: &DetectedToken,
     ) -> BootstrapResult<GenesisState> {
+        let detection_report = detect_hardware_tokens_report();
+        self.run_hardware_token_bootstrap_with_driver(
+            token,
+            &detection_report,
+            &Pkcs11SessionDriver,
+        )
+    }
+
+    fn run_hardware_token_bootstrap_with_driver<D: HardwareTokenSessionDriver>(
+        &mut self,
+        token: &DetectedToken,
+        detection_report: &TokenDetectionReport,
+        driver: &D,
+    ) -> BootstrapResult<GenesisState> {
         self.phase = BootstrapPhase::KeyGeneration;
         write_phase_lock(&self.config.data_dir, &self.phase)?;
 
-        tracing::info!(?token, "Using hardware token for key generation");
+        let pin = self.config.hardware_token_pin.as_ref().ok_or_else(|| {
+            BootstrapError::HardwareToken(
+                "hardware token PIN is required until interactive prompt plumbing is implemented"
+                    .to_string(),
+            )
+        })?;
 
-        // In a real implementation, this would:
-        // 1. Connect to the token
-        // 2. Generate keypair on token
-        // 3. Get public key
-        // 4. Create genesis
+        let detected_tokens = detection_report.all_tokens();
+        tracing::info!(
+            requested_provider = %token.provider.display(),
+            requested_slot = token.slot,
+            detected_tokens = detected_tokens.len(),
+            detection_issues = detection_report.issues().len(),
+            "Preparing hardware-token bootstrap session"
+        );
 
-        Err(BootstrapError::HardwareToken(
-            "Hardware token support not yet fully implemented".to_string(),
-        ))
+        let session =
+            authenticate_bootstrap_session_with_driver(token, &detected_tokens, pin, driver)
+                .map_err(|err| map_hardware_token_error(detection_report, err))?;
+
+        let provider = session.token().provider.display().to_string();
+        let slot = session.token().slot;
+        let label = session.token().label.clone();
+        let token_display = session.token().to_string();
+        let session_state = session.session_state();
+        let read_write = session.read_write();
+
+        tracing::info!(
+            provider = %provider,
+            slot,
+            label = %label,
+            session_state = %session_state,
+            read_write,
+            "Authenticated hardware-token session established"
+        );
+
+        session.close().map_err(|err| {
+            BootstrapError::HardwareToken(format!(
+                "hardware token session cleanup failed after authentication: {err}"
+            ))
+        })?;
+
+        Err(BootstrapError::HardwareToken(format!(
+            "authenticated hardware token session established for {token_display}, but certificate selection and provisioning handoff are not implemented yet"
+        )))
     }
 
     /// Run import bootstrap from existing recovery phrase.
@@ -579,9 +642,60 @@ pub fn detect_hardware_tokens_report() -> TokenDetectionReport {
     detector.detect_report()
 }
 
+fn map_hardware_token_error(
+    detection_report: &TokenDetectionReport,
+    error: TokenError,
+) -> BootstrapError {
+    match error {
+        TokenError::NoTokens if detection_report.issues().is_empty() => {
+            BootstrapError::NoHardwareTokens
+        }
+        TokenError::NoTokens => BootstrapError::HardwareToken(format!(
+            "no compatible hardware tokens detected: {}",
+            summarize_detection_issues(detection_report)
+        )),
+        other => BootstrapError::HardwareToken(other.to_string()),
+    }
+}
+
+fn summarize_detection_issues(detection_report: &TokenDetectionReport) -> String {
+    let issues = detection_report.issues();
+    if issues.is_empty() {
+        return "no provider diagnostics available".to_string();
+    }
+
+    let mut summary = issues
+        .iter()
+        .take(3)
+        .map(|issue| {
+            format!(
+                "{:?} for {}: {}",
+                issue.stage,
+                issue.provider.display(),
+                issue.message
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    if issues.len() > 3 {
+        use std::fmt::Write;
+        let _ = write!(summary, "; ... ({} total issues)", issues.len());
+    }
+
+    summary
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hardware_token::{
+        AuthenticatedSessionState, AuthenticatedTokenSession, ProviderDetectionResult,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -1058,6 +1172,29 @@ mod tests {
         assert!(debug.contains("SingleDevice"));
     }
 
+    #[test]
+    fn test_config_debug_redacts_hardware_token_pin() {
+        let dir = tempdir().unwrap();
+        let token = DetectedToken {
+            provider: std::path::PathBuf::from("/test/pkcs11.so"),
+            slot: 0,
+            label: "TestToken".to_string(),
+            manufacturer: "TestMfg".to_string(),
+            serial: "SN123".to_string(),
+            mechanisms: vec!["CKM_ED25519".to_string()],
+        };
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::HardwareToken { token })
+            .hardware_token_pin("123456")
+            .build()
+            .unwrap();
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("123456"));
+    }
+
     // ---- Config builder error messages ----
 
     #[test]
@@ -1225,7 +1362,7 @@ mod tests {
     // ---- Hardware token not implemented ----
 
     #[test]
-    fn test_hardware_token_not_implemented() {
+    fn test_hardware_token_requires_pin_before_login() {
         let dir = tempdir().unwrap();
         let token = DetectedToken {
             provider: std::path::PathBuf::from("/test/pkcs11.so"),
@@ -1244,7 +1381,54 @@ mod tests {
 
         let workflow = BootstrapWorkflow::new(config).unwrap();
         let result = workflow.run();
-        assert!(matches!(result, Err(BootstrapError::HardwareToken(_))));
+        assert!(matches!(
+            result,
+            Err(BootstrapError::HardwareToken(message))
+                if message.contains("PIN is required")
+        ));
+    }
+
+    #[test]
+    fn test_hardware_token_authenticates_before_truthful_handoff_refusal() {
+        let dir = tempdir().unwrap();
+        let token = DetectedToken {
+            provider: std::path::PathBuf::from("/test/pkcs11.so"),
+            slot: 0,
+            label: "TestToken".to_string(),
+            manufacturer: "TestMfg".to_string(),
+            serial: "SN123".to_string(),
+            mechanisms: vec!["CKM_ED25519".to_string()],
+        };
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::HardwareToken {
+                token: token.clone(),
+            })
+            .hardware_token_pin("123456")
+            .skip_time_validation(true)
+            .build()
+            .unwrap();
+
+        let mut workflow = BootstrapWorkflow::new(config).unwrap();
+        let driver = MockSessionDriver::default();
+        let detection_report = TokenDetectionReport {
+            providers: vec![ProviderDetectionResult {
+                provider: token.provider.clone(),
+                tokens: vec![token.clone()],
+                issues: Vec::new(),
+            }],
+        };
+
+        let result =
+            workflow.run_hardware_token_bootstrap_with_driver(&token, &detection_report, &driver);
+
+        assert!(matches!(
+            result,
+            Err(BootstrapError::HardwareToken(message))
+                if message.contains("authenticated hardware token session established")
+                    && message.contains("certificate selection and provisioning handoff")
+        ));
+        assert_eq!(driver.close_count(), 1);
     }
 
     // ---- Force overwrite cleans genesis.cbor ----
@@ -1399,5 +1583,36 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(config.data_dir, dir.path());
+    }
+
+    #[derive(Default)]
+    struct MockSessionDriver {
+        close_count: Arc<AtomicUsize>,
+    }
+
+    impl MockSessionDriver {
+        fn close_count(&self) -> usize {
+            self.close_count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl HardwareTokenSessionDriver for MockSessionDriver {
+        fn open_authenticated_session(
+            &self,
+            token: &DetectedToken,
+            pin: &HardwareTokenPin,
+        ) -> Result<AuthenticatedTokenSession, TokenError> {
+            assert!(!pin.is_empty());
+            let close_count = Arc::clone(&self.close_count);
+            Ok(AuthenticatedTokenSession::with_close_action(
+                token.clone(),
+                AuthenticatedSessionState::ReadWriteUser,
+                true,
+                move || {
+                    close_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            ))
+        }
     }
 }

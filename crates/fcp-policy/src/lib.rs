@@ -129,9 +129,11 @@ mod tests {
 
     #[test]
     fn policy_exports_approval_types() {
+        fn _scope_exists(_s: ApprovalScope) {}
+
         let _: ApprovalMode = ApprovalMode::Interactive;
         // ApprovalScope variants carry data — just verify the type exists
-        fn _scope_exists(_s: ApprovalScope) {}
+        let _ = _scope_exists;
     }
 
     #[test]

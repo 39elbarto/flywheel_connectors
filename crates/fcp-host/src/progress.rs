@@ -1430,7 +1430,7 @@ mod tests {
         let pt = PhaseTransition {
             from_phase: "start".into(),
             to_phase: "phase_0".into(),
-            phases_remaining: remaining.clone(),
+            phases_remaining: remaining,
             timestamp: fixed_now(),
         };
         let json = serde_json::to_string(&pt).unwrap();
@@ -1616,7 +1616,7 @@ mod tests {
         let ctrl = ProgressController::new();
         for i in 0..10 {
             let id = format!("op{i}");
-            ctrl.start_tracking(&id, i as u64, "w", &zero_throttle_opts());
+            ctrl.start_tracking(&id, i, "w", &zero_throttle_opts());
             ctrl.record_update(&id, make_update("w", (i + 1) * 10, Some(100)), fixed_now());
         }
         let agg = ctrl.aggregate();

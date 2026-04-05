@@ -1491,6 +1491,10 @@ fn oti_roundtrip_fidelity() {
 /// Zone lifecycle snapshots expose deterministic durable-state structure and
 /// current reconstruction posture without needing GC or repair internals.
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "this end-to-end lifecycle snapshot test intentionally keeps the full store and symbol setup inline"
+)]
 fn lifecycle_snapshot_reflects_reachability_and_symbol_state() {
     run_store_test(
         "lifecycle_snapshot_reflects_reachability_and_symbol_state",

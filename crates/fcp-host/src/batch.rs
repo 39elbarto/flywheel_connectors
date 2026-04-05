@@ -795,6 +795,11 @@ const fn batch_status(aborted: bool, completed: usize, failed: usize) -> BatchSt
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::redundant_clone,
+        reason = "clone-focused tests intentionally exercise Clone impls"
+    )]
+
     use super::*;
 
     // ── Helpers ──
@@ -2956,6 +2961,7 @@ mod tests {
     fn batch_invoke_request_clone() {
         let req = simple_request(vec![op("a", "t", &[]), op("b", "t", &["a"])]);
         let cloned = req.clone();
+        assert_eq!(req.operations.len(), cloned.operations.len());
         assert_eq!(cloned.operations.len(), 2);
         assert_eq!(cloned.operations[1].depends_on, vec!["a"]);
     }
@@ -2995,6 +3001,7 @@ mod tests {
             total_duration_ms: 10,
         };
         let cloned = resp.clone();
+        assert_eq!(resp.status, cloned.status);
         assert_eq!(cloned.status, BatchStatus::AllFailed);
         assert_eq!(cloned.failed, 3);
         assert_eq!(cloned.results[0].id, "x");
@@ -3038,6 +3045,7 @@ mod tests {
             duration_ms: 99,
         };
         let cloned = result.clone();
+        assert_eq!(result.id, cloned.id);
         assert_eq!(cloned.id, "z");
         assert_eq!(cloned.duration_ms, 99);
         assert_eq!(cloned.output, result.output);
@@ -3053,6 +3061,7 @@ mod tests {
             retry_after_ms: Some(100),
         };
         let cloned = err.clone();
+        assert_eq!(err.code, cloned.code);
         assert_eq!(cloned.code, "X");
         assert_eq!(cloned.retry_after_ms, Some(100));
     }

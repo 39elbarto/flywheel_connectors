@@ -877,7 +877,7 @@ mod tests {
         let conflict = conflict.unwrap();
         assert_eq!(conflict.holders.len(), 2);
         assert_eq!(conflict.severity, ConflictSeverity::Critical);
-        assert!(conflict.resolution.contains("b")); // higher token wins
+        assert!(conflict.resolution.contains('b')); // higher token wins
     }
 
     #[test]
@@ -889,7 +889,7 @@ mod tests {
             .detect_conflicts(&zone(), &subject(), &purpose(), &existing, 1000)
             .expect("conflict should be detected");
 
-        assert!(conflict.resolution.contains("a"));
+        assert!(conflict.resolution.contains('a'));
     }
 
     #[test]

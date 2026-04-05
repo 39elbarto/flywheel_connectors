@@ -1687,7 +1687,9 @@ mod tests {
             max_chunk_threshold: 256 * 1024,
             chunk_size: 64 * 1024,
         };
-        let payload: Vec<u8> = (0..(50 * 64)).map(|i| (i % 251) as u8).collect();
+        let payload: Vec<u8> = (0..(50 * 64))
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
         let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
         let mut symbols = encoder.encode_all();
         let oti = encoder.transmission_info();
@@ -1696,8 +1698,8 @@ mod tests {
 
         let mut decoder = RaptorQDecoder::new(oti, &config);
         for (esi, data) in symbols {
-            if let Ok(Some(decoded)) = decoder.add_symbol(esi, data) {
-                assert_eq!(decoded, payload);
+            if let Ok(Some(reconstructed)) = decoder.add_symbol(esi, data) {
+                assert_eq!(reconstructed, payload);
                 return;
             }
         }
@@ -1740,7 +1742,9 @@ mod tests {
             max_chunk_threshold: 256 * 1024,
             chunk_size: 64 * 1024,
         };
-        let payload: Vec<u8> = (0..(50 * 64)).map(|i| (i % 251) as u8).collect();
+        let payload: Vec<u8> = (0..(50 * 64))
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
         let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
         let mut symbols = encoder.encode_all();
         let oti = encoder.transmission_info();
@@ -1755,8 +1759,8 @@ mod tests {
         let mut decoder = RaptorQDecoder::new(oti, &config);
         for (esi, data) in symbols.into_iter().take(k + 16) {
             match decoder.add_symbol(esi, data) {
-                Ok(Some(decoded)) => {
-                    assert_eq!(decoded, payload);
+                Ok(Some(reconstructed)) => {
+                    assert_eq!(reconstructed, payload);
                     return;
                 }
                 Ok(None) => {}
@@ -1945,7 +1949,9 @@ mod tests {
             repair_ratio_bps: 5000,
             ..test_config()
         };
-        let payload: Vec<u8> = (0..(20 * 64)).map(|idx| (idx % 251) as u8).collect();
+        let payload: Vec<u8> = (0..(20 * 64))
+            .map(|idx| u8::try_from(idx % 251).unwrap())
+            .collect();
         let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
         let oti = encoder.transmission_info();
         let k = usize::try_from(encoder.source_symbols()).unwrap();

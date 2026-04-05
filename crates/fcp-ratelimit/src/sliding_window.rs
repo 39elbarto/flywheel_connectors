@@ -672,7 +672,7 @@ mod tests {
     async fn sliding_window_partial_expiry() {
         // Wider margins to avoid flakiness under heavy load.
         // Window = 1s, gaps = 200ms → clear separation between expiry times.
-        let limiter = SlidingWindow::new(3, Duration::from_millis(1000));
+        let limiter = SlidingWindow::new(3, Duration::from_secs(1));
         limiter.try_acquire().await; // t≈0ms
         sleep(Duration::from_millis(200)).await;
         limiter.try_acquire().await; // t≈200ms

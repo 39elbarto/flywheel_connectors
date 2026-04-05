@@ -4,10 +4,16 @@
 //! hardware security modules (HSMs) and smart cards via PKCS#11.
 
 use cryptoki::context::{CInitializeArgs, CInitializeFlags, Pkcs11};
+use cryptoki::error::{Error as Pkcs11Error, RvError};
+use cryptoki::session::{Session, SessionState, UserType};
 use cryptoki::slot::Slot;
+use cryptoki::types::AuthPin;
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Information about a detected hardware token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +186,397 @@ impl TokenDetectionReport {
     }
 }
 
+/// Redacted PIN material for hardware-token login.
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+pub struct HardwareTokenPin(String);
+
+impl HardwareTokenPin {
+    /// Create a new hardware-token PIN wrapper.
+    #[must_use]
+    pub fn new(pin: impl Into<String>) -> Self {
+        Self(pin.into())
+    }
+
+    /// Whether the provided PIN is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn to_auth_pin(&self) -> AuthPin {
+        AuthPin::new(self.0.clone().into())
+    }
+}
+
+impl fmt::Debug for HardwareTokenPin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+/// Normalized state for an authenticated PKCS#11 session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AuthenticatedSessionState {
+    /// Read-only session, no authenticated user.
+    ReadOnlyPublic,
+    /// Read-only session authenticated as a normal user.
+    ReadOnlyUser,
+    /// Read-write session, no authenticated user.
+    ReadWritePublic,
+    /// Read-write session authenticated as a normal user.
+    ReadWriteUser,
+    /// Read-write session authenticated as the security officer.
+    ReadWriteSecurityOfficer,
+}
+
+impl From<SessionState> for AuthenticatedSessionState {
+    fn from(value: SessionState) -> Self {
+        match value {
+            SessionState::RoPublic => Self::ReadOnlyPublic,
+            SessionState::RoUser => Self::ReadOnlyUser,
+            SessionState::RwPublic => Self::ReadWritePublic,
+            SessionState::RwUser => Self::ReadWriteUser,
+            SessionState::RwSecurityOfficer => Self::ReadWriteSecurityOfficer,
+        }
+    }
+}
+
+impl fmt::Display for AuthenticatedSessionState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::ReadOnlyPublic => "ro-public",
+            Self::ReadOnlyUser => "ro-user",
+            Self::ReadWritePublic => "rw-public",
+            Self::ReadWriteUser => "rw-user",
+            Self::ReadWriteSecurityOfficer => "rw-so",
+        };
+        f.write_str(label)
+    }
+}
+
+/// A live authenticated hardware-token session with redaction-safe metadata.
+pub struct AuthenticatedTokenSession {
+    token: DetectedToken,
+    session_state: AuthenticatedSessionState,
+    read_write: bool,
+    close_action: Option<Box<dyn FnOnce() -> Result<(), TokenError>>>,
+}
+
+impl fmt::Debug for AuthenticatedTokenSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthenticatedTokenSession")
+            .field("token", &self.token)
+            .field("session_state", &self.session_state)
+            .field("read_write", &self.read_write)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AuthenticatedTokenSession {
+    /// Create an authenticated session wrapper with an injected close action.
+    pub(crate) fn with_close_action(
+        token: DetectedToken,
+        session_state: AuthenticatedSessionState,
+        read_write: bool,
+        close_action: impl FnOnce() -> Result<(), TokenError> + 'static,
+    ) -> Self {
+        Self {
+            token,
+            session_state,
+            read_write,
+            close_action: Some(Box::new(close_action)),
+        }
+    }
+
+    /// The canonical detected token that was authenticated.
+    #[must_use]
+    pub const fn token(&self) -> &DetectedToken {
+        &self.token
+    }
+
+    /// The authenticated session state reported by the token.
+    #[must_use]
+    pub const fn session_state(&self) -> AuthenticatedSessionState {
+        self.session_state
+    }
+
+    /// Whether the session has read-write access.
+    #[must_use]
+    pub const fn read_write(&self) -> bool {
+        self.read_write
+    }
+
+    /// Close the authenticated session immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns a token error if logout or session cleanup fails.
+    pub fn close(mut self) -> Result<(), TokenError> {
+        if let Some(close_action) = self.close_action.take() {
+            return close_action();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for AuthenticatedTokenSession {
+    fn drop(&mut self) {
+        if let Some(close_action) = self.close_action.take() {
+            if let Err(err) = close_action() {
+                tracing::warn!(
+                    provider = %self.token.provider.display(),
+                    slot = self.token.slot,
+                    label = %self.token.label,
+                    ?err,
+                    "Failed to close authenticated hardware-token session"
+                );
+            }
+        }
+    }
+}
+
+/// Driver abstraction for opening authenticated hardware-token sessions.
+pub(crate) trait HardwareTokenSessionDriver: Send + Sync {
+    /// Open and authenticate a session for the selected token.
+    ///
+    /// # Errors
+    ///
+    /// Returns a token error if the provider, slot, or login sequence fails.
+    fn open_authenticated_session(
+        &self,
+        token: &DetectedToken,
+        pin: &HardwareTokenPin,
+    ) -> Result<AuthenticatedTokenSession, TokenError>;
+}
+
+/// Real PKCS#11-backed session driver.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Pkcs11SessionDriver;
+
+impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
+    fn open_authenticated_session(
+        &self,
+        token: &DetectedToken,
+        pin: &HardwareTokenPin,
+    ) -> Result<AuthenticatedTokenSession, TokenError> {
+        let provider_guard = provider_probe_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let pkcs11 = Pkcs11::new(&token.provider).map_err(map_pkcs11_error)?;
+        let owns_initialization =
+            match pkcs11.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)) {
+                Ok(()) => true,
+                Err(Pkcs11Error::Pkcs11(RvError::CryptokiAlreadyInitialized, _)) => false,
+                Err(err) => return Err(map_pkcs11_error(err)),
+            };
+
+        let slot = Slot::try_from(u64::from(token.slot))
+            .map_err(|err| TokenError::Pkcs11(err.to_string()))?;
+        let session = match pkcs11.open_rw_session(slot) {
+            Ok(session) => session,
+            Err(err) => {
+                let _ = finalize_pkcs11_context(pkcs11, owns_initialization);
+                return Err(map_pkcs11_error(err));
+            }
+        };
+
+        let auth_pin = pin.to_auth_pin();
+        match session.login(UserType::User, Some(&auth_pin)) {
+            Ok(()) | Err(Pkcs11Error::Pkcs11(RvError::UserAlreadyLoggedIn, _)) => {}
+            Err(err) => {
+                cleanup_failed_session(session, pkcs11, owns_initialization);
+                return Err(map_pkcs11_error(err));
+            }
+        }
+
+        let session_info = match session.get_session_info() {
+            Ok(session_info) => session_info,
+            Err(err) => {
+                cleanup_failed_session(session, pkcs11, owns_initialization);
+                return Err(map_pkcs11_error(err));
+            }
+        };
+
+        let session_state = AuthenticatedSessionState::from(session_info.session_state());
+        let read_write = session_info.read_write();
+
+        Ok(AuthenticatedTokenSession::with_close_action(
+            token.clone(),
+            session_state,
+            read_write,
+            move || {
+                let close_result = close_pkcs11_session(session, session_state);
+                let finalize_result = finalize_pkcs11_context(pkcs11, owns_initialization);
+                drop(provider_guard);
+                close_result.and(finalize_result)
+            },
+        ))
+    }
+}
+
+/// Rank detected tokens into a deterministic bootstrap order.
+#[must_use]
+pub fn rank_detected_tokens(tokens: &[DetectedToken]) -> Vec<DetectedToken> {
+    let mut ranked = tokens.to_vec();
+    ranked.sort_by_key(token_rank_key);
+    ranked
+}
+
+type TokenRankKey = (
+    Reverse<bool>,
+    Reverse<bool>,
+    PathBuf,
+    u32,
+    String,
+    String,
+    String,
+);
+
+fn token_rank_key(token: &DetectedToken) -> TokenRankKey {
+    (
+        Reverse(token.supports_ed25519()),
+        Reverse(token.supports_x25519()),
+        token.provider.clone(),
+        token.slot,
+        token.serial.clone(),
+        token.label.clone(),
+        token.manufacturer.clone(),
+    )
+}
+
+fn token_identity_matches(requested: &DetectedToken, candidate: &DetectedToken) -> bool {
+    requested.provider == candidate.provider
+        && requested.slot == candidate.slot
+        && token_field_matches(&requested.label, &candidate.label)
+        && token_field_matches(&requested.manufacturer, &candidate.manufacturer)
+        && token_field_matches(&requested.serial, &candidate.serial)
+}
+
+fn token_field_matches(requested: &str, candidate: &str) -> bool {
+    requested == candidate || requested == "unknown" || candidate == "unknown"
+}
+
+/// Canonicalize a requested bootstrap token against the latest discovery pass.
+///
+/// # Errors
+///
+/// Returns a typed refusal if the token is absent or lacks the required
+/// Ed25519 signing capability.
+pub(crate) fn select_bootstrap_token(
+    requested: &DetectedToken,
+    candidates: &[DetectedToken],
+) -> Result<DetectedToken, TokenError> {
+    if candidates.is_empty() {
+        return Err(TokenError::NoTokens);
+    }
+
+    let ranked = rank_detected_tokens(candidates);
+    let Some(candidate) = ranked
+        .into_iter()
+        .find(|candidate| token_identity_matches(requested, candidate))
+    else {
+        return Err(TokenError::TokenNotFound(token_locator(requested)));
+    };
+
+    if !candidate.supports_ed25519() {
+        return Err(TokenError::UnsupportedMechanism(
+            "Ed25519 signing".to_string(),
+        ));
+    }
+
+    Ok(candidate)
+}
+
+/// Establish a truthful authenticated bootstrap session for a selected token.
+///
+/// # Errors
+///
+/// Returns a typed refusal if the PIN is missing, the token is unavailable, or
+/// PKCS#11 login fails.
+pub(crate) fn authenticate_bootstrap_session_with_driver<D: HardwareTokenSessionDriver>(
+    requested: &DetectedToken,
+    candidates: &[DetectedToken],
+    pin: &HardwareTokenPin,
+    driver: &D,
+) -> Result<AuthenticatedTokenSession, TokenError> {
+    if pin.is_empty() {
+        return Err(TokenError::PinRequired);
+    }
+
+    let selected = select_bootstrap_token(requested, candidates)?;
+    driver.open_authenticated_session(&selected, pin)
+}
+
+fn token_locator(token: &DetectedToken) -> String {
+    format!(
+        "{} [{}] via {} slot {}",
+        token.label,
+        token.serial,
+        token.provider.display(),
+        token.slot
+    )
+}
+
+fn cleanup_failed_session(session: Session, pkcs11: Pkcs11, owns_initialization: bool) {
+    let _ = session.close();
+    let _ = finalize_pkcs11_context(pkcs11, owns_initialization);
+}
+
+fn close_pkcs11_session(
+    session: Session,
+    session_state: AuthenticatedSessionState,
+) -> Result<(), TokenError> {
+    let logout_result = match session_state {
+        AuthenticatedSessionState::ReadOnlyUser
+        | AuthenticatedSessionState::ReadWriteUser
+        | AuthenticatedSessionState::ReadWriteSecurityOfficer => match session.logout() {
+            Ok(()) | Err(Pkcs11Error::Pkcs11(RvError::UserNotLoggedIn, _)) => Ok(()),
+            Err(err) => Err(map_pkcs11_error(err)),
+        },
+        AuthenticatedSessionState::ReadOnlyPublic | AuthenticatedSessionState::ReadWritePublic => {
+            Ok(())
+        }
+    };
+
+    let close_result = session.close().map_err(map_pkcs11_error);
+    logout_result.and(close_result)
+}
+
+fn finalize_pkcs11_context(pkcs11: Pkcs11, owns_initialization: bool) -> Result<(), TokenError> {
+    if owns_initialization {
+        pkcs11.finalize().map_err(map_pkcs11_error)
+    } else {
+        Ok(())
+    }
+}
+
+fn map_pkcs11_error(error: Pkcs11Error) -> TokenError {
+    match error {
+        Pkcs11Error::Pkcs11(
+            RvError::PinIncorrect
+            | RvError::PinInvalid
+            | RvError::PinExpired
+            | RvError::UserPinNotInitialized,
+            _,
+        ) => TokenError::InvalidPin,
+        Pkcs11Error::Pkcs11(RvError::PinLocked, _) => TokenError::PinLocked,
+        Pkcs11Error::Pkcs11(
+            RvError::Cancel | RvError::FunctionCanceled | RvError::FunctionRejected,
+            _,
+        ) => TokenError::Cancelled,
+        Pkcs11Error::Pkcs11(
+            RvError::DeviceRemoved
+            | RvError::TokenNotPresent
+            | RvError::SessionClosed
+            | RvError::SessionHandleInvalid
+            | RvError::SlotIdInvalid,
+            _,
+        ) => TokenError::Disconnected,
+        other => TokenError::Pkcs11(other.to_string()),
+    }
+}
+
 /// Provider for hardware token operations.
 pub trait HardwareTokenProvider: Send + Sync {
     /// List available tokens.
@@ -218,6 +615,10 @@ pub enum TokenError {
     #[error("no hardware tokens detected")]
     NoTokens,
 
+    /// A PIN is required before a login attempt can be made.
+    #[error("hardware token PIN is required")]
+    PinRequired,
+
     /// Token not found.
     #[error("token not found: {0}")]
     TokenNotFound(String),
@@ -225,6 +626,14 @@ pub enum TokenError {
     /// Invalid PIN.
     #[error("invalid PIN")]
     InvalidPin,
+
+    /// The PIN is locked after repeated failures.
+    #[error("hardware token PIN is locked")]
+    PinLocked,
+
+    /// The user canceled or rejected the login flow.
+    #[error("hardware token login was cancelled")]
+    Cancelled,
 
     /// Key not found.
     #[error("key not found: {0}")]
@@ -534,6 +943,10 @@ pub mod mock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use tempfile::tempdir;
 
     fn test_token() -> DetectedToken {
@@ -581,6 +994,107 @@ mod tests {
             .generate_keypair(&tokens[0], "1234", "test-key")
             .unwrap();
         assert_eq!(pubkey.len(), 32);
+    }
+
+    #[test]
+    fn hardware_token_pin_debug_is_redacted() {
+        let pin = HardwareTokenPin::new("123456");
+        assert_eq!(format!("{pin:?}"), "<redacted>");
+    }
+
+    #[test]
+    fn rank_detected_tokens_prefers_fcp_capabilities_and_stable_order() {
+        let mut weaker = test_token();
+        weaker.slot = 9;
+        weaker.mechanisms = vec!["CKM_RSA_PKCS".to_string()];
+
+        let mut ed25519_only = test_token();
+        ed25519_only.slot = 2;
+        ed25519_only.serial = "A".to_string();
+        ed25519_only.mechanisms = vec!["CKM_ED25519".to_string()];
+
+        let mut ed25519_and_x25519 = test_token();
+        ed25519_and_x25519.slot = 1;
+        ed25519_and_x25519.serial = "B".to_string();
+        ed25519_and_x25519.mechanisms = vec!["CKM_ECDH".to_string(), "CKM_ED25519".to_string()];
+
+        let ranked =
+            rank_detected_tokens(&[weaker, ed25519_only.clone(), ed25519_and_x25519.clone()]);
+
+        assert_eq!(ranked[0], ed25519_and_x25519);
+        assert_eq!(ranked[1], ed25519_only);
+        assert!(!ranked[2].supports_ed25519());
+    }
+
+    #[test]
+    fn select_bootstrap_token_matches_requested_identity() {
+        let requested = test_token();
+        let mut distractor = requested.clone();
+        distractor.slot = 7;
+        distractor.serial = "different".to_string();
+
+        let selected =
+            select_bootstrap_token(&requested, &[distractor, requested.clone()]).unwrap();
+        assert_eq!(selected, requested);
+    }
+
+    #[test]
+    fn authenticate_bootstrap_session_refuses_missing_pin() {
+        let requested = test_token();
+        let pin = HardwareTokenPin::new("");
+        let result = authenticate_bootstrap_session_with_driver(
+            &requested,
+            std::slice::from_ref(&requested),
+            &pin,
+            &MockSessionDriver::default(),
+        );
+
+        assert!(matches!(result, Err(TokenError::PinRequired)));
+    }
+
+    #[test]
+    fn authenticate_bootstrap_session_refuses_unsupported_mechanism() {
+        let mut requested = test_token();
+        requested.mechanisms = vec!["CKM_RSA_PKCS".to_string()];
+        let pin = HardwareTokenPin::new("123456");
+
+        let result = authenticate_bootstrap_session_with_driver(
+            &requested,
+            std::slice::from_ref(&requested),
+            &pin,
+            &MockSessionDriver::default(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(TokenError::UnsupportedMechanism(mechanism)) if mechanism.contains("Ed25519")
+        ));
+    }
+
+    #[test]
+    fn authenticate_bootstrap_session_returns_authenticated_session_and_closes_it() {
+        let requested = test_token();
+        let pin = HardwareTokenPin::new("123456");
+        let driver = MockSessionDriver::default();
+
+        let session = authenticate_bootstrap_session_with_driver(
+            &requested,
+            std::slice::from_ref(&requested),
+            &pin,
+            &driver,
+        )
+        .unwrap();
+
+        assert_eq!(session.token(), &requested);
+        assert_eq!(
+            session.session_state(),
+            AuthenticatedSessionState::ReadWriteUser
+        );
+        assert!(session.read_write());
+        assert_eq!(driver.close_count(), 0);
+
+        session.close().unwrap();
+        assert_eq!(driver.close_count(), 1);
     }
 
     // ---- DetectedToken mechanism checks ----
@@ -1005,6 +1519,13 @@ mod tests {
     }
 
     #[test]
+    fn token_error_debug_pin_required() {
+        let err = TokenError::PinRequired;
+        let debug = format!("{err:?}");
+        assert!(debug.contains("PinRequired"));
+    }
+
+    #[test]
     fn token_error_debug_token_not_found() {
         let err = TokenError::TokenNotFound("slot-3".into());
         let debug = format!("{err:?}");
@@ -1048,5 +1569,35 @@ mod tests {
         let token = test_token();
         let key = provider.generate_keypair(&token, "0000", "key1").unwrap();
         assert_eq!(key.len(), 32);
+    }
+
+    #[derive(Default)]
+    struct MockSessionDriver {
+        close_count: Arc<AtomicUsize>,
+    }
+
+    impl MockSessionDriver {
+        fn close_count(&self) -> usize {
+            self.close_count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl HardwareTokenSessionDriver for MockSessionDriver {
+        fn open_authenticated_session(
+            &self,
+            token: &DetectedToken,
+            _pin: &HardwareTokenPin,
+        ) -> Result<AuthenticatedTokenSession, TokenError> {
+            let close_count = Arc::clone(&self.close_count);
+            Ok(AuthenticatedTokenSession::with_close_action(
+                token.clone(),
+                AuthenticatedSessionState::ReadWriteUser,
+                true,
+                move || {
+                    close_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            ))
+        }
     }
 }

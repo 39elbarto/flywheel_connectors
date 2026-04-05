@@ -1318,7 +1318,7 @@ mod tests {
                 ZoneIdError::MissingPrefix
             ))
         ));
-        assert!(config.zone_memberships.get("alice").is_none());
+        assert!(!config.zone_memberships.contains_key("alice"));
     }
 
     #[test]

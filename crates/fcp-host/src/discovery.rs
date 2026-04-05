@@ -276,7 +276,7 @@ impl DiscoveryResponse {
 
     #[cfg(test)]
     #[must_use]
-    fn with_host_capabilities(
+    const fn with_host_capabilities(
         mut self,
         supports_streaming: Option<bool>,
         supports_batching: Option<bool>,
@@ -5998,7 +5998,7 @@ mod tests {
 
     #[test]
     fn discovery_cache_metadata_ttl_seconds_from_duration() {
-        let cache = DiscoveryCache::new(Duration::from_secs(120));
+        let cache = DiscoveryCache::new(Duration::from_mins(2));
         let now = Utc::now();
         let meta = cache.cache_metadata(&"test-payload", now);
         assert_eq!(meta.max_age_seconds, 120);

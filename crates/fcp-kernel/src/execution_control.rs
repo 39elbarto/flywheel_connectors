@@ -659,6 +659,7 @@ mod tests {
             observed_at: Utc::now(),
         };
 
-        assert_eq!(evidence.digest(), evidence.clone().digest());
+        let digest = evidence.digest();
+        assert_eq!(digest, evidence.digest());
     }
 }

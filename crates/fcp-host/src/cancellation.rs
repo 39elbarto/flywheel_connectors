@@ -250,6 +250,11 @@ impl Default for CancellationController {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::redundant_clone,
+        reason = "clone-focused tests intentionally exercise Clone impls"
+    )]
+
     use super::*;
     use chrono::TimeZone;
     use fcp_kernel::OperationId;
@@ -1767,8 +1772,14 @@ mod tests {
             reason: "out of memory".into(),
         };
         let cloned = original.clone();
-        if let CancelReason::AgentAbort { reason } = cloned {
-            assert_eq!(reason, "out of memory");
+        if let (
+            CancelReason::AgentAbort {
+                reason: original_reason,
+            },
+            CancelReason::AgentAbort { reason },
+        ) = (&original, cloned)
+        {
+            assert_eq!(reason, *original_reason);
         } else {
             panic!("expected AgentAbort after clone");
         }
@@ -1780,8 +1791,14 @@ mod tests {
             remaining_ms: 12345,
         };
         let cloned = original.clone();
-        if let CancelReason::TimeoutApproaching { remaining_ms } = cloned {
-            assert_eq!(remaining_ms, 12345);
+        if let (
+            CancelReason::TimeoutApproaching {
+                remaining_ms: original_remaining_ms,
+            },
+            CancelReason::TimeoutApproaching { remaining_ms },
+        ) = (&original, cloned)
+        {
+            assert_eq!(remaining_ms, *original_remaining_ms);
         } else {
             panic!("expected TimeoutApproaching after clone");
         }
@@ -1795,15 +1812,22 @@ mod tests {
             limit: 8000,
         };
         let cloned = original.clone();
-        if let CancelReason::ResourceLimit {
-            resource,
-            current,
-            limit,
-        } = cloned
+        if let (
+            CancelReason::ResourceLimit {
+                resource: original_resource,
+                current: original_current,
+                limit: original_limit,
+            },
+            CancelReason::ResourceLimit {
+                resource,
+                current,
+                limit,
+            },
+        ) = (&original, cloned)
         {
-            assert_eq!(resource, "gpu_vram");
-            assert_eq!(current, 7500);
-            assert_eq!(limit, 8000);
+            assert_eq!(resource, *original_resource);
+            assert_eq!(current, *original_current);
+            assert_eq!(limit, *original_limit);
         } else {
             panic!("expected ResourceLimit after clone");
         }
@@ -1815,8 +1839,14 @@ mod tests {
             by_operation_id: "op_replacement_v3".into(),
         };
         let cloned = original.clone();
-        if let CancelReason::Superseded { by_operation_id } = cloned {
-            assert_eq!(by_operation_id, "op_replacement_v3");
+        if let (
+            CancelReason::Superseded {
+                by_operation_id: original_id,
+            },
+            CancelReason::Superseded { by_operation_id },
+        ) = (&original, cloned)
+        {
+            assert_eq!(by_operation_id, *original_id);
         } else {
             panic!("expected Superseded after clone");
         }
@@ -1826,6 +1856,7 @@ mod tests {
     fn cancel_reason_clone_session_closing() {
         let original = CancelReason::SessionClosing;
         let cloned = original.clone();
+        assert_eq!(original.label(), cloned.label());
         assert_eq!(cloned.label(), "session_closing");
     }
 
@@ -2028,8 +2059,14 @@ mod tests {
     fn cleanup_clone_full_preserves_timeout() {
         let c = CleanupBehavior::Full { timeout_ms: 9999 };
         let cloned = c.clone();
-        if let CleanupBehavior::Full { timeout_ms } = cloned {
-            assert_eq!(timeout_ms, 9999);
+        if let (
+            CleanupBehavior::Full {
+                timeout_ms: original_timeout_ms,
+            },
+            CleanupBehavior::Full { timeout_ms },
+        ) = (&c, cloned)
+        {
+            assert_eq!(timeout_ms, *original_timeout_ms);
         } else {
             panic!("expected Full after clone");
         }
@@ -2070,7 +2107,7 @@ mod tests {
     fn outcome_clone_equals_copy() {
         let a = CancellationOutcome::Failed;
         let b = a;
-        let c = a.clone();
+        let c = a;
         assert_eq!(b, c);
     }
 
@@ -2306,8 +2343,8 @@ mod tests {
         };
         let json = serde_json::to_string(&cr).unwrap();
         let parsed: CleanupResult = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.cleaned.len(), 100);
-        assert_eq!(parsed.failed.len(), 50);
+        assert_eq!(parsed.cleaned, cleaned);
+        assert_eq!(parsed.failed, failed);
     }
 
     // ── NEW: CancellationAuditEvent edge cases ──

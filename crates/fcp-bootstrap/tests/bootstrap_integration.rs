@@ -633,13 +633,23 @@ fn test_bootstrap_workflow_hardware_token_returns_error() {
     let workflow = BootstrapWorkflow::new(config).expect("create workflow");
     let result = workflow.run();
 
-    let is_token_error = matches!(result, Err(BootstrapError::HardwareToken(_)));
-    log = log.with_result(if is_token_error { "pass" } else { "fail" });
+    let has_truthful_pin_refusal = matches!(
+        &result,
+        Err(BootstrapError::HardwareToken(message)) if message.contains("PIN is required")
+    );
+    if let Err(err) = &result {
+        log = log.with_error(err);
+    }
+    log = log.with_result(if has_truthful_pin_refusal {
+        "pass"
+    } else {
+        "fail"
+    });
     log.emit();
 
     assert!(
-        is_token_error,
-        "hardware token bootstrap should return hardware token error until implemented"
+        has_truthful_pin_refusal,
+        "hardware token bootstrap should refuse missing PIN before attempting token login"
     );
 }
 

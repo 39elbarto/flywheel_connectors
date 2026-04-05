@@ -1074,6 +1074,11 @@ impl Drop for ConnectionGuard<'_> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::redundant_clone,
+        reason = "clone-focused tests intentionally exercise Clone impls"
+    )]
+
     use super::*;
 
     #[derive(Debug, serde::Deserialize)]
@@ -2471,6 +2476,7 @@ mod tests {
     fn restart_policy_clone() {
         let policy = RestartPolicy::OnCrash;
         let cloned = policy.clone();
+        assert_eq!(policy, cloned);
         assert_eq!(cloned, RestartPolicy::OnCrash);
     }
 
@@ -2559,6 +2565,7 @@ mod tests {
     fn stop_reason_clone() {
         let r = StopReason::Upgrade;
         let cloned = r.clone();
+        assert_eq!(r, cloned);
         assert_eq!(cloned, StopReason::Upgrade);
     }
 
@@ -2578,7 +2585,7 @@ mod tests {
     #[test]
     fn backoff_attempts_increments() {
         let mut backoff =
-            ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(60), 2.0);
+            ExponentialBackoff::new(Duration::from_millis(100), Duration::from_mins(1), 2.0);
         assert_eq!(backoff.attempts(), 0);
         let _ = backoff.next_backoff();
         assert_eq!(backoff.attempts(), 1);
@@ -2589,7 +2596,7 @@ mod tests {
     #[test]
     fn backoff_reset_brings_attempts_to_zero() {
         let mut backoff =
-            ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(60), 2.0);
+            ExponentialBackoff::new(Duration::from_millis(100), Duration::from_mins(1), 2.0);
         for _ in 0..5 {
             let _ = backoff.next_backoff();
         }
@@ -2642,7 +2649,7 @@ mod tests {
         let config = SupervisorConfig {
             restart_policy: RestartPolicy::Always,
             max_restarts: 10,
-            restart_window: Duration::from_secs(60),
+            restart_window: Duration::from_mins(1),
             health_check_interval: Duration::from_secs(5),
             health_check_timeout: Duration::from_secs(2),
             graceful_shutdown_timeout: Duration::from_secs(10),
@@ -2653,7 +2660,7 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let parsed: SupervisorConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.max_restarts, config.max_restarts);
-        assert_eq!(parsed.backoff_multiplier, config.backoff_multiplier);
+        assert!((parsed.backoff_multiplier - config.backoff_multiplier).abs() < f64::EPSILON);
         assert_eq!(parsed.restart_policy, RestartPolicy::Always);
     }
 
@@ -2871,7 +2878,7 @@ mod tests {
             window: Duration::from_secs(10),
         };
         let s = denied.to_string();
-        assert!(s.contains("3"));
+        assert!(s.contains('3'));
         assert!(s.contains("10"));
     }
 

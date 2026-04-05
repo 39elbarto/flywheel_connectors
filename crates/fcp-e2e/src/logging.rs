@@ -576,14 +576,21 @@ mod tests {
         });
         let redacted = super::redact_secrets(&input);
         assert_eq!(
-            redacted.get("access_token").and_then(|v| v.as_str()),
+            redacted
+                .get("access_token")
+                .and_then(serde_json::Value::as_str),
             Some("redacted")
         );
         assert_eq!(
-            redacted.get("credential").and_then(|v| v.as_str()),
+            redacted
+                .get("credential")
+                .and_then(serde_json::Value::as_str),
             Some("redacted")
         );
-        assert_eq!(redacted.get("name").and_then(|v| v.as_str()), Some("test"));
+        assert_eq!(
+            redacted.get("name").and_then(serde_json::Value::as_str),
+            Some("test")
+        );
     }
 
     #[test]
@@ -597,11 +604,12 @@ mod tests {
         let redacted = super::redact_secrets(&input);
         let auth = redacted.get("auth").expect("auth key");
         assert_eq!(
-            auth.get("client_secret").and_then(|v| v.as_str()),
+            auth.get("client_secret")
+                .and_then(serde_json::Value::as_str),
             Some("redacted")
         );
         assert_eq!(
-            auth.get("client_id").and_then(|v| v.as_str()),
+            auth.get("client_id").and_then(serde_json::Value::as_str),
             Some("my-app")
         );
     }
@@ -615,12 +623,15 @@ mod tests {
         let redacted = super::redact_secrets(&input);
         let arr = redacted.as_array().expect("array");
         assert_eq!(
-            arr[0].get("password").and_then(|v| v.as_str()),
+            arr[0].get("password").and_then(serde_json::Value::as_str),
             Some("redacted")
         );
-        assert_eq!(arr[0].get("user").and_then(|v| v.as_str()), Some("alice"));
         assert_eq!(
-            arr[1].get("password").and_then(|v| v.as_str()),
+            arr[0].get("user").and_then(serde_json::Value::as_str),
+            Some("alice")
+        );
+        assert_eq!(
+            arr[1].get("password").and_then(serde_json::Value::as_str),
             Some("redacted")
         );
     }
@@ -718,7 +729,7 @@ mod tests {
         assert_eq!(parts.len(), 2);
         let first: serde_json::Value = serde_json::from_str(parts[0]).expect("valid JSON");
         assert_eq!(
-            first.get("test_name").and_then(|v| v.as_str()),
+            first.get("test_name").and_then(serde_json::Value::as_str),
             Some("test1")
         );
     }
@@ -790,11 +801,17 @@ mod tests {
             json!({"access_token": "secret-value", "zone_id": "z:work"}),
         );
         assert_eq!(
-            entry.context.get("access_token").and_then(|v| v.as_str()),
+            entry
+                .context
+                .get("access_token")
+                .and_then(serde_json::Value::as_str),
             Some("redacted")
         );
         assert_eq!(
-            entry.context.get("zone_id").and_then(|v| v.as_str()),
+            entry
+                .context
+                .get("zone_id")
+                .and_then(serde_json::Value::as_str),
             Some("z:work")
         );
     }
@@ -928,7 +945,7 @@ mod tests {
                 .details
                 .as_ref()
                 .and_then(|details| details.get("token"))
-                .and_then(|value| value.as_str()),
+                .and_then(serde_json::Value::as_str),
             Some("redacted")
         );
     }
@@ -982,10 +999,16 @@ mod tests {
         drop(entry);
         assert_eq!(cloned.test_name, "clone_ctx");
         assert_eq!(
-            cloned.context.get("zone_id").and_then(|v| v.as_str()),
+            cloned
+                .context
+                .get("zone_id")
+                .and_then(serde_json::Value::as_str),
             Some("z:personal")
         );
-        let arr = cloned.context.get("extra").and_then(|v| v.as_array());
+        let arr = cloned
+            .context
+            .get("extra")
+            .and_then(serde_json::Value::as_array);
         assert_eq!(arr.map(Vec::len), Some(3));
     }
 
@@ -1211,7 +1234,7 @@ mod tests {
                 .and_then(|details| details.get("session"))
                 .and_then(|session| session.get("detail"))
                 .and_then(|detail| detail.get("token"))
-                .and_then(|value| value.as_str()),
+                .and_then(serde_json::Value::as_str),
             Some("redacted")
         );
     }
@@ -1265,7 +1288,7 @@ mod tests {
                 .as_ref()
                 .and_then(|summary| summary.get("session"))
                 .and_then(|session| session.get("transport"))
-                .and_then(|value| value.as_str()),
+                .and_then(serde_json::Value::as_str),
             Some("websocket")
         );
         assert_eq!(

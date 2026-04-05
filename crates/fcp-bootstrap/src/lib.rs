@@ -104,7 +104,8 @@ pub use cold_recovery::{ColdRecovery, ColdRecoveryError, ColdRecoveryWarning};
 pub use error::{BootstrapError, BootstrapResult};
 pub use genesis::{GenesisState, GenesisValidationError};
 pub use hardware_token::{
-    DetectedToken, DetectionIssue, DetectionStage, HardwareTokenProvider, ProviderDetectionResult,
+    AuthenticatedSessionState, AuthenticatedTokenSession, DetectedToken, DetectionIssue,
+    DetectionStage, HardwareTokenPin, HardwareTokenProvider, ProviderDetectionResult,
     TokenDetectionReport, TokenDetector,
 };
 pub use phase::{BootstrapPhase, InitResult, InitSuggestion, PartialStateSuggestion};

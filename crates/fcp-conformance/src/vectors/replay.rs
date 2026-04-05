@@ -52,9 +52,12 @@ mod tests {
     fn idempotency_class_variants_exhaustive() {
         // FCP defines exactly three idempotency classes.
         use fcp_core::IdempotencyClass;
-        let _none = IdempotencyClass::None;
-        let _best_effort = IdempotencyClass::BestEffort;
-        let _strict = IdempotencyClass::Strict;
+        let classes = [
+            IdempotencyClass::None,
+            IdempotencyClass::BestEffort,
+            IdempotencyClass::Strict,
+        ];
+        assert_eq!(classes.len(), 3);
     }
 
     #[test]

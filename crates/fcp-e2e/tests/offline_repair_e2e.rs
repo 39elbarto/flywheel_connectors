@@ -1240,6 +1240,7 @@ fn access_pattern_eviction_at_capacity() {
 // F. E2E Flow Tests
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn offline_repair_full_flow() {
     // Phase 1: Setup — create objects with encoding parameters

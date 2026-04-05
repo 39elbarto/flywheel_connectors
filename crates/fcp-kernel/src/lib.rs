@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn kernel_exports_checkpoint_types() {
         // CheckpointTrigger variants have data fields, just verify the type exists
-        let _trigger: fn(u64, u64) -> CheckpointTrigger =
+        let _: fn(u64, u64) -> CheckpointTrigger =
             |elapsed, threshold| CheckpointTrigger::TimeElapsed {
                 elapsed_secs: elapsed,
                 threshold_secs: threshold,
@@ -290,7 +290,7 @@ mod tests {
 
         let policy = SupplyChainVerificationPolicy::default();
         let pipeline = VerificationPipeline::new(policy);
-        let _verify: fn(
+        let _: fn(
             &VerificationPipeline,
             &str,
             Option<&SupplyChainAttestation>,

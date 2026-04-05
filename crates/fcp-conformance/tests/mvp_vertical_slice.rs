@@ -255,11 +255,21 @@ struct RevocationReplayEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RevocationStateEvidence {
-    chain_valid: bool,
+    decisions: RevocationDecisionEvidence,
+    propagation: RevocationPropagationEvidence,
+    post_revoke_reason_code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RevocationDecisionEvidence {
     allow_before_revoke: bool,
     deny_after_revoke: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RevocationPropagationEvidence {
+    chain_valid: bool,
     revocation_propagated: bool,
-    post_revoke_reason_code: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,10 +358,15 @@ struct DenialPathReplayEvidence {
 struct DenialPathStateEvidence {
     decision_is_deny: bool,
     violation_is_genesis: bool,
+    explanation_markers: ExplanationMarkerEvidence,
     reason_code: String,
-    explanation_mentions_capability: bool,
-    explanation_mentions_connector: bool,
     explanation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ExplanationMarkerEvidence {
+    mentions_capability: bool,
+    mentions_connector: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,6 +377,70 @@ struct DenialPathArtifactBundle {
     state: DenialPathStateEvidence,
     assertions: Vec<ScenarioAssertionEvidence>,
     log_entry_count: usize,
+    log_jsonl_valid: bool,
+}
+
+struct RecoveryArtifactInputs<'a> {
+    logs: &'a [LogEntry],
+    zone: &'a ZoneId,
+    object_id: &'a ObjectId,
+    failed_node_id: &'a NodeId,
+    running_nodes_before_repair: usize,
+    running_nodes_after_repair: usize,
+    available_replicas_before_repair: usize,
+    available_replicas_after_repair: usize,
+    degraded_coverage_bps: u16,
+    recovered_coverage_bps: u16,
+    log_jsonl_valid: bool,
+}
+
+struct EpochReplayArtifactInputs<'a> {
+    logs: &'a [LogEntry],
+    zone: &'a ZoneId,
+    event_ids: &'a [ObjectId],
+    tail_event_id: &'a ObjectId,
+    state: EpochReplayStateEvidence,
+    log_jsonl_valid: bool,
+}
+
+struct RevocationArtifactInputs<'a> {
+    logs: &'a [LogEntry],
+    connector_id: &'a ConnectorId,
+    issue_event_id: &'a ObjectId,
+    use_event_id: &'a ObjectId,
+    revoke_event_id: &'a ObjectId,
+    deny_event_id: &'a ObjectId,
+    state: RevocationStateEvidence,
+    log_jsonl_valid: bool,
+}
+
+struct TaintApprovalArtifactInputs<'a> {
+    logs: &'a [LogEntry],
+    connector_id: &'a ConnectorId,
+    taint_event_id: &'a ObjectId,
+    approval_event_id: &'a ObjectId,
+    success_event_id: &'a ObjectId,
+    state: TaintApprovalStateEvidence,
+    log_jsonl_valid: bool,
+}
+
+struct HappyPathArtifactInputs<'a> {
+    logs: &'a [LogEntry],
+    zone: &'a ZoneId,
+    connector_id: &'a ConnectorId,
+    manifest_obj_id: &'a ObjectId,
+    genesis_event_id: &'a ObjectId,
+    invoke_event_id: &'a ObjectId,
+    state: HappyPathStateEvidence,
+    log_jsonl_valid: bool,
+}
+
+struct DenialPathArtifactInputs<'a> {
+    logs: &'a [LogEntry],
+    connector_id: &'a ConnectorId,
+    request_object_id: &'a ObjectId,
+    violation_event_id: &'a ObjectId,
+    state: DenialPathStateEvidence,
     log_jsonl_valid: bool,
 }
 
@@ -388,21 +467,23 @@ fn count_available_replicas(
         .count()
 }
 
-fn build_recovery_artifact_bundle(
-    logs: &[LogEntry],
-    zone: &ZoneId,
-    object_id: ObjectId,
-    failed_node_id: &NodeId,
-    running_nodes_before_repair: usize,
-    running_nodes_after_repair: usize,
-    available_replicas_before_repair: usize,
-    available_replicas_after_repair: usize,
-    degraded_coverage_bps: u16,
-    recovered_coverage_bps: u16,
-    log_jsonl_valid: bool,
-) -> RecoveryArtifactBundle {
+fn build_recovery_artifact_bundle(inputs: RecoveryArtifactInputs<'_>) -> RecoveryArtifactBundle {
+    let RecoveryArtifactInputs {
+        logs,
+        zone,
+        object_id,
+        failed_node_id,
+        running_nodes_before_repair,
+        running_nodes_after_repair,
+        available_replicas_before_repair,
+        available_replicas_after_repair,
+        degraded_coverage_bps,
+        recovered_coverage_bps,
+        log_jsonl_valid,
+    } = inputs;
+
     RecoveryArtifactBundle {
-        scenario_key: "offline_repair".to_string(),
+        scenario_key: OFFLINE_REPAIR_SCENARIO.to_string(),
         contract_id: OFFLINE_REPAIR_CONTRACT_ID.to_string(),
         replay: RecoveryReplayEvidence {
             seed: SEED,
@@ -430,19 +511,19 @@ fn build_recovery_artifact_bundle(
 }
 
 fn build_epoch_replay_artifact_bundle(
-    logs: &[LogEntry],
-    zone: &ZoneId,
-    event_ids: &[ObjectId],
-    tail_event_id: &ObjectId,
-    chain_valid: bool,
-    distributed_node_count: usize,
-    tail_event_visible_on_all_nodes: bool,
-    checkpoint_audit_seq: u64,
-    checkpoint_seq: u64,
-    log_jsonl_valid: bool,
+    inputs: EpochReplayArtifactInputs<'_>,
 ) -> EpochReplayArtifactBundle {
+    let EpochReplayArtifactInputs {
+        logs,
+        zone,
+        event_ids,
+        tail_event_id,
+        state,
+        log_jsonl_valid,
+    } = inputs;
+
     EpochReplayArtifactBundle {
-        scenario_key: "epoch_replay".to_string(),
+        scenario_key: EPOCH_REPLAY_SCENARIO.to_string(),
         contract_id: EPOCH_REPLAY_CONTRACT_ID.to_string(),
         replay: EpochReplayReplayEvidence {
             seed: SEED,
@@ -450,15 +531,7 @@ fn build_epoch_replay_artifact_bundle(
             event_ids: event_ids.iter().map(ToString::to_string).collect(),
             tail_event_id: tail_event_id.to_string(),
         },
-        state: EpochReplayStateEvidence {
-            chain_valid,
-            event_count: u8::try_from(event_ids.len()).expect("event count fits in u8"),
-            distributed_node_count: u8::try_from(distributed_node_count)
-                .expect("distributed node count fits in u8"),
-            tail_event_visible_on_all_nodes,
-            checkpoint_audit_seq,
-            checkpoint_seq,
-        },
+        state,
         assertions: scenario_assertions(logs, EPOCH_REPLAY_SCENARIO),
         log_entry_count: logs.len(),
         log_jsonl_valid,
@@ -466,21 +539,21 @@ fn build_epoch_replay_artifact_bundle(
 }
 
 fn build_revocation_artifact_bundle(
-    logs: &[LogEntry],
-    connector_id: &ConnectorId,
-    issue_event_id: &ObjectId,
-    use_event_id: &ObjectId,
-    revoke_event_id: &ObjectId,
-    deny_event_id: &ObjectId,
-    chain_valid: bool,
-    allow_before_revoke: bool,
-    deny_after_revoke: bool,
-    revocation_propagated: bool,
-    post_revoke_reason_code: &str,
-    log_jsonl_valid: bool,
+    inputs: RevocationArtifactInputs<'_>,
 ) -> RevocationArtifactBundle {
+    let RevocationArtifactInputs {
+        logs,
+        connector_id,
+        issue_event_id,
+        use_event_id,
+        revoke_event_id,
+        deny_event_id,
+        state,
+        log_jsonl_valid,
+    } = inputs;
+
     RevocationArtifactBundle {
-        scenario_key: "revocation".to_string(),
+        scenario_key: REVOCATION_SCENARIO.to_string(),
         contract_id: REVOCATION_CONTRACT_ID.to_string(),
         replay: RevocationReplayEvidence {
             seed: SEED,
@@ -490,13 +563,7 @@ fn build_revocation_artifact_bundle(
             revoke_event_id: revoke_event_id.to_string(),
             deny_event_id: deny_event_id.to_string(),
         },
-        state: RevocationStateEvidence {
-            chain_valid,
-            allow_before_revoke,
-            deny_after_revoke,
-            revocation_propagated,
-            post_revoke_reason_code: post_revoke_reason_code.to_string(),
-        },
+        state,
         assertions: scenario_assertions(logs, REVOCATION_SCENARIO),
         log_entry_count: logs.len(),
         log_jsonl_valid,
@@ -504,19 +571,18 @@ fn build_revocation_artifact_bundle(
 }
 
 fn build_taint_approval_artifact_bundle(
-    logs: &[LogEntry],
-    connector_id: &ConnectorId,
-    taint_event_id: &ObjectId,
-    approval_event_id: &ObjectId,
-    success_event_id: &ObjectId,
-    chain_valid: bool,
-    denied_before_approval: bool,
-    allowed_after_approval: bool,
-    taint_reason_code: &str,
-    approval_event_type: &str,
-    allow_explanation: &str,
-    log_jsonl_valid: bool,
+    inputs: TaintApprovalArtifactInputs<'_>,
 ) -> TaintApprovalArtifactBundle {
+    let TaintApprovalArtifactInputs {
+        logs,
+        connector_id,
+        taint_event_id,
+        approval_event_id,
+        success_event_id,
+        state,
+        log_jsonl_valid,
+    } = inputs;
+
     TaintApprovalArtifactBundle {
         scenario_key: TAINT_APPROVAL_SCENARIO.to_string(),
         contract_id: TAINT_APPROVAL_CONTRACT_ID.to_string(),
@@ -527,14 +593,7 @@ fn build_taint_approval_artifact_bundle(
             approval_event_id: approval_event_id.to_string(),
             success_event_id: success_event_id.to_string(),
         },
-        state: TaintApprovalStateEvidence {
-            chain_valid,
-            denied_before_approval,
-            allowed_after_approval,
-            taint_reason_code: taint_reason_code.to_string(),
-            approval_event_type: approval_event_type.to_string(),
-            allow_explanation: allow_explanation.to_string(),
-        },
+        state,
         assertions: scenario_assertions(logs, TAINT_APPROVAL_SCENARIO),
         log_entry_count: logs.len(),
         log_jsonl_valid,
@@ -542,22 +601,19 @@ fn build_taint_approval_artifact_bundle(
 }
 
 fn build_happy_path_artifact_bundle(
-    logs: &[LogEntry],
-    zone: &ZoneId,
-    connector_id: &ConnectorId,
-    manifest_obj_id: &ObjectId,
-    genesis_event_id: &ObjectId,
-    invoke_event_id: &ObjectId,
-    chain_valid: bool,
-    receipt_is_allow: bool,
-    allow_reason_code: &str,
-    evidence_count: usize,
-    audit_head_seq: u64,
-    manifest_visible_nodes: usize,
-    running_node_count: usize,
-    gossip_converged: bool,
-    log_jsonl_valid: bool,
+    inputs: HappyPathArtifactInputs<'_>,
 ) -> HappyPathArtifactBundle {
+    let HappyPathArtifactInputs {
+        logs,
+        zone,
+        connector_id,
+        manifest_obj_id,
+        genesis_event_id,
+        invoke_event_id,
+        state,
+        log_jsonl_valid,
+    } = inputs;
+
     HappyPathArtifactBundle {
         scenario_key: HAPPY_PATH_SCENARIO.to_string(),
         contract_id: HAPPY_PATH_CONTRACT_ID.to_string(),
@@ -569,18 +625,7 @@ fn build_happy_path_artifact_bundle(
             genesis_event_id: genesis_event_id.to_string(),
             invoke_event_id: invoke_event_id.to_string(),
         },
-        state: HappyPathStateEvidence {
-            chain_valid,
-            receipt_is_allow,
-            allow_reason_code: allow_reason_code.to_string(),
-            evidence_count: u8::try_from(evidence_count).expect("evidence count fits in u8"),
-            audit_head_seq,
-            manifest_visible_nodes: u8::try_from(manifest_visible_nodes)
-                .expect("visible node count fits in u8"),
-            running_node_count: u8::try_from(running_node_count)
-                .expect("running node count fits in u8"),
-            gossip_converged,
-        },
+        state,
         assertions: scenario_assertions(logs, HAPPY_PATH_SCENARIO),
         log_entry_count: logs.len(),
         log_jsonl_valid,
@@ -588,18 +633,17 @@ fn build_happy_path_artifact_bundle(
 }
 
 fn build_denial_path_artifact_bundle(
-    logs: &[LogEntry],
-    connector_id: &ConnectorId,
-    request_object_id: &ObjectId,
-    violation_event_id: &ObjectId,
-    decision_is_deny: bool,
-    violation_is_genesis: bool,
-    reason_code: &str,
-    explanation_mentions_capability: bool,
-    explanation_mentions_connector: bool,
-    explanation: &str,
-    log_jsonl_valid: bool,
+    inputs: DenialPathArtifactInputs<'_>,
 ) -> DenialPathArtifactBundle {
+    let DenialPathArtifactInputs {
+        logs,
+        connector_id,
+        request_object_id,
+        violation_event_id,
+        state,
+        log_jsonl_valid,
+    } = inputs;
+
     DenialPathArtifactBundle {
         scenario_key: DENIAL_PATH_SCENARIO.to_string(),
         contract_id: DENIAL_PATH_CONTRACT_ID.to_string(),
@@ -609,14 +653,7 @@ fn build_denial_path_artifact_bundle(
             request_object_id: request_object_id.to_string(),
             violation_event_id: violation_event_id.to_string(),
         },
-        state: DenialPathStateEvidence {
-            decision_is_deny,
-            violation_is_genesis,
-            reason_code: reason_code.to_string(),
-            explanation_mentions_capability,
-            explanation_mentions_connector,
-            explanation: explanation.to_string(),
-        },
+        state,
         assertions: scenario_assertions(logs, DENIAL_PATH_SCENARIO),
         log_entry_count: logs.len(),
         log_jsonl_valid,
@@ -780,23 +817,28 @@ fn happy_path_install_invoke_receipt_audit_verify() {
         "happy path logs should validate against schema: {log_jsonl_validation:?}"
     );
 
-    let artifact_bundle = build_happy_path_artifact_bundle(
-        &happy_logs,
-        &zone,
-        &connector_id,
-        &manifest_obj_id,
-        &genesis_id,
-        &invoke_event_id,
+    let happy_state = HappyPathStateEvidence {
         chain_valid,
         receipt_is_allow,
-        &receipt.reason_code,
-        evidence_count,
-        head.head_seq,
-        manifest_visible_nodes,
-        running_node_count,
+        allow_reason_code: receipt.reason_code,
+        evidence_count: u8::try_from(evidence_count).expect("evidence count fits in u8"),
+        audit_head_seq: head.head_seq,
+        manifest_visible_nodes: u8::try_from(manifest_visible_nodes)
+            .expect("visible node count fits in u8"),
+        running_node_count: u8::try_from(running_node_count)
+            .expect("running node count fits in u8"),
         gossip_converged,
+    };
+    let artifact_bundle = build_happy_path_artifact_bundle(HappyPathArtifactInputs {
+        logs: &happy_logs,
+        zone: &zone,
+        connector_id: &connector_id,
+        manifest_obj_id: &manifest_obj_id,
+        genesis_event_id: &genesis_id,
+        invoke_event_id: &invoke_event_id,
+        state: happy_state,
         log_jsonl_valid,
-    );
+    });
     assert_eq!(artifact_bundle.contract_id, HAPPY_PATH_CONTRACT_ID);
     assert_eq!(
         artifact_bundle
@@ -931,19 +973,24 @@ fn denial_path_invoke_without_cap_produces_receipt() {
         "denial path logs should validate against schema: {log_jsonl_validation:?}"
     );
 
-    let artifact_bundle = build_denial_path_artifact_bundle(
-        &denial_logs,
-        &connector_id,
-        &receipt.request_object_id,
-        &violation_event_id,
+    let denial_state = DenialPathStateEvidence {
         decision_is_deny,
         violation_is_genesis,
-        &receipt.reason_code,
-        explanation_mentions_capability,
-        explanation_mentions_connector,
-        explanation,
+        explanation_markers: ExplanationMarkerEvidence {
+            mentions_capability: explanation_mentions_capability,
+            mentions_connector: explanation_mentions_connector,
+        },
+        reason_code: receipt.reason_code.clone(),
+        explanation: explanation.to_string(),
+    };
+    let artifact_bundle = build_denial_path_artifact_bundle(DenialPathArtifactInputs {
+        logs: &denial_logs,
+        connector_id: &connector_id,
+        request_object_id: &receipt.request_object_id,
+        violation_event_id: &violation_event_id,
+        state: denial_state,
         log_jsonl_valid,
-    );
+    });
     assert_eq!(artifact_bundle.contract_id, DENIAL_PATH_CONTRACT_ID);
     assert_eq!(
         artifact_bundle
@@ -965,8 +1012,13 @@ fn denial_path_invoke_without_cap_produces_receipt() {
     assert!(artifact_bundle.state.decision_is_deny);
     assert!(artifact_bundle.state.violation_is_genesis);
     assert_eq!(artifact_bundle.state.reason_code, "FCP-2101");
-    assert!(artifact_bundle.state.explanation_mentions_capability);
-    assert!(artifact_bundle.state.explanation_mentions_connector);
+    assert!(
+        artifact_bundle
+            .state
+            .explanation_markers
+            .mentions_capability
+    );
+    assert!(artifact_bundle.state.explanation_markers.mentions_connector);
 
     let artifact_json =
         serde_json::to_value(&artifact_bundle).expect("serialize denial path artifact bundle");
@@ -1153,20 +1205,27 @@ fn revocation_flow_issue_use_revoke_deny() {
         "revocation logs should validate against schema: {log_jsonl_validation:?}"
     );
 
-    let artifact_bundle = build_revocation_artifact_bundle(
-        &revocation_logs,
-        &connector_id,
-        &issue_id,
-        &use_id,
-        &revoke_id,
-        &deny_event_id,
-        chain_valid,
-        allow_before_revoke,
-        deny_after_revoke,
-        revocation_propagated,
-        &deny_receipt.reason_code,
+    let revocation_state = RevocationStateEvidence {
+        decisions: RevocationDecisionEvidence {
+            allow_before_revoke,
+            deny_after_revoke,
+        },
+        propagation: RevocationPropagationEvidence {
+            chain_valid,
+            revocation_propagated,
+        },
+        post_revoke_reason_code: deny_receipt.reason_code,
+    };
+    let artifact_bundle = build_revocation_artifact_bundle(RevocationArtifactInputs {
+        logs: &revocation_logs,
+        connector_id: &connector_id,
+        issue_event_id: &issue_id,
+        use_event_id: &use_id,
+        revoke_event_id: &revoke_id,
+        deny_event_id: &deny_event_id,
+        state: revocation_state,
         log_jsonl_valid,
-    );
+    });
     assert_eq!(artifact_bundle.contract_id, REVOCATION_CONTRACT_ID);
     assert_eq!(
         artifact_bundle
@@ -1194,10 +1253,10 @@ fn revocation_flow_issue_use_revoke_deny() {
         ]
     );
     assert_eq!(artifact_bundle.log_entry_count, revocation_logs.len());
-    assert!(artifact_bundle.state.chain_valid);
-    assert!(artifact_bundle.state.allow_before_revoke);
-    assert!(artifact_bundle.state.deny_after_revoke);
-    assert!(artifact_bundle.state.revocation_propagated);
+    assert!(artifact_bundle.state.propagation.chain_valid);
+    assert!(artifact_bundle.state.decisions.allow_before_revoke);
+    assert!(artifact_bundle.state.decisions.deny_after_revoke);
+    assert!(artifact_bundle.state.propagation.revocation_propagated);
     assert_eq!(artifact_bundle.state.post_revoke_reason_code, "FCP-2105");
 
     let artifact_json =
@@ -1329,20 +1388,23 @@ fn taint_approval_deny_then_approve_then_succeed() {
         "taint/approval logs should validate against schema: {log_jsonl_validation:?}"
     );
 
-    let artifact_bundle = build_taint_approval_artifact_bundle(
-        &taint_logs,
-        &connector_id,
-        &taint_id,
-        &approval_id,
-        &success_id,
+    let taint_state = TaintApprovalStateEvidence {
         chain_valid,
         denied_before_approval,
         allowed_after_approval,
-        &taint_receipt.reason_code,
-        &approval_event.event_type,
-        allow_explanation,
+        taint_reason_code: taint_receipt.reason_code,
+        approval_event_type: approval_event.event_type,
+        allow_explanation: allow_explanation.to_string(),
+    };
+    let artifact_bundle = build_taint_approval_artifact_bundle(TaintApprovalArtifactInputs {
+        logs: &taint_logs,
+        connector_id: &connector_id,
+        taint_event_id: &taint_id,
+        approval_event_id: &approval_id,
+        success_event_id: &success_id,
+        state: taint_state,
         log_jsonl_valid,
-    );
+    });
     assert_eq!(artifact_bundle.contract_id, TAINT_APPROVAL_CONTRACT_ID);
     assert_eq!(
         artifact_bundle
@@ -1547,11 +1609,11 @@ fn offline_repair_reduced_availability_then_recovery() {
         "offline repair logs should validate against schema: {log_jsonl_validation:?}"
     );
 
-    let artifact_bundle = build_recovery_artifact_bundle(
-        &offline_repair_logs,
-        &zone,
-        object_id,
-        &failed_node_id,
+    let artifact_bundle = build_recovery_artifact_bundle(RecoveryArtifactInputs {
+        logs: &offline_repair_logs,
+        zone: &zone,
+        object_id: &object_id,
+        failed_node_id: &failed_node_id,
         running_nodes_before_repair,
         running_nodes_after_repair,
         available_replicas_before_repair,
@@ -1559,7 +1621,7 @@ fn offline_repair_reduced_availability_then_recovery() {
         degraded_coverage_bps,
         recovered_coverage_bps,
         log_jsonl_valid,
-    );
+    });
     assert_eq!(artifact_bundle.contract_id, OFFLINE_REPAIR_CONTRACT_ID);
     assert_eq!(
         artifact_bundle
@@ -1739,18 +1801,23 @@ fn epoch_replay_install_and_replay_events() {
         .iter()
         .map(|(_, event_id)| *event_id)
         .collect::<Vec<_>>();
-    let artifact_bundle = build_epoch_replay_artifact_bundle(
-        &epoch_replay_logs,
-        &zone,
-        &event_ids,
-        &tail_event_id,
+    let epoch_state = EpochReplayStateEvidence {
         chain_valid,
-        distributed_node_count,
+        event_count: u8::try_from(event_ids.len()).expect("event count fits in u8"),
+        distributed_node_count: u8::try_from(distributed_node_count)
+            .expect("distributed node count fits in u8"),
         tail_event_visible_on_all_nodes,
-        checkpoint.audit_seq,
-        checkpoint.checkpoint_seq,
+        checkpoint_audit_seq: checkpoint.audit_seq,
+        checkpoint_seq: checkpoint.checkpoint_seq,
+    };
+    let artifact_bundle = build_epoch_replay_artifact_bundle(EpochReplayArtifactInputs {
+        logs: &epoch_replay_logs,
+        zone: &zone,
+        event_ids: &event_ids,
+        tail_event_id: &tail_event_id,
+        state: epoch_state,
         log_jsonl_valid,
-    );
+    });
     assert_eq!(artifact_bundle.contract_id, EPOCH_REPLAY_CONTRACT_ID);
     assert_eq!(
         artifact_bundle

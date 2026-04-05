@@ -1575,6 +1575,7 @@ mod tests {
             Ok(())
         }
 
+        #[allow(clippy::too_many_lines)]
         fn introspect(&self) -> Introspection {
             Introspection {
                 operations: vec![OperationInfo {
@@ -2435,7 +2436,7 @@ mod tests {
         assert!(!lines.is_empty());
         let parsed: serde_json::Value = serde_json::from_str(&lines).expect("valid JSON");
         assert_eq!(
-            parsed.get("test_name").and_then(|v| v.as_str()),
+            parsed.get("test_name").and_then(serde_json::Value::as_str),
             Some("test1")
         );
     }
@@ -2493,7 +2494,7 @@ mod tests {
         assert!(!lines.is_empty());
         let parsed: serde_json::Value = serde_json::from_str(&lines).expect("valid JSON");
         assert_eq!(
-            parsed.get("test_name").and_then(|v| v.as_str()),
+            parsed.get("test_name").and_then(serde_json::Value::as_str),
             Some("batch_test")
         );
     }
@@ -2622,14 +2623,20 @@ mod tests {
         ];
         let json = findings_to_json(&findings);
         assert_eq!(json.len(), 3);
-        assert_eq!(json[0].get("status").and_then(|v| v.as_str()), Some("pass"));
         assert_eq!(
-            json[0].get("check").and_then(|v| v.as_str()),
+            json[0].get("status").and_then(serde_json::Value::as_str),
+            Some("pass")
+        );
+        assert_eq!(
+            json[0].get("check").and_then(serde_json::Value::as_str),
             Some("check_pass")
         );
-        assert_eq!(json[1].get("status").and_then(|v| v.as_str()), Some("fail"));
         assert_eq!(
-            json[2].get("status").and_then(|v| v.as_str()),
+            json[1].get("status").and_then(serde_json::Value::as_str),
+            Some("fail")
+        );
+        assert_eq!(
+            json[2].get("status").and_then(serde_json::Value::as_str),
             Some("skipped")
         );
     }
@@ -3318,7 +3325,10 @@ mod tests {
         }];
         let json = findings_to_json(&findings);
         assert_eq!(json.len(), 1);
-        assert_eq!(json[0].get("message").and_then(|v| v.as_str()), Some("yep"));
+        assert_eq!(
+            json[0].get("message").and_then(serde_json::Value::as_str),
+            Some("yep")
+        );
     }
 }
 
@@ -3601,6 +3611,7 @@ mod openai_e2e_tests {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn streaming_sse_body() -> String {
         let events = [
             json!({
@@ -3774,6 +3785,7 @@ mod openai_e2e_tests {
         mock.assert_received("/v1/chat/completions").await;
     }
 
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn openai_manifest_network_guard_allows_openai_and_denies_non_openai_hosts() {
         let manifest = openai_manifest_toml();
@@ -4217,6 +4229,7 @@ mod slack_e2e_tests {
         assert_eq!(result["receipt"]["operation"], "slack.post_message");
     }
 
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn slack_manifest_network_guard_allows_slack_and_denies_non_slack_hosts() {
         let manifest = slack_manifest_toml();

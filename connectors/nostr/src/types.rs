@@ -728,7 +728,7 @@ mod tests {
     #[test]
     fn encrypted_dm_event_validate_empty_pubkey() {
         let dm = EncryptedDmEvent {
-            recipient_pubkey: "".into(),
+            recipient_pubkey: String::new(),
             content: "content".into(),
             kind: 4,
         };

@@ -132,7 +132,7 @@ mod tests {
         };
         assert!(matches!(err.to_fcp_error(), FcpError::RateLimited { .. }));
         assert!(err.is_retryable());
-        assert_eq!(err.retry_after(), Some(Duration::from_millis(5000)));
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(5)));
     }
 
     #[test]
@@ -232,7 +232,7 @@ mod tests {
         let err = DeepgramError::RateLimited {
             retry_after_ms: 10_000,
         };
-        assert_eq!(err.retry_after(), Some(Duration::from_millis(10_000)));
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(10)));
 
         // Non-rate-limited errors return None
         let err = DeepgramError::Api {

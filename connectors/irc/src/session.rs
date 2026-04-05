@@ -1094,8 +1094,7 @@ mod tests {
             buf.push(msg, event);
         }
 
-        let privates: Vec<_> = buf.private_messages().collect();
-        assert_eq!(privates.len(), 2);
+        assert_eq!(buf.private_messages().count(), 2);
     }
 
     #[test]

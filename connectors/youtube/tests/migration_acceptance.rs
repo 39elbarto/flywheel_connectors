@@ -1,7 +1,7 @@
-//! Google migration acceptance suite for YouTube.
+//! Google migration acceptance suite for `YouTube`.
 //!
 //! Validates that the shared `fcp-google-discovery` substrate correctly
-//! integrates with the YouTube connector.
+//! integrates with the `YouTube` connector.
 //!
 //! Required by bead `lszk.45.2.6`.
 

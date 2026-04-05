@@ -166,7 +166,7 @@ mod tests {
             retry_after_ms: 5000,
         };
         assert!(err.is_retryable());
-        assert_eq!(err.retry_after(), Some(Duration::from_millis(5000)));
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(5)));
     }
 
     #[test]

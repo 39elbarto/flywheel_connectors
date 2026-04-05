@@ -1750,7 +1750,7 @@ async fn socket_mode_subscribe_reuses_single_connection() {
             () = async {
                 loop {
                     match ws_stream.recv(&Cx::for_testing()).await {
-                        Ok(Some(ServerWsMessage::Close(_))) | Ok(None) | Err(_) => break,
+                        Ok(Some(ServerWsMessage::Close(_)) | None) | Err(_) => break,
                         _ => {}
                     }
                 }

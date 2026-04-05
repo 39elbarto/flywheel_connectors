@@ -27,9 +27,6 @@ use fcp_pinecone::{client::PineconeClient, connector::PineconeConnector, error::
 
 fn capability_for_operation(operation: &str) -> &'static str {
     match operation {
-        "pinecone.list_indexes" | "pinecone.describe_index" | "pinecone.describe_index_stats" => {
-            "pinecone.indexes.read"
-        }
         "pinecone.create_index" | "pinecone.delete_index" => "pinecone.indexes.write",
         "pinecone.query" | "pinecone.fetch" => "pinecone.vectors.read",
         "pinecone.upsert" | "pinecone.delete" => "pinecone.vectors.write",

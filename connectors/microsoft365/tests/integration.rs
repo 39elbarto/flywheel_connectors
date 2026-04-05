@@ -39,11 +39,6 @@ fn capability_for_operation(op: &str) -> &str {
             "m365.mail.send"
         }
         "m365.mail.create_draft" | "m365.mail.add_attachment" => "m365.mail.write",
-        "m365.mail.list_messages"
-        | "m365.mail.get_message"
-        | "m365.mail.search_messages"
-        | "m365.mail.list_threads"
-        | "m365.mail.list_attachments" => "m365.mail.read",
         "m365.files.upload_file" | "m365.files.delete_item" | "m365.files.create_share_link" => {
             "m365.files.write"
         }

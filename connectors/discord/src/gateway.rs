@@ -158,16 +158,13 @@ mod tests {
     }
 
     fn hello_payload(interval_ms: u64) -> ServerWsMessage {
-        ServerWsMessage::Text(
-            json!({
-                "op": GatewayOpcode::Hello as i32,
-                "d": { "heartbeat_interval": interval_ms },
-                "s": null,
-                "t": null,
-            })
-            .to_string()
-            .into(),
-        )
+        let payload = json!({
+            "op": GatewayOpcode::Hello as i32,
+            "d": { "heartbeat_interval": interval_ms },
+            "s": null,
+            "t": null,
+        });
+        ServerWsMessage::Text(serde_json::to_string(&payload).expect("hello payload serializes"))
     }
 
     fn dispatch_payload(
@@ -175,16 +172,13 @@ mod tests {
         sequence: u64,
         data: &serde_json::Value,
     ) -> ServerWsMessage {
-        ServerWsMessage::Text(
-            json!({
-                "op": GatewayOpcode::Dispatch as i32,
-                "d": data,
-                "s": sequence,
-                "t": event_name,
-            })
-            .to_string()
-            .into(),
-        )
+        let payload = json!({
+            "op": GatewayOpcode::Dispatch as i32,
+            "d": data,
+            "s": sequence,
+            "t": event_name,
+        });
+        ServerWsMessage::Text(serde_json::to_string(&payload).expect("dispatch payload serializes"))
     }
 
     fn test_config(gateway_url: String) -> DiscordConfig {
@@ -1228,7 +1222,12 @@ async fn run_gateway_loop_inner(
                     "op": GatewayOpcode::Heartbeat as i32,
                     "d": state.sequence
                 });
-                if let Err(e) = ws_stream.send_text(heartbeat.to_string()).await {
+                if let Err(e) = ws_stream
+                    .send_text(
+                        serde_json::to_string(&heartbeat).expect("heartbeat payload serializes"),
+                    )
+                    .await
+                {
                     error!(error = %e, "Failed to send heartbeat");
                     return Err(DiscordError::Gateway(format!(
                         "Failed to send heartbeat: {e}"
@@ -1292,7 +1291,13 @@ async fn run_gateway_loop_inner(
                             "op": GatewayOpcode::Heartbeat as i32,
                             "d": state.sequence
                         });
-                        if let Err(e) = ws_stream.send_text(heartbeat.to_string()).await {
+                        if let Err(e) = ws_stream
+                            .send_text(
+                                serde_json::to_string(&heartbeat)
+                                    .expect("heartbeat payload serializes"),
+                            )
+                            .await
+                        {
                             error!(error = %e, "Failed to send heartbeat response");
                             return Err(DiscordError::Gateway(format!(
                                 "Failed to send heartbeat: {e}"

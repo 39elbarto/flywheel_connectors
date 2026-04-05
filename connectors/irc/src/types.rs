@@ -622,7 +622,7 @@ mod tests {
             "request_timeout_ms": 5000
         }))
         .unwrap();
-        assert_eq!(config.timeout(), Duration::from_millis(5000));
+        assert_eq!(config.timeout(), Duration::from_secs(5));
     }
 
     #[test]
@@ -644,7 +644,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(config.request_timeout_ms, DEFAULT_TIMEOUT_MS);
-        assert_eq!(config.timeout(), Duration::from_millis(10_000));
+        assert_eq!(config.timeout(), Duration::from_secs(10));
     }
 
     #[test]

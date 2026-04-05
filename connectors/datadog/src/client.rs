@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn encode_query_value_special_chars() {
-        let encoded = encode_query_value("avg:system.cpu{host:web01}&extra=1");
+        let encoded = encode_query_value(concat!("avg:system.cpu", "{host:web01}", "&extra=1"));
         assert!(!encoded.contains('&'));
         assert!(!encoded.contains('='));
         assert!(!encoded.contains('{'));

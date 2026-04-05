@@ -505,13 +505,12 @@ mod tests {
             file_url: None,
         };
 
-        let raw = serde_json::to_value(&json!({
+        let raw = serde_json::to_value(json!({
             "user_id": 4, "username": "mikael", "text": "Tjena"
         }))
         .unwrap();
 
-        let (event, verification) =
-            normalize_inbound_event(&payload, Some("shared-secret"), raw.clone());
+        let (event, verification) = normalize_inbound_event(&payload, Some("shared-secret"), raw);
 
         assert_eq!(event.event_type, "inbound_webhook");
         assert_eq!(event.channel_id.as_deref(), Some("34"));
@@ -591,7 +590,7 @@ mod tests {
             channel_name: Some("general".into()),
             channel_type: None,
             text: Some("Hi there".into()),
-            timestamp: Some(json!(1646827836131_i64)),
+            timestamp: Some(json!(1_646_827_836_131_i64)),
             token: Some("some-token".into()),
             trigger_word: None,
             thread_id: None,
@@ -704,17 +703,17 @@ mod tests {
 
         let payload = InboundWebhookPayload {
             user_id: None,
-            username: Some("".into()),
+            username: Some(String::new()),
             post_id: None,
             channel_id: None,
             channel_name: Some("   ".into()),
             channel_type: None,
-            text: Some("".into()),
+            text: Some(String::new()),
             timestamp: None,
             token: None,
             trigger_word: Some("  ".into()),
             thread_id: None,
-            file_url: Some("".into()),
+            file_url: Some(String::new()),
         };
 
         let (event, _) = normalize_inbound_event(&payload, None, json!({}));

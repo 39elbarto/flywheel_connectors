@@ -387,6 +387,11 @@ pub struct MessageReference {
 
 #[cfg(test)]
 mod tests {
+    #![allow(
+        clippy::redundant_clone,
+        reason = "clone-focused tests intentionally exercise the Clone impls"
+    )]
+
     use super::*;
     use serde_json::json;
 

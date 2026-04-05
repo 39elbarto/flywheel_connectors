@@ -1660,7 +1660,7 @@ mod tests {
     /// Build a capability token signed by the given key for zone z:work.
     /// Grants `CAP_READ` with all operation names listed so read-path invoke
     /// calls pass verification. For write/manage operations, a separate token
-    /// with the matching capability_id would be needed.
+    /// with the matching `capability_id` would be needed.
     fn test_token_for_key(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         let now = chrono::Utc::now();
         let expires = now + chrono::Duration::hours(1);

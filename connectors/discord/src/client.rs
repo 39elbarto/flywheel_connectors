@@ -148,7 +148,7 @@ mod tests {
         let client = DiscordClient::from_config(&config).unwrap();
         // Deref should give us a reference to DiscordApiClient.
         // We verify by checking that api_client() and deref() return the same pointer.
-        let via_deref: *const DiscordApiClient = &*client;
+        let via_deref: *const DiscordApiClient = &raw const *client;
         let via_method: *const DiscordApiClient = client.api_client();
         assert_eq!(via_deref, via_method);
     }

@@ -294,6 +294,7 @@ It freezes six representative answer classes spanning the five required operator
 
 Each matrix row also freezes the minimum replay contract for later proof-bundle work:
 
+- the acceptance-bundle routing (`bundle_layer` + `bundle_suite`)
 - the representative rerun command
 - the required artifact bundle members
 - the required structured log fields

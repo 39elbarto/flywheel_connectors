@@ -60,6 +60,9 @@ Every surviving seam row must record:
 - `user_visible_impact`
 - `replacement_path`
 - proof-artifact pointers
+- `deletion_gate`
+- `proof_obligations` broken out into unit, integration, and e2e evidence
+- `workflow_artifacts` that preserve before/after operator-visible proof
 
 ### Current Non-Placeholder Seams
 
@@ -73,6 +76,56 @@ Every surviving seam row must record:
 | Workspace `tokio` dependency retained for compatibility | `quarantined-transitive` | `flywheel_connectors-18irp` | The workspace still teaches Tokio as a live dependency because the remaining compat seams keep it in the graph. | Delete the compat seams above, then remove Tokio from the workspace dependency surface. | `Cargo.toml`; `scripts/ci/asupersync_tokio_guard.sh` |
 | Raw `asupersync::` imports in non-core crates | `replace-after-pilot` | `flywheel_connectors-9syku.11.2` | Runtime crates outside async-core still bypass the abstraction boundary, so upstream API drift can break them independently. | Wrap the missing types in `fcp-async-core`, prove the `fcp-streaming` pilot, then migrate the remaining crates. | `crates/fcp-streaming/src/websocket.rs`; targeted crate-local runtime tests |
 | Incomplete `ConnectorRuntime` adoption across connector families | `replace-after-pilot` | `flywheel_connectors-9syku.11.3` | Connectors still vary in cancellation, deadline, retry, and lifecycle behavior instead of sharing one FCP3 runtime contract. | Finish the request-response, streaming, and stateful migration waves and delete the old lifecycle glue from connectors and scaffolds. | `crates/fcp-sdk/src/migration.rs`; migrated connector family tests and transcripts |
+
+### Phase-7 Row Gates And Proof
+
+#### Raw `tokio::io` import in `crates/fwc/src/serve_mcp.rs`
+
+- Deletion gate: Close `flywheel_connectors-9syku.11.2` only after `fcp_async_core::io` exports the missing `AsyncWrite` and `lines()` surface, the raw Tokio import disappears from `crates/fwc/src/serve_mcp.rs`, and the Tokio guard remains green.
+- Proof obligations: Unit: async-core I/O wrapper tests for the missing trait and line-stream behavior. Integration: `crates/fwc/tests/cual_integration.rs` coverage for the MCP stdio path. E2E: replayable `fwc serve-mcp` proof showing the stdio workflow stays truthful without direct Tokio I/O.
+- Workflow artifacts: Before: the current guard or grep evidence that `serve_mcp` still imports `tokio::io`. After: `trace.jsonl`, `summary.json`, `environment.json`, and `replay.sh` for the MCP stdio scenario.
+
+#### Hand-rolled exception-ledger style error handling
+
+- Deletion gate: Close `flywheel_connectors-9syku.11.3` only after the remaining connector families migrate onto `ConnectorErrorMapping` and `RetryLoop`, and the bespoke retry or error-translation seams no longer appear in shipping connector paths.
+- Proof obligations: Unit: `fcp-sdk` migration contract tests that pin the shared error taxonomy. Integration: representative migrated connector-family tests proving the shared mapping is used on real request paths. E2E: connector transcripts showing retries, timeout handling, and FCP error shaping come from the shared runtime contract.
+- Workflow artifacts: Before: code or transcript evidence of bespoke error handling on the affected archetype. After: migrated connector proof bundles and transcripts showing one shared runtime/error model.
+
+#### `get_or_create_tokio_compat_handle`
+
+- Deletion gate: Close `flywheel_connectors-18irp` only after reqwest and wiremock compatibility no longer need a hidden Tokio runtime and the compat handle can be deleted from `fcp-async-core` entirely.
+- Proof obligations: Unit: async-core runtime tests proving task spawn and block-on remain correct without entering Tokio context. Integration: `crates/fcp-testkit/src/mock_server.rs` and `crates/fcp-host/tests/host_connector_integration.rs` coverage proving the remaining HTTP/mock surfaces work natively. E2E: host-backed connector verification showing no hidden Tokio runtime is required.
+- Workflow artifacts: Before: runtime traces or documentation that the compat handle is still entered. After: host-backed proof artifacts showing the same flows operate without the quarantined Tokio bridge.
+
+#### `TokioContextFuture` wrapper
+
+- Deletion gate: Close `flywheel_connectors-18irp` only after spawned tasks stop entering Tokio context during polling and the wrapper can be removed alongside the compat handle.
+- Proof obligations: Unit: async-core spawn and cancellation tests proving polling stays correct without Tokio context injection. Integration: mock-server and host integration tests proving reqwest or wiremock callers survive the cutover. E2E: connector or host transcripts showing the same workflows run without Tokio-context scaffolding.
+- Workflow artifacts: Before: runtime traces demonstrating Tokio-context polling. After: cutover artifacts proving the polling path is native and the quarantined wrapper is gone.
+
+#### `asupersync-tokio-compat` bridge in `fcp-host`
+
+- Deletion gate: Close `flywheel_connectors-18irp` only after the host admin API is served through an async-core-native stack or a deliberately blessed permanent bridge, with the current quarantine removed from `crates/fcp-host/src/bin/fcp-host.rs`.
+- Proof obligations: Unit: executor or server-stack tests for the replacement HTTP surface. Integration: `crates/fcp-host/tests/host_connector_integration.rs` proving admin discovery, status, and invoke paths survive the swap. E2E: host-backed admin API transcripts showing the node-local supervision root remains truthful through the new server stack.
+- Workflow artifacts: Before: current host-admin trace and code anchors showing the Tokio bridge. After: host-backed replay bundle proving the replacement server stack and artifact schema.
+
+#### Workspace `tokio` dependency retained for compatibility
+
+- Deletion gate: Remove the workspace `tokio` dependency only after the three quarantined seams above are deleted or formally reclassified as permanent infrastructure with explicit proof.
+- Proof obligations: Unit: dependency or guard tests proving no production or test-critical path still imports Tokio through the workspace surface. Integration: guard-script coverage in `scripts/ci/asupersync_tokio_guard.sh`. E2E: representative host and connector proof bundles showing the workspace still operates with Tokio absent from the dependency surface.
+- Workflow artifacts: Before: current dependency graph and guard-script output showing Tokio still present. After: updated graph or guard output plus replayable host or connector bundles proving the cutover held.
+
+#### Raw `asupersync::` imports in non-core crates
+
+- Deletion gate: Close `flywheel_connectors-9syku.11.2` only after the remaining crates consume async-core wrappers instead of direct upstream imports and the `fcp-streaming` pilot proves the boundary is mechanically stable.
+- Proof obligations: Unit: wrapper coverage for each newly exposed async-core type. Integration: targeted crate-local tests for `fcp-streaming`, `fcp-oauth`, `fcp-graphql`, `fcp-raptorq`, `fcp-tailscale`, and `fcp-telemetry` proving the wrapper layer is sufficient. E2E: representative streaming or operator transcripts showing runtime behavior is unchanged while the abstraction boundary tightens.
+- Workflow artifacts: Before: import-surface inventory or grep output proving direct `asupersync::` usage. After: updated import-surface proof plus crate-local and workflow-level transcripts showing the wrapped surface in action.
+
+#### Incomplete `ConnectorRuntime` adoption across connector families
+
+- Deletion gate: Close `flywheel_connectors-9syku.11.3` only after request-response, streaming, and stateful connector families all run through `ConnectorRuntime` and the old per-connector lifecycle glue is deleted.
+- Proof obligations: Unit: `fcp-sdk` runtime and migration tests proving lifecycle, cancellation, deadline, and retry semantics. Integration: migrated connector-family tests for request-response, streaming, and stateful connectors. E2E: connector transcripts or bundles proving the shared runtime contract is the only operator-visible lifecycle path left.
+- Workflow artifacts: Before: scaffold or connector-family evidence of bespoke lifecycle glue. After: migrated family transcripts and proof bundles showing one shared runtime surface across connectors.
 
 ---
 

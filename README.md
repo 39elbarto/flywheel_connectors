@@ -18,13 +18,15 @@ A secure connector protocol and Rust platform for AI agent operations across zon
 
 1. **FCP specifications and a still-migrating ownership split**: the mesh-native protocol model, security invariants, and the emerging FCP3 owner crates (`fcp-kernel`, `fcp-policy`, `fcp-evidence`) that currently still re-export much of `fcp-core`
 
-2. **A real host-first Rust platform**: today the most concrete operator path is `fwc -> fcp-host HTTP admin API -> connector subprocesses over supervised stdio/JSON-RPC`
+2. **A truthful transition control plane**: today the concrete operator path is still `fwc -> fcp-host HTTP admin API -> connector subprocesses over supervised stdio/JSON-RPC`, but the CLI already distinguishes mesh-backed, host-backed, node-local, and offline answers instead of collapsing everything into a single fake "live" state
 
 3. **A complete connector workspace**: 150 connector crates covering messaging, cloud, databases, AI providers, dev tools, productivity, local-device control, and Google service integrations, all with typed operations, structured error mapping, and manifest-declared security policy
 
-**Current reality**: the long-term vision is personal-device sovereignty, mesh durability, and capability-gated execution across your own infrastructure. The implemented operator surface today is primarily host-first (`fwc` -> `fcp-host` -> connector subprocesses), with the mesh-native data plane proven at the protocol and store layers.
+**Steady-state mental model**: the mesh is the intended center of gravity. Mesh-backed answers are the highest-confidence runtime truth, host-backed answers are the current node-local control-plane view, and offline artifacts are preparation/debugging surfaces rather than runtime truth.
 
-**The direction**: keep the strong zone/capability/evidence model, keep pushing toward the mesh-native design, and make the README honest about what is implemented now versus what is still being refounded.
+**Current reality**: the long-term vision is personal-device sovereignty, mesh durability, and capability-gated execution across your own infrastructure. Operators still commonly enter through the host-first `fwc -> fcp-host` stack, but that stack should be read as the current supervision boundary and truth-reporting surface, not as the final architectural teaching model.
+
+**The direction**: keep the strong zone/capability/evidence model, keep pushing toward the mesh-native design, and make the README teach mesh-backed steady-state operation first while describing host-first truthfulness as a transition constraint or fallback where that is still genuinely true.
 
 **Registry Note**: Registries are just sources of signed manifests/binaries. Your mesh can mirror and pin connectors as content-addressed objects so installs/updates work offline and without upstream dependency.
 
@@ -38,13 +40,13 @@ A secure connector protocol and Rust platform for AI agent operations across zon
 
 ### Why Use FCP?
 
-The most mature operator surface today is the host-first `fwc` + `fcp-host` stack. The table below mixes current strengths with explicit architectural direction; subsystem maturity is not uniform yet.
+Read the platform from the mesh outward. The table below starts with the steady-state properties FCP is trying to preserve, then calls out the current truthful operator surfaces that expose those properties during the transition.
 
 | Feature | What It Does |
 |---------|--------------|
-| **Host-First Today** | A truthful CLI/host stack already exists for discovery, introspection, lifecycle control, history, and live invocation |
 | **Mesh-Native Architecture** | Every device IS the Hub. No central coordinator. |
 | **Symbol-First Protocol** | RaptorQ fountain codes enable multipath aggregation and offline resilience |
+| **Truthful Runtime Resolution** | `fwc` resolves runtime mode explicitly and can already classify answers as mesh-backed, host-backed, node-local, or offline instead of fabricating a single "live" answer |
 | **Zone Isolation** | Cryptographic namespaces with integrity/confidentiality axes and Tailscale ACL enforcement |
 | **Mesh-Stored Policy Objects** | Zone definitions + policies are owner-signed mesh objects (auditable + rollbackable) |
 | **Capability Tokens (CWT/COSE)** | Provable authority with grant_object_ids; tokens are canonically CBOR-encoded and COSE-signed for interoperability |
@@ -56,9 +58,14 @@ The most mature operator surface today is the host-first `fwc` + `fcp-host` stac
 | **Tamper-Evident Audit** | Hash-linked audit chain with monotonic seq and quorum-signed checkpoints |
 | **Revocation** | First-class revocation objects with O(1) freshness checks |
 | **Egress Proxy** | Connector network access via capability-gated proxy with CIDR deny defaults |
+| **Host-First Control Plane (Current)** | The current operator boundary is still `fwc` + `fcp-host`, but it exists to expose truthful runtime state while the wider mesh-native cutover continues |
 | **Supply Chain Attestations** | in-toto/SLSA provenance + SBOM + vulnerability-scan attestations, transparency logging |
 
 ### Quick Example
+
+This diagram is the intended steady-state model. The current `fwc -> fcp-host`
+operator path is the transition control plane that explains whether a result is
+already mesh-backed or is still only host-backed/node-local.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -763,17 +770,23 @@ Reconnecting ──(max retries)────> Unhealthy
 cargo build -p fwc --bin fwc --release
 cp target/release/fwc ~/.local/bin/
 
-# Discover connectors (offline mode, no running fcp-host needed)
+# Ask the runtime truth question first.
+# This path is acceptance-covered in crates/fwc/tests/cual_integration.rs
+# and grounded in the knowledge-state model in crates/fwc/src/truth.rs.
+fwc --host http://127.0.0.1:8787 mesh explain-availability github
+fwc --host http://127.0.0.1:8787 status github
+fwc --host http://127.0.0.1:8787 invoke github issues.create --file payload.json
+
+# Explicit offline preparation when you want artifact-backed data.
 fwc list --offline
 fwc search "send message" --offline
 fwc show github --offline
 fwc ops github --offline
 fwc schema github issues.create --offline
 
-# With a running fcp-host
-fwc list
-fwc invoke github issues.create --file payload.json
-fwc simulate github issues.create --file payload.json
+# Current transition control-plane workflows
+fwc --host http://127.0.0.1:8787 list
+fwc --host http://127.0.0.1:8787 simulate github issues.create --file payload.json
 fwc history --connector github --limit 20
 ```
 
@@ -1288,8 +1301,12 @@ Delivers the core safety story ("zones + explicit authority + auditable operatio
 
 ## FWC Truth Model
 
-`fwc` follows a host-first truthful model.
+`fwc` still enforces a host-first control-plane truth contract, but the
+knowledge model it exposes is no longer host-centric.
 
+- The knowledge-state taxonomy lives in `crates/fwc/src/truth.rs` and explicitly distinguishes `mesh-backed`, `host-backed`, `node-local`, `offline`, `degraded`, and `fallback-derived` answers.
+- `mesh-backed` is the steady-state answer: when live runtime data is joined with placement/durability evidence, the CLI can elevate a result beyond merely node-local status.
+- `host-backed` is the current node-local authoritative control-plane view, which is why `fwc -> fcp-host` still matters operationally during the transition.
 - The command-source classification matrix lives in `crates/fwc/src/catalog.rs` and explicitly marks commands as `live_host`, `offline_artifact`, `hybrid`, or `passthrough`.
 - Runtime resolution is performed before dispatch and yields `live`, `explicit-offline`, `degraded-offline`, or `refused` rather than allowing silent live-to-offline switching.
 - User-facing result semantics are carried by `CommandAvailability` in `crates/fwc/src/readiness.rs`, with explicit states such as `live-runtime`, `offline-artifact`, `unsupported`, `planned`, `unavailable`, `denied`, and `unknown`.
@@ -1308,7 +1325,127 @@ When a `fwc` run fails, the shortest trustworthy debugging loop is:
 
 Template expansion failures, context/preset/bookmark activation drift, pinned-profile mismatches, stale session resume, and replay-environment mismatches should all be debugged through that bundle contract rather than through ad hoc shell retries. The current tree does not yet expose a dedicated preset/bookmark activation CLI, so those symptoms are diagnosed through `fwc context current`, `fwc session ...`, `fwc history ...`, and connector config surfaces instead.
 
-For operator and agent workflows, migration guidance, and evidence-bundle expectations, see [docs/FWC_Host_First_Truthfulness_Playbook.md](docs/FWC_Host_First_Truthfulness_Playbook.md).
+For operator and agent workflows, migration guidance, and evidence-bundle expectations, see [docs/FWC_Host_First_Truthfulness_Playbook.md](docs/FWC_Host_First_Truthfulness_Playbook.md). That playbook is intentionally transition-specific; the steady-state architectural target remains the mesh/object model described in `FCP_Specification_V3.md` and the surrounding mesh/data-plane crates.
+
+## Production Mesh Deployment Runbook
+
+This repository now has a truthful deployment/runbook surface for the current
+platform shape. Read it with two constraints in mind:
+
+1. the steady-state architectural target is still mesh-native
+2. the proven operator path today is still `fwc -> fcp-host -> connector subprocesses`
+
+The guide is therefore about running the current system honestly, not
+pretending the future cutover is already complete.
+
+### Proof Anchors
+
+Treat these as the evidence bundle for deployment claims:
+
+- [docs/FWC_Host_First_Truthfulness_Playbook.md](docs/FWC_Host_First_Truthfulness_Playbook.md) for the operator truth model, replay contract, and deployment/failover checklist
+- [docs/FCP3_Acceptance_Contracts.md](docs/FCP3_Acceptance_Contracts.md) for the phase-5/phase-6 proof obligations behind mesh-backed and host-backed claims
+- [docs/testing/core_platform_evidence_index.md](docs/testing/core_platform_evidence_index.md) for the rerun commands that verify the platform crates backing the operator story
+
+### Current Honest Topology
+
+| Role | Current responsibility | What it proves |
+|------|------------------------|----------------|
+| **Active host node** | Runs `fcp-host`, supervises connector subprocesses, owns the live connector inventory file and lifecycle state snapshot | Authoritative live `fwc` answers for status, doctor, rollout, config, and invoke |
+| **Standby host-capable peer** | Has the same connector binaries, manifests, policy objects, and deployment artifacts staged, but is not treated as authoritative until promoted | Promotion readiness, not current live truth |
+| **Mesh/object peers** | Hold placement targets, policy/evidence objects, and durability context used by `mesh explain-availability` | Whether a live answer can be elevated from merely host-backed to mesh-backed |
+
+Today this should be operated as a **single-active-host** system with
+deliberate promotion of a standby peer. Connector lifecycle/admin state is
+still persisted locally by `fcp-host`, so active/active control-plane teaching
+would be dishonest.
+
+### Minimum Bring-Up
+
+Build the operator binaries with remote compilation:
+
+```bash
+rch exec -- cargo build -p fcp-host -p fwc --release
+```
+
+Start `fcp-host` with explicit operator-state paths:
+
+```bash
+export FCP_HOST_BIND=0.0.0.0:8787
+export FCP_HOST_CONNECTORS_FILE=/srv/fcp/connectors.json
+export FCP_HOST_LIFECYCLE_STATE_FILE=/srv/fcp/lifecycle-state.json
+
+./target/release/fcp-host
+```
+
+Then verify the deployment from an operator shell:
+
+```bash
+fwc --host http://127.0.0.1:8787 list
+fwc --host http://127.0.0.1:8787 mesh explain-availability github
+fwc --host http://127.0.0.1:8787 status github
+fwc --host http://127.0.0.1:8787 doctor --zone z:work --all
+fwc config doctor github --host http://127.0.0.1:8787
+```
+
+Healthy interpretation:
+
+- `list`, `status`, `doctor`, `config doctor`, and rollout/config mutations are
+  authoritative only when they come from the live host
+- `mesh explain-availability` is the command that can legitimately elevate a
+  connector from host-backed/node-local truth to mesh-backed truth
+- if `mesh explain-availability` does not report mesh-backed readiness, do not
+  describe the deployment as fully mesh-backed yet
+
+### Provisioning And Secret Flow
+
+- Treat `FCP_HOST_CONNECTORS_FILE` as the live connector inventory source that
+  `fcp-host` mutates.
+- Treat `FCP_HOST_LIFECYCLE_STATE_FILE` as the local admin-state snapshot that
+  must move with the active host during a controlled failover.
+- Stage the same connector binaries and manifests on the standby peer before
+  claiming failover readiness.
+- Use `fwc config export <connector> --host ... --file baseline.json` before
+  any risky config change.
+- Use `fwc config import <connector> --host ... --file candidate.json` for live
+  config mutation, then immediately run `fwc config doctor`.
+- If `fwc config export` reports a sanitized non-replayable snapshot, move the
+  affected secrets into credential references or rebuild a complete config
+  document explicitly; do not assume the sanitized export is a rollback file.
+
+### Rollout And Rollback Loop
+
+Use the rollout surface as the operator control loop:
+
+```bash
+fwc rollout set github --canary 10 --host http://127.0.0.1:8787
+fwc rollout status github --host http://127.0.0.1:8787
+fwc status github --host http://127.0.0.1:8787
+fwc doctor --zone z:work --all --host http://127.0.0.1:8787
+fwc rollout rollback github --to 1.2.2 --host http://127.0.0.1:8787
+```
+
+Operational rules:
+
+- `rollout set` and `rollout rollback` are truthful for the current node's live
+  mutation, but they do not by themselves prove later runtime stabilization
+- after every rollout or rollback, re-check `rollout status`, `status`,
+  `doctor`, and `mesh explain-availability`
+- if the active node degrades, promote the staged standby peer deliberately
+  rather than assuming automatic lease handoff or automatic state convergence
+
+### Failover Assumptions
+
+The current deployment guide is intentionally narrower than the long-term mesh
+vision:
+
+- multi-node durable-object placement is part of the evidence story
+- connector admin/lifecycle state is still node-local
+- automatic lease handoff and multi-node connector-state replication remain
+  future proof obligations, not current production promises
+
+That means the current honest production story is **warm-standby mesh-backed
+operation with supervised promotion**, not autonomous active/active mesh
+control-plane failover.
 
 ## Project Structure
 
@@ -1374,7 +1511,7 @@ In other words: the repo already contains a broad platform and connector surface
 
 ## Current Implementation Topology
 
-Practically, the current implementation behaves like a host-first platform layered over lower-level protocol, mesh, and object-store crates. The primary operator path is `fwc -> fcp-host -> connector subprocesses`, even though the longer-term architecture remains more mesh-native and FCP3-oriented.
+Practically, the current implementation still exposes a host-first control plane layered over lower-level protocol, mesh, and object-store crates. The primary operator path is `fwc -> fcp-host -> connector subprocesses`, but that should be read as the current supervision and truth-reporting boundary, not as permission to teach the whole platform as permanently host-centric.
 
 The workspace already clusters into a few clear responsibility bands:
 
@@ -1805,7 +1942,7 @@ Sensitive zones can use MLS/TreeKEM-based post-compromise security, where compro
 
 Honest about what FCP doesn't do yet:
 
-- **No production mesh deployment**: The mesh protocol and data plane are implemented and tested, but no production multi-device deployment guide exists yet. The host-first stack is the proven operator path today.
+- **Production deployment is still single-active-host**: This repository now documents the current deployment/runbook surface, but the honest operating model is still one active `fcp-host` with staged standby peers. Connector admin state remains node-local and automatic multi-node failover is not yet a production guarantee.
 - **No GUI**: `fwc` is CLI-only. The `serve-mcp` command exposes connectors as MCP tools for AI agent consumption, but there is no web dashboard.
 - **Connector maturity varies**: The connector workspace compiles and passes tests, but depth of operation coverage ranges from comprehensive (GitHub: 12 ops, Gmail: 10 ops) to minimal (some connectors have 3-5 core operations).
 - **No Windows sandbox**: `fcp-sandbox` implements seccomp/Landlock on Linux and basic WASI isolation. macOS uses seatbelt. Windows sandbox support is Tier 2 and not yet hardened.

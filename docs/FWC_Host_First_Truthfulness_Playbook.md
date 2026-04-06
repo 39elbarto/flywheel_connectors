@@ -227,6 +227,183 @@ The enforcement types live in `crates/fwc/src/catalog.rs`:
 - `SimulateResult`
 - `DiscoveryDataSource`
 
+## Production Deployment Runbook
+
+This section is the operator-facing deployment guide for the current truthful
+platform shape. It is intentionally narrower than the long-term mesh-native
+vision: it teaches how to run the system that exists now, without fabricating
+automatic multi-node properties that the codebase does not yet prove.
+
+### Proof anchors
+
+Use these artifacts together when you need to justify a deployment claim:
+
+| Evidence surface | Why it matters |
+|---|---|
+| `docs/FCP3_Acceptance_Contracts.md` | Names the phase-5 mesh and phase-6 CLI truth proof obligations |
+| `docs/testing/core_platform_evidence_index.md` | Lists the rerun commands for the platform crates behind the operator story |
+| `crates/fwc/tests/cual_integration.rs` | Freezes operator-truth fixture classes, including `mesh_backed`, `node_local`, `offline`, and `degraded` |
+| `crates/fcp-host/tests/host_connector_integration.rs` | Covers rollout, rollback, config mutation, and host-backed lifecycle/admin flows |
+
+If the guide below and those proof surfaces diverge, trust the proof surfaces
+and update the guide.
+
+### Current honest topology
+
+Treat production today as a **single-active-host, warm-standby mesh**.
+
+| Role | Must exist | Current truthful responsibility |
+|---|---|---|
+| Active host node | Yes | Runs `fcp-host`, supervises connectors, owns the authoritative live admin state |
+| Standby host-capable peer | Strongly recommended | Holds the same binaries, manifests, and deployment artifacts so promotion is deliberate and fast |
+| Mesh/object peers | Yes for mesh-backed claims | Supply placement/durability context that can elevate a live answer from host-backed to mesh-backed |
+
+Current assumptions that must stay explicit:
+
+- all live operator mutations still flow through the active `fcp-host`
+- `FCP_HOST_CONNECTORS_FILE` is the live connector inventory mutation surface
+- `FCP_HOST_LIFECYCLE_STATE_FILE` is the local admin-state snapshot that must
+  move with the promoted host
+- connector admin/lifecycle state is still node-local, so active/active
+  control-plane claims would be dishonest
+
+### Provisioning sequence
+
+1. Build release binaries with remote compilation.
+   ```bash
+   rch exec -- cargo build -p fcp-host -p fwc --release
+   ```
+2. Stage the same connector binaries and manifests on the active node and at
+   least one standby peer.
+3. Provision explicit host-state paths on the active node.
+   ```bash
+   export FCP_HOST_BIND=0.0.0.0:8787
+   export FCP_HOST_CONNECTORS_FILE=/srv/fcp/connectors.json
+   export FCP_HOST_LIFECYCLE_STATE_FILE=/srv/fcp/lifecycle-state.json
+   ./target/release/fcp-host
+   ```
+4. Keep the connector inventory file and lifecycle state file under your normal
+   deployment backup/replication discipline. They are the current operator truth
+   surfaces for live inventory and lifecycle history.
+
+### Secret and config flow
+
+Configuration changes should always preserve a replayable rollback path.
+
+1. Export the live baseline before changing anything.
+   ```bash
+   fwc config export github --host http://127.0.0.1:8787 --file baseline.json
+   ```
+2. Validate the current live snapshot.
+   ```bash
+   fwc config doctor github --host http://127.0.0.1:8787
+   ```
+3. Import the candidate config document.
+   ```bash
+   fwc config import github --host http://127.0.0.1:8787 --file candidate.json
+   ```
+4. Re-run `fwc config doctor`.
+
+Important limitation:
+
+- if `fwc config export` reports a sanitized non-replayable snapshot, the
+  exported file is inspection evidence only, not a rollback artifact
+- when that happens, either move secrets into credential references or prepare
+  a complete replacement config document explicitly before you mutate live state
+
+### Bring-up verification loop
+
+Run this minimum command set after provisioning and after every promotion:
+
+```bash
+fwc --host http://127.0.0.1:8787 list
+fwc --host http://127.0.0.1:8787 mesh explain-availability github
+fwc --host http://127.0.0.1:8787 status github
+fwc --host http://127.0.0.1:8787 doctor --zone z:work --all
+fwc config doctor github --host http://127.0.0.1:8787
+```
+
+How to interpret the answers:
+
+- `list`, `status`, `doctor`, `config doctor`, and rollout/config mutation
+  answers are authoritative only when they come from the live host
+- `mesh explain-availability` is the surface that can legitimately upgrade the
+  story from merely host-backed/node-local truth to mesh-backed truth
+- if the best honest answer is still `node_local`, `host_backed`, `degraded`,
+  or `offline`, do not describe the deployment as fully mesh-backed yet
+
+### Rollout and rollback sequence
+
+Use rollout commands as the live operator mutation path:
+
+```bash
+fwc rollout set github --canary 10 --host http://127.0.0.1:8787
+fwc rollout status github --host http://127.0.0.1:8787
+fwc status github --host http://127.0.0.1:8787
+fwc doctor --zone z:work --all --host http://127.0.0.1:8787
+fwc rollout rollback github --to 1.2.2 --host http://127.0.0.1:8787
+```
+
+Read the truth contract literally:
+
+- `rollout set` proves that the active node accepted the canary mutation
+- `rollout status` proves the current node-local rollout state snapshot
+- `rollout rollback` proves that the rollback mutation happened on the active node
+- none of those answers by themselves prove later runtime stabilization
+
+The stabilization check is always the same follow-up loop:
+
+1. `fwc rollout status ...`
+2. `fwc status ...`
+3. `fwc doctor --zone ... --all ...`
+4. `fwc mesh explain-availability ...`
+
+### Failover and promotion assumptions
+
+The current failover story is **supervised promotion**, not automatic mesh
+control-plane relocation.
+
+Use this checklist:
+
+1. Confirm the current active host is degraded or unavailable via `status`,
+   `doctor`, and `mesh explain-availability`.
+2. Promote the staged standby peer with the same connector binaries, manifests,
+   connector inventory file, and lifecycle state snapshot.
+3. Re-run the bring-up verification loop against the promoted host.
+4. Only after the promoted host returns truthful live answers should you route
+   normal operator traffic to it.
+
+Do not claim any of the following until new proof artifacts land:
+
+- automatic lease handoff between nodes
+- automatic multi-node connector-state convergence
+- active/active host mutation safety
+- post-promotion equivalence without re-running the verification loop
+
+### Evidence and diagnosis bundle
+
+When a deployment check or promotion drill fails, use the replayable evidence
+contract rather than ad hoc shell guessing.
+
+Start with the same bundle order described elsewhere in this playbook:
+
+1. `summary.json`
+2. `trace.jsonl`
+3. `environment.json`
+4. `replay.sh`
+
+Then re-run the platform proof surfaces that back this runbook:
+
+```bash
+rch exec -- cargo test -p fwc --test cual_integration
+rch exec -- cargo test -p fcp-host --test host_connector_integration
+rch exec -- cargo test -p fcp-e2e
+```
+
+Those commands do not prove a specific deployment is healthy, but they are the
+fastest way to separate a local deployment/configuration problem from a broken
+platform contract.
+
 ## Migration Checklist
 
 Use this checklist whenever you move an older or ambiguous `fwc` surface into the host-first truthful model.

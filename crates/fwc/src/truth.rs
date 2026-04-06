@@ -746,7 +746,6 @@ impl LiveTruthResolver {
         let start = Instant::now();
         let sources = strategy.source_order();
         let mut attempts = Vec::with_capacity(sources.len());
-        let mut best_partial: Option<(T, KnowledgeState, Duration)> = None;
 
         for source in &sources {
             let attempt_start = Instant::now();
@@ -784,30 +783,6 @@ impl LiveTruthResolver {
                     });
                 }
             }
-        }
-
-        // If we have a partial result from any source, use it as degraded
-        if let Some((value, source, _elapsed)) = best_partial {
-            let freshness = TruthFreshness::now(self.max_age_for(source), start.elapsed());
-
-            let trace = DecisionTrace {
-                attempts,
-                selected_source: source,
-                strategy,
-                reason: format!(
-                    "using partial data from {} after all preferred sources failed",
-                    source.label()
-                ),
-                used_fallback: true,
-                correlation_id: Uuid::new_v4(),
-            };
-
-            return Ok(TruthResolution::new(
-                value,
-                KnowledgeState::Degraded,
-                freshness,
-                trace,
-            ));
         }
 
         Err(ResolutionError {
@@ -866,7 +841,7 @@ impl LiveTruthResolver {
                         source: *source,
                         outcome: SourceOutcome::Partial,
                         elapsed: attempt_elapsed,
-                        detail: Some(detail.clone()),
+                        detail: Some(detail),
                     });
                     if best_partial.is_none() {
                         best_partial = Some((value, *source, attempt_elapsed));
@@ -1149,7 +1124,7 @@ impl OperatorEvidenceLookup {
     #[must_use]
     pub fn to_structured_log(&self) -> serde_json::Value {
         serde_json::json!({
-            "command": format!("{:?}", self.command).to_lowercase(),
+            "command": serde_json::to_value(self.command).unwrap_or_default(),
             "connector_id": self.connector_id,
             "knowledge_state": self.knowledge_state.label(),
             "confidence": self.knowledge_state.confidence(),
@@ -1223,8 +1198,8 @@ pub struct RemediationFinding {
 /// - Evidence-backed findings with remediation guidance
 /// - The underlying evidence lookup for audit linkage
 ///
-/// All five major operator commands (doctor, preflight, show, health,
-/// explain) produce this same output shape, so docs and support flows
+/// All six operator commands (doctor, preflight, show, health, explain,
+/// status) produce this same output shape, so docs and support flows
 /// can teach it once.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RemediationOutput {
@@ -1303,7 +1278,7 @@ impl RemediationOutput {
     #[must_use]
     pub fn to_structured_log(&self) -> serde_json::Value {
         serde_json::json!({
-            "command": format!("{:?}", self.evidence_lookup.command).to_lowercase(),
+            "command": serde_json::to_value(self.evidence_lookup.command).unwrap_or_default(),
             "connector_id": self.evidence_lookup.connector_id,
             "summary": self.summary,
             "knowledge_state": self.evidence_lookup.knowledge_state.label(),

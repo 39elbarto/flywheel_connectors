@@ -17139,7 +17139,6 @@ fn invoke_dispatch_host(
             },
         },
     });
-    let _live_envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, command);
 
     if !valid {
         payload["error"] = json!({

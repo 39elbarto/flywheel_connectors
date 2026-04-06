@@ -266,6 +266,7 @@ mod test_observability;
 #[allow(dead_code)]
 mod throttle;
 mod trace_cmd;
+mod truth;
 #[allow(dead_code)] // Idempotent undo for reversible operations.
 mod undo;
 mod validate;

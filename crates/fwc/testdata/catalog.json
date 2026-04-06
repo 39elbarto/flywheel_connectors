@@ -36,7 +36,7 @@
     { "path": "mesh/startup_reconciliation_report.json", "kind": "mesh_typed", "purpose": "Typed startup reconciliation summary for admin-state convergence.", "validation": "typed" },
     { "path": "operation_inputs/invalid_create_issue.json", "kind": "operation_input", "purpose": "Invalid github.create_issue payload missing a required field.", "validation": "schema" },
     { "path": "operation_inputs/valid_create_issue.json", "kind": "operation_input", "purpose": "Valid github.create_issue payload.", "validation": "schema" },
-    { "path": "operator_truth/fixture_matrix.json", "kind": "operator_truth_matrix", "purpose": "Frozen operator-truth contract matrix for offline, node-local, mesh-backed, degraded, fallback-derived, and truthful refusal CLI answers, including replay metadata.", "validation": "typed" },
+    { "path": "operator_truth/fixture_matrix.json", "kind": "operator_truth_matrix", "purpose": "Frozen operator-truth contract matrix for offline, node-local, mesh-backed, degraded, fallback-derived, and truthful refusal CLI answers, including replay metadata and acceptance-bundle routing.", "validation": "typed" },
     { "path": "operation_inputs/valid_send_message.json", "kind": "operation_input", "purpose": "Valid slack.send_message payload.", "validation": "schema" },
     { "path": "pipelines/conditional_pipe.toml", "kind": "pipeline_toml", "purpose": "Conditional pipeline fixture with branch-style conditions.", "validation": "semantic" },
     { "path": "pipelines/invalid_pipe.toml", "kind": "pipeline_toml", "purpose": "Semantically invalid pipeline fixture with a dependency cycle.", "validation": "semantic" },

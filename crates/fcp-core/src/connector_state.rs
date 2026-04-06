@@ -6155,4 +6155,185 @@ mod tests {
             "resume.denied".to_string()
         );
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Bead 24llg.5.3.2: Fork resolution regression scenarios
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Helper: register two branches from the same prev to create a fork.
+    fn setup_fork_detector(
+        prev: ObjectId,
+        branch_a: ObjectId,
+        branch_b: ObjectId,
+        lease_a: u64,
+        lease_b: u64,
+    ) -> (StateForkDetector, ForkEvent) {
+        let mut detector = StateForkDetector::default();
+        detector.register(branch_a, Some(prev), 10, lease_a);
+        detector.register(branch_b, Some(prev), 20, lease_b);
+
+        let result = detector.detect_fork(
+            crate::ZoneId::work(),
+            crate::ConnectorId::from_static("test.connector"),
+            1_700_000_000,
+        );
+        let fork = match result {
+            StateForkDetectionResult::ForkDetected(f) => f,
+            StateForkDetectionResult::NoFork { .. } => {
+                panic!("Expected fork detection, got NoFork")
+            }
+        };
+        (detector, fork)
+    }
+
+    /// Scenario: conflict-heavy merge — two branches with different lease_seq
+    /// values produce a deterministic winner with decision diagnostics.
+    #[test]
+    fn regression_lease_conflict_deterministic_winner() {
+        let prev = test_object_id("prev");
+        let branch_a = test_object_id("a");
+        let branch_b = test_object_id("b");
+
+        let (detector, fork) = setup_fork_detector(prev, branch_a, branch_b, 5, 10);
+
+        let outcome = detector.resolve(
+            &fork,
+            ForkResolution::ChooseByLease,
+            &ConnectorStateModel::SingletonWriter,
+            1_700_000_000,
+        );
+
+        assert!(outcome.resolved, "Fork should be resolved");
+        assert!(
+            outcome.winning_head.is_some(),
+            "Should have a winner"
+        );
+        assert!(
+            outcome.decision_detail.is_some(),
+            "Successful resolution should have decision_detail"
+        );
+        let detail = outcome.decision_detail.unwrap();
+        assert!(
+            detail.contains("lease_seq"),
+            "Decision detail should explain lease-based resolution: {detail}"
+        );
+    }
+
+    /// Scenario: lease tie produces explicit failure diagnostic.
+    #[test]
+    fn regression_lease_tie_explicit_failure() {
+        let prev = test_object_id("prev");
+        let branch_a = test_object_id("a");
+        let branch_b = test_object_id("b");
+
+        let (detector, fork) = setup_fork_detector(prev, branch_a, branch_b, 7, 7);
+
+        let outcome = detector.resolve(
+            &fork,
+            ForkResolution::ChooseByLease,
+            &ConnectorStateModel::SingletonWriter,
+            1_700_000_000,
+        );
+
+        assert!(!outcome.resolved, "Lease tie should not resolve");
+        assert!(outcome.winning_head.is_none());
+        assert!(
+            outcome.failure_reason.as_ref().unwrap().contains("tie"),
+            "Failure reason should mention tie: {:?}",
+            outcome.failure_reason
+        );
+        assert!(
+            outcome.decision_detail.is_some(),
+            "Failed resolution should have decision_detail"
+        );
+    }
+
+    /// Scenario: CRDT merge resolution produces diagnostic for both branches.
+    #[test]
+    fn regression_crdt_merge_resolution_diagnostic() {
+        let prev = test_object_id("prev");
+        let branch_a = test_object_id("a");
+        let branch_b = test_object_id("b");
+
+        let (detector, fork) = setup_fork_detector(prev, branch_a, branch_b, 0, 0);
+
+        let outcome = detector.resolve(
+            &fork,
+            ForkResolution::CrdtMerge,
+            &ConnectorStateModel::Crdt {
+                crdt_type: CrdtType::LwwMap,
+            },
+            1_700_000_000,
+        );
+
+        assert!(outcome.resolved, "CRDT merge should resolve");
+        assert!(outcome.decision_detail.is_some());
+        let detail = outcome.decision_detail.unwrap();
+        assert!(
+            detail.contains("CRDT"),
+            "CRDT merge detail should mention CRDT: {detail}"
+        );
+    }
+
+    /// Scenario: invalid strategy for model produces explicit diagnostic.
+    #[test]
+    fn regression_invalid_strategy_diagnostic() {
+        let prev = test_object_id("prev");
+        let branch_a = test_object_id("a");
+        let branch_b = test_object_id("b");
+
+        let (detector, fork) = setup_fork_detector(prev, branch_a, branch_b, 0, 0);
+
+        // CrdtMerge is invalid for SingletonWriter model
+        let outcome = detector.resolve(
+            &fork,
+            ForkResolution::CrdtMerge,
+            &ConnectorStateModel::SingletonWriter,
+            1_700_000_000,
+        );
+
+        assert!(!outcome.resolved, "Invalid strategy should not resolve");
+        assert!(
+            outcome
+                .failure_reason
+                .as_ref()
+                .unwrap()
+                .contains("not valid"),
+            "Should explain strategy invalidity: {:?}",
+            outcome.failure_reason
+        );
+        assert!(
+            outcome.decision_detail.is_some(),
+            "Failed resolution should have decision_detail"
+        );
+    }
+
+    /// Scenario: resolution outcome serializes with all diagnostic fields.
+    #[test]
+    fn regression_resolution_outcome_json_transcript() {
+        let prev = test_object_id("prev");
+        let branch_a = test_object_id("a");
+        let branch_b = test_object_id("b");
+
+        let (detector, fork) = setup_fork_detector(prev, branch_a, branch_b, 5, 10);
+
+        let outcome = detector.resolve(
+            &fork,
+            ForkResolution::ChooseByLease,
+            &ConnectorStateModel::SingletonWriter,
+            1_700_000_000,
+        );
+
+        let json = serde_json::to_value(&outcome).unwrap();
+
+        // Validate transcript-consumable fields
+        assert!(json["resolved"].is_boolean());
+        assert!(json["strategy"].is_string());
+        assert!(json["resolved_at"].is_number());
+        assert!(json["decision_detail"].is_string());
+        assert!(json["fork_event"].is_object());
+        assert!(json["fork_event"]["common_prev"].is_string());
+        assert!(json["fork_event"]["branch_a"].is_string());
+        assert!(json["fork_event"]["branch_b"].is_string());
+    }
 }

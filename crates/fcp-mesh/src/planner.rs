@@ -2857,7 +2857,7 @@ mod tests {
     #[test]
     fn placement_evidence_from_plan_with_selected() {
         let planner = ExecutionPlanner::new();
-        let connector_id = ConnectorId::from_static("fcp.test");
+        let connector_id = test_connector_id();
         let plan = ExecutionPlan {
             selected: Some(CandidateNode {
                 node_id: NodeId::new("node-1"),
@@ -2902,7 +2902,7 @@ mod tests {
     #[test]
     fn placement_evidence_from_plan_no_eligible() {
         let planner = ExecutionPlanner::new();
-        let connector_id = ConnectorId::from_static("fcp.test");
+        let connector_id = test_connector_id();
         let plan = ExecutionPlan {
             selected: None,
             alternatives: vec![],
@@ -2979,7 +2979,7 @@ mod tests {
             .memory_mb(memory_mb)
             .power_source(PowerSource::Mains)
             .add_connector(InstalledConnector::new(
-                ConnectorId::from_static("fcp.test"),
+                test_connector_id(),
                 "0.1.0",
                 ObjectId::from_bytes([0u8; 32]),
             ));
@@ -3004,7 +3004,7 @@ mod tests {
             ],
             1_700_000_000,
         );
-        let context = PlannerContext::new(ConnectorId::from_static("fcp.test"));
+        let context = PlannerContext::new(test_connector_id());
         let policy = PlacementPolicy {
             excludes: vec![DevicePattern::NodeId {
                 id: NodeId::new("node-a"),
@@ -3028,7 +3028,7 @@ mod tests {
             ],
             1_700_000_000,
         );
-        let context = PlannerContext::new(ConnectorId::from_static("fcp.test"));
+        let context = PlannerContext::new(test_connector_id());
         let policy = PlacementPolicy {
             requires: vec![DeviceRequirement::Memory { min_mb: 1024 }],
             ..Default::default()
@@ -3049,7 +3049,7 @@ mod tests {
             ],
             1_700_000_000,
         );
-        let context = PlannerContext::new(ConnectorId::from_static("fcp.test"));
+        let context = PlannerContext::new(test_connector_id());
         let policy = PlacementPolicy {
             requires: vec![DeviceRequirement::Gpu { min_vram_mb: 8192 }],
             ..Default::default()
@@ -3064,7 +3064,7 @@ mod tests {
     fn plan_with_policy_empty_policy_same_as_plan() {
         let planner = ExecutionPlanner::new();
         let input = PlannerInput::new(vec![test_node("node-a", 1024, false)], 1_700_000_000);
-        let context = PlannerContext::new(ConnectorId::from_static("fcp.test"));
+        let context = PlannerContext::new(test_connector_id());
         let policy = PlacementPolicy::default();
 
         let base = planner.plan(&input, &context);
@@ -3084,7 +3084,7 @@ mod tests {
             ],
             1_700_000_000,
         );
-        let context = PlannerContext::new(ConnectorId::from_static("fcp.test"));
+        let context = PlannerContext::new(test_connector_id());
         let policy = PlacementPolicy {
             prefers: vec![DevicePreference::SpecificDevice {
                 node_id: NodeId::new("node-b"),
@@ -3103,7 +3103,7 @@ mod tests {
     fn plan_with_policy_no_eligible_returns_empty() {
         let planner = ExecutionPlanner::new();
         let input = PlannerInput::new(vec![test_node("node-a", 256, false)], 1_700_000_000);
-        let context = PlannerContext::new(ConnectorId::from_static("fcp.test"));
+        let context = PlannerContext::new(test_connector_id());
         let policy = PlacementPolicy {
             requires: vec![DeviceRequirement::Gpu { min_vram_mb: 8192 }],
             ..Default::default()
@@ -3111,5 +3111,178 @@ mod tests {
 
         let plan = planner.plan_with_policy(&input, &context, &policy);
         assert!(plan.selected.is_none());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Bead 24llg.5.3.2: Regression scenarios for placement decisions
+    // with evidence extraction and diagnostic validation
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Scenario: zone-exclusion placement rejects nodes outside allowed zones
+    /// and evidence captures the exclusion.
+    #[test]
+    fn regression_zone_exclusion_evidence_captured() {
+        let planner = ExecutionPlanner::new();
+        let work_zone: ZoneId = "z:work".parse().unwrap();
+        let public_zone: ZoneId = "z:public".parse().unwrap();
+
+        let mut node_work = make_node_info("work-node", 4096, true, "1.0.0", vec![]);
+        node_work.zones = vec![work_zone.clone()];
+
+        let mut node_public = make_node_info("public-node", 4096, true, "1.0.0", vec![]);
+        node_public.zones = vec![public_zone];
+
+        let input = PlannerInput::new(vec![node_work, node_public], 1_700_000_000);
+        let ctx = PlannerContext::new(test_connector_id());
+        let policy = PlacementPolicy {
+            zones: vec![work_zone],
+            ..PlacementPolicy::default()
+        };
+
+        let plan = planner.plan_with_policy(&input, &ctx, &policy);
+        let connector_id = test_connector_id();
+        let evidence = planner.evidence_from_plan(&plan, &connector_id, None);
+
+        // Evidence should show placement was found
+        assert_eq!(
+            evidence.reason_code.as_deref(),
+            Some("placement_found"),
+            "Should find a placement in the work zone"
+        );
+        assert!(
+            evidence.chosen_node.is_some(),
+            "Should have a chosen node"
+        );
+        // The chosen node should be in the work zone
+        let chosen = evidence.chosen_node.as_ref().unwrap();
+        assert!(
+            chosen.as_str().contains("work-node"),
+            "Chosen node should be the work-zone node, got: {}",
+            chosen
+        );
+        // The public-only node should not appear in candidate scores
+        assert!(
+            !evidence
+                .candidate_scores
+                .iter()
+                .any(|c| c.node_id.as_str().contains("public-node")),
+            "Public-zone-only node should not appear in candidate scores"
+        );
+    }
+
+    /// Scenario: all nodes excluded by zone policy produces no_eligible evidence.
+    #[test]
+    fn regression_all_nodes_excluded_evidence() {
+        let planner = ExecutionPlanner::new();
+        let owner_zone: ZoneId = "z:owner".parse().unwrap();
+
+        // All nodes are in public zone, but policy requires owner zone
+        let mut node_a = make_node_info("node-a", 4096, true, "1.0.0", vec![]);
+        node_a.zones = vec!["z:public".parse().unwrap()];
+
+        let mut node_b = make_node_info("node-b", 4096, true, "1.0.0", vec![]);
+        node_b.zones = vec!["z:work".parse().unwrap()];
+
+        let input = PlannerInput::new(vec![node_a, node_b], 1_700_000_000);
+        let ctx = PlannerContext::new(test_connector_id());
+        let policy = PlacementPolicy {
+            zones: vec![owner_zone],
+            ..PlacementPolicy::default()
+        };
+
+        let plan = planner.plan_with_policy(&input, &ctx, &policy);
+        let connector_id = test_connector_id();
+        let evidence = planner.evidence_from_plan(&plan, &connector_id, None);
+
+        assert_eq!(
+            evidence.reason_code.as_deref(),
+            Some("no_eligible_node"),
+            "All nodes excluded should produce no_eligible_node reason"
+        );
+        assert!(
+            evidence.chosen_node.is_none(),
+            "No node should be chosen when all are excluded"
+        );
+    }
+
+    /// Scenario: evidence is produced even when node scores are penalized.
+    #[test]
+    fn regression_evidence_produced_for_penalized_nodes() {
+        let planner = ExecutionPlanner::new();
+
+        // Create a node without the required connector (penalty applied)
+        let node = make_node_info("node-a", 4096, false, "1.0.0", vec![]);
+
+        let input = PlannerInput::new(vec![node], 1_700_000_000);
+        let ctx = PlannerContext::new(test_connector_id());
+        let policy = PlacementPolicy::default();
+
+        let plan = planner.plan_with_policy(&input, &ctx, &policy);
+        let connector_id = test_connector_id();
+        let evidence = planner.evidence_from_plan(&plan, &connector_id, None);
+
+        // Evidence should be produced regardless of penalty
+        assert_eq!(evidence.connector_id, connector_id);
+        assert!(evidence.nodes_considered > 0);
+    }
+
+    /// Scenario: multi-node placement produces ranked candidate scores.
+    #[test]
+    fn regression_multi_node_ranked_candidates() {
+        let planner = ExecutionPlanner::new();
+
+        let node_a = make_node_info("fast-node", 8192, true, "1.0.0", vec![]);
+        let node_b = make_node_info("slow-node", 1024, true, "1.0.0", vec![]);
+        let node_c = make_node_info("medium-node", 4096, true, "1.0.0", vec![]);
+
+        let input = PlannerInput::new(vec![node_a, node_b, node_c], 1_700_000_000);
+        let ctx = PlannerContext::new(test_connector_id());
+        let policy = PlacementPolicy::default();
+
+        let plan = planner.plan_with_policy(&input, &ctx, &policy);
+        let connector_id = test_connector_id();
+        let evidence = planner.evidence_from_plan(&plan, &connector_id, None);
+
+        // Should have multiple candidate scores
+        assert!(
+            evidence.candidate_scores.len() >= 2,
+            "Multi-node plan should have multiple candidate scores, got {}",
+            evidence.candidate_scores.len()
+        );
+        // Scores should be in descending order (best first)
+        for window in evidence.candidate_scores.windows(2) {
+            assert!(
+                window[0].score >= window[1].score,
+                "Candidate scores should be descending: {} >= {}",
+                window[0].score,
+                window[1].score
+            );
+        }
+    }
+
+    /// Scenario: evidence serializes to stable JSON for transcript consumption.
+    #[test]
+    fn regression_evidence_json_shape() {
+        let planner = ExecutionPlanner::new();
+        let node = make_node_info("test-node", 4096, true, "1.0.0", vec![]);
+        let input = PlannerInput::new(vec![node], 1_700_000_000);
+        let ctx = PlannerContext::new(test_connector_id());
+        let policy = PlacementPolicy::default();
+
+        let plan = planner.plan_with_policy(&input, &ctx, &policy);
+        let connector_id = test_connector_id();
+        let evidence = planner.evidence_from_plan(&plan, &connector_id, None);
+
+        let json = serde_json::to_value(&evidence).unwrap();
+
+        // Validate required evidence fields for transcript consumption
+        assert!(json["connector_id"].is_string(), "connector_id must be string");
+        assert!(json["reason_code"].is_string(), "reason_code must be string");
+        assert!(json["candidate_scores"].is_array(), "candidate_scores must be array");
+        assert!(json["nodes_considered"].is_number(), "nodes_considered must be number");
+        assert!(json["nodes_excluded"].is_number(), "nodes_excluded must be number");
+        assert!(json["degraded_mode"].is_boolean(), "degraded_mode must be boolean");
+        assert!(json["limiting_factors"].is_array(), "limiting_factors must be array");
+        assert!(json["decided_at"].is_number(), "decided_at must be number");
     }
 }

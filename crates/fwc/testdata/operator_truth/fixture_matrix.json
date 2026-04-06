@@ -7,6 +7,8 @@
       "mode": "offline-artifact",
       "source": "workspace-manifests",
       "availability": "offline-artifact",
+      "bundle_layer": "e2e",
+      "bundle_suite": "cli_truth",
       "connector_status": "ready",
       "connector_state": "unknown",
       "provenance": {
@@ -37,6 +39,8 @@
       "command": "status",
       "source": "host-admin-api",
       "availability": "live-runtime",
+      "bundle_layer": "e2e",
+      "bundle_suite": "cli_truth",
       "response_scope": "connector",
       "provenance": {
         "source": "host-admin-api",
@@ -77,6 +81,8 @@
       "mode": "live-inventory",
       "source": "host-admin-api",
       "availability": "live-runtime",
+      "bundle_layer": "e2e",
+      "bundle_suite": "cli_truth",
       "provenance": {
         "source": "live_host_inventory",
         "authoritative": true
@@ -114,6 +120,8 @@
       "command": "health",
       "source": "host-admin-api",
       "availability": "live-runtime",
+      "bundle_layer": "e2e",
+      "bundle_suite": "cli_truth",
       "response_scope": "connector",
       "provenance": {
         "source": "host-admin-api",
@@ -152,6 +160,8 @@
       "command": "install",
       "source": "host-admin-api",
       "availability": "live-runtime",
+      "bundle_layer": "e2e",
+      "bundle_suite": "cli_truth",
       "provenance": {
         "source": "host-admin-api",
         "authoritative": true,
@@ -196,6 +206,8 @@
       "command": "invoke",
       "source": "host-admin-api",
       "availability": "denied",
+      "bundle_layer": "e2e",
+      "bundle_suite": "cli_truth",
       "status": "denied",
       "phase": "preflight",
       "required_message_substrings": [
@@ -228,6 +240,8 @@
       "mode": "offline-artifact",
       "source": "workspace-manifests",
       "availability": "offline-artifact",
+      "bundle_layer": "e2e",
+      "bundle_suite": "cli_truth",
       "provenance": {
         "source": "workspace_manifest",
         "authoritative": false
@@ -256,6 +270,8 @@
       "subcommand": "get",
       "source": "host-admin-api",
       "availability": "live-runtime",
+      "bundle_layer": "e2e",
+      "bundle_suite": "cli_truth",
       "provenance": {
         "source": "host-admin-api",
         "authoritative": true,
@@ -289,6 +305,8 @@
       "subcommand": "verify",
       "source": "host-admin-api",
       "availability": "live-runtime",
+      "bundle_layer": "e2e",
+      "bundle_suite": "cli_truth",
       "provenance": {
         "source": "host-admin-api",
         "authoritative": true,
@@ -321,6 +339,8 @@
       "command": "history",
       "source": "host-admin-api",
       "availability": "live-runtime",
+      "bundle_layer": "e2e",
+      "bundle_suite": "cli_truth",
       "provenance": {
         "source": "live_host_audit_chain",
         "authoritative": true,
@@ -349,6 +369,8 @@
       "command": "readiness",
       "source": "host-admin-api",
       "availability": "live-runtime",
+      "bundle_layer": "e2e",
+      "bundle_suite": "cli_truth",
       "provenance": {
         "source": "host-admin-api",
         "authoritative": true,

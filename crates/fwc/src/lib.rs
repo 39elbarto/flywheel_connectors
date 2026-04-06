@@ -9,3 +9,4 @@ pub mod readiness;
 pub mod recovery;
 pub mod schema_nav;
 pub mod search;
+pub mod test_observability;

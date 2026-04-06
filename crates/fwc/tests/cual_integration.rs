@@ -16,6 +16,11 @@ use fcp_host::{
     PreflightResponse as HostPreflightResponse,
 };
 use fcp_manifest::ConnectorManifest;
+use fwc::readiness::CommandAvailability;
+use fwc::test_observability::{
+    ArtifactManifest, BundleOutcome, ScenarioLayer, TraceCategory, TraceEntry, TraceLevel,
+    TruthContext, TruthPhase, create_bundle, new_trace_log, scenario_context,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -95,6 +100,10 @@ struct OperatorTruthFixture {
     status: Option<String>,
     #[serde(default)]
     phase: Option<String>,
+    #[serde(default)]
+    bundle_layer: Option<String>,
+    #[serde(default)]
+    bundle_suite: Option<String>,
     #[serde(default)]
     connector_status: Option<String>,
     #[serde(default)]
@@ -338,6 +347,23 @@ fn assert_operator_truth_fixture_has_core_evidence_contract(fixture: &OperatorTr
         "fixture {} must provide an `fwc` rerun command",
         fixture.id
     );
+    assert!(
+        fixture
+            .bundle_suite
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty()),
+        "fixture {} must define bundle_suite",
+        fixture.id
+    );
+    assert!(
+        fixture
+            .bundle_layer
+            .as_deref()
+            .and_then(ScenarioLayer::parse_label)
+            .is_some(),
+        "fixture {} must define a supported bundle_layer",
+        fixture.id
+    );
 }
 
 fn assert_operator_truth_fixture_contract(payload: &Value, fixture: &OperatorTruthFixture) {
@@ -459,6 +485,143 @@ fn assert_operator_truth_fixture_human_summary(text: &str, fixture: &OperatorTru
             text.contains(expected),
             "human output missing `{expected}` for fixture {}:\n{text}",
             fixture.id
+        );
+    }
+}
+
+fn command_availability_from_tag(tag: &str) -> CommandAvailability {
+    match tag {
+        "live-runtime" => CommandAvailability::LiveRuntime,
+        "offline-artifact" => CommandAvailability::OfflineArtifact,
+        "unsupported" => CommandAvailability::Unsupported,
+        "planned" => CommandAvailability::Planned,
+        "unavailable" => CommandAvailability::Unavailable,
+        "denied" => CommandAvailability::Denied,
+        "unknown" => CommandAvailability::Unknown,
+        other => panic!("unsupported command availability tag `{other}`"),
+    }
+}
+
+fn operator_truth_fixture_availability(fixture: &OperatorTruthFixture) -> CommandAvailability {
+    let tag = fixture
+        .availability
+        .as_deref()
+        .or(fixture.status.as_deref())
+        .expect("fixture must define availability or status");
+    command_availability_from_tag(tag)
+}
+
+fn operator_truth_fixture_phase(fixture: &OperatorTruthFixture) -> TruthPhase {
+    match fixture.phase.as_deref() {
+        Some("setup") => TruthPhase::Setup,
+        Some("preflight") => TruthPhase::Preflight,
+        Some("simulate") => TruthPhase::Simulate,
+        Some("invoke") => TruthPhase::Invoke,
+        Some("teardown") => TruthPhase::Teardown,
+        Some(phase) => panic!("unsupported explicit truth phase `{phase}`"),
+        None if fixture.mode.as_deref() == Some("offline-artifact") => TruthPhase::OfflineArtifact,
+        None => TruthPhase::HostDiscovery,
+    }
+}
+
+fn operator_truth_fixture_bundle_layer(fixture: &OperatorTruthFixture) -> ScenarioLayer {
+    let layer = fixture
+        .bundle_layer
+        .as_deref()
+        .expect("fixture must define bundle_layer");
+    ScenarioLayer::parse_label(layer).unwrap_or_else(|| {
+        panic!(
+            "unsupported bundle layer `{layer}` for fixture {}",
+            fixture.id
+        )
+    })
+}
+
+fn operator_truth_fixture_bundle_suite<'a>(fixture: &'a OperatorTruthFixture) -> &'a str {
+    fixture
+        .bundle_suite
+        .as_deref()
+        .expect("fixture must define bundle_suite")
+}
+
+fn operator_truth_provenance_markers(payload: &Value) -> Vec<String> {
+    let mut markers = std::collections::BTreeSet::new();
+    if let Some(source) = payload["source"].as_str() {
+        markers.insert(source.to_owned());
+    }
+    let provenance = &payload["provenance"];
+    for field in ["source", "transport", "scope"] {
+        if let Some(value) = provenance[field].as_str() {
+            markers.insert(value.to_owned());
+        }
+    }
+    if let Some(scope) = payload["scope"].as_str() {
+        markers.insert(format!("response-scope:{scope}"));
+    }
+    markers.into_iter().collect()
+}
+
+fn operator_truth_context(payload: &Value, fixture: &OperatorTruthFixture) -> TruthContext {
+    let mut truth = TruthContext::new(operator_truth_fixture_availability(fixture))
+        .with_phase(operator_truth_fixture_phase(fixture));
+    for marker in operator_truth_provenance_markers(payload) {
+        truth = truth.with_provenance_marker(marker);
+    }
+    truth
+}
+
+fn manifest_artifact_file_names(manifest: &ArtifactManifest) -> std::collections::BTreeSet<String> {
+    manifest
+        .artifact_paths
+        .values()
+        .filter_map(|path| {
+            Path::new(path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+fn assert_bundle_manifest_matches_operator_truth_fixture(
+    manifest: &ArtifactManifest,
+    payload: &Value,
+    fixture: &OperatorTruthFixture,
+) {
+    let availability = operator_truth_fixture_availability(fixture);
+    assert_eq!(
+        manifest
+            .truthfulness
+            .command_availabilities
+            .get(availability.tag()),
+        Some(&1),
+        "bundle manifest should preserve fixture availability {}",
+        availability.tag()
+    );
+    assert!(
+        manifest
+            .truthfulness
+            .phases
+            .iter()
+            .any(|phase| phase == operator_truth_fixture_phase(fixture).as_str()),
+        "bundle manifest missing expected phase {}",
+        operator_truth_fixture_phase(fixture).as_str()
+    );
+    for marker in operator_truth_provenance_markers(payload) {
+        assert!(
+            manifest
+                .truthfulness
+                .provenance_markers
+                .iter()
+                .any(|value| value == &marker),
+            "bundle manifest missing provenance marker `{marker}`"
+        );
+    }
+    let artifact_names = manifest_artifact_file_names(manifest);
+    for artifact in &fixture.required_artifacts {
+        assert!(
+            artifact_names.contains(artifact),
+            "bundle manifest missing required artifact `{artifact}`"
         );
     }
 }
@@ -1699,6 +1862,106 @@ fn invoke_denial_records_history_and_suggests_recovery_actions() {
         history["entries"][0]["error_code"],
         "connector policy denied the request"
     );
+}
+
+#[test]
+fn operator_truth_fixture_refusal_exports_replayable_bundle_manifest() {
+    let fixture = load_operator_truth_fixture("refusal_invoke_preflight_denied");
+    let capability_token = test_capability_token_arg();
+    let home = tempdir().expect("temp home should be created");
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 1, "risky");
+    let github_create_issue = mock_tool_descriptor_json(
+        "github.create_issue",
+        "github.issue_write",
+        "medium",
+        "risky",
+        "none",
+        Some("interactive"),
+        &json!({
+            "type": "object",
+            "properties": {
+                "owner": { "type": "string" },
+                "repo": { "type": "string" },
+                "title": { "type": "string" },
+                "body": { "type": "string" }
+            },
+            "required": ["owner", "repo", "title"]
+        }),
+        &json!({
+            "type": "object",
+            "properties": {
+                "number": { "type": "integer" }
+            },
+            "required": ["number"]
+        }),
+    );
+    let (host, server) = spawn_mock_host_sequence(vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(std::slice::from_ref(&github_connector)),
+        ),
+        (
+            "GET /rpc/introspect/fcp.github:enterprise:v1".to_owned(),
+            mock_introspection_response_json(&github_connector, &[github_create_issue]),
+        ),
+        (
+            "POST /rpc/preflight".to_owned(),
+            mock_preflight_response_json(false),
+        ),
+    ]);
+
+    let (exit_code, payload, _stderr) = run_json_in_home(
+        home.path(),
+        &[
+            "--json",
+            "--host",
+            &host,
+            "invoke",
+            "github",
+            "issues.create",
+            "--input",
+            "{\"owner\":\"octocat\",\"repo\":\"hello-world\",\"title\":\"Denied issue\"}",
+            "--capability-token",
+            &capability_token,
+        ],
+    );
+    server.join().expect("mock host thread should complete");
+    assert_ne!(exit_code, 0, "denied invoke should not report success");
+
+    let mut log = new_trace_log();
+    let ctx = scenario_context(
+        operator_truth_fixture_bundle_layer(&fixture),
+        operator_truth_fixture_bundle_suite(&fixture),
+        &fixture.id,
+    )
+    .with_tag("acceptance")
+    .with_env("FWC_HOST", host.clone());
+    log.append(
+        TraceEntry::new(
+            &ctx.trace_id,
+            &ctx.scenario_id,
+            TraceLevel::Warn,
+            TraceCategory::Approval,
+            "captured refusal acceptance scenario",
+        )
+        .with_field("command", json!("invoke"))
+        .with_field("connector", json!("github"))
+        .with_truth_context(operator_truth_context(&payload, &fixture)),
+    );
+    let base = tempdir().expect("artifact tempdir should exist");
+    let (bundle, manifest) = create_bundle(base.path(), &ctx, &log, BundleOutcome::Pass);
+
+    assert_eq!(manifest.scenario_id.case, fixture.id);
+    assert!(
+        bundle
+            .root
+            .to_string_lossy()
+            .contains("/artifacts/e2e/cli_truth/")
+    );
+    assert_bundle_manifest_matches_operator_truth_fixture(&manifest, &payload, &fixture);
+    assert_eq!(manifest.truthfulness.live_entry_count, 0);
+    assert_eq!(manifest.truthfulness.offline_entry_count, 0);
 }
 
 #[allow(clippy::too_many_lines)]
@@ -4104,6 +4367,8 @@ fn operator_truth_fixture_matrix_freezes_core_answer_classes() {
         .iter()
         .filter(|fixture| canonical_ids.contains(&fixture.id))
     {
+        assert_eq!(fixture.bundle_layer.as_deref(), Some("e2e"));
+        assert_eq!(fixture.bundle_suite.as_deref(), Some("cli_truth"));
         assert!(
             !fixture.human_summary_contains.is_empty()
                 || !fixture.required_message_substrings.is_empty(),
@@ -4174,6 +4439,115 @@ fn operator_truth_fixture_node_local_status_matches_cli_contract() {
 }
 
 #[test]
+fn operator_truth_fixture_offline_show_exports_replayable_bundle_manifest() {
+    let fixture = load_operator_truth_fixture("offline_show_workspace_manifest");
+    let payload = run_json_ok(&["--json", "show", "github", "--offline"]);
+    let mut log = new_trace_log();
+    let ctx = scenario_context(
+        operator_truth_fixture_bundle_layer(&fixture),
+        operator_truth_fixture_bundle_suite(&fixture),
+        &fixture.id,
+    )
+    .with_tag("acceptance")
+    .with_env("FWC_MODE", "offline");
+    log.append(
+        TraceEntry::new(
+            &ctx.trace_id,
+            &ctx.scenario_id,
+            TraceLevel::Info,
+            TraceCategory::CliStep,
+            "captured offline show acceptance scenario",
+        )
+        .with_field("command", json!("show"))
+        .with_field("connector", json!("github"))
+        .with_truth_context(operator_truth_context(&payload, &fixture)),
+    );
+    let base = tempdir().expect("artifact tempdir should exist");
+    let (bundle, manifest) = create_bundle(base.path(), &ctx, &log, BundleOutcome::Pass);
+
+    assert_eq!(manifest.scenario_id.case, fixture.id);
+    assert!(
+        bundle
+            .root
+            .to_string_lossy()
+            .contains("/artifacts/e2e/cli_truth/")
+    );
+    assert_bundle_manifest_matches_operator_truth_fixture(&manifest, &payload, &fixture);
+    assert_eq!(manifest.truthfulness.offline_entry_count, 1);
+    assert_eq!(manifest.truthfulness.live_entry_count, 0);
+}
+
+#[test]
+fn operator_truth_fixture_node_local_status_exports_replayable_bundle_manifest() {
+    let fixture = load_operator_truth_fixture("node_local_status_host_admin");
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 1, "risky");
+    let routes = vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector]),
+        ),
+        (
+            "GET /rpc/health".to_owned(),
+            mock_host_health_json("healthy"),
+        ),
+        (
+            "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
+            mock_connector_admin_status_json(
+                "registry",
+                "registry://fcp/github-enterprise/1.2.3",
+                &Value::Null,
+            ),
+        ),
+        (
+            "GET /rpc/rollout/pin/fcp.github:enterprise:v1".to_owned(),
+            mock_pin_status_json(false, None),
+        ),
+        (
+            "GET /rpc/rollout/fcp.github:enterprise:v1".to_owned(),
+            mock_rollout_status_json("production", "1.2.3", false, None, 0),
+        ),
+    ];
+    let (host, server) = spawn_mock_host_sequence(routes);
+    let payload = run_json_ok(&["--json", "--host", &host, "status", "github"]);
+    server.join().expect("mock host thread should complete");
+
+    let mut log = new_trace_log();
+    let ctx = scenario_context(
+        operator_truth_fixture_bundle_layer(&fixture),
+        operator_truth_fixture_bundle_suite(&fixture),
+        &fixture.id,
+    )
+    .with_tag("acceptance")
+    .with_env("FWC_HOST", host.clone());
+    log.append(
+        TraceEntry::new(
+            &ctx.trace_id,
+            &ctx.scenario_id,
+            TraceLevel::Info,
+            TraceCategory::HostRequest,
+            "captured node-local status acceptance scenario",
+        )
+        .with_field("command", json!("status"))
+        .with_field("connector", json!("github"))
+        .with_truth_context(operator_truth_context(&payload, &fixture)),
+    );
+    let base = tempdir().expect("artifact tempdir should exist");
+    let (bundle, manifest) = create_bundle(base.path(), &ctx, &log, BundleOutcome::Pass);
+
+    assert_eq!(manifest.scenario_id.case, fixture.id);
+    assert!(
+        bundle
+            .root
+            .to_string_lossy()
+            .contains("/artifacts/e2e/cli_truth/")
+    );
+    assert_bundle_manifest_matches_operator_truth_fixture(&manifest, &payload, &fixture);
+    assert_eq!(manifest.truthfulness.live_entry_count, 1);
+    assert_eq!(manifest.truthfulness.offline_entry_count, 0);
+}
+
+#[test]
 fn operator_truth_fixture_mesh_backed_availability_matches_cli_contract() {
     let fixture = load_operator_truth_fixture("mesh_backed_explain_availability");
     let github_connector =
@@ -4226,6 +4600,80 @@ fn operator_truth_fixture_mesh_backed_availability_matches_cli_contract() {
 }
 
 #[test]
+fn operator_truth_fixture_mesh_backed_exports_replayable_bundle_manifest() {
+    let fixture = load_operator_truth_fixture("mesh_backed_explain_availability");
+    let github_connector =
+        mock_connector_summary_json("fcp.github:enterprise:v1", "GitHub Enterprise", 1, "risky");
+    let placement_policy = json!({
+        "min_nodes": 2,
+        "max_node_fraction_bps": 5000,
+        "preferred_devices": [],
+        "excluded_devices": [],
+        "target_coverage_bps": 9000,
+        "min_source_diversity": 2,
+    });
+    let routes = vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector]),
+        ),
+        (
+            "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
+            mock_connector_admin_status_json(
+                "mesh_mirror",
+                "/opt/fcp/mirrors/github-enterprise",
+                &placement_policy,
+            ),
+        ),
+    ];
+    let (host, server) = spawn_mock_host_sequence(routes);
+    let payload = run_json_ok(&[
+        "--json",
+        "--host",
+        &host,
+        "mesh",
+        "explain-availability",
+        "github",
+    ]);
+    server.join().expect("mock host thread should complete");
+
+    let mut log = new_trace_log();
+    let ctx = scenario_context(
+        operator_truth_fixture_bundle_layer(&fixture),
+        operator_truth_fixture_bundle_suite(&fixture),
+        &fixture.id,
+    )
+    .with_tag("acceptance")
+    .with_env("FWC_HOST", host.clone());
+    log.append(
+        TraceEntry::new(
+            &ctx.trace_id,
+            &ctx.scenario_id,
+            TraceLevel::Info,
+            TraceCategory::HostReceipt,
+            "captured mesh-backed availability acceptance scenario",
+        )
+        .with_field("command", json!("mesh"))
+        .with_field("subcommand", json!("explain-availability"))
+        .with_field("connector", json!("github"))
+        .with_truth_context(operator_truth_context(&payload, &fixture)),
+    );
+    let base = tempdir().expect("artifact tempdir should exist");
+    let (bundle, manifest) = create_bundle(base.path(), &ctx, &log, BundleOutcome::Pass);
+
+    assert_eq!(manifest.scenario_id.case, fixture.id);
+    assert!(
+        bundle
+            .root
+            .to_string_lossy()
+            .contains("/artifacts/e2e/cli_truth/")
+    );
+    assert_bundle_manifest_matches_operator_truth_fixture(&manifest, &payload, &fixture);
+    assert_eq!(manifest.truthfulness.live_entry_count, 1);
+    assert_eq!(manifest.truthfulness.offline_entry_count, 0);
+}
+
+#[test]
 fn operator_truth_fixture_degraded_health_matches_cli_contract() {
     let fixture = load_operator_truth_fixture("degraded_connector_health");
     let github_connector = mock_connector_summary_with_health_json(
@@ -4265,6 +4713,71 @@ fn operator_truth_fixture_degraded_health_matches_cli_contract() {
 }
 
 #[test]
+fn operator_truth_fixture_degraded_exports_replayable_bundle_manifest() {
+    let fixture = load_operator_truth_fixture("degraded_connector_health");
+    let github_connector = mock_connector_summary_with_health_json(
+        "fcp.github:enterprise:v1",
+        "GitHub Enterprise",
+        1,
+        "risky",
+        ConnectorHealth::degraded("upstream latency"),
+    );
+    let routes = vec![
+        (
+            "POST /rpc/discover".to_owned(),
+            mock_discovery_response_json(&[github_connector]),
+        ),
+        (
+            "GET /rpc/health".to_owned(),
+            mock_host_health_json("healthy"),
+        ),
+    ];
+    let (host, server) = spawn_mock_host_sequence(routes);
+    let payload = run_json_ok(&[
+        "--json",
+        "--host",
+        &host,
+        "health",
+        "fcp.github:enterprise:v1",
+    ]);
+    server.join().expect("mock host thread should complete");
+
+    let mut log = new_trace_log();
+    let ctx = scenario_context(
+        operator_truth_fixture_bundle_layer(&fixture),
+        operator_truth_fixture_bundle_suite(&fixture),
+        &fixture.id,
+    )
+    .with_tag("acceptance")
+    .with_env("FWC_HOST", host.clone());
+    log.append(
+        TraceEntry::new(
+            &ctx.trace_id,
+            &ctx.scenario_id,
+            TraceLevel::Warn,
+            TraceCategory::HostReceipt,
+            "captured degraded health acceptance scenario",
+        )
+        .with_field("command", json!("health"))
+        .with_field("connector", json!("fcp.github:enterprise:v1"))
+        .with_truth_context(operator_truth_context(&payload, &fixture)),
+    );
+    let base = tempdir().expect("artifact tempdir should exist");
+    let (bundle, manifest) = create_bundle(base.path(), &ctx, &log, BundleOutcome::Pass);
+
+    assert_eq!(manifest.scenario_id.case, fixture.id);
+    assert!(
+        bundle
+            .root
+            .to_string_lossy()
+            .contains("/artifacts/e2e/cli_truth/")
+    );
+    assert_bundle_manifest_matches_operator_truth_fixture(&manifest, &payload, &fixture);
+    assert_eq!(manifest.truthfulness.live_entry_count, 1);
+    assert_eq!(manifest.truthfulness.offline_entry_count, 0);
+}
+
+#[test]
 fn operator_truth_fixture_fallback_install_matches_cli_contract() {
     let fixture = load_operator_truth_fixture("fallback_derived_install_activation");
     let (_package_dir, package_output_path) =
@@ -4297,6 +4810,61 @@ fn operator_truth_fixture_fallback_install_matches_cli_contract() {
             .as_array()
             .is_some_and(|items| !items.is_empty())
     );
+}
+
+#[test]
+fn operator_truth_fixture_fallback_exports_replayable_bundle_manifest() {
+    let fixture = load_operator_truth_fixture("fallback_derived_install_activation");
+    let (_package_dir, package_output_path) =
+        write_test_package_output("fcp.github:enterprise:v1", "1.2.4");
+    let package_output_path = package_output_path.display().to_string();
+    let routes = vec![
+        (
+            "POST /rpc/connectors/apply".to_owned(),
+            mock_inventory_mutation_response_json("1.2.4"),
+        ),
+        (
+            "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
+            json!({ "status": "not-a-valid-admin-status" }),
+        ),
+    ];
+    let (host, server) = spawn_mock_host_sequence(routes);
+    let payload = run_json_ok(&["--json", "--host", &host, "install", &package_output_path]);
+    server.join().expect("mock host thread should complete");
+
+    let mut log = new_trace_log();
+    let ctx = scenario_context(
+        operator_truth_fixture_bundle_layer(&fixture),
+        operator_truth_fixture_bundle_suite(&fixture),
+        &fixture.id,
+    )
+    .with_tag("acceptance")
+    .with_env("FWC_HOST", host.clone());
+    log.append(
+        TraceEntry::new(
+            &ctx.trace_id,
+            &ctx.scenario_id,
+            TraceLevel::Warn,
+            TraceCategory::HostReceipt,
+            "captured fallback-derived install acceptance scenario",
+        )
+        .with_field("command", json!("install"))
+        .with_field("connector", json!("fcp.github:enterprise:v1"))
+        .with_truth_context(operator_truth_context(&payload, &fixture)),
+    );
+    let base = tempdir().expect("artifact tempdir should exist");
+    let (bundle, manifest) = create_bundle(base.path(), &ctx, &log, BundleOutcome::Pass);
+
+    assert_eq!(manifest.scenario_id.case, fixture.id);
+    assert!(
+        bundle
+            .root
+            .to_string_lossy()
+            .contains("/artifacts/e2e/cli_truth/")
+    );
+    assert_bundle_manifest_matches_operator_truth_fixture(&manifest, &payload, &fixture);
+    assert_eq!(manifest.truthfulness.live_entry_count, 1);
+    assert_eq!(manifest.truthfulness.offline_entry_count, 0);
 }
 
 /// Verify that the node-local context command produces structured output

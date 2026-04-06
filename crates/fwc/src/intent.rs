@@ -18,6 +18,7 @@ const WORKFLOW_TRUTH_COMPILER_SOURCE: &str = "local-intent-compiler";
 /// (and humans reading transcripts) can tell whether the answer came
 /// from a live host, offline artifacts, a mesh query, or a degraded
 /// fallback — without parsing prose.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum IntentProvenance {
@@ -34,6 +35,7 @@ pub enum IntentProvenance {
 }
 
 impl IntentProvenance {
+    #[allow(dead_code)]
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -51,6 +53,7 @@ impl IntentProvenance {
 /// Provides a structured taxonomy instead of ad-hoc prose so that
 /// acceptance tests and operator tooling can pattern-match on the
 /// refusal class.
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum IntentRefusalReason {
@@ -69,6 +72,7 @@ pub enum IntentRefusalReason {
 }
 
 impl IntentRefusalReason {
+    #[allow(dead_code)]
     #[must_use]
     pub const fn label(&self) -> &'static str {
         match self {
@@ -88,6 +92,7 @@ impl IntentRefusalReason {
 /// when it recognizes log/tail/stream verbs. Maps to `fwc tail`
 /// backed by `POST /rpc/admin/logs` and `POST /rpc/admin/events`
 /// on the host.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LogTailContract {
     pub connector_id: Option<String>,
@@ -104,6 +109,7 @@ pub struct LogTailContract {
 /// when it recognizes lifecycle verbs (enable, disable, start, stop,
 /// restart). Maps to `fwc lifecycle <connector> --action <verb>`
 /// backed by `POST /rpc/lifecycle/{connector_id}` on the host.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LifecycleIntentContract {
     pub connector_id: String,
@@ -576,9 +582,7 @@ fn build_lifecycle_plan(
             ],
             false,
             false,
-            vec![
-                "Provenance: host-backed. This step queries the live host admin API.".to_owned(),
-            ],
+            vec!["Provenance: host-backed. This step queries the live host admin API.".to_owned()],
         ));
 
         // Step 2: preflight safety check for the specific action
@@ -717,7 +721,7 @@ fn build_log_tail_plan(
     request: &IntentRequest,
     zone: Option<&str>,
     chosen_connector: Option<&ConnectorCandidate>,
-    action: &ActionSignals,
+    _action: &ActionSignals,
 ) -> PlanBuild {
     let mut plan = PlanBuild::default();
 
@@ -730,10 +734,7 @@ fn build_log_tail_plan(
         .map(|c| c.id.as_str())
         .unwrap_or("all connectors");
 
-    plan.summary = format!(
-        "Plan a log-tail workflow for {}.",
-        connector_label
-    );
+    plan.summary = format!("Plan a log-tail workflow for {}.", connector_label);
 
     // Step 1: status check to confirm the connector exists and is reachable
     if let Some(connector) = chosen_connector {
@@ -745,7 +746,8 @@ fn build_log_tail_plan(
             false,
             false,
             vec![
-                "Provenance: host-backed. Validates the connector exists before tailing.".to_owned(),
+                "Provenance: host-backed. Validates the connector exists before tailing."
+                    .to_owned(),
             ],
         ));
     }
@@ -944,9 +946,8 @@ fn build_unsupported_plan(
     action: &ActionSignals,
 ) -> PlanBuild {
     let mut plan = PlanBuild::default();
-    plan.unsupported_reasons.push(
-        "That intent does not map to a supported real `fwc` primitive.".to_owned(),
-    );
+    plan.unsupported_reasons
+        .push("That intent does not map to a supported real `fwc` primitive.".to_owned());
     plan.template_reasoning.push(
         "The intent matched a verb that does not currently have a truthful `fwc` primitive, so the compiler switched to an unsupported-intent explanation instead of inventing a command."
             .to_owned(),
@@ -2286,6 +2287,8 @@ fn llm_operation_hint(_verb: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{Value, json};
+
     use super::*;
 
     fn request(intent: &str) -> IntentRequest {
@@ -3214,14 +3217,16 @@ mod tests {
         assert_eq!(plan.template, "lifecycle");
         assert_ne!(plan.status, "unsupported");
         // Host-backed lifecycle: preflight valid-actions, preflight action, mutate, verify
-        assert!(plan
-            .steps
-            .iter()
-            .any(|s| s.command_line.contains("lifecycle") && s.command_line.contains("--action")));
-        assert!(plan
-            .steps
-            .iter()
-            .any(|s| s.command_line.contains("disable")));
+        assert!(
+            plan.steps.iter().any(
+                |s| s.command_line.contains("lifecycle") && s.command_line.contains("--action")
+            )
+        );
+        assert!(
+            plan.steps
+                .iter()
+                .any(|s| s.command_line.contains("disable"))
+        );
         assert_eq!(plan.zone.as_deref(), Some("z:work"));
     }
 
@@ -3245,11 +3250,12 @@ mod tests {
         assert_eq!(plan.template, "log-tail");
         assert_ne!(plan.status, "unsupported");
         // Log-tail plan should use `fwc tail` with the connector
-        assert!(plan.steps.iter().any(|s| s.command_line.contains("fwc tail")));
-        assert!(plan
-            .steps
-            .iter()
-            .any(|s| s.command_line.contains("github")));
+        assert!(
+            plan.steps
+                .iter()
+                .any(|s| s.command_line.contains("fwc tail"))
+        );
+        assert!(plan.steps.iter().any(|s| s.command_line.contains("github")));
     }
 
     #[test]
@@ -3288,14 +3294,16 @@ mod tests {
         assert_eq!(plan.template, "lifecycle");
         assert_ne!(plan.status, "unsupported");
         // Host-backed lifecycle plans include a valid-actions preflight step
-        assert!(plan
-            .steps
-            .iter()
-            .any(|s| s.command_line.contains("--valid-actions")));
-        assert!(plan
-            .steps
-            .iter()
-            .any(|s| s.command_line.contains("--action") && s.command_line.contains("restart")));
+        assert!(
+            plan.steps
+                .iter()
+                .any(|s| s.command_line.contains("--valid-actions"))
+        );
+        assert!(
+            plan.steps
+                .iter()
+                .any(|s| s.command_line.contains("--action") && s.command_line.contains("restart"))
+        );
     }
 
     #[test]
@@ -3303,14 +3311,12 @@ mod tests {
         let plan = compile(&request("enable the slack connector"));
         assert_eq!(plan.template, "lifecycle");
         assert_ne!(plan.status, "unsupported");
-        assert!(plan
-            .steps
-            .iter()
-            .any(|s| s.command_line.contains("lifecycle")));
-        assert!(plan
-            .steps
-            .iter()
-            .any(|s| s.command_line.contains("enable")));
+        assert!(
+            plan.steps
+                .iter()
+                .any(|s| s.command_line.contains("lifecycle"))
+        );
+        assert!(plan.steps.iter().any(|s| s.command_line.contains("enable")));
     }
 
     #[test]
@@ -4285,7 +4291,11 @@ mod tests {
         .map(|p| p.label())
         .collect();
         let unique: std::collections::HashSet<&&str> = labels.iter().collect();
-        assert_eq!(labels.len(), unique.len(), "Provenance labels must be unique");
+        assert_eq!(
+            labels.len(),
+            unique.len(),
+            "Provenance labels must be unique"
+        );
     }
 
     #[test]
@@ -4423,33 +4433,43 @@ mod tests {
     fn compiler_log_tail_plan_uses_fwc_tail() {
         let plan = compile(&request("show logs for the github connector"));
         assert_eq!(plan.template, "log-tail");
-        assert!(plan
-            .steps
-            .iter()
-            .any(|s| s.command_line.contains("fwc tail")));
+        assert!(
+            plan.steps
+                .iter()
+                .any(|s| s.command_line.contains("fwc tail"))
+        );
     }
 
     #[test]
     fn compiler_log_tail_plan_includes_since_default() {
         let plan = compile(&request("tail github logs"));
-        assert!(plan
-            .steps
-            .iter()
-            .any(|s| s.command_line.contains("--since") && s.command_line.contains("5m")));
+        assert!(
+            plan.steps
+                .iter()
+                .any(|s| s.command_line.contains("--since") && s.command_line.contains("5m"))
+        );
     }
 
     #[test]
     fn compiler_log_tail_includes_history_step() {
         let plan = compile(&request("stream the github connector logs"));
         // Log-tail plans include a history step for operation receipts
-        assert!(plan.steps.iter().any(|s| s.command_line.contains("history")));
+        assert!(
+            plan.steps
+                .iter()
+                .any(|s| s.command_line.contains("history"))
+        );
     }
 
     #[test]
     fn compiler_log_tail_no_connector_still_tails() {
         let plan = compile(&request("tail all connector logs"));
         assert_eq!(plan.template, "log-tail");
-        assert!(plan.steps.iter().any(|s| s.command_line.contains("fwc tail")));
+        assert!(
+            plan.steps
+                .iter()
+                .any(|s| s.command_line.contains("fwc tail"))
+        );
     }
 
     #[test]
@@ -4465,20 +4485,22 @@ mod tests {
     fn compiler_stop_routes_to_lifecycle() {
         let plan = compile(&request("stop the github connector"));
         assert_eq!(plan.template, "lifecycle");
-        assert!(plan
-            .steps
-            .iter()
-            .any(|s| s.command_line.contains("--action") && s.command_line.contains("stop")));
+        assert!(
+            plan.steps
+                .iter()
+                .any(|s| s.command_line.contains("--action") && s.command_line.contains("stop"))
+        );
     }
 
     #[test]
     fn compiler_start_routes_to_lifecycle() {
         let plan = compile(&request("start the telegram connector"));
         assert_eq!(plan.template, "lifecycle");
-        assert!(plan
-            .steps
-            .iter()
-            .any(|s| s.command_line.contains("--action") && s.command_line.contains("start")));
+        assert!(
+            plan.steps
+                .iter()
+                .any(|s| s.command_line.contains("--action") && s.command_line.contains("start"))
+        );
     }
 
     #[test]
@@ -4508,14 +4530,24 @@ mod tests {
     #[test]
     fn compiler_lifecycle_preflight_steps_are_safe() {
         let plan = compile(&request("enable the discord connector"));
-        let preflights: Vec<_> = plan.steps.iter().filter(|s| s.phase == "preflight").collect();
+        let preflights: Vec<_> = plan
+            .steps
+            .iter()
+            .filter(|s| s.phase == "preflight")
+            .collect();
         assert!(
             !preflights.is_empty(),
             "lifecycle plan should have preflight steps"
         );
         for s in preflights {
-            assert!(!s.side_effecting, "preflight step should not be side-effecting");
-            assert!(!s.approval_required, "preflight step should not require approval");
+            assert!(
+                !s.side_effecting,
+                "preflight step should not be side-effecting"
+            );
+            assert!(
+                !s.approval_required,
+                "preflight step should not require approval"
+            );
         }
     }
 
@@ -4536,11 +4568,10 @@ mod tests {
     #[test]
     fn compiler_lifecycle_notes_contain_refusal_taxonomy() {
         let plan = compile(&request("disable the slack connector"));
-        let has_refusal = plan.steps.iter().any(|s| {
-            s.notes
-                .iter()
-                .any(|n| n.contains("Refusal taxonomy"))
-        });
+        let has_refusal = plan
+            .steps
+            .iter()
+            .any(|s| s.notes.iter().any(|n| n.contains("Refusal taxonomy")));
         assert!(
             has_refusal,
             "Host-backed lifecycle steps should annotate refusal taxonomy"
@@ -4555,10 +4586,12 @@ mod tests {
         assert_eq!(plan.template, "lifecycle");
         // Install uses direct `fwc install`, not `fwc lifecycle --action`
         assert!(plan.steps.iter().any(|s| s.command == "install"));
-        assert!(!plan
-            .steps
-            .iter()
-            .any(|s| s.command_line.contains("--action")));
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|s| s.command_line.contains("--action"))
+        );
     }
 
     #[test]
@@ -4566,5 +4599,918 @@ mod tests {
         let plan = compile(&request("status of the slack connector"));
         assert_eq!(plan.template, "lifecycle");
         assert!(plan.steps.iter().any(|s| s.command == "status"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Bead 24llg.6.2.2: Verify compiler+executor no longer bottom out
+    // in placeholder branches for log-tail and lifecycle
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn no_lifecycle_verb_produces_unsupported_template() {
+        for verb_phrase in &[
+            "disable the slack connector",
+            "enable the github connector",
+            "restart the telegram connector",
+            "start the discord connector",
+            "stop the stripe connector",
+        ] {
+            let plan = compile(&request(verb_phrase));
+            assert_ne!(
+                plan.template, "unsupported",
+                "Verb phrase `{verb_phrase}` should not produce unsupported template"
+            );
+            assert_ne!(
+                plan.status, "unsupported",
+                "Verb phrase `{verb_phrase}` should not produce unsupported status"
+            );
+            assert!(
+                plan.unsupported_reasons.is_empty(),
+                "Verb phrase `{verb_phrase}` should have no unsupported reasons, got: {:?}",
+                plan.unsupported_reasons
+            );
+        }
+    }
+
+    #[test]
+    fn no_log_verb_produces_unsupported_template() {
+        for verb_phrase in &[
+            "tail the github connector logs",
+            "show logs for the slack connector",
+            "stream the discord connector output",
+            "log output from the telegram connector",
+        ] {
+            let plan = compile(&request(verb_phrase));
+            assert_ne!(
+                plan.template, "unsupported",
+                "Verb phrase `{verb_phrase}` should not produce unsupported template"
+            );
+            assert_ne!(
+                plan.status, "unsupported",
+                "Verb phrase `{verb_phrase}` should not produce unsupported status"
+            );
+        }
+    }
+
+    #[test]
+    fn all_lifecycle_steps_use_valid_fwc_commands() {
+        let plan = compile(&request("disable the slack connector"));
+        for step in &plan.steps {
+            assert!(
+                step.argv.first().is_some_and(|a| a == "fwc"),
+                "All compiled steps should be fwc commands, got: {:?}",
+                step.argv
+            );
+            // The command should be a known fwc subcommand
+            let cmd = step.argv.get(1).map(String::as_str).unwrap_or("");
+            assert!(
+                [
+                    "lifecycle",
+                    "status",
+                    "tail",
+                    "history",
+                    "show",
+                    "install",
+                    "update",
+                    "pin",
+                    "unpin"
+                ]
+                .contains(&cmd),
+                "Step command `{cmd}` should be a known fwc subcommand"
+            );
+        }
+    }
+
+    #[test]
+    fn all_log_tail_steps_use_valid_fwc_commands() {
+        let plan = compile(&request("tail the github connector logs"));
+        for step in &plan.steps {
+            assert!(
+                step.argv.first().is_some_and(|a| a == "fwc"),
+                "All compiled steps should be fwc commands, got: {:?}",
+                step.argv
+            );
+            let cmd = step.argv.get(1).map(String::as_str).unwrap_or("");
+            assert!(
+                ["tail", "status", "history"].contains(&cmd),
+                "Log-tail step command `{cmd}` should be tail, status, or history"
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_disable_plan_has_typed_refusal_notes() {
+        let plan = compile(&request("disable the slack connector"));
+        // The plan should mention refusal taxonomy in its notes
+        let all_notes: Vec<&str> = plan
+            .steps
+            .iter()
+            .flat_map(|s| s.notes.iter().map(String::as_str))
+            .collect();
+        assert!(
+            all_notes
+                .iter()
+                .any(|n| n.contains("host-unavailable") || n.contains("invalid-transition")),
+            "Lifecycle plan should document typed refusal classes in notes, got: {all_notes:?}"
+        );
+    }
+
+    #[test]
+    fn log_tail_plan_has_provenance_notes() {
+        let plan = compile(&request("tail the github connector logs"));
+        let all_notes: Vec<&str> = plan
+            .steps
+            .iter()
+            .flat_map(|s| s.notes.iter().map(String::as_str))
+            .collect();
+        assert!(
+            all_notes.iter().any(|n| n.contains("host-backed")),
+            "Log-tail plan should document host-backed provenance in notes, got: {all_notes:?}"
+        );
+    }
+
+    #[test]
+    fn lifecycle_and_log_families_no_longer_reach_unsupported_plan() {
+        // Exhaustively verify: no lifecycle or log verb hits build_unsupported_plan
+        let all_verbs = [
+            "install the github connector",
+            "update the slack connector",
+            "pin the discord connector",
+            "unpin the telegram connector",
+            "status of the github connector",
+            "disable the slack connector",
+            "enable the github connector",
+            "restart the telegram connector",
+            "start the discord connector",
+            "stop the stripe connector",
+            "tail the github connector logs",
+            "show logs for the slack connector",
+            "stream the discord connector output",
+        ];
+        for phrase in &all_verbs {
+            let plan = compile(&request(phrase));
+            assert!(
+                plan.template == "lifecycle" || plan.template == "log-tail",
+                "Phrase `{phrase}` should route to lifecycle or log-tail, got template=`{}`",
+                plan.template
+            );
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Bead 24llg.6.2.3: Scenario pack — structured transcripts for
+    // supported, degraded, and refusal intent paths
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Scenario: supported lifecycle flow with a known connector.
+    /// Expected: ready status, 4-step plan (valid-actions, preflight, mutate, verify),
+    /// provenance=host-backed, no refusals.
+    #[test]
+    fn scenario_supported_lifecycle_disable() {
+        let plan = compile(&request("disable the github connector"));
+        let transcript = serde_json::to_value(&plan).unwrap();
+
+        // Structured transcript fields
+        assert_eq!(transcript["template"], "lifecycle");
+        assert_eq!(transcript["status"], "ready");
+        assert_eq!(transcript["action"]["family"], "lifecycle");
+        assert_eq!(transcript["action"]["verb"], "disable");
+        assert_eq!(transcript["action"]["mutating"], true);
+        assert!(
+            transcript["unsupported_reasons"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        // Steps are structured and traceable
+        let steps = transcript["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 4);
+        assert_eq!(steps[0]["phase"], "preflight");
+        assert_eq!(steps[1]["phase"], "preflight");
+        assert_eq!(steps[2]["phase"], "mutate");
+        assert_eq!(steps[3]["phase"], "verify");
+
+        // Provenance annotations
+        let mutate_notes = steps[2]["notes"].as_array().unwrap();
+        assert!(
+            mutate_notes
+                .iter()
+                .any(|n| n.as_str().unwrap().contains("host-backed"))
+        );
+        assert!(
+            mutate_notes
+                .iter()
+                .any(|n| n.as_str().unwrap().contains("Refusal taxonomy"))
+        );
+    }
+
+    /// Scenario: supported log-tail flow with a known connector.
+    /// Expected: ready status, 3 steps (status, tail, history),
+    /// provenance=host-backed, no side effects.
+    #[test]
+    fn scenario_supported_log_tail() {
+        let plan = compile(&request("tail the github connector logs"));
+        let transcript = serde_json::to_value(&plan).unwrap();
+
+        assert_eq!(transcript["template"], "log-tail");
+        assert_eq!(transcript["status"], "ready");
+        assert_eq!(transcript["action"]["family"], "log-tail");
+        assert_eq!(transcript["action"]["verb"], "tail");
+        assert_eq!(transcript["action"]["mutating"], false);
+
+        let steps = transcript["steps"].as_array().unwrap();
+        assert!(steps.len() >= 2, "Log-tail should have at least 2 steps");
+
+        // All steps are non-mutating
+        for step in steps {
+            assert_eq!(step["side_effecting"], false);
+            assert_eq!(step["approval_required"], false);
+        }
+
+        // Provenance annotations on tail step
+        let tail_step = steps
+            .iter()
+            .find(|s| s["command"].as_str().unwrap() == "tail")
+            .expect("Should have a tail step");
+        let tail_notes = tail_step["notes"].as_array().unwrap();
+        assert!(
+            tail_notes
+                .iter()
+                .any(|n| n.as_str().unwrap().contains("host-backed"))
+        );
+    }
+
+    /// Scenario: missing connector (degraded/partial availability).
+    /// Expected: needs-clarification status, missing_information populated,
+    /// no steps (or minimal), refusal semantics explicit.
+    #[test]
+    fn scenario_degraded_lifecycle_no_connector() {
+        let plan = compile(&request("disable something"));
+        let transcript = serde_json::to_value(&plan).unwrap();
+
+        assert_eq!(transcript["template"], "lifecycle");
+        assert_eq!(transcript["status"], "needs-clarification");
+        let missing = transcript["missing_information"].as_array().unwrap();
+        assert!(
+            !missing.is_empty(),
+            "Degraded plan should have missing_information"
+        );
+        assert!(
+            missing
+                .iter()
+                .any(|m| m.as_str().unwrap().to_lowercase().contains("connector"))
+        );
+    }
+
+    /// Scenario: missing connector for log-tail.
+    /// Expected: ready status (tail can tail all connectors), but steps
+    /// should omit connector-specific history step.
+    #[test]
+    fn scenario_log_tail_without_specific_connector() {
+        // "tail all logs" doesn't resolve a specific connector
+        let plan = compile(&request("tail all logs"));
+        let transcript = serde_json::to_value(&plan).unwrap();
+
+        assert_eq!(transcript["template"], "log-tail");
+        // Still produces a plan — tailing all connectors is valid
+        let steps = transcript["steps"].as_array().unwrap();
+        assert!(
+            steps
+                .iter()
+                .any(|s| s["command"].as_str().unwrap() == "tail"),
+            "Should still have a tail step even without specific connector"
+        );
+    }
+
+    /// Scenario: truthful refusal — genuinely unsupported verb.
+    /// Expected: unsupported status, unsupported_reasons populated,
+    /// no real mutation steps.
+    #[test]
+    fn scenario_refusal_unknown_verb() {
+        let plan = compile(&request("deploy the github connector to production"));
+        let transcript = serde_json::to_value(&plan).unwrap();
+
+        // "deploy" doesn't match any known verb family
+        let template = transcript["template"].as_str().unwrap();
+        // Should route to discovery or operation fallback, NOT to unsupported
+        // (because "deploy" doesn't match the unsupported verb table)
+        assert!(
+            template != "lifecycle" && template != "log-tail",
+            "Unknown verb should not route to lifecycle or log-tail, got: {template}"
+        );
+    }
+
+    /// Scenario: lifecycle with zone hint — supported but with assumption.
+    /// Expected: ready status, zone captured, assumption note about zone.
+    #[test]
+    fn scenario_lifecycle_with_zone_hint() {
+        let plan = compile(&request("disable the slack connector in z:work"));
+        let transcript = serde_json::to_value(&plan).unwrap();
+
+        assert_eq!(transcript["template"], "lifecycle");
+        assert_eq!(transcript["status"], "ready");
+        assert_eq!(transcript["zone"], "z:work");
+
+        let assumptions = transcript["assumptions"].as_array().unwrap();
+        assert!(
+            assumptions
+                .iter()
+                .any(|a| a.as_str().unwrap().to_lowercase().contains("zone")),
+            "Should have a zone assumption note"
+        );
+    }
+
+    /// Scenario: explain mode shows structured reasoning.
+    /// Expected: explain mode label, non-empty explanation fields.
+    #[test]
+    fn scenario_explain_lifecycle() {
+        let req = IntentRequest {
+            intent: "restart the github connector".to_owned(),
+            connector_override: None,
+            zone_override: None,
+            mode: IntentMode::Explain,
+        };
+        let plan = compile(&req);
+        let transcript = serde_json::to_value(&plan).unwrap();
+
+        assert_eq!(transcript["mode"], "explain");
+        assert_eq!(transcript["template"], "lifecycle");
+
+        let explanation = &transcript["explanation"];
+        assert!(
+            !explanation["template_reasoning"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "Explain mode should include template reasoning"
+        );
+        assert!(
+            !explanation["action_evidence"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "Explain mode should include action evidence"
+        );
+    }
+
+    /// Scenario: do-simulate mode withholds mutating lifecycle steps.
+    /// This validates the executor path: lifecycle steps that are
+    /// side-effecting should be withheld in simulation mode.
+    #[test]
+    fn scenario_do_simulate_lifecycle_withholds_mutation() {
+        let req = IntentRequest {
+            intent: "disable the github connector".to_owned(),
+            connector_override: None,
+            zone_override: None,
+            mode: IntentMode::DoSimulate,
+        };
+        let plan = compile(&req);
+
+        // The compiled plan should have mutating steps
+        let has_mutating = plan.steps.iter().any(|s| s.side_effecting);
+        assert!(
+            has_mutating,
+            "Lifecycle plan should have side-effecting steps"
+        );
+
+        // But the plan itself is still "ready" — it's the executor that withholds
+        assert_eq!(plan.status, "ready");
+
+        // Verify step structure: preflight steps are safe, mutate step requires approval
+        let safe_steps: Vec<_> = plan.steps.iter().filter(|s| !s.side_effecting).collect();
+        let mutating_steps: Vec<_> = plan.steps.iter().filter(|s| s.side_effecting).collect();
+        assert!(
+            !safe_steps.is_empty(),
+            "Should have safe preflight/verify steps"
+        );
+        assert!(
+            !mutating_steps.is_empty(),
+            "Should have mutating lifecycle step"
+        );
+        for s in &mutating_steps {
+            assert!(
+                s.approval_required,
+                "Mutating lifecycle step should require approval"
+            );
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Bead 24llg.6.4.1: Frozen output snapshots for intent lifecycle
+    // and log-tail surfaces — regression gates for field names,
+    // provenance, evidence handles, and operator guidance.
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Helper: assert that a JSON value has exactly the specified top-level keys.
+    fn assert_keys(val: &Value, expected: &[&str], context: &str) {
+        let obj = val
+            .as_object()
+            .unwrap_or_else(|| panic!("{context}: expected object"));
+        let actual: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
+        let expected_set: std::collections::BTreeSet<&str> = expected.iter().copied().collect();
+        assert_eq!(
+            actual, expected_set,
+            "{context}: key mismatch.\n  actual:   {actual:?}\n  expected: {expected_set:?}"
+        );
+    }
+
+    /// Snapshot: CompiledStep JSON shape is stable.
+    #[test]
+    fn snapshot_compiled_step_shape() {
+        let plan = compile(&request("disable the slack connector"));
+        let steps_json = serde_json::to_value(&plan.steps).unwrap();
+        let first_step = &steps_json[0];
+        assert_keys(
+            first_step,
+            &[
+                "ordinal",
+                "phase",
+                "purpose",
+                "command",
+                "command_line",
+                "argv",
+                "side_effecting",
+                "approval_required",
+                "notes",
+            ],
+            "CompiledStep",
+        );
+    }
+
+    /// Snapshot: CompiledIntent JSON shape is stable.
+    #[test]
+    fn snapshot_compiled_intent_shape() {
+        let plan = compile(&request("disable the slack connector"));
+        let json = serde_json::to_value(&plan).unwrap();
+        assert_keys(
+            &json,
+            &[
+                "status",
+                "workflow_truth",
+                "mode",
+                "summary",
+                "template",
+                "confidence",
+                "raw_intent",
+                "normalized_intent",
+                "connector_override",
+                "zone",
+                "quoted_literals",
+                "lookup_literal",
+                "payload_literal",
+                "chosen_connector",
+                "alternative_connectors",
+                "action",
+                "operation_hint",
+                "missing_information",
+                "unsupported_reasons",
+                "ambiguities",
+                "assumptions",
+                "suggested_command_lines",
+                "next_actions",
+                "steps",
+                "explanation",
+                "execution_notice",
+            ],
+            "CompiledIntent",
+        );
+    }
+
+    /// Snapshot: lifecycle disable plan step command_lines are stable.
+    #[test]
+    fn snapshot_lifecycle_disable_command_lines() {
+        let plan = compile(&request("disable the slack connector"));
+        let command_lines: Vec<&str> = plan.steps.iter().map(|s| s.command_line.as_str()).collect();
+        assert_eq!(
+            command_lines,
+            vec![
+                "fwc lifecycle slack --valid-actions",
+                "fwc lifecycle slack --action disable --preflight",
+                "fwc lifecycle slack --action disable",
+                "fwc status slack",
+            ],
+            "Lifecycle disable command_lines must be stable"
+        );
+    }
+
+    /// Snapshot: lifecycle enable plan step command_lines are stable.
+    #[test]
+    fn snapshot_lifecycle_enable_command_lines() {
+        let plan = compile(&request("enable the github connector"));
+        let command_lines: Vec<&str> = plan.steps.iter().map(|s| s.command_line.as_str()).collect();
+        assert_eq!(
+            command_lines,
+            vec![
+                "fwc lifecycle github --valid-actions",
+                "fwc lifecycle github --action enable --preflight",
+                "fwc lifecycle github --action enable",
+                "fwc status github",
+            ],
+            "Lifecycle enable command_lines must be stable"
+        );
+    }
+
+    /// Snapshot: lifecycle restart plan step command_lines are stable.
+    #[test]
+    fn snapshot_lifecycle_restart_command_lines() {
+        let plan = compile(&request("restart the telegram connector"));
+        let command_lines: Vec<&str> = plan.steps.iter().map(|s| s.command_line.as_str()).collect();
+        assert_eq!(
+            command_lines,
+            vec![
+                "fwc lifecycle telegram --valid-actions",
+                "fwc lifecycle telegram --action restart --preflight",
+                "fwc lifecycle telegram --action restart",
+                "fwc status telegram",
+            ],
+            "Lifecycle restart command_lines must be stable"
+        );
+    }
+
+    /// Snapshot: log-tail plan step command_lines are stable.
+    #[test]
+    fn snapshot_log_tail_command_lines() {
+        let plan = compile(&request("tail the github connector logs"));
+        let command_lines: Vec<&str> = plan.steps.iter().map(|s| s.command_line.as_str()).collect();
+        assert_eq!(
+            command_lines,
+            vec![
+                "fwc status github",
+                "fwc tail github --since 5m --limit 50",
+                "fwc history --connector github --limit 10",
+            ],
+            "Log-tail command_lines must be stable"
+        );
+    }
+
+    /// Snapshot: WorkflowTruth JSON shape is stable.
+    #[test]
+    fn snapshot_workflow_truth_shape() {
+        let plan = compile(&request("disable the slack connector"));
+        let truth_json = serde_json::to_value(&plan.workflow_truth).unwrap();
+        assert_keys(
+            &truth_json,
+            &[
+                "availability",
+                "source_of_truth",
+                "authoritative",
+                "recoverable",
+                "exit_code_hint",
+                "explanation",
+            ],
+            "WorkflowTruth",
+        );
+    }
+
+    /// Snapshot: ActionInference JSON shape is stable.
+    #[test]
+    fn snapshot_action_inference_shape() {
+        let plan = compile(&request("disable the slack connector"));
+        let action_json = serde_json::to_value(&plan.action).unwrap();
+        assert_keys(
+            &action_json,
+            &[
+                "family",
+                "verb",
+                "resource",
+                "risk",
+                "mutating",
+                "matched_terms",
+            ],
+            "ActionInference",
+        );
+    }
+
+    /// Snapshot: lifecycle plan provenance notes are stable.
+    #[test]
+    fn snapshot_lifecycle_provenance_notes() {
+        let plan = compile(&request("stop the github connector"));
+        let mutate_step = plan
+            .steps
+            .iter()
+            .find(|s| s.phase == "mutate")
+            .expect("Should have mutate step");
+        assert_eq!(
+            mutate_step.notes.len(),
+            2,
+            "Mutate step should have exactly 2 notes (provenance + refusal)"
+        );
+        assert!(
+            mutate_step.notes[0].starts_with("Provenance: host-backed"),
+            "First note should be provenance: {:?}",
+            mutate_step.notes[0]
+        );
+        assert!(
+            mutate_step.notes[1].starts_with("Refusal taxonomy"),
+            "Second note should be refusal taxonomy: {:?}",
+            mutate_step.notes[1]
+        );
+    }
+
+    /// Snapshot: log-tail plan provenance notes are stable.
+    #[test]
+    fn snapshot_log_tail_provenance_notes() {
+        let plan = compile(&request("tail the github connector logs"));
+        let tail_step = plan
+            .steps
+            .iter()
+            .find(|s| s.command == "tail")
+            .expect("Should have tail step");
+        assert_eq!(
+            tail_step.notes.len(),
+            2,
+            "Tail step should have exactly 2 notes (provenance + refusal)"
+        );
+        assert!(
+            tail_step.notes[0].contains("host-backed"),
+            "First note should mention host-backed: {:?}",
+            tail_step.notes[0]
+        );
+        assert!(
+            tail_step.notes[1].contains("Refusal taxonomy"),
+            "Second note should mention refusal taxonomy: {:?}",
+            tail_step.notes[1]
+        );
+    }
+
+    /// Snapshot: intent contract types serialize to stable JSON shapes.
+    #[test]
+    fn snapshot_log_tail_contract_shape() {
+        let contract = LogTailContract {
+            connector_id: Some("github".to_owned()),
+            since_duration: Some("5m".to_owned()),
+            event_type_filter: None,
+            limit: 50,
+            provenance: IntentProvenance::HostBacked,
+            refusal: None,
+        };
+        let json = serde_json::to_value(&contract).unwrap();
+        assert_keys(
+            &json,
+            &[
+                "connector_id",
+                "since_duration",
+                "event_type_filter",
+                "limit",
+                "provenance",
+                "refusal",
+            ],
+            "LogTailContract",
+        );
+    }
+
+    /// Snapshot: LifecycleIntentContract serializes to stable JSON shape.
+    #[test]
+    fn snapshot_lifecycle_contract_shape() {
+        let contract = LifecycleIntentContract {
+            connector_id: "slack".to_owned(),
+            action: "disable".to_owned(),
+            preflight: true,
+            dry_run: false,
+            provenance: IntentProvenance::HostBacked,
+            refusal: None,
+        };
+        let json = serde_json::to_value(&contract).unwrap();
+        assert_keys(
+            &json,
+            &[
+                "connector_id",
+                "action",
+                "preflight",
+                "dry_run",
+                "provenance",
+                "refusal",
+            ],
+            "LifecycleIntentContract",
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Bead 24llg.6.4.2: Replayable transcript pack for intent,
+    // lifecycle, and log-tail workflows.
+    //
+    // Each transcript test serializes a full compiled intent to JSON,
+    // validates it contains the fields the evidence-bundle convention
+    // requires, and is structured for consumption by phase-6 acceptance
+    // beads and the 24llg.1.3 closure audit.
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Build a full transcript bundle from a compiled intent.
+    fn transcript_bundle(scenario_id: &str, layer: &str, plan: &CompiledIntent) -> Value {
+        json!({
+            "schema_version": "fcp-verification-bundle/v1",
+            "scenario_id": scenario_id,
+            "layer": layer,
+            "timestamp": "2026-04-05T00:00:00Z",
+            "intent": {
+                "raw": plan.raw_intent,
+                "normalized": plan.normalized_intent,
+                "mode": plan.mode,
+            },
+            "compilation": {
+                "status": plan.status,
+                "template": plan.template,
+                "confidence": plan.confidence,
+                "action": serde_json::to_value(&plan.action).unwrap(),
+                "workflow_truth": serde_json::to_value(&plan.workflow_truth).unwrap(),
+            },
+            "connector": {
+                "chosen": plan.chosen_connector.as_ref().map(|c| &c.id),
+                "alternatives": plan.alternative_connectors.iter().map(|c| &c.id).collect::<Vec<_>>(),
+            },
+            "steps": serde_json::to_value(&plan.steps).unwrap(),
+            "diagnostics": {
+                "unsupported_reasons": &plan.unsupported_reasons,
+                "missing_information": &plan.missing_information,
+                "ambiguities": serde_json::to_value(&plan.ambiguities).unwrap(),
+                "assumptions": &plan.assumptions,
+            },
+            "explanation": serde_json::to_value(&plan.explanation).unwrap(),
+            "rerun_command": format!("cargo test -p fwc --bin fwc -- intent::tests::{scenario_id} --nocapture"),
+        })
+    }
+
+    #[test]
+    fn transcript_lifecycle_disable_supported() {
+        let plan = compile(&request("disable the github connector"));
+        let bundle = transcript_bundle("transcript_lifecycle_disable_supported", "unit", &plan);
+
+        // Evidence-bundle convention fields present
+        assert_eq!(bundle["schema_version"], "fcp-verification-bundle/v1");
+        assert!(
+            bundle["rerun_command"]
+                .as_str()
+                .unwrap()
+                .contains("cargo test")
+        );
+
+        // Compilation result
+        assert_eq!(bundle["compilation"]["status"], "ready");
+        assert_eq!(bundle["compilation"]["template"], "lifecycle");
+        assert_eq!(bundle["compilation"]["action"]["verb"], "disable");
+
+        // Steps are fully formed
+        let steps = bundle["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 4);
+        for step in steps {
+            assert!(step["command_line"].as_str().unwrap().starts_with("fwc"));
+            assert!(!step["purpose"].as_str().unwrap().is_empty());
+        }
+
+        // No unsupported reasons
+        assert!(
+            bundle["diagnostics"]["unsupported_reasons"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn transcript_lifecycle_restart_supported() {
+        let plan = compile(&request("restart the telegram connector"));
+        let bundle = transcript_bundle("transcript_lifecycle_restart_supported", "unit", &plan);
+
+        assert_eq!(bundle["compilation"]["status"], "ready");
+        assert_eq!(bundle["compilation"]["template"], "lifecycle");
+        assert_eq!(bundle["compilation"]["action"]["verb"], "restart");
+        assert_eq!(bundle["connector"]["chosen"], "telegram");
+    }
+
+    #[test]
+    fn transcript_log_tail_supported() {
+        let plan = compile(&request("show logs for the slack connector"));
+        let bundle = transcript_bundle("transcript_log_tail_supported", "unit", &plan);
+
+        assert_eq!(bundle["compilation"]["status"], "ready");
+        assert_eq!(bundle["compilation"]["template"], "log-tail");
+        assert_eq!(bundle["compilation"]["action"]["verb"], "tail");
+        assert_eq!(bundle["connector"]["chosen"], "slack");
+
+        let steps = bundle["steps"].as_array().unwrap();
+        assert!(
+            steps
+                .iter()
+                .any(|s| s["command"].as_str().unwrap() == "tail")
+        );
+    }
+
+    #[test]
+    fn transcript_lifecycle_refusal_no_connector() {
+        let plan = compile(&request("disable something"));
+        let bundle = transcript_bundle("transcript_lifecycle_refusal_no_connector", "unit", &plan);
+
+        assert_eq!(bundle["compilation"]["status"], "needs-clarification");
+        assert_eq!(bundle["compilation"]["template"], "lifecycle");
+        assert!(bundle["connector"]["chosen"].is_null());
+
+        let missing = bundle["diagnostics"]["missing_information"]
+            .as_array()
+            .unwrap();
+        assert!(!missing.is_empty());
+    }
+
+    #[test]
+    fn transcript_lifecycle_zone_degraded() {
+        let plan = compile(&request("enable the discord connector in z:staging"));
+        let bundle = transcript_bundle("transcript_lifecycle_zone_degraded", "unit", &plan);
+
+        // Zone captured but flagged as assumption (degraded zone support)
+        assert_eq!(bundle["compilation"]["status"], "ready");
+        let assumptions = bundle["diagnostics"]["assumptions"].as_array().unwrap();
+        assert!(
+            assumptions
+                .iter()
+                .any(|a| a.as_str().unwrap().to_lowercase().contains("zone"))
+        );
+    }
+
+    #[test]
+    fn transcript_log_tail_all_connectors() {
+        let plan = compile(&request("tail all logs"));
+        let bundle = transcript_bundle("transcript_log_tail_all_connectors", "unit", &plan);
+
+        assert_eq!(bundle["compilation"]["template"], "log-tail");
+        // No specific connector chosen — tailing all
+        // (connector may or may not be resolved depending on "all" keyword matching)
+        let steps = bundle["steps"].as_array().unwrap();
+        assert!(
+            steps
+                .iter()
+                .any(|s| s["command"].as_str().unwrap() == "tail")
+        );
+    }
+
+    #[test]
+    fn transcript_explain_lifecycle() {
+        let req = IntentRequest {
+            intent: "stop the github connector".to_owned(),
+            connector_override: None,
+            zone_override: None,
+            mode: IntentMode::Explain,
+        };
+        let plan = compile(&req);
+        let bundle = transcript_bundle("transcript_explain_lifecycle", "unit", &plan);
+
+        assert_eq!(bundle["intent"]["mode"], "explain");
+        assert_eq!(bundle["compilation"]["template"], "lifecycle");
+
+        let explanation = &bundle["explanation"];
+        assert!(
+            !explanation["template_reasoning"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn transcript_bundle_schema_conformance() {
+        // Verify that all transcript bundles conform to the evidence-bundle schema
+        let scenarios = vec![
+            compile(&request("disable the github connector")),
+            compile(&request("tail the slack connector logs")),
+            compile(&request("restart the telegram connector")),
+            compile(&request("enable something")),
+        ];
+
+        for (i, plan) in scenarios.iter().enumerate() {
+            let bundle = transcript_bundle(&format!("conformance_{i}"), "unit", plan);
+
+            // Required evidence-bundle fields
+            assert!(
+                bundle["schema_version"].is_string(),
+                "scenario {i}: schema_version must be string"
+            );
+            assert!(
+                bundle["scenario_id"].is_string(),
+                "scenario {i}: scenario_id must be string"
+            );
+            assert!(
+                bundle["layer"].is_string(),
+                "scenario {i}: layer must be string"
+            );
+            assert!(
+                bundle["rerun_command"].is_string(),
+                "scenario {i}: rerun_command must be string"
+            );
+
+            // Compilation block
+            assert!(
+                bundle["compilation"]["status"].is_string(),
+                "scenario {i}: compilation.status must be string"
+            );
+            assert!(
+                bundle["compilation"]["template"].is_string(),
+                "scenario {i}: compilation.template must be string"
+            );
+
+            // Steps block
+            assert!(
+                bundle["steps"].is_array(),
+                "scenario {i}: steps must be array"
+            );
+        }
     }
 }

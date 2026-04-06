@@ -16868,10 +16868,12 @@ fn preflight_dispatch_host(
         },
     });
 
-    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, command);
-    if preflight.allowed {
-        envelope.inject_into(&mut payload);
-    }
+    let envelope = if preflight.allowed {
+        CommandEnvelope::new(CommandAvailability::LiveRuntime, command)
+    } else {
+        CommandEnvelope::new(CommandAvailability::Denied, command)
+    };
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
         exit_code: if preflight.allowed {
@@ -17136,7 +17138,7 @@ fn invoke_dispatch_host(
             },
         },
     });
-    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "invoke");
+    let _live_envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, command);
 
     if !valid {
         payload["error"] = json!({
@@ -17222,9 +17224,12 @@ fn invoke_dispatch_host(
             args.idempotency_key.as_deref(),
             latency_ms,
         );
-        if preflight.allowed {
-            envelope.inject_into(&mut payload);
-        }
+        let envelope = if preflight.allowed {
+            CommandEnvelope::new(CommandAvailability::LiveRuntime, command)
+        } else {
+            CommandEnvelope::new(CommandAvailability::Denied, command)
+        };
+        envelope.inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
             exit_code: if preflight.allowed {
@@ -17269,6 +17274,7 @@ fn invoke_dispatch_host(
                 connector.slug, operation.name, host.endpoint
             ),
         ]);
+        CommandEnvelope::new(CommandAvailability::Denied, command).inject_into(&mut payload);
         return Ok(DispatchOutcome {
             payload,
             exit_code: CliExitCode::PolicyDenied,
@@ -17342,6 +17348,7 @@ fn invoke_dispatch_host(
         ],
     });
 
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "invoke");
     if matches!(response.status, InvokeStatus::Ok) {
         envelope.inject_into(&mut payload);
     }

@@ -71,6 +71,7 @@ enum OperatorTruthAnswerClass {
     MeshBacked,
     Degraded,
     FallbackDerived,
+    Refusal,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,12 +89,18 @@ struct OperatorTruthFixture {
     #[serde(default)]
     mode: Option<String>,
     source: String,
-    availability: String,
+    #[serde(default)]
+    availability: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    phase: Option<String>,
     #[serde(default)]
     connector_status: Option<String>,
     #[serde(default)]
     connector_state: Option<String>,
-    provenance: OperatorTruthProvenance,
+    #[serde(default)]
+    provenance: Option<OperatorTruthProvenance>,
     #[serde(default)]
     response_scope: Option<String>,
     #[serde(default)]
@@ -108,6 +115,22 @@ struct OperatorTruthFixture {
     required_evidence_handles: Vec<String>,
     #[serde(default)]
     required_warning_substrings: Vec<String>,
+    #[serde(default)]
+    required_message_substrings: Vec<String>,
+    #[serde(default)]
+    required_next_action_substrings: Vec<String>,
+    #[serde(default)]
+    required_artifacts: Vec<String>,
+    #[serde(default)]
+    required_log_fields: Vec<String>,
+    #[serde(default)]
+    rerun_command: Option<String>,
+    #[serde(default)]
+    error_type: Option<String>,
+    #[serde(default)]
+    preflight_allowed: Option<bool>,
+    #[serde(default)]
+    minimum_next_actions: Option<usize>,
     #[serde(default)]
     human_summary_contains: Vec<String>,
     notes: String,
@@ -266,15 +289,71 @@ fn payload_warning_contains(payload: &Value, needle: &str) -> bool {
     })
 }
 
+fn payload_message_contains(payload: &Value, needle: &str) -> bool {
+    payload["message"]
+        .as_str()
+        .is_some_and(|message| message.contains(needle))
+}
+
+fn payload_next_action_contains(payload: &Value, needle: &str) -> bool {
+    payload["next_actions"].as_array().is_some_and(|actions| {
+        actions
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|action| action.contains(needle))
+    })
+}
+
+fn assert_operator_truth_fixture_has_core_evidence_contract(fixture: &OperatorTruthFixture) {
+    for artifact in [
+        "trace.jsonl",
+        "summary.json",
+        "environment.json",
+        "replay.sh",
+    ] {
+        assert!(
+            fixture
+                .required_artifacts
+                .iter()
+                .any(|value| value == artifact),
+            "fixture {} missing required artifact {artifact}",
+            fixture.id
+        );
+    }
+    for field in ["correlation_id", "phase"] {
+        assert!(
+            fixture
+                .required_log_fields
+                .iter()
+                .any(|value| value == field),
+            "fixture {} missing required log field {field}",
+            fixture.id
+        );
+    }
+    assert!(
+        fixture
+            .rerun_command
+            .as_deref()
+            .is_some_and(|command| command.starts_with("fwc ")),
+        "fixture {} must provide an `fwc` rerun command",
+        fixture.id
+    );
+}
+
 fn assert_operator_truth_fixture_contract(payload: &Value, fixture: &OperatorTruthFixture) {
     assert_eq!(payload["command"], fixture.command);
-    assert_eq!(
-        payload["availability"]["availability"],
-        fixture.availability
-    );
     assert_eq!(payload["source"], fixture.source);
     assert!(!fixture.notes.trim().is_empty());
 
+    if let Some(availability) = fixture.availability.as_deref() {
+        assert_eq!(payload["availability"]["availability"], availability);
+    }
+    if let Some(status) = fixture.status.as_deref() {
+        assert_eq!(payload["status"], status);
+    }
+    if let Some(phase) = fixture.phase.as_deref() {
+        assert_eq!(payload["phase"], phase);
+    }
     if let Some(subcommand) = fixture.subcommand.as_deref() {
         assert_eq!(payload["subcommand"], subcommand);
     }
@@ -285,26 +364,28 @@ fn assert_operator_truth_fixture_contract(payload: &Value, fixture: &OperatorTru
         assert_eq!(payload["scope"], scope);
     }
 
-    let provenance = &payload["provenance"];
-    assert_eq!(provenance["source"], fixture.provenance.source);
-    assert_eq!(
-        provenance["authoritative"],
-        fixture.provenance.authoritative
-    );
-    if let Some(transport) = fixture.provenance.transport.as_deref() {
-        assert_eq!(provenance["transport"], transport);
-    }
-    if let Some(scope) = fixture.provenance.scope.as_deref() {
-        assert_eq!(provenance["scope"], scope);
-    }
-    if let Some(mesh_backed) = fixture.provenance.mesh_backed {
-        assert_eq!(provenance["mesh_backed"], mesh_backed);
-    }
-    if let Some(degraded) = fixture.provenance.degraded {
-        assert_eq!(provenance["degraded"], degraded);
-    }
-    if let Some(fallback_derived) = fixture.provenance.fallback_derived {
-        assert_eq!(provenance["fallback_derived"], fallback_derived);
+    if let Some(provenance_fixture) = fixture.provenance.as_ref() {
+        let provenance = &payload["provenance"];
+        assert_eq!(provenance["source"], provenance_fixture.source);
+        assert_eq!(
+            provenance["authoritative"],
+            provenance_fixture.authoritative
+        );
+        if let Some(transport) = provenance_fixture.transport.as_deref() {
+            assert_eq!(provenance["transport"], transport);
+        }
+        if let Some(scope) = provenance_fixture.scope.as_deref() {
+            assert_eq!(provenance["scope"], scope);
+        }
+        if let Some(mesh_backed) = provenance_fixture.mesh_backed {
+            assert_eq!(provenance["mesh_backed"], mesh_backed);
+        }
+        if let Some(degraded) = provenance_fixture.degraded {
+            assert_eq!(provenance["degraded"], degraded);
+        }
+        if let Some(fallback_derived) = provenance_fixture.fallback_derived {
+            assert_eq!(provenance["fallback_derived"], fallback_derived);
+        }
     }
 
     if let Some(state) = fixture.source_selection_state.as_deref() {
@@ -325,6 +406,12 @@ fn assert_operator_truth_fixture_contract(payload: &Value, fixture: &OperatorTru
     if let Some(state) = fixture.connector_state.as_deref() {
         assert_eq!(payload["connector"]["state"], state);
     }
+    if let Some(error_type) = fixture.error_type.as_deref() {
+        assert_eq!(payload["error"]["type"], error_type);
+    }
+    if let Some(preflight_allowed) = fixture.preflight_allowed {
+        assert_eq!(payload["preflight"]["allowed"], preflight_allowed);
+    }
 
     for kind in &fixture.required_evidence_handles {
         assert!(
@@ -337,6 +424,30 @@ fn assert_operator_truth_fixture_contract(payload: &Value, fixture: &OperatorTru
         assert!(
             payload_warning_contains(payload, warning),
             "payload missing warning containing `{warning}`: {}",
+            serde_json::to_string_pretty(payload).unwrap_or_default()
+        );
+    }
+    for message in &fixture.required_message_substrings {
+        assert!(
+            payload_message_contains(payload, message),
+            "payload missing message containing `{message}`: {}",
+            serde_json::to_string_pretty(payload).unwrap_or_default()
+        );
+    }
+    if let Some(minimum_next_actions) = fixture.minimum_next_actions {
+        let next_actions = payload["next_actions"]
+            .as_array()
+            .expect("payload missing next_actions array");
+        assert!(
+            next_actions.len() >= minimum_next_actions,
+            "payload expected at least {minimum_next_actions} next actions: {}",
+            serde_json::to_string_pretty(payload).unwrap_or_default()
+        );
+    }
+    for next_action in &fixture.required_next_action_substrings {
+        assert!(
+            payload_next_action_contains(payload, next_action),
+            "payload missing next_action containing `{next_action}`: {}",
             serde_json::to_string_pretty(payload).unwrap_or_default()
         );
     }
@@ -1502,6 +1613,7 @@ fn pipeline_dry_run_records_history_entries_for_shared_fixture_workflow() {
 
 #[test]
 fn invoke_denial_records_history_and_suggests_recovery_actions() {
+    let fixture = load_operator_truth_fixture("refusal_invoke_preflight_denied");
     let capability_token = test_capability_token_arg();
     let home = tempdir().expect("temp home should be created");
     let github_connector =
@@ -1567,28 +1679,11 @@ fn invoke_denial_records_history_and_suggests_recovery_actions() {
         exit_code, 0,
         "denied invoke should not report success, stderr:\n{stderr}"
     );
-    assert_eq!(payload["command"], "invoke");
-    assert_eq!(payload["status"], "denied");
-    assert_eq!(payload["phase"], "preflight");
-    assert_eq!(payload["error"]["type"], "policy-denied");
-    assert_eq!(payload["preflight"]["allowed"], false);
+    assert_operator_truth_fixture_contract(&payload, &fixture);
     assert_eq!(
         payload["preflight"]["reason"],
         "connector policy denied the request"
     );
-    let next_actions = payload["next_actions"]
-        .as_array()
-        .expect("denied invoke should include recovery actions");
-    assert!(next_actions.iter().any(|action| {
-        action
-            .as_str()
-            .is_some_and(|value| value.contains("status") && value.contains("--host"))
-    }));
-    assert!(next_actions.iter().any(|action| {
-        action
-            .as_str()
-            .is_some_and(|value| value.contains("simulate") && value.contains("--host"))
-    }));
 
     let history = run_json_ok_in_home(home.path(), &["--json", "history", "--status", "denied"]);
     assert_eq!(history["command"], "history");
@@ -3959,6 +4054,7 @@ fn operator_truth_fixture_matrix_freezes_core_answer_classes() {
         "mesh_backed_explain_availability".to_owned(),
         "degraded_connector_health".to_owned(),
         "fallback_derived_install_activation".to_owned(),
+        "refusal_invoke_preflight_denied".to_owned(),
     ]);
     let missing_canonical_ids = canonical_ids.difference(&ids).cloned().collect::<Vec<_>>();
     assert!(
@@ -3980,14 +4076,27 @@ fn operator_truth_fixture_matrix_freezes_core_answer_classes() {
             OperatorTruthAnswerClass::MeshBacked,
             OperatorTruthAnswerClass::Degraded,
             OperatorTruthAnswerClass::FallbackDerived,
+            OperatorTruthAnswerClass::Refusal,
         ])
     );
 
     for fixture in &matrix.fixtures {
         assert!(!fixture.command.trim().is_empty());
         assert!(!fixture.source.trim().is_empty());
-        assert!(!fixture.availability.trim().is_empty());
+        assert!(
+            fixture
+                .availability
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+                || fixture
+                    .status
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty()),
+            "fixture {} must freeze either availability or status",
+            fixture.id
+        );
         assert!(!fixture.notes.trim().is_empty());
+        assert_operator_truth_fixture_has_core_evidence_contract(fixture);
     }
 
     for fixture in matrix
@@ -3996,8 +4105,9 @@ fn operator_truth_fixture_matrix_freezes_core_answer_classes() {
         .filter(|fixture| canonical_ids.contains(&fixture.id))
     {
         assert!(
-            !fixture.human_summary_contains.is_empty(),
-            "fixture {} must freeze at least one human-facing summary string",
+            !fixture.human_summary_contains.is_empty()
+                || !fixture.required_message_substrings.is_empty(),
+            "fixture {} must freeze either human-facing output or machine message strings",
             fixture.id
         );
     }

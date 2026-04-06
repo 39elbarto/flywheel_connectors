@@ -283,15 +283,22 @@ This bead is the documentation layer of a wider evidence stack. The sibling bead
 
 The canonical fixture set for stable operator-truth answers now lives in `crates/fwc/testdata/operator_truth/fixture_matrix.json`.
 
-It freezes five representative answer classes that downstream CLI work can depend on without re-reading implementation details:
+It freezes six representative answer classes spanning the five required operator-truth modes, so downstream CLI work can depend on one shared acceptance matrix without re-reading implementation details:
 
 - `offline`: manifest-backed `show --offline` answers
 - `node_local`: host-admin `status <connector> --host ...` answers
 - `mesh_backed`: live `mesh explain-availability` answers with placement-backed readiness
 - `degraded`: live `health <connector> --host ...` answers where degradation is explicit
-- `fallback_derived`: live `install` answers where host mutation succeeded but post-install truth is still degraded
+- `fallback_derived`: the degraded post-mutation install case, where host mutation succeeded but post-install truth is still degraded
+- `refusal`: truthful preflight denial for live `invoke` when policy rejects execution before the connector runs
 
-`crates/fwc/tests/cual_integration.rs` executes those representative flows against the fixture matrix, so changes to operator-facing truth fields must update both the implementation and the frozen contract fixture set.
+Each matrix row also freezes the minimum replay contract for later proof-bundle work:
+
+- the representative rerun command
+- the required artifact bundle members
+- the required structured log fields
+
+`crates/fwc/tests/cual_integration.rs` executes the representative flows against the fixture matrix, so changes to operator-facing truth fields or evidence requirements must update both the implementation and the frozen contract fixture set.
 
 ### Fast semantic checks
 

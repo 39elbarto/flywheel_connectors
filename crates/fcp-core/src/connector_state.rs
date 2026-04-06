@@ -1847,17 +1847,30 @@ pub struct ForkResolutionOutcome {
     pub resolved: bool,
     /// Reason if resolution failed.
     pub failure_reason: Option<String>,
+    /// Structured diagnostic explaining the resolution decision.
+    pub decision_detail: Option<String>,
 }
 
 impl ForkResolutionOutcome {
     /// Create a successful resolution outcome.
     #[must_use]
-    pub const fn success(
+    pub fn success(
         fork_event: ForkEvent,
         strategy: ForkResolution,
         winning_head: ObjectId,
         resolved_at: u64,
     ) -> Self {
+        let detail = match strategy {
+            ForkResolution::ChooseByLease => {
+                "Winner determined by highest lease_seq among forked branches.".to_owned()
+            }
+            ForkResolution::CrdtMerge => {
+                "Both branches merged via CRDT semantics; no data lost.".to_owned()
+            }
+            ForkResolution::ManualResolution => {
+                "Resolution was manually selected by an operator.".to_owned()
+            }
+        };
         Self {
             fork_event,
             strategy,
@@ -1865,6 +1878,7 @@ impl ForkResolutionOutcome {
             resolved_at,
             resolved: true,
             failure_reason: None,
+            decision_detail: Some(detail),
         }
     }
 
@@ -1876,13 +1890,16 @@ impl ForkResolutionOutcome {
         resolved_at: u64,
         reason: impl Into<String>,
     ) -> Self {
+        let reason_str = reason.into();
+        let detail = format!("Resolution failed: {reason_str}");
         Self {
             fork_event,
             strategy,
             winning_head: None,
             resolved_at,
             resolved: false,
-            failure_reason: Some(reason.into()),
+            failure_reason: Some(reason_str),
+            decision_detail: Some(detail),
         }
     }
 }
@@ -2005,6 +2022,25 @@ pub fn merge_crdt_states(
     }
 }
 
+/// Structured diagnostic for a CRDT merge decision.
+///
+/// Captures why a particular merge outcome was reached so that audits
+/// and operator flows can explain the decision without source-code
+/// archaeology.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergeDiagnostic {
+    /// The CRDT strategy that governed this merge.
+    pub strategy: String,
+    /// Number of entries/elements in branch A before merge.
+    pub branch_a_size: usize,
+    /// Number of entries/elements in branch B before merge.
+    pub branch_b_size: usize,
+    /// Number of entries/elements in the merged result.
+    pub merged_size: usize,
+    /// Human-readable explanation of the merge outcome.
+    pub explanation: String,
+}
+
 /// Outcome of a CRDT merge operation on forked connector state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrdtMergeOutcome {
@@ -2016,6 +2052,8 @@ pub struct CrdtMergeOutcome {
     pub crdt_type: CrdtType,
     /// Timestamp when the merge completed.
     pub merged_at: u64,
+    /// Structured diagnostic explaining the merge decision.
+    pub diagnostic: Option<MergeDiagnostic>,
 }
 
 /// Fork detector for connector state objects.
@@ -3141,6 +3179,7 @@ mod tests {
             merged_state_cbor: state,
             crdt_type: CrdtType::GCounter,
             merged_at: 2000,
+            diagnostic: None,
         };
 
         let json = serde_json::to_string(&outcome).unwrap();
@@ -3660,6 +3699,110 @@ mod tests {
         let back: ForkResolutionOutcome = serde_json::from_str(&json).unwrap();
         assert!(!back.resolved);
         assert!(back.failure_reason.is_some());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Bead 24llg.5.3.1: Merge and placement decision diagnostics
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn fork_resolution_success_has_decision_detail() {
+        let outcome = ForkResolutionOutcome::success(
+            create_test_fork_event(),
+            ForkResolution::ChooseByLease,
+            test_object_id("winner"),
+            1_700_000_100,
+        );
+        assert!(outcome.resolved);
+        let detail = outcome.decision_detail.as_ref().expect("should have decision_detail");
+        assert!(
+            detail.contains("lease_seq"),
+            "ChooseByLease detail should mention lease_seq: {detail}"
+        );
+    }
+
+    #[test]
+    fn fork_resolution_crdt_merge_decision_detail() {
+        let outcome = ForkResolutionOutcome::success(
+            create_test_fork_event(),
+            ForkResolution::CrdtMerge,
+            test_object_id("merged"),
+            1_700_000_100,
+        );
+        let detail = outcome.decision_detail.as_ref().expect("should have decision_detail");
+        assert!(
+            detail.contains("CRDT"),
+            "CrdtMerge detail should mention CRDT: {detail}"
+        );
+    }
+
+    #[test]
+    fn fork_resolution_failure_has_decision_detail() {
+        let outcome = ForkResolutionOutcome::failure(
+            create_test_fork_event(),
+            ForkResolution::ManualResolution,
+            1_700_000_100,
+            "lease tie",
+        );
+        let detail = outcome.decision_detail.as_ref().expect("should have decision_detail");
+        assert!(
+            detail.contains("lease tie"),
+            "Failure detail should include the reason: {detail}"
+        );
+    }
+
+    #[test]
+    fn fork_resolution_decision_detail_serializes() {
+        let outcome = ForkResolutionOutcome::success(
+            create_test_fork_event(),
+            ForkResolution::ChooseByLease,
+            test_object_id("winner"),
+            1_700_000_100,
+        );
+        let json = serde_json::to_value(&outcome).unwrap();
+        assert!(
+            json["decision_detail"].is_string(),
+            "decision_detail should serialize as string"
+        );
+    }
+
+    #[test]
+    fn merge_diagnostic_serializes() {
+        let diag = MergeDiagnostic {
+            strategy: "lww-map".to_owned(),
+            branch_a_size: 3,
+            branch_b_size: 5,
+            merged_size: 6,
+            explanation: "LWW merge resolved 2 conflicting keys by timestamp.".to_owned(),
+        };
+        let json = serde_json::to_value(&diag).unwrap();
+        assert_eq!(json["strategy"], "lww-map");
+        assert_eq!(json["branch_a_size"], 3);
+        assert_eq!(json["merged_size"], 6);
+    }
+
+    #[test]
+    fn crdt_merge_outcome_with_diagnostic() {
+        let mut counter = crate::GCounter::default();
+        counter.increment(crate::CrdtActorId::new("test"), 10);
+        let state = fcp_cbor::to_canonical_cbor(&counter).unwrap();
+
+        let outcome = CrdtMergeOutcome {
+            fork_event: create_test_fork_event(),
+            merged_state_cbor: state,
+            crdt_type: CrdtType::GCounter,
+            merged_at: 2000,
+            diagnostic: Some(MergeDiagnostic {
+                strategy: "g-counter".to_owned(),
+                branch_a_size: 1,
+                branch_b_size: 1,
+                merged_size: 1,
+                explanation: "GCounter merge took max of each actor's count.".to_owned(),
+            }),
+        };
+        let json = serde_json::to_value(&outcome).unwrap();
+        assert!(json["diagnostic"].is_object());
+        assert_eq!(json["diagnostic"]["strategy"], "g-counter");
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -1,13 +1,14 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::{CommandTruthSource, classify_command};
-use crate::readiness::CommandAvailability;
+use crate::readiness::{CommandAvailability, DiscoveryCatalog, normalize_operation_selector};
 
 const EXECUTION_NOTICE: &str = "The plan compiler emits concrete `fwc` primitives. A step only succeeds if that primitive is actually implemented and the live host or local state it needs is configured; `fwc` does not fabricate success.";
 const WORKFLOW_TRUTH_COMPILER_SOURCE: &str = "local-intent-compiler";
@@ -320,6 +321,86 @@ struct ConnectorProfile {
     id: String,
     aliases: Vec<String>,
     keywords: Vec<String>,
+    operations: Vec<ManifestOperationProfile>,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+struct ManifestOperationProfile {
+    actual_id: String,
+    local_id: String,
+    preferred_selector: String,
+    aliases: Vec<String>,
+    description: String,
+    capability: String,
+    risk_level: String,
+    safety_tier: String,
+    when_to_use: String,
+    common_mistakes: Vec<String>,
+}
+
+impl ManifestOperationProfile {
+    fn from_discovered(operation: &crate::readiness::DiscoveredOperation) -> Self {
+        Self {
+            actual_id: operation.actual_id.clone(),
+            local_id: operation.local_id.clone(),
+            preferred_selector: operation.preferred_selector.clone(),
+            aliases: operation.aliases.clone(),
+            description: operation.description.clone(),
+            capability: operation.summary.capability.clone(),
+            risk_level: operation.summary.risk_level.clone(),
+            safety_tier: operation.summary.safety_tier.clone(),
+            when_to_use: operation.when_to_use.clone(),
+            common_mistakes: operation.common_mistakes.clone(),
+        }
+    }
+
+    fn selector_keys(&self) -> BTreeSet<String> {
+        self.aliases
+            .iter()
+            .map(|alias| normalize_operation_selector(alias))
+            .chain([
+                normalize_operation_selector(&self.actual_id),
+                normalize_operation_selector(&self.local_id),
+                normalize_operation_selector(&self.preferred_selector),
+            ])
+            .collect()
+    }
+
+    fn matches_selector(&self, selector: &str) -> bool {
+        let normalized = normalize_operation_selector(selector);
+        self.selector_keys().contains(&normalized)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct OperationIndex {
+    by_connector: BTreeMap<String, Vec<ManifestOperationProfile>>,
+}
+
+impl OperationIndex {
+    fn load() -> Self {
+        let Ok(catalog) = DiscoveryCatalog::load() else {
+            return Self::default();
+        };
+
+        let by_connector = catalog
+            .connectors()
+            .iter()
+            .map(|connector| {
+                (
+                    connector.slug.clone(),
+                    connector
+                        .operations
+                        .iter()
+                        .map(ManifestOperationProfile::from_discovered)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+
+        Self { by_connector }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -371,6 +452,9 @@ pub fn compile(request: &IntentRequest) -> CompiledIntent {
         &profiles,
     );
     let chosen_connector = connector_candidates.first().cloned();
+    let chosen_profile = chosen_connector
+        .as_ref()
+        .and_then(|candidate| profiles.iter().find(|profile| profile.id == candidate.id));
     let alternative_connectors = connector_candidates
         .iter()
         .skip(1)
@@ -395,6 +479,7 @@ pub fn compile(request: &IntentRequest) -> CompiledIntent {
         payload_literal.as_deref(),
         lookup_literal.as_deref(),
         chosen_connector.as_ref(),
+        chosen_profile,
         &connector_candidates,
         &action_signals,
     );
@@ -507,6 +592,7 @@ fn build_plan(
     payload_literal: Option<&str>,
     lookup_literal: Option<&str>,
     chosen_connector: Option<&ConnectorCandidate>,
+    chosen_profile: Option<&ConnectorProfile>,
     connector_candidates: &[ConnectorCandidate],
     action: &ActionSignals,
 ) -> PlanBuild {
@@ -525,6 +611,7 @@ fn build_plan(
             payload_literal,
             lookup_literal,
             chosen_connector,
+            chosen_profile,
             connector_candidates,
             action,
         ),
@@ -1083,6 +1170,7 @@ fn build_operation_plan(
     payload_literal: Option<&str>,
     lookup_literal: Option<&str>,
     chosen_connector: Option<&ConnectorCandidate>,
+    chosen_profile: Option<&ConnectorProfile>,
     connector_candidates: &[ConnectorCandidate],
     action: &ActionSignals,
 ) -> PlanBuild {
@@ -1126,8 +1214,13 @@ fn build_operation_plan(
         return plan;
     };
 
-    let operation_hint =
-        infer_operation_hint(&connector.id, action, payload_literal, lookup_literal);
+    let operation_hint = infer_operation_hint(
+        chosen_profile,
+        &connector.id,
+        action,
+        payload_literal,
+        lookup_literal,
+    );
     plan.operation_hint = Some(operation_hint.clone());
     plan.summary = format!(
         "Plan a {} workflow on `{}` via `{}`.",
@@ -1522,13 +1615,14 @@ fn infer_resource(normalized_intent: &str) -> Option<&'static str> {
 }
 
 fn infer_operation_hint(
+    chosen_profile: Option<&ConnectorProfile>,
     connector_id: &str,
     action: &ActionSignals,
     payload_literal: Option<&str>,
     lookup_literal: Option<&str>,
 ) -> String {
     let resource = action.resource.unwrap_or("object");
-    match connector_id {
+    let heuristic_hint = match connector_id {
         "github" => github_operation_hint(action.verb, resource),
         "slack" | "discord" | "telegram" => messaging_operation_hint(action.verb, resource),
         "notion" => notion_operation_hint(action.verb, resource),
@@ -1545,6 +1639,144 @@ fn infer_operation_hint(
         }
         "openai" | "anthropic" | "google-ai" | "llm-router" => llm_operation_hint(action.verb),
         _ => generic_operation_hint(action.verb, resource, payload_literal, lookup_literal),
+    };
+
+    if let Some(profile) = chosen_profile
+        && let Some(manifest_hint) = canonical_manifest_operation_hint(profile, &heuristic_hint)
+            .or_else(|| infer_manifest_operation_hint(profile, action))
+    {
+        return manifest_hint;
+    }
+
+    heuristic_hint
+}
+
+fn canonical_manifest_operation_hint(profile: &ConnectorProfile, selector: &str) -> Option<String> {
+    profile
+        .operations
+        .iter()
+        .find(|operation| operation.matches_selector(selector))
+        .map(|operation| operation.preferred_selector.clone())
+}
+
+fn infer_manifest_operation_hint(
+    profile: &ConnectorProfile,
+    action: &ActionSignals,
+) -> Option<String> {
+    let selector_candidates = manifest_selector_candidates(action);
+    if selector_candidates.is_empty() {
+        return None;
+    }
+
+    let mut matches = profile
+        .operations
+        .iter()
+        .filter_map(|operation| {
+            selector_candidates
+                .iter()
+                .enumerate()
+                .find(|(_, selector)| operation.matches_selector(selector))
+                .and_then(|(rank, selector)| {
+                    let rank = i32::try_from(rank).ok()?;
+                    let mut score = 100_i32 - rank;
+                    if normalize_operation_selector(&operation.preferred_selector) == *selector {
+                        score += 10;
+                    }
+                    if contains_term(&operation.local_id.replace('_', " "), action.verb) {
+                        score += 2;
+                    }
+                    Some((score, operation))
+                })
+        })
+        .collect::<Vec<_>>();
+
+    matches.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.preferred_selector.cmp(&right.1.preferred_selector))
+    });
+    matches
+        .first()
+        .map(|(_, operation)| operation.preferred_selector.clone())
+}
+
+fn manifest_selector_candidates(action: &ActionSignals) -> Vec<String> {
+    let Some(resource) = action.resource else {
+        return Vec::new();
+    };
+
+    let mut selectors = Vec::new();
+    let mut seen = BTreeSet::new();
+    for noun in manifest_resource_variants(resource) {
+        for verb in manifest_verb_variants(action.verb) {
+            let selector = normalize_operation_selector(&format!("{noun}.{verb}"));
+            if seen.insert(selector.clone()) {
+                selectors.push(selector);
+            }
+        }
+    }
+    if action.verb == "comment" {
+        for verb in ["create", "add", "post"] {
+            let selector = normalize_operation_selector(&format!("comments.{verb}"));
+            if seen.insert(selector.clone()) {
+                selectors.push(selector);
+            }
+        }
+    }
+    selectors
+}
+
+fn manifest_verb_variants(verb: &str) -> &'static [&'static str] {
+    match verb {
+        "append" => &["append", "add", "create", "post"],
+        "comment" => &["comment", "create", "add", "reply", "post"],
+        "create" => &["create", "post", "open", "add"],
+        "get" => &["get", "read", "fetch", "retrieve", "download", "info"],
+        "list" => &["list", "search", "get", "read"],
+        "query" => &["query", "search", "list", "run", "get"],
+        "search" => &["search", "find", "list", "query"],
+        "send" => &["send", "post", "create", "reply"],
+        "update" => &["update", "set", "edit", "modify"],
+        _ => &[],
+    }
+}
+
+fn manifest_resource_variants(resource: &str) -> Vec<String> {
+    let singular = singularize_resource(resource);
+    let plural = pluralize_resource(&singular);
+    let mut variants = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for value in [singular, plural] {
+        for variant in [
+            value.clone(),
+            value.replace('_', "-"),
+            value.replace('_', ""),
+        ] {
+            if seen.insert(variant.clone()) {
+                variants.push(variant);
+            }
+        }
+    }
+
+    variants
+}
+
+fn singularize_resource(resource: &str) -> String {
+    let normalized = normalize_operation_selector(resource);
+    match normalized.as_str() {
+        "queries" => "query".to_owned(),
+        value if value.ends_with('s') => value.trim_end_matches('s').to_owned(),
+        value => value.to_owned(),
+    }
+}
+
+fn pluralize_resource(resource: &str) -> String {
+    match resource {
+        "query" => "queries".to_owned(),
+        value if value.ends_with('s') => value.to_owned(),
+        value => format!("{value}s"),
     }
 }
 
@@ -1617,6 +1849,13 @@ fn build_next_actions(
 }
 
 fn connector_profiles() -> Vec<ConnectorProfile> {
+    static CONNECTOR_PROFILES: OnceLock<Vec<ConnectorProfile>> = OnceLock::new();
+    CONNECTOR_PROFILES
+        .get_or_init(build_connector_profiles)
+        .clone()
+}
+
+fn build_connector_profiles() -> Vec<ConnectorProfile> {
     let mut profiles = curated_connector_profiles();
 
     for connector_id in workspace_connector_ids() {
@@ -1625,7 +1864,19 @@ fn connector_profiles() -> Vec<ConnectorProfile> {
             .or_insert_with(|| generic_connector_profile(&connector_id));
     }
 
+    for (connector_id, operations) in &operation_index().by_connector {
+        let profile = profiles
+            .entry(connector_id.clone())
+            .or_insert_with(|| generic_connector_profile(connector_id));
+        profile.operations = operations.clone();
+    }
+
     profiles.into_values().collect()
+}
+
+fn operation_index() -> &'static OperationIndex {
+    static OPERATION_INDEX: OnceLock<OperationIndex> = OnceLock::new();
+    OPERATION_INDEX.get_or_init(OperationIndex::load)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1699,6 +1950,7 @@ fn curated_connector(id: &str, aliases: &[&str], keywords: &[&str]) -> Connector
             .iter()
             .map(|keyword| (*keyword).to_owned())
             .collect(),
+        operations: Vec::new(),
     }
 }
 
@@ -1709,6 +1961,7 @@ fn generic_connector_profile(id: &str) -> ConnectorProfile {
         id: id.to_owned(),
         aliases,
         keywords: id.split('-').map(str::to_owned).collect(),
+        operations: Vec::new(),
     }
 }
 
@@ -2318,6 +2571,28 @@ mod tests {
         }
     }
 
+    fn connector_profile(connector_id: &str) -> ConnectorProfile {
+        connector_profiles()
+            .into_iter()
+            .find(|profile| profile.id == connector_id)
+            .unwrap_or_else(|| panic!("expected connector profile for `{connector_id}`"))
+    }
+
+    fn manifest_operation(preferred_selector: &str) -> ManifestOperationProfile {
+        ManifestOperationProfile {
+            actual_id: preferred_selector.to_owned(),
+            local_id: preferred_selector.replace('.', "_"),
+            preferred_selector: preferred_selector.to_owned(),
+            aliases: Vec::new(),
+            description: String::new(),
+            capability: String::new(),
+            risk_level: "low".to_owned(),
+            safety_tier: "safe".to_owned(),
+            when_to_use: String::new(),
+            common_mistakes: Vec::new(),
+        }
+    }
+
     // ── parse_literals ──────────────────────────────────────
 
     #[test]
@@ -2750,7 +3025,100 @@ mod tests {
         assert!(candidates.is_empty());
     }
 
+    #[test]
+    fn connector_profiles_merge_manifest_operations_for_curated_connector() {
+        let github = connector_profile("github");
+        let create_issue = github
+            .operations
+            .iter()
+            .find(|operation| operation.preferred_selector == "issues.create")
+            .expect("github manifest operation should be indexed");
+
+        assert_eq!(create_issue.actual_id, "github.create_issue");
+        assert_eq!(create_issue.capability, "github.write");
+        assert_eq!(create_issue.risk_level, "medium");
+        assert_eq!(create_issue.safety_tier, "risky");
+        assert!(create_issue.matches_selector("github.create_issue"));
+        assert!(create_issue.matches_selector("issues.create"));
+    }
+
+    #[test]
+    fn connector_profiles_merge_manifest_operations_for_uncurated_connector() {
+        let asana = connector_profile("asana");
+        assert!(
+            asana
+                .operations
+                .iter()
+                .any(|operation| operation.preferred_selector == "projects.list")
+        );
+        assert!(
+            asana
+                .operations
+                .iter()
+                .any(|operation| operation.preferred_selector == "tasks.create")
+        );
+    }
+
     // ── operation hints ─────────────────────────────────────
+
+    #[test]
+    fn infer_operation_hint_prefers_manifest_selector_for_slack_send_message() {
+        let slack = connector_profile("slack");
+        let action = ActionSignals {
+            family: "operation",
+            verb: "send",
+            resource: Some("message"),
+            risk: "medium",
+            mutating: true,
+            matched_terms: vec!["send".to_owned()],
+            needs_lookup: false,
+        };
+
+        let hint = infer_operation_hint(Some(&slack), "slack", &action, Some("hello"), None);
+        assert_eq!(hint, "messages.post");
+    }
+
+    #[test]
+    fn infer_operation_hint_uses_manifest_selector_for_uncurated_connector() {
+        let asana = connector_profile("asana");
+        let action = ActionSignals {
+            family: "operation",
+            verb: "list",
+            resource: Some("project"),
+            risk: "low",
+            mutating: false,
+            matched_terms: vec!["list".to_owned()],
+            needs_lookup: false,
+        };
+
+        let hint = infer_operation_hint(Some(&asana), "asana", &action, None, None);
+        assert_eq!(hint, "projects.list");
+    }
+
+    #[test]
+    fn infer_operation_hint_preserves_manifest_priority_order() {
+        let profile = ConnectorProfile {
+            id: "slack".to_owned(),
+            aliases: Vec::new(),
+            keywords: Vec::new(),
+            operations: vec![
+                manifest_operation("messages.create"),
+                manifest_operation("messages.post"),
+            ],
+        };
+        let action = ActionSignals {
+            family: "operation",
+            verb: "send",
+            resource: Some("message"),
+            risk: "medium",
+            mutating: true,
+            matched_terms: vec!["send".to_owned()],
+            needs_lookup: false,
+        };
+
+        let hint = infer_operation_hint(Some(&profile), "slack", &action, Some("hello"), None);
+        assert_eq!(hint, "messages.post");
+    }
 
     #[test]
     fn github_operation_hint_issues_create() {
@@ -3235,6 +3603,21 @@ mod tests {
         let profiles = connector_profiles();
         assert!(profiles.iter().any(|profile| profile.id == "github"));
         assert!(profiles.iter().any(|profile| profile.id == "slack"));
+    }
+
+    #[test]
+    fn compiler_prefers_manifest_selector_for_slack_message_plan() {
+        let plan = compile(&request("send a Slack message \"hello from intent\""));
+        assert_eq!(
+            plan.chosen_connector.as_ref().map(|c| c.id.as_str()),
+            Some("slack")
+        );
+        assert_eq!(plan.operation_hint.as_deref(), Some("messages.post"));
+        assert!(
+            plan.steps
+                .iter()
+                .any(|step| step.command_line.contains("fwc schema slack messages.post"))
+        );
     }
 
     #[test]
@@ -5468,7 +5851,7 @@ mod tests {
     #[test]
     fn transcript_bundle_schema_conformance() {
         // Verify that all transcript bundles conform to the evidence-bundle schema
-        let scenarios = vec![
+        let scenarios = [
             compile(&request("disable the github connector")),
             compile(&request("tail the slack connector logs")),
             compile(&request("restart the telegram connector")),

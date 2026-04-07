@@ -5,3 +5,4 @@ Conventions:
 - JSON files stay strict JSON so they can be deserialized directly in tests.
 - TOML and JSONL files are also kept parseable by the real `fwc` parsers.
 - `golden/` contains future-facing render snapshots for `fwc access`, `fwc setup`, and `fwc mesh`; those files are syntax-checked and cataloged without claiming the command family is fully implemented yet.
+- `generator/` stores canonical `fwc new` scaffold bundles so exact emitted manifest/runtime/test surfaces can be frozen and diffed in regression tests.

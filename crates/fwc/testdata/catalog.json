@@ -15,6 +15,7 @@
     { "path": "batch/invalid_batch.jsonl", "kind": "batch_jsonl", "purpose": "Semantically invalid batch fixture for error handling.", "validation": "semantic" },
     { "path": "batch/mixed_batch.jsonl", "kind": "batch_jsonl", "purpose": "Mixed-connector batch fixture for heterogeneous dispatch.", "validation": "semantic" },
     { "path": "batch/simple_batch.jsonl", "kind": "batch_jsonl", "purpose": "Homogeneous batch fixture for map-style execution.", "validation": "semantic" },
+    { "path": "generator/truthful_request_response_bundle.json", "kind": "golden_json", "purpose": "Canonical truthful request-response scaffold bundle emitted by fwc new for exact regression coverage.", "validation": "json" },
     { "path": "golden/access_plan.json", "kind": "golden_json", "purpose": "Future access command JSON render snapshot.", "validation": "json" },
     { "path": "golden/access_plan.toon", "kind": "golden_toon", "purpose": "Future access command TOON render snapshot.", "validation": "text" },
     { "path": "golden/dispatch_invocations.json", "kind": "golden_json", "purpose": "Representative future dispatch invocation argv vectors.", "validation": "json" },

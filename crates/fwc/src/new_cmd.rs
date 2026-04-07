@@ -3766,6 +3766,79 @@ fn print_precheck_results(prechecks: &PrecheckResults) {
 mod tests {
     use super::*;
 
+    fn generator_fixture_path(relative: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("testdata")
+            .join(relative)
+    }
+
+    fn load_generator_fixture_json(relative: &str) -> serde_json::Value {
+        serde_json::from_str(
+            &fs::read_to_string(generator_fixture_path(relative))
+                .expect("generator fixture should be readable"),
+        )
+        .expect("generator fixture should deserialize")
+    }
+
+    fn write_generator_fixture_json(relative: &str, value: &serde_json::Value) {
+        let path = generator_fixture_path(relative);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("generator fixture parent should exist");
+        }
+        let payload = serde_json::to_string_pretty(value).expect("generator fixture should serialize");
+        fs::write(&path, format!("{payload}\n")).expect("generator fixture should be writable");
+    }
+
+    fn canonical_truthful_request_response_bundle() -> serde_json::Value {
+        let connector_id = "fcp.truthful-sample";
+        let crate_path = "connectors/truthful-sample";
+        let files = generate_files(
+            connector_id,
+            "truthful-sample",
+            "fcp-truthful-sample",
+            ConnectorArchetype::RequestResponse,
+            "z:project:truthful-sample",
+            false,
+        )
+        .expect("fixture files");
+        let prechecks = run_prechecks(&files, connector_id, "z:project:truthful-sample");
+        let next_steps = generate_next_steps(
+            connector_id,
+            crate_path,
+            ConnectorArchetype::RequestResponse,
+            false,
+        );
+
+        serde_json::json!({
+            "connector_id": connector_id,
+            "crate_path": crate_path,
+            "archetype": "request-response",
+            "zone": "z:project:truthful-sample",
+            "prechecks": prechecks,
+            "next_steps": next_steps,
+            "files": files.iter().map(|(path, content, purpose)| serde_json::json!({
+                "path": path,
+                "purpose": purpose,
+                "content": content,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    fn all_archetypes() -> [ConnectorArchetype; 10] {
+        [
+            ConnectorArchetype::RequestResponse,
+            ConnectorArchetype::Streaming,
+            ConnectorArchetype::Bidirectional,
+            ConnectorArchetype::Polling,
+            ConnectorArchetype::Webhook,
+            ConnectorArchetype::Queue,
+            ConnectorArchetype::File,
+            ConnectorArchetype::Database,
+            ConnectorArchetype::Cli,
+            ConnectorArchetype::Browser,
+        ]
+    }
+
     // ---- types tests (from types submodule) ----
 
     #[test]
@@ -5590,6 +5663,62 @@ serde = "1"
         .unwrap();
         for (path, content, _) in &files {
             assert!(!content.is_empty(), "file {path} has empty content");
+        }
+    }
+
+    #[test]
+    #[ignore = "fixture refresh helper; run explicitly with -- --ignored --nocapture"]
+    fn emit_truthful_scaffold_fixture_bundle() {
+        let bundle = canonical_truthful_request_response_bundle();
+        if std::env::var_os("FCP_UPDATE_GOLDENS").is_some() {
+            write_generator_fixture_json("generator/truthful_request_response_bundle.json", &bundle);
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&bundle).expect("fixture JSON")
+        );
+    }
+
+    #[test]
+    fn truthful_request_response_scaffold_matches_golden_bundle() {
+        let actual = canonical_truthful_request_response_bundle();
+        let expected =
+            load_generator_fixture_json("generator/truthful_request_response_bundle.json");
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn generated_scaffolds_never_emit_legacy_placeholder_markers() {
+        let banned_markers = [
+            "[provides.operations.placeholder_operation]",
+            "\"api client not implemented\".to_string()",
+            "api client not implemented",
+            "bidirectional send not implemented",
+            "TODO: Replace placeholders with the actual service limits before shipping.",
+        ];
+
+        for (index, archetype) in all_archetypes().into_iter().enumerate() {
+            let connector_id = format!("fcp.fixture{index}");
+            let short_name = format!("fixture{index}");
+            let crate_name = format!("fcp-fixture{index}");
+            let files = generate_files(
+                &connector_id,
+                &short_name,
+                &crate_name,
+                archetype,
+                "z:project:fixture",
+                false,
+            )
+            .unwrap_or_else(|error| panic!("failed to generate files for {archetype:?}: {error}"));
+
+            for (path, content, _) in files {
+                for marker in banned_markers {
+                    assert!(
+                        !content.contains(marker),
+                        "{archetype:?} generated {path} with legacy marker `{marker}`"
+                    );
+                }
+            }
         }
     }
 

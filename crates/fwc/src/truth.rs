@@ -1756,7 +1756,7 @@ mod tests {
             attempts: vec![SourceAttempt {
                 source: KnowledgeState::HostBacked,
                 outcome: SourceOutcome::Unreachable,
-                elapsed: Duration::from_millis(5000),
+                elapsed: Duration::from_secs(5),
                 detail: Some("connection refused".into()),
             }],
             reason: "host unreachable".into(),
@@ -2149,7 +2149,7 @@ mod tests {
         // Prove correct mode
         assert_eq!(resolution.knowledge_state, KnowledgeState::Offline);
         assert!(!resolution.knowledge_state.is_live());
-        assert_eq!(resolution.knowledge_state.confidence(), 0.4);
+        assert!((resolution.knowledge_state.confidence() - 0.4).abs() < f64::EPSILON);
         assert!(!resolution.is_fallback());
 
         // Prove trace shows offline branch
@@ -2192,7 +2192,7 @@ mod tests {
 
         assert_eq!(resolution.knowledge_state, KnowledgeState::NodeLocal);
         assert!(!resolution.knowledge_state.is_live());
-        assert_eq!(resolution.knowledge_state.confidence(), 0.6);
+        assert!((resolution.knowledge_state.confidence() - 0.6).abs() < f64::EPSILON);
         assert!(!resolution.is_fallback());
 
         let log = resolution_to_log(&resolution);
@@ -2223,7 +2223,7 @@ mod tests {
 
         assert_eq!(resolution.knowledge_state, KnowledgeState::HostBacked);
         assert!(resolution.knowledge_state.is_live());
-        assert_eq!(resolution.knowledge_state.confidence(), 0.9);
+        assert!((resolution.knowledge_state.confidence() - 0.9).abs() < f64::EPSILON);
         assert!(!resolution.is_fallback());
 
         let log = resolution_to_log(&resolution);
@@ -2266,7 +2266,7 @@ mod tests {
 
         assert_eq!(resolution.knowledge_state, KnowledgeState::MeshBacked);
         assert!(resolution.knowledge_state.is_live());
-        assert_eq!(resolution.knowledge_state.confidence(), 1.0);
+        assert!((resolution.knowledge_state.confidence() - 1.0).abs() < f64::EPSILON);
         assert!(!resolution.is_fallback());
 
         // Mesh was tried first and succeeded — host was never queried
@@ -2316,7 +2316,7 @@ mod tests {
 
         assert_eq!(resolution.knowledge_state, KnowledgeState::Degraded);
         assert!(!resolution.knowledge_state.is_live());
-        assert_eq!(resolution.knowledge_state.confidence(), 0.3);
+        assert!((resolution.knowledge_state.confidence() - 0.3).abs() < f64::EPSILON);
         assert!(resolution.is_fallback());
 
         // Trace shows host was partial, mesh was unavailable

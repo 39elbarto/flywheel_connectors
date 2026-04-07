@@ -3412,8 +3412,7 @@ mod tests {
         // UUID v4 format: 8-4-4-4-12 hex chars separated by dashes
         let s = id.as_str();
         assert_eq!(s.len(), 36, "UUID should be 36 chars");
-        let parts: Vec<&str> = s.split('-').collect();
-        assert_eq!(parts.len(), 5);
+        assert_eq!(s.split('-').count(), 5);
     }
 
     #[test]
@@ -4114,8 +4113,8 @@ mod tests {
         );
 
         let m = ArtifactManifest::new(
-            ctx.scenario_id.clone(),
-            ctx.trace_id.clone(),
+            ctx.scenario_id,
+            ctx.trace_id,
             4,
             0,
             BundleOutcome::Pass,
@@ -4479,7 +4478,7 @@ mod tests {
         // We can indirectly verify via ReplayEnvelope
         let sid = ScenarioId::new(ScenarioLayer::Unit, "s", "c");
         let tid = TraceId::from_string("t");
-        let env = ReplayEnvelope::new(sid.clone(), tid.clone(), "  cargo build", "/dir");
+        let env = ReplayEnvelope::new(sid, tid, "  cargo build", "/dir");
         assert_eq!(env.command_runner.as_deref(), Some("rch exec --"));
     }
 

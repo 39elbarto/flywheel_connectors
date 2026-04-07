@@ -366,6 +366,7 @@ fn assert_operator_truth_fixture_has_core_evidence_contract(fixture: &OperatorTr
     );
 }
 
+#[allow(clippy::too_many_lines)]
 fn assert_operator_truth_fixture_contract(payload: &Value, fixture: &OperatorTruthFixture) {
     assert_eq!(payload["command"], fixture.command);
     assert_eq!(payload["source"], fixture.source);
@@ -537,7 +538,7 @@ fn operator_truth_fixture_bundle_layer(fixture: &OperatorTruthFixture) -> Scenar
     })
 }
 
-fn operator_truth_fixture_bundle_suite<'a>(fixture: &'a OperatorTruthFixture) -> &'a str {
+fn operator_truth_fixture_bundle_suite(fixture: &OperatorTruthFixture) -> &str {
     fixture
         .bundle_suite
         .as_deref()
@@ -1936,7 +1937,7 @@ fn operator_truth_fixture_refusal_exports_replayable_bundle_manifest() {
         &fixture.id,
     )
     .with_tag("acceptance")
-    .with_env("FWC_HOST", host.clone());
+    .with_env("FWC_HOST", host);
     log.append(
         TraceEntry::new(
             &ctx.trace_id,
@@ -4519,7 +4520,7 @@ fn operator_truth_fixture_node_local_status_exports_replayable_bundle_manifest()
         &fixture.id,
     )
     .with_tag("acceptance")
-    .with_env("FWC_HOST", host.clone());
+    .with_env("FWC_HOST", host);
     log.append(
         TraceEntry::new(
             &ctx.trace_id,
@@ -4644,7 +4645,7 @@ fn operator_truth_fixture_mesh_backed_exports_replayable_bundle_manifest() {
         &fixture.id,
     )
     .with_tag("acceptance")
-    .with_env("FWC_HOST", host.clone());
+    .with_env("FWC_HOST", host);
     log.append(
         TraceEntry::new(
             &ctx.trace_id,
@@ -4749,7 +4750,7 @@ fn operator_truth_fixture_degraded_exports_replayable_bundle_manifest() {
         &fixture.id,
     )
     .with_tag("acceptance")
-    .with_env("FWC_HOST", host.clone());
+    .with_env("FWC_HOST", host);
     log.append(
         TraceEntry::new(
             &ctx.trace_id,
@@ -4839,7 +4840,7 @@ fn operator_truth_fixture_fallback_exports_replayable_bundle_manifest() {
         &fixture.id,
     )
     .with_tag("acceptance")
-    .with_env("FWC_HOST", host.clone());
+    .with_env("FWC_HOST", host);
     log.append(
         TraceEntry::new(
             &ctx.trace_id,

@@ -120,6 +120,10 @@ pub struct ScenarioId {
 
 impl ScenarioId {
     /// Create a new scenario ID from its components.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `suite` or `case` is empty or contains non-path-safe characters.
     #[must_use]
     pub fn new(layer: ScenarioLayer, suite: impl Into<String>, case: impl Into<String>) -> Self {
         let suite = suite.into();
@@ -470,7 +474,7 @@ impl TruthContext {
 
     /// Set the phase marker.
     #[must_use]
-    pub fn with_phase(mut self, phase: TruthPhase) -> Self {
+    pub const fn with_phase(mut self, phase: TruthPhase) -> Self {
         self.phase = Some(phase);
         self
     }
@@ -498,14 +502,14 @@ impl TruthContext {
 
     /// Mark the step as part of a reconnect sequence.
     #[must_use]
-    pub fn with_reconnect_event(mut self, event: ReconnectEvent) -> Self {
+    pub const fn with_reconnect_event(mut self, event: ReconnectEvent) -> Self {
         self.reconnect_event = Some(event);
         self
     }
 
     /// Mark the step as part of a cancellation sequence.
     #[must_use]
-    pub fn with_cancellation_event(mut self, event: CancellationEvent) -> Self {
+    pub const fn with_cancellation_event(mut self, event: CancellationEvent) -> Self {
         self.cancellation_event = Some(event);
         self
     }
@@ -926,6 +930,11 @@ impl ArtifactBundle {
     /// Create a new bundle with deterministic ID and path layout.
     ///
     /// Path pattern: `{base}/artifacts/{layer}/{suite}/{case}/{timestamp_millis}/`
+    ///
+    /// # Panics
+    ///
+    /// Panics if `scenario_id.suite` or `scenario_id.case` is empty or contains
+    /// non-path-safe characters.
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn new(base: &std::path::Path, scenario_id: &ScenarioId, trace_id: &TraceId) -> Self {

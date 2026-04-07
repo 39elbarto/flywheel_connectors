@@ -1259,7 +1259,7 @@ impl RemediationOutput {
 
     /// Sort findings by severity (critical first).
     pub fn sort_by_severity(&mut self) {
-        self.findings.sort_by(|a, b| b.severity.cmp(&a.severity));
+        self.findings.sort_by_key(|f| std::cmp::Reverse(f.severity));
     }
 
     /// Most severe finding, if any.

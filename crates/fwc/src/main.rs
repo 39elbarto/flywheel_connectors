@@ -266,6 +266,7 @@ mod test_observability;
 #[allow(dead_code)]
 mod throttle;
 mod trace_cmd;
+#[allow(dead_code)] // Types planned for mesh-native integration, not yet wired to dispatch.
 mod truth;
 #[allow(dead_code)] // Idempotent undo for reversible operations.
 mod undo;

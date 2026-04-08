@@ -71,7 +71,10 @@ use wasmtime_wasi::{
     sockets::SocketAddrUse,
 };
 
-use crate::egress::{EgressGuard, EgressHttpRequest, EgressRequest, EgressTcpConnectRequest};
+use crate::egress::{
+    CredentialInjector, EgressDecision, EgressGuard, EgressHttpRequest, EgressRequest,
+    EgressTcpConnectRequest, EgressTcpDecision,
+};
 use crate::sandbox::{CompiledPolicy, SandboxError, resolve_policy_path};
 use fcp_manifest::NetworkConstraints;
 
@@ -495,6 +498,76 @@ impl NetworkCapabilityGate {
         debug!(host = %host, port = %port, tls = %tls, "TCP connection allowed");
         Ok(())
     }
+
+    /// Authorize a mediated HTTP request and inject credentials when allowed.
+    ///
+    /// This is the credential-aware Network Guard path higher-level WASI
+    /// `network_request`-style hostcalls should use. Raw Preview2 sockets stay
+    /// disabled for strict profiles because they bypass this mediation layer.
+    ///
+    /// # Errors
+    ///
+    /// Returns `WasiError::NetworkAccessDenied` if policy or credential checks fail.
+    pub fn authorize_http(
+        &self,
+        request: &mut EgressHttpRequest,
+        injector: &dyn CredentialInjector,
+        operation_id: &str,
+        credential_allow: &[String],
+    ) -> WasiResult<EgressDecision> {
+        if self.block_direct && self.constraints.is_none() {
+            return Err(WasiError::NetworkAccessDenied(
+                "direct network access blocked and no constraints configured".into(),
+            ));
+        }
+
+        let Some(constraints) = &self.constraints else {
+            return Err(WasiError::NetworkAccessDenied("no network policy".into()));
+        };
+
+        self.guard
+            .authorize_http(
+                request,
+                constraints,
+                injector,
+                operation_id,
+                credential_allow,
+            )
+            .map_err(|e| WasiError::NetworkAccessDenied(e.to_string()))
+    }
+
+    /// Authorize a mediated TCP connect request and return any injected auth bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `WasiError::NetworkAccessDenied` if policy or credential checks fail.
+    pub fn authorize_tcp(
+        &self,
+        request: &EgressTcpConnectRequest,
+        injector: &dyn CredentialInjector,
+        operation_id: &str,
+        credential_allow: &[String],
+    ) -> WasiResult<EgressTcpDecision> {
+        if self.block_direct && self.constraints.is_none() {
+            return Err(WasiError::NetworkAccessDenied(
+                "direct network access blocked and no constraints configured".into(),
+            ));
+        }
+
+        let Some(constraints) = &self.constraints else {
+            return Err(WasiError::NetworkAccessDenied("no network policy".into()));
+        };
+
+        self.guard
+            .authorize_tcp(
+                request,
+                constraints,
+                injector,
+                operation_id,
+                credential_allow,
+            )
+            .map_err(|e| WasiError::NetworkAccessDenied(e.to_string()))
+    }
 }
 
 // ============================================================================
@@ -631,6 +704,38 @@ impl WasiHostState {
     /// Returns `WasiError::NetworkAccessDenied` if the connection violates policy.
     pub fn validate_tcp_access(&self, host: &str, port: u16, tls: bool) -> WasiResult<()> {
         self.net_gate.check_tcp(host, port, tls)
+    }
+
+    /// Authorize a credential-aware HTTP request through the mediated Network Guard path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `WasiError::NetworkAccessDenied` if policy or credential checks fail.
+    pub fn authorize_http_request(
+        &self,
+        request: &mut EgressHttpRequest,
+        injector: &dyn CredentialInjector,
+        operation_id: &str,
+        credential_allow: &[String],
+    ) -> WasiResult<EgressDecision> {
+        self.net_gate
+            .authorize_http(request, injector, operation_id, credential_allow)
+    }
+
+    /// Authorize a credential-aware TCP connect through the mediated Network Guard path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `WasiError::NetworkAccessDenied` if policy or credential checks fail.
+    pub fn authorize_tcp_connect(
+        &self,
+        request: &EgressTcpConnectRequest,
+        injector: &dyn CredentialInjector,
+        operation_id: &str,
+        credential_allow: &[String],
+    ) -> WasiResult<EgressTcpDecision> {
+        self.net_gate
+            .authorize_tcp(request, injector, operation_id, credential_allow)
     }
 }
 

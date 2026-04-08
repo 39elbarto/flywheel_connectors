@@ -673,6 +673,315 @@ mod integration {
 }
 
 // ============================================================================
+// Wiremock Proof Tests
+// ============================================================================
+
+mod wiremock_proof {
+    use super::*;
+    use std::collections::HashMap;
+
+    use fcp_manifest::NetworkConstraints;
+    use reqwest::{Method, StatusCode};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+
+    #[derive(Clone, Debug)]
+    struct LiteralCredential {
+        host_allow: Vec<String>,
+        header_name: String,
+        header_value: String,
+    }
+
+    #[derive(Default)]
+    struct LiteralCredentialInjector {
+        credentials: HashMap<String, LiteralCredential>,
+    }
+
+    impl LiteralCredentialInjector {
+        fn register(
+            &mut self,
+            id: &str,
+            host_allow: Vec<String>,
+            header_name: &str,
+            header_value: &str,
+        ) {
+            self.credentials.insert(
+                id.to_string(),
+                LiteralCredential {
+                    host_allow,
+                    header_name: header_name.to_string(),
+                    header_value: header_value.to_string(),
+                },
+            );
+        }
+    }
+
+    impl CredentialInjector for LiteralCredentialInjector {
+        fn is_authorized(
+            &self,
+            credential_id: &str,
+            _operation_id: &str,
+            credential_allow: &[String],
+        ) -> Result<bool, EgressError> {
+            if !self.credentials.contains_key(credential_id) {
+                return Err(EgressError::CredentialError(format!(
+                    "credential not found: {credential_id}"
+                )));
+            }
+            Ok(credential_allow
+                .iter()
+                .any(|allowed| allowed == credential_id))
+        }
+
+        fn is_host_allowed(&self, credential_id: &str, host: &str) -> Result<bool, EgressError> {
+            let Some(credential) = self.credentials.get(credential_id) else {
+                return Err(EgressError::CredentialError(format!(
+                    "credential not found: {credential_id}"
+                )));
+            };
+            Ok(credential.host_allow.iter().any(|allowed| allowed == host))
+        }
+
+        fn inject_http(
+            &self,
+            credential_id: &str,
+            headers: &mut Vec<HttpHeader>,
+        ) -> Result<(), EgressError> {
+            let credential = self.credentials.get(credential_id).ok_or_else(|| {
+                EgressError::CredentialError(format!("credential not found: {credential_id}"))
+            })?;
+            headers.push(HttpHeader {
+                name: credential.header_name.clone(),
+                value: credential.header_value.clone(),
+            });
+            Ok(())
+        }
+
+        fn get_tcp_auth(&self, credential_id: &str) -> Result<Option<Vec<u8>>, EgressError> {
+            if self.credentials.contains_key(credential_id) {
+                Ok(None)
+            } else {
+                Err(EgressError::CredentialError(format!(
+                    "credential not found: {credential_id}"
+                )))
+            }
+        }
+    }
+
+    fn loopback_constraints(host: &str, port: u16) -> NetworkConstraints {
+        NetworkConstraints {
+            host_allow: vec![host.to_string()],
+            port_allow: vec![port],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: false,
+            deny_private_ranges: false,
+            deny_tailnet_ranges: false,
+            require_sni: false,
+            spki_pins: vec![],
+            deny_ip_literals: false,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 10_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        }
+    }
+
+    async fn dispatch_request(request: &EgressHttpRequest) -> reqwest::Result<reqwest::Response> {
+        let client = reqwest::Client::new();
+        let method = Method::from_bytes(request.method.as_bytes()).expect("valid HTTP method");
+        let mut builder = client.request(method, &request.url);
+        for header in &request.headers {
+            builder = builder.header(&header.name, &header.value);
+        }
+        if let Some(body) = &request.body {
+            builder = builder.body(body.clone());
+        }
+        builder.send().await
+    }
+
+    fn connector_view_is_secretless(request: &EgressHttpRequest, forbidden_values: &[&str]) {
+        assert!(
+            request.headers.is_empty(),
+            "connector input must start header-free"
+        );
+        let serialized = serde_json::to_string(request).expect("serialize connector request");
+        for value in forbidden_values {
+            assert!(
+                !serialized.contains(value),
+                "connector-facing request must not contain `{value}`"
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn wiremock_observes_bearer_token_after_proxy_injection() {
+        let server = MockServer::start().await;
+        let server_url = url::Url::parse(&server.uri()).expect("parse mock uri");
+        let host = server_url.host_str().expect("mock host").to_string();
+        let port = server_url.port().expect("mock port");
+
+        Mock::given(method("GET"))
+            .and(path("/bearer"))
+            .and(header("Authorization", "Bearer secret-123"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let mut injector = LiteralCredentialInjector::default();
+        injector.register(
+            "cred-bearer",
+            vec![host.clone()],
+            "Authorization",
+            "Bearer secret-123",
+        );
+
+        let guard = EgressGuard::new();
+        let constraints = loopback_constraints(&host, port);
+        let mut request = EgressHttpRequest {
+            url: format!("{}/bearer", server.uri()),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: Some("cred-bearer".into()),
+        };
+
+        connector_view_is_secretless(&request, &["Authorization", "secret-123"]);
+
+        let decision = guard
+            .authorize_http(
+                &mut request,
+                &constraints,
+                &injector,
+                "op.fetch",
+                &["cred-bearer".into()],
+            )
+            .expect("proxy should authorize bearer request");
+
+        assert!(decision.credential_injected);
+        assert_eq!(request.headers.len(), 1);
+        assert_eq!(request.headers[0].name, "Authorization");
+        assert_eq!(request.headers[0].value, "Bearer secret-123");
+
+        let response = dispatch_request(&request)
+            .await
+            .expect("dispatch request to wiremock");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn wiremock_observes_basic_auth_after_proxy_injection() {
+        let server = MockServer::start().await;
+        let server_url = url::Url::parse(&server.uri()).expect("parse mock uri");
+        let host = server_url.host_str().expect("mock host").to_string();
+        let port = server_url.port().expect("mock port");
+
+        Mock::given(method("POST"))
+            .and(path("/basic"))
+            .and(header("Authorization", "Basic dXNlcjpwYXNz"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let mut injector = LiteralCredentialInjector::default();
+        injector.register(
+            "cred-basic-literal",
+            vec![host.clone()],
+            "Authorization",
+            "Basic dXNlcjpwYXNz",
+        );
+
+        let guard = EgressGuard::new();
+        let constraints = loopback_constraints(&host, port);
+        let mut request = EgressHttpRequest {
+            url: format!("{}/basic", server.uri()),
+            method: "POST".into(),
+            headers: vec![],
+            body: Some(br#"{"probe":"basic"}"#.to_vec()),
+            credential_id: Some("cred-basic-literal".into()),
+        };
+
+        connector_view_is_secretless(&request, &["Authorization", "dXNlcjpwYXNz"]);
+
+        let decision = guard
+            .authorize_http(
+                &mut request,
+                &constraints,
+                &injector,
+                "op.fetch",
+                &["cred-basic-literal".into()],
+            )
+            .expect("proxy should authorize basic-auth request");
+
+        assert!(decision.credential_injected);
+        assert_eq!(request.headers[0].value, "Basic dXNlcjpwYXNz");
+
+        let response = dispatch_request(&request)
+            .await
+            .expect("dispatch request to wiremock");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn wiremock_observes_custom_header_after_proxy_injection() {
+        let server = MockServer::start().await;
+        let server_url = url::Url::parse(&server.uri()).expect("parse mock uri");
+        let host = server_url.host_str().expect("mock host").to_string();
+        let port = server_url.port().expect("mock port");
+
+        Mock::given(method("GET"))
+            .and(path("/api-key"))
+            .and(header("X-API-Key", "key-abc-123"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let mut injector = LiteralCredentialInjector::default();
+        injector.register(
+            "cred-api-key",
+            vec![host.clone()],
+            "X-API-Key",
+            "key-abc-123",
+        );
+
+        let guard = EgressGuard::new();
+        let constraints = loopback_constraints(&host, port);
+        let mut request = EgressHttpRequest {
+            url: format!("{}/api-key", server.uri()),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: Some("cred-api-key".into()),
+        };
+
+        connector_view_is_secretless(&request, &["X-API-Key", "key-abc-123"]);
+
+        let decision = guard
+            .authorize_http(
+                &mut request,
+                &constraints,
+                &injector,
+                "op.fetch",
+                &["cred-api-key".into()],
+            )
+            .expect("proxy should authorize custom-header request");
+
+        assert!(decision.credential_injected);
+        assert_eq!(request.headers[0].name, "X-API-Key");
+        assert_eq!(request.headers[0].value, "key-abc-123");
+
+        let response = dispatch_request(&request)
+            .await
+            .expect("dispatch request to wiremock");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+// ============================================================================
 // Structured Logging Verification Tests
 // ============================================================================
 

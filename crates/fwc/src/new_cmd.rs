@@ -3785,7 +3785,8 @@ mod tests {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("generator fixture parent should exist");
         }
-        let payload = serde_json::to_string_pretty(value).expect("generator fixture should serialize");
+        let payload =
+            serde_json::to_string_pretty(value).expect("generator fixture should serialize");
         fs::write(&path, format!("{payload}\n")).expect("generator fixture should be writable");
     }
 
@@ -5671,7 +5672,10 @@ serde = "1"
     fn emit_truthful_scaffold_fixture_bundle() {
         let bundle = canonical_truthful_request_response_bundle();
         if std::env::var_os("FCP_UPDATE_GOLDENS").is_some() {
-            write_generator_fixture_json("generator/truthful_request_response_bundle.json", &bundle);
+            write_generator_fixture_json(
+                "generator/truthful_request_response_bundle.json",
+                &bundle,
+            );
         }
         println!(
             "{}",

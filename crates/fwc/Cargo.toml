@@ -33,6 +33,7 @@ fcp-raptorq.workspace = true
 fcp-manifest.workspace = true
 fcp-mesh.workspace = true
 fcp-policy.workspace = true
+fcp-registry.workspace = true
 fcp-sandbox.workspace = true
 fcp-telemetry.workspace = true
 fcp-testkit.workspace = true

@@ -288,9 +288,12 @@ use reqwest::blocking::{Client as BlockingClient, ClientBuilder as BlockingClien
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use url::Url;
 
-use fcp_core::{ApprovalToken, CapabilityToken, CapabilityUsageKey, ZoneId};
-use fcp_crypto::{canonicalize::to_deterministic_cbor, cose::CoseToken};
+use fcp_core::{ApprovalToken, CapabilityToken, CapabilityUsageKey, ConnectorTarget, ZoneId};
+use fcp_crypto::{
+    Ed25519Signature, Ed25519VerifyingKey, canonicalize::to_deterministic_cbor, cose::CoseToken,
+};
 use fcp_host::{
     BatchInvokeResponse as HostBatchInvokeResponse, BatchOptions as HostBatchOptions,
     BudgetReportRequest as HostBudgetReportRequest,
@@ -317,8 +320,14 @@ use fcp_kernel::{
     AgentHint, ApprovalMode, BudgetStatus, CapabilityId, ConnectorHealth, ConnectorId,
     InvokeRequest, InvokeResponse, InvokeStatus, LifecycleState, LifecycleStatus, OperationId,
     OperationInfo, RateLimitDeclarations, RequestId, RolloutPolicy, SafetyTier, SelfCheckStatus,
+    SupplyChainAttestation,
 };
 use fcp_manifest::ConnectorManifest;
+use fcp_registry::{
+    AttestationEvidence as RegistryAttestationEvidence, ConnectorBundle,
+    MANIFEST_SIGNATURE_CONTEXT, ManifestSignatureArtifact, RegistryTrustPolicy, RegistryVerifier,
+    SupplyChainEvidence as RegistrySupplyChainEvidence, manifest_signing_bytes,
+};
 use fcp_telemetry::{
     CapabilityRecommendation, CapabilitySuggestionKind, CapabilityUsageAggregate,
     RecommendationConfig, recommend_capabilities,
@@ -328,6 +337,7 @@ use crate::credential::{AuthStatus, AuthTestResult, ExpiryInfo};
 use crate::credential_store::{
     AuthMethod, Credential, CredentialStore, parse_credential_fields, validate_connector_id,
 };
+use crate::lifecycle_install::is_version_newer;
 use crate::package_cmd::{
     BuildMetadata as PackageBuildMetadata, PACKAGE_OUTPUT_FILENAME,
     PackageArgs as PackageBuildArgs, PackageOutput,
@@ -889,6 +899,7 @@ impl IntentArgs {
             connector_override: self.connector.clone(),
             zone_override: self.zone.clone(),
             mode,
+            host_url: None, // Populated by dispatch layer when --host is set
         }
     }
 }
@@ -926,6 +937,7 @@ impl DoIntentArgs {
             } else {
                 intent::IntentMode::DoSimulate
             },
+            host_url: None, // Populated by dispatch layer when --host is set
         }
     }
 }
@@ -1702,12 +1714,16 @@ struct LifecycleArgs {
 
 #[derive(Args, Debug, Serialize)]
 struct InstallArgs {
-    /// Package source path, connector crate path, or workspace connector selector.
+    /// Package source path, connector crate path, workspace connector selector, or registry selector.
     source: String,
 
     /// Optional version to require from the resolved package artifact.
     #[arg(long)]
     version: Option<String>,
+
+    /// Registry endpoint used to resolve the connector instead of a local path or workspace build.
+    #[arg(long)]
+    registry: Option<String>,
 
     /// Verify only and do not write the connector into the managed inventory.
     #[arg(long, default_value_t = false)]
@@ -1727,9 +1743,13 @@ struct UpdateArgs {
     /// Installed connector id, alias, or family name.
     connector: String,
 
-    /// Optional replacement package source path, connector crate path, or workspace connector selector.
+    /// Optional replacement package source path, connector crate path, workspace connector selector, or registry selector.
     #[arg(long)]
     source: Option<String>,
+
+    /// Registry endpoint used to resolve the replacement artifact.
+    #[arg(long)]
+    registry: Option<String>,
 
     /// Explain the update plan without applying it.
     #[arg(long, default_value_t = false)]
@@ -7456,6 +7476,7 @@ fn resolve_mesh_offline_truth(
 
 fn resolve_install_verify_only_truth(artifact: &PreparedPackageArtifact) -> LiveTruthResolution {
     let authoritative_scope = match artifact.source_kind {
+        PreparedPackageSourceKind::Registry => "registry-verified-local-cache",
         PreparedPackageSourceKind::LocalPackageMetadataFile
         | PreparedPackageSourceKind::LocalPackagedDirectory => "local-machine-only",
         PreparedPackageSourceKind::LocalConnectorCrate
@@ -7517,6 +7538,7 @@ fn install_verify_only_availability_fact(artifact: &PreparedPackageArtifact) -> 
     json!({
         "state": "local-verification-only",
         "authoritative_scope": match artifact.source_kind {
+            PreparedPackageSourceKind::Registry => "registry-verified-local-cache",
             PreparedPackageSourceKind::LocalPackageMetadataFile
             | PreparedPackageSourceKind::LocalPackagedDirectory => "local-machine-only",
             PreparedPackageSourceKind::LocalConnectorCrate
@@ -13707,6 +13729,7 @@ fn read_json_file(path: &PathBuf) -> Result<Value> {
 
 #[derive(Clone, Copy, Debug)]
 enum PreparedPackageSourceKind {
+    Registry,
     LocalPackageMetadataFile,
     LocalPackagedDirectory,
     LocalConnectorCrate,
@@ -13716,6 +13739,7 @@ enum PreparedPackageSourceKind {
 impl PreparedPackageSourceKind {
     const fn state(&self) -> &'static str {
         match self {
+            Self::Registry => "registry-download",
             Self::LocalPackageMetadataFile => "local-package-output-file",
             Self::LocalPackagedDirectory => "local-packaged-directory",
             Self::LocalConnectorCrate => "local-connector-crate",
@@ -13739,6 +13763,7 @@ struct PreparedPackageArtifact {
     build_metadata: PackageBuildMetadata,
     verification: Vec<Value>,
     requested_source: String,
+    reinvoke_source: String,
     source_description: String,
     source_kind: PreparedPackageSourceKind,
     resolved_input_path: PathBuf,
@@ -13760,6 +13785,14 @@ fn package_source_selection_value(artifact: &PreparedPackageArtifact) -> Value {
 
 fn package_local_offline_readiness_value(artifact: &PreparedPackageArtifact) -> Value {
     match artifact.source_kind {
+        PreparedPackageSourceKind::Registry => json!({
+            "state": "registry-cached-artifact",
+            "authoritative_scope": "local-machine-cache",
+            "explanation": "This connector artifact was fetched from a registry, verified locally, and cached on this machine. That proves the downloaded artifact and its supply-chain metadata, but it still does not prove any live host has installed it or that a mesh mirror exists.",
+            "resolved_input_path": artifact.resolved_input_path.display().to_string(),
+            "binary_path": artifact.package_output.binary_path.display().to_string(),
+            "manifest_path": artifact.package_output.manifest_path.display().to_string(),
+        }),
         PreparedPackageSourceKind::LocalPackageMetadataFile
         | PreparedPackageSourceKind::LocalPackagedDirectory => json!({
             "state": "local-artifact-present",
@@ -13799,6 +13832,7 @@ fn install_verify_only_evidence_handles(artifact: &PreparedPackageArtifact) -> V
         "connector_id": artifact.manifest.connector.id.as_str(),
         "verification_count": artifact.verification.len(),
         "authoritative_scope": match artifact.source_kind {
+            PreparedPackageSourceKind::Registry => "registry-verified-local-cache",
             PreparedPackageSourceKind::LocalPackageMetadataFile
             | PreparedPackageSourceKind::LocalPackagedDirectory => "local-machine-only",
             PreparedPackageSourceKind::LocalConnectorCrate
@@ -14167,6 +14201,8 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
         &args.source,
         args.version.as_deref(),
         args.include_hidden,
+        args.registry.as_deref(),
+        None,
     ) {
         Ok(artifact) => artifact,
         Err(error) => {
@@ -14176,12 +14212,14 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
                     "command": "install",
                     "error": {
                         "type": "invalid-install-source",
-                        "message": error.to_string(),
+                        "message": format!("{error:#}"),
                     },
                     "source": args.source,
+                    "registry": args.registry,
                     "next_actions": [
                         "Run `fwc package --json` on a connector crate first, or pass a package directory containing package-output.json.".to_owned(),
                         "Pass a workspace connector selector such as `github` when installing from local source.".to_owned(),
+                        "Pass `--registry <endpoint>` to resolve the install candidate from a registry.".to_owned(),
                     ],
                 }),
                 exit_code: CliExitCode::Validation,
@@ -14210,10 +14248,10 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
             "availability_fact": install_verify_only_availability_fact(&artifact),
             "source_selection": package_source_selection_value(&artifact),
             "offline_readiness": package_local_offline_readiness_value(&artifact),
-            "repair_hints": install_verify_only_repair_hints(&artifact, &args.source),
+            "repair_hints": install_verify_only_repair_hints(&artifact, &artifact.reinvoke_source),
             "verification": artifact.verification,
             "next_actions": [
-                format!("fwc install {} --host <endpoint>", &args.source),
+                format!("fwc install {} --host <endpoint>", &artifact.reinvoke_source),
                 format!(
                     "fwc mesh availability {} --host <endpoint>",
                     artifact.manifest.connector.id
@@ -14245,12 +14283,16 @@ fn install_dispatch(args: &InstallArgs, explicit_host: Option<&str>) -> Result<D
             "install",
             json!({
                 "source": args.source,
+                "registry": args.registry,
                 "version": args.version,
                 "verify_only": args.verify_only,
                 "include_hidden": args.include_hidden,
             }),
             vec![
-                "fwc install <source> --host <endpoint>".to_owned(),
+                format!(
+                    "fwc install <source>{} --host <endpoint>",
+                    registry_arg_suffix(args.registry.as_deref())
+                ),
                 "Use `--verify-only` when you only want package verification without changing a running host."
                     .to_owned(),
             ],
@@ -14341,10 +14383,14 @@ fn update_dispatch(args: &UpdateArgs, explicit_host: Option<&str>) -> Result<Dis
             json!({
                 "connector": args.connector,
                 "source": args.source,
+                "registry": args.registry,
                 "dry_run": args.dry_run,
             }),
             vec![
-                "fwc update <connector> --host <endpoint>".to_owned(),
+                format!(
+                    "fwc update <connector>{} --host <endpoint>",
+                    registry_arg_suffix(args.registry.as_deref())
+                ),
                 "Update planning and application both require a live host so `fwc` can reason about the actual installed inventory."
                     .to_owned(),
             ],
@@ -14352,22 +14398,38 @@ fn update_dispatch(args: &UpdateArgs, explicit_host: Option<&str>) -> Result<Dis
     };
     let client = HostAdminClient::new(&host.endpoint)?;
     let (host_catalog, _) = client.catalog(None)?;
-    let target_connector_id = match host_catalog.resolve_connector(&args.connector) {
-        Ok(connector) => connector.summary.id.to_string(),
-        Err(error) => {
-            if args.connector.contains(':') {
-                args.connector.clone()
-            } else {
-                return Ok(connector_resolution_dispatch(
-                    "update",
-                    &args.connector,
-                    &error,
-                ));
+    let (target_connector_id, current_version) =
+        match host_catalog.resolve_connector(&args.connector) {
+            Ok(connector) => (
+                connector.summary.id.to_string(),
+                Some(connector.summary.version.to_string()),
+            ),
+            Err(error) => {
+                if args.connector.contains(':') {
+                    (args.connector.clone(), None)
+                } else {
+                    return Ok(connector_resolution_dispatch(
+                        "update",
+                        &args.connector,
+                        &error,
+                    ));
+                }
             }
+        };
+    let source = args.source.clone().unwrap_or_else(|| {
+        if args.registry.is_some() {
+            target_connector_id.clone()
+        } else {
+            args.connector.clone()
         }
-    };
-    let source = args.source.as_deref().unwrap_or(&args.connector);
-    let artifact = match prepare_package_artifact(source, None, true) {
+    });
+    let artifact = match prepare_package_artifact(
+        &source,
+        None,
+        true,
+        args.registry.as_deref(),
+        current_version.as_deref(),
+    ) {
         Ok(artifact) => artifact,
         Err(error) => {
             return Ok(DispatchOutcome {
@@ -14376,12 +14438,14 @@ fn update_dispatch(args: &UpdateArgs, explicit_host: Option<&str>) -> Result<Dis
                     "command": "update",
                     "error": {
                         "type": "invalid-update-source",
-                        "message": error.to_string(),
+                        "message": format!("{error:#}"),
                     },
                     "source": source,
+                    "registry": args.registry,
                     "next_actions": [
                         "Run `fwc package --json` on a connector crate first, or pass a package directory containing package-output.json.".to_owned(),
                         "Pass a workspace connector selector such as `github` when updating from local source.".to_owned(),
+                        "Pass `--registry <endpoint>` to resolve the update candidate from a registry.".to_owned(),
                     ],
                 }),
                 exit_code: CliExitCode::Validation,
@@ -14507,10 +14571,583 @@ fn update_dispatch(args: &UpdateArgs, explicit_host: Option<&str>) -> Result<Dis
     })
 }
 
+fn registry_arg_suffix(registry: Option<&str>) -> String {
+    registry
+        .filter(|endpoint| !endpoint.trim().is_empty())
+        .map_or_else(String::new, |endpoint| format!(" --registry {endpoint}"))
+}
+
+fn registry_cache_root() -> Result<PathBuf> {
+    let config_path = required_context_config_path()?;
+    let config_dir = config_path
+        .parent()
+        .context("context config path has no parent directory for registry cache")?;
+    Ok(config_dir.join("registry-cache"))
+}
+
+fn registry_endpoint_url(endpoint: &str, segments: &[&str]) -> Result<Url> {
+    let mut url =
+        Url::parse(endpoint).with_context(|| format!("invalid registry endpoint `{endpoint}`"))?;
+    {
+        let mut path = url.path_segments_mut().map_err(|_| {
+            anyhow::anyhow!("registry endpoint `{endpoint}` cannot be used as a base URL")
+        })?;
+        path.pop_if_empty();
+        path.extend(segments.iter().copied());
+    }
+    Ok(url)
+}
+
+fn resolve_registry_asset_url(endpoint: &str, location: &str) -> Result<Url> {
+    Url::parse(location)
+        .or_else(|_| Url::parse(endpoint)?.join(location))
+        .with_context(|| format!("invalid registry artifact URL `{location}`"))
+}
+
+fn registry_fetch_json<T: DeserializeOwned>(client: &BlockingClient, url: &Url) -> Result<T> {
+    let response = client
+        .get(url.as_str())
+        .send()
+        .with_context(|| format!("failed to fetch registry JSON: {url}"))?
+        .error_for_status()
+        .with_context(|| format!("registry returned an error response for {url}"))?;
+    response
+        .json()
+        .with_context(|| format!("invalid registry JSON response from {url}"))
+}
+
+fn registry_fetch_text(client: &BlockingClient, url: &Url) -> Result<String> {
+    let response = client
+        .get(url.as_str())
+        .send()
+        .with_context(|| format!("failed to fetch registry text: {url}"))?
+        .error_for_status()
+        .with_context(|| format!("registry returned an error response for {url}"))?;
+    response
+        .text()
+        .with_context(|| format!("invalid registry text response from {url}"))
+}
+
+fn registry_fetch_bytes(client: &BlockingClient, url: &Url) -> Result<Vec<u8>> {
+    let response = client
+        .get(url.as_str())
+        .send()
+        .with_context(|| format!("failed to fetch registry bytes: {url}"))?
+        .error_for_status()
+        .with_context(|| format!("registry returned an error response for {url}"))?;
+    response
+        .bytes()
+        .map(|bytes| bytes.to_vec())
+        .with_context(|| format!("invalid registry bytes response from {url}"))
+}
+
+fn sha256_prefixed(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn blake3_prefixed(bytes: &[u8]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(bytes);
+    format!("blake3-256:{}", hasher.finalize().to_hex())
+}
+
+fn sanitize_cache_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn registry_target_triple(target: &ConnectorTarget) -> String {
+    match (target.os.as_str(), target.arch.as_str()) {
+        ("linux", "amd64") => "x86_64-unknown-linux-gnu".to_owned(),
+        ("linux", "arm64") => "aarch64-unknown-linux-gnu".to_owned(),
+        ("darwin", "amd64") => "x86_64-apple-darwin".to_owned(),
+        ("darwin", "arm64") => "aarch64-apple-darwin".to_owned(),
+        ("windows", "amd64") => "x86_64-pc-windows-msvc".to_owned(),
+        _ => format!("{}-{}", target.arch, target.os),
+    }
+}
+
+fn resolve_registry_connector_id(
+    source: &str,
+    include_hidden_workspace_connectors: bool,
+) -> Result<String> {
+    if source.contains(':') {
+        return Ok(source.to_owned());
+    }
+
+    let catalog = DiscoveryCatalog::load_for_connector_filter(Some(source))?;
+    match catalog.resolve_connector(source) {
+        Ok(connector) => {
+            if !include_hidden_workspace_connectors && connector.is_hidden_by_default() {
+                bail!(
+                    "workspace connector `{}` is `{}` and hidden by default; retry with `--include-hidden` if you intentionally want to install this non-live connector from a registry",
+                    connector.slug,
+                    connector
+                        .manifest_status
+                        .map(|status| status.to_string())
+                        .unwrap_or_else(|| "unknown".to_owned())
+                );
+            }
+            Ok(connector.detail.summary.id.to_string())
+        }
+        Err(_) => Ok(source.to_owned()),
+    }
+}
+
+fn parse_registry_verifying_key(
+    signature_artifact: &ManifestSignatureArtifact,
+) -> Result<Ed25519VerifyingKey> {
+    let decoded = hex::decode(&signature_artifact.verifying_key).with_context(|| {
+        format!(
+            "registry signature artifact key `{}` is not valid lowercase hex",
+            signature_artifact.key_id
+        )
+    })?;
+    let raw: [u8; 32] = decoded.try_into().map_err(|_| {
+        anyhow::anyhow!(
+            "registry signature artifact key `{}` must decode to exactly 32 bytes",
+            signature_artifact.key_id
+        )
+    })?;
+    Ed25519VerifyingKey::from_bytes(&raw).with_context(|| {
+        format!(
+            "registry signature artifact key `{}` is not a valid Ed25519 public key",
+            signature_artifact.key_id
+        )
+    })
+}
+
+fn verify_registry_attestation(
+    attestation: &SupplyChainAttestation,
+    verifying_key: &Ed25519VerifyingKey,
+    expected_binary_digests: &[String],
+) -> Result<RegistrySupplyChainEvidence> {
+    attestation
+        .validate()
+        .map_err(|error| anyhow::anyhow!("invalid registry attestation: {error}"))?;
+    if !expected_binary_digests
+        .iter()
+        .any(|digest| digest == &attestation.subject_digest)
+    {
+        let expected = expected_binary_digests.join(" or ");
+        bail!(
+            "registry attestation subject digest mismatch: expected one of `{expected}`, found `{}`",
+            attestation.subject_digest
+        );
+    }
+
+    let signature_bytes = hex::decode(&attestation.signature.signature)
+        .context("registry attestation signature is not valid lowercase hex")?;
+    let signature = Ed25519Signature::try_from_slice(&signature_bytes)
+        .context("registry attestation signature has an invalid length")?;
+    let signing_bytes = attestation.signing_bytes().map_err(|error| {
+        anyhow::anyhow!("failed to compute registry attestation signing bytes: {error}")
+    })?;
+    verifying_key
+        .verify(&signing_bytes, &signature)
+        .context("registry attestation signature verification failed")?;
+
+    Ok(RegistrySupplyChainEvidence {
+        transparency_log_present: false,
+        attestations: vec![RegistryAttestationEvidence {
+            attestation_type: fcp_manifest::AttestationType::InToto,
+            slsa_level: Some(attestation.slsa_level),
+            builder_id: Some(attestation.builder_id.clone()),
+            expires_at: None,
+        }],
+    })
+}
+
+fn build_registry_package_build_metadata(
+    attestation: Option<&SupplyChainAttestation>,
+    target: &ConnectorTarget,
+) -> PackageBuildMetadata {
+    PackageBuildMetadata {
+        rust_version: "registry".to_owned(),
+        cargo_version: "registry".to_owned(),
+        target_triple: registry_target_triple(target),
+        build_timestamp: attestation
+            .map(|value| value.metadata.build_finished_at.to_rfc3339())
+            .unwrap_or_else(|| Utc::now().to_rfc3339()),
+        profile: "registry".to_owned(),
+        git_commit: None,
+        git_dirty: None,
+        features: Vec::new(),
+        build_env: std::collections::HashMap::new(),
+        cargo_flags: Vec::new(),
+    }
+}
+
+fn registry_cached_package_dir(
+    endpoint: &str,
+    connector_id: &str,
+    version: &str,
+    target: &ConnectorTarget,
+) -> Result<PathBuf> {
+    let endpoint_hash = sha256_prefixed(endpoint.as_bytes()).replace("sha256:", "");
+    Ok(registry_cache_root()?
+        .join(endpoint_hash)
+        .join(sanitize_cache_component(connector_id))
+        .join(sanitize_cache_component(version))
+        .join(sanitize_cache_component(&target.as_string())))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_registry_package_output(
+    endpoint: &str,
+    connector_id: &str,
+    version: &str,
+    target: &ConnectorTarget,
+    binary_name: &str,
+    manifest_toml: &str,
+    binary_bytes: &[u8],
+    attestation_json: Option<&str>,
+    build_metadata: &PackageBuildMetadata,
+) -> Result<PackageOutput> {
+    let output_dir = registry_cached_package_dir(endpoint, connector_id, version, target)?;
+    std::fs::create_dir_all(&output_dir).with_context(|| {
+        format!(
+            "failed to create registry cache directory {}",
+            output_dir.display()
+        )
+    })?;
+
+    let manifest_path = output_dir.join("manifest.toml");
+    std::fs::write(&manifest_path, manifest_toml).with_context(|| {
+        format!(
+            "failed to write cached registry manifest {}",
+            manifest_path.display()
+        )
+    })?;
+
+    let binary_path = output_dir.join(binary_name);
+    std::fs::write(&binary_path, binary_bytes).with_context(|| {
+        format!(
+            "failed to write cached registry binary {}",
+            binary_path.display()
+        )
+    })?;
+
+    if let Some(attestation_json) = attestation_json {
+        let attestation_path = output_dir.join("attestation.json");
+        std::fs::write(&attestation_path, attestation_json).with_context(|| {
+            format!(
+                "failed to write cached registry attestation {}",
+                attestation_path.display()
+            )
+        })?;
+    }
+
+    let build_metadata_path = output_dir.join("build-metadata.json");
+    std::fs::write(
+        &build_metadata_path,
+        serde_json::to_vec_pretty(build_metadata)?,
+    )
+    .with_context(|| {
+        format!(
+            "failed to write cached registry build metadata {}",
+            build_metadata_path.display()
+        )
+    })?;
+
+    let package_output = PackageOutput {
+        output_dir: output_dir.clone(),
+        binary_path: binary_path.clone(),
+        manifest_path,
+        sbom_path: None,
+        build_metadata_path,
+        binary_sha256: compute_file_sha256(&binary_path)?,
+        connector_id: connector_id.to_owned(),
+        version: version.to_owned(),
+    };
+
+    let package_output_path = output_dir.join(PACKAGE_OUTPUT_FILENAME);
+    std::fs::write(
+        &package_output_path,
+        serde_json::to_vec_pretty(&package_output)?,
+    )
+    .with_context(|| {
+        format!(
+            "failed to write cached registry package metadata {}",
+            package_output_path.display()
+        )
+    })?;
+
+    Ok(package_output)
+}
+
+fn prepare_registry_package_artifact(
+    source: &str,
+    requested_version: Option<&str>,
+    include_hidden_workspace_connectors: bool,
+    registry_endpoint: &str,
+    current_version: Option<&str>,
+) -> Result<PreparedPackageArtifact> {
+    let registry_connector_id =
+        resolve_registry_connector_id(source, include_hidden_workspace_connectors)?;
+    let client = BlockingClientBuilder::new()
+        .build()
+        .context("failed to build registry HTTP client")?;
+
+    let release_url = if let Some(version) = requested_version {
+        registry_endpoint_url(
+            registry_endpoint,
+            &[
+                "v1",
+                "connectors",
+                &registry_connector_id,
+                "versions",
+                version,
+            ],
+        )?
+    } else {
+        registry_endpoint_url(
+            registry_endpoint,
+            &["v1", "connectors", &registry_connector_id, "latest"],
+        )?
+    };
+    let release: fcp_registry::RegistryVersionDescriptor =
+        registry_fetch_json(&client, &release_url).with_context(|| {
+            format!(
+                "failed to resolve `{registry_connector_id}` from registry `{registry_endpoint}`"
+            )
+        })?;
+
+    let expected_target = ConnectorTarget::from_env();
+    let target_descriptor = release
+        .targets
+        .iter()
+        .find(|target| target.os == expected_target.os && target.arch == expected_target.arch)
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "registry `{registry_endpoint}` has no `{}` artifact for `{}` version `{}`",
+                expected_target.as_string(),
+                registry_connector_id,
+                release.version
+            )
+        })?;
+
+    if let Some(current_version) = current_version
+        && !is_version_newer(current_version, &release.version)
+    {
+        bail!(
+            "registry `{registry_endpoint}` did not expose a newer version for `{}` (current `{current_version}`, latest `{}`).",
+            registry_connector_id,
+            release.version
+        );
+    }
+
+    let manifest_url =
+        resolve_registry_asset_url(registry_endpoint, &target_descriptor.manifest_url)?;
+    let binary_url = resolve_registry_asset_url(registry_endpoint, &target_descriptor.binary_url)?;
+    let signature_url =
+        resolve_registry_asset_url(registry_endpoint, &target_descriptor.signature_url)?;
+
+    let manifest_toml = registry_fetch_text(&client, &manifest_url)?;
+    let binary_bytes = registry_fetch_bytes(&client, &binary_url)?;
+    let signature_artifact: ManifestSignatureArtifact =
+        registry_fetch_json(&client, &signature_url)?;
+
+    let manifest_sha256 = sha256_prefixed(manifest_toml.as_bytes());
+    if manifest_sha256 != target_descriptor.manifest_sha256 {
+        bail!(
+            "registry manifest checksum mismatch for `{}` version `{}`: descriptor `{}`, fetched `{manifest_sha256}`",
+            registry_connector_id,
+            release.version,
+            target_descriptor.manifest_sha256
+        );
+    }
+
+    let binary_sha256 = sha256_prefixed(&binary_bytes);
+    let binary_blake3 = blake3_prefixed(&binary_bytes);
+    if binary_sha256 != target_descriptor.binary_sha256 {
+        bail!(
+            "registry binary checksum mismatch for `{}` version `{}`: descriptor `{}`, fetched `{binary_sha256}`",
+            registry_connector_id,
+            release.version,
+            target_descriptor.binary_sha256
+        );
+    }
+
+    if signature_artifact.target != expected_target {
+        bail!(
+            "registry signature target mismatch for `{}` version `{}`: expected `{}`, found `{}`",
+            registry_connector_id,
+            release.version,
+            expected_target.as_string(),
+            signature_artifact.target.as_string()
+        );
+    }
+
+    if signature_artifact.context != String::from_utf8_lossy(MANIFEST_SIGNATURE_CONTEXT) {
+        bail!(
+            "registry signature context mismatch for `{}` version `{}`",
+            registry_connector_id,
+            release.version
+        );
+    }
+
+    if signature_artifact.binary_hash != binary_sha256 {
+        bail!(
+            "registry signature artifact binary checksum mismatch for `{}` version `{}`: artifact `{}`, fetched `{binary_sha256}`",
+            registry_connector_id,
+            release.version,
+            signature_artifact.binary_hash
+        );
+    }
+
+    let parsed_manifest = ConnectorManifest::parse_str(&manifest_toml).with_context(|| {
+        format!(
+            "registry manifest for `{registry_connector_id}` version `{}` is invalid",
+            release.version
+        )
+    })?;
+    let signing_bytes = manifest_signing_bytes(&parsed_manifest).with_context(|| {
+        format!(
+            "failed to compute registry signing bytes for `{registry_connector_id}` version `{}`",
+            release.version
+        )
+    })?;
+    let manifest_signing_hash = sha256_prefixed(&signing_bytes);
+    if signature_artifact.manifest_signing_hash != manifest_signing_hash {
+        bail!(
+            "registry signature artifact signing hash mismatch for `{}` version `{}`: artifact `{}`, fetched `{manifest_signing_hash}`",
+            registry_connector_id,
+            release.version,
+            signature_artifact.manifest_signing_hash
+        );
+    }
+
+    let verifying_key = parse_registry_verifying_key(&signature_artifact)?;
+    let (attestation, attestation_json, supply_chain_evidence) =
+        if let Some(attestation_location) = target_descriptor.attestation_url.as_deref() {
+            let attestation_url =
+                resolve_registry_asset_url(registry_endpoint, attestation_location)?;
+            let raw = registry_fetch_text(&client, &attestation_url)?;
+            let attestation: SupplyChainAttestation = serde_json::from_str(&raw).with_context(|| {
+                format!(
+                    "invalid registry attestation JSON for `{registry_connector_id}` version `{}`",
+                    release.version
+                )
+            })?;
+            let evidence = verify_registry_attestation(
+                &attestation,
+                &verifying_key,
+                &[binary_sha256.clone(), binary_blake3.clone()],
+            )?;
+            (Some(attestation), Some(raw), Some(evidence))
+        } else {
+            (None, None, None)
+        };
+
+    let mut trust_policy = RegistryTrustPolicy::default();
+    trust_policy
+        .publisher_keys
+        .insert(signature_artifact.key_id.clone(), verifying_key);
+    let bundle = ConnectorBundle {
+        manifest_toml: manifest_toml.clone(),
+        binary: binary_bytes.clone(),
+        target: expected_target.clone(),
+    };
+    RegistryVerifier::new(trust_policy)
+        .verify_bundle(
+            &bundle,
+            None,
+            supply_chain_evidence.as_ref(),
+            Some(&expected_target),
+        )
+        .with_context(|| {
+            format!(
+                "registry verification failed for `{registry_connector_id}` version `{}` from `{registry_endpoint}`",
+                release.version
+            )
+        })?;
+
+    let build_metadata =
+        build_registry_package_build_metadata(attestation.as_ref(), &expected_target);
+    let package_output = materialize_registry_package_output(
+        registry_endpoint,
+        &registry_connector_id,
+        &release.version,
+        &expected_target,
+        &signature_artifact.binary_name,
+        &manifest_toml,
+        &binary_bytes,
+        attestation_json.as_deref(),
+        &build_metadata,
+    )?;
+    let (manifest, build_metadata, local_verification) =
+        inspect_package_output(&package_output, requested_version)?;
+
+    let mut verification = vec![
+        json!({
+            "check": "registry-platform",
+            "status": "ok",
+            "detail": expected_target.as_string(),
+        }),
+        json!({
+            "check": "registry-manifest-sha256",
+            "status": "ok",
+            "detail": manifest_sha256,
+        }),
+        json!({
+            "check": "registry-binary-sha256",
+            "status": "ok",
+            "detail": binary_sha256,
+        }),
+        json!({
+            "check": "registry-signature",
+            "status": "ok",
+            "detail": signature_artifact.key_id.clone(),
+        }),
+    ];
+    if let Some(attestation) = attestation.as_ref() {
+        verification.push(json!({
+            "check": "registry-attestation",
+            "status": "ok",
+            "detail": attestation.builder_id.clone(),
+        }));
+    }
+    verification.extend(local_verification);
+
+    Ok(PreparedPackageArtifact {
+        package_output,
+        manifest,
+        build_metadata,
+        verification,
+        requested_source: source.to_owned(),
+        reinvoke_source: format!("{source} --registry {registry_endpoint}"),
+        source_description: format!(
+            "registry `{registry_endpoint}` connector `{}` version `{}`",
+            registry_connector_id, release.version
+        ),
+        source_kind: PreparedPackageSourceKind::Registry,
+        resolved_input_path: registry_cached_package_dir(
+            registry_endpoint,
+            &registry_connector_id,
+            &release.version,
+            &expected_target,
+        )?,
+    })
+}
+
 fn prepare_package_artifact(
     source: &str,
     requested_version: Option<&str>,
     include_hidden_workspace_connectors: bool,
+    registry_endpoint: Option<&str>,
+    current_version: Option<&str>,
 ) -> Result<PreparedPackageArtifact> {
     // Gate 1: Reject sources containing known demo/stub/placeholder markers
     // before any expensive resolution work (bead 29.12).
@@ -14519,6 +15156,18 @@ fn prepare_package_artifact(
             "Source `{source}` contains a demo/placeholder marker and cannot be used \
              for runtime install/update. Use `fwc package <connector>` to build a real \
              package artifact, or provide a real registry/directory source."
+        );
+    }
+
+    if let Some(endpoint) = registry_endpoint.filter(|value| !value.trim().is_empty())
+        && !Path::new(source).exists()
+    {
+        return prepare_registry_package_artifact(
+            source,
+            requested_version,
+            include_hidden_workspace_connectors,
+            endpoint,
+            current_version,
         );
     }
 
@@ -14551,6 +15200,7 @@ fn prepare_package_artifact(
         build_metadata,
         verification,
         requested_source: source.to_owned(),
+        reinvoke_source: source.to_owned(),
         source_description: resolved.source_description,
         source_kind: resolved.source_kind,
         resolved_input_path: resolved.resolved_input_path,
@@ -24662,6 +25312,8 @@ fn enrich_unknown_guide_command(payload: &mut Value, command: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
+    use crate::supply_chain_cmd::{SignArgs, SupplyChainArgs, SupplyChainCommand};
+
     use super::{ExportToolsArgs, export_tools};
     use std::collections::BTreeMap as StdBTreeMap;
     use std::fs;
@@ -24685,9 +25337,10 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use clap::CommandFactory;
     use fcp_core::{
-        BudgetEnforcement, BudgetStatus, ConnectorHealth, InvokeResponse, RequestId,
-        UsageBudgetSnapshot, UsageBudgetUsage, UsageMetricKind, ZoneId,
+        BudgetEnforcement, BudgetStatus, ConnectorHealth, ConnectorTarget, InvokeResponse,
+        RequestId, UsageBudgetSnapshot, UsageBudgetUsage, UsageMetricKind, ZoneId,
     };
+    use fcp_crypto::Ed25519SigningKey;
     use fcp_host::{
         BudgetReportResponse as HostBudgetReportResponse,
         ConnectorAdminStatus as HostConnectorAdminStatus, ConnectorInventoryApplyReport,
@@ -24696,8 +25349,25 @@ mod tests {
         IntrospectionResponse as HostIntrospectionResponse, ManagedConnectorConfig,
         PreflightResponse as HostPreflightResponse, StartupReconciliationReport,
     };
+    use fcp_registry::ManifestSignatureArtifact;
     use serde_json::{Value, json};
     use tempfile::TempDir;
+
+    #[derive(Clone)]
+    struct MockHttpResponse {
+        content_type: &'static str,
+        body: Vec<u8>,
+    }
+
+    #[derive(Clone)]
+    struct SignedRegistryFixture {
+        connector_id: String,
+        version: String,
+        manifest_toml: String,
+        binary_bytes: Vec<u8>,
+        signature_artifact: ManifestSignatureArtifact,
+        attestation_json: Option<String>,
+    }
 
     fn execute_json(args: &[&str]) -> (std::process::ExitCode, Value) {
         let owned_args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
@@ -25756,13 +26426,17 @@ mod tests {
         assert_eq!(auth.principal_hint.as_deref(), Some("test-principal"));
     }
 
-    fn write_test_package_output(connector_id: &str, version: &str) -> (TempDir, PathBuf) {
+    fn fixture_manifest_text(
+        connector_id: &str,
+        version: &str,
+        policy_section: Option<&str>,
+    ) -> String {
         const PLACEHOLDER_INTERFACE_HASH: &str = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
 
-        let tempdir = tempfile::tempdir().expect("temp package dir");
-        let package_dir = tempdir.path().join("package");
-        fs::create_dir_all(&package_dir).expect("package dir");
-
+        let policy_section = policy_section
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map_or_else(String::new, |value| format!("\n{value}\n"));
         let manifest_template = format!(
             r#"[manifest]
 format = "fcp-connector-manifest"
@@ -25816,6 +26490,7 @@ fs_readonly_paths = ["/usr"]
 fs_writable_paths = ["$CONNECTOR_STATE"]
 deny_exec = true
 deny_ptrace = true
+{policy_section}
 "#
         );
         let unchecked = ConnectorManifest::parse_str_unchecked(&manifest_template)
@@ -25823,8 +26498,15 @@ deny_ptrace = true
         let interface_hash = unchecked
             .compute_interface_hash()
             .expect("fixture interface hash should compute");
-        let manifest_text =
-            manifest_template.replace(PLACEHOLDER_INTERFACE_HASH, &interface_hash.to_string());
+        manifest_template.replace(PLACEHOLDER_INTERFACE_HASH, &interface_hash.to_string())
+    }
+
+    fn write_test_package_output(connector_id: &str, version: &str) -> (TempDir, PathBuf) {
+        let tempdir = tempfile::tempdir().expect("temp package dir");
+        let package_dir = tempdir.path().join("package");
+        fs::create_dir_all(&package_dir).expect("package dir");
+
+        let manifest_text = fixture_manifest_text(connector_id, version, None);
         let manifest =
             ConnectorManifest::parse_str(&manifest_text).expect("fixture manifest should validate");
 
@@ -25869,6 +26551,359 @@ deny_ptrace = true
         .expect("package output");
 
         (tempdir, package_output_path)
+    }
+
+    fn write_test_signed_registry_package(
+        connector_id: &str,
+        version: &str,
+        policy_section: Option<&str>,
+    ) -> (TempDir, PathBuf) {
+        let tempdir = tempfile::tempdir().expect("signed package tempdir");
+        let source_dir = tempdir.path().join("unsigned");
+        fs::create_dir_all(&source_dir).expect("unsigned source dir");
+
+        let manifest_path = source_dir.join("manifest.toml");
+        let binary_path = source_dir.join("fixture-connector");
+        fs::write(
+            &manifest_path,
+            fixture_manifest_text(connector_id, version, policy_section),
+        )
+        .expect("fixture manifest");
+        fs::write(&binary_path, format!("fixture:{connector_id}:{version}"))
+            .expect("fixture binary");
+
+        let signing_key = Ed25519SigningKey::generate();
+        let signing_key_path = tempdir.path().join("signing-key.hex");
+        fs::write(&signing_key_path, hex::encode(signing_key.to_bytes()))
+            .expect("signing key file");
+
+        let output_dir = tempdir.path().join("signed-package");
+        crate::supply_chain_cmd::run(&SupplyChainArgs {
+            command: SupplyChainCommand::Sign(SignArgs {
+                manifest: manifest_path.display().to_string(),
+                binary: binary_path.display().to_string(),
+                signing_key: signing_key_path.display().to_string(),
+                output_dir: Some(output_dir.display().to_string()),
+                key_id: None,
+                builder_id: "fwc.supply-chain.sign".to_string(),
+                build_type: "manual".to_string(),
+                invocation_id: None,
+                source_uri: None,
+                source_commit: None,
+                json: false,
+            }),
+        })
+        .expect("fixture signing should succeed");
+
+        assert!(output_dir.join("manifest.toml").is_file());
+        assert!(output_dir.join("manifest-signature.json").is_file());
+        assert!(output_dir.join("attestation.json").is_file());
+
+        (tempdir, output_dir)
+    }
+
+    fn load_signed_registry_fixture(package_dir: &std::path::Path) -> SignedRegistryFixture {
+        let manifest_toml =
+            fs::read_to_string(package_dir.join("manifest.toml")).expect("signed manifest");
+        let manifest =
+            ConnectorManifest::parse_str(&manifest_toml).expect("signed manifest parses");
+        let signature_artifact: ManifestSignatureArtifact = serde_json::from_str(
+            &fs::read_to_string(package_dir.join("manifest-signature.json"))
+                .expect("signature artifact"),
+        )
+        .expect("signature artifact parses");
+        let binary_bytes =
+            fs::read(package_dir.join(&signature_artifact.binary_name)).expect("signed binary");
+        let attestation_path = package_dir.join("attestation.json");
+        let attestation_json = fs::read_to_string(&attestation_path).ok();
+
+        SignedRegistryFixture {
+            connector_id: manifest.connector.id.to_string(),
+            version: manifest.connector.version.to_string(),
+            manifest_toml,
+            binary_bytes,
+            signature_artifact,
+            attestation_json,
+        }
+    }
+
+    fn registry_segments_path(segments: &[&str]) -> String {
+        super::registry_endpoint_url("http://registry.test", segments)
+            .expect("registry path")
+            .path()
+            .to_owned()
+    }
+
+    fn mock_json_http_response(value: Value) -> MockHttpResponse {
+        MockHttpResponse {
+            content_type: "application/json",
+            body: serde_json::to_vec(&value).expect("json response"),
+        }
+    }
+
+    fn mock_text_http_response(text: String) -> MockHttpResponse {
+        MockHttpResponse {
+            content_type: "text/plain; charset=utf-8",
+            body: text.into_bytes(),
+        }
+    }
+
+    fn mock_binary_http_response(bytes: Vec<u8>) -> MockHttpResponse {
+        MockHttpResponse {
+            content_type: "application/octet-stream",
+            body: bytes,
+        }
+    }
+
+    fn spawn_mock_http_server(
+        routes: StdBTreeMap<String, MockHttpResponse>,
+        expected_requests: usize,
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock http server should bind");
+        listener
+            .set_nonblocking(true)
+            .expect("mock http server should configure nonblocking accept");
+        let endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("mock http server address")
+        );
+
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut served = 0usize;
+
+            while served < expected_requests && Instant::now() < deadline {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(error) => panic!("mock http accept failed: {error}"),
+                };
+
+                served += 1;
+                stream
+                    .set_nonblocking(false)
+                    .expect("mock http stream should switch back to blocking mode");
+
+                let mut reader =
+                    BufReader::new(stream.try_clone().expect("mock http should clone socket"));
+                let mut request_line = String::new();
+                reader
+                    .read_line(&mut request_line)
+                    .expect("mock http should read request line");
+                assert!(
+                    !request_line.trim().is_empty(),
+                    "mock http received an empty request line"
+                );
+
+                let mut content_length = 0usize;
+                loop {
+                    let mut header = String::new();
+                    reader
+                        .read_line(&mut header)
+                        .expect("mock http should read headers");
+                    if header == "\r\n" || header.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = header.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = value
+                            .trim()
+                            .parse()
+                            .expect("content-length should be numeric");
+                    }
+                }
+
+                if content_length > 0 {
+                    let mut body = vec![0u8; content_length];
+                    reader
+                        .read_exact(&mut body)
+                        .expect("mock http should read request body");
+                }
+
+                let mut parts = request_line.split_whitespace();
+                let method = parts.next().expect("request method should exist");
+                let path = parts.next().expect("request path should exist");
+                let key = format!("{method} {path}");
+                let response = routes.get(&key).unwrap_or_else(|| {
+                    panic!(
+                        "unexpected mock http request `{key}`; expected one of {:?}",
+                        routes.keys().collect::<Vec<_>>()
+                    )
+                });
+
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    response.content_type,
+                    response.body.len()
+                );
+                stream
+                    .write_all(headers.as_bytes())
+                    .expect("mock http should write headers");
+                stream
+                    .write_all(&response.body)
+                    .expect("mock http should write body");
+                stream.flush().expect("mock http should flush response");
+            }
+
+            assert_eq!(
+                served, expected_requests,
+                "mock http served {served} request(s), expected {expected_requests}"
+            );
+        });
+
+        (endpoint, handle)
+    }
+
+    fn registry_routes_for_fixture(
+        fixture: &SignedRegistryFixture,
+        served_binary: Option<Vec<u8>>,
+        signature_artifact_override: Option<ManifestSignatureArtifact>,
+        release_target_override: Option<ConnectorTarget>,
+        include_attestation: bool,
+    ) -> StdBTreeMap<String, MockHttpResponse> {
+        let served_binary = served_binary.unwrap_or_else(|| fixture.binary_bytes.clone());
+        let signature_artifact =
+            signature_artifact_override.unwrap_or_else(|| fixture.signature_artifact.clone());
+        let release_target =
+            release_target_override.unwrap_or_else(|| signature_artifact.target.clone());
+        let release_os = release_target.os.clone();
+        let release_arch = release_target.arch.clone();
+        let release_target_name = release_target.as_string();
+        let manifest_sha256 = super::sha256_prefixed(fixture.manifest_toml.as_bytes());
+        let binary_sha256 = super::sha256_prefixed(&served_binary);
+        let signature_json =
+            serde_json::to_value(&signature_artifact).expect("signature artifact json");
+
+        let latest_path =
+            registry_segments_path(&["v1", "connectors", &fixture.connector_id, "latest"]);
+        let version_path = registry_segments_path(&[
+            "v1",
+            "connectors",
+            &fixture.connector_id,
+            "versions",
+            &fixture.version,
+        ]);
+        let manifest_path = registry_segments_path(&[
+            "v1",
+            "connectors",
+            &fixture.connector_id,
+            "versions",
+            &fixture.version,
+            "targets",
+            &release_os,
+            &release_arch,
+            "manifest",
+        ]);
+        let binary_path = registry_segments_path(&[
+            "v1",
+            "connectors",
+            &fixture.connector_id,
+            "versions",
+            &fixture.version,
+            "targets",
+            &release_os,
+            &release_arch,
+            "binary",
+        ]);
+        let signature_path = registry_segments_path(&[
+            "v1",
+            "connectors",
+            &fixture.connector_id,
+            "versions",
+            &fixture.version,
+            "targets",
+            &release_os,
+            &release_arch,
+            "signature",
+        ]);
+        let attestation_path = registry_segments_path(&[
+            "v1",
+            "connectors",
+            &fixture.connector_id,
+            "versions",
+            &fixture.version,
+            "targets",
+            &release_os,
+            &release_arch,
+            "attestation",
+        ]);
+
+        let descriptor = json!({
+            "version": fixture.version,
+            "is_latest": true,
+            "targets": [{
+                "os": release_os,
+                "arch": release_arch,
+                "target": release_target_name,
+                "manifest_sha256": manifest_sha256,
+                "binary_sha256": binary_sha256,
+                "manifest_url": manifest_path,
+                "binary_url": binary_path,
+                "signature_url": signature_path,
+                "attestation_url": if include_attestation && fixture.attestation_json.is_some() {
+                    Value::String(attestation_path.clone())
+                } else {
+                    Value::Null
+                },
+                "signature": signature_json.clone(),
+            }],
+        });
+
+        let mut routes = StdBTreeMap::from([
+            (
+                format!("GET {latest_path}"),
+                mock_json_http_response(descriptor.clone()),
+            ),
+            (
+                format!("GET {version_path}"),
+                mock_json_http_response(descriptor),
+            ),
+            (
+                format!("GET {manifest_path}"),
+                mock_text_http_response(fixture.manifest_toml.clone()),
+            ),
+            (
+                format!("GET {binary_path}"),
+                mock_binary_http_response(served_binary),
+            ),
+            (
+                format!("GET {signature_path}"),
+                mock_json_http_response(signature_json),
+            ),
+        ]);
+
+        if let Some(attestation_json) = fixture
+            .attestation_json
+            .as_ref()
+            .filter(|_| include_attestation)
+        {
+            routes.insert(
+                format!("GET {attestation_path}"),
+                MockHttpResponse {
+                    content_type: "application/json",
+                    body: attestation_json.as_bytes().to_vec(),
+                },
+            );
+        }
+
+        routes
+    }
+
+    fn non_native_registry_target() -> ConnectorTarget {
+        let native = ConnectorTarget::from_env();
+        let linux = ConnectorTarget {
+            os: "linux".to_string(),
+            arch: "amd64".to_string(),
+        };
+        let darwin = ConnectorTarget {
+            os: "darwin".to_string(),
+            arch: "arm64".to_string(),
+        };
+        if native == linux { darwin } else { linux }
     }
 
     fn mock_inventory_mutation_response_json(
@@ -28799,6 +29834,17 @@ deny_ptrace = true
                         warning.contains("could not read post-install connector status")
                     })
                 }))
+        );
+    }
+
+    fn assert_verification_check(payload: &Value, check: &str) {
+        assert!(
+            payload["verification"]
+                .as_array()
+                .is_some_and(|checks| checks
+                    .iter()
+                    .any(|entry| entry["check"] == check && entry["status"] == "ok")),
+            "expected verification check `{check}` in payload: {payload:#}"
         );
     }
 
@@ -36374,6 +37420,97 @@ depends_on = ["missing"]
         assert!(payload["error"]["recoverable"].as_bool().unwrap_or(false));
     }
 
+    #[test]
+    fn install_registry_source_downloads_verifies_and_applies() {
+        let (_context_dir, _context_path, _guard) = temp_context_config();
+        let (_signed_tempdir, signed_dir) = write_test_signed_registry_package(
+            "fcp.github:enterprise:v1",
+            "1.2.5",
+            Some(
+                r#"[policy]
+require_attestation_types = ["in-toto"]"#,
+            ),
+        );
+        let fixture = load_signed_registry_fixture(&signed_dir);
+        let (registry, registry_server) = spawn_mock_http_server(
+            registry_routes_for_fixture(&fixture, None, None, None, true),
+            5,
+        );
+        let (host, host_server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/connectors/apply".to_owned(),
+                    mock_inventory_mutation_response_json(
+                        ConnectorInventoryMutationKind::Install,
+                        false,
+                        ManagedConnectorConfig {
+                            id: "fcp.github:enterprise:v1".to_string(),
+                            binary: "/opt/fcp/github-enterprise".to_string(),
+                            name: Some("GitHub Enterprise".to_string()),
+                            description: Some("Live installed GitHub connector".to_string()),
+                            args: Vec::new(),
+                            env: StdBTreeMap::new(),
+                            config: None,
+                            categories: vec!["code".to_string()],
+                            version: Some("1.2.5".to_string()),
+                        },
+                        None,
+                    ),
+                ),
+                (
+                    "GET /rpc/connectors/fcp.github:enterprise:v1/status".to_owned(),
+                    mock_connector_admin_status_json(),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "install",
+            "fcp.github:enterprise:v1",
+            "--registry",
+            &registry,
+        ]);
+
+        registry_server
+            .join()
+            .expect("registry mock thread should complete");
+        host_server
+            .join()
+            .expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "install");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "install-activation",
+            true,
+            false,
+            false,
+        );
+        assert_eq!(payload["installed"]["version"], "1.2.5");
+        assert_eq!(payload["package"]["version"], "1.2.5");
+        assert_eq!(
+            payload["package_source_selection"]["state"],
+            "registry-download"
+        );
+        assert_eq!(
+            payload["package_source_selection"]["silent_fallback"],
+            false
+        );
+        assert_verification_check(&payload, "registry-manifest-sha256");
+        assert_verification_check(&payload, "registry-binary-sha256");
+        assert_verification_check(&payload, "registry-signature");
+        assert_verification_check(&payload, "registry-attestation");
+        assert_evidence_handle(&payload, "host-inventory-apply");
+        assert_evidence_handle(&payload, "mesh-live-availability");
+    }
+
     // ── lifecycle commands: update ────────────────────────────
 
     #[test]
@@ -36385,6 +37522,235 @@ depends_on = ["missing"]
         assert_eq!(payload["command"], "update");
         assert_eq!(payload["error"]["type"], "missing-host-endpoint");
         assert_eq!(payload["details"]["connector"], "github");
+    }
+
+    #[test]
+    fn update_registry_source_detects_newer_version_and_applies() {
+        let (_context_dir, _context_path, _guard) = temp_context_config();
+        let (_signed_tempdir, signed_dir) = write_test_signed_registry_package(
+            "fcp.github:enterprise:v1",
+            "1.2.5",
+            Some(
+                r#"[policy]
+require_attestation_types = ["in-toto"]"#,
+            ),
+        );
+        let fixture = load_signed_registry_fixture(&signed_dir);
+        let (registry, registry_server) = spawn_mock_http_server(
+            registry_routes_for_fixture(&fixture, None, None, None, true),
+            5,
+        );
+        let previous = ManagedConnectorConfig {
+            id: "fcp.github:enterprise:v1".to_string(),
+            binary: "/opt/fcp/github-enterprise-old".to_string(),
+            name: Some("GitHub Enterprise".to_string()),
+            description: Some("Existing live GitHub connector".to_string()),
+            args: vec!["--existing".to_string()],
+            env: StdBTreeMap::from([("LOG_LEVEL".to_string(), "debug".to_string())]),
+            config: Some(json!({ "profile": "work" })),
+            categories: vec!["code".to_string(), "dev-tools".to_string()],
+            version: Some("1.2.3".to_string()),
+        };
+        let updated = ManagedConnectorConfig {
+            id: "fcp.github:enterprise:v1".to_string(),
+            binary: "/opt/fcp/github-enterprise-new".to_string(),
+            name: Some("GitHub Enterprise".to_string()),
+            description: Some("Updated live GitHub connector".to_string()),
+            args: previous.args.clone(),
+            env: previous.env.clone(),
+            config: previous.config.clone(),
+            categories: previous.categories.clone(),
+            version: Some("1.2.5".to_string()),
+        };
+        let (host, host_server) = spawn_mock_host(
+            StdBTreeMap::from([
+                (
+                    "POST /rpc/discover".to_owned(),
+                    mock_discovery_response_json(),
+                ),
+                (
+                    "POST /rpc/connectors/apply".to_owned(),
+                    mock_inventory_mutation_response_json(
+                        ConnectorInventoryMutationKind::Update,
+                        false,
+                        updated,
+                        Some(previous),
+                    ),
+                ),
+            ]),
+            2,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "update",
+            "github",
+            "--registry",
+            &registry,
+        ]);
+
+        registry_server
+            .join()
+            .expect("registry mock thread should complete");
+        host_server
+            .join()
+            .expect("mock host thread should complete");
+        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(payload["command"], "update");
+        assert_eq!(payload["mode"], "apply");
+        assert_install_contract(
+            &payload,
+            "host-admin-api",
+            "node-local-root-app",
+            "update-activation",
+            true,
+            false,
+            false,
+        );
+        assert_eq!(payload["current"]["version"], "1.2.3");
+        assert_eq!(payload["updated"]["version"], "1.2.5");
+        assert_eq!(payload["activation"]["inventory_updated"], true);
+        assert_verification_check(&payload, "registry-signature");
+        assert_verification_check(&payload, "registry-attestation");
+        assert_evidence_handle(&payload, "host-inventory-apply");
+    }
+
+    #[test]
+    fn install_registry_verify_only_rejects_tampered_binary_signature_mismatch() {
+        let (_context_dir, _context_path, _guard) = temp_context_config();
+        let (_signed_tempdir, signed_dir) =
+            write_test_signed_registry_package("fcp.github:enterprise:v1", "1.2.5", None);
+        let fixture = load_signed_registry_fixture(&signed_dir);
+        let mut tampered_binary = fixture.binary_bytes.clone();
+        tampered_binary.extend_from_slice(b":tampered");
+        let mut tampered_signature = fixture.signature_artifact.clone();
+        tampered_signature.binary_hash = super::sha256_prefixed(&tampered_binary);
+        let (registry, registry_server) = spawn_mock_http_server(
+            registry_routes_for_fixture(
+                &fixture,
+                Some(tampered_binary),
+                Some(tampered_signature),
+                None,
+                false,
+            ),
+            4,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "install",
+            "fcp.github:enterprise:v1",
+            "--registry",
+            &registry,
+            "--verify-only",
+        ]);
+
+        registry_server
+            .join()
+            .expect("registry mock thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "install");
+        assert_eq!(payload["error"]["type"], "invalid-install-source");
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("registry verification failed"))
+        );
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("signature"))
+        );
+    }
+
+    #[test]
+    fn install_registry_verify_only_rejects_wrong_platform_release() {
+        let (_context_dir, _context_path, _guard) = temp_context_config();
+        let (_signed_tempdir, signed_dir) =
+            write_test_signed_registry_package("fcp.github:enterprise:v1", "1.2.5", None);
+        let fixture = load_signed_registry_fixture(&signed_dir);
+        let expected_target = ConnectorTarget::from_env().as_string();
+        let (registry, registry_server) = spawn_mock_http_server(
+            registry_routes_for_fixture(
+                &fixture,
+                None,
+                None,
+                Some(non_native_registry_target()),
+                false,
+            ),
+            1,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "install",
+            "fcp.github:enterprise:v1",
+            "--registry",
+            &registry,
+            "--verify-only",
+        ]);
+
+        registry_server
+            .join()
+            .expect("registry mock thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "install");
+        assert_eq!(payload["error"]["type"], "invalid-install-source");
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("has no"))
+        );
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(&expected_target))
+        );
+    }
+
+    #[test]
+    fn install_registry_verify_only_rejects_missing_attestation_when_policy_requires_it() {
+        let (_context_dir, _context_path, _guard) = temp_context_config();
+        let (_signed_tempdir, signed_dir) = write_test_signed_registry_package(
+            "fcp.github:enterprise:v1",
+            "1.2.5",
+            Some(
+                r#"[policy]
+require_attestation_types = ["in-toto"]"#,
+            ),
+        );
+        let fixture = load_signed_registry_fixture(&signed_dir);
+        let (registry, registry_server) = spawn_mock_http_server(
+            registry_routes_for_fixture(&fixture, None, None, None, false),
+            4,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "install",
+            "fcp.github:enterprise:v1",
+            "--registry",
+            &registry,
+            "--verify-only",
+        ]);
+
+        registry_server
+            .join()
+            .expect("registry mock thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "install");
+        assert_eq!(payload["error"]["type"], "invalid-install-source");
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("attestation"))
+        );
     }
 
     #[test]

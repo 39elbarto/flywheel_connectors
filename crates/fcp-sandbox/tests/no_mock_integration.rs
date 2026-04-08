@@ -76,6 +76,121 @@ fn open_constraints() -> NetworkConstraints {
     }
 }
 
+fn mediated_constraints() -> NetworkConstraints {
+    NetworkConstraints {
+        host_allow: vec!["api.example.com".to_string()],
+        port_allow: vec![443],
+        ip_allow: vec![],
+        cidr_deny: vec![
+            "127.0.0.0/8".to_string(),
+            "10.0.0.0/8".to_string(),
+            "100.64.0.0/10".to_string(),
+        ],
+        deny_localhost: true,
+        deny_private_ranges: true,
+        deny_tailnet_ranges: true,
+        require_sni: true,
+        spki_pins: vec![],
+        deny_ip_literals: true,
+        require_host_canonicalization: true,
+        dns_max_ips: 16,
+        max_redirects: 5,
+        connect_timeout_ms: 10_000,
+        total_timeout_ms: 60_000,
+        max_response_bytes: 10 * 1024 * 1024,
+    }
+}
+
+fn localhost_block_constraints() -> NetworkConstraints {
+    NetworkConstraints {
+        host_allow: vec!["*".to_string()],
+        port_allow: vec![443, 80],
+        ip_allow: vec![],
+        cidr_deny: vec![
+            "127.0.0.0/8".to_string(),
+            "10.0.0.0/8".to_string(),
+            "100.64.0.0/10".to_string(),
+        ],
+        deny_localhost: true,
+        deny_private_ranges: true,
+        deny_tailnet_ranges: true,
+        require_sni: false,
+        spki_pins: vec![],
+        deny_ip_literals: false,
+        require_host_canonicalization: false,
+        dns_max_ips: 16,
+        max_redirects: 5,
+        connect_timeout_ms: 10_000,
+        total_timeout_ms: 60_000,
+        max_response_bytes: 10 * 1024 * 1024,
+    }
+}
+
+#[derive(Debug)]
+struct RecordingCredentialInjector {
+    authorized: bool,
+    allowed_hosts: Vec<String>,
+    auth_header_value: String,
+    tcp_auth: Option<Vec<u8>>,
+}
+
+impl RecordingCredentialInjector {
+    fn bearer(allowed_hosts: &[&str]) -> Self {
+        Self {
+            authorized: true,
+            allowed_hosts: allowed_hosts
+                .iter()
+                .map(|host| (*host).to_string())
+                .collect(),
+            auth_header_value: "Bearer test-token".to_string(),
+            tcp_auth: Some(b"test-auth".to_vec()),
+        }
+    }
+
+    fn unauthorized(allowed_hosts: &[&str]) -> Self {
+        Self {
+            authorized: false,
+            allowed_hosts: allowed_hosts
+                .iter()
+                .map(|host| (*host).to_string())
+                .collect(),
+            auth_header_value: "Bearer test-token".to_string(),
+            tcp_auth: Some(b"test-auth".to_vec()),
+        }
+    }
+}
+
+impl CredentialInjector for RecordingCredentialInjector {
+    fn is_authorized(
+        &self,
+        _credential_id: &str,
+        _operation_id: &str,
+        _credential_allow: &[String],
+    ) -> Result<bool, EgressError> {
+        Ok(self.authorized)
+    }
+
+    fn is_host_allowed(&self, _credential_id: &str, host: &str) -> Result<bool, EgressError> {
+        Ok(self.allowed_hosts.iter().any(|allowed| allowed == host))
+    }
+
+    fn inject_http(
+        &self,
+        _credential_id: &str,
+        headers: &mut Vec<HttpHeader>,
+    ) -> Result<(), EgressError> {
+        headers.push(HttpHeader {
+            name: "Authorization".to_string(),
+            value: self.auth_header_value.clone(),
+        });
+        Ok(())
+    }
+
+    fn get_tcp_auth(&self, _credential_id: &str) -> Result<Option<Vec<u8>>, EgressError> {
+        Ok(self.tcp_auth.clone())
+    }
+}
+
 fn http_request(url: &str) -> EgressRequest {
     EgressRequest::Http(EgressHttpRequest {
         url: url.to_string(),
@@ -1118,6 +1233,185 @@ async fn wasi_runtime_network_policy_controls_preview2_socket_hostcalls() {
             .await;
         assert!(blocked_bind.is_err());
     }
+}
+
+#[fcp_async_core::runtime::test]
+async fn wasi_runtime_network_guard_authorizes_mediated_http_requests_inside_store() {
+    let runtime =
+        WasiRuntime::new(WasiConfig::default().with_network_constraints(mediated_constraints()))
+            .unwrap();
+    let mut store = runtime.create_store().unwrap();
+
+    {
+        let mut sockets = store.data_mut().sockets();
+        let network = instance_network::Host::instance_network(&mut sockets).unwrap();
+        let err = ip_name_lookup::Host::resolve_addresses(
+            &mut sockets,
+            network,
+            "api.example.com".into(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("resolver-failure"));
+    }
+
+    let injector = RecordingCredentialInjector::bearer(&["api.example.com"]);
+    let mut request = EgressHttpRequest {
+        url: "https://api.example.com/v1/data".to_string(),
+        method: "GET".to_string(),
+        headers: vec![],
+        body: None,
+        credential_id: Some("test-cred".to_string()),
+    };
+
+    let decision = store
+        .data()
+        .authorize_http_request(
+            &mut request,
+            &injector,
+            "sandbox.egress.read",
+            &["test-cred".to_string()],
+        )
+        .unwrap();
+
+    assert!(decision.allowed);
+    assert!(decision.credential_injected);
+    assert_eq!(decision.expected_sni.as_deref(), Some("api.example.com"));
+    assert!(
+        request.headers.iter().any(|header| {
+            header.name == "Authorization" && header.value == "Bearer test-token"
+        })
+    );
+}
+
+#[test]
+fn wasi_host_state_authorize_http_denies_disallowed_host_without_timeout() {
+    let config = WasiConfig::default().with_network_constraints(mediated_constraints());
+    let runtime = WasiRuntime::new(config).unwrap();
+    let store = runtime.create_store().unwrap();
+    let injector = RecordingCredentialInjector::bearer(&["api.example.com"]);
+    let mut request = EgressHttpRequest {
+        url: "https://evil.com/".to_string(),
+        method: "GET".to_string(),
+        headers: vec![],
+        body: None,
+        credential_id: Some("test-cred".to_string()),
+    };
+
+    let err = store
+        .data()
+        .authorize_http_request(
+            &mut request,
+            &injector,
+            "sandbox.egress.read",
+            &["test-cred".to_string()],
+        )
+        .unwrap_err();
+
+    assert!(err.to_string().contains("host not allowed"));
+    assert!(request.headers.is_empty());
+}
+
+#[test]
+fn wasi_host_state_authorize_http_denies_localhost_via_egress_rules() {
+    let config = WasiConfig::default().with_network_constraints(localhost_block_constraints());
+    let runtime = WasiRuntime::new(config).unwrap();
+    let store = runtime.create_store().unwrap();
+    let injector = RecordingCredentialInjector::bearer(&["127.0.0.1"]);
+    let mut request = EgressHttpRequest {
+        url: "http://127.0.0.1/health".to_string(),
+        method: "GET".to_string(),
+        headers: vec![],
+        body: None,
+        credential_id: Some("test-cred".to_string()),
+    };
+
+    let err = store
+        .data()
+        .authorize_http_request(
+            &mut request,
+            &injector,
+            "sandbox.egress.read",
+            &["test-cred".to_string()],
+        )
+        .unwrap_err();
+
+    assert!(err.to_string().contains("localhost access denied"));
+    assert!(request.headers.is_empty());
+}
+
+#[test]
+fn wasi_host_state_authorize_tcp_returns_injected_auth_bytes() {
+    let constraints = NetworkConstraints {
+        host_allow: vec!["db.example.com".to_string()],
+        port_allow: vec![5432],
+        ip_allow: vec![],
+        cidr_deny: vec![],
+        deny_localhost: true,
+        deny_private_ranges: true,
+        deny_tailnet_ranges: true,
+        require_sni: false,
+        spki_pins: vec![],
+        deny_ip_literals: true,
+        require_host_canonicalization: true,
+        dns_max_ips: 16,
+        max_redirects: 5,
+        connect_timeout_ms: 10_000,
+        total_timeout_ms: 60_000,
+        max_response_bytes: 10 * 1024 * 1024,
+    };
+    let config = WasiConfig::default().with_network_constraints(constraints);
+    let runtime = WasiRuntime::new(config).unwrap();
+    let store = runtime.create_store().unwrap();
+    let injector = RecordingCredentialInjector::bearer(&["db.example.com"]);
+    let request = EgressTcpConnectRequest {
+        host: "db.example.com".to_string(),
+        port: 5432,
+        tls: true,
+        sni_override: None,
+        credential_id: Some("test-cred".to_string()),
+    };
+
+    let decision = store
+        .data()
+        .authorize_tcp_connect(
+            &request,
+            &injector,
+            "sandbox.egress.db",
+            &["test-cred".to_string()],
+        )
+        .unwrap();
+
+    assert!(decision.decision.allowed);
+    assert!(decision.decision.credential_injected);
+    assert_eq!(decision.tcp_auth.as_deref(), Some(&b"test-auth"[..]));
+}
+
+#[test]
+fn wasi_host_state_authorize_http_rejects_unauthorized_credential() {
+    let config = WasiConfig::default().with_network_constraints(mediated_constraints());
+    let runtime = WasiRuntime::new(config).unwrap();
+    let store = runtime.create_store().unwrap();
+    let injector = RecordingCredentialInjector::unauthorized(&["api.example.com"]);
+    let mut request = EgressHttpRequest {
+        url: "https://api.example.com/v1/data".to_string(),
+        method: "GET".to_string(),
+        headers: vec![],
+        body: None,
+        credential_id: Some("test-cred".to_string()),
+    };
+
+    let err = store
+        .data()
+        .authorize_http_request(
+            &mut request,
+            &injector,
+            "sandbox.egress.read",
+            &["test-cred".to_string()],
+        )
+        .unwrap_err();
+
+    assert!(err.to_string().contains("not authorized"));
+    assert!(request.headers.is_empty());
 }
 
 // ============================================================================

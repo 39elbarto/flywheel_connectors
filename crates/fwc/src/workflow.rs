@@ -41,6 +41,7 @@ impl WorkflowRequest {
             } else {
                 IntentMode::DoSimulate
             },
+            host_url: None,
         })
     }
 }
@@ -3497,7 +3498,10 @@ mod tests {
     }
 
     #[test]
-    fn current_workflow_truth_for_unsupported_intent() {
+    fn current_workflow_truth_for_lifecycle_intent() {
+        // "disable slack" is now a supported lifecycle intent (added in the
+        // intent/readiness/recovery expansion commit). The compiler maps it to
+        // a lifecycle command, which requires a live host for execution.
         let store = store();
         let task = store
             .create(WorkflowRequest {
@@ -3507,7 +3511,7 @@ mod tests {
             })
             .expect("task should be created");
         let truth = current_workflow_truth(&task);
-        assert_eq!(truth.availability, CommandAvailability::Unsupported);
+        assert_eq!(truth.availability, CommandAvailability::LiveRuntime);
     }
 
     #[test]

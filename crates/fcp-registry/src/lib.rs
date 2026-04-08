@@ -7,8 +7,17 @@
 //! MUST be packable into FCPS frames per §9.8.2.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use axum::{
+    Json, Router,
+    extract::{Path as AxumPath, State},
+    http::{HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use bytes::Bytes;
 use chrono::Utc;
 use fcp_cbor::{CanonicalSerializer, SerializationError};
@@ -31,11 +40,131 @@ use fcp_store::{
     ObjectStore, ObjectStoreError, ObjectSymbolMeta, ObjectTransmissionInfo, StoredSymbol,
     SymbolMeta, SymbolStore, SymbolStoreError,
 };
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Signing context for manifest signatures.
 pub const MANIFEST_SIGNATURE_CONTEXT: &[u8] = b"fcp.registry.manifest.v1";
+pub const REGISTRY_MANIFEST_FILENAME: &str = "manifest.toml";
+pub const REGISTRY_MANIFEST_SIGNATURE_FILENAME: &str = "manifest-signature.json";
+pub const REGISTRY_ATTESTATION_FILENAME: &str = "attestation.json";
+
+/// Detached manifest-signature metadata emitted alongside a signed connector package.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManifestSignatureArtifact {
+    pub key_id: String,
+    pub verifying_key: String,
+    pub context: String,
+    pub manifest_signing_hash: String,
+    pub binary_hash: String,
+    pub signature: String,
+    pub target: ConnectorTarget,
+    pub binary_name: String,
+}
+
+#[derive(Debug, Clone)]
+struct RegistryPackageRecord {
+    connector_id: String,
+    version: Version,
+    manifest_toml: String,
+    manifest_sha256: String,
+    manifest_signature: ManifestSignatureArtifact,
+    manifest_signature_json: String,
+    binary_sha256: String,
+    binary_bytes: Vec<u8>,
+    attestation_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegistryCatalogResponse {
+    pub connectors: Vec<RegistryConnectorSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegistryConnectorSummary {
+    pub connector_id: String,
+    pub latest_version: String,
+    pub versions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegistryConnectorDescriptor {
+    pub connector_id: String,
+    pub latest_version: String,
+    pub versions: Vec<RegistryVersionDescriptor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegistryVersionDescriptor {
+    pub version: String,
+    pub is_latest: bool,
+    pub targets: Vec<RegistryTargetDescriptor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegistryTargetDescriptor {
+    pub os: String,
+    pub arch: String,
+    pub target: String,
+    pub manifest_sha256: String,
+    pub binary_sha256: String,
+    pub manifest_url: String,
+    pub binary_url: String,
+    pub signature_url: String,
+    pub attestation_url: Option<String>,
+    pub signature: ManifestSignatureArtifact,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LocalRegistryCatalog {
+    connectors: HashMap<String, HashMap<String, Vec<RegistryPackageRecord>>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RegistryCatalogError {
+    #[error("no signed package directories were provided")]
+    EmptyCatalog,
+    #[error("failed to read `{path}`: {source}")]
+    ReadFile {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("signed package `{path}` is missing `{file_name}`")]
+    MissingFile {
+        path: PathBuf,
+        file_name: &'static str,
+    },
+    #[error("signed package `{path}` has invalid signature metadata: {source}")]
+    SignatureArtifactJson {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("signed package `{path}` has invalid manifest: {source}")]
+    ManifestParse {
+        path: PathBuf,
+        #[source]
+        source: ManifestError,
+    },
+    #[error("signed package `{path}` is missing binary `{binary_name}`")]
+    MissingBinary { path: PathBuf, binary_name: String },
+    #[error(
+        "signed package `{path}` binary digest mismatch (artifact {artifact_hash}, actual {actual_hash})"
+    )]
+    BinaryHashMismatch {
+        path: PathBuf,
+        artifact_hash: String,
+        actual_hash: String,
+    },
+    #[error("duplicate signed package for `{connector_id}` version `{version}` target `{target}`")]
+    DuplicateTarget {
+        connector_id: String,
+        version: String,
+        target: String,
+    },
+}
 
 /// Registry verification failures.
 #[derive(Debug, thiserror::Error)]
@@ -66,6 +195,11 @@ pub enum RegistryError {
     RequiredAttestationMissing { attestation: String },
     #[error("attestation evidence missing")]
     AttestationEvidenceMissing,
+    #[error("attestation `{attestation}` expired at {expired_at}")]
+    AttestationExpired {
+        attestation: String,
+        expired_at: u64,
+    },
     #[error("attestation does not meet minimum SLSA level {required}")]
     SlsaLevelInsufficient { required: u8 },
     #[error("attestation builder `{builder}` not in trusted builders list")]
@@ -131,6 +265,7 @@ pub struct AttestationEvidence {
     pub attestation_type: AttestationType,
     pub slsa_level: Option<u8>,
     pub builder_id: Option<String>,
+    pub expires_at: Option<u64>,
 }
 
 /// Verified connector bundle metadata.
@@ -497,6 +632,11 @@ impl TufVerifier for MockTufVerifier {
         pinned_root: &TufRootMetadata,
         target_path: &str,
     ) -> Result<TufVerificationResult, SupplyChainVerificationError> {
+        let now = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
+        if pinned_root.expires <= now || self.root.expires <= now {
+            return Err(SupplyChainVerificationError::TufExpired);
+        }
+
         // Check root hash matches
         if pinned_root.root_hash != self.root.root_hash {
             return Err(SupplyChainVerificationError::TufRootMismatch {
@@ -1339,8 +1479,33 @@ fn enforce_supply_chain_policy(
         }
     }
 
-    if !policy.require_attestation_types.is_empty() {
+    let attestation_policy_active = !policy.require_attestation_types.is_empty()
+        || policy.min_slsa_level.is_some()
+        || !policy.trusted_builders.is_empty();
+    let attestation_evidence = if attestation_policy_active {
         let evidence = evidence.ok_or(RegistryError::AttestationEvidenceMissing)?;
+        let now = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
+        if let Some((attestation_type, expired_at)) = evidence
+            .attestations
+            .iter()
+            .filter_map(|att| {
+                att.expires_at
+                    .map(|expires_at| (att.attestation_type, expires_at))
+            })
+            .find(|(_, expires_at)| *expires_at <= now)
+        {
+            return Err(RegistryError::AttestationExpired {
+                attestation: attestation_label(attestation_type).to_string(),
+                expired_at,
+            });
+        }
+        Some(evidence)
+    } else {
+        None
+    };
+
+    if !policy.require_attestation_types.is_empty() {
+        let evidence = attestation_evidence.ok_or(RegistryError::AttestationEvidenceMissing)?;
         for required in &policy.require_attestation_types {
             if !evidence
                 .attestations
@@ -1355,7 +1520,7 @@ fn enforce_supply_chain_policy(
     }
 
     if let Some(required_level) = policy.min_slsa_level {
-        let evidence = evidence.ok_or(RegistryError::AttestationEvidenceMissing)?;
+        let evidence = attestation_evidence.ok_or(RegistryError::AttestationEvidenceMissing)?;
         let meets_level = evidence
             .attestations
             .iter()
@@ -1368,7 +1533,7 @@ fn enforce_supply_chain_policy(
     }
 
     if !policy.trusted_builders.is_empty() {
-        let evidence = evidence.ok_or(RegistryError::AttestationEvidenceMissing)?;
+        let evidence = attestation_evidence.ok_or(RegistryError::AttestationEvidenceMissing)?;
         // At least one attestation must identify a trusted builder.
         // Empty attestation lists or attestations without builder_id cannot
         // satisfy a trusted_builders policy.
@@ -1408,6 +1573,460 @@ fn attestation_label(attestation: AttestationType) -> &'static str {
         AttestationType::ReproducibleBuild => "reproducible-build",
         AttestationType::CodeReview => "code-review",
     }
+}
+
+#[derive(Debug, Serialize)]
+struct RegistryHealthResponse {
+    status: &'static str,
+    connectors: usize,
+}
+
+impl LocalRegistryCatalog {
+    /// Build an in-memory catalog from one or more signed package directories.
+    ///
+    /// Each directory is expected to contain `manifest.toml`,
+    /// `manifest-signature.json`, the signed binary named by the signature
+    /// artifact, and optionally `attestation.json`.
+    ///
+    /// # Errors
+    /// Returns [`RegistryCatalogError`] if any package directory is malformed or
+    /// duplicates an existing connector/version/target tuple.
+    pub fn from_signed_package_dirs(
+        package_dirs: &[PathBuf],
+    ) -> Result<Self, RegistryCatalogError> {
+        if package_dirs.is_empty() {
+            return Err(RegistryCatalogError::EmptyCatalog);
+        }
+
+        let mut catalog = Self::default();
+        for package_dir in package_dirs {
+            let record = Self::load_signed_package(package_dir)?;
+            catalog.insert(record)?;
+        }
+        Ok(catalog)
+    }
+
+    #[must_use]
+    pub fn connectors_response(&self) -> RegistryCatalogResponse {
+        let mut connectors: Vec<_> = self
+            .connectors
+            .keys()
+            .filter_map(|connector_id| self.connector_summary(connector_id))
+            .collect();
+        connectors.sort_by(|left, right| left.connector_id.cmp(&right.connector_id));
+        RegistryCatalogResponse { connectors }
+    }
+
+    #[must_use]
+    pub fn connector_descriptor(&self, connector_id: &str) -> Option<RegistryConnectorDescriptor> {
+        let entries = self.sorted_version_entries(connector_id)?;
+        let latest_version = entries.first()?.0.clone();
+        let versions = entries
+            .iter()
+            .map(|(version, records)| {
+                self.version_descriptor(
+                    connector_id,
+                    version.as_str(),
+                    records,
+                    version.as_str() == latest_version.as_str(),
+                )
+            })
+            .collect();
+        Some(RegistryConnectorDescriptor {
+            connector_id: connector_id.to_owned(),
+            latest_version,
+            versions,
+        })
+    }
+
+    #[must_use]
+    pub fn latest_release(&self, connector_id: &str) -> Option<RegistryVersionDescriptor> {
+        let entries = self.sorted_version_entries(connector_id)?;
+        let latest_version = entries.first()?.0.clone();
+        let (_, records) = entries.first()?;
+        Some(self.version_descriptor(connector_id, latest_version.as_str(), records, true))
+    }
+
+    #[must_use]
+    pub fn release(&self, connector_id: &str, version: &str) -> Option<RegistryVersionDescriptor> {
+        let entries = self.sorted_version_entries(connector_id)?;
+        let latest_version = entries.first()?.0.clone();
+        let (_, records) = entries
+            .into_iter()
+            .find(|(candidate, _)| candidate.as_str() == version)?;
+        Some(self.version_descriptor(
+            connector_id,
+            version,
+            records,
+            version == latest_version.as_str(),
+        ))
+    }
+
+    #[must_use]
+    pub fn router(self) -> Router {
+        registry_router(Arc::new(self))
+    }
+
+    fn connector_summary(&self, connector_id: &str) -> Option<RegistryConnectorSummary> {
+        let entries = self.sorted_version_entries(connector_id)?;
+        let latest_version = entries.first()?.0.clone();
+        let versions = entries
+            .into_iter()
+            .map(|(version, _)| version.clone())
+            .collect();
+        Some(RegistryConnectorSummary {
+            connector_id: connector_id.to_owned(),
+            latest_version,
+            versions,
+        })
+    }
+
+    fn insert(&mut self, record: RegistryPackageRecord) -> Result<(), RegistryCatalogError> {
+        let connector_id = record.connector_id.clone();
+        let version = record.version.to_string();
+        let target = record.manifest_signature.target.as_string();
+
+        let versions = self.connectors.entry(connector_id.clone()).or_default();
+        let records = versions.entry(version.clone()).or_default();
+        if records
+            .iter()
+            .any(|existing| existing.manifest_signature.target == record.manifest_signature.target)
+        {
+            return Err(RegistryCatalogError::DuplicateTarget {
+                connector_id,
+                version,
+                target,
+            });
+        }
+
+        records.push(record);
+        records.sort_by(|left, right| {
+            left.manifest_signature
+                .target
+                .as_string()
+                .cmp(&right.manifest_signature.target.as_string())
+        });
+        Ok(())
+    }
+
+    fn load_signed_package(
+        package_dir: &Path,
+    ) -> Result<RegistryPackageRecord, RegistryCatalogError> {
+        let manifest_path = package_dir.join(REGISTRY_MANIFEST_FILENAME);
+        let manifest_toml = std::fs::read_to_string(&manifest_path).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                RegistryCatalogError::MissingFile {
+                    path: package_dir.to_path_buf(),
+                    file_name: REGISTRY_MANIFEST_FILENAME,
+                }
+            } else {
+                RegistryCatalogError::ReadFile {
+                    path: manifest_path.clone(),
+                    source,
+                }
+            }
+        })?;
+        let manifest = ConnectorManifest::parse_str(&manifest_toml).map_err(|source| {
+            RegistryCatalogError::ManifestParse {
+                path: manifest_path.clone(),
+                source,
+            }
+        })?;
+
+        let signature_path = package_dir.join(REGISTRY_MANIFEST_SIGNATURE_FILENAME);
+        let signature_json = std::fs::read_to_string(&signature_path).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                RegistryCatalogError::MissingFile {
+                    path: package_dir.to_path_buf(),
+                    file_name: REGISTRY_MANIFEST_SIGNATURE_FILENAME,
+                }
+            } else {
+                RegistryCatalogError::ReadFile {
+                    path: signature_path.clone(),
+                    source,
+                }
+            }
+        })?;
+        let signature: ManifestSignatureArtifact =
+            serde_json::from_str(&signature_json).map_err(|source| {
+                RegistryCatalogError::SignatureArtifactJson {
+                    path: signature_path.clone(),
+                    source,
+                }
+            })?;
+
+        let binary_path = package_dir.join(&signature.binary_name);
+        let binary_bytes = std::fs::read(&binary_path).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                RegistryCatalogError::MissingBinary {
+                    path: package_dir.to_path_buf(),
+                    binary_name: signature.binary_name.clone(),
+                }
+            } else {
+                RegistryCatalogError::ReadFile {
+                    path: binary_path.clone(),
+                    source,
+                }
+            }
+        })?;
+        let binary_sha256 = hash_bytes(&binary_bytes);
+        if binary_sha256 != signature.binary_hash {
+            return Err(RegistryCatalogError::BinaryHashMismatch {
+                path: package_dir.to_path_buf(),
+                artifact_hash: signature.binary_hash.clone(),
+                actual_hash: binary_sha256,
+            });
+        }
+
+        let attestation_path = package_dir.join(REGISTRY_ATTESTATION_FILENAME);
+        let attestation_json = std::fs::read_to_string(&attestation_path)
+            .map(Some)
+            .or_else(|source| {
+                if source.kind() == std::io::ErrorKind::NotFound {
+                    Ok(None)
+                } else {
+                    Err(RegistryCatalogError::ReadFile {
+                        path: attestation_path.clone(),
+                        source,
+                    })
+                }
+            })?;
+
+        Ok(RegistryPackageRecord {
+            connector_id: manifest.connector.id.to_string(),
+            version: manifest.connector.version.clone(),
+            manifest_toml: manifest_toml.clone(),
+            manifest_sha256: hash_bytes(manifest_toml.as_bytes()),
+            manifest_signature: signature,
+            manifest_signature_json: signature_json,
+            binary_sha256: hash_bytes(&binary_bytes),
+            binary_bytes,
+            attestation_json,
+        })
+    }
+
+    fn sorted_version_entries(
+        &self,
+        connector_id: &str,
+    ) -> Option<Vec<(&String, &Vec<RegistryPackageRecord>)>> {
+        let versions = self.connectors.get(connector_id)?;
+        let mut entries: Vec<_> = versions.iter().collect();
+        entries.sort_by(|(_, left), (_, right)| right[0].version.cmp(&left[0].version));
+        Some(entries)
+    }
+
+    fn version_descriptor(
+        &self,
+        connector_id: &str,
+        version: &str,
+        records: &[RegistryPackageRecord],
+        is_latest: bool,
+    ) -> RegistryVersionDescriptor {
+        let mut targets: Vec<_> = records
+            .iter()
+            .map(|record| Self::target_descriptor(connector_id, version, record))
+            .collect();
+        targets.sort_by(|left, right| left.target.cmp(&right.target));
+        RegistryVersionDescriptor {
+            version: version.to_owned(),
+            is_latest,
+            targets,
+        }
+    }
+
+    fn target_descriptor(
+        connector_id: &str,
+        version: &str,
+        record: &RegistryPackageRecord,
+    ) -> RegistryTargetDescriptor {
+        let os = record.manifest_signature.target.os.clone();
+        let arch = record.manifest_signature.target.arch.clone();
+        let target = record.manifest_signature.target.as_string();
+        RegistryTargetDescriptor {
+            os: os.clone(),
+            arch: arch.clone(),
+            target,
+            manifest_sha256: record.manifest_sha256.clone(),
+            binary_sha256: record.binary_sha256.clone(),
+            manifest_url: format!(
+                "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/manifest"
+            ),
+            binary_url: format!(
+                "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/binary"
+            ),
+            signature_url: format!(
+                "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/signature"
+            ),
+            attestation_url: record.attestation_json.as_ref().map(|_| {
+                format!(
+                    "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/attestation"
+                )
+            }),
+            signature: record.manifest_signature.clone(),
+        }
+    }
+
+    fn target_record(
+        &self,
+        connector_id: &str,
+        version: &str,
+        os: &str,
+        arch: &str,
+    ) -> Option<&RegistryPackageRecord> {
+        self.connectors
+            .get(connector_id)?
+            .get(version)?
+            .iter()
+            .find(|record| {
+                record.manifest_signature.target.os == os
+                    && record.manifest_signature.target.arch == arch
+            })
+    }
+}
+
+#[must_use]
+pub fn registry_router(catalog: Arc<LocalRegistryCatalog>) -> Router {
+    Router::new()
+        .route("/health", get(registry_health_handler))
+        .route("/v1/connectors", get(registry_list_handler))
+        .route(
+            "/v1/connectors/{connector_id}",
+            get(registry_connector_handler),
+        )
+        .route(
+            "/v1/connectors/{connector_id}/latest",
+            get(registry_latest_handler),
+        )
+        .route(
+            "/v1/connectors/{connector_id}/versions/{version}",
+            get(registry_version_handler),
+        )
+        .route(
+            "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/manifest",
+            get(registry_manifest_handler),
+        )
+        .route(
+            "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/binary",
+            get(registry_binary_handler),
+        )
+        .route(
+            "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/signature",
+            get(registry_signature_handler),
+        )
+        .route(
+            "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/attestation",
+            get(registry_attestation_handler),
+        )
+        .with_state(catalog)
+}
+
+async fn registry_health_handler(
+    State(catalog): State<Arc<LocalRegistryCatalog>>,
+) -> Json<RegistryHealthResponse> {
+    Json(RegistryHealthResponse {
+        status: "ok",
+        connectors: catalog.connectors.len(),
+    })
+}
+
+async fn registry_list_handler(
+    State(catalog): State<Arc<LocalRegistryCatalog>>,
+) -> Json<RegistryCatalogResponse> {
+    Json(catalog.connectors_response())
+}
+
+async fn registry_connector_handler(
+    State(catalog): State<Arc<LocalRegistryCatalog>>,
+    AxumPath(connector_id): AxumPath<String>,
+) -> Result<Json<RegistryConnectorDescriptor>, StatusCode> {
+    catalog
+        .connector_descriptor(&connector_id)
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn registry_latest_handler(
+    State(catalog): State<Arc<LocalRegistryCatalog>>,
+    AxumPath(connector_id): AxumPath<String>,
+) -> Result<Json<RegistryVersionDescriptor>, StatusCode> {
+    catalog
+        .latest_release(&connector_id)
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn registry_version_handler(
+    State(catalog): State<Arc<LocalRegistryCatalog>>,
+    AxumPath((connector_id, version)): AxumPath<(String, String)>,
+) -> Result<Json<RegistryVersionDescriptor>, StatusCode> {
+    catalog
+        .release(&connector_id, &version)
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn registry_manifest_handler(
+    State(catalog): State<Arc<LocalRegistryCatalog>>,
+    AxumPath((connector_id, version, os, arch)): AxumPath<(String, String, String, String)>,
+) -> Result<Response, StatusCode> {
+    let record = catalog
+        .target_record(&connector_id, &version, &os, &arch)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(registry_bytes_response(
+        "text/plain; charset=utf-8",
+        record.manifest_toml.clone().into_bytes(),
+    ))
+}
+
+async fn registry_binary_handler(
+    State(catalog): State<Arc<LocalRegistryCatalog>>,
+    AxumPath((connector_id, version, os, arch)): AxumPath<(String, String, String, String)>,
+) -> Result<Response, StatusCode> {
+    let record = catalog
+        .target_record(&connector_id, &version, &os, &arch)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(registry_bytes_response(
+        "application/octet-stream",
+        record.binary_bytes.clone(),
+    ))
+}
+
+async fn registry_signature_handler(
+    State(catalog): State<Arc<LocalRegistryCatalog>>,
+    AxumPath((connector_id, version, os, arch)): AxumPath<(String, String, String, String)>,
+) -> Result<Response, StatusCode> {
+    let record = catalog
+        .target_record(&connector_id, &version, &os, &arch)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(registry_bytes_response(
+        "application/json",
+        record.manifest_signature_json.clone().into_bytes(),
+    ))
+}
+
+async fn registry_attestation_handler(
+    State(catalog): State<Arc<LocalRegistryCatalog>>,
+    AxumPath((connector_id, version, os, arch)): AxumPath<(String, String, String, String)>,
+) -> Result<Response, StatusCode> {
+    let record = catalog
+        .target_record(&connector_id, &version, &os, &arch)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let attestation = record
+        .attestation_json
+        .clone()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(registry_bytes_response(
+        "application/json",
+        attestation.into_bytes(),
+    ))
+}
+
+fn registry_bytes_response(content_type: &'static str, body: Vec<u8>) -> Response {
+    let mut response = body.into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response
 }
 
 #[async_trait]
@@ -2187,6 +2806,7 @@ require_attestation_types = ["in-toto"]
                         attestation_type: AttestationType::CodeReview,
                         slsa_level: Some(2),
                         builder_id: Some("builder-a".to_string()),
+                        expires_at: None,
                     }],
                 };
 
@@ -2245,6 +2865,7 @@ min_slsa_level = 3
                         attestation_type: AttestationType::InToto,
                         slsa_level: Some(2),
                         builder_id: Some("builder-a".to_string()),
+                        expires_at: None,
                     }],
                 };
 
@@ -2303,6 +2924,7 @@ trusted_builders = ["trusted-builder"]
                         attestation_type: AttestationType::InToto,
                         slsa_level: Some(3),
                         builder_id: Some("untrusted".to_string()),
+                        expires_at: None,
                     }],
                 };
 
@@ -2955,6 +3577,7 @@ trusted_builders = ["trusted-builder"]
                         attestation_type: AttestationType::InToto,
                         slsa_level: Some(3),
                         builder_id: Some("trusted-builder".to_string()),
+                        expires_at: None,
                     }],
                 };
 
@@ -3189,11 +3812,13 @@ require_attestation_types = ["in-toto", "code-review"]
                             attestation_type: AttestationType::InToto,
                             slsa_level: Some(2),
                             builder_id: None,
+                            expires_at: None,
                         },
                         AttestationEvidence {
                             attestation_type: AttestationType::CodeReview,
                             slsa_level: None,
                             builder_id: None,
+                            expires_at: None,
                         },
                     ],
                 };
@@ -3637,6 +4262,37 @@ sig = "base64:{sig_b64}"
 
                 RegistryLogData {
                     reason_code: Some("tuf_target_not_found".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn mock_tuf_verifier_rejects_expired_metadata() {
+        run_registry_test(
+            "mock_tuf_verifier_rejects_expired_metadata",
+            "verify",
+            "tuf-adapter",
+            1,
+            || async {
+                let root = TufRootMetadata {
+                    version: 5,
+                    root_hash: "sha256:rootabc".to_string(),
+                    expires: 0,
+                    key_ids: vec!["key1".to_string()],
+                    threshold: 1,
+                };
+                let verifier = MockTufVerifier::new(root.clone());
+
+                let err = verifier
+                    .verify_target(&root, "connectors/fcp.test-1.0.0.tar.gz")
+                    .await
+                    .expect_err("expired metadata should be rejected");
+                assert!(matches!(err, SupplyChainVerificationError::TufExpired));
+
+                RegistryLogData {
+                    reason_code: Some("tuf_expired_detected".to_string()),
                     ..RegistryLogData::default()
                 }
             },
@@ -4434,6 +5090,7 @@ sig = "base64:{sig_b64}"
                         attestation_type: AttestationType::InToto,
                         slsa_level: None, // no level provided
                         builder_id: None,
+                        expires_at: None,
                     }],
                 };
 
@@ -4474,6 +5131,7 @@ sig = "base64:{sig_b64}"
                         attestation_type: AttestationType::InToto,
                         slsa_level: None,
                         builder_id: None, // no builder_id cannot satisfy trusted_builders
+                        expires_at: None,
                     }],
                 };
 
@@ -5116,6 +5774,10 @@ sig = "{reg_sig}"
                     RegistryError::TransparencyLogMissing,
                     RegistryError::TransparencyEvidenceMissing,
                     RegistryError::AttestationEvidenceMissing,
+                    RegistryError::AttestationExpired {
+                        attestation: "in-toto".into(),
+                        expired_at: 0,
+                    },
                 ];
                 for err in &cases {
                     assert!(
@@ -5255,7 +5917,7 @@ sig = "{reg_sig}"
             "registry_error_debug_all_variants",
             "unit",
             "error-debug",
-            14,
+            15,
             || async {
                 let variants: Vec<(&str, RegistryError)> = vec![
                     ("MissingSignatures", RegistryError::MissingSignatures),
@@ -5306,6 +5968,13 @@ sig = "{reg_sig}"
                     (
                         "AttestationEvidenceMissing",
                         RegistryError::AttestationEvidenceMissing,
+                    ),
+                    (
+                        "AttestationExpired",
+                        RegistryError::AttestationExpired {
+                            attestation: "a".into(),
+                            expired_at: 0,
+                        },
                     ),
                     (
                         "SlsaLevelInsufficient",
@@ -5485,6 +6154,7 @@ sig = "{reg_sig}"
                     attestation_type: AttestationType::ReproducibleBuild,
                     slsa_level: Some(4),
                     builder_id: Some("github-actions".into()),
+                    expires_at: None,
                 };
                 let debug = format!("{ev:?}");
                 assert!(debug.contains("ReproducibleBuild"));
@@ -5755,11 +6425,13 @@ sig = "{reg_sig}"
                             attestation_type: AttestationType::InToto,
                             slsa_level: Some(4),
                             builder_id: Some("trusted-ci".into()),
+                            expires_at: None,
                         },
                         AttestationEvidence {
                             attestation_type: AttestationType::CodeReview,
                             slsa_level: None,
                             builder_id: None,
+                            expires_at: None,
                         },
                     ],
                 };
@@ -5800,6 +6472,7 @@ sig = "{reg_sig}"
                         attestation_type: AttestationType::InToto,
                         slsa_level: Some(3),
                         builder_id: None,
+                        expires_at: None,
                     }],
                 };
 
@@ -6509,11 +7182,13 @@ sig = "{reg_sig}"
                     attestation_type: AttestationType::InToto,
                     slsa_level: Some(3),
                     builder_id: Some("github-actions".into()),
+                    expires_at: None,
                 },
                 AttestationEvidence {
                     attestation_type: AttestationType::ReproducibleBuild,
                     slsa_level: None,
                     builder_id: None,
+                    expires_at: None,
                 },
             ],
         };
@@ -7134,6 +7809,13 @@ sig = "{reg_sig}"
                 "attestation evidence",
                 RegistryError::AttestationEvidenceMissing,
             ),
+            (
+                "expired",
+                RegistryError::AttestationExpired {
+                    attestation: "in-toto".into(),
+                    expired_at: 0,
+                },
+            ),
             ("SLSA", RegistryError::SlsaLevelInsufficient { required: 3 }),
             (
                 "builder",
@@ -7466,11 +8148,13 @@ sig = "{}"
                             attestation_type: AttestationType::InToto,
                             slsa_level: Some(3),
                             builder_id: Some("trusted-ci".to_string()),
+                            expires_at: None,
                         },
                         AttestationEvidence {
                             attestation_type: AttestationType::CodeReview,
                             slsa_level: None,
                             builder_id: None,
+                            expires_at: None,
                         },
                     ],
                 };
@@ -7530,6 +8214,7 @@ trusted_builders = ["trusted-ci"]
                         attestation_type: AttestationType::InToto,
                         slsa_level: Some(3),
                         builder_id: Some("trusted-ci".to_string()),
+                        expires_at: None,
                     }],
                 };
 
@@ -7962,6 +8647,7 @@ trusted_builders = ["trusted-ci"]
                 attestation_type: AttestationType::InToto,
                 slsa_level: Some(3),
                 builder_id: Some("ci".to_string()),
+                expires_at: None,
             }],
         };
         let cloned = evidence.clone();
@@ -7988,6 +8674,7 @@ trusted_builders = ["trusted-ci"]
                 attestation_type: AttestationType::InToto,
                 slsa_level: Some(i as u8),
                 builder_id: Some(format!("builder-{i}")),
+                expires_at: None,
             })
             .collect();
         let evidence = SupplyChainEvidence {
@@ -8011,6 +8698,7 @@ trusted_builders = ["trusted-ci"]
                 attestation_type: *at,
                 slsa_level: None,
                 builder_id: None,
+                expires_at: None,
             };
             let cloned = ev.clone();
             assert_eq!(cloned.attestation_type, ev.attestation_type);
@@ -8023,6 +8711,7 @@ trusted_builders = ["trusted-ci"]
             attestation_type: AttestationType::InToto,
             slsa_level: Some(255),
             builder_id: None,
+            expires_at: None,
         };
         assert_eq!(ev.slsa_level, Some(255));
     }
@@ -8033,6 +8722,7 @@ trusted_builders = ["trusted-ci"]
             attestation_type: AttestationType::CodeReview,
             slsa_level: Some(1),
             builder_id: Some(String::new()),
+            expires_at: None,
         };
         assert_eq!(ev.builder_id, Some(String::new()));
     }
@@ -8777,6 +9467,17 @@ trusted_builders = ["trusted-ci"]
     }
 
     #[test]
+    fn registry_error_attestation_expired_contains_fields() {
+        let err = RegistryError::AttestationExpired {
+            attestation: "in-toto".to_string(),
+            expired_at: 42,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("in-toto"));
+        assert!(msg.contains("42"));
+    }
+
+    #[test]
     fn registry_error_slsa_insufficient_contains_level() {
         let err = RegistryError::SlsaLevelInsufficient { required: 4 };
         assert!(err.to_string().contains('4'));
@@ -9151,10 +9852,40 @@ trusted_builders = ["trusted-ci"]
                 attestation_type: AttestationType::InToto,
                 slsa_level: Some(3), // exact match
                 builder_id: None,
+                expires_at: None,
             }],
         };
         enforce_supply_chain_policy(&manifest, Some(&evidence))
             .expect("exact SLSA level should pass");
+    }
+
+    #[test]
+    fn supply_chain_expired_attestation_fails() {
+        let mut manifest = minimal_manifest();
+        manifest.policy = Some(PolicySection {
+            require_transparency_log: false,
+            require_attestation_types: vec![AttestationType::InToto],
+            min_slsa_level: None,
+            trusted_builders: Vec::new(),
+        });
+        let evidence = SupplyChainEvidence {
+            transparency_log_present: false,
+            attestations: vec![AttestationEvidence {
+                attestation_type: AttestationType::InToto,
+                slsa_level: Some(3),
+                builder_id: None,
+                expires_at: Some(0),
+            }],
+        };
+        let err = enforce_supply_chain_policy(&manifest, Some(&evidence))
+            .expect_err("expired attestation should fail");
+        assert!(matches!(
+            err,
+            RegistryError::AttestationExpired {
+                attestation,
+                expired_at: 0,
+            } if attestation == "in-toto"
+        ));
     }
 
     #[test]
@@ -9172,6 +9903,7 @@ trusted_builders = ["trusted-ci"]
                 attestation_type: AttestationType::InToto,
                 slsa_level: Some(2), // one below
                 builder_id: None,
+                expires_at: None,
             }],
         };
         let err = enforce_supply_chain_policy(&manifest, Some(&evidence))
@@ -9197,6 +9929,7 @@ trusted_builders = ["trusted-ci"]
                 attestation_type: AttestationType::InToto,
                 slsa_level: Some(4), // well above minimum
                 builder_id: None,
+                expires_at: None,
             }],
         };
         enforce_supply_chain_policy(&manifest, Some(&evidence)).expect("level 4 >= required 1");
@@ -9217,6 +9950,7 @@ trusted_builders = ["trusted-ci"]
                 attestation_type: AttestationType::InToto,
                 slsa_level: Some(0),
                 builder_id: None,
+                expires_at: None,
             }],
         };
         enforce_supply_chain_policy(&manifest, Some(&evidence)).expect("level 0 == required 0");
@@ -9239,6 +9973,7 @@ trusted_builders = ["trusted-ci"]
                 attestation_type: AttestationType::InToto,
                 slsa_level: None,
                 builder_id: Some("my-ci".to_string()),
+                expires_at: None,
             }],
         };
         enforce_supply_chain_policy(&manifest, Some(&evidence))
@@ -9260,6 +9995,7 @@ trusted_builders = ["trusted-ci"]
                 attestation_type: AttestationType::InToto,
                 slsa_level: None,
                 builder_id: Some("my-ci".to_string()), // lowercase
+                expires_at: None,
             }],
         };
         let err =
@@ -9282,6 +10018,7 @@ trusted_builders = ["trusted-ci"]
                 attestation_type: AttestationType::InToto,
                 slsa_level: None,
                 builder_id: Some("ci-beta".to_string()),
+                expires_at: None,
             }],
         };
         enforce_supply_chain_policy(&manifest, Some(&evidence))
@@ -9304,11 +10041,13 @@ trusted_builders = ["trusted-ci"]
                     attestation_type: AttestationType::InToto,
                     slsa_level: None,
                     builder_id: Some("trusted-ci".to_string()), // ok
+                    expires_at: None,
                 },
                 AttestationEvidence {
                     attestation_type: AttestationType::CodeReview,
                     slsa_level: None,
                     builder_id: Some("evil-ci".to_string()), // not trusted
+                    expires_at: None,
                 },
             ],
         };
@@ -10076,6 +10815,10 @@ trusted_builders = ["trusted-ci"]
                 attestation: "a".into(),
             },
             RegistryError::AttestationEvidenceMissing,
+            RegistryError::AttestationExpired {
+                attestation: "a".into(),
+                expired_at: 0,
+            },
             RegistryError::SlsaLevelInsufficient { required: 1 },
             RegistryError::UntrustedBuilder {
                 builder: "b".into(),
@@ -10557,5 +11300,228 @@ trusted_builders = ["trusted-ci"]
         let json = r#"{"connector_id":"fcp.test","manifest_hash":"m"}"#;
         let result: Result<RegistryVerificationReport, _> = serde_json::from_str(json);
         assert!(result.is_err());
+    }
+
+    fn registry_manifest_with_identity(connector_id: &str, version: &str) -> String {
+        let manifest_toml = base_manifest_toml()
+            .replace(
+                r#"id = "fcp.minimal""#,
+                &format!(r#"id = "{connector_id}""#),
+            )
+            .replace(r#"version = "0.1.0""#, &format!(r#"version = "{version}""#));
+        let unchecked = ConnectorManifest::parse_str_unchecked(&manifest_toml).expect("manifest");
+        let interface_hash = unchecked.compute_interface_hash().expect("interface hash");
+        manifest_toml.replace(
+            &unchecked.manifest.interface_hash.to_string(),
+            &interface_hash.to_string(),
+        )
+    }
+
+    fn write_signed_package_dir(
+        root: &Path,
+        connector_id: &str,
+        version: &str,
+        target: ConnectorTarget,
+        binary_name: &str,
+        binary_bytes: &[u8],
+    ) -> PathBuf {
+        let package_dir = root.join(format!(
+            "{}-{}-{}",
+            connector_id.replace(':', "_"),
+            version,
+            target.as_string().replace('/', "_")
+        ));
+        std::fs::create_dir_all(&package_dir).expect("create package dir");
+
+        let signing_key = Ed25519SigningKey::generate();
+        let unsigned = registry_manifest_with_identity(connector_id, version);
+        let binary_hash = hash_bytes(binary_bytes);
+        let signature = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
+        let manifest_toml =
+            with_signatures(&unsigned, &publisher_signature_section("pub1", &signature));
+        let signing_bytes = manifest_signing_bytes(
+            &ConnectorManifest::parse_str(&unsigned).expect("unsigned manifest parses"),
+        )
+        .expect("signing bytes");
+        let signature_artifact = ManifestSignatureArtifact {
+            key_id: "pub1".to_string(),
+            verifying_key: hex::encode(signing_key.verifying_key().to_bytes()),
+            context: String::from_utf8_lossy(MANIFEST_SIGNATURE_CONTEXT).into_owned(),
+            manifest_signing_hash: hash_bytes(&signing_bytes),
+            binary_hash,
+            signature: String::from(signature),
+            target: target.clone(),
+            binary_name: binary_name.to_string(),
+        };
+
+        std::fs::write(
+            package_dir.join(REGISTRY_MANIFEST_FILENAME),
+            format!("{manifest_toml}\n"),
+        )
+        .expect("write manifest");
+        std::fs::write(package_dir.join(binary_name), binary_bytes).expect("write binary");
+        std::fs::write(
+            package_dir.join(REGISTRY_MANIFEST_SIGNATURE_FILENAME),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&signature_artifact).expect("serialize signature")
+            ),
+        )
+        .expect("write signature artifact");
+        std::fs::write(
+            package_dir.join(REGISTRY_ATTESTATION_FILENAME),
+            r#"{"predicate_type":"https://slsa.dev/provenance/v1"}"#,
+        )
+        .expect("write attestation");
+
+        package_dir
+    }
+
+    #[test]
+    fn local_registry_catalog_tracks_latest_version_and_targets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let linux = ConnectorTarget {
+            os: "linux".to_string(),
+            arch: "amd64".to_string(),
+        };
+        let darwin = ConnectorTarget {
+            os: "darwin".to_string(),
+            arch: "arm64".to_string(),
+        };
+
+        let v1 = write_signed_package_dir(
+            temp.path(),
+            "fcp.registry-test",
+            "1.0.0",
+            linux.clone(),
+            "registry-test-linux",
+            b"linux-v1",
+        );
+        let v2_linux = write_signed_package_dir(
+            temp.path(),
+            "fcp.registry-test",
+            "2.0.0",
+            linux.clone(),
+            "registry-test-linux-v2",
+            b"linux-v2",
+        );
+        let v2_darwin = write_signed_package_dir(
+            temp.path(),
+            "fcp.registry-test",
+            "2.0.0",
+            darwin.clone(),
+            "registry-test-darwin-v2",
+            b"darwin-v2",
+        );
+
+        let catalog = LocalRegistryCatalog::from_signed_package_dirs(&[v1, v2_linux, v2_darwin])
+            .expect("catalog");
+        let connector = catalog
+            .connector_descriptor("fcp.registry-test")
+            .expect("connector descriptor");
+
+        assert_eq!(connector.latest_version, "2.0.0");
+        assert_eq!(connector.versions.len(), 2);
+        assert_eq!(connector.versions[0].version, "2.0.0");
+        assert_eq!(connector.versions[1].version, "1.0.0");
+        assert_eq!(connector.versions[0].targets.len(), 2);
+        assert_eq!(connector.versions[0].targets[0].target, "darwin-arm64");
+        assert_eq!(connector.versions[0].targets[1].target, "linux-amd64");
+        assert!(
+            connector.versions[0].targets[0]
+                .signature_url
+                .contains("/targets/darwin/arm64/signature")
+        );
+    }
+
+    #[test]
+    fn local_registry_router_serves_target_artifacts() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::Request;
+        use tower::util::ServiceExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let linux = ConnectorTarget {
+            os: "linux".to_string(),
+            arch: "amd64".to_string(),
+        };
+        let package_dir = write_signed_package_dir(
+            temp.path(),
+            "fcp.router-test",
+            "1.2.0",
+            linux,
+            "router-test-linux",
+            b"router-binary",
+        );
+
+        let catalog =
+            LocalRegistryCatalog::from_signed_package_dirs(&[package_dir]).expect("catalog");
+        let app = catalog.router();
+
+        fcp_async_core::runtime::block_on_sync(async move {
+            let release_response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/connectors/fcp.router-test/latest")
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("latest response");
+            assert_eq!(release_response.status(), StatusCode::OK);
+            let release_body = to_bytes(release_response.into_body(), usize::MAX)
+                .await
+                .expect("latest body");
+            let release: RegistryVersionDescriptor =
+                serde_json::from_slice(&release_body).expect("release descriptor");
+            assert_eq!(release.version, "1.2.0");
+            assert_eq!(release.targets.len(), 1);
+            assert_eq!(release.targets[0].binary_sha256, hash_bytes(b"router-binary"));
+
+            let manifest_response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/connectors/fcp.router-test/versions/1.2.0/targets/linux/amd64/manifest")
+                        .body(Body::empty())
+                        .expect("manifest request"),
+                )
+                .await
+                .expect("manifest response");
+            assert_eq!(manifest_response.status(), StatusCode::OK);
+            let manifest_type = manifest_response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok());
+            assert_eq!(manifest_type, Some("text/plain; charset=utf-8"));
+            let manifest_body = to_bytes(manifest_response.into_body(), usize::MAX)
+                .await
+                .expect("manifest body");
+            let manifest_text = String::from_utf8(manifest_body.to_vec()).expect("utf8 manifest");
+            assert!(manifest_text.contains(r#"id = "fcp.router-test""#));
+
+            let binary_response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/connectors/fcp.router-test/versions/1.2.0/targets/linux/amd64/binary")
+                        .body(Body::empty())
+                        .expect("binary request"),
+                )
+                .await
+                .expect("binary response");
+            assert_eq!(binary_response.status(), StatusCode::OK);
+            let binary_type = binary_response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok());
+            assert_eq!(binary_type, Some("application/octet-stream"));
+            let binary_body = to_bytes(binary_response.into_body(), usize::MAX)
+                .await
+                .expect("binary body");
+            assert_eq!(binary_body.as_ref(), b"router-binary");
+        })
+        .expect("build test runtime");
     }
 }

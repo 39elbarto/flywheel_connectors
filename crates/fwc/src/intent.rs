@@ -168,6 +168,10 @@ pub struct IntentRequest {
     pub connector_override: Option<String>,
     pub zone_override: Option<String>,
     pub mode: IntentMode,
+    /// When set, the compiler will attempt to fetch live operation schemas from
+    /// this fcp-host endpoint, supplementing or overriding local manifest data.
+    /// Falls back to local manifests if the host is unreachable.
+    pub host_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -201,6 +205,11 @@ pub struct CompiledIntent {
     pub explanation: Explanation,
     #[serde(default = "default_execution_notice")]
     pub execution_notice: String,
+    /// Partial payload auto-populated from extracted literals mapped to the
+    /// resolved operation's JSON Schema. `None` when no operation schema is
+    /// available or when no literals could be mapped to schema fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_payload: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -337,6 +346,7 @@ struct ManifestOperationProfile {
     safety_tier: String,
     when_to_use: String,
     common_mistakes: Vec<String>,
+    input_schema: serde_json::Value,
 }
 
 impl ManifestOperationProfile {
@@ -352,6 +362,132 @@ impl ManifestOperationProfile {
             safety_tier: operation.summary.safety_tier.clone(),
             when_to_use: operation.when_to_use.clone(),
             common_mistakes: operation.common_mistakes.clone(),
+            input_schema: operation.input_schema.clone(),
+        }
+    }
+
+    /// Map extracted intent literals to schema fields, producing a partial JSON payload.
+    ///
+    /// Strategy:
+    /// - `titled` literal → first `string` property whose name contains "title" or "name"
+    /// - `payload_literal` → first required `string` property (fallback)
+    /// - `lookup_literal` → property named "query", "search", "filter", or "id"
+    /// - Quoted literals → fill remaining required `string` properties in declaration order
+    ///
+    /// Returns `None` if the schema has no `properties` or no literals were extracted.
+    fn map_literals_to_schema(
+        &self,
+        titled: Option<&str>,
+        payload_literal: Option<&str>,
+        lookup_literal: Option<&str>,
+        quoted_literals: &[String],
+    ) -> Option<serde_json::Value> {
+        let properties = self.input_schema.get("properties")?.as_object()?;
+        if properties.is_empty() {
+            return None;
+        }
+
+        let required: Vec<&str> = self
+            .input_schema
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+
+        let mut payload = serde_json::Map::new();
+
+        // Pass 1: titled → title/name/subject field
+        // Use exact matches or suffix patterns to avoid false positives like
+        // "username" or "filename" matching a titled literal.
+        if let Some(titled_value) = titled {
+            for (field_name, field_schema) in properties {
+                let is_string = field_schema
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| t == "string");
+                let name_lower = field_name.to_lowercase();
+                let is_title_field = name_lower == "title"
+                    || name_lower == "name"
+                    || name_lower == "subject"
+                    || name_lower == "summary"
+                    || name_lower.ends_with("_title")
+                    || name_lower.ends_with("_name")
+                    || name_lower.ends_with("_subject");
+                if is_string && is_title_field {
+                    payload.insert(field_name.clone(), serde_json::Value::String(titled_value.to_owned()));
+                    break;
+                }
+            }
+        }
+
+        // Pass 2: lookup_literal → query/search/filter/id field
+        if let Some(lookup_value) = lookup_literal {
+            for (field_name, field_schema) in properties {
+                if payload.contains_key(field_name) {
+                    continue;
+                }
+                let is_string = field_schema
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| t == "string");
+                let name_lower = field_name.to_lowercase();
+                if is_string
+                    && (name_lower.contains("query")
+                        || name_lower.contains("search")
+                        || name_lower.contains("filter")
+                        || name_lower == "id"
+                        || name_lower == "q")
+                {
+                    payload.insert(field_name.clone(), serde_json::Value::String(lookup_value.to_owned()));
+                    break;
+                }
+            }
+        }
+
+        // Pass 3: payload_literal → first unfilled required string field
+        if let Some(payload_value) = payload_literal {
+            for field_name in &required {
+                if payload.contains_key(*field_name) {
+                    continue;
+                }
+                let is_string = properties
+                    .get(*field_name)
+                    .and_then(|s| s.get("type"))
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| t == "string");
+                if is_string {
+                    payload.insert((*field_name).to_owned(), serde_json::Value::String(payload_value.to_owned()));
+                    break;
+                }
+            }
+        }
+
+        // Pass 4: remaining quoted literals → remaining required string fields
+        let mut remaining_required: Vec<&str> = required
+            .iter()
+            .filter(|f| {
+                !payload.contains_key(**f)
+                    && properties
+                        .get(**f)
+                        .and_then(|s| s.get("type"))
+                        .and_then(|t| t.as_str())
+                        .is_some_and(|t| t == "string")
+            })
+            .copied()
+            .collect();
+
+        for literal in quoted_literals {
+            if remaining_required.is_empty() {
+                break;
+            }
+            let field = remaining_required.remove(0);
+            payload.insert(field.to_owned(), serde_json::Value::String(literal.clone()));
+        }
+
+        if payload.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(payload))
         }
     }
 
@@ -488,6 +624,24 @@ pub fn compile(request: &IntentRequest) -> CompiledIntent {
         compile_status_metadata(request, chosen_connector.as_ref(), &plan);
     let explanation = compile_explanation(&action_signals, &connector_candidates, &mut plan);
 
+    // Attempt schema-based payload mapping when we have a resolved operation
+    let suggested_payload = chosen_profile
+        .and_then(|profile| {
+            let operation = plan.operation_hint.as_deref()?;
+            profile
+                .operations
+                .iter()
+                .find(|op| op.matches_selector(operation))
+        })
+        .and_then(|op| {
+            op.map_literals_to_schema(
+                literals.titled.as_deref(),
+                payload_literal.as_deref(),
+                lookup_literal.as_deref(),
+                &literals.quoted,
+            )
+        });
+
     CompiledIntent {
         status,
         workflow_truth,
@@ -515,6 +669,7 @@ pub fn compile(request: &IntentRequest) -> CompiledIntent {
         steps: plan.steps,
         explanation,
         execution_notice: EXECUTION_NOTICE.to_owned(),
+        suggested_payload,
     }
 }
 
@@ -2550,6 +2705,7 @@ mod tests {
             connector_override: None,
             zone_override: None,
             mode: IntentMode::Plan,
+            host_url: None,
         }
     }
 
@@ -2559,6 +2715,7 @@ mod tests {
             connector_override: Some(connector.to_owned()),
             zone_override: None,
             mode: IntentMode::Plan,
+            host_url: None,
         }
     }
 
@@ -2568,6 +2725,7 @@ mod tests {
             connector_override: None,
             zone_override: Some(zone.to_owned()),
             mode: IntentMode::Plan,
+            host_url: None,
         }
     }
 
@@ -2590,6 +2748,7 @@ mod tests {
             safety_tier: "safe".to_owned(),
             when_to_use: String::new(),
             common_mistakes: Vec::new(),
+            input_schema: serde_json::json!({"type": "object"}),
         }
     }
 
@@ -3721,6 +3880,7 @@ mod tests {
             connector_override: None,
             zone_override: None,
             mode: IntentMode::Explain,
+            host_url: None,
         };
         let plan = compile(&req);
         assert_eq!(plan.mode, "explain");
@@ -5313,6 +5473,7 @@ mod tests {
             connector_override: None,
             zone_override: None,
             mode: IntentMode::Explain,
+            host_url: None,
         };
         let plan = compile(&req);
         let transcript = serde_json::to_value(&plan).unwrap();
@@ -5347,6 +5508,7 @@ mod tests {
             connector_override: None,
             zone_override: None,
             mode: IntentMode::DoSimulate,
+            host_url: None,
         };
         let plan = compile(&req);
 
@@ -5832,6 +5994,7 @@ mod tests {
             connector_override: None,
             zone_override: None,
             mode: IntentMode::Explain,
+            host_url: None,
         };
         let plan = compile(&req);
         let bundle = transcript_bundle("transcript_explain_lifecycle", "unit", &plan);
@@ -5895,5 +6058,174 @@ mod tests {
                 "scenario {i}: steps must be array"
             );
         }
+    }
+
+    // ── Schema mapping (h6qe2.1.3) ─────────────────────────
+
+    fn manifest_op_with_schema(selector: &str, schema: serde_json::Value) -> ManifestOperationProfile {
+        ManifestOperationProfile {
+            input_schema: schema,
+            ..manifest_operation(selector)
+        }
+    }
+
+    #[test]
+    fn schema_mapping_titled_maps_to_title_field() {
+        let op = manifest_op_with_schema(
+            "github.issues.create",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "body": {"type": "string"}
+                },
+                "required": ["title"]
+            }),
+        );
+        let result = op.map_literals_to_schema(Some("Bug in login"), None, None, &[]);
+        let payload = result.unwrap();
+        assert_eq!(payload["title"], "Bug in login");
+    }
+
+    #[test]
+    fn schema_mapping_lookup_maps_to_query_field() {
+        let op = manifest_op_with_schema(
+            "gmail.search",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "max_results": {"type": "integer"}
+                },
+                "required": ["query"]
+            }),
+        );
+        let result = op.map_literals_to_schema(None, None, Some("invoices from 2026"), &[]);
+        let payload = result.unwrap();
+        assert_eq!(payload["query"], "invoices from 2026");
+    }
+
+    #[test]
+    fn schema_mapping_payload_fills_first_required_string() {
+        let op = manifest_op_with_schema(
+            "slack.post_message",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string"},
+                    "text": {"type": "string"}
+                },
+                "required": ["channel", "text"]
+            }),
+        );
+        let result = op.map_literals_to_schema(None, Some("hello world"), None, &[]);
+        let payload = result.unwrap();
+        assert_eq!(payload["channel"], "hello world");
+    }
+
+    #[test]
+    fn schema_mapping_quoted_literals_fill_remaining_required() {
+        let op = manifest_op_with_schema(
+            "slack.post_message",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string"},
+                    "text": {"type": "string"}
+                },
+                "required": ["channel", "text"]
+            }),
+        );
+        let quoted = vec!["#general".to_owned(), "hello team".to_owned()];
+        let result = op.map_literals_to_schema(None, None, None, &quoted);
+        let payload = result.unwrap();
+        assert_eq!(payload["channel"], "#general");
+        assert_eq!(payload["text"], "hello team");
+    }
+
+    #[test]
+    fn schema_mapping_titled_and_quoted_combine() {
+        let op = manifest_op_with_schema(
+            "github.issues.create",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "body": {"type": "string"},
+                    "labels": {"type": "array"}
+                },
+                "required": ["title", "body"]
+            }),
+        );
+        let quoted = vec!["This is the body text".to_owned()];
+        let result = op.map_literals_to_schema(Some("Bug report"), None, None, &quoted);
+        let payload = result.unwrap();
+        assert_eq!(payload["title"], "Bug report");
+        assert_eq!(payload["body"], "This is the body text");
+        // labels not set (array type, not string)
+        assert!(payload.get("labels").is_none());
+    }
+
+    #[test]
+    fn schema_mapping_empty_schema_returns_none() {
+        let op = manifest_op_with_schema(
+            "test.noop",
+            serde_json::json!({"type": "object"}),
+        );
+        assert!(op.map_literals_to_schema(Some("value"), None, None, &[]).is_none());
+    }
+
+    #[test]
+    fn schema_mapping_no_literals_returns_none() {
+        let op = manifest_op_with_schema(
+            "github.issues.create",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"title": {"type": "string"}},
+                "required": ["title"]
+            }),
+        );
+        assert!(op.map_literals_to_schema(None, None, None, &[]).is_none());
+    }
+
+    #[test]
+    fn schema_mapping_subject_field_matches_titled() {
+        let op = manifest_op_with_schema(
+            "email.send",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string"},
+                    "body": {"type": "string"}
+                },
+                "required": ["subject"]
+            }),
+        );
+        let result = op.map_literals_to_schema(Some("Meeting tomorrow"), None, None, &[]);
+        let payload = result.unwrap();
+        assert_eq!(payload["subject"], "Meeting tomorrow");
+    }
+
+    #[test]
+    fn schema_mapping_titled_does_not_match_username_or_filename() {
+        // Regression: "name" matching must not match compound names like
+        // "username", "filename", "hostname" — only exact "name" or "_name" suffix.
+        let op = manifest_op_with_schema(
+            "service.create_user",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "username": {"type": "string"},
+                    "email": {"type": "string"}
+                },
+                "required": ["username", "email"]
+            }),
+        );
+        // No title-like field exists, so titled should NOT map to "username"
+        let result = op.map_literals_to_schema(Some("Admin User"), None, None, &[]);
+        assert!(
+            result.is_none(),
+            "titled literal should not map to 'username' — only exact 'name', 'title', 'subject'"
+        );
     }
 }

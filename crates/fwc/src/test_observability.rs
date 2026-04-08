@@ -4112,14 +4112,8 @@ mod tests {
             .with_truth_context(truth),
         );
 
-        let m = ArtifactManifest::new(
-            ctx.scenario_id,
-            ctx.trace_id,
-            4,
-            0,
-            BundleOutcome::Pass,
-        )
-        .with_trace_log(&log);
+        let m = ArtifactManifest::new(ctx.scenario_id, ctx.trace_id, 4, 0, BundleOutcome::Pass)
+            .with_trace_log(&log);
         assert_eq!(m.truthfulness.offline_entry_count, 1);
         assert_eq!(m.truthfulness.phases, vec!["offline-artifact"]);
     }

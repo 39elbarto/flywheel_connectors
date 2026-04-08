@@ -309,8 +309,14 @@ fn verify_bundle_tampered_binary_fails() {
     let verifier = RegistryVerifier::new(trust);
     let result = verifier.verify_bundle(&bundle, None, None, None);
     assert!(
-        result.is_err(),
-        "tampered binary should invalidate signature"
+        matches!(
+            result,
+            Err(RegistryError::PublisherThresholdUnmet {
+                required: 1,
+                valid: 0,
+            })
+        ),
+        "tampered binary should fail structured threshold validation: {result:?}"
     );
 }
 
@@ -378,14 +384,21 @@ fn verify_bundle_target_mismatch_fails() {
         os: "windows".to_string(),
         arch: "arm64".to_string(),
     };
+    let expected_target = wrong_target.as_string();
+    let actual_target = test_target().as_string();
 
     let verifier = RegistryVerifier::new(trust);
     let result = verifier.verify_bundle(&bundle, None, None, Some(&wrong_target));
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("target mismatch"),
-        "expected target mismatch: {err}"
+        matches!(
+            result,
+            Err(RegistryError::TargetMismatch {
+                ref expected,
+                ref found,
+            })
+                if expected == &expected_target && found == &actual_target
+        ),
+        "expected structured target mismatch: {result:?}"
     );
 }
 
@@ -431,11 +444,15 @@ fn verify_bundle_capability_ceiling_violation() {
 
     let verifier = RegistryVerifier::new(trust);
     let result = verifier.verify_bundle(&bundle, Some(&policy), None, None);
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("exceeds zone ceiling"),
-        "expected ceiling violation: {err}"
+        matches!(
+            result,
+            Err(RegistryError::CapabilityCeilingViolation {
+                ref capability,
+            })
+                if capability == "minimal.op"
+        ),
+        "expected structured capability ceiling violation: {result:?}"
     );
 }
 
@@ -536,16 +553,18 @@ min_slsa_level = 3
             attestation_type: AttestationType::InToto,
             slsa_level: Some(1),
             builder_id: None,
+            expires_at: None,
         }],
     };
 
     let verifier = RegistryVerifier::new(trust);
     let result = verifier.verify_bundle(&bundle, None, Some(&evidence), None);
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("SLSA level"),
-        "expected SLSA level error: {err}"
+        matches!(
+            result,
+            Err(RegistryError::SlsaLevelInsufficient { required: 3 })
+        ),
+        "expected structured SLSA level error: {result:?}"
     );
 }
 
@@ -584,16 +603,70 @@ trusted_builders = ["github-actions"]
             attestation_type: AttestationType::InToto,
             slsa_level: None,
             builder_id: Some("evil-builder".to_string()),
+            expires_at: None,
         }],
     };
 
     let verifier = RegistryVerifier::new(trust);
     let result = verifier.verify_bundle(&bundle, None, Some(&evidence), None);
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
     assert!(
-        err.contains("not in trusted builders"),
-        "expected untrusted builder: {err}"
+        matches!(
+            result,
+            Err(RegistryError::UntrustedBuilder { ref builder }) if builder == "evil-builder"
+        ),
+        "expected structured untrusted builder error: {result:?}"
+    );
+}
+
+#[test]
+fn verify_bundle_expired_attestation_fails() {
+    let signing_key = Ed25519SigningKey::generate();
+    let verifying_key = signing_key.verifying_key();
+    let binary = test_binary();
+    let b_hash = binary_hash(&binary);
+
+    let policy_section = r#"
+[policy]
+require_transparency_log = false
+require_attestation_types = ["in-toto"]
+"#;
+    let unsigned = unsigned_manifest_toml(policy_section);
+    let sig = sign_manifest(&unsigned, &signing_key, &b_hash);
+    let sig_section = publisher_sig_toml("pub1", &sig);
+    let manifest_toml = format!("{unsigned}\n{sig_section}");
+
+    let bundle = ConnectorBundle {
+        manifest_toml,
+        binary,
+        target: test_target(),
+    };
+
+    let mut trust = RegistryTrustPolicy::default();
+    trust
+        .publisher_keys
+        .insert("pub1".to_string(), verifying_key);
+
+    let evidence = SupplyChainEvidence {
+        transparency_log_present: false,
+        attestations: vec![AttestationEvidence {
+            attestation_type: AttestationType::InToto,
+            slsa_level: Some(3),
+            builder_id: Some("trusted-builder".to_string()),
+            expires_at: Some(0),
+        }],
+    };
+
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, None, Some(&evidence), None);
+    assert!(
+        matches!(
+            result,
+            Err(RegistryError::AttestationExpired {
+                ref attestation,
+                expired_at: 0,
+            }) if attestation == "in-toto"
+        ),
+        "expected structured attestation expiry error: {result:?}"
     );
 }
 
@@ -1773,6 +1846,17 @@ fn registry_error_display_attestation_evidence_missing() {
 }
 
 #[test]
+fn registry_error_display_attestation_expired() {
+    let err = RegistryError::AttestationExpired {
+        attestation: "in-toto".to_string(),
+        expired_at: 0,
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("in-toto"));
+    assert!(msg.contains("expired"));
+}
+
+#[test]
 fn registry_error_display_signature_bytes() {
     let err = RegistryError::SignatureBytes;
     assert!(err.to_string().contains("signature"));
@@ -2048,11 +2132,9 @@ require_attestation_types = ["in-toto"]
 
     // No evidence provided → should fail
     let result = verifier.verify_bundle(&bundle, None, None, None);
-    assert!(result.is_err());
-    let err_str = result.unwrap_err().to_string();
     assert!(
-        err_str.contains("evidence") || err_str.contains("attestation"),
-        "expected attestation error, got: {err_str}"
+        matches!(result, Err(RegistryError::AttestationEvidenceMissing)),
+        "expected structured attestation evidence error, got: {result:?}"
     );
 }
 
@@ -2095,6 +2177,7 @@ require_attestation_types = ["in-toto"]
             attestation_type: AttestationType::InToto,
             slsa_level: Some(2),
             builder_id: None,
+            expires_at: None,
         }],
     };
 

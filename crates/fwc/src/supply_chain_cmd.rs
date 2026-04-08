@@ -1,13 +1,41 @@
 //! Supply-chain verification and report commands.
 
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
 use anyhow::{Context, Result};
+use base64::Engine;
 use clap::{Args, Subcommand};
+use fcp_core::{
+    AttestationMaterial, AttestationMetadata, AttestationPredicateType, ConnectorTarget,
+    SUPPLY_CHAIN_ATTESTATION_FORMAT, SUPPLY_CHAIN_ATTESTATION_SCHEMA_VERSION,
+    SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SupplyChainSignature, TrustRootBinding,
+};
+use fcp_crypto::{Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey};
 use fcp_kernel::{
     CanonicalEncoding, HashAlgorithm, SoftwareBillOfMaterials, SupplyChainAttestation,
     SupplyChainVerificationPolicy, VerificationDecision, VerificationEvidence,
     VerificationPipeline,
 };
+use fcp_manifest::{
+    AttestationType, Base64Bytes, ConnectorManifest, SignatureEntry, SignatureThreshold,
+    SignaturesSection,
+};
+use fcp_registry::{
+    AttestationEvidence, ConnectorBundle, MANIFEST_SIGNATURE_CONTEXT, ManifestSignatureArtifact,
+    RegistryTrustPolicy, RegistryVerifier, SupplyChainEvidence, manifest_signing_bytes,
+    signature_message,
+};
 use serde::Serialize;
+use sha2::{Digest as _, Sha256};
+use url::Url;
+
+const DEFAULT_SIGNED_OUTPUT_DIR: &str = "signed-package";
+const DEFAULT_BUILDER_ID: &str = "fwc.supply-chain.sign";
+const DEFAULT_BUILD_TYPE: &str = "manual";
+const MANIFEST_SIGNATURE_FILENAME: &str = "manifest-signature.json";
+const ATTESTATION_FILENAME: &str = "attestation.json";
 
 #[derive(Args, Debug, Clone)]
 pub struct SupplyChainArgs {
@@ -17,10 +45,59 @@ pub struct SupplyChainArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum SupplyChainCommand {
+    /// Sign a connector bundle and emit detached provenance artifacts.
+    Sign(SignArgs),
     /// Verify supply-chain evidence for one connector artifact.
     Verify(VerifyArgs),
     /// Summarize attestation, SBOM, trust roots, and verification steps.
     Report(ReportArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct SignArgs {
+    /// Path to the manifest TOML file.
+    #[arg(long)]
+    pub manifest: String,
+
+    /// Path to the built connector binary.
+    #[arg(long)]
+    pub binary: String,
+
+    /// Path to a file containing the 32-byte Ed25519 signing key as hex.
+    #[arg(long)]
+    pub signing_key: String,
+
+    /// Output directory for the signed package.
+    #[arg(long)]
+    pub output_dir: Option<String>,
+
+    /// Override the key identifier written into the manifest and attestation.
+    #[arg(long)]
+    pub key_id: Option<String>,
+
+    /// Builder identifier recorded in the generated attestation.
+    #[arg(long, default_value = DEFAULT_BUILDER_ID)]
+    pub builder_id: String,
+
+    /// Build type recorded in the generated attestation.
+    #[arg(long, default_value = DEFAULT_BUILD_TYPE)]
+    pub build_type: String,
+
+    /// Optional invocation identifier for the attestation metadata.
+    #[arg(long)]
+    pub invocation_id: Option<String>,
+
+    /// Optional source URI captured in the provenance payload.
+    #[arg(long)]
+    pub source_uri: Option<String>,
+
+    /// Optional source commit captured in the provenance payload.
+    #[arg(long)]
+    pub source_commit: Option<String>,
+
+    /// Output JSON instead of human-readable text.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -165,11 +242,59 @@ struct TrustRootReport {
     root_id: String,
 }
 
+#[derive(Debug, Serialize)]
+struct SignOutput {
+    connector_id: String,
+    version: String,
+    key_id: String,
+    target: String,
+    source_uri: Option<String>,
+    source_commit: Option<String>,
+    output_dir: PathBuf,
+    manifest_path: PathBuf,
+    binary_path: PathBuf,
+    manifest_signature_path: PathBuf,
+    attestation_path: PathBuf,
+    manifest_sha256: String,
+    binary_sha256: String,
+    binary_blake3: String,
+    attestation_digest: String,
+    registry_verified: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ProvenancePayload {
+    connector_id: String,
+    version: String,
+    builder_id: String,
+    build_type: String,
+    target: String,
+    source_uri: Option<String>,
+    source_commit: Option<String>,
+    input_manifest_sha256: String,
+    binary_sha256: String,
+    binary_blake3: String,
+    generated_at: chrono::DateTime<chrono::Utc>,
+}
+
 pub fn run(args: &SupplyChainArgs) -> Result<()> {
     match &args.command {
+        SupplyChainCommand::Sign(args) => run_sign(args),
         SupplyChainCommand::Verify(args) => run_verify(args),
         SupplyChainCommand::Report(args) => run_report(args),
     }
+}
+
+fn run_sign(args: &SignArgs) -> Result<()> {
+    let output = sign_bundle(args)?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        print_sign_output(&output);
+    }
+
+    Ok(())
 }
 
 fn run_verify(args: &VerifyArgs) -> Result<()> {
@@ -217,6 +342,429 @@ fn run_report(args: &ReportArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn sign_bundle(args: &SignArgs) -> Result<SignOutput> {
+    let manifest_path = PathBuf::from(&args.manifest)
+        .canonicalize()
+        .with_context(|| format!("failed to resolve manifest path: {}", args.manifest))?;
+    let binary_path = PathBuf::from(&args.binary)
+        .canonicalize()
+        .with_context(|| format!("failed to resolve binary path: {}", args.binary))?;
+    let signing_key_path = PathBuf::from(&args.signing_key)
+        .canonicalize()
+        .with_context(|| format!("failed to resolve signing key path: {}", args.signing_key))?;
+    let manifest_dir = manifest_path
+        .parent()
+        .context("manifest path has no parent directory")?;
+
+    let manifest_input = fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed to read manifest: {}", manifest_path.display()))?;
+    let binary_bytes = fs::read(&binary_path)
+        .with_context(|| format!("failed to read binary: {}", binary_path.display()))?;
+    let signing_key = read_signing_key(&signing_key_path)?;
+    let signing_verifying_key = signing_key.verifying_key();
+    let key_id = args
+        .key_id
+        .clone()
+        .unwrap_or_else(|| signing_key.key_id().to_hex());
+
+    let mut manifest = ConnectorManifest::parse_str(&manifest_input)
+        .with_context(|| format!("failed to parse manifest: {}", manifest_path.display()))?;
+    let connector_id = manifest.connector.id.clone();
+    let connector_id_str = connector_id.to_string();
+    let version = manifest.connector.version.to_string();
+
+    let binary_sha256 = hash_sha256_prefixed(&binary_bytes);
+    let binary_blake3 = hash_blake3_prefixed(&binary_bytes);
+    let input_manifest_sha256 = hash_sha256_prefixed(manifest_input.as_bytes());
+    let input_manifest_blake3 = hash_blake3_prefixed(manifest_input.as_bytes());
+
+    let signing_bytes = manifest_signing_bytes(&manifest)
+        .context("failed to canonicalize manifest signing bytes")?;
+    let manifest_signature = signing_key.sign_with_context(
+        MANIFEST_SIGNATURE_CONTEXT,
+        &signature_message(&signing_bytes, &binary_sha256),
+    );
+    let manifest_signature_entry = Base64Bytes::try_from(format!(
+        "base64:{}",
+        base64::engine::general_purpose::STANDARD.encode(manifest_signature.to_bytes())
+    ))?;
+    upsert_publisher_signature(&mut manifest, &key_id, manifest_signature_entry.clone());
+
+    let signed_manifest_toml =
+        toml::to_string_pretty(&manifest).context("failed to serialize signed manifest")?;
+    ConnectorManifest::parse_str(&signed_manifest_toml)
+        .context("signed manifest failed validation after inserting signatures")?;
+    let signed_manifest_sha256 = hash_sha256_prefixed(signed_manifest_toml.as_bytes());
+
+    let now = chrono::Utc::now();
+    let source_uri = args
+        .source_uri
+        .clone()
+        .or_else(|| discover_source_uri(manifest_dir));
+    let source_commit = args
+        .source_commit
+        .clone()
+        .or_else(|| discover_source_commit(manifest_dir));
+    let provenance = ProvenancePayload {
+        connector_id: connector_id_str.clone(),
+        version: version.clone(),
+        builder_id: args.builder_id.clone(),
+        build_type: args.build_type.clone(),
+        target: ConnectorTarget::from_env().as_string(),
+        source_uri: source_uri.clone(),
+        source_commit: source_commit.clone(),
+        input_manifest_sha256: input_manifest_sha256.clone(),
+        binary_sha256: binary_sha256.clone(),
+        binary_blake3: binary_blake3.clone(),
+        generated_at: now,
+    };
+    let provenance_bytes =
+        serde_json::to_vec(&provenance).context("failed to serialize provenance payload")?;
+    let provenance_hash = hash_blake3_prefixed(&provenance_bytes);
+
+    let target = ConnectorTarget::from_env();
+    let attestation = build_attestation(
+        &connector_id_str,
+        &key_id,
+        &signing_key,
+        &manifest_path,
+        &source_uri,
+        &source_commit,
+        &input_manifest_blake3,
+        &binary_blake3,
+        &provenance_hash,
+        &args.builder_id,
+        &args.build_type,
+        args.invocation_id.clone(),
+        now,
+    )?;
+    verify_attestation_signature(&attestation, &signing_verifying_key)?;
+
+    let output_dir = args
+        .output_dir
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join(DEFAULT_SIGNED_OUTPUT_DIR));
+    fs::create_dir_all(&output_dir).with_context(|| {
+        format!(
+            "failed to create output directory: {}",
+            output_dir.display()
+        )
+    })?;
+    let output_dir = output_dir.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve output directory: {}",
+            output_dir.display()
+        )
+    })?;
+
+    let output_binary = output_dir.join(
+        binary_path
+            .file_name()
+            .context("binary path has no file name")?,
+    );
+    fs::copy(&binary_path, &output_binary).with_context(|| {
+        format!(
+            "failed to copy binary from {} to {}",
+            binary_path.display(),
+            output_binary.display()
+        )
+    })?;
+
+    let output_manifest = output_dir.join("manifest.toml");
+    fs::write(&output_manifest, format!("{signed_manifest_toml}\n")).with_context(|| {
+        format!(
+            "failed to write signed manifest to {}",
+            output_manifest.display()
+        )
+    })?;
+
+    let signature_artifact = ManifestSignatureArtifact {
+        key_id: key_id.clone(),
+        verifying_key: hex::encode(signing_verifying_key.to_bytes()),
+        context: String::from_utf8_lossy(MANIFEST_SIGNATURE_CONTEXT).into_owned(),
+        manifest_signing_hash: hash_sha256_prefixed(&signing_bytes),
+        binary_hash: binary_sha256.clone(),
+        signature: String::from(manifest_signature_entry),
+        target: target.clone(),
+        binary_name: output_binary
+            .file_name()
+            .expect("copied binary has file name")
+            .to_string_lossy()
+            .into_owned(),
+    };
+    let manifest_signature_path = output_dir.join(MANIFEST_SIGNATURE_FILENAME);
+    fs::write(
+        &manifest_signature_path,
+        format!("{}\n", serde_json::to_string_pretty(&signature_artifact)?),
+    )
+    .with_context(|| {
+        format!(
+            "failed to write manifest signature artifact to {}",
+            manifest_signature_path.display()
+        )
+    })?;
+
+    let attestation_path = output_dir.join(ATTESTATION_FILENAME);
+    fs::write(
+        &attestation_path,
+        format!("{}\n", serde_json::to_string_pretty(&attestation)?),
+    )
+    .with_context(|| {
+        format!(
+            "failed to write attestation to {}",
+            attestation_path.display()
+        )
+    })?;
+
+    let mut trust_policy = RegistryTrustPolicy::default();
+    trust_policy
+        .publisher_keys
+        .insert(key_id.clone(), signing_verifying_key);
+    let verifier = RegistryVerifier::new(trust_policy);
+    let supply_chain_evidence = build_registry_supply_chain_evidence(&attestation);
+    verifier
+        .verify_bundle(
+            &ConnectorBundle {
+                manifest_toml: signed_manifest_toml.clone(),
+                binary: binary_bytes,
+                target: target.clone(),
+            },
+            None,
+            Some(&supply_chain_evidence),
+            Some(&target),
+        )
+        .context("signed bundle failed registry verification")?;
+
+    let attestation_digest = attestation
+        .content_hash(CanonicalEncoding::Json, HashAlgorithm::Blake3_256)
+        .map_err(|e| anyhow::anyhow!("attestation hash failed: {e}"))?;
+
+    Ok(SignOutput {
+        connector_id: connector_id_str,
+        version,
+        key_id,
+        target: target.as_string(),
+        source_uri,
+        source_commit,
+        output_dir,
+        manifest_path: output_manifest,
+        binary_path: output_binary,
+        manifest_signature_path,
+        attestation_path,
+        manifest_sha256: signed_manifest_sha256,
+        binary_sha256,
+        binary_blake3,
+        attestation_digest,
+        registry_verified: true,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_attestation(
+    connector_id: &str,
+    key_id: &str,
+    signing_key: &Ed25519SigningKey,
+    manifest_path: &Path,
+    source_uri: &Option<String>,
+    source_commit: &Option<String>,
+    manifest_digest: &str,
+    binary_digest: &str,
+    provenance_hash: &str,
+    builder_id: &str,
+    build_type: &str,
+    invocation_id: Option<String>,
+    generated_at: chrono::DateTime<chrono::Utc>,
+) -> Result<SupplyChainAttestation> {
+    let mut materials = vec![AttestationMaterial {
+        uri: file_uri(manifest_path),
+        digest: manifest_digest.to_string(),
+    }];
+
+    if let Some(source_uri) = source_uri {
+        let uri = source_commit.as_ref().map_or_else(
+            || source_uri.clone(),
+            |commit| format!("{source_uri}#{commit}"),
+        );
+        let digest_source = source_commit.as_deref().unwrap_or(source_uri);
+        materials.push(AttestationMaterial {
+            uri,
+            digest: hash_blake3_prefixed(digest_source.as_bytes()),
+        });
+    } else if let Some(commit) = source_commit {
+        materials.push(AttestationMaterial {
+            uri: format!("git-commit:{commit}"),
+            digest: hash_blake3_prefixed(commit.as_bytes()),
+        });
+    }
+
+    let mut attestation = SupplyChainAttestation {
+        format: SUPPLY_CHAIN_ATTESTATION_FORMAT.to_string(),
+        schema_version: SUPPLY_CHAIN_ATTESTATION_SCHEMA_VERSION.to_string(),
+        subject_digest: binary_digest.to_string(),
+        predicate_type: AttestationPredicateType::InTotoStatementV1,
+        builder_id: builder_id.to_string(),
+        build_type: build_type.to_string(),
+        materials,
+        metadata: AttestationMetadata {
+            build_started_at: generated_at,
+            build_finished_at: generated_at,
+            invocation_id,
+        },
+        slsa_level: 0,
+        provenance_hash: provenance_hash.to_string(),
+        trust_root: TrustRootBinding {
+            root_type: "manual".to_string(),
+            root_id: key_id.to_string(),
+        },
+        builder_allowlist: vec![builder_id.to_string()],
+        signature: SupplyChainSignature::new(
+            key_id,
+            "pending",
+            SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS
+                .iter()
+                .map(|field| (*field).to_string())
+                .collect(),
+        ),
+    };
+    let signing_bytes = attestation
+        .signing_bytes()
+        .map_err(|e| anyhow::anyhow!("failed to compute attestation signing bytes: {e}"))?;
+    attestation.signature = SupplyChainSignature::new(
+        key_id,
+        signing_key.sign(&signing_bytes).to_hex(),
+        SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS
+            .iter()
+            .map(|field| (*field).to_string())
+            .collect(),
+    );
+    attestation
+        .validate()
+        .map_err(|e| anyhow::anyhow!("invalid attestation for {connector_id}: {e}"))?;
+    Ok(attestation)
+}
+
+fn build_registry_supply_chain_evidence(
+    attestation: &SupplyChainAttestation,
+) -> SupplyChainEvidence {
+    SupplyChainEvidence {
+        transparency_log_present: false,
+        attestations: vec![AttestationEvidence {
+            attestation_type: AttestationType::InToto,
+            slsa_level: Some(attestation.slsa_level),
+            builder_id: Some(attestation.builder_id.clone()),
+            expires_at: None,
+        }],
+    }
+}
+
+fn verify_attestation_signature(
+    attestation: &SupplyChainAttestation,
+    verifying_key: &Ed25519VerifyingKey,
+) -> Result<()> {
+    let signature_bytes = hex::decode(&attestation.signature.signature)
+        .context("attestation signature is not valid lowercase hex")?;
+    let signature = Ed25519Signature::try_from_slice(&signature_bytes)
+        .context("attestation signature has invalid length")?;
+    let signing_bytes = attestation
+        .signing_bytes()
+        .map_err(|e| anyhow::anyhow!("failed to compute attestation signing bytes: {e}"))?;
+    verifying_key
+        .verify(&signing_bytes, &signature)
+        .context("attestation signature verification failed")?;
+    Ok(())
+}
+
+fn upsert_publisher_signature(
+    manifest: &mut ConnectorManifest,
+    key_id: &str,
+    signature: Base64Bytes,
+) {
+    let signatures = manifest.signatures.get_or_insert(SignaturesSection {
+        publisher_signatures: Vec::new(),
+        publisher_threshold: None,
+        registry_signature: None,
+        transparency_log_entry: None,
+    });
+
+    if let Some(entry) = signatures
+        .publisher_signatures
+        .iter_mut()
+        .find(|entry| entry.kid == key_id)
+    {
+        entry.sig = signature;
+    } else {
+        signatures.publisher_signatures.push(SignatureEntry {
+            kid: key_id.to_string(),
+            sig: signature,
+        });
+    }
+
+    if signatures.publisher_threshold.is_none() {
+        let n = u8::try_from(signatures.publisher_signatures.len())
+            .expect("publisher signature count must fit into u8");
+        signatures.publisher_threshold = Some(SignatureThreshold { k: 1, n });
+    }
+}
+
+fn read_signing_key(path: &Path) -> Result<Ed25519SigningKey> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read signing key file: {}", path.display()))?;
+    let trimmed = raw.trim().trim_start_matches("0x");
+    let decoded = hex::decode(trimmed)
+        .with_context(|| format!("failed to decode signing key hex from {}", path.display()))?;
+    let bytes: [u8; 32] = decoded
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("signing key must decode to exactly 32 bytes"))?;
+    Ed25519SigningKey::from_bytes(&bytes).context("failed to construct Ed25519 signing key")
+}
+
+fn discover_source_commit(start: &Path) -> Option<String> {
+    run_git(start, &["rev-parse", "HEAD"])
+}
+
+fn discover_source_uri(start: &Path) -> Option<String> {
+    run_git(start, &["rev-parse", "--show-toplevel"]).map(|root| {
+        let path = PathBuf::from(root);
+        Url::from_file_path(&path).map_or_else(
+            |_| format!("git+{}", path.display()),
+            |url| format!("git+{url}"),
+        )
+    })
+}
+
+fn run_git(start: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(start)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn file_uri(path: &Path) -> String {
+    Url::from_file_path(path).map_or_else(
+        |_| format!("file://{}", path.display()),
+        |url| url.to_string(),
+    )
+}
+
+fn hash_sha256_prefixed(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn hash_blake3_prefixed(bytes: &[u8]) -> String {
+    format!("blake3-256:{}", blake3::hash(bytes).to_hex())
 }
 
 fn evaluate_supply_chain(
@@ -493,9 +1041,41 @@ fn print_supply_chain_report(connector_id: &str, output: &SupplyChainReportOutpu
     }
 }
 
+fn print_sign_output(output: &SignOutput) {
+    println!(
+        "Signed connector package for {} {}",
+        output.connector_id, output.version
+    );
+    println!("  Key ID: {}", output.key_id);
+    println!("  Target: {}", output.target);
+    println!("  Manifest: {}", output.manifest_path.display());
+    println!("  Binary: {}", output.binary_path.display());
+    println!("  Signature: {}", output.manifest_signature_path.display());
+    println!("  Attestation: {}", output.attestation_path.display());
+    println!("  Manifest SHA-256: {}", output.manifest_sha256);
+    println!("  Binary SHA-256: {}", output.binary_sha256);
+    println!("  Binary BLAKE3: {}", output.binary_blake3);
+    println!("  Attestation Digest: {}", output.attestation_digest);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use tempfile::tempdir;
+
+    const MINIMAL_MANIFEST: &str =
+        include_str!("../../../tests/vectors/manifest/manifest_minimal.toml");
+    const PLACEHOLDER_INTERFACE_HASH: &str = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
+
+    fn minimal_manifest_fixture() -> String {
+        let unchecked =
+            ConnectorManifest::parse_str_unchecked(MINIMAL_MANIFEST).expect("unchecked manifest");
+        let computed = unchecked
+            .compute_interface_hash()
+            .expect("compute interface hash");
+        MINIMAL_MANIFEST.replace(PLACEHOLDER_INTERFACE_HASH, &computed.to_string())
+    }
 
     // ── camel_to_snake_case ────────────────────────────────────────────
 
@@ -1253,6 +1833,124 @@ mod tests {
         assert_eq!(args.min_slsa_level, cloned.min_slsa_level);
         assert_eq!(args.allow_unsigned, cloned.allow_unsigned);
         assert_eq!(args.json, cloned.json);
+    }
+
+    #[test]
+    fn upsert_publisher_signature_replaces_existing_kid() {
+        let mut manifest =
+            ConnectorManifest::parse_str(&minimal_manifest_fixture()).expect("manifest parses");
+        let original = Base64Bytes::try_from("base64:AQID".to_string()).expect("base64");
+        upsert_publisher_signature(&mut manifest, "kid-1", original);
+        let replacement = Base64Bytes::try_from("base64:BAUG".to_string()).expect("base64");
+        upsert_publisher_signature(&mut manifest, "kid-1", replacement.clone());
+
+        let signatures = manifest.signatures.expect("signatures present");
+        assert_eq!(signatures.publisher_signatures.len(), 1);
+        assert_eq!(signatures.publisher_signatures[0].kid, "kid-1");
+        assert_eq!(signatures.publisher_signatures[0].sig, replacement);
+        assert_eq!(
+            signatures
+                .publisher_threshold
+                .expect("threshold created")
+                .to_string(),
+            "1-of-1"
+        );
+    }
+
+    #[test]
+    fn read_signing_key_rejects_bad_length() {
+        let temp = tempdir().expect("tempdir");
+        let key_path = temp.path().join("signing.key");
+        fs::write(&key_path, "deadbeef").expect("write key");
+
+        let err = read_signing_key(&key_path).expect_err("short key must fail");
+        assert!(err.to_string().contains("exactly 32 bytes"));
+    }
+
+    #[test]
+    fn sign_bundle_emits_registry_verified_package() {
+        let temp = tempdir().expect("tempdir");
+        let manifest_path = temp.path().join("manifest.toml");
+        let binary_path = temp.path().join("connector.bin");
+        let key_path = temp.path().join("signing.key");
+        let output_dir = temp.path().join("out");
+
+        fs::write(&manifest_path, minimal_manifest_fixture()).expect("write manifest");
+        fs::write(&binary_path, b"connector-binary").expect("write binary");
+
+        let signing_key =
+            Ed25519SigningKey::from_bytes(&[7u8; 32]).expect("deterministic signing key");
+        fs::write(&key_path, hex::encode(signing_key.to_bytes())).expect("write key");
+
+        let output = sign_bundle(&SignArgs {
+            manifest: manifest_path.display().to_string(),
+            binary: binary_path.display().to_string(),
+            signing_key: key_path.display().to_string(),
+            output_dir: Some(output_dir.display().to_string()),
+            key_id: None,
+            builder_id: "test-builder".to_string(),
+            build_type: "test-build".to_string(),
+            invocation_id: Some("invocation-1".to_string()),
+            source_uri: Some("git+https://example.invalid/flywheel_connectors".to_string()),
+            source_commit: Some("0123456789abcdef".to_string()),
+            json: false,
+        })
+        .expect("sign bundle");
+
+        assert!(output.registry_verified);
+        assert!(output.manifest_path.exists());
+        assert!(output.binary_path.exists());
+        assert!(output.manifest_signature_path.exists());
+        assert!(output.attestation_path.exists());
+
+        let signed_manifest =
+            fs::read_to_string(&output.manifest_path).expect("read signed manifest");
+        let parsed_manifest =
+            ConnectorManifest::parse_str(&signed_manifest).expect("parse manifest");
+        let signatures = parsed_manifest.signatures.expect("signatures present");
+        assert_eq!(signatures.publisher_signatures.len(), 1);
+        assert_eq!(
+            signatures
+                .publisher_threshold
+                .expect("threshold")
+                .to_string(),
+            "1-of-1"
+        );
+
+        let signature_artifact: ManifestSignatureArtifact = serde_json::from_str(
+            &fs::read_to_string(&output.manifest_signature_path).expect("read signature artifact"),
+        )
+        .expect("parse signature artifact");
+        assert_eq!(signature_artifact.key_id, output.key_id);
+        assert_eq!(signature_artifact.binary_hash, output.binary_sha256);
+        assert_eq!(
+            signature_artifact.context,
+            String::from_utf8_lossy(MANIFEST_SIGNATURE_CONTEXT)
+        );
+
+        let attestation: SupplyChainAttestation = serde_json::from_str(
+            &fs::read_to_string(&output.attestation_path).expect("read attestation"),
+        )
+        .expect("parse attestation");
+        attestation.validate().expect("attestation validates");
+        verify_attestation_signature(&attestation, &signing_key.verifying_key())
+            .expect("attestation signature verifies");
+        assert_eq!(attestation.subject_digest, output.binary_blake3);
+        assert_eq!(attestation.builder_id, "test-builder");
+        assert_eq!(attestation.build_type, "test-build");
+        assert_eq!(
+            attestation.metadata.invocation_id.as_deref(),
+            Some("invocation-1")
+        );
+        assert!(
+            attestation
+                .materials
+                .iter()
+                .any(|material| material.uri.contains("manifest.toml"))
+        );
+        assert!(attestation.materials.iter().any(|material| {
+            material.uri == "git+https://example.invalid/flywheel_connectors#0123456789abcdef"
+        }));
     }
 
     // ── VerifyOutput serialization edge cases ────────────────────────

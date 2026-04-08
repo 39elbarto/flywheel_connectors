@@ -45,4 +45,6 @@ libc = "0.2"
 
 [dev-dependencies]
 pretty_assertions.workspace = true
+reqwest.workspace = true
 tracing-subscriber.workspace = true
+wiremock.workspace = true

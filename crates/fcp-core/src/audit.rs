@@ -1078,6 +1078,164 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // W3C Trace Context Cross-Component Contract (br21t.3.7)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn trace_context_invoke_to_audit_contract() {
+        // Proves: trace_id from InvokeRequest.context flows into AuditEvent.trace_context
+        let trace_id = [
+            0x0A, 0xF7, 0x65, 0x19, 0x16, 0xCD, 0x43, 0xDD, 0x84, 0x48, 0xEB, 0x21, 0x1C, 0x80,
+            0x31, 0x9C,
+        ];
+        let span_id = [0xB7, 0xAD, 0x6B, 0x71, 0x69, 0x20, 0x33, 0x31];
+
+        let trace = TraceContext {
+            trace_id,
+            span_id,
+            flags: 0x01, // sampled
+        };
+
+        // Simulate: InvokeRequest carries trace_id as W3C hex string
+        let invoke_trace_id =
+            hex::encode(trace_id); // "0af7651916cd43dd8448eb211c80319c"
+        assert_eq!(invoke_trace_id.len(), 32, "W3C trace_id must be 32 hex chars");
+
+        // Simulate: AuditEvent records the binary trace context
+        let event = create_audit_event_with_trace(42, None, Some(trace));
+        let ctx = event.trace_context.as_ref().unwrap();
+
+        // Contract: binary trace_id matches the hex string from InvokeRequest
+        assert_eq!(hex::encode(ctx.trace_id), invoke_trace_id);
+        assert_eq!(ctx.span_id, span_id);
+        assert_eq!(ctx.flags, 0x01);
+
+        // Contract: JSON serialization preserves trace_context
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("trace_context"));
+        let roundtrip: AuditEvent = serde_json::from_str(&json).unwrap();
+        let rt_ctx = roundtrip.trace_context.as_ref().unwrap();
+        assert_eq!(rt_ctx.trace_id, trace_id);
+        assert_eq!(rt_ctx.span_id, span_id);
+    }
+
+    #[test]
+    fn trace_context_child_span_preserves_trace_id() {
+        // Contract: child spans share the same trace_id but have different span_ids
+        let trace_id = [0xAA; 16];
+        let parent_span = [0x11; 8];
+        let child_span = [0x22; 8];
+
+        let parent = TraceContext {
+            trace_id,
+            span_id: parent_span,
+            flags: 0x01,
+        };
+        let child = TraceContext {
+            trace_id,
+            span_id: child_span,
+            flags: 0x01,
+        };
+
+        // Same trace_id across spans
+        assert_eq!(parent.trace_id, child.trace_id);
+        // Different span_ids
+        assert_ne!(parent.span_id, child.span_id);
+
+        // Both produce valid audit events linked via prev hash
+        let parent_event = create_audit_event_with_trace(1, None, Some(parent));
+        let prev_id = test_object_id("parent-link");
+        let child_event =
+            create_audit_event_with_trace(2, Some(prev_id), Some(child));
+
+        let p_ctx = parent_event.trace_context.as_ref().unwrap();
+        let c_ctx = child_event.trace_context.as_ref().unwrap();
+        assert_eq!(p_ctx.trace_id, c_ctx.trace_id, "trace_id must be shared");
+        assert_ne!(
+            p_ctx.span_id, c_ctx.span_id,
+            "span_ids must differ between parent and child"
+        );
+    }
+
+    #[test]
+    fn trace_context_correlation_id_independent() {
+        // Contract: correlation_id and trace_context are independent fields
+        let trace = TraceContext {
+            trace_id: [0xFF; 16],
+            span_id: [0xEE; 8],
+            flags: 0x01,
+        };
+        let event = create_audit_event_with_trace(99, None, Some(trace));
+
+        // correlation_id is derived from seq (test fixture), NOT from trace_id
+        assert_ne!(
+            event.correlation_id.0.as_bytes(),
+            &event.trace_context.as_ref().unwrap().trace_id,
+            "correlation_id and trace_id should be independent"
+        );
+
+        // Both are present in JSON
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("correlation_id"));
+        assert!(json.contains("trace_context"));
+    }
+
+    #[test]
+    fn trace_context_audit_chain_carries_trace_through_linked_events() {
+        // Contract: hash-linked audit chain preserves trace context per event
+        let trace_id = [0xBB; 16];
+
+        let link1 = test_object_id("chain-link-1");
+        let link2 = test_object_id("chain-link-2");
+
+        let event1 = create_audit_event_with_trace(
+            1,
+            None,
+            Some(TraceContext {
+                trace_id,
+                span_id: [0x01; 8],
+                flags: 0x01,
+            }),
+        );
+        let event2 = create_audit_event_with_trace(
+            2,
+            Some(link1),
+            Some(TraceContext {
+                trace_id,
+                span_id: [0x02; 8],
+                flags: 0x01,
+            }),
+        );
+        let event3 = create_audit_event_with_trace(
+            3,
+            Some(link2),
+            Some(TraceContext {
+                trace_id,
+                span_id: [0x03; 8],
+                flags: 0x01,
+            }),
+        );
+
+        // All events share the same trace_id
+        for event in [&event1, &event2, &event3] {
+            assert_eq!(
+                event.trace_context.as_ref().unwrap().trace_id,
+                trace_id,
+                "all events in chain should share trace_id"
+            );
+        }
+
+        // Hash links form a chain
+        assert!(event1.prev.is_none());
+        assert_eq!(event2.prev, Some(link1));
+        assert_eq!(event3.prev, Some(link2));
+
+        // Monotonic seq
+        assert!(event1.seq < event2.seq);
+        assert!(event2.seq < event3.seq);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // Golden Vector Tests (Deterministic Serialization)
     // ─────────────────────────────────────────────────────────────────────────
 

@@ -68,6 +68,10 @@ pub enum CryptoError {
     #[error("invalid secret key")]
     InvalidSecretKey,
 
+    /// FROST threshold cryptography operation failed.
+    #[error("FROST operation failed: {0}")]
+    FrostFailed(String),
+
     /// Serialization error.
     #[error("serialization error: {0}")]
     SerializationError(String),
@@ -184,6 +188,15 @@ mod tests {
     }
 
     #[test]
+    fn error_display_frost_failed() {
+        let err = CryptoError::FrostFailed("invalid identifier".to_string());
+        assert_eq!(
+            err.to_string(),
+            "FROST operation failed: invalid identifier"
+        );
+    }
+
+    #[test]
     fn error_display_serialization_error() {
         let err = CryptoError::SerializationError("bad cbor".to_string());
         assert_eq!(err.to_string(), "serialization error: bad cbor");
@@ -243,6 +256,14 @@ mod tests {
     }
 
     #[test]
+    fn error_debug_frost_failed() {
+        let err = CryptoError::FrostFailed("bad proof".into());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("FrostFailed"));
+        assert!(debug.contains("bad proof"));
+    }
+
+    #[test]
     fn error_debug_token_expired() {
         let err = CryptoError::TokenExpired;
         let debug = format!("{err:?}");
@@ -293,6 +314,7 @@ mod tests {
             CryptoError::AeadDecryptFailed,
             CryptoError::InvalidPublicKey,
             CryptoError::InvalidSecretKey,
+            CryptoError::FrostFailed("test".into()),
             CryptoError::TokenExpired,
             CryptoError::TokenNotYetValid,
         ];
@@ -381,6 +403,7 @@ mod tests {
             ),
             ("InvalidPublicKey", CryptoError::InvalidPublicKey),
             ("InvalidSecretKey", CryptoError::InvalidSecretKey),
+            ("FrostFailed", CryptoError::FrostFailed("u".into())),
             (
                 "SerializationError",
                 CryptoError::SerializationError("s".into()),
@@ -441,6 +464,7 @@ mod tests {
             CryptoError::KeyDerivationFailed("w".into()),
             CryptoError::InvalidPublicKey,
             CryptoError::InvalidSecretKey,
+            CryptoError::FrostFailed("u".into()),
             CryptoError::SerializationError("s".into()),
             CryptoError::TokenValidationError("t".into()),
             CryptoError::TokenExpired,

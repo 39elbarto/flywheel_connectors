@@ -16,6 +16,7 @@
 //! # Modules
 //!
 //! - [`ed25519`] - Ed25519 signing and verification
+//! - [`frost`] - FROST threshold signing and distributed key generation
 //! - [`x25519`] - X25519 ECDH key exchange
 //! - [`hkdf`] - HKDF-SHA256 key derivation
 //! - [`aead`] - ChaCha20-Poly1305 and XChaCha20-Poly1305 AEAD
@@ -88,6 +89,7 @@ pub mod canonicalize;
 pub mod cose;
 pub mod ed25519;
 pub mod error;
+pub mod frost;
 pub mod hkdf;
 pub mod hpke_seal;
 pub mod kid;
@@ -102,8 +104,15 @@ pub use aead::{
 };
 pub use canonicalize::{Signable, canonical_signing_bytes, schema_hash};
 pub use cose::{CapabilityTokenBuilder, CoseToken, CwtClaims};
-pub use ed25519::{Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey};
+pub use ed25519::{Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, OwnerSigner};
 pub use error::{CryptoError, CryptoResult};
+pub use frost::{
+    FrostDkgRound1Package, FrostDkgRound1SecretPackage, FrostDkgRound2Package,
+    FrostDkgRound2SecretPackage, FrostKeyPackage, FrostLocalCoordinator, FrostPublicKeyPackage,
+    FrostSignatureShare, FrostSigningCommitments, FrostSigningNonces, FrostSigningPackage,
+    FrostSigningShare, aggregate, commit, commit_with_rng, dkg_part1, dkg_part1_with_rng,
+    dkg_part2, dkg_part3, sign, signing_package,
+};
 pub use hkdf::{DerivedKey, Fcp2KeyDerivation, HkdfSha256, hkdf_sha256, hkdf_sha256_array};
 pub use hpke_seal::{Fcp2Aad, HpkeSealedBox, hpke_open, hpke_seal};
 pub use kid::KeyId;

@@ -50,7 +50,7 @@
 
 use chrono::{DateTime, Utc};
 use fcp_crypto::{
-    Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, KeyId, X25519PublicKey,
+    Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, KeyId, OwnerSigner, X25519PublicKey,
     canonical_signing_bytes, canonicalize::to_deterministic_cbor,
 };
 use serde::{Deserialize, Serialize};
@@ -410,7 +410,7 @@ impl DeviceEnrollmentApproval {
     /// Returns an error if JSON serialization fails.
     #[allow(clippy::too_many_arguments)]
     pub fn sign(
-        owner_key: &Ed25519SigningKey,
+        owner_key: &dyn OwnerSigner,
         request: &DeviceEnrollmentRequest,
         zone_id: ZoneId,
         approved_tags: Vec<String>,
@@ -440,7 +440,11 @@ impl DeviceEnrollmentApproval {
             })?,
         );
 
-        let owner_signature = owner_key.sign(&signing_bytes);
+        let owner_signature = owner_key.owner_sign(&signing_bytes).map_err(|e| {
+            FcpError::Internal {
+                message: format!("owner signing failed: {e}"),
+            }
+        })?;
 
         Ok(Self {
             device_id: request.device_id.clone(),
@@ -453,7 +457,7 @@ impl DeviceEnrollmentApproval {
             issued_at: now,
             expires_at,
             owner_signature,
-            signer_kid: owner_key.key_id(),
+            signer_kid: owner_key.owner_key_id(),
         })
     }
 
@@ -738,7 +742,7 @@ impl NodeKeyAttestation {
     ///
     /// Returns an error if JSON serialization fails.
     pub fn sign(
-        owner_key: &Ed25519SigningKey,
+        owner_key: &dyn OwnerSigner,
         node_id: impl Into<String>,
         approval: &DeviceEnrollmentApproval,
         validity_hours: u32,
@@ -760,7 +764,7 @@ impl NodeKeyAttestation {
     /// - JSON serialization fails
     /// - Tags include values not in the approval's `approved_tags`
     pub fn sign_with_tags(
-        owner_key: &Ed25519SigningKey,
+        owner_key: &dyn OwnerSigner,
         node_id: impl Into<String>,
         approval: &DeviceEnrollmentApproval,
         tags: Vec<String>,
@@ -801,7 +805,11 @@ impl NodeKeyAttestation {
             })?,
         );
 
-        let owner_signature = owner_key.sign(&signing_bytes);
+        let owner_signature = owner_key.owner_sign(&signing_bytes).map_err(|e| {
+            FcpError::Internal {
+                message: format!("owner signing failed: {e}"),
+            }
+        })?;
 
         Ok(Self {
             node_id,
@@ -814,7 +822,7 @@ impl NodeKeyAttestation {
             issued_at: now,
             expires_at,
             owner_signature,
-            signer_kid: owner_key.key_id(),
+            signer_kid: owner_key.owner_key_id(),
         })
     }
 
@@ -2672,5 +2680,145 @@ mod tests {
             approval.encryption_key.key_id()
         );
         assert_eq!(attestation.issuance_kid(), approval.issuance_key.key_id());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FROST Threshold Signing Integration Tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn execute_dkg() -> (
+        std::collections::BTreeMap<u16, fcp_crypto::FrostKeyPackage>,
+        fcp_crypto::FrostPublicKeyPackage,
+    ) {
+        use fcp_crypto::{dkg_part1, dkg_part2, dkg_part3};
+
+        let (min_signers, max_signers) = (2u16, 3u16);
+        let mut round1_secrets = std::collections::BTreeMap::new();
+        let mut round1_public = std::collections::BTreeMap::new();
+
+        for p in 1..=max_signers {
+            let (secret, package) = dkg_part1(p, max_signers, min_signers).unwrap();
+            round1_secrets.insert(p, secret);
+            round1_public.insert(p, package);
+        }
+
+        let mut round2_secrets = std::collections::BTreeMap::new();
+        let mut inbound_round2: std::collections::BTreeMap<
+            u16,
+            std::collections::BTreeMap<u16, fcp_crypto::FrostDkgRound2Package>,
+        > = std::collections::BTreeMap::new();
+
+        for p in 1..=max_signers {
+            let received = round1_public
+                .iter()
+                .filter(|(s, _)| **s != p)
+                .map(|(s, pkg)| (*s, pkg.clone()))
+                .collect();
+            let (secret, outbound) = dkg_part2(round1_secrets.get(&p).unwrap(), &received).unwrap();
+            round2_secrets.insert(p, secret);
+            for (recipient, pkg) in outbound {
+                inbound_round2
+                    .entry(recipient)
+                    .or_default()
+                    .insert(p, pkg);
+            }
+        }
+
+        let mut key_packages = std::collections::BTreeMap::new();
+        let mut last_public = None;
+        for p in 1..=max_signers {
+            let received_r1 = round1_public
+                .iter()
+                .filter(|(s, _)| **s != p)
+                .map(|(s, pkg)| (*s, pkg.clone()))
+                .collect();
+            let (kp, pp) = dkg_part3(
+                round2_secrets.get(&p).unwrap(),
+                &received_r1,
+                inbound_round2.get(&p).unwrap(),
+            )
+            .unwrap();
+            key_packages.insert(p, kp);
+            last_public = Some(pp);
+        }
+
+        (key_packages, last_public.unwrap())
+    }
+
+    #[test]
+    fn frost_threshold_signs_enrollment_approval() {
+        let (key_packages, public_key_package) = execute_dkg();
+        let coordinator =
+            fcp_crypto::FrostLocalCoordinator::new(key_packages, public_key_package.clone())
+                .unwrap();
+
+        let (signing_secret, signing_key, encryption_key, issuance_key) = create_test_keys();
+        let request = DeviceEnrollmentRequest::new(
+            "frost-device",
+            signing_key,
+            encryption_key,
+            issuance_key,
+            DeviceMetadata::default(),
+            &signing_secret,
+        )
+        .unwrap();
+        let manifest = create_test_manifest();
+
+        // Sign with FROST threshold coordinator (k=2 of n=3)
+        let approval = DeviceEnrollmentApproval::sign(
+            &coordinator,
+            &request,
+            ZoneId::work(),
+            vec!["fcp:zone:work".into()],
+            manifest,
+            168,
+        )
+        .unwrap();
+
+        // Verify with the group public key (standard Ed25519 verification)
+        assert!(approval
+            .verify(public_key_package.group_public_key())
+            .is_ok());
+    }
+
+    #[test]
+    fn frost_threshold_signs_node_key_attestation() {
+        let (key_packages, public_key_package) = execute_dkg();
+        let coordinator =
+            fcp_crypto::FrostLocalCoordinator::new(key_packages, public_key_package.clone())
+                .unwrap();
+
+        // First create an approval (also with FROST)
+        let (signing_secret, signing_key, encryption_key, issuance_key) = create_test_keys();
+        let request = DeviceEnrollmentRequest::new(
+            "frost-attest-device",
+            signing_key,
+            encryption_key,
+            issuance_key,
+            DeviceMetadata::default(),
+            &signing_secret,
+        )
+        .unwrap();
+        let manifest = create_test_manifest();
+
+        let approval = DeviceEnrollmentApproval::sign(
+            &coordinator,
+            &request,
+            ZoneId::work(),
+            vec!["fcp:zone:work".into()],
+            manifest,
+            168,
+        )
+        .unwrap();
+
+        // Sign attestation with FROST coordinator
+        let attestation =
+            NodeKeyAttestation::sign(&coordinator, "frost-node-001", &approval, 168).unwrap();
+
+        assert_eq!(attestation.node_id, "frost-node-001");
+        // Verify with standard Ed25519 verify using group public key
+        assert!(attestation
+            .verify(public_key_package.group_public_key())
+            .is_ok());
     }
 }

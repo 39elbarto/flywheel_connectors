@@ -97,6 +97,38 @@ impl Ed25519SigningKey {
     }
 }
 
+/// Trait for owner-level signing operations.
+///
+/// This abstraction supports both single-key Ed25519 signing (backward
+/// compatible, no network) and FROST threshold signing (k-of-n participants,
+/// requires coordination rounds). Callers use `owner_sign()` without knowing
+/// which scheme is active.
+///
+/// The returned signature is always a standard Ed25519 signature, verifiable
+/// with the owner's public key regardless of whether single-key or FROST
+/// produced it.
+pub trait OwnerSigner {
+    /// Sign a message with the owner key (single-key or threshold).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if signing fails (e.g., FROST quorum unreachable).
+    fn owner_sign(&self, message: &[u8]) -> crate::CryptoResult<Ed25519Signature>;
+
+    /// Get the key ID of the owner key used for signing.
+    fn owner_key_id(&self) -> crate::kid::KeyId;
+}
+
+impl OwnerSigner for Ed25519SigningKey {
+    fn owner_sign(&self, message: &[u8]) -> crate::CryptoResult<Ed25519Signature> {
+        Ok(self.sign(message))
+    }
+
+    fn owner_key_id(&self) -> crate::kid::KeyId {
+        self.key_id()
+    }
+}
+
 impl Clone for Ed25519SigningKey {
     fn clone(&self) -> Self {
         Self {

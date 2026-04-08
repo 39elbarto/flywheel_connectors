@@ -262,4 +262,188 @@ criterion_group!(
     bench_session_verify_incoming,
 );
 
-criterion_main!(admission_benches, device_benches, session_benches,);
+// ============================================================================
+// Gossip / XOR Filter / IBLT Benchmarks
+// ============================================================================
+
+use fcp_mesh::{
+    gossip::{GossipConfig, GossipState, MeshGossip, XorFilterPlaceholder},
+    iblt::Iblt,
+};
+use fcp_mesh::admission::ObjectAdmissionClass;
+
+fn make_object_ids(count: usize) -> Vec<ObjectId> {
+    (0..count)
+        .map(|i| ObjectId::from_unscoped_bytes(format!("bench-obj-{i}").as_bytes()))
+        .collect()
+}
+
+fn bench_xor_filter_insert(c: &mut Criterion) {
+    let mut group = c.benchmark_group("xor_filter_insert");
+    for &size in &[1_000usize, 10_000, 100_000] {
+        let items: Vec<Vec<u8>> = (0..size)
+            .map(|i| format!("item-{i}").into_bytes())
+            .collect();
+        group.throughput(Throughput::Elements(size as u64));
+        group.bench_function(format!("{size}"), |b| {
+            b.iter(|| {
+                let mut filter = XorFilterPlaceholder::new();
+                for item in &items {
+                    filter.insert(black_box(item));
+                }
+                black_box(filter.len())
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_xor_filter_query(c: &mut Criterion) {
+    let mut group = c.benchmark_group("xor_filter_query");
+    for &size in &[1_000usize, 10_000, 100_000] {
+        let items: Vec<Vec<u8>> = (0..size)
+            .map(|i| format!("item-{i}").into_bytes())
+            .collect();
+        let mut filter = XorFilterPlaceholder::new();
+        for item in &items {
+            filter.insert(item);
+        }
+        group.throughput(Throughput::Elements(size as u64));
+        group.bench_function(format!("{size}"), |b| {
+            b.iter(|| {
+                let mut hits = 0u32;
+                for item in &items {
+                    if filter.may_contain(black_box(item)) {
+                        hits += 1;
+                    }
+                }
+                black_box(hits)
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_xor_filter_digest(c: &mut Criterion) {
+    let mut group = c.benchmark_group("xor_filter_digest");
+    for &size in &[1_000usize, 10_000] {
+        let mut filter = XorFilterPlaceholder::new();
+        for i in 0..size {
+            filter.insert(format!("item-{i}").as_bytes());
+        }
+        group.bench_function(format!("{size}"), |b| {
+            b.iter(|| black_box(filter.digest()));
+        });
+    }
+    group.finish();
+}
+
+fn bench_iblt_insert_and_decode(c: &mut Criterion) {
+    let mut group = c.benchmark_group("iblt_reconcile");
+    for &diff_size in &[5usize, 20, 50] {
+        let shared_ids = make_object_ids(1000);
+        let left_only: Vec<ObjectId> = (0..diff_size)
+            .map(|i| ObjectId::from_unscoped_bytes(format!("left-only-{i}").as_bytes()))
+            .collect();
+        let right_only: Vec<ObjectId> = (0..diff_size)
+            .map(|i| {
+                ObjectId::from_unscoped_bytes(format!("right-only-{i}").as_bytes())
+            })
+            .collect();
+
+        group.bench_function(format!("diff_{diff_size}"), |b| {
+            b.iter(|| {
+                let mut left = Iblt::with_expected_difference(diff_size * 2);
+                let mut right = Iblt::with_expected_difference(diff_size * 2);
+
+                for id in &shared_ids {
+                    left.insert(*id);
+                    right.insert(*id);
+                }
+                for id in &left_only {
+                    left.insert(*id);
+                }
+                for id in &right_only {
+                    right.insert(*id);
+                }
+
+                let diff = left.subtract(&right).unwrap();
+                let result = diff.decode();
+                black_box(result.is_complete())
+            });
+        });
+    }
+    group.finish();
+}
+
+fn bench_gossip_reconciliation(c: &mut Criterion) {
+    let mut group = c.benchmark_group("gossip_reconcile_e2e");
+    let zone = fcp_core::ZoneId::work();
+
+    for &shared_count in &[100usize, 1_000, 10_000] {
+        let diff_count = 10;
+        let shared = make_object_ids(shared_count);
+        let a_only: Vec<ObjectId> = (0..diff_count)
+            .map(|i| {
+                ObjectId::from_unscoped_bytes(format!("a-only-{i}").as_bytes())
+            })
+            .collect();
+        let b_only: Vec<ObjectId> = (0..diff_count)
+            .map(|i| {
+                ObjectId::from_unscoped_bytes(format!("b-only-{i}").as_bytes())
+            })
+            .collect();
+
+        group.bench_function(format!("shared_{shared_count}_diff_{diff_count}"), |b| {
+            b.iter(|| {
+                let mut node_a = MeshGossip::with_defaults(
+                    fcp_core::TailscaleNodeId::new("bench-a"),
+                );
+                let mut node_b = MeshGossip::with_defaults(
+                    fcp_core::TailscaleNodeId::new("bench-b"),
+                );
+
+                for obj in shared.iter().chain(a_only.iter()) {
+                    node_a.announce_object(
+                        &zone,
+                        obj,
+                        ObjectAdmissionClass::Admitted,
+                        1,
+                    );
+                }
+                for obj in shared.iter().chain(b_only.iter()) {
+                    node_b.announce_object(
+                        &zone,
+                        obj,
+                        ObjectAdmissionClass::Admitted,
+                        1,
+                    );
+                }
+
+                let b_iblt = node_b
+                    .build_zone_iblt(&zone, diff_count * 2)
+                    .unwrap();
+                let result = node_a.reconcile_zone_iblt(
+                    &zone,
+                    fcp_core::TailscaleNodeId::new("bench-b"),
+                    &b_iblt,
+                    diff_count * 2,
+                    2,
+                );
+                black_box(result.is_some())
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    gossip_benches,
+    bench_xor_filter_insert,
+    bench_xor_filter_query,
+    bench_xor_filter_digest,
+    bench_iblt_insert_and_decode,
+    bench_gossip_reconciliation,
+);
+
+criterion_main!(admission_benches, device_benches, session_benches, gossip_benches,);

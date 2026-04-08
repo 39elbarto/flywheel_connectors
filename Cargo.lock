@@ -2627,6 +2627,7 @@ dependencies = [
  "coset",
  "criterion",
  "ed25519-dalek",
+ "frost-ed25519",
  "hex",
  "hkdf",
  "hpke",
@@ -4071,6 +4072,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
+ "xorf",
  "zeroize",
 ]
 
@@ -4834,9 +4836,11 @@ name = "fcp-registry"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "clap",
  "fcp-async-core",
  "fcp-cbor",
  "fcp-core",
@@ -4851,8 +4855,11 @@ dependencies = [
  "sha2",
  "sigstore",
  "sigstore-trust-root",
+ "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "tough",
+ "tower",
  "url",
  "uuid",
 ]
@@ -4965,6 +4972,7 @@ dependencies = [
  "libc",
  "pretty_assertions",
  "rand 0.8.5",
+ "reqwest 0.13.2",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -4973,6 +4981,7 @@ dependencies = [
  "url",
  "wasmtime",
  "wasmtime-wasi",
+ "wiremock",
 ]
 
 [[package]]
@@ -6336,6 +6345,7 @@ dependencies = [
  "fcp-mesh",
  "fcp-policy",
  "fcp-raptorq",
+ "fcp-registry",
  "fcp-sandbox",
  "fcp-telemetry",
  "fcp-testkit",
@@ -13303,6 +13313,18 @@ dependencies = [
  "rusticata-macros",
  "thiserror 2.0.18",
  "time",
+]
+
+[[package]]
+name = "xorf"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45e820b97864028eb5069aabf2d90ad7bc279a0ed0292f1306451ce4b91adc13"
+dependencies = [
+ "libm",
+ "rand 0.8.5",
+ "serde",
+ "serde_bytes",
 ]
 
 [[package]]

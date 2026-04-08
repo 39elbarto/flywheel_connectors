@@ -4,6 +4,7 @@
 //! - [`admission`] - Admission control with per-peer budgets and anti-amplification
 //! - [`device`] - Device profile types for execution planning and capability reporting
 //! - [`gossip`] - Gossip protocol for metadata and object announcement
+//! - [`iblt`] - Production invertible bloom lookup tables for compact set differences
 //! - [`session`] - Session layer with authenticated handshake, key schedule, and anti-replay
 //! - [`symbol_request`] - Symbol request handling with bounded requests and targeted repair
 //! - [`transport`] - Transport path ranking + deterministic multipath selection
@@ -31,6 +32,7 @@ pub mod degraded;
 
 pub mod device;
 pub mod gossip;
+pub mod iblt;
 pub mod node;
 pub mod planner;
 pub mod replay;
@@ -45,6 +47,7 @@ pub use degraded::*;
 
 pub use device::*;
 pub use gossip::*;
+pub use iblt::*;
 pub use node::*;
 pub use planner::*;
 pub use replay::*;

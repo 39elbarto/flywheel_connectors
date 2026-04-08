@@ -274,6 +274,9 @@ wasmtime-wasi = "41.0"
 # HTTP client
 reqwest = { version = "0.13", features = ["json", "query", "rustls"], default-features = false }
 
+# Probabilistic data structures
+xorf = { version = "0.12", features = ["serde"] }
+
 # Testing
 wiremock = "0.6"
 pretty_assertions = "1.4"

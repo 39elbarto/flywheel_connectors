@@ -1,0 +1,391 @@
+//! Production IBLT support for bounded mesh set reconciliation.
+//!
+//! The mesh gossip layer needs a compact way to describe small set differences
+//! without exchanging full object inventories. An Invertible Bloom Lookup Table
+//! (IBLT) provides O(d) communication in the common case where two nodes differ
+//! by only a handful of objects.
+
+use std::collections::{BTreeSet, VecDeque};
+
+use fcp_core::ObjectId;
+use serde::{Deserialize, Serialize};
+
+/// The production IBLT uses three independent hash positions per key.
+pub const IBLT_HASH_COUNT: usize = 3;
+
+/// Recommended minimum cell budget for production reconciliation.
+pub const MIN_RECOMMENDED_IBLT_CELLS: usize = 64;
+
+const INDEX_HASH_DOMAINS: [&[u8]; IBLT_HASH_COUNT] =
+    [b"fcp-iblt-h0", b"fcp-iblt-h1", b"fcp-iblt-h2"];
+const HASH_CHECK_DOMAIN: &[u8] = b"fcp-iblt-hc";
+
+/// A single IBLT cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IbltCell {
+    /// Signed item count accumulated in this cell.
+    pub count: i32,
+    /// XOR of all keys hashed into this cell.
+    pub key_sum: [u8; 32],
+    /// XOR of 32-bit hash checks for all keys hashed into this cell.
+    pub hash_check: u32,
+}
+
+impl IbltCell {
+    fn apply(&mut self, object_id: ObjectId, delta: i32) {
+        self.count += delta;
+        xor_into(&mut self.key_sum, object_id.as_bytes());
+        self.hash_check ^= hash_check_for(object_id);
+    }
+
+    fn subtract(&self, other: &Self) -> Self {
+        let mut key_sum = self.key_sum;
+        xor_into(&mut key_sum, &other.key_sum);
+        Self {
+            count: self.count - other.count,
+            key_sum,
+            hash_check: self.hash_check ^ other.hash_check,
+        }
+    }
+
+    fn is_zero(&self) -> bool {
+        self.count == 0 && self.key_sum == [0_u8; 32] && self.hash_check == 0
+    }
+
+    fn pure_key(&self) -> Option<(ObjectId, i32)> {
+        if self.count.abs() != 1 {
+            return None;
+        }
+
+        let object_id = ObjectId::from_bytes(self.key_sum);
+        if self.hash_check == hash_check_for(object_id) {
+            Some((object_id, self.count.signum()))
+        } else {
+            None
+        }
+    }
+}
+
+/// Errors returned by production IBLT operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum IbltError {
+    /// Cell count must be positive.
+    #[error("iblt cell count must be greater than zero")]
+    InvalidCellCount,
+    /// Two sketches must use the same cell budget before subtraction.
+    #[error("iblt cell count mismatch: left={left}, right={right}")]
+    CellCountMismatch { left: usize, right: usize },
+}
+
+/// Result of decoding an IBLT difference sketch.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IbltDecodeResult {
+    /// Objects present only in the left-hand sketch.
+    pub only_left: BTreeSet<ObjectId>,
+    /// Objects present only in the right-hand sketch.
+    pub only_right: BTreeSet<ObjectId>,
+    /// `true` when the sketch peeled completely.
+    pub complete: bool,
+    /// Non-zero cells left over after peeling stalled.
+    pub remaining_nonzero_cells: usize,
+}
+
+impl IbltDecodeResult {
+    /// Whether the decode finished without requiring a fallback exchange.
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        self.complete
+    }
+}
+
+/// Production IBLT for mesh object reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Iblt {
+    cells: Vec<IbltCell>,
+}
+
+impl Default for Iblt {
+    fn default() -> Self {
+        Self::with_expected_difference(0)
+    }
+}
+
+impl Iblt {
+    /// Build an IBLT sized for an expected difference set.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the recommended cell count for the given difference is zero.
+    #[must_use]
+    pub fn with_expected_difference(expected_difference: usize) -> Self {
+        Self::with_cell_count(Self::recommended_cell_count(expected_difference))
+            .expect("recommended IBLT cell count must be non-zero")
+    }
+
+    /// Build an IBLT with an explicit cell count.
+    ///
+    /// # Errors
+    /// Returns [`IbltError::InvalidCellCount`] when `cell_count == 0`.
+    pub fn with_cell_count(cell_count: usize) -> Result<Self, IbltError> {
+        if cell_count == 0 {
+            return Err(IbltError::InvalidCellCount);
+        }
+
+        Ok(Self {
+            cells: vec![IbltCell::default(); cell_count],
+        })
+    }
+
+    /// Recommended cell budget for an expected difference size.
+    #[must_use]
+    pub const fn recommended_cell_count(expected_difference: usize) -> usize {
+        let scaled = expected_difference.saturating_mul(3).saturating_add(1) / 2;
+        if scaled < MIN_RECOMMENDED_IBLT_CELLS {
+            MIN_RECOMMENDED_IBLT_CELLS
+        } else {
+            scaled
+        }
+    }
+
+    /// Number of cells in the sketch.
+    #[must_use]
+    pub fn cell_count(&self) -> usize {
+        self.cells.len()
+    }
+
+    /// Borrow the raw cell slice.
+    #[must_use]
+    pub fn cells(&self) -> &[IbltCell] {
+        &self.cells
+    }
+
+    /// Insert an object into the sketch.
+    pub fn insert(&mut self, object_id: ObjectId) {
+        self.apply(object_id, 1);
+    }
+
+    /// Delete an object from the sketch.
+    pub fn delete(&mut self, object_id: ObjectId) {
+        self.apply(object_id, -1);
+    }
+
+    /// Subtract `other` from `self` to form an A-B difference sketch.
+    ///
+    /// # Errors
+    /// Returns [`IbltError::CellCountMismatch`] when the sketches use different
+    /// cell budgets.
+    pub fn subtract(&self, other: &Self) -> Result<Self, IbltError> {
+        if self.cells.len() != other.cells.len() {
+            return Err(IbltError::CellCountMismatch {
+                left: self.cells.len(),
+                right: other.cells.len(),
+            });
+        }
+
+        let cells = self
+            .cells
+            .iter()
+            .zip(&other.cells)
+            .map(|(left, right)| left.subtract(right))
+            .collect();
+        Ok(Self { cells })
+    }
+
+    /// Decode the sketch by repeatedly peeling pure cells.
+    #[must_use]
+    pub fn decode(&self) -> IbltDecodeResult {
+        let mut working = self.cells.clone();
+        let mut pending = VecDeque::new();
+        let mut only_left = BTreeSet::new();
+        let mut only_right = BTreeSet::new();
+
+        for (index, cell) in working.iter().enumerate() {
+            if cell.pure_key().is_some() {
+                pending.push_back(index);
+            }
+        }
+
+        while let Some(index) = pending.pop_front() {
+            let Some((object_id, sign)) = working[index].pure_key() else {
+                continue;
+            };
+
+            if sign > 0 {
+                only_left.insert(object_id);
+            } else {
+                only_right.insert(object_id);
+            }
+
+            for peer_index in Self::indices_for(object_id, working.len()) {
+                working[peer_index].apply(object_id, -sign);
+                if working[peer_index].pure_key().is_some() {
+                    pending.push_back(peer_index);
+                }
+            }
+        }
+
+        let remaining_nonzero_cells = working.iter().filter(|cell| !cell.is_zero()).count();
+
+        IbltDecodeResult {
+            only_left,
+            only_right,
+            complete: remaining_nonzero_cells == 0,
+            remaining_nonzero_cells,
+        }
+    }
+
+    fn apply(&mut self, object_id: ObjectId, delta: i32) {
+        for index in Self::indices_for(object_id, self.cells.len()) {
+            self.cells[index].apply(object_id, delta);
+        }
+    }
+
+    fn indices_for(object_id: ObjectId, cell_count: usize) -> [usize; IBLT_HASH_COUNT] {
+        let mut indices = [0_usize; IBLT_HASH_COUNT];
+
+        for (position, domain) in INDEX_HASH_DOMAINS.iter().enumerate() {
+            let mut index = hash_index(domain, object_id.as_bytes(), cell_count);
+            let mut steps = 0;
+            while steps < cell_count && indices[..position].contains(&index) {
+                index = (index + 1) % cell_count;
+                steps += 1;
+            }
+            indices[position] = index;
+        }
+
+        indices
+    }
+}
+
+fn hash_index(domain: &[u8], key: &[u8; 32], cell_count: usize) -> usize {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(key);
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest.as_bytes()[..8]);
+    let value = u64::from_le_bytes(bytes);
+    (value % u64::try_from(cell_count).expect("cell count fits into u64")) as usize
+}
+
+fn hash_check_for(object_id: ObjectId) -> u32 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(HASH_CHECK_DOMAIN);
+    hasher.update(object_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 4];
+    bytes.copy_from_slice(&digest.as_bytes()[..4]);
+    u32::from_le_bytes(bytes)
+}
+
+fn xor_into(target: &mut [u8; 32], value: &[u8; 32]) {
+    for (target_byte, value_byte) in target.iter_mut().zip(value) {
+        *target_byte ^= value_byte;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn object_id(label: &str) -> ObjectId {
+        ObjectId::from_unscoped_bytes(label.as_bytes())
+    }
+
+    #[test]
+    fn recommended_cell_count_uses_floor_and_growth_factor() {
+        assert_eq!(Iblt::recommended_cell_count(0), MIN_RECOMMENDED_IBLT_CELLS);
+        assert_eq!(Iblt::recommended_cell_count(1), MIN_RECOMMENDED_IBLT_CELLS);
+        assert_eq!(Iblt::recommended_cell_count(50), 75);
+    }
+
+    #[test]
+    fn subtract_rejects_mismatched_cell_counts() {
+        let left = Iblt::with_cell_count(64).expect("valid left cell count");
+        let right = Iblt::with_cell_count(65).expect("valid right cell count");
+        let error = left
+            .subtract(&right)
+            .expect_err("mismatched cell counts must fail");
+        assert_eq!(
+            error,
+            IbltError::CellCountMismatch {
+                left: 64,
+                right: 65
+            }
+        );
+    }
+
+    #[test]
+    fn subtract_and_decode_recovers_bidirectional_difference() {
+        let mut left = Iblt::with_expected_difference(4);
+        let mut right = Iblt::with_expected_difference(4);
+
+        let shared_a = object_id("shared-a");
+        let shared_b = object_id("shared-b");
+        let left_only = object_id("left-only");
+        let right_only = object_id("right-only");
+
+        for object_id in [shared_a, shared_b, left_only] {
+            left.insert(object_id);
+        }
+        for object_id in [shared_a, shared_b, right_only] {
+            right.insert(object_id);
+        }
+
+        let difference = left.subtract(&right).expect("same-sized sketches subtract");
+        let decoded = difference.decode();
+
+        assert!(decoded.is_complete(), "well-sized sketch should peel fully");
+        assert_eq!(decoded.remaining_nonzero_cells, 0);
+        assert_eq!(decoded.only_left, BTreeSet::from([left_only]));
+        assert_eq!(decoded.only_right, BTreeSet::from([right_only]));
+    }
+
+    #[test]
+    fn delete_cancels_insert_for_same_object() {
+        let mut iblt = Iblt::with_expected_difference(2);
+        let object_id = object_id("same-object");
+
+        iblt.insert(object_id);
+        iblt.delete(object_id);
+
+        let decoded = iblt.decode();
+        assert!(decoded.is_complete());
+        assert!(decoded.only_left.is_empty());
+        assert!(decoded.only_right.is_empty());
+        assert_eq!(decoded.remaining_nonzero_cells, 0);
+    }
+
+    #[test]
+    fn decode_reports_partial_when_no_pure_cells_exist() {
+        let first = object_id("first");
+        let second = object_id("second");
+
+        let mut key_sum = *first.as_bytes();
+        xor_into(&mut key_sum, second.as_bytes());
+
+        let iblt = Iblt {
+            cells: vec![
+                IbltCell {
+                    count: 2,
+                    key_sum,
+                    hash_check: hash_check_for(first) ^ hash_check_for(second),
+                },
+                IbltCell::default(),
+                IbltCell::default(),
+            ],
+        };
+
+        let decoded = iblt.decode();
+        assert!(!decoded.is_complete(), "decoder must signal a fallback");
+        assert_eq!(decoded.remaining_nonzero_cells, 1);
+        assert!(decoded.only_left.is_empty());
+        assert!(decoded.only_right.is_empty());
+    }
+
+    #[test]
+    fn explicit_zero_cell_count_is_rejected() {
+        let error = Iblt::with_cell_count(0).expect_err("zero cells must be rejected");
+        assert_eq!(error, IbltError::InvalidCellCount);
+    }
+}

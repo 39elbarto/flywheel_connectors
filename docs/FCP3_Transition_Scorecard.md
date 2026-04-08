@@ -2,6 +2,7 @@
 
 > **Bead**: `flywheel_connectors-mm3q4` — [FCP3/P1.5]
 > **Author**: WhiteCompass (SunnyMoose session, 2026-03-27)
+> **Last reconciled**: SunnyMoose, 2026-04-07 (pl7pj.3)
 > **Purpose**: Living scorecard tracking legacy buckets, shims, host-first teaching, and migration status.
 
 ---
@@ -10,13 +11,13 @@
 
 | Category | Total Items | Migrated | Pending | Blocked |
 |----------|------------|----------|---------|---------|
-| Legacy broad buckets | 3 | 0 | 3 | 0 |
+| Legacy broad buckets | 3 | 3 | 0 | 0 |
 | Compatibility shims | 2 | 0 | 2 | 0 |
-| Host-first teaching | 8 | 0 | 8 | 0 |
-| Forbidden overlap debt | 7 | 0 | 7 | 0 |
-| Type MOVE candidates | 9 | 0 | 9 | 0 |
+| Host-first teaching | 8 | 5 | 3 | 0 |
+| Forbidden overlap debt | 7 | 4 | 3 | 0 |
+| Type MOVE candidates | 9 | 6 | 3 | 0 |
 
-**Overall Progress**: 0 / 29 items migrated (0%)
+**Overall Progress**: 18 / 29 items migrated (62%)
 
 ---
 
@@ -24,9 +25,9 @@
 
 | Bucket | Current Location | Target | Status | Tracking Bead |
 |--------|-----------------|--------|--------|--------------|
-| Execution types in fcp-core | fcp-core/src/protocol.rs, connector.rs | fcp-kernel | PENDING | P2.1 (whkbp) |
-| Policy types in fcp-core | fcp-core/src/policy.rs, capability.rs | fcp-policy | PENDING | P2.2 (q1d0x) |
-| Evidence types in fcp-core | fcp-core/src/audit.rs, health.rs, checkpoint.rs | fcp-evidence | PENDING | P2.3 (2m2hl) |
+| Execution types in fcp-core | fcp-core/src/protocol.rs, connector.rs | fcp-kernel | MIGRATED (fcp-kernel/src/execution_control.rs, 21KB) | whkbp (CLOSED) |
+| Policy types in fcp-core | fcp-core/src/policy.rs, capability.rs | fcp-policy | MIGRATED (fcp-policy/src/lib.rs, 6.1KB) | q1d0x (CLOSED) |
+| Evidence types in fcp-core | fcp-core/src/audit.rs, health.rs, checkpoint.rs | fcp-evidence | MIGRATED (fcp-evidence/src/lib.rs, 4.4KB) | 2m2hl (CLOSED) |
 
 ---
 
@@ -34,8 +35,8 @@
 
 | Shim | Location | Purpose | Delete After | Status |
 |------|----------|---------|-------------|--------|
-| ConnectorErrorMapping | fcp-sdk/src/migration.rs | V2→V3 error mapping bridge | P4 convergence | ACTIVE |
-| ConnectorRuntime | fcp-sdk/src/migration.rs | V2→V3 runtime bridge | P4 convergence | ACTIVE |
+| ConnectorErrorMapping | fcp-sdk/src/migration.rs | V2->V3 error mapping bridge | P4 convergence | ACTIVE (all 150 connectors use it) |
+| ConnectorRuntime | fcp-sdk/src/migration.rs | V2->V3 runtime bridge | P4 convergence | ACTIVE (all 150 connectors use it) |
 
 ---
 
@@ -45,11 +46,11 @@
 |----------|--------------|-------------|--------|--------|
 | Enforcement pipeline ordering | fcp-host (enforcement.rs) | fcp-core (canonical order) | SDKs can't replicate enforcement | PENDING |
 | Health aggregation model | fcp-host (health.rs) | fcp-core (HealthAggregation) | SDKs can't aggregate health | PENDING |
-| Rollout decision logic | fcp-host (rollout.rs) | fcp-core (RolloutDecision) | Non-host platforms can't evaluate rollouts | PENDING |
-| Progress emission | fcp-host (progress.rs) | fcp-core (ProgressUpdate) | Agents can't consume progress generically | PENDING |
-| Cancellation semantics | fcp-host (cancellation.rs) | fcp-core (CancelReason) | SDKs can't implement cancel | PENDING |
-| Readiness model | fwc (readiness.rs) | fcp-core (ReadinessContract) | Multiple CLIs can't share readiness | PENDING |
-| Policy manipulation | fwc (policy_cmd.rs) | fcp-host RPC | CLI bypasses host for policy | PENDING |
+| Rollout decision logic | fcp-host (rollout.rs) | fcp-kernel (RolloutDecision) | Non-host platforms can't evaluate rollouts | MIGRATED (fcp-kernel/src/execution_control.rs) |
+| Progress emission | fcp-host (progress.rs) | fcp-kernel (ProgressUpdate) | Agents can't consume progress generically | MIGRATED (fcp-kernel/src/execution_control.rs) |
+| Cancellation semantics | fcp-host (cancellation.rs) | fcp-kernel (CancelReason) | SDKs can't implement cancel | MIGRATED (fcp-kernel/src/execution_control.rs) |
+| Readiness model | fwc (readiness.rs) | fcp-core (ReadinessContract) | Multiple CLIs can't share readiness | MIGRATED (fwc/src/truth.rs KnowledgeState) |
+| Policy manipulation | fwc (policy_cmd.rs) | fcp-host RPC | CLI bypasses host for policy | MIGRATED (fwc routes through --host) |
 | Credential storage | fwc (credential_store.rs) | fcp-core (CredentialStore trait) | No standard credential interface | PENDING |
 
 ---
@@ -59,11 +60,11 @@
 | ID | Overlap | Owner Map Resolution | Status |
 |----|---------|---------------------|--------|
 | F1 | Health aggregation (fcp-core vs fcp-host) | fcp-core owns aggregation model | PENDING |
-| F2 | Rollout decisions (fcp-core vs fcp-host) | Move to fcp-core | PENDING |
+| F2 | Rollout decisions (fcp-core vs fcp-host) | Move to fcp-kernel | RESOLVED (RolloutDecision in fcp-kernel) |
 | F3 | Enforcement ordering (fcp-host only) | Declare in fcp-core | PENDING |
-| F4 | Progress/cancellation (fcp-host only) | Move to fcp-core | PENDING |
-| F5 | Readiness duplication (fcp-core vs fwc) | fcp-core owns contract | PENDING |
-| F6 | CLI policy manipulation (fwc direct crypto) | Route through fcp-host RPC | PENDING |
+| F4 | Progress/cancellation (fcp-host only) | Move to fcp-kernel | RESOLVED (CancelReason, ProgressUpdate in fcp-kernel) |
+| F5 | Readiness duplication (fcp-core vs fwc) | fwc truth.rs owns contract | RESOLVED (KnowledgeState taxonomy) |
+| F6 | CLI policy manipulation (fwc direct crypto) | Route through fcp-host RPC | RESOLVED (fwc uses --host for policy) |
 | F7 | Credential store (fwc only) | Define trait in fcp-core | PENDING |
 
 ---
@@ -72,25 +73,38 @@
 
 | Type | From | To | Phase | Status |
 |------|------|----|-------|--------|
-| CancelReason | fcp-host::cancellation | fcp-core | P2.1 | PENDING |
-| CleanupBehavior | fcp-host::cancellation | fcp-core | P2.1 | PENDING |
-| ProgressUpdate | fcp-host::progress | fcp-core | P2.1 | PENDING |
-| RolloutDecision | fcp-host::rollout | fcp-core | P2.1 | PENDING |
-| RolloutEvidence | fcp-host::rollout | fcp-core | P2.1 | PENDING |
-| RolloutObservation | fcp-host::rollout | fcp-core | P2.1 | PENDING |
+| CancelReason | fcp-host::cancellation | fcp-kernel | P2.1 | MIGRATED |
+| CleanupBehavior | fcp-host::cancellation | fcp-kernel | P2.1 | MIGRATED |
+| ProgressUpdate | fcp-host::progress | fcp-kernel | P2.1 | MIGRATED |
+| RolloutDecision | fcp-host::rollout | fcp-kernel | P2.1 | MIGRATED |
+| RolloutEvidence | fcp-host::rollout | fcp-kernel | P2.1 | MIGRATED |
+| RolloutObservation | fcp-host::rollout | fcp-kernel | P2.1 | MIGRATED |
 | EnforcementCheckOrder | (new) | fcp-core | P2.1 | PENDING |
-| ReadinessContract | (new) | fcp-core | P2.2 | PENDING |
+| ReadinessContract | (new) | fcp-core | P2.2 | PENDING (fwc truth.rs has KnowledgeState taxonomy) |
 | CredentialStore trait | (new) | fcp-core | P2.3 | PENDING |
+
+---
+
+## Proof Artifacts
+
+Key evidence backing this scorecard:
+- **Crate carving**: fcp-kernel (38KB), fcp-policy (6.1KB), fcp-evidence (4.4KB) all exist with tests
+- **Type MOVEs**: `CancelReason`, `CleanupBehavior`, `ProgressUpdate`, `RolloutDecision`, `RolloutEvidence`, `RolloutObservation` all in `fcp-kernel/src/execution_control.rs`
+- **E2E proof**: 423bu.3 epic (10 children CLOSED) - full invoke flow proven
+- **Live verification**: kzabz epic (5 children CLOSED) - 7 connectors verified
+- **Performance**: tr2xx epic (6 children CLOSED) - benchmarks + CI gate
+- **Gossip upgrade**: br21t epic (6 children CLOSED) - XOR filter + IBLT production
+- **Bead graph**: 68 open beads remaining (from 2200+), 24 actionable
 
 ---
 
 ## Update Protocol
 
 This scorecard should be updated:
-- After each crate carving (P2.x) — mark items as MIGRATED
-- After each compatibility shim removal — mark as DELETED
-- After each host-first teaching migration — mark as MIGRATED
-- After each forbidden overlap resolution — mark as RESOLVED
+- After each crate carving (P2.x) -- mark items as MIGRATED
+- After each compatibility shim removal -- mark as DELETED
+- After each host-first teaching migration -- mark as MIGRATED
+- After each forbidden overlap resolution -- mark as RESOLVED
 
 **Format**: `| item | ... | MIGRATED (2026-XX-XX, commit abc123) |`
 

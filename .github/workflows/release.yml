@@ -35,24 +35,24 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: fcp
-            asset: fcp-linux-amd64
+            artifact: fwc
+            asset: fwc-linux-amd64
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            artifact: fcp
-            asset: fcp-linux-arm64
+            artifact: fwc
+            asset: fwc-linux-arm64
           - os: macos-14
             target: aarch64-apple-darwin
-            artifact: fcp
-            asset: fcp-darwin-arm64
+            artifact: fwc
+            asset: fwc-darwin-arm64
           - os: macos-13
             target: x86_64-apple-darwin
-            artifact: fcp
-            asset: fcp-darwin-amd64
+            artifact: fwc
+            asset: fwc-darwin-amd64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: fcp.exe
-            asset: fcp-windows-amd64.exe
+            artifact: fwc.exe
+            asset: fwc-windows-amd64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -63,7 +63,7 @@ jobs:
           key: release-${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --package fcp-cli --target ${{ matrix.target }}
+        run: cargo build --release --package fwc --target ${{ matrix.target }}
 
       - name: Create tarball (Unix)
         if: runner.os != 'Windows'
@@ -173,6 +173,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -197,6 +198,21 @@ jobs:
           cd dist
           cat *.sha256 | sort > SHA256SUMS.txt
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v4.0.0
+        with:
+          cosign-release: v3.0.3
+
+      - name: Sign release artifacts
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cd dist
+          shopt -s nullglob
+          for artifact in *.tar.xz *.zip SHA256SUMS.txt; do
+            cosign sign-blob "$artifact" --bundle "${artifact}.sigstore.json" --yes
+          done
+
       - uses: softprops/action-gh-release@v2
         with:
           name: v${{ steps.version.outputs.version }}
@@ -211,19 +227,22 @@ jobs:
 
             | Platform | CLI | Anthropic | Discord | OpenAI | Telegram |
             |----------|-----|-----------|---------|--------|----------|
-            | Linux (x64) | [fcp](fcp-linux-amd64.tar.xz) | [anthropic](fcp-anthropic-linux-amd64.tar.xz) | [discord](fcp-discord-linux-amd64.tar.xz) | [openai](fcp-openai-linux-amd64.tar.xz) | [telegram](fcp-telegram-linux-amd64.tar.xz) |
-            | Linux (ARM64) | [fcp](fcp-linux-arm64.tar.xz) | [anthropic](fcp-anthropic-linux-arm64.tar.xz) | [discord](fcp-discord-linux-arm64.tar.xz) | [openai](fcp-openai-linux-arm64.tar.xz) | [telegram](fcp-telegram-linux-arm64.tar.xz) |
-            | macOS (ARM64) | [fcp](fcp-darwin-arm64.tar.xz) | [anthropic](fcp-anthropic-darwin-arm64.tar.xz) | [discord](fcp-discord-darwin-arm64.tar.xz) | [openai](fcp-openai-darwin-arm64.tar.xz) | [telegram](fcp-telegram-darwin-arm64.tar.xz) |
-            | macOS (x64) | [fcp](fcp-darwin-amd64.tar.xz) | [anthropic](fcp-anthropic-darwin-amd64.tar.xz) | [discord](fcp-discord-darwin-amd64.tar.xz) | [openai](fcp-openai-darwin-amd64.tar.xz) | [telegram](fcp-telegram-darwin-amd64.tar.xz) |
-            | Windows (x64) | [fcp](fcp-windows-amd64.exe.zip) | [anthropic](fcp-anthropic-windows-amd64.zip) | [discord](fcp-discord-windows-amd64.zip) | [openai](fcp-openai-windows-amd64.zip) | [telegram](fcp-telegram-windows-amd64.zip) |
+            | Linux (x64) | [fwc](fwc-linux-amd64.tar.xz) | [anthropic](fcp-anthropic-linux-amd64.tar.xz) | [discord](fcp-discord-linux-amd64.tar.xz) | [openai](fcp-openai-linux-amd64.tar.xz) | [telegram](fcp-telegram-linux-amd64.tar.xz) |
+            | Linux (ARM64) | [fwc](fwc-linux-arm64.tar.xz) | [anthropic](fcp-anthropic-linux-arm64.tar.xz) | [discord](fcp-discord-linux-arm64.tar.xz) | [openai](fcp-openai-linux-arm64.tar.xz) | [telegram](fcp-telegram-linux-arm64.tar.xz) |
+            | macOS (ARM64) | [fwc](fwc-darwin-arm64.tar.xz) | [anthropic](fcp-anthropic-darwin-arm64.tar.xz) | [discord](fcp-discord-darwin-arm64.tar.xz) | [openai](fcp-openai-darwin-arm64.tar.xz) | [telegram](fcp-telegram-darwin-arm64.tar.xz) |
+            | macOS (x64) | [fwc](fwc-darwin-amd64.tar.xz) | [anthropic](fcp-anthropic-darwin-amd64.tar.xz) | [discord](fcp-discord-darwin-amd64.tar.xz) | [openai](fcp-openai-darwin-amd64.tar.xz) | [telegram](fcp-telegram-darwin-amd64.tar.xz) |
+            | Windows (x64) | [fwc](fwc-windows-amd64.zip) | [anthropic](fcp-anthropic-windows-amd64.zip) | [discord](fcp-discord-windows-amd64.zip) | [openai](fcp-openai-windows-amd64.zip) | [telegram](fcp-telegram-windows-amd64.zip) |
 
             ### Verification
 
             ```bash
-            # Download and verify
+            # Download and verify checksums
             curl -LO https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.version }}/SHA256SUMS.txt
             sha256sum -c SHA256SUMS.txt --ignore-missing
             ```
+
+            Every archive and checksum manifest also ships with a Sigstore keyless
+            bundle (`*.sigstore.json`) generated by this workflow.
 
     outputs:
       version: ${{ steps.version.outputs.version }}

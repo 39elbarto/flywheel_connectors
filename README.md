@@ -8,7 +8,7 @@
 > target. `FCP_Specification_V2.md` is retained as historical / legacy-interoperability context.
 > When descriptions conflict, trust V3 for intended semantics and the code for current behavior.
 
-A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. The current tree includes **31 platform crates** under `crates/`, **150 connector crates** under `connectors/`, and a single agent-first CLI (`fwc`) that refuses to fabricate runtime state.
+A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. The current tree includes **31 platform crates** under `crates/`, **150 connector crates** under `connectors/`, and a single agent-first CLI (`fwc`) that refuses to fabricate runtime state. Connector maturity is intentionally described as uneven: all 150 currently ship a `manifest.toml` and tests, 138 follow the full `src/client.rs` + `src/connector.rs` + `src/types.rs` layout, and a smaller set remain thinner or explicitly incubating/quarantined.
 
 ---
 
@@ -20,7 +20,7 @@ A secure connector protocol and Rust platform for AI agent operations across zon
 
 2. **A truthful transition control plane**: today the concrete operator path is still `fwc -> fcp-host HTTP admin API -> connector subprocesses over supervised stdio/JSON-RPC`, but the CLI already distinguishes mesh-backed, host-backed, node-local, and offline answers instead of collapsing everything into a single fake "live" state
 
-3. **A complete connector workspace**: 150 connector crates covering messaging, cloud, databases, AI providers, dev tools, productivity, local-device control, and Google service integrations, all with typed operations, structured error mapping, and manifest-declared security policy
+3. **A broad but uneven connector workspace**: 150 connector crates covering messaging, cloud, databases, AI providers, dev tools, productivity, local-device control, and Google service integrations; all 150 currently ship manifests, tests, and `ConnectorErrorMapping`, while the depth of typed operation metadata and runtime proof still varies by connector
 
 **Steady-state mental model**: the mesh is the intended center of gravity. Mesh-backed answers are the highest-confidence runtime truth, host-backed answers are the current node-local control-plane view, and offline artifacts are preparation/debugging surfaces rather than runtime truth.
 
@@ -42,24 +42,26 @@ A secure connector protocol and Rust platform for AI agent operations across zon
 
 Read the platform from the mesh outward. The table below starts with the steady-state properties FCP is trying to preserve, then calls out the current truthful operator surfaces that expose those properties during the transition.
 
-| Feature | What It Does |
-|---------|--------------|
-| **Mesh-Native Architecture** | Every device IS the Hub. No central coordinator. |
-| **Symbol-First Protocol** | RaptorQ fountain codes enable multipath aggregation and offline resilience |
-| **Truthful Runtime Resolution** | `fwc` resolves runtime mode explicitly and can already classify answers as mesh-backed, host-backed, node-local, or offline instead of fabricating a single "live" answer |
-| **Zone Isolation** | Cryptographic namespaces with integrity/confidentiality axes and Tailscale ACL enforcement |
-| **Mesh-Stored Policy Objects** | Zone definitions + policies are owner-signed mesh objects (auditable + rollbackable) |
-| **Capability Tokens (CWT/COSE)** | Provable authority with grant_object_ids; tokens are canonically CBOR-encoded and COSE-signed for interoperability |
-| **Threshold Owner Key** | FROST signing so no single device holds the complete owner private key |
-| **Threshold Secrets** | Shamir secret sharing with k-of-n across devices; never complete on any single machine |
-| **Secretless Connectors** | Egress proxy can inject credentials so connectors never see raw API keys by default |
-| **Computation Migration** | Operations execute on the optimal device automatically |
-| **Offline Access** | Measurable availability SLOs via ObjectPlacementPolicy and background repair |
-| **Tamper-Evident Audit** | Hash-linked audit chain with monotonic seq and quorum-signed checkpoints |
-| **Revocation** | First-class revocation objects with O(1) freshness checks |
-| **Egress Proxy** | Connector network access via capability-gated proxy with CIDR deny defaults |
-| **Host-First Control Plane (Current)** | The current operator boundary is still `fwc` + `fcp-host`, but it exists to expose truthful runtime state while the wider mesh-native cutover continues |
-| **Supply Chain Attestations** | in-toto/SLSA provenance + SBOM + vulnerability-scan attestations, transparency logging |
+Status legend: `PROVEN` = backed by direct proof in the current repo, `IMPLEMENTED` = code and tests exist but wider end-to-end proof or production hardening is incomplete, `DESIGNED` = architectural target or type-level/runtime scaffolding exists but the operational story is not yet complete, `PLANNED` = intended direction with little or no built surface yet.
+
+| Feature | Status | What It Does |
+|---------|--------|--------------|
+| **Mesh-Native Architecture** | `DESIGNED` | Intended steady-state: every device is a peer and the mesh is the center of gravity; the current truthful operator surface is still host-first. |
+| **Symbol-First Protocol** | `IMPLEMENTED` | RaptorQ/object-symbol framing, reconstruction, and repair machinery exist in-tree for multipath aggregation and offline resilience. |
+| **Truthful Runtime Resolution** | `IMPLEMENTED` | `fwc` resolves runtime mode explicitly and can already classify answers as mesh-backed, host-backed, node-local, or offline instead of fabricating a single "live" answer. |
+| **Zone Isolation** | `PROVEN` | Cryptographic namespaces with integrity/confidentiality axes and Tailscale ACL enforcement. |
+| **Mesh-Stored Policy Objects** | `IMPLEMENTED` | Zone definitions and policy bundles exist as owner-signed objects; the wider mesh-backed cutover remains in progress. |
+| **Capability Tokens (CWT/COSE)** | `PROVEN` | Provable authority with `grant_object_ids`; tokens are canonically CBOR-encoded and COSE-signed for interoperability. |
+| **Threshold Owner Key** | `IMPLEMENTED` | FROST ceremony/signing support exists in `fcp-bootstrap`, but it is not yet the universal operational default. |
+| **Threshold Secrets** | `IMPLEMENTED` | Shamir secret sharing exists for device-distributed recovery so raw secret material need not live on one machine. |
+| **Secretless Connectors** | `IMPLEMENTED` | Egress proxy and `credential_id` flows exist so connectors can rely on host-side credential injection; broader proof work is still open. |
+| **Computation Migration** | `DESIGNED` | Migration state machines and framework code exist, but automatic optimal-device execution is not yet an operational guarantee. |
+| **Offline Access** | `IMPLEMENTED` | `ObjectPlacementPolicy` and repair controllers exist for SLO-driven object durability and recovery. |
+| **Tamper-Evident Audit** | `PROVEN` | Hash-linked audit chain with monotonic sequence numbers and quorum-signed checkpoints. |
+| **Revocation** | `IMPLEMENTED` | First-class revocation objects and O(1)-style freshness checks exist in the current evidence/core surfaces. |
+| **Egress Proxy** | `IMPLEMENTED` | Connector network access is routed through manifest-aware guardrails with CIDR deny defaults; some end-to-end proof beads are still open. |
+| **Host-First Control Plane (Current)** | `IMPLEMENTED` | The current operator boundary is still `fwc` + `fcp-host`, and it exists to expose truthful runtime state while the wider mesh-native cutover continues. |
+| **Supply Chain Attestations** | `IMPLEMENTED` | Registry-side attestation schemas and verification policy exist; packaging/release proof is still incomplete. |
 
 ### Quick Example
 
@@ -686,9 +688,11 @@ These unlock entire categories of autonomous agent work.
 
 ### Connector Inventory (150 connector crates)
 
-Every connector follows the same structural contract: a `manifest.toml` declaring capabilities, zones, rate limits, network constraints, and sandbox policy; a `ConnectorErrorMapping` implementation bridging connector-specific errors to the FCP error taxonomy; and typed `OperationInfo` structs with AI agent hints (when to use, common mistakes, examples).
+The live tree currently contains 150 connector crates. All 150 ship a `manifest.toml`, tests, and `ConnectorErrorMapping`; 138 currently follow the full `src/client.rs` + `src/connector.rs` + `src/types.rs` layout, and 137 currently publish explicit `OperationInfo` structs. That means the workspace is broad, but the connector surface is not perfectly uniform.
 
-The authoritative inventory is the `connectors/` directory or manifest-backed `fwc list --offline`, not a handwritten static table. The category map below is representative rather than exhaustive. Recent additions in the current wave include BlueBubbles, Synology Chat, Google Places, Email Generic, Sonos, Hue, Apple Notes, and Apple Reminders.
+The authoritative inventory is the `connectors/` directory or manifest-backed `fwc list --offline`, not a handwritten static table. The older audits in [`docs/connector_census_v3.md`](docs/connector_census_v3.md) and [`docs/V3_Connector_Audit_Matrix.md`](docs/V3_Connector_Audit_Matrix.md) are useful historical snapshots, but they only cover an earlier 89-connector window and should not be treated as the live inventory. Recent additions in the current wave include BlueBubbles, Synology Chat, Google Places, Email Generic, Sonos, Hue, Apple Notes, and Apple Reminders.
+
+Inventory presence also does not mean end-to-end proof. A few connectors are explicitly non-live today, including `huggingface`, `tlon`, and `zalo` (`status = "incubating"`) plus `zalouser` (`status = "quarantined"`), and the representative category table below should be read as workspace coverage rather than a supervised-flow integration pass list.
 
 | Category | Representative Connectors |
 |----------|---------------------------|
@@ -797,12 +801,20 @@ fwc history --connector github --limit 20
 | **Discovery** | `list`, `search`, `show`, `ops`, `schema`, `examples`, `zones` | Find connectors and understand their operations |
 | **Lifecycle** | `doctor`, `status`, `health`, `install`, `update`, `pin`, `rollout` | Manage connector health and deployment |
 | **Execution** | `invoke`, `simulate`, `preflight`, `cancel` | Run operations with safety gates |
-| **Workflow** | `task`, `plan`, `explain`, `do` | Intent-first workflow compilation |
+| **Workflow** | `task`, `plan`, `explain`, `do` | Intent-first workflow compilation and safe-by-default materialization |
 | **Composition** | `pipe`, `pipeline`, `recipe`, `map`, `batch-file` | Chain and parallelize operations |
 | **History** | `history`, `replay`, `compare`, `undo`, `approvals` | Audit trail and reversal guidance |
 | **Auth** | `auth`, `config` | Credential and configuration management |
 | **Export** | `export-tools`, `serve-mcp` | Expose connectors as MCP tools |
 | **Evidence** | `supply-chain`, `audit`, `manifest`, `net`, `trace`, `policy` | Verify security posture |
+
+### Workflow Commands
+
+`fwc plan`, `fwc explain`, and `fwc do` are implemented today; they are not placeholder UX. The local intent compiler in `crates/fwc/src/intent.rs` is nearly 5.9k lines with 258 inline tests and compiles natural-language goals into concrete `fwc` primitives plus workflow-truth metadata, ambiguity reporting, missing-information prompts, and suggested next actions.
+
+Resolution is strongest for the current curated connector profile set, which is currently two dozen connectors with explicit aliases and domain keywords layered on top of manifest-derived operation metadata. Connectors outside that curated set still participate through generic alias/keyword matching plus the manifest-backed operation index loaded from the discovery catalog, but the match quality is weaker and may require `--connector` or more explicit literals in the intent.
+
+`fwc do` is also safe by default: it materializes the compiled workflow in simulation mode unless you explicitly pass `--approve` for side-effecting execution. Manifest-backed resolution is already part of the current compiler, but broader ranking and refinement improvements are still in progress.
 
 ### Output Formats
 
@@ -1091,7 +1103,7 @@ window = "60s"
 | **Multi-device** | Mesh-native with fountain code distribution | Single process | Client-server | Load balancer |
 | **Revocation** | First-class objects with O(1) freshness | N/A | N/A | API key rotation |
 | **Agent UX** | TOON-first CLI with intent compilation | Python SDK | JSON-RPC | REST API |
-| **Connector count** | 150 connector crates in the workspace | ~50 community tools | Varies by server | Custom per service |
+| **Connector count** | 150 connector crates in the workspace, with maturity varying per connector | ~50 community tools | Varies by server | Custom per service |
 | **Supply chain** | Ed25519 signatures, in-toto/SLSA attestations | pip install | npm install | Docker images |
 
 FCP is heavier than MCP or LangChain tools. That weight buys cryptographic isolation, mesh distribution, and auditability. For single-machine prototyping, MCP is simpler. For production agent operations where security matters, FCP provides guarantees the alternatives cannot.
@@ -1449,7 +1461,7 @@ control-plane failover.
 
 ## Project Structure
 
-This is a schematic map, not an exhaustive directory dump. The current tree contains 31 crates under `crates/` and 150 connector crates under `connectors/`. Default workspace operations focus on a curated subset of platform crates; connector crates are usually targeted explicitly.
+This is a schematic map, not an exhaustive directory dump. The current tree contains 31 crates under `crates/` and 150 connector crates under `connectors/`. All 150 connector crates currently ship manifests and tests; 138 use the full `client.rs`/`connector.rs`/`types.rs` layout, while a smaller set are thinner or explicitly incubating/quarantined. Default workspace operations focus on a curated subset of platform crates; connector crates are usually targeted explicitly.
 
 ```
 flywheel_connectors/
@@ -1486,7 +1498,7 @@ flywheel_connectors/
 │   ├── fcp-e2e/               # End-to-end compliance and host-backed scenarios
 │   └── fwc/                   # Sole supported Flywheel connectors CLI
 │
-├── connectors/                # 150 connector crates at varying maturity
+├── connectors/                # 150 connector crates at varying maturity; 138 use the full client/connector/types layout
 │   ├── github/
 │   ├── gmail/
 │   ├── slack/

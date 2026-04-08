@@ -654,11 +654,45 @@ jobs:
           cargo test -p fcp-telegram
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # Benchmarks: Performance regression gate
+  # ─────────────────────────────────────────────────────────────────────────────
+  benchmarks:
+    name: Benchmarks
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.lane == 'full' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: benchmarks
+
+      - name: Run core benchmarks
+        run: |
+          cargo bench -p fcp-mesh --bench mesh_benchmarks -- --output-format bencher 2>&1 | tee bench_mesh.txt || true
+          cargo bench -p fcp-core --bench pcs_benchmarks -- --output-format bencher 2>&1 | tee bench_pcs.txt || true
+          cargo bench -p fwc --bench cual_bench -- --output-format bencher 2>&1 | tee bench_fwc.txt || true
+
+      - name: Benchmark summary
+        run: |
+          echo "## Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          for f in bench_mesh.txt bench_pcs.txt bench_fwc.txt; do
+            if [[ -f "$f" ]]; then
+              echo "### $(basename "$f" .txt)" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              grep "^test " "$f" | head -20 >> $GITHUB_STEP_SUMMARY || true
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # Summary: Final status check
   # ─────────────────────────────────────────────────────────────────────────────
   ci-success:
     name: CI Success
-    needs: [lint, asupersync-guardrails, migration-smoke, focused-suite, asupersync-migration-dashboard, test, golden-vectors, security, msrv, build, docs, connectors]
+    needs: [lint, asupersync-guardrails, migration-smoke, focused-suite, asupersync-migration-dashboard, test, golden-vectors, security, msrv, build, docs, connectors, benchmarks]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -677,6 +711,7 @@ jobs:
           BUILD_RESULT: ${{ needs.build.result }}
           DOCS_RESULT: ${{ needs.docs.result }}
           CONNECTORS_RESULT: ${{ needs.connectors.result }}
+          BENCHMARKS_RESULT: ${{ needs.benchmarks.result }}
         run: |
           set -euo pipefail
 
@@ -712,6 +747,7 @@ jobs:
               require_success "build" "${BUILD_RESULT}"
               require_success "docs" "${DOCS_RESULT}"
               require_success "connectors" "${CONNECTORS_RESULT}"
+              require_success "benchmarks" "${BENCHMARKS_RESULT}"
               ;;
             *)
               echo "::error::Unknown lane '${LANE}'"

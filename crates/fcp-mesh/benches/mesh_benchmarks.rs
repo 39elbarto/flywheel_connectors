@@ -267,7 +267,7 @@ criterion_group!(
 // ============================================================================
 
 use fcp_mesh::{
-    gossip::{GossipConfig, GossipState, MeshGossip, XorFilterPlaceholder},
+    gossip::{MeshGossip, XorFilterPlaceholder},
     iblt::Iblt,
 };
 use fcp_mesh::admission::ObjectAdmissionClass;
@@ -425,7 +425,7 @@ fn bench_gossip_reconciliation(c: &mut Criterion) {
                     .unwrap();
                 let result = node_a.reconcile_zone_iblt(
                     &zone,
-                    fcp_core::TailscaleNodeId::new("bench-b"),
+                    &fcp_core::TailscaleNodeId::new("bench-b"),
                     &b_iblt,
                     diff_count * 2,
                     2,

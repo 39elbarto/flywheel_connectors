@@ -368,11 +368,13 @@ impl ManifestOperationProfile {
 
     /// Map extracted intent literals to schema fields, producing a partial JSON payload.
     ///
-    /// Strategy:
-    /// - `titled` literal → first `string` property whose name contains "title" or "name"
-    /// - `payload_literal` → first required `string` property (fallback)
-    /// - `lookup_literal` → property named "query", "search", "filter", or "id"
-    /// - Quoted literals → fill remaining required `string` properties in declaration order
+    /// Strategy (applied in order, each pass skips fields already filled):
+    /// 1. `titled` → first `string` field named exactly `title`, `name`, `subject`,
+    ///    `summary`, or ending with `_title`, `_name`, `_subject`
+    /// 2. `lookup_literal` → first `string` field containing `query`, `search`,
+    ///    `filter`, or named exactly `id` / `q`
+    /// 3. `payload_literal` → first unfilled required `string` field
+    /// 4. Quoted literals → fill remaining required `string` fields in declaration order
     ///
     /// Returns `None` if the schema has no `properties` or no literals were extracted.
     fn map_literals_to_schema(

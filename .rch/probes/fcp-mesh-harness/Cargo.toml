@@ -1,0 +1,23 @@
+[package]
+name = "rch-fcp-mesh-harness-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dev-dependencies]
+blake3 = "1.8.3"
+bytes = "1.11"
+fcp-async-core = { path = "../../../crates/fcp-async-core" }
+fcp-core = { path = "../../../crates/fcp-core" }
+fcp-crypto = { path = "../../../crates/fcp-crypto" }
+fcp-mesh = { path = "../../../crates/fcp-mesh" }
+fcp-raptorq = { path = "../../../crates/fcp-raptorq" }
+fcp-store = { path = "../../../crates/fcp-store" }
+fcp-tailscale = { path = "../../../crates/fcp-tailscale" }
+thiserror = "2.0"
+
+[[test]]
+name = "multi_node_harness"
+path = "../../../crates/fcp-mesh/tests/multi_node_harness.rs"
+
+[workspace]

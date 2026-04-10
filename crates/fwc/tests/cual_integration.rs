@@ -1282,7 +1282,7 @@ fn mock_invoke_response_json(result: Value) -> Value {
 fn test_capability_token_arg() -> String {
     let token = CapabilityToken::test_token();
     base64::engine::general_purpose::STANDARD
-        .encode(token.raw.to_cbor().expect("test token should encode"))
+        .encode(token.raw().to_cbor().expect("test token should encode"))
 }
 
 #[test]

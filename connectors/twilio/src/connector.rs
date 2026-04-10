@@ -2993,7 +2993,7 @@ mod tests {
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)
             .unwrap();
-        CapabilityToken { raw: cose }
+        CapabilityToken::from_raw(cose)
     }
 
     #[fcp_async_core::runtime::test]

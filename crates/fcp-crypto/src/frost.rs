@@ -1360,7 +1360,9 @@ impl FrostLocalCoordinator {
         let mut nonces_map = BTreeMap::new();
         for &participant in &selected {
             let key_pkg = self.key_packages.get(&participant).ok_or_else(|| {
-                CryptoError::FrostFailed(format!("missing key package for participant {participant}"))
+                CryptoError::FrostFailed(format!(
+                    "missing key package for participant {participant}"
+                ))
             })?;
             let (nonces, commitments) = commit(key_pkg)?;
             nonces_map.insert(participant, nonces);

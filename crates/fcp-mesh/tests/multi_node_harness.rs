@@ -136,7 +136,12 @@ impl Ord for PendingDelivery {
         other
             .deliver_at_ms
             .cmp(&self.deliver_at_ms)
-            .then_with(|| self.envelope.from.as_str().cmp(other.envelope.from.as_str()))
+            .then_with(|| {
+                self.envelope
+                    .from
+                    .as_str()
+                    .cmp(other.envelope.from.as_str())
+            })
             .then_with(|| self.envelope.to.as_str().cmp(other.envelope.to.as_str()))
     }
 }
@@ -266,21 +271,10 @@ impl MultiNodeMeshHarness {
 
             tasks.spawn(
                 format!("multi-node-harness-{node_name}"),
-                run_node_task(
-                    identity.clone(),
-                    mesh_node,
-                    event_rx,
-                    outbound_tx.clone(),
-                ),
+                run_node_task(identity.clone(), mesh_node, event_rx, outbound_tx.clone()),
             );
 
-            nodes.insert(
-                node_name,
-                NodeHandle {
-                    identity,
-                    event_tx,
-                },
-            );
+            nodes.insert(node_name, NodeHandle { identity, event_tx });
         }
 
         Ok(Self {
@@ -565,8 +559,12 @@ impl MultiNodeMeshHarness {
         )
         .await?;
         let request = await_reply("create_object_request", reply_rx).await?;
-        let disposition =
-            self.schedule_message(requester, responder, GossipMessage::Request(request), self.now_ms);
+        let disposition = self.schedule_message(
+            requester,
+            responder,
+            GossipMessage::Request(request),
+            self.now_ms,
+        );
         self.flush().await?;
         if disposition == DeliveryDisposition::Queued {
             self.wait_for_observed_response(requester, responder, zone_id, observed_before)
@@ -601,8 +599,12 @@ impl MultiNodeMeshHarness {
         )
         .await?;
         let request = await_reply("create_symbol_request", reply_rx).await?;
-        let disposition =
-            self.schedule_message(requester, responder, GossipMessage::Request(request), self.now_ms);
+        let disposition = self.schedule_message(
+            requester,
+            responder,
+            GossipMessage::Request(request),
+            self.now_ms,
+        );
         self.flush().await?;
         if disposition == DeliveryDisposition::Queued {
             self.wait_for_observed_response(requester, responder, zone_id, observed_before)
@@ -732,13 +734,16 @@ impl MultiNodeMeshHarness {
             while let Some(delivery) = self.pop_ready() {
                 let event_tx = self.node_handle(&delivery.envelope.to)?.event_tx.clone();
                 let recipient = delivery.envelope.to.as_str().to_string();
-                time::timeout(IO_TIMEOUT, event_tx.send(NodeEvent::Network(delivery.envelope)))
-                    .await
-                    .map_err(|_| HarnessError::OperationTimeout {
-                        operation: "network_send",
-                        timeout_ms: u64::try_from(IO_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
-                    })?
-                    .map_err(|_| HarnessError::NetworkChannelClosed(recipient))?;
+                time::timeout(
+                    IO_TIMEOUT,
+                    event_tx.send(NodeEvent::Network(delivery.envelope)),
+                )
+                .await
+                .map_err(|_| HarnessError::OperationTimeout {
+                    operation: "network_send",
+                    timeout_ms: u64::try_from(IO_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+                })?
+                .map_err(|_| HarnessError::NetworkChannelClosed(recipient))?;
                 delivered += 1;
             }
 
@@ -777,7 +782,7 @@ impl MultiNodeMeshHarness {
                     );
                 }
                 Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
-                    break
+                    break;
                 }
             }
         }
@@ -848,7 +853,11 @@ async fn run_node_task(
     while let Some(event) = event_rx.recv().await {
         match event {
             NodeEvent::Command(command) => match command {
-                NodeCommand::RegisterPeers { peers, now_ms, reply } => {
+                NodeCommand::RegisterPeers {
+                    peers,
+                    now_ms,
+                    reply,
+                } => {
                     mesh.update_local_state(
                         default_profile(&identity.node_id),
                         HashSet::new(),
@@ -922,7 +931,9 @@ async fn run_node_task(
                     now_secs,
                     reply,
                 } => {
-                    let request = mesh.gossip_mut().create_request(&zone_id, object_ids, now_secs);
+                    let request = mesh
+                        .gossip_mut()
+                        .create_request(&zone_id, object_ids, now_secs);
                     let _ = reply.send(request);
                 }
                 NodeCommand::CreateSymbolRequest {
@@ -1112,7 +1123,9 @@ fn test_symbol(
 async fn multi_node_harness_routes_real_gossip_messages() {
     let zone_id = ZoneId::work();
     let epoch = EpochId::new("epoch-harness");
-    let mut harness = MultiNodeMeshHarness::new_three_node(0xC0FFEE).await.unwrap();
+    let mut harness = MultiNodeMeshHarness::new_three_node(0xC0FFEE)
+        .await
+        .unwrap();
     harness.register_all_peers().await.unwrap();
 
     let node_ids = harness.node_ids();
@@ -1125,13 +1138,23 @@ async fn multi_node_harness_routes_real_gossip_messages() {
 
     assert!(
         harness
-            .announce_object(&node_a, zone_id.clone(), object_a, ObjectAdmissionClass::Admitted)
+            .announce_object(
+                &node_a,
+                zone_id.clone(),
+                object_a,
+                ObjectAdmissionClass::Admitted
+            )
             .await
             .unwrap()
     );
     assert!(
         harness
-            .announce_object(&node_a, zone_id.clone(), object_b, ObjectAdmissionClass::Admitted)
+            .announce_object(
+                &node_a,
+                zone_id.clone(),
+                object_b,
+                ObjectAdmissionClass::Admitted
+            )
             .await
             .unwrap()
     );
@@ -1149,9 +1172,18 @@ async fn multi_node_harness_routes_real_gossip_messages() {
         .await
         .unwrap();
 
-    let snapshot_a = harness.snapshot(&node_a, zone_id.clone(), 10).await.unwrap();
-    let snapshot_b = harness.snapshot(&node_b, zone_id.clone(), 10).await.unwrap();
-    let snapshot_c = harness.snapshot(&node_c, zone_id.clone(), 10).await.unwrap();
+    let snapshot_a = harness
+        .snapshot(&node_a, zone_id.clone(), 10)
+        .await
+        .unwrap();
+    let snapshot_b = harness
+        .snapshot(&node_b, zone_id.clone(), 10)
+        .await
+        .unwrap();
+    let snapshot_c = harness
+        .snapshot(&node_c, zone_id.clone(), 10)
+        .await
+        .unwrap();
 
     assert_eq!(snapshot_a.peer_count, 2);
     assert_eq!(snapshot_b.peer_count, 2);
@@ -1187,7 +1219,9 @@ async fn multi_node_harness_routes_real_gossip_messages() {
 async fn multi_node_harness_enforces_latency_loss_and_partitions() {
     let zone_id = ZoneId::work();
     let epoch = EpochId::new("epoch-network-controls");
-    let mut harness = MultiNodeMeshHarness::new_three_node(0xBAD5EED).await.unwrap();
+    let mut harness = MultiNodeMeshHarness::new_three_node(0xBAD5EED)
+        .await
+        .unwrap();
     harness.register_all_peers().await.unwrap();
 
     let node_ids = harness.node_ids();
@@ -1213,21 +1247,36 @@ async fn multi_node_harness_enforces_latency_loss_and_partitions() {
         .unwrap();
     assert_eq!(disposition, DeliveryDisposition::Queued);
 
-    let pre_delivery = harness.snapshot(&node_b, zone_id.clone(), 10).await.unwrap();
+    let pre_delivery = harness
+        .snapshot(&node_b, zone_id.clone(), 10)
+        .await
+        .unwrap();
     assert!(
         pre_delivery.observed_messages.is_empty(),
         "latency should keep the summary pending until time advances"
     );
 
-    harness.advance_time(Duration::from_millis(249)).await.unwrap();
-    let still_pending = harness.snapshot(&node_b, zone_id.clone(), 10).await.unwrap();
+    harness
+        .advance_time(Duration::from_millis(249))
+        .await
+        .unwrap();
+    let still_pending = harness
+        .snapshot(&node_b, zone_id.clone(), 10)
+        .await
+        .unwrap();
     assert!(
         still_pending.observed_messages.is_empty(),
         "summary should still be pending before latency budget expires"
     );
 
-    harness.advance_time(Duration::from_millis(1)).await.unwrap();
-    let delivered = harness.snapshot(&node_b, zone_id.clone(), 10).await.unwrap();
+    harness
+        .advance_time(Duration::from_millis(1))
+        .await
+        .unwrap();
+    let delivered = harness
+        .snapshot(&node_b, zone_id.clone(), 10)
+        .await
+        .unwrap();
     assert!(
         delivered
             .observed_messages
@@ -1242,7 +1291,10 @@ async fn multi_node_harness_enforces_latency_loss_and_partitions() {
         .await
         .unwrap();
     assert_eq!(dropped, DeliveryDisposition::DroppedByPacketLoss);
-    let dropped_snapshot = harness.snapshot(&node_c, zone_id.clone(), 10).await.unwrap();
+    let dropped_snapshot = harness
+        .snapshot(&node_c, zone_id.clone(), 10)
+        .await
+        .unwrap();
     assert!(
         dropped_snapshot.observed_messages.is_empty(),
         "100% packet loss should prevent delivery"
@@ -1254,7 +1306,10 @@ async fn multi_node_harness_enforces_latency_loss_and_partitions() {
         .await
         .unwrap();
     assert_eq!(partitioned, DeliveryDisposition::DroppedByPartition);
-    let partitioned_snapshot = harness.snapshot(&node_b, zone_id.clone(), 10).await.unwrap();
+    let partitioned_snapshot = harness
+        .snapshot(&node_b, zone_id.clone(), 10)
+        .await
+        .unwrap();
     assert_eq!(
         partitioned_snapshot
             .observed_messages
@@ -1273,7 +1328,9 @@ async fn multi_node_harness_enforces_latency_loss_and_partitions() {
 async fn multi_node_harness_supports_symbol_store_seeding() {
     let zone_id = ZoneId::work();
     let object_id = test_object_id("symbol-seeding");
-    let mut harness = MultiNodeMeshHarness::new_three_node(0xFACEFEED).await.unwrap();
+    let mut harness = MultiNodeMeshHarness::new_three_node(0xFACEFEED)
+        .await
+        .unwrap();
     let node = harness.node_ids()[0].clone();
 
     let meta = ObjectSymbolMeta {
@@ -1309,7 +1366,9 @@ async fn multi_node_harness_supports_symbol_store_seeding() {
 async fn gossip_convergence_all_nodes_agree_after_exchange() {
     let zone_id = ZoneId::work();
     let epoch = EpochId::new("epoch-convergence");
-    let mut harness = MultiNodeMeshHarness::new_three_node(0xC0FFEE_01).await.unwrap();
+    let mut harness = MultiNodeMeshHarness::new_three_node(0xC0FFEE_01)
+        .await
+        .unwrap();
     harness.register_all_peers().await.unwrap();
 
     let node_ids = harness.node_ids();
@@ -1321,18 +1380,37 @@ async fn gossip_convergence_all_nodes_agree_after_exchange() {
     let obj_a = test_object_id("conv-obj-a");
     let obj_b = test_object_id("conv-obj-b");
     harness
-        .announce_object(&node_a, zone_id.clone(), obj_a, ObjectAdmissionClass::Admitted)
+        .announce_object(
+            &node_a,
+            zone_id.clone(),
+            obj_a,
+            ObjectAdmissionClass::Admitted,
+        )
         .await
         .unwrap();
     harness
-        .announce_object(&node_b, zone_id.clone(), obj_b, ObjectAdmissionClass::Admitted)
+        .announce_object(
+            &node_b,
+            zone_id.clone(),
+            obj_b,
+            ObjectAdmissionClass::Admitted,
+        )
         .await
         .unwrap();
 
     // Before gossip: each node only knows its own objects
-    let snap_a = harness.snapshot(&node_a, zone_id.clone(), 10).await.unwrap();
-    let snap_b = harness.snapshot(&node_b, zone_id.clone(), 10).await.unwrap();
-    let snap_c = harness.snapshot(&node_c, zone_id.clone(), 10).await.unwrap();
+    let snap_a = harness
+        .snapshot(&node_a, zone_id.clone(), 10)
+        .await
+        .unwrap();
+    let snap_b = harness
+        .snapshot(&node_b, zone_id.clone(), 10)
+        .await
+        .unwrap();
+    let snap_c = harness
+        .snapshot(&node_c, zone_id.clone(), 10)
+        .await
+        .unwrap();
     assert_eq!(snap_a.known_objects.len(), 1, "A should know 1 object");
     assert_eq!(snap_b.known_objects.len(), 1, "B should know 1 object");
     assert_eq!(snap_c.known_objects.len(), 0, "C should know 0 objects");
@@ -1352,7 +1430,12 @@ async fn gossip_convergence_all_nodes_agree_after_exchange() {
         .request_objects(&node_b, &node_a, zone_id.clone(), vec![obj_a])
         .await;
     harness
-        .announce_object(&node_b, zone_id.clone(), obj_a, ObjectAdmissionClass::Admitted)
+        .announce_object(
+            &node_b,
+            zone_id.clone(),
+            obj_a,
+            ObjectAdmissionClass::Admitted,
+        )
         .await
         .unwrap();
 
@@ -1361,7 +1444,12 @@ async fn gossip_convergence_all_nodes_agree_after_exchange() {
         .request_objects(&node_a, &node_b, zone_id.clone(), vec![obj_b])
         .await;
     harness
-        .announce_object(&node_a, zone_id.clone(), obj_b, ObjectAdmissionClass::Admitted)
+        .announce_object(
+            &node_a,
+            zone_id.clone(),
+            obj_b,
+            ObjectAdmissionClass::Admitted,
+        )
         .await
         .unwrap();
 
@@ -1370,21 +1458,40 @@ async fn gossip_convergence_all_nodes_agree_after_exchange() {
         .request_objects(&node_c, &node_a, zone_id.clone(), vec![obj_a])
         .await;
     harness
-        .announce_object(&node_c, zone_id.clone(), obj_a, ObjectAdmissionClass::Admitted)
+        .announce_object(
+            &node_c,
+            zone_id.clone(),
+            obj_a,
+            ObjectAdmissionClass::Admitted,
+        )
         .await
         .unwrap();
     let _ = harness
         .request_objects(&node_c, &node_b, zone_id.clone(), vec![obj_b])
         .await;
     harness
-        .announce_object(&node_c, zone_id.clone(), obj_b, ObjectAdmissionClass::Admitted)
+        .announce_object(
+            &node_c,
+            zone_id.clone(),
+            obj_b,
+            ObjectAdmissionClass::Admitted,
+        )
         .await
         .unwrap();
 
     // Verify convergence: all 3 nodes have both objects
-    let final_a = harness.snapshot(&node_a, zone_id.clone(), 10).await.unwrap();
-    let final_b = harness.snapshot(&node_b, zone_id.clone(), 10).await.unwrap();
-    let final_c = harness.snapshot(&node_c, zone_id.clone(), 10).await.unwrap();
+    let final_a = harness
+        .snapshot(&node_a, zone_id.clone(), 10)
+        .await
+        .unwrap();
+    let final_b = harness
+        .snapshot(&node_b, zone_id.clone(), 10)
+        .await
+        .unwrap();
+    let final_c = harness
+        .snapshot(&node_c, zone_id.clone(), 10)
+        .await
+        .unwrap();
 
     assert_eq!(final_a.known_objects.len(), 2, "A should have 2 objects");
     assert_eq!(final_b.known_objects.len(), 2, "B should have 2 objects");
@@ -1449,19 +1556,28 @@ async fn symbol_distribution_across_three_nodes() {
     // Distribute symbols: A gets [0..5), B gets [5..10), C gets [10..15) (repair)
     for esi in 0..5 {
         harness
-            .store_symbol(&node_a, test_symbol(object_id, zone_id.clone(), esi, 1, symbol_size))
+            .store_symbol(
+                &node_a,
+                test_symbol(object_id, zone_id.clone(), esi, 1, symbol_size),
+            )
             .await
             .unwrap();
     }
     for esi in 5..10 {
         harness
-            .store_symbol(&node_b, test_symbol(object_id, zone_id.clone(), esi, 2, symbol_size))
+            .store_symbol(
+                &node_b,
+                test_symbol(object_id, zone_id.clone(), esi, 2, symbol_size),
+            )
             .await
             .unwrap();
     }
     for esi in 10..total_symbols {
         harness
-            .store_symbol(&node_c, test_symbol(object_id, zone_id.clone(), esi, 3, symbol_size))
+            .store_symbol(
+                &node_c,
+                test_symbol(object_id, zone_id.clone(), esi, 3, symbol_size),
+            )
             .await
             .unwrap();
     }
@@ -1469,7 +1585,12 @@ async fn symbol_distribution_across_three_nodes() {
     // Announce the object from all nodes
     for node in [&node_a, &node_b, &node_c] {
         harness
-            .announce_object(node, zone_id.clone(), object_id, ObjectAdmissionClass::Admitted)
+            .announce_object(
+                node,
+                zone_id.clone(),
+                object_id,
+                ObjectAdmissionClass::Admitted,
+            )
             .await
             .unwrap();
     }
@@ -1490,9 +1611,18 @@ async fn symbol_distribution_across_three_nodes() {
     );
 
     // Verify each node has exactly its assigned symbols
-    let snap_a = harness.snapshot(&node_a, zone_id.clone(), 10).await.unwrap();
-    let snap_b = harness.snapshot(&node_b, zone_id.clone(), 10).await.unwrap();
-    let snap_c = harness.snapshot(&node_c, zone_id.clone(), 10).await.unwrap();
+    let snap_a = harness
+        .snapshot(&node_a, zone_id.clone(), 10)
+        .await
+        .unwrap();
+    let snap_b = harness
+        .snapshot(&node_b, zone_id.clone(), 10)
+        .await
+        .unwrap();
+    let snap_c = harness
+        .snapshot(&node_c, zone_id.clone(), 10)
+        .await
+        .unwrap();
     assert_eq!(snap_a.known_objects.len(), 1, "A knows 1 object");
     assert_eq!(snap_b.known_objects.len(), 1, "B knows 1 object");
     assert_eq!(snap_c.known_objects.len(), 1, "C knows 1 object");
@@ -1536,12 +1666,18 @@ async fn object_reconstruction_from_distributed_symbols() {
     };
 
     // Store meta on node_a
-    harness.store_object_meta(&node_a, meta.clone()).await.unwrap();
+    harness
+        .store_object_meta(&node_a, meta.clone())
+        .await
+        .unwrap();
 
     // Node A has symbols [0,1,2] - not enough alone (need 6)
     for esi in 0..3 {
         harness
-            .store_symbol(&node_a, test_symbol(object_id, zone_id.clone(), esi, 1, symbol_size))
+            .store_symbol(
+                &node_a,
+                test_symbol(object_id, zone_id.clone(), esi, 1, symbol_size),
+            )
             .await
             .unwrap();
     }
@@ -1553,7 +1689,10 @@ async fn object_reconstruction_from_distributed_symbols() {
     // Add symbols [3,4,5] to A (simulating receipt from other nodes via gossip)
     for esi in 3..6 {
         harness
-            .store_symbol(&node_a, test_symbol(object_id, zone_id.clone(), esi, 2, symbol_size))
+            .store_symbol(
+                &node_a,
+                test_symbol(object_id, zone_id.clone(), esi, 2, symbol_size),
+            )
             .await
             .unwrap();
     }
@@ -1563,10 +1702,16 @@ async fn object_reconstruction_from_distributed_symbols() {
     );
 
     // Verify insufficient symbols fail
-    harness.store_object_meta(&node_b, meta.clone()).await.unwrap();
+    harness
+        .store_object_meta(&node_b, meta.clone())
+        .await
+        .unwrap();
     for esi in 0..5 {
         harness
-            .store_symbol(&node_b, test_symbol(object_id, zone_id.clone(), esi, 1, symbol_size))
+            .store_symbol(
+                &node_b,
+                test_symbol(object_id, zone_id.clone(), esi, 1, symbol_size),
+            )
             .await
             .unwrap();
     }
@@ -1586,7 +1731,9 @@ async fn object_reconstruction_from_distributed_symbols() {
 async fn partition_recovery_nodes_reconverge_after_healing() {
     let zone_id = ZoneId::work();
     let epoch = EpochId::new("epoch-partition");
-    let mut harness = MultiNodeMeshHarness::new_three_node(0xFADE_01).await.unwrap();
+    let mut harness = MultiNodeMeshHarness::new_three_node(0xFADE_01)
+        .await
+        .unwrap();
     harness.register_all_peers().await.unwrap();
 
     let node_ids = harness.node_ids();
@@ -1615,14 +1762,24 @@ async fn partition_recovery_nodes_reconverge_after_healing() {
         .request_objects(&node_b, &node_a, zone_id.clone(), vec![obj_shared])
         .await;
     harness
-        .announce_object(&node_b, zone_id.clone(), obj_shared, ObjectAdmissionClass::Admitted)
+        .announce_object(
+            &node_b,
+            zone_id.clone(),
+            obj_shared,
+            ObjectAdmissionClass::Admitted,
+        )
         .await
         .unwrap();
     let _ = harness
         .request_objects(&node_c, &node_a, zone_id.clone(), vec![obj_shared])
         .await;
     harness
-        .announce_object(&node_c, zone_id.clone(), obj_shared, ObjectAdmissionClass::Admitted)
+        .announce_object(
+            &node_c,
+            zone_id.clone(),
+            obj_shared,
+            ObjectAdmissionClass::Admitted,
+        )
         .await
         .unwrap();
 
@@ -1674,8 +1831,14 @@ async fn partition_recovery_nodes_reconverge_after_healing() {
         .unwrap();
 
     // Verify: A doesn't know about B's object, B/C don't know about A's
-    let snap_a = harness.snapshot(&node_a, zone_id.clone(), 10).await.unwrap();
-    let snap_b = harness.snapshot(&node_b, zone_id.clone(), 10).await.unwrap();
+    let snap_a = harness
+        .snapshot(&node_a, zone_id.clone(), 10)
+        .await
+        .unwrap();
+    let snap_b = harness
+        .snapshot(&node_b, zone_id.clone(), 10)
+        .await
+        .unwrap();
     assert!(
         !snap_a.known_objects.contains(&obj_b_during),
         "A should NOT know B's object during partition"
@@ -1737,9 +1900,18 @@ async fn partition_recovery_nodes_reconverge_after_healing() {
         .unwrap();
 
     // Verify: ALL nodes have ALL objects (convergence after partition heal)
-    let final_a = harness.snapshot(&node_a, zone_id.clone(), 10).await.unwrap();
-    let final_b = harness.snapshot(&node_b, zone_id.clone(), 10).await.unwrap();
-    let final_c = harness.snapshot(&node_c, zone_id.clone(), 10).await.unwrap();
+    let final_a = harness
+        .snapshot(&node_a, zone_id.clone(), 10)
+        .await
+        .unwrap();
+    let final_b = harness
+        .snapshot(&node_b, zone_id.clone(), 10)
+        .await
+        .unwrap();
+    let final_c = harness
+        .snapshot(&node_c, zone_id.clone(), 10)
+        .await
+        .unwrap();
 
     let expected_objects = vec![obj_shared, obj_a_during, obj_b_during];
     for obj in &expected_objects {
@@ -1758,9 +1930,21 @@ async fn partition_recovery_nodes_reconverge_after_healing() {
     }
 
     // No data loss: exactly 3 objects on every node
-    assert_eq!(final_a.known_objects.len(), 3, "A should have all 3 objects");
-    assert_eq!(final_b.known_objects.len(), 3, "B should have all 3 objects");
-    assert_eq!(final_c.known_objects.len(), 3, "C should have all 3 objects");
+    assert_eq!(
+        final_a.known_objects.len(),
+        3,
+        "A should have all 3 objects"
+    );
+    assert_eq!(
+        final_b.known_objects.len(),
+        3,
+        "B should have all 3 objects"
+    );
+    assert_eq!(
+        final_c.known_objects.len(),
+        3,
+        "C should have all 3 objects"
+    );
 
     harness.shutdown().await.unwrap();
 }

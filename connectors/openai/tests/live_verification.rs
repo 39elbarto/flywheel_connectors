@@ -9,8 +9,8 @@
 //! or other write-heavy operations are exercised.
 
 use fcp_core::CapabilityToken;
-use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::Ed25519SigningKey;
+use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_openai::connector::OpenAIConnector;
 
 use chrono::{Duration, Utc};
@@ -53,13 +53,10 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
         .unwrap();
-    CapabilityToken { raw: cose }
+    CapabilityToken::from_raw(cose)
 }
 
-async fn setup_live_connector(
-    connector: &mut OpenAIConnector,
-    api_key: &str,
-) -> Ed25519SigningKey {
+async fn setup_live_connector(connector: &mut OpenAIConnector, api_key: &str) -> Ed25519SigningKey {
     // Configure with real OpenAI API key
     connector
         .handle_configure(json!({
@@ -121,10 +118,7 @@ async fn live_chat_completions() {
         "response should contain a text reply field: {result}"
     );
     let reply = reply.unwrap();
-    assert!(
-        !reply.is_empty(),
-        "reply should not be empty"
-    );
+    assert!(!reply.is_empty(), "reply should not be empty");
 
     eprintln!(
         "PASS: live_chat_completions — got reply: {:?}",
@@ -240,8 +234,5 @@ async fn live_introspect() {
         ops.len()
     );
 
-    eprintln!(
-        "PASS: live_introspect — {} operations reported",
-        ops.len()
-    );
+    eprintln!("PASS: live_introspect — {} operations reported", ops.len());
 }

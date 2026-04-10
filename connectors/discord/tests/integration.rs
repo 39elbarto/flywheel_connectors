@@ -58,7 +58,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
         .unwrap();
-    fcp_core::CapabilityToken { raw: cose }
+    fcp_core::CapabilityToken::from_raw(cose)
 }
 
 fn unique_zone_dir(label: &str) -> String {

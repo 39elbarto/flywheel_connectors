@@ -8,8 +8,8 @@
 //! do not create or mutate any resources.
 
 use fcp_core::CapabilityToken;
-use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::Ed25519SigningKey;
+use fcp_crypto::cose::CapabilityTokenBuilder;
 
 use chrono::{Duration, Utc};
 use serde_json::json;
@@ -65,7 +65,7 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
         .unwrap();
-    CapabilityToken { raw: cose }
+    CapabilityToken::from_raw(cose)
 }
 
 async fn setup_live_connector(
@@ -251,8 +251,5 @@ async fn live_introspect() {
         "operations should include stripe.list_customers: {op_ids:?}"
     );
 
-    eprintln!(
-        "PASS: live_introspect — {} operations reported",
-        ops.len()
-    );
+    eprintln!("PASS: live_introspect — {} operations reported", ops.len());
 }

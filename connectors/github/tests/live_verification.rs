@@ -10,8 +10,8 @@
 //! Bead: kzabz.1
 
 use fcp_core::CapabilityToken;
-use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::Ed25519SigningKey;
+use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_github::connector::GitHubConnector;
 
 use chrono::{Duration, Utc};
@@ -52,13 +52,10 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
         .unwrap();
-    CapabilityToken { raw: cose }
+    CapabilityToken::from_raw(cose)
 }
 
-async fn setup_live_connector(
-    connector: &mut GitHubConnector,
-    token: &str,
-) -> Ed25519SigningKey {
+async fn setup_live_connector(connector: &mut GitHubConnector, token: &str) -> Ed25519SigningKey {
     // Configure with real GitHub API
     connector
         .handle_configure(json!({

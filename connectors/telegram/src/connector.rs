@@ -1820,7 +1820,7 @@ mod tests {
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)
             .unwrap();
-        fcp_core::CapabilityToken { raw: cose }
+        fcp_core::CapabilityToken::from_raw(cose)
     }
 
     use wiremock::matchers::{body_json, method, path};

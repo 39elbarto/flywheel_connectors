@@ -20,9 +20,9 @@ use std::path::PathBuf;
 
 use fcp_cbor::SchemaId;
 use fcp_core::{
-    BloomFilter, EpochId, FreshnessFailureReason, FreshnessPolicy, NodeId, NodeSignature,
-    ObjectHeader, ObjectId, Provenance, QuorumPolicy, RevocationEvent, RevocationHead,
-    RevocationObject, RevocationRegistry, RevocationScope, RiskTier, SignatureSet, ZoneId,
+    EpochId, FreshnessFailureReason, FreshnessPolicy, NodeId, NodeSignature, ObjectHeader,
+    ObjectId, Provenance, QuorumPolicy, RevocationEvent, RevocationHead, RevocationObject,
+    RevocationRegistry, RevocationScope, RiskTier, SignatureSet, ZoneId,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -710,55 +710,41 @@ mod adversarial {
         );
     }
 
-    /// Attack: Bloom filter bypass attempt.
+    /// Attack: Probabilistic filter bypass (historical).
     ///
-    /// Scenario: Attacker tries to exploit bloom filter false positives.
+    /// Scenario: Ensure registry uses exact membership and cannot be tricked by FP/TP tradeoffs.
     #[test]
-    fn attack_bloom_filter_bypass() {
+    fn attack_probabilistic_filter_bypass() {
         log_test_event(
-            "attack_bloom_filter_bypass",
+            "attack_probabilistic_filter_bypass",
             "test_start",
             &serde_json::json!({
-                "attack_type": "bloom_filter_manipulation",
-                "description": "Attempting to exploit bloom filter properties"
+                "attack_type": "probabilistic_filter",
+                "description": "Registry must not rely on probabilistic membership"
             }),
         );
 
-        // Create a small bloom filter (higher false positive rate)
-        let mut bf = BloomFilter::new(10, 0.3); // 30% FP rate for testing
-
-        // Insert known items
-        for i in 0..10u32 {
-            bf.insert(&i.to_le_bytes());
-        }
-
-        // Verify no false negatives (security guarantee)
-        for i in 0..10u32 {
-            assert!(
-                bf.might_contain(&i.to_le_bytes()),
-                "Bloom filter must never have false negatives"
-            );
-        }
-
-        // False positives are expected but shouldn't affect security
-        // because we always verify against the actual map
         let mut registry = RevocationRegistry::new();
         let revocation = test_revocation(1, RevocationScope::Capability);
         registry.add_revocation(&revocation);
 
-        // Not-revoked item might hit bloom filter but will fail map lookup
+        // Exact map lookup: unknown ID must be unrevoked
         let not_revoked = ObjectId::from_bytes([99u8; 32]);
         assert!(
             !registry.is_revoked(&not_revoked),
-            "False positive in bloom should be caught by map lookup"
+            "Exact registry lookup should not produce false positives"
         );
 
+        // Known ID must be revoked
+        let revoked = ObjectId::from_bytes([1u8; 32]);
+        assert!(registry.is_revoked(&revoked));
+
         log_test_event(
-            "attack_bloom_filter_bypass",
+            "attack_probabilistic_filter_bypass",
             "test_complete",
             &serde_json::json!({
-                "false_negative_guarantee": "verified",
-                "false_positive_handling": "map_lookup_fallback"
+                "membership_check": "exact_hashmap",
+                "false_positive_risk": "eliminated"
             }),
         );
     }

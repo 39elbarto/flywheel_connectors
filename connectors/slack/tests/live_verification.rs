@@ -8,8 +8,8 @@
 //! workspace's public channels — no side effects or write permissions needed.
 
 use fcp_core::CapabilityToken;
-use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::Ed25519SigningKey;
+use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_slack::connector::SlackConnector;
 
 use chrono::{Duration, Utc};
@@ -52,13 +52,10 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
         .unwrap();
-    CapabilityToken { raw: cose }
+    CapabilityToken::from_raw(cose)
 }
 
-async fn setup_live_connector(
-    connector: &mut SlackConnector,
-    token: &str,
-) -> Ed25519SigningKey {
+async fn setup_live_connector(connector: &mut SlackConnector, token: &str) -> Ed25519SigningKey {
     // Configure with real Slack API
     connector
         .handle_configure(json!({
@@ -249,8 +246,5 @@ async fn live_introspect() {
         "should contain slack.post_message: {op_ids:?}"
     );
 
-    eprintln!(
-        "PASS: live_introspect — {} operations reported",
-        ops.len()
-    );
+    eprintln!("PASS: live_introspect — {} operations reported", ops.len());
 }

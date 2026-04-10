@@ -1429,10 +1429,8 @@ impl MeshGossip {
         let result = state.reconcile_with_peer_iblt(peer_iblt, expected_difference)?;
 
         let max_objects = MAX_OBJECT_IDS_PER_REQUEST;
-        let peer_missing: Vec<ObjectId> =
-            result.only_left.into_iter().take(max_objects).collect();
-        let we_missing: Vec<ObjectId> =
-            result.only_right.into_iter().take(max_objects).collect();
+        let peer_missing: Vec<ObjectId> = result.only_left.into_iter().take(max_objects).collect();
+        let we_missing: Vec<ObjectId> = result.only_right.into_iter().take(max_objects).collect();
 
         if result.complete {
             debug!(
@@ -2783,7 +2781,11 @@ mod tests {
         // Construct filter from 1000 BLAKE3 hashes; verify all members query true.
         let mut filter = XorFilterPlaceholder::new();
         let items: Vec<Vec<u8>> = (0..1000)
-            .map(|i| blake3::hash(format!("member-{i}").as_bytes()).as_bytes().to_vec())
+            .map(|i| {
+                blake3::hash(format!("member-{i}").as_bytes())
+                    .as_bytes()
+                    .to_vec()
+            })
             .collect();
 
         for item in &items {
@@ -2901,9 +2903,7 @@ mod tests {
     #[test]
     fn xor_filter_determinism_same_inputs_same_filter() {
         // Same items in same order produce identical digests
-        let items: Vec<Vec<u8>> = (0..100)
-            .map(|i| format!("det-{i}").into_bytes())
-            .collect();
+        let items: Vec<Vec<u8>> = (0..100).map(|i| format!("det-{i}").into_bytes()).collect();
 
         let mut f1 = XorFilterPlaceholder::with_seed(7);
         let mut f2 = XorFilterPlaceholder::with_seed(7);
@@ -3586,7 +3586,13 @@ mod tests {
         // Empty peer IBLT (peer has nothing)
         let peer_iblt = Iblt::with_expected_difference(MAX_OBJECT_IDS_PER_REQUEST + 50);
         let response = gossip
-            .reconcile_zone_iblt(&zone, &test_node("peer"), &peer_iblt, MAX_OBJECT_IDS_PER_REQUEST + 50, 2)
+            .reconcile_zone_iblt(
+                &zone,
+                &test_node("peer"),
+                &peer_iblt,
+                MAX_OBJECT_IDS_PER_REQUEST + 50,
+                2,
+            )
             .expect("reconciliation should succeed");
 
         // Response should be bounded by MAX_OBJECT_IDS_PER_REQUEST
@@ -3602,13 +3608,7 @@ mod tests {
     fn mesh_gossip_reconcile_unknown_zone_returns_none() {
         let gossip = MeshGossip::with_defaults(test_node("local"));
         let iblt = Iblt::with_expected_difference(0);
-        let result = gossip.reconcile_zone_iblt(
-            &ZoneId::owner(),
-            &test_node("peer"),
-            &iblt,
-            0,
-            1,
-        );
+        let result = gossip.reconcile_zone_iblt(&ZoneId::owner(), &test_node("peer"), &iblt, 0, 1);
         assert!(result.is_none(), "unknown zone should return None");
     }
 
@@ -3648,9 +3648,7 @@ mod tests {
         let summary_a = node_a
             .create_summary(&zone, epoch.clone())
             .expect("zone exists");
-        let summary_b = node_b
-            .create_summary(&zone, epoch)
-            .expect("zone exists");
+        let summary_b = node_b.create_summary(&zone, epoch).expect("zone exists");
 
         // Digests should differ (different object sets)
         assert!(summary_a.differs_from(&summary_b));

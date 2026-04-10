@@ -2249,6 +2249,15 @@ pub enum PolicySimulationError {
 ///
 /// This does NOT execute connector logic or write mesh objects.
 ///
+/// # Safety (unverified claim access)
+///
+/// This function intentionally reads claims from an unverified token
+/// for policy *simulation* purposes. The claims are used only to
+/// extract principal and capability metadata for the dry-run decision —
+/// no authorization is granted based on these claims.  Real enforcement
+/// uses [`CapabilityVerifier::verify()`] which returns
+/// `CapabilityToken<Verified>`.
+///
 /// # Errors
 /// Returns [`PolicySimulationError`] if required inputs are missing or invalid.
 pub fn simulate_policy_decision(
@@ -2262,6 +2271,9 @@ pub fn simulate_policy_decision(
         });
     }
 
+    // SAFETY: Unverified claim access is acceptable here because this is
+    // a policy *simulation* — no authorization is granted.  The claims
+    // are used solely to populate the DecisionReceipt for dry-run UX.
     let claims = invoke
         .capability_token
         .raw()

@@ -66,7 +66,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
         .expect("capability token signing should succeed");
-    CapabilityToken { raw }
+    CapabilityToken::from_raw(raw)
 }
 
 fn invoke_req(

@@ -201,7 +201,7 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .sign(signing_key)
         .expect("capability token sign");
-    CapabilityToken { raw: cose }
+    CapabilityToken::from_raw(cose)
 }
 
 fn invoke_request(
@@ -400,11 +400,21 @@ async fn e2e_connector_invoke_with_mock() {
         token,
     );
 
-    let response = connector.invoke(invoke).await.expect("invoke should succeed");
-    assert_eq!(response.status, InvokeStatus::Ok, "invoke status should be Ok");
+    let response = connector
+        .invoke(invoke)
+        .await
+        .expect("invoke should succeed");
+    assert_eq!(
+        response.status,
+        InvokeStatus::Ok,
+        "invoke status should be Ok"
+    );
 
     // The response result should contain the repo information
-    let result = response.result.as_ref().expect("result should be present on Ok response");
+    let result = response
+        .result
+        .as_ref()
+        .expect("result should be present on Ok response");
     let result_str = serde_json::to_string(result).unwrap_or_default();
     assert!(
         result_str.contains("Hello-World") || result_str.contains("hello-world"),
@@ -414,8 +424,7 @@ async fn e2e_connector_invoke_with_mock() {
     // Verify through the E2E runner harness as well
     let signing_key2 = Ed25519SigningKey::generate();
     let mut connector2 = GitHubAdapter::new();
-    let handshake2 =
-        handshake_request(signing_key2.verifying_key().to_bytes(), &["github.read"]);
+    let handshake2 = handshake_request(signing_key2.verifying_key().to_bytes(), &["github.read"]);
     let token2 = build_token(&signing_key2, "github.read", &["github.get_repo"]);
     let invoke2 = invoke_request(
         "github.get_repo",
@@ -472,15 +481,13 @@ async fn e2e_capability_verification() {
         .expect("configure");
 
     // Handshake with github.write capability (NOT github.read/github.get_repo)
-    let handshake =
-        handshake_request(signing_key.verifying_key().to_bytes(), &["github.write"]);
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["github.write"]);
     connector.handshake(handshake).await.expect("handshake");
 
     // Run through the E2E runner expecting an error
     let mut connector2 = GitHubAdapter::new();
     let signing_key2 = Ed25519SigningKey::generate();
-    let handshake2 =
-        handshake_request(signing_key2.verifying_key().to_bytes(), &["github.write"]);
+    let handshake2 = handshake_request(signing_key2.verifying_key().to_bytes(), &["github.write"]);
     let token2 = build_token(&signing_key2, "github.write", &["github.write"]);
     let invoke2 = invoke_request(
         "github.get_repo",
@@ -532,12 +539,10 @@ async fn e2e_error_mapping_structured() {
     // Mount 404 response for the repo endpoint
     Mock::given(method("GET"))
         .and(path("/repos/octocat/nonexistent"))
-        .respond_with(
-            ResponseTemplate::new(404).set_body_json(json!({
-                "message": "Not Found",
-                "documentation_url": "https://docs.github.com/rest/repos/repos#get-a-repository"
-            })),
-        )
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "message": "Not Found",
+            "documentation_url": "https://docs.github.com/rest/repos/repos#get-a-repository"
+        })))
         .mount(mock.inner())
         .await;
 
@@ -693,8 +698,7 @@ fn e2e_evidence_bundle_assembly() {
 
     // ── Verify bundle structure ─────────────────────────────────────────
     assert_eq!(
-        bundle.schema_version,
-        VERIFICATION_BUNDLE_SCHEMA_VERSION,
+        bundle.schema_version, VERIFICATION_BUNDLE_SCHEMA_VERSION,
         "schema_version should match the constant"
     );
     assert_eq!(bundle.scenario_id, "full_system_evidence_test");
@@ -710,23 +714,17 @@ fn e2e_evidence_bundle_assembly() {
 
     // Verify logs.jsonl equivalent path is present
     assert!(
-        bundle
-            .artifact_paths
-            .contains_key("logs_jsonl"),
+        bundle.artifact_paths.contains_key("logs_jsonl"),
         "artifact_paths must include logs_jsonl"
     );
     // Verify summary.txt path
     assert!(
-        bundle
-            .artifact_paths
-            .contains_key("summary_txt"),
+        bundle.artifact_paths.contains_key("summary_txt"),
         "artifact_paths must include summary_txt"
     );
     // Verify environment.json path
     assert!(
-        bundle
-            .artifact_paths
-            .contains_key("environment_json"),
+        bundle.artifact_paths.contains_key("environment_json"),
         "artifact_paths must include environment_json"
     );
 
@@ -746,12 +744,7 @@ fn e2e_evidence_bundle_assembly() {
     );
 
     // Total assertion count
-    let total_assertions: usize = bundle
-        .script
-        .steps
-        .iter()
-        .map(|s| s.assertions.len())
-        .sum();
+    let total_assertions: usize = bundle.script.steps.iter().map(|s| s.assertions.len()).sum();
     assert_eq!(total_assertions, 4, "bundle should have 4 assertions total");
 
     // All assertions passed
@@ -764,12 +757,7 @@ fn e2e_evidence_bundle_assembly() {
     assert!(all_passed, "all assertions in bundle should have passed");
 
     // Evidence items present
-    let total_evidence: usize = bundle
-        .script
-        .steps
-        .iter()
-        .map(|s| s.evidence.len())
-        .sum();
+    let total_evidence: usize = bundle.script.steps.iter().map(|s| s.evidence.len()).sum();
     assert_eq!(
         total_evidence, 3,
         "bundle should have 3 evidence items (log, metric, health snapshot)"

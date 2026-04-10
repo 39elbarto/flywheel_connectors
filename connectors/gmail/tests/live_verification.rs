@@ -8,8 +8,8 @@
 //! or delete any data.
 
 use fcp_core::CapabilityToken;
-use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::Ed25519SigningKey;
+use fcp_crypto::cose::CapabilityTokenBuilder;
 
 use chrono::{Duration, Utc};
 use serde_json::json;
@@ -58,7 +58,7 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
         .unwrap();
-    CapabilityToken { raw: cose }
+    CapabilityToken::from_raw(cose)
 }
 
 async fn setup_live_connector(
@@ -121,10 +121,7 @@ async fn live_labels_list() {
         "Gmail account should have at least one label (INBOX, etc.)"
     );
 
-    eprintln!(
-        "PASS: live_labels_list — returned {} labels",
-        labels.len()
-    );
+    eprintln!("PASS: live_labels_list — returned {} labels", labels.len());
 }
 
 #[fcp_async_core::test]
@@ -239,8 +236,5 @@ async fn live_introspect() {
         "operations should include gmail.list_labels: {op_ids:?}"
     );
 
-    eprintln!(
-        "PASS: live_introspect — {} operations reported",
-        ops.len()
-    );
+    eprintln!("PASS: live_introspect — {} operations reported", ops.len());
 }

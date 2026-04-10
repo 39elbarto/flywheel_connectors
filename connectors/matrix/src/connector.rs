@@ -1685,7 +1685,7 @@ mod tests {
             ])
             .sign(signing_key)
             .expect("Failed to create test token");
-        CapabilityToken { raw: cose_token }
+        CapabilityToken::from_raw(cose_token)
     }
 
     /// Configure and handshake with a real key pair so invoke token verification succeeds.

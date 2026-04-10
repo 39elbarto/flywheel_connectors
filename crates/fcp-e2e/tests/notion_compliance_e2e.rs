@@ -214,7 +214,7 @@ fn build_token(
         .validity(now, now + ChronoDuration::hours(1))
         .sign(signing_key)
         .expect("capability token sign");
-    CapabilityToken { raw: cose }
+    CapabilityToken::from_raw(cose)
 }
 
 fn invoke_request(

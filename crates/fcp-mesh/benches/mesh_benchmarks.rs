@@ -266,11 +266,11 @@ criterion_group!(
 // Gossip / XOR Filter / IBLT Benchmarks
 // ============================================================================
 
+use fcp_mesh::admission::ObjectAdmissionClass;
 use fcp_mesh::{
     gossip::{MeshGossip, XorFilterPlaceholder},
     iblt::Iblt,
 };
-use fcp_mesh::admission::ObjectAdmissionClass;
 
 fn make_object_ids(count: usize) -> Vec<ObjectId> {
     (0..count)
@@ -346,9 +346,7 @@ fn bench_iblt_insert_and_decode(c: &mut Criterion) {
             .map(|i| ObjectId::from_unscoped_bytes(format!("left-only-{i}").as_bytes()))
             .collect();
         let right_only: Vec<ObjectId> = (0..diff_size)
-            .map(|i| {
-                ObjectId::from_unscoped_bytes(format!("right-only-{i}").as_bytes())
-            })
+            .map(|i| ObjectId::from_unscoped_bytes(format!("right-only-{i}").as_bytes()))
             .collect();
 
         group.bench_function(format!("diff_{diff_size}"), |b| {
@@ -384,45 +382,27 @@ fn bench_gossip_reconciliation(c: &mut Criterion) {
         let diff_count = 10;
         let shared = make_object_ids(shared_count);
         let a_only: Vec<ObjectId> = (0..diff_count)
-            .map(|i| {
-                ObjectId::from_unscoped_bytes(format!("a-only-{i}").as_bytes())
-            })
+            .map(|i| ObjectId::from_unscoped_bytes(format!("a-only-{i}").as_bytes()))
             .collect();
         let b_only: Vec<ObjectId> = (0..diff_count)
-            .map(|i| {
-                ObjectId::from_unscoped_bytes(format!("b-only-{i}").as_bytes())
-            })
+            .map(|i| ObjectId::from_unscoped_bytes(format!("b-only-{i}").as_bytes()))
             .collect();
 
         group.bench_function(format!("shared_{shared_count}_diff_{diff_count}"), |b| {
             b.iter(|| {
-                let mut node_a = MeshGossip::with_defaults(
-                    fcp_core::TailscaleNodeId::new("bench-a"),
-                );
-                let mut node_b = MeshGossip::with_defaults(
-                    fcp_core::TailscaleNodeId::new("bench-b"),
-                );
+                let mut node_a =
+                    MeshGossip::with_defaults(fcp_core::TailscaleNodeId::new("bench-a"));
+                let mut node_b =
+                    MeshGossip::with_defaults(fcp_core::TailscaleNodeId::new("bench-b"));
 
                 for obj in shared.iter().chain(a_only.iter()) {
-                    node_a.announce_object(
-                        &zone,
-                        obj,
-                        ObjectAdmissionClass::Admitted,
-                        1,
-                    );
+                    node_a.announce_object(&zone, obj, ObjectAdmissionClass::Admitted, 1);
                 }
                 for obj in shared.iter().chain(b_only.iter()) {
-                    node_b.announce_object(
-                        &zone,
-                        obj,
-                        ObjectAdmissionClass::Admitted,
-                        1,
-                    );
+                    node_b.announce_object(&zone, obj, ObjectAdmissionClass::Admitted, 1);
                 }
 
-                let b_iblt = node_b
-                    .build_zone_iblt(&zone, diff_count * 2)
-                    .unwrap();
+                let b_iblt = node_b.build_zone_iblt(&zone, diff_count * 2).unwrap();
                 let result = node_a.reconcile_zone_iblt(
                     &zone,
                     &fcp_core::TailscaleNodeId::new("bench-b"),
@@ -446,4 +426,9 @@ criterion_group!(
     bench_gossip_reconciliation,
 );
 
-criterion_main!(admission_benches, device_benches, session_benches, gossip_benches,);
+criterion_main!(
+    admission_benches,
+    device_benches,
+    session_benches,
+    gossip_benches,
+);

@@ -3714,7 +3714,10 @@ mod tests {
             1_700_000_100,
         );
         assert!(outcome.resolved);
-        let detail = outcome.decision_detail.as_ref().expect("should have decision_detail");
+        let detail = outcome
+            .decision_detail
+            .as_ref()
+            .expect("should have decision_detail");
         assert!(
             detail.contains("lease_seq"),
             "ChooseByLease detail should mention lease_seq: {detail}"
@@ -3729,7 +3732,10 @@ mod tests {
             test_object_id("merged"),
             1_700_000_100,
         );
-        let detail = outcome.decision_detail.as_ref().expect("should have decision_detail");
+        let detail = outcome
+            .decision_detail
+            .as_ref()
+            .expect("should have decision_detail");
         assert!(
             detail.contains("CRDT"),
             "CrdtMerge detail should mention CRDT: {detail}"
@@ -3744,7 +3750,10 @@ mod tests {
             1_700_000_100,
             "lease tie",
         );
-        let detail = outcome.decision_detail.as_ref().expect("should have decision_detail");
+        let detail = outcome
+            .decision_detail
+            .as_ref()
+            .expect("should have decision_detail");
         assert!(
             detail.contains("lease tie"),
             "Failure detail should include the reason: {detail}"
@@ -6204,10 +6213,7 @@ mod tests {
         );
 
         assert!(outcome.resolved, "Fork should be resolved");
-        assert!(
-            outcome.winning_head.is_some(),
-            "Should have a winner"
-        );
+        assert!(outcome.winning_head.is_some(), "Should have a winner");
         assert!(
             outcome.decision_detail.is_some(),
             "Successful resolution should have decision_detail"

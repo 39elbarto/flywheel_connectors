@@ -13,7 +13,7 @@ use crate::{
     CapabilityToken, ConnectorId, EventAck, EventEnvelope, EventNack, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, InstanceId, Introspection, InvokeRequest, InvokeResponse,
     RateLimitDeclarations, SelfCheckReport, ShutdownRequest, SimulateRequest, SimulateResponse,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, Verified,
 };
 
 /// Type alias for event streams.
@@ -165,18 +165,21 @@ pub trait Bidirectional: Streaming {
 #[async_trait]
 pub trait Polling: FcpConnector {
     /// Start polling a target.
+    ///
+    /// Requires a `CapabilityToken<Verified>` — the caller must verify the
+    /// token via [`CapabilityVerifier::verify()`] before calling this method.
     async fn start_polling(
         &self,
         target: &str,
         interval: Option<std::time::Duration>,
-        token: &CapabilityToken,
+        token: &CapabilityToken<Verified>,
     ) -> FcpResult<()>;
 
     /// Stop polling a target.
-    async fn stop_polling(&self, target: &str, token: &CapabilityToken) -> FcpResult<()>;
+    async fn stop_polling(&self, target: &str, token: &CapabilityToken<Verified>) -> FcpResult<()>;
 
     /// Trigger immediate poll.
-    async fn poll_now(&self, target: &str, token: &CapabilityToken) -> FcpResult<usize>;
+    async fn poll_now(&self, target: &str, token: &CapabilityToken<Verified>) -> FcpResult<usize>;
 
     /// Get event stream.
     fn events(&self) -> EventStream;
@@ -186,7 +189,14 @@ pub trait Polling: FcpConnector {
 #[async_trait]
 pub trait Webhook: FcpConnector {
     /// Register a webhook handler.
-    async fn register_handler(&self, source: &str, token: &CapabilityToken) -> FcpResult<()>;
+    ///
+    /// Requires a `CapabilityToken<Verified>` — the caller must verify the
+    /// token via [`CapabilityVerifier::verify()`] before calling this method.
+    async fn register_handler(
+        &self,
+        source: &str,
+        token: &CapabilityToken<Verified>,
+    ) -> FcpResult<()>;
 
     /// Get the webhook URL.
     ///

@@ -2284,8 +2284,8 @@ mod tests {{
         operation: &str,
     ) -> CapabilityToken {{
         let now = chrono::Utc::now();
-        CapabilityToken {{
-            raw: fcp_crypto::cose::CapabilityTokenBuilder::new()
+        CapabilityToken::from_raw(
+            fcp_crypto::cose::CapabilityTokenBuilder::new()
                 .capability_id(CAP_SCAFFOLD_STATUS)
                 .zone_id("z:work")
                 .principal("user:test")
@@ -2294,7 +2294,7 @@ mod tests {{
                 .validity(now, now + chrono::Duration::hours(1))
                 .sign(signing_key)
                 .expect("test capability token should sign"),
-        }}
+        )
     }}
 
     fn base_handshake(signing_key: &fcp_crypto::ed25519::Ed25519SigningKey) -> HandshakeRequest {{
@@ -2531,8 +2531,8 @@ fn test_capability_token(
     operation: &str,
 ) -> CapabilityToken {{
         let now = chrono::Utc::now();
-        CapabilityToken {{
-            raw: fcp_crypto::cose::CapabilityTokenBuilder::new()
+        CapabilityToken::from_raw(
+            fcp_crypto::cose::CapabilityTokenBuilder::new()
             .capability_id(CAP_SCAFFOLD_STATUS)
             .zone_id("z:work")
             .principal("user:test")
@@ -2541,7 +2541,7 @@ fn test_capability_token(
             .validity(now, now + chrono::Duration::hours(1))
             .sign(signing_key)
             .expect("test capability token should sign"),
-    }}
+    )
 }}
 
 fn base_handshake(signing_key: &fcp_crypto::ed25519::Ed25519SigningKey) -> HandshakeRequest {{

@@ -40,7 +40,7 @@ fn generate_token(signing_key: &Ed25519SigningKey, cap: &str, ops: &[&str]) -> C
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
         .expect("token sign");
-    CapabilityToken { raw: cose }
+    CapabilityToken::from_raw(cose)
 }
 
 fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {

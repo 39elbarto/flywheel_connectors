@@ -45,7 +45,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, operation: &str) -> Cap
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
         .unwrap();
-    CapabilityToken { raw: cose }
+    CapabilityToken::from_raw(cose)
 }
 
 async fn setup_handshake(

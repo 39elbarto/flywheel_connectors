@@ -440,11 +440,12 @@ impl DeviceEnrollmentApproval {
             })?,
         );
 
-        let owner_signature = owner_key.owner_sign(&signing_bytes).map_err(|e| {
-            FcpError::Internal {
-                message: format!("owner signing failed: {e}"),
-            }
-        })?;
+        let owner_signature =
+            owner_key
+                .owner_sign(&signing_bytes)
+                .map_err(|e| FcpError::Internal {
+                    message: format!("owner signing failed: {e}"),
+                })?;
 
         Ok(Self {
             device_id: request.device_id.clone(),
@@ -805,11 +806,12 @@ impl NodeKeyAttestation {
             })?,
         );
 
-        let owner_signature = owner_key.owner_sign(&signing_bytes).map_err(|e| {
-            FcpError::Internal {
-                message: format!("owner signing failed: {e}"),
-            }
-        })?;
+        let owner_signature =
+            owner_key
+                .owner_sign(&signing_bytes)
+                .map_err(|e| FcpError::Internal {
+                    message: format!("owner signing failed: {e}"),
+                })?;
 
         Ok(Self {
             node_id,
@@ -2717,10 +2719,7 @@ mod tests {
             let (secret, outbound) = dkg_part2(round1_secrets.get(&p).unwrap(), &received).unwrap();
             round2_secrets.insert(p, secret);
             for (recipient, pkg) in outbound {
-                inbound_round2
-                    .entry(recipient)
-                    .or_default()
-                    .insert(p, pkg);
+                inbound_round2.entry(recipient).or_default().insert(p, pkg);
             }
         }
 
@@ -2776,9 +2775,11 @@ mod tests {
         .unwrap();
 
         // Verify with the group public key (standard Ed25519 verification)
-        assert!(approval
-            .verify(public_key_package.group_public_key())
-            .is_ok());
+        assert!(
+            approval
+                .verify(public_key_package.group_public_key())
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2817,8 +2818,10 @@ mod tests {
 
         assert_eq!(attestation.node_id, "frost-node-001");
         // Verify with standard Ed25519 verify using group public key
-        assert!(attestation
-            .verify(public_key_package.group_public_key())
-            .is_ok());
+        assert!(
+            attestation
+                .verify(public_key_package.group_public_key())
+                .is_ok()
+        );
     }
 }

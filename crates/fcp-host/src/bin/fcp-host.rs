@@ -4911,8 +4911,8 @@ mod tests {
         zone_id: &str,
     ) -> fcp_core::CapabilityToken {
         let now = Utc::now();
-        fcp_core::CapabilityToken {
-            raw: fcp_crypto::cose::CapabilityTokenBuilder::new()
+        fcp_core::CapabilityToken::from_raw(
+            fcp_crypto::cose::CapabilityTokenBuilder::new()
                 .capability_id(capability_id)
                 .zone_id(zone_id)
                 .principal("user:test")
@@ -4921,7 +4921,7 @@ mod tests {
                 .validity(now, now + chrono::Duration::hours(1))
                 .sign(signing_key)
                 .expect("test capability token should sign"),
-        }
+        )
     }
 
     fn failing_admin_state_path(dir: &tempfile::TempDir) -> std::path::PathBuf {

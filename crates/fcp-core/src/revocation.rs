@@ -9,7 +9,7 @@
 //! - `RevocationObject`: Owner-signed object revoking one or more `ObjectId`s
 //! - `RevocationEvent`: Chain node linking revocations with monotonic sequence
 //! - `RevocationHead`: Quorum-signed checkpoint for O(1) freshness comparison
-//! - `RevocationRegistry`: Fast lookup with bloom filter for negative lookups
+//! - `RevocationRegistry`: Exact lookup table for revocation objects
 //!
 //! # Freshness Policies
 //!
@@ -351,116 +351,11 @@ pub struct RevocationCheckResult {
     pub head_age_secs: u64,
 }
 
-/// Simple bloom filter for fast negative lookups.
-///
-/// This is a basic implementation; production systems should use a more
-/// sophisticated bloom filter library with configurable false positive rates.
-#[derive(Debug, Clone)]
-pub struct BloomFilter {
-    /// Bit vector for the bloom filter.
-    bits: Vec<u64>,
-    /// Number of hash functions (k).
-    num_hashes: u8,
-    /// Number of bits (m).
-    num_bits: usize,
-}
-
-impl BloomFilter {
-    /// Create a new bloom filter sized for expected elements.
-    ///
-    /// Uses optimal sizing: m = -n*ln(p) / (ln(2)^2), k = (m/n) * ln(2)
-    /// where n = expected elements, p = false positive rate (0.01 = 1%).
-    #[must_use]
-    #[allow(clippy::cast_precision_loss)]
-    pub fn new(expected_elements: usize, false_positive_rate: f64) -> Self {
-        let ln2 = std::f64::consts::LN_2;
-        let n = expected_elements.max(1) as f64;
-        let p = false_positive_rate.clamp(0.0001, 0.5);
-
-        // m = -n * ln(p) / (ln(2)^2)
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let m = (-n * p.ln() / (ln2 * ln2)).ceil() as usize;
-        let m = m.max(64); // Minimum 64 bits
-
-        // k = (m/n) * ln(2)
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let k = ((m as f64 / n) * ln2).ceil() as u8;
-        let k = k.clamp(1, 16); // Reasonable bounds
-
-        // Round up to multiple of 64 for u64 storage
-        let num_bits = m.div_ceil(64) * 64;
-        let bits = vec![0u64; num_bits / 64];
-
-        Self {
-            bits,
-            num_hashes: k,
-            num_bits,
-        }
-    }
-
-    /// Insert an item into the bloom filter.
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn insert(&mut self, item: &[u8]) {
-        let (h1, h2) = Self::hash_item(item);
-        let m = self.num_bits as u64;
-        for i in 0..self.num_hashes {
-            // Double hashing: h_i = (h1 + i * h2) % m
-            let hash = h1.wrapping_add(u64::from(i).wrapping_mul(h2));
-            // Truncation is safe: hash % m < m, and m fits in usize (it came from usize)
-            let index = (hash % m) as usize;
-            self.bits[index / 64] |= 1u64 << (index % 64);
-        }
-    }
-
-    /// Check if an item might be in the bloom filter.
-    ///
-    /// Returns `false` if definitely not present, `true` if possibly present.
-    #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn might_contain(&self, item: &[u8]) -> bool {
-        let (h1, h2) = Self::hash_item(item);
-        let m = self.num_bits as u64;
-        for i in 0..self.num_hashes {
-            let hash = h1.wrapping_add(u64::from(i).wrapping_mul(h2));
-            let index = (hash % m) as usize;
-            if self.bits[index / 64] & (1u64 << (index % 64)) == 0 {
-                return false;
-            }
-        }
-        true
-    }
-
-    /// Hash function using BLAKE3 to generate two 64-bit hashes for Double Hashing.
-    fn hash_item(item: &[u8]) -> (u64, u64) {
-        let hash = blake3::hash(item);
-        let bytes = hash.as_bytes();
-        let mut buf1 = [0u8; 8];
-        let mut buf2 = [0u8; 8];
-        buf1.copy_from_slice(&bytes[0..8]);
-        buf2.copy_from_slice(&bytes[8..16]);
-        let h1 = u64::from_le_bytes(buf1);
-        let h2 = u64::from_le_bytes(buf2);
-
-        (h1, h2)
-    }
-
-    /// Clear the bloom filter.
-    pub fn clear(&mut self) {
-        self.bits.fill(0);
-    }
-}
-
-impl Default for BloomFilter {
-    fn default() -> Self {
-        // Default: 10000 elements, 1% false positive rate
-        Self::new(10000, 0.01)
-    }
-}
-
 /// Revocation registry (NORMATIVE).
 ///
-/// Provides fast revocation lookups using a bloom filter for negative lookups
-/// and a hash map for confirmed revocations.
+/// Provides exact revocation lookups via a hash map. Previous probabilistic
+/// filters (Bloom/XOR) were removed to eliminate false-positive latency and
+/// make check/use atomicity easier to reason about.
 ///
 /// # Usage
 ///
@@ -481,9 +376,6 @@ impl Default for BloomFilter {
 pub struct RevocationRegistry {
     /// Active revocations indexed by revoked `ObjectId`.
     revocations: HashMap<ObjectId, RevocationObject>,
-
-    /// Bloom filter for fast negative lookups.
-    bloom_filter: BloomFilter,
 
     /// Latest known revocation head.
     pub head: Option<ObjectId>,
@@ -507,7 +399,6 @@ impl RevocationRegistry {
     pub fn with_capacity(expected_revocations: usize) -> Self {
         Self {
             revocations: HashMap::with_capacity(expected_revocations),
-            bloom_filter: BloomFilter::new(expected_revocations, 0.01),
             head: None,
             head_seq: 0,
             last_updated: 0,
@@ -516,23 +407,15 @@ impl RevocationRegistry {
 
     /// Check if an object ID is revoked (MUST be called before any capability use).
     ///
-    /// Uses bloom filter for fast negative lookup, then checks the revocation map.
+    /// Exact membership check (no probabilistic filters).
     #[must_use]
     pub fn is_revoked(&self, object_id: &ObjectId) -> bool {
-        // Fast path: bloom filter says definitely not present
-        if !self.bloom_filter.might_contain(object_id.as_bytes()) {
-            return false;
-        }
-        // Slow path: check the actual map
         self.revocations.contains_key(object_id)
     }
 
     /// Check if an object ID is revoked at a specific time.
     #[must_use]
     pub fn is_revoked_at(&self, object_id: &ObjectId, at: u64) -> bool {
-        if !self.bloom_filter.might_contain(object_id.as_bytes()) {
-            return false;
-        }
         self.revocations
             .get(object_id)
             .is_some_and(|r| r.is_active(at))
@@ -547,7 +430,6 @@ impl RevocationRegistry {
     /// Add a revocation to the registry.
     pub fn add_revocation(&mut self, revocation: &RevocationObject) {
         for object_id in &revocation.revoked {
-            self.bloom_filter.insert(object_id.as_bytes());
             self.revocations.insert(*object_id, revocation.clone());
         }
     }
@@ -642,7 +524,6 @@ impl RevocationRegistry {
     /// Clear all revocations.
     pub fn clear(&mut self) {
         self.revocations.clear();
-        self.bloom_filter.clear();
         self.head = None;
         self.head_seq = 0;
         self.last_updated = 0;
@@ -856,50 +737,6 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // BloomFilter Tests
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn bloom_filter_basic() {
-        let mut bf = BloomFilter::new(100, 0.01);
-
-        let item = b"test item";
-        assert!(!bf.might_contain(item));
-
-        bf.insert(item);
-        assert!(bf.might_contain(item));
-    }
-
-    #[test]
-    fn bloom_filter_no_false_negatives() {
-        let mut bf = BloomFilter::new(1000, 0.01);
-
-        // Insert many items
-        for i in 0..100u32 {
-            bf.insert(&i.to_le_bytes());
-        }
-
-        // All inserted items must be found
-        for i in 0..100u32 {
-            assert!(
-                bf.might_contain(&i.to_le_bytes()),
-                "Bloom filter false negative for {i}"
-            );
-        }
-    }
-
-    #[test]
-    fn bloom_filter_clear() {
-        let mut bf = BloomFilter::new(100, 0.01);
-
-        bf.insert(b"test");
-        assert!(bf.might_contain(b"test"));
-
-        bf.clear();
-        assert!(!bf.might_contain(b"test"));
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
     // RevocationRegistry Tests
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -916,7 +753,6 @@ mod tests {
         let registry = RevocationRegistry::new();
         let id = ObjectId::from_bytes([99u8; 32]);
 
-        // Fast path: bloom filter says not present
         assert!(!registry.is_revoked(&id));
     }
 
@@ -1842,69 +1678,6 @@ mod tests {
         assert_eq!(cloned.scope, result.scope);
         assert_eq!(cloned.stale_data, result.stale_data);
         assert_eq!(cloned.head_age_secs, result.head_age_secs);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // BloomFilter – Additional Tests
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[test]
-    fn bloom_filter_default() {
-        let bf = BloomFilter::default();
-        assert!(!bf.might_contain(b"anything"));
-    }
-
-    #[test]
-    fn bloom_filter_insert_same_item_twice() {
-        let mut bf = BloomFilter::new(100, 0.01);
-        bf.insert(b"hello");
-        bf.insert(b"hello");
-        assert!(bf.might_contain(b"hello"));
-    }
-
-    #[test]
-    fn bloom_filter_many_items_no_false_negatives() {
-        let mut bf = BloomFilter::new(10_000, 0.01);
-        for i in 0..1000u32 {
-            bf.insert(&i.to_le_bytes());
-        }
-        for i in 0..1000u32 {
-            assert!(
-                bf.might_contain(&i.to_le_bytes()),
-                "false negative for item {i}"
-            );
-        }
-    }
-
-    #[test]
-    fn bloom_filter_different_sizes() {
-        // Very small
-        let mut bf_small = BloomFilter::new(1, 0.5);
-        bf_small.insert(b"x");
-        assert!(bf_small.might_contain(b"x"));
-
-        // Medium
-        let mut bf_medium = BloomFilter::new(1000, 0.001);
-        bf_medium.insert(b"y");
-        assert!(bf_medium.might_contain(b"y"));
-    }
-
-    #[test]
-    fn bloom_filter_empty_item() {
-        let mut bf = BloomFilter::new(100, 0.01);
-        bf.insert(b"");
-        assert!(bf.might_contain(b""));
-    }
-
-    #[test]
-    fn bloom_filter_clear_then_reuse() {
-        let mut bf = BloomFilter::new(100, 0.01);
-        bf.insert(b"first");
-        bf.clear();
-        assert!(!bf.might_contain(b"first"));
-        bf.insert(b"second");
-        assert!(bf.might_contain(b"second"));
-        assert!(!bf.might_contain(b"first"));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -416,7 +416,10 @@ impl ManifestOperationProfile {
                     || name_lower.ends_with("_name")
                     || name_lower.ends_with("_subject");
                 if is_string && is_title_field {
-                    payload.insert(field_name.clone(), serde_json::Value::String(titled_value.to_owned()));
+                    payload.insert(
+                        field_name.clone(),
+                        serde_json::Value::String(titled_value.to_owned()),
+                    );
                     break;
                 }
             }
@@ -440,7 +443,10 @@ impl ManifestOperationProfile {
                         || name_lower == "id"
                         || name_lower == "q")
                 {
-                    payload.insert(field_name.clone(), serde_json::Value::String(lookup_value.to_owned()));
+                    payload.insert(
+                        field_name.clone(),
+                        serde_json::Value::String(lookup_value.to_owned()),
+                    );
                     break;
                 }
             }
@@ -458,7 +464,10 @@ impl ManifestOperationProfile {
                     .and_then(|t| t.as_str())
                     .is_some_and(|t| t == "string");
                 if is_string {
-                    payload.insert((*field_name).to_owned(), serde_json::Value::String(payload_value.to_owned()));
+                    payload.insert(
+                        (*field_name).to_owned(),
+                        serde_json::Value::String(payload_value.to_owned()),
+                    );
                     break;
                 }
             }
@@ -6064,7 +6073,10 @@ mod tests {
 
     // ── Schema mapping (h6qe2.1.3) ─────────────────────────
 
-    fn manifest_op_with_schema(selector: &str, schema: serde_json::Value) -> ManifestOperationProfile {
+    fn manifest_op_with_schema(
+        selector: &str,
+        schema: serde_json::Value,
+    ) -> ManifestOperationProfile {
         ManifestOperationProfile {
             input_schema: schema,
             ..manifest_operation(selector)
@@ -6170,11 +6182,11 @@ mod tests {
 
     #[test]
     fn schema_mapping_empty_schema_returns_none() {
-        let op = manifest_op_with_schema(
-            "test.noop",
-            serde_json::json!({"type": "object"}),
+        let op = manifest_op_with_schema("test.noop", serde_json::json!({"type": "object"}));
+        assert!(
+            op.map_literals_to_schema(Some("value"), None, None, &[])
+                .is_none()
         );
-        assert!(op.map_literals_to_schema(Some("value"), None, None, &[]).is_none());
     }
 
     #[test]

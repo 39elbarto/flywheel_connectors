@@ -1097,9 +1097,12 @@ mod tests {
         };
 
         // Simulate: InvokeRequest carries trace_id as W3C hex string
-        let invoke_trace_id =
-            hex::encode(trace_id); // "0af7651916cd43dd8448eb211c80319c"
-        assert_eq!(invoke_trace_id.len(), 32, "W3C trace_id must be 32 hex chars");
+        let invoke_trace_id = hex::encode(trace_id); // "0af7651916cd43dd8448eb211c80319c"
+        assert_eq!(
+            invoke_trace_id.len(),
+            32,
+            "W3C trace_id must be 32 hex chars"
+        );
 
         // Simulate: AuditEvent records the binary trace context
         let event = create_audit_event_with_trace(42, None, Some(trace));
@@ -1145,8 +1148,7 @@ mod tests {
         // Both produce valid audit events linked via prev hash
         let parent_event = create_audit_event_with_trace(1, None, Some(parent));
         let prev_id = test_object_id("parent-link");
-        let child_event =
-            create_audit_event_with_trace(2, Some(prev_id), Some(child));
+        let child_event = create_audit_event_with_trace(2, Some(prev_id), Some(child));
 
         let p_ctx = parent_event.trace_context.as_ref().unwrap();
         let c_ctx = child_event.trace_context.as_ref().unwrap();

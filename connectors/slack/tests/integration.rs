@@ -62,7 +62,7 @@ fn generate_valid_token_for_operation(
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
         .unwrap();
-    fcp_core::CapabilityToken { raw: cose }
+    fcp_core::CapabilityToken::from_raw(cose)
 }
 
 async fn setup_handshake(connector: &mut SlackConnector, caps: &[&str]) -> Ed25519SigningKey {

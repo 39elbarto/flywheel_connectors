@@ -4335,7 +4335,7 @@ mod tests {
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)
             .unwrap();
-        CapabilityToken { raw: cose }
+        CapabilityToken::from_raw(cose)
     }
 
     fn make_access_token(scopes: &[&str], roles: &[&str]) -> String {

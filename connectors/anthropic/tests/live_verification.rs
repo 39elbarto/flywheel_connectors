@@ -8,10 +8,10 @@
 //! the response shape. The `live_error_mapping_invalid_key` test runs without a
 //! key and confirms structured FCP error mapping.
 
-use fcp_core::CapabilityToken;
-use fcp_crypto::cose::CapabilityTokenBuilder;
-use fcp_crypto::Ed25519SigningKey;
 use fcp_anthropic::connector::AnthropicConnector;
+use fcp_core::CapabilityToken;
+use fcp_crypto::Ed25519SigningKey;
+use fcp_crypto::cose::CapabilityTokenBuilder;
 
 use chrono::{Duration, Utc};
 use serde_json::json;
@@ -21,7 +21,9 @@ use serde_json::json;
 // ============================================================================
 
 fn anthropic_api_key() -> Option<String> {
-    std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.is_empty())
+    std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
 }
 
 macro_rules! skip_without_key {
@@ -51,7 +53,7 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
         .unwrap();
-    CapabilityToken { raw: cose }
+    CapabilityToken::from_raw(cose)
 }
 
 async fn setup_live_connector(
@@ -256,8 +258,5 @@ async fn live_introspect() {
         "operations should include anthropic.message: {introspection}"
     );
 
-    eprintln!(
-        "PASS: live_introspect — {} operations reported",
-        ops.len()
-    );
+    eprintln!("PASS: live_introspect — {} operations reported", ops.len());
 }

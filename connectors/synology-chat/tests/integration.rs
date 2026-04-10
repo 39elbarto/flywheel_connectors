@@ -54,7 +54,7 @@ fn capability_token(
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
         .expect("token should sign");
-    CapabilityToken { raw }
+    CapabilityToken::from_raw(raw)
 }
 
 fn invoke_request(

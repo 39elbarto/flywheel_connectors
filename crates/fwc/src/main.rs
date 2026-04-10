@@ -17039,7 +17039,7 @@ fn resolve_live_auth(args: &LiveAuthArgs) -> std::result::Result<ResolvedLiveAut
     }
 
     let principal_hint = capability_token
-        .raw
+        .raw()
         .claims_unverified()
         .ok()
         .and_then(|claims| {
@@ -17079,7 +17079,7 @@ fn parse_capability_token_bytes(
 
     // Try CBOR parsing directly (handles both tagged and untagged COSE_Sign1).
     if let Ok(raw) = CoseToken::from_cbor(bytes) {
-        return Ok(CapabilityToken { raw });
+        return Ok(CapabilityToken::from_raw(raw));
     }
 
     // Fallback: if the bytes start with CBOR tag 18 (0xD2 = major type 6, value 18),
@@ -17087,7 +17087,7 @@ fn parse_capability_token_bytes(
     // COSE_Sign1 that coset's from_tagged_slice rejects due to encoding quirks.
     if bytes.first() == Some(&0xD2) && bytes.len() > 1 {
         if let Ok(raw) = CoseToken::from_cbor(&bytes[1..]) {
-            return Ok(CapabilityToken { raw });
+            return Ok(CapabilityToken::from_raw(raw));
         }
     }
 
@@ -26367,12 +26367,12 @@ mod tests {
 
         let token = super::CapabilityToken::test_token();
         base64::engine::general_purpose::STANDARD
-            .encode(token.raw.to_cbor().expect("test token should encode"))
+            .encode(token.raw().to_cbor().expect("test token should encode"))
     }
 
     fn test_tagged_capability_token_bytes() -> Vec<u8> {
         let token = super::CapabilityToken::test_token();
-        let encoded = token.raw.to_cbor().expect("test token should encode");
+        let encoded = token.raw().to_cbor().expect("test token should encode");
         let mut tagged = Vec::with_capacity(encoded.len() + 1);
         tagged.push(0xd2);
         tagged.extend(encoded);

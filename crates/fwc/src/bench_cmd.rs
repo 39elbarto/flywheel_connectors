@@ -1351,9 +1351,7 @@ fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
         .sign(&signing_key)
         .expect("capability token should sign");
 
-    let capability = CapabilityArtifact {
-        raw: cose_capability,
-    };
+    let capability = CapabilityArtifact::from_raw(cose_capability);
 
     let verifier = CapabilityVerifier::new(pub_bytes, zone.clone(), InstanceId::new());
     let op = OperationId::new("op.test").expect("operation id must be canonical");

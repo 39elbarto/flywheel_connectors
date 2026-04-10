@@ -946,8 +946,8 @@ mod tests {
         let now = Utc::now();
         let expires = now + ChronoDuration::hours(1);
 
-        let token = CapabilityToken {
-            raw: CapabilityTokenBuilder::new()
+        let token = CapabilityToken::from_raw(
+            CapabilityTokenBuilder::new()
                 .capability_id(capability)
                 .zone_id("z:work")
                 .principal("user:test")
@@ -956,7 +956,7 @@ mod tests {
                 .validity(now, expires)
                 .sign(&signing_key)
                 .expect("signed capability token"),
-        };
+        );
 
         let mut handshake = base_handshake();
         handshake.host_public_key = host_public_key;

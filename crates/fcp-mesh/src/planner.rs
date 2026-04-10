@@ -3149,10 +3149,7 @@ mod tests {
             Some("placement_found"),
             "Should find a placement in the work zone"
         );
-        assert!(
-            evidence.chosen_node.is_some(),
-            "Should have a chosen node"
-        );
+        assert!(evidence.chosen_node.is_some(), "Should have a chosen node");
         // The chosen node should be in the work zone
         let chosen = evidence.chosen_node.as_ref().unwrap();
         assert!(
@@ -3276,13 +3273,34 @@ mod tests {
         let json = serde_json::to_value(&evidence).unwrap();
 
         // Validate required evidence fields for transcript consumption
-        assert!(json["connector_id"].is_string(), "connector_id must be string");
-        assert!(json["reason_code"].is_string(), "reason_code must be string");
-        assert!(json["candidate_scores"].is_array(), "candidate_scores must be array");
-        assert!(json["nodes_considered"].is_number(), "nodes_considered must be number");
-        assert!(json["nodes_excluded"].is_number(), "nodes_excluded must be number");
-        assert!(json["degraded_mode"].is_boolean(), "degraded_mode must be boolean");
-        assert!(json["limiting_factors"].is_array(), "limiting_factors must be array");
+        assert!(
+            json["connector_id"].is_string(),
+            "connector_id must be string"
+        );
+        assert!(
+            json["reason_code"].is_string(),
+            "reason_code must be string"
+        );
+        assert!(
+            json["candidate_scores"].is_array(),
+            "candidate_scores must be array"
+        );
+        assert!(
+            json["nodes_considered"].is_number(),
+            "nodes_considered must be number"
+        );
+        assert!(
+            json["nodes_excluded"].is_number(),
+            "nodes_excluded must be number"
+        );
+        assert!(
+            json["degraded_mode"].is_boolean(),
+            "degraded_mode must be boolean"
+        );
+        assert!(
+            json["limiting_factors"].is_array(),
+            "limiting_factors must be array"
+        );
         assert!(json["decided_at"].is_number(), "decided_at must be number");
     }
 }

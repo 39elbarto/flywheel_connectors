@@ -764,12 +764,13 @@ impl MeshNode {
     {
         request.validate_idempotency_key()?;
 
-        let claims = verifier.verify(
+        let verified_token = verifier.verify(
             &request.capability_token,
             required_capability,
             &request.operation,
             resource_uris,
         )?;
+        let claims = verified_token.claims();
 
         if let Some(holder_node) = claims.get_holder_node() {
             let proof = request.holder_proof.as_ref().ok_or_else(|| {
@@ -811,7 +812,7 @@ impl MeshNode {
             return Err(MeshNodeEnforcementError::TokenRevoked { token_id });
         }
 
-        Ok(claims)
+        Ok(claims.clone())
     }
 
     /// Validate that a receipt correctly references its intent.

@@ -563,7 +563,7 @@ fn build_live_capability_token(
         .validity(now, now + chrono::Duration::hours(1))
         .sign(signing_key)
         .expect("capability token signing should succeed");
-    CapabilityToken { raw }
+    CapabilityToken::from_raw(raw)
 }
 
 fn build_live_capability_token_with_validity(
@@ -584,7 +584,7 @@ fn build_live_capability_token_with_validity(
         .validity(not_before, expires)
         .sign(signing_key)
         .expect("capability token signing should succeed");
-    CapabilityToken { raw }
+    CapabilityToken::from_raw(raw)
 }
 
 fn build_invoke_request(

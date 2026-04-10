@@ -268,8 +268,8 @@ fn build_token(
     operations: &[&str],
 ) -> CapabilityToken {
     let now = Utc::now();
-    CapabilityToken {
-        raw: CapabilityTokenBuilder::new()
+    CapabilityToken::from_raw(
+        CapabilityTokenBuilder::new()
             .capability_id(capability)
             .zone_id("z:work")
             .principal("user:test")
@@ -278,7 +278,7 @@ fn build_token(
             .validity(now, now + ChronoDuration::hours(1))
             .sign(signing_key)
             .expect("capability token sign"),
-    }
+    )
 }
 
 fn invoke_request(

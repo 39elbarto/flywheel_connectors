@@ -8,8 +8,8 @@
 //! nonexistent ID) — no messages are sent.
 
 use fcp_core::CapabilityToken;
-use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::Ed25519SigningKey;
+use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_telegram::connector::TelegramConnector;
 
 use chrono::{Duration, Utc};
@@ -52,13 +52,10 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .validity(now, now + Duration::hours(1))
         .sign(signing_key)
         .unwrap();
-    CapabilityToken { raw: cose }
+    CapabilityToken::from_raw(cose)
 }
 
-async fn setup_live_connector(
-    connector: &mut TelegramConnector,
-    token: &str,
-) -> Ed25519SigningKey {
+async fn setup_live_connector(connector: &mut TelegramConnector, token: &str) -> Ed25519SigningKey {
     // Configure with real Telegram Bot API — this calls getMe to validate
     connector
         .handle_configure(json!({
@@ -71,10 +68,8 @@ async fn setup_live_connector(
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
 
-    let zone_dir = std::env::temp_dir().join(format!(
-        "fcp-telegram-live-test-{}",
-        std::process::id()
-    ));
+    let zone_dir =
+        std::env::temp_dir().join(format!("fcp-telegram-live-test-{}", std::process::id()));
 
     connector
         .handle_handshake(json!({
@@ -262,8 +257,5 @@ async fn live_introspect() {
         "should contain telegram.get_file: {op_ids:?}"
     );
 
-    eprintln!(
-        "PASS: live_introspect — {} operations reported",
-        ops.len()
-    );
+    eprintln!("PASS: live_introspect — {} operations reported", ops.len());
 }

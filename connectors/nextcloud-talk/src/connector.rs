@@ -1299,7 +1299,7 @@ mod tests {
             .validity(now, now + ChronoDuration::hours(1))
             .sign(signing_key)
             .expect("token");
-        CapabilityToken { raw: cose }
+        CapabilityToken::from_raw(cose)
     }
 
     #[test]

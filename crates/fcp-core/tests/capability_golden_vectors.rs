@@ -225,13 +225,13 @@ mod token_field_validation {
             .expiration(now + Duration::hours(1));
 
         let cose_token = CoseToken::sign(&sk, &claims).unwrap();
-        let token = CapabilityToken { raw: cose_token };
+        let token = CapabilityToken::from_raw(cose_token);
 
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.test");
         let cap = CapabilityId::new("cap.test").unwrap();
 
-        let result = verifier.verify(&token, &cap, &op, &[]);
+        let result = verifier.verify(token, &cap, &op, &[]);
         assert!(
             matches!(result, Err(FcpError::MissingField { .. })),
             "missing zone_id should fail verification: {result:?}"
@@ -254,14 +254,14 @@ mod token_field_validation {
             .sign(&sk)
             .unwrap();
 
-        let token = CapabilityToken { raw: cose_token };
+        let token = CapabilityToken::from_raw(cose_token);
 
         // Verifier expects z:work
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.test");
         let cap = CapabilityId::new("cap.test").unwrap();
 
-        let result = verifier.verify(&token, &cap, &op, &[]);
+        let result = verifier.verify(token, &cap, &op, &[]);
         assert!(
             matches!(result, Err(FcpError::ZoneViolation { .. })),
             "zone mismatch should fail: {result:?}"
@@ -284,13 +284,13 @@ mod token_field_validation {
             .sign(&sk)
             .unwrap();
 
-        let token = CapabilityToken { raw: cose_token };
+        let token = CapabilityToken::from_raw(cose_token);
 
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.write"); // Not granted
         let cap = CapabilityId::new("cap.test").unwrap();
 
-        let result = verifier.verify(&token, &cap, &op, &[]);
+        let result = verifier.verify(token, &cap, &op, &[]);
         assert!(
             matches!(result, Err(FcpError::OperationNotGranted { .. })),
             "ungranted operation should fail: {result:?}"
@@ -313,7 +313,7 @@ mod token_field_validation {
             .sign(&sk)
             .unwrap();
 
-        let token = CapabilityToken { raw: cose_token };
+        let token = CapabilityToken::from_raw(cose_token);
 
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let cap = CapabilityId::new("cap.test").unwrap();
@@ -321,7 +321,7 @@ mod token_field_validation {
         // All these operations should be accepted
         for op_name in ["op.read", "op.write", "op.delete"] {
             let op = OperationId::from_static(op_name);
-            let result = verifier.verify(&token, &cap, &op, &[]);
+            let result = verifier.verify(token.clone(), &cap, &op, &[]);
             assert!(result.is_ok(), "operation {op_name} should be accepted");
         }
     }
@@ -357,7 +357,7 @@ mod resource_constraints {
             .custom(fcp2_claims::CONSTRAINTS, constraints_val);
 
         let cose_token = CoseToken::sign(sk, &claims).unwrap();
-        CapabilityToken { raw: cose_token }
+        CapabilityToken::from_raw(cose_token)
     }
 
     #[test]
@@ -380,11 +380,11 @@ mod resource_constraints {
         let cap = CapabilityId::new("cap.test").unwrap();
 
         // Allowed resource should pass
-        let result = verifier.verify(&token, &cap, &op, &["/api/v1/users".into()]);
+        let result = verifier.verify(token.clone(), &cap, &op, &["/api/v1/users".into()]);
         assert!(result.is_ok(), "allowed resource should pass");
 
         // Disallowed resource should fail
-        let result = verifier.verify(&token, &cap, &op, &["/private/secrets".into()]);
+        let result = verifier.verify(token, &cap, &op, &["/private/secrets".into()]);
         assert!(
             matches!(result, Err(FcpError::ResourceNotAllowed { .. })),
             "disallowed resource should fail: {result:?}"
@@ -411,11 +411,11 @@ mod resource_constraints {
         let cap = CapabilityId::new("cap.test").unwrap();
 
         // Non-denied resource should pass
-        let result = verifier.verify(&token, &cap, &op, &["/api/v1/users".into()]);
+        let result = verifier.verify(token.clone(), &cap, &op, &["/api/v1/users".into()]);
         assert!(result.is_ok(), "non-denied resource should pass");
 
         // Denied resource should fail
-        let result = verifier.verify(&token, &cap, &op, &["/admin/users".into()]);
+        let result = verifier.verify(token, &cap, &op, &["/admin/users".into()]);
         assert!(
             matches!(result, Err(FcpError::ResourceNotAllowed { .. })),
             "denied resource should fail: {result:?}"
@@ -443,7 +443,7 @@ mod resource_constraints {
 
         // All allowed
         let result = verifier.verify(
-            &token,
+            token.clone(),
             &cap,
             &op,
             &["/api/v1/users".into(), "/api/v2/items".into()],
@@ -452,7 +452,7 @@ mod resource_constraints {
 
         // One disallowed
         let result = verifier.verify(
-            &token,
+            token,
             &cap,
             &op,
             &["/api/v1/users".into(), "/private/data".into()],
@@ -808,14 +808,14 @@ mod adversarial_attacks {
             .sign(&sk)
             .unwrap();
 
-        let token = CapabilityToken { raw: cose_token };
+        let token = CapabilityToken::from_raw(cose_token);
 
         // Verifier enforces z:owner
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::owner(), InstanceId::new());
         let op = OperationId::from_static("op.admin");
         let cap = CapabilityId::new("cap.admin").unwrap();
 
-        let result = verifier.verify(&token, &cap, &op, &[]);
+        let result = verifier.verify(token, &cap, &op, &[]);
         assert!(
             matches!(result, Err(FcpError::ZoneViolation { .. })),
             "zone escalation should fail: {result:?}"
@@ -839,14 +839,14 @@ mod adversarial_attacks {
             .sign(&sk)
             .unwrap();
 
-        let token = CapabilityToken { raw: cose_token };
+        let token = CapabilityToken::from_raw(cose_token);
 
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let cap = CapabilityId::new("cap.files").unwrap();
 
         // Attempt to use for write operation
         let op_write = OperationId::from_static("op.write");
-        let result = verifier.verify(&token, &cap, &op_write, &[]);
+        let result = verifier.verify(token.clone(), &cap, &op_write, &[]);
         assert!(
             matches!(result, Err(FcpError::OperationNotGranted { .. })),
             "operation escalation should fail: {result:?}"
@@ -854,7 +854,7 @@ mod adversarial_attacks {
 
         // Attempt to use for delete operation
         let op_delete = OperationId::from_static("op.delete");
-        let result = verifier.verify(&token, &cap, &op_delete, &[]);
+        let result = verifier.verify(token, &cap, &op_delete, &[]);
         assert!(
             matches!(result, Err(FcpError::OperationNotGranted { .. })),
             "operation escalation should fail: {result:?}"
@@ -880,14 +880,14 @@ mod adversarial_attacks {
             .sign(&old_sk)
             .unwrap();
 
-        let token = CapabilityToken { raw: cose_token };
+        let token = CapabilityToken::from_raw(cose_token);
 
         // Verifier now uses NEW key
         let verifier = CapabilityVerifier::new(new_pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.test");
         let cap = CapabilityId::new("cap.test").unwrap();
 
-        let result = verifier.verify(&token, &cap, &op, &[]);
+        let result = verifier.verify(token, &cap, &op, &[]);
         assert!(
             matches!(result, Err(FcpError::InvalidSignature)),
             "old key should fail after rotation: {result:?}"
@@ -953,7 +953,7 @@ mod adversarial_attacks {
             .custom(fcp2_claims::CONSTRAINTS, constraints_val);
 
         let cose_token = CoseToken::sign(&sk, &claims).unwrap();
-        let token = CapabilityToken { raw: cose_token };
+        let token = CapabilityToken::from_raw(cose_token);
 
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::from_static("op.read");
@@ -963,7 +963,7 @@ mod adversarial_attacks {
         let blocked_paths = ["/unsafe/file", "/etc/passwd", "/root/data"];
 
         for path in blocked_paths {
-            let result = verifier.verify(&token, &cap, &op, &[path.into()]);
+            let result = verifier.verify(token.clone(), &cap, &op, &[path.into()]);
             assert!(
                 result.is_err(),
                 "path '{path}' should be blocked: {result:?}"
@@ -971,11 +971,11 @@ mod adversarial_attacks {
         }
 
         // Clean path should work
-        let result = verifier.verify(&token, &cap, &op, &["/safe/file.txt".into()]);
+        let result = verifier.verify(token.clone(), &cap, &op, &["/safe/file.txt".into()]);
         assert!(result.is_ok(), "clean safe path should work");
 
         // Nested path should work
-        let result = verifier.verify(&token, &cap, &op, &["/safe/deeply/nested/file.txt".into()]);
+        let result = verifier.verify(token, &cap, &op, &["/safe/deeply/nested/file.txt".into()]);
         assert!(result.is_ok(), "nested safe path should work");
     }
 }
@@ -1083,7 +1083,7 @@ mod grant_verification {
             .grant_objects(grant_ids);
 
         let cose_token = CoseToken::sign(sk, &claims).unwrap();
-        CapabilityToken { raw: cose_token }
+        CapabilityToken::from_raw(cose_token)
     }
 
     #[test]
@@ -1096,7 +1096,7 @@ mod grant_verification {
         let token = create_token_with_grants(&sk, &[], &["op.test"]);
 
         // Signature should still verify
-        let claims = token.raw.verify(&pk).expect("signature should verify");
+        let claims = token.raw().verify(&pk).expect("signature should verify");
 
         // Grant objects should be empty array
         if let Some(grants_val) = claims.get(fcp2_claims::GRANT_OBJECT_IDS) {
@@ -1118,7 +1118,7 @@ mod grant_verification {
 
         let token = create_token_with_grants(&sk, &[&grant_id_1, &grant_id_2], &["op.read"]);
 
-        let claims = token.raw.verify(&pk).expect("signature should verify");
+        let claims = token.raw().verify(&pk).expect("signature should verify");
 
         // Verify grant_object_ids are present
         let grants_val = claims
@@ -1161,7 +1161,7 @@ mod grant_verification {
         // Token claims read and write operations
         let token = create_token_with_grants(&sk, &[&grant_id], &["op.read", "op.write"]);
 
-        let claims = token.raw.verify(&pk).expect("signature should verify");
+        let claims = token.raw().verify(&pk).expect("signature should verify");
 
         // Verify operations are present
         let ops_val = claims
@@ -1183,7 +1183,7 @@ mod grant_verification {
         let token = create_token_with_grants(&sk, &[&grant_id], &["op.test"]);
 
         // Serialize to CBOR
-        let cbor = token.raw.to_cbor().expect("should serialize");
+        let cbor = token.raw().to_cbor().expect("should serialize");
 
         // Deserialize
         let restored = CoseToken::from_cbor(&cbor).expect("should deserialize");
@@ -1280,7 +1280,7 @@ mod checkpoint_freshness {
             .checkpoint(chk_id, chk_seq);
 
         let cose_token = CoseToken::sign(sk, &claims).unwrap();
-        CapabilityToken { raw: cose_token }
+        CapabilityToken::from_raw(cose_token)
     }
 
     #[test]
@@ -1293,7 +1293,7 @@ mod checkpoint_freshness {
 
         let token = create_token_with_checkpoint(&sk, &chk_id, chk_seq);
 
-        let claims = token.raw.verify(&pk).expect("signature should verify");
+        let claims = token.raw().verify(&pk).expect("signature should verify");
 
         // Verify CHK_ID
         let chk_id_val = claims
@@ -1327,7 +1327,7 @@ mod checkpoint_freshness {
         let local_seq = 150u64;
 
         let token = create_token_with_checkpoint(&sk, &chk_id, token_seq);
-        let claims = token.raw.verify(&pk).expect("signature should verify");
+        let claims = token.raw().verify(&pk).expect("signature should verify");
 
         // Extract token's checkpoint sequence and check freshness
         if let Some(ciborium::Value::Integer(i)) = claims.get(fcp2_claims::CHK_SEQ) {
@@ -1357,7 +1357,7 @@ mod checkpoint_freshness {
         let local_seq = 150u64;
 
         let token = create_token_with_checkpoint(&sk, &chk_id, token_seq);
-        let claims = token.raw.verify(&pk).expect("signature should verify");
+        let claims = token.raw().verify(&pk).expect("signature should verify");
 
         if let Some(ciborium::Value::Integer(i)) = claims.get(fcp2_claims::CHK_SEQ) {
             let token_chk_seq = u64::try_from(*i).unwrap();
@@ -1385,7 +1385,7 @@ mod checkpoint_freshness {
         let local_chk_id = [0xBBu8; 16];
 
         let token = create_token_with_checkpoint(&sk, &token_chk_id, 100);
-        let claims = token.raw.verify(&pk).expect("signature should verify");
+        let claims = token.raw().verify(&pk).expect("signature should verify");
 
         if let Some(ciborium::Value::Bytes(token_id_bytes)) = claims.get(fcp2_claims::CHK_ID) {
             // IDs should not match
@@ -1414,7 +1414,7 @@ mod checkpoint_freshness {
         let token = create_token_with_checkpoint(&sk, &chk_id, chk_seq);
 
         // Serialize
-        let cbor = token.raw.to_cbor().unwrap();
+        let cbor = token.raw().to_cbor().unwrap();
 
         // Deserialize
         let restored = CoseToken::from_cbor(&cbor).unwrap();
@@ -1454,7 +1454,7 @@ mod checkpoint_freshness {
         let chk_seq = 0u64;
 
         let token = create_token_with_checkpoint(&sk, &chk_id, chk_seq);
-        let claims = token.raw.verify(&pk).expect("signature should verify");
+        let claims = token.raw().verify(&pk).expect("signature should verify");
 
         if let Some(ciborium::Value::Integer(i)) = claims.get(fcp2_claims::CHK_SEQ) {
             let seq: u64 = (*i).try_into().unwrap();
@@ -1478,7 +1478,7 @@ mod checkpoint_freshness {
         let chk_seq = u64::MAX;
 
         let token = create_token_with_checkpoint(&sk, &chk_id, chk_seq);
-        let claims = token.raw.verify(&pk).expect("signature should verify");
+        let claims = token.raw().verify(&pk).expect("signature should verify");
 
         if let Some(ciborium::Value::Integer(i)) = claims.get(fcp2_claims::CHK_SEQ) {
             // CBOR integers might be i128, need careful conversion
@@ -1517,7 +1517,7 @@ mod holder_proof_verification {
             .holder_node(holder_node);
 
         let cose_token = CoseToken::sign(sk, &claims).unwrap();
-        CapabilityToken { raw: cose_token }
+        CapabilityToken::from_raw(cose_token)
     }
 
     #[test]
@@ -1528,7 +1528,7 @@ mod holder_proof_verification {
         let holder = "node:holder-123";
         let token = create_token_with_holder(&sk, holder);
 
-        let claims = token.raw.verify(&pk).expect("signature should verify");
+        let claims = token.raw().verify(&pk).expect("signature should verify");
 
         let holder_val = claims
             .get(fcp2_claims::HOLDER_NODE)
@@ -1548,7 +1548,7 @@ mod holder_proof_verification {
         let expected_holder = "node:my-node";
         let token = create_token_with_holder(&sk, expected_holder);
 
-        let claims = token.raw.verify(&pk).expect("signature should verify");
+        let claims = token.raw().verify(&pk).expect("signature should verify");
 
         assert!(
             matches!(
@@ -1569,7 +1569,7 @@ mod holder_proof_verification {
         let local_node = "node:my-node";
 
         let token = create_token_with_holder(&sk, token_holder);
-        let claims = token.raw.verify(&pk).expect("signature should verify");
+        let claims = token.raw().verify(&pk).expect("signature should verify");
 
         if let Some(ciborium::Value::Text(holder_from_token)) = claims.get(fcp2_claims::HOLDER_NODE)
         {
@@ -1624,7 +1624,7 @@ mod holder_proof_verification {
         let token = create_token_with_holder(&sk, holder);
 
         // Serialize
-        let cbor = token.raw.to_cbor().unwrap();
+        let cbor = token.raw().to_cbor().unwrap();
 
         // Deserialize
         let restored = CoseToken::from_cbor(&cbor).unwrap();
@@ -1651,7 +1651,7 @@ mod holder_proof_verification {
         let holder = "node:test-holder_123.v2";
         let token = create_token_with_holder(&sk, holder);
 
-        let claims = token.raw.verify(&pk).expect("signature should verify");
+        let claims = token.raw().verify(&pk).expect("signature should verify");
 
         assert!(
             matches!(
@@ -1684,7 +1684,7 @@ mod issuer_verification {
             .expiration(now + Duration::hours(1));
 
         let cose_token = CoseToken::sign(sk, &claims).unwrap();
-        CapabilityToken { raw: cose_token }
+        CapabilityToken::from_raw(cose_token)
     }
 
     #[test]
@@ -1695,7 +1695,7 @@ mod issuer_verification {
         let issuer = "node:primary-issuer";
         let token = create_token_with_issuer(&sk, issuer);
 
-        let claims = token.raw.verify(&pk).expect("signature should verify");
+        let claims = token.raw().verify(&pk).expect("signature should verify");
 
         assert_eq!(claims.get_issuer(), Some(issuer));
     }
@@ -1709,7 +1709,7 @@ mod issuer_verification {
         let token_issuer = "node:secondary";
 
         let token = create_token_with_issuer(&sk, token_issuer);
-        let claims = token.raw.verify(&pk).expect("signature should verify");
+        let claims = token.raw().verify(&pk).expect("signature should verify");
 
         let issuer = claims.get_issuer().expect("issuer should be present");
 
@@ -1729,7 +1729,7 @@ mod issuer_verification {
         let token_issuer = "node:rogue";
 
         let token = create_token_with_issuer(&sk, token_issuer);
-        let claims = token.raw.verify(&pk).expect("signature should verify");
+        let claims = token.raw().verify(&pk).expect("signature should verify");
 
         let issuer = claims.get_issuer().expect("issuer should be present");
 
@@ -1775,7 +1775,7 @@ mod issuer_verification {
         let token = create_token_with_issuer(&sk, issuer);
 
         // Serialize
-        let cbor = token.raw.to_cbor().unwrap();
+        let cbor = token.raw().to_cbor().unwrap();
 
         // Deserialize
         let restored = CoseToken::from_cbor(&cbor).unwrap();
@@ -1795,7 +1795,7 @@ mod issuer_verification {
         let token_issuer = "node:any";
 
         let token = create_token_with_issuer(&sk, token_issuer);
-        let claims = token.raw.verify(&pk).expect("signature should verify");
+        let claims = token.raw().verify(&pk).expect("signature should verify");
 
         let issuer = claims.get_issuer().expect("issuer should be present");
 
@@ -2080,9 +2080,9 @@ mod test_helpers {
         let token = CapabilityToken::test_token();
 
         // Should have valid structure
-        let _cbor = token.raw.to_cbor().expect("should serialize");
+        let _cbor = token.raw().to_cbor().expect("should serialize");
 
         // Can get key ID
-        let _kid = token.raw.get_key_id().expect("should have key ID");
+        let _kid = token.raw().get_key_id().expect("should have key ID");
     }
 }

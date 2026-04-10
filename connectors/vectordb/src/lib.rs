@@ -1405,7 +1405,7 @@ mod tests {
             .validity(now, now + ChronoDuration::hours(1))
             .sign(signing_key)
             .expect("capability token sign");
-        CapabilityToken { raw: token }
+        CapabilityToken::from_raw(token)
     }
 
     #[test]

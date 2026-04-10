@@ -1623,7 +1623,7 @@ mod tests {
             .validity(now, now + ChronoDuration::hours(1))
             .sign(signing_key)
             .expect("capability token should sign");
-        CapabilityToken { raw }
+        CapabilityToken::from_raw(raw)
     }
 
     fn invoke_req(

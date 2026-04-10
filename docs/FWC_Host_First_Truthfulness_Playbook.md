@@ -1,6 +1,7 @@
 # FWC Host-First Truthfulness Playbook
 
-> Status: active operator/agent guide for the current `fwc` host-first truth contract
+> Status: active operator/agent guide for the current `fwc` host-first truth contract (V1 operational model)
+> Operational model: **V1 (Host-First)** — see [OPERATIONAL_MODEL_VERSIONS.md](OPERATIONAL_MODEL_VERSIONS.md) for version definitions
 > Primary beads: `flywheel_connectors-1g7z0.29.8`, `flywheel_connectors-1g7z0.29.8.3`
 > Implementation anchors: `crates/fwc/src/catalog.rs`, `crates/fwc/src/readiness.rs`, `crates/fwc/src/main.rs`, `crates/fwc/tests/cual_integration.rs`, `crates/fwc/src/test_observability.rs`, `docs/testing/e2e_log_schema.md`, `docs/testing/coverage-inventory.md`
 

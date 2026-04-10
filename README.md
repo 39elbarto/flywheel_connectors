@@ -1309,6 +1309,19 @@ Key principle: **if you can't explain a denial or quantify offline availability,
 
 ---
 
+## Operational Model Versions
+
+FCP defines two operational model versions. **All operators should assume V1 today.**
+
+| Version | Name | Status | Description |
+|---------|------|--------|-------------|
+| **V1** | Host-First | **Current, Proven** | `fwc -> fcp-host -> connector subprocesses`. Single-active-host deployment. Host-backed and node-local answers. |
+| **V2** | Mesh-Native | **Target, NOT YET OPERATIONAL** | Personal device mesh, symbol-first distribution, mesh-backed answers, automatic failover. Zero production evidence. |
+
+**V2 has no committed timeline.** See [docs/OPERATIONAL_MODEL_VERSIONS.md](docs/OPERATIONAL_MODEL_VERSIONS.md) for the full version definitions, per-command version requirements, and transition milestones.
+
+---
+
 ## Profiles and Roadmap
 
 ### MVP Profile (Ship First)

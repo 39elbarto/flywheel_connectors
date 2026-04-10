@@ -2264,9 +2264,9 @@ pub fn simulate_policy_decision(
 
     let claims = invoke
         .capability_token
-        .raw
+        .raw()
         .claims_unverified()
-        .map_err(|err| PolicySimulationError::TokenClaims {
+        .map_err(|err: fcp_crypto::CryptoError| PolicySimulationError::TokenClaims {
             message: err.to_string(),
         })?;
 

@@ -76,11 +76,16 @@ pub trait FcpConnector: Send + Sync {
     /// - **Policy-aware:** simulate must reflect capability/policy gating as closely as invoke.
     /// - **Deterministic & bounded:** checks must be bounded (timeouts, size limits).
     ///
-    /// Connectors SHOULD implement simulate for expensive or dangerous operations.
-    /// The default implementation returns "allowed" with no cost estimate.
+    /// Connectors MUST override simulate for each operation they support.
+    /// The default implementation denies all operations (default-deny principle).
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
-        // Default implementation: operation would succeed, no cost/availability info
-        Ok(SimulateResponse::allowed(req.id))
+        // Default-deny: connectors that have not explicitly validated an operation
+        // must not silently claim it would succeed.
+        Ok(SimulateResponse::denied(
+            req.id,
+            "Operation not simulated: connector has not implemented simulate() for this operation",
+            "FCP-3010",
+        ))
     }
 
     /// Subscribe to event topics.
@@ -1765,5 +1770,254 @@ mod tests {
             "total must equal success + error"
         );
         assert_eq!(m.requests_total, 500);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Default simulate() — default-deny enforcement (MOR/C3.5)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Minimal connector that does NOT override simulate(), relying on
+    /// the trait default to prove that it denies all operations.
+    struct DefaultSimulateConnector {
+        base: BaseConnector,
+    }
+
+    impl DefaultSimulateConnector {
+        fn new() -> Self {
+            Self {
+                base: BaseConnector::new(ConnectorId::from_static("test:default-sim:v1")),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl FcpConnector for DefaultSimulateConnector {
+        fn id(&self) -> &ConnectorId {
+            &self.base.id
+        }
+        async fn configure(&mut self, _: serde_json::Value) -> FcpResult<()> {
+            Ok(())
+        }
+        async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+            Ok(HandshakeResponse {
+                status: "accepted".into(),
+                capabilities_granted: vec![],
+                session_id: crate::SessionId::new(),
+                manifest_hash: "sha256:test".into(),
+                nonce: req.nonce,
+                event_caps: None,
+                auth_caps: None,
+                op_catalog_hash: None,
+            })
+        }
+        async fn health(&self) -> HealthSnapshot {
+            HealthSnapshot::ready()
+        }
+        fn metrics(&self) -> ConnectorMetrics {
+            self.base.metrics()
+        }
+        async fn shutdown(&mut self, _: ShutdownRequest) -> FcpResult<()> {
+            Ok(())
+        }
+        fn introspect(&self) -> Introspection {
+            Introspection {
+                operations: vec![],
+                events: vec![],
+                resource_types: vec![],
+                auth_caps: None,
+                event_caps: None,
+            }
+        }
+        async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
+            Ok(InvokeResponse::ok(req.id, serde_json::json!({})))
+        }
+        // NOTE: simulate() is intentionally NOT overridden here.
+        async fn subscribe(&self, req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
+            Ok(SubscribeResponse {
+                r#type: "response".into(),
+                id: req.id,
+                result: crate::SubscribeResult {
+                    confirmed_topics: vec![],
+                    cursors: std::collections::HashMap::new(),
+                    replay_supported: false,
+                    buffer: None,
+                },
+            })
+        }
+        async fn unsubscribe(&self, _: UnsubscribeRequest) -> FcpResult<()> {
+            Ok(())
+        }
+    }
+
+    /// Connector that explicitly overrides simulate() to allow its
+    /// known operation, proving the override pattern works.
+    struct OverrideSimulateConnector {
+        base: BaseConnector,
+    }
+
+    impl OverrideSimulateConnector {
+        fn new() -> Self {
+            Self {
+                base: BaseConnector::new(ConnectorId::from_static("test:override-sim:v1")),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl FcpConnector for OverrideSimulateConnector {
+        fn id(&self) -> &ConnectorId {
+            &self.base.id
+        }
+        async fn configure(&mut self, _: serde_json::Value) -> FcpResult<()> {
+            Ok(())
+        }
+        async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+            Ok(HandshakeResponse {
+                status: "accepted".into(),
+                capabilities_granted: vec![],
+                session_id: crate::SessionId::new(),
+                manifest_hash: "sha256:test".into(),
+                nonce: req.nonce,
+                event_caps: None,
+                auth_caps: None,
+                op_catalog_hash: None,
+            })
+        }
+        async fn health(&self) -> HealthSnapshot {
+            HealthSnapshot::ready()
+        }
+        fn metrics(&self) -> ConnectorMetrics {
+            self.base.metrics()
+        }
+        async fn shutdown(&mut self, _: ShutdownRequest) -> FcpResult<()> {
+            Ok(())
+        }
+        fn introspect(&self) -> Introspection {
+            Introspection {
+                operations: vec![],
+                events: vec![],
+                resource_types: vec![],
+                auth_caps: None,
+                event_caps: None,
+            }
+        }
+        async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
+            Ok(InvokeResponse::ok(req.id, serde_json::json!({})))
+        }
+        async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+            if req.operation.as_str() == "test.allowed_op" {
+                Ok(SimulateResponse::allowed(req.id))
+            } else {
+                Ok(SimulateResponse::denied(
+                    req.id,
+                    "Unknown operation",
+                    "FCP-3010",
+                ))
+            }
+        }
+        async fn subscribe(&self, req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
+            Ok(SubscribeResponse {
+                r#type: "response".into(),
+                id: req.id,
+                result: crate::SubscribeResult {
+                    confirmed_topics: vec![],
+                    cursors: std::collections::HashMap::new(),
+                    replay_supported: false,
+                    buffer: None,
+                },
+            })
+        }
+        async fn unsubscribe(&self, _: UnsubscribeRequest) -> FcpResult<()> {
+            Ok(())
+        }
+    }
+
+    fn make_simulate_request(operation: &'static str) -> SimulateRequest {
+        SimulateRequest {
+            r#type: "simulate".into(),
+            id: crate::RequestId::new("sim-test"),
+            connector_id: ConnectorId::from_static("test:default-sim:v1"),
+            operation: crate::OperationId::from_static(operation),
+            zone_id: crate::ZoneId::work(),
+            input: serde_json::json!({}),
+            capability_token: crate::CapabilityToken::test_token(),
+            estimate_cost: false,
+            check_availability: false,
+            context: None,
+            correlation_id: None,
+        }
+    }
+
+    #[test]
+    fn default_simulate_returns_denied() {
+        let _ = fcp_async_core::runtime::block_on_sync(async {
+            let connector = DefaultSimulateConnector::new();
+            let req = make_simulate_request("any.operation");
+
+            let result = connector.simulate(req).await;
+
+            assert!(result.is_ok());
+            let response = result.unwrap();
+            assert!(
+                !response.would_succeed,
+                "Default simulate() must deny — default-deny principle"
+            );
+        });
+    }
+
+    #[test]
+    fn default_simulate_denied_includes_reason_code() {
+        let _ = fcp_async_core::runtime::block_on_sync(async {
+            let connector = DefaultSimulateConnector::new();
+            let req = make_simulate_request("unknown.op");
+
+            let response = connector.simulate(req).await.unwrap();
+
+            assert!(response.failure_reason.is_some());
+            assert!(
+                response
+                    .failure_reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("not simulated"),
+                "Reason should explain the operation was not simulated"
+            );
+            assert_eq!(
+                response.denial_code.as_deref(),
+                Some("FCP-3010"),
+                "Denial code should be FCP-3010"
+            );
+        });
+    }
+
+    #[test]
+    fn override_simulate_returns_allowed_for_known_op() {
+        let _ = fcp_async_core::runtime::block_on_sync(async {
+            let connector = OverrideSimulateConnector::new();
+            let req = make_simulate_request("test.allowed_op");
+
+            let response = connector.simulate(req).await.unwrap();
+
+            assert!(
+                response.would_succeed,
+                "Explicit simulate() override must allow known operations"
+            );
+            assert!(response.failure_reason.is_none());
+        });
+    }
+
+    #[test]
+    fn override_simulate_denies_unknown_op() {
+        let _ = fcp_async_core::runtime::block_on_sync(async {
+            let connector = OverrideSimulateConnector::new();
+            let req = make_simulate_request("unknown.operation");
+
+            let response = connector.simulate(req).await.unwrap();
+
+            assert!(
+                !response.would_succeed,
+                "Override should still deny operations it doesn't handle"
+            );
+        });
     }
 }

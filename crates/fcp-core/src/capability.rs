@@ -696,16 +696,109 @@ pub struct RoleAssignment {
     pub constraints: CapabilityConstraints,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phantom type markers for compile-time token verification enforcement
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Marker type: token has not been cryptographically verified.
+///
+/// A `CapabilityToken<Unverified>` can be created by deserialization or
+/// construction, but it carries NO proof that its signature, claims, or
+/// zone binding are valid. Code that requires authorization evidence must
+/// accept `CapabilityToken<Verified>` instead.
+#[derive(Debug, Clone, Copy)]
+pub struct Unverified;
+
+/// Marker type: token has been cryptographically verified by a
+/// [`CapabilityVerifier`].
+///
+/// A `CapabilityToken<Verified>` can only be produced by
+/// [`CapabilityVerifier::verify()`], which validates the COSE signature,
+/// timing, zone binding, operation grant, and resource constraints.
+/// The verified claims are accessible via [`CapabilityToken::claims()`].
+#[derive(Debug, Clone, Copy)]
+pub struct Verified;
+
+/// Convenience alias for an unverified capability token.
+pub type UnverifiedToken = CapabilityToken<Unverified>;
+
+/// Convenience alias for a verified capability token.
+pub type VerifiedToken = CapabilityToken<Verified>;
+
 /// Flywheel Capability Token (FCT) - cryptographically signed authorization.
 ///
-/// Wraps a `COSE_Sign1` token containing FCP2 claims.
+/// Wraps a `COSE_Sign1` token containing FCP2 claims, with compile-time
+/// tracking of verification state via phantom types.
+///
+/// - `CapabilityToken<Unverified>` (the default): deserialized but not yet
+///   verified. Cannot access claims.
+/// - `CapabilityToken<Verified>`: produced only by [`CapabilityVerifier::verify()`].
+///   Carries the verified [`CwtClaims`] accessible via [`claims()`](CapabilityToken::claims).
+///
+/// This type-level distinction prevents accidentally using an unverified token
+/// where a verified one is required — the compiler catches the mistake.
 #[derive(Debug, Clone)]
-pub struct CapabilityToken {
+pub struct CapabilityToken<S = Unverified> {
     /// The raw `COSE_Sign1` token
-    pub raw: CoseToken,
+    raw: CoseToken,
+    /// Verified claims — populated only in `Verified` state.
+    verified_claims: Option<CwtClaims>,
+    /// Phantom data for compile-time state tracking.
+    _state: std::marker::PhantomData<S>,
 }
 
-impl Serialize for CapabilityToken {
+// Methods available on ALL token states
+impl<S> CapabilityToken<S> {
+    /// Access the raw COSE token.
+    #[must_use]
+    pub const fn raw(&self) -> &CoseToken {
+        &self.raw
+    }
+
+    /// Consume the token and return the raw COSE token.
+    #[must_use]
+    pub fn into_raw(self) -> CoseToken {
+        self.raw
+    }
+}
+
+// Methods available only on VERIFIED tokens
+impl CapabilityToken<Verified> {
+    /// Access the cryptographically verified claims.
+    ///
+    /// These claims have been validated for signature, timing, zone binding,
+    /// and operation grant by a [`CapabilityVerifier`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the token was constructed without verified claims. This
+    /// cannot happen through the public API since only `CapabilityVerifier::verify`
+    /// produces `CapabilityToken<Verified>`.
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // Cannot be const: calls Option::as_ref + expect
+    pub fn claims(&self) -> &CwtClaims {
+        self.verified_claims
+            .as_ref()
+            .expect("Verified token always has claims")
+    }
+
+    /// Downgrade a verified token back to unverified.
+    ///
+    /// This discards the verification proof. Useful when a verified token
+    /// needs to be re-serialized or passed to an API that accepts unverified
+    /// tokens.
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // Cannot be const: drops Option<CwtClaims>
+    pub fn downgrade(self) -> CapabilityToken<Unverified> {
+        CapabilityToken {
+            raw: self.raw,
+            verified_claims: None,
+            _state: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Serialize for CapabilityToken<Unverified> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -716,7 +809,18 @@ impl Serialize for CapabilityToken {
     }
 }
 
-impl<'de> Deserialize<'de> for CapabilityToken {
+impl Serialize for CapabilityToken<Verified> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Serialize as the raw COSE bytes (same as unverified)
+        let bytes = self.raw.to_cbor().map_err(serde::ser::Error::custom)?;
+        serializer.serialize_bytes(&bytes)
+    }
+}
+
+impl<'de> Deserialize<'de> for CapabilityToken<Unverified> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -768,25 +872,39 @@ impl<'de> Deserialize<'de> for CapabilityToken {
         let bytes = deserializer.deserialize_any(BytesVisitor)?;
         let raw = CoseToken::from_cbor(&bytes).map_err(serde::de::Error::custom)?;
 
-        // Note: Claims are not verified here! They are just parsed.
-        // The verifier MUST be called.
-
-        Ok(Self { raw })
+        // Deserialization always produces Unverified — the caller MUST
+        // pass through CapabilityVerifier::verify() before using claims.
+        Ok(Self {
+            raw,
+            verified_claims: None,
+            _state: std::marker::PhantomData,
+        })
     }
 }
 
-impl CapabilityToken {
+// Methods available only on UNVERIFIED tokens
+impl CapabilityToken<Unverified> {
+    /// Create a new unverified token from a raw COSE token.
+    #[must_use]
+    pub const fn from_raw(raw: CoseToken) -> Self {
+        Self {
+            raw,
+            verified_claims: None,
+            _state: std::marker::PhantomData,
+        }
+    }
+
     /// Create a test token with minimal fields for testing.
     ///
-    /// This token has a dummy signature and should only be used in tests.
+    /// This token has a valid signature from a throwaway key and should
+    /// only be used in tests. It is **unverified** — call
+    /// `CapabilityVerifier::verify()` to produce a `CapabilityToken<Verified>`.
     ///
     /// # Panics
     ///
     /// Panics if token signing fails during test token construction.
     #[must_use]
     pub fn test_token() -> Self {
-        // Construct a dummy CoseToken from raw bytes (invalid signature but structurally okay)
-        // Or better, generate a real one with a throwaway key.
         use fcp_crypto::cose::CapabilityTokenBuilder;
         use fcp_crypto::ed25519::Ed25519SigningKey;
 
@@ -803,7 +921,7 @@ impl CapabilityToken {
             .sign(&signing_key)
             .expect("Failed to create test token");
 
-        Self { raw: cose_token }
+        Self::from_raw(cose_token)
     }
 }
 
@@ -1062,13 +1180,46 @@ impl CapabilityVerifier {
         })
     }
 
-    /// Verify a capability token.
+    /// Verify a capability token, producing a `CapabilityToken<Verified>`.
+    ///
+    /// On success, returns a verified token that carries the validated
+    /// [`CwtClaims`]. This is the ONLY way to obtain a
+    /// `CapabilityToken<Verified>`. The raw token is cloned into the
+    /// verified token; the original unverified token remains available
+    /// but cannot access claims.
     ///
     /// # Errors
     ///
     /// Returns an error if the signature is invalid, claims are missing/expired,
     /// zone binding fails, or the operation is not granted.
     pub fn verify(
+        &self,
+        token: &CapabilityToken,
+        required_capability: &CapabilityId,
+        operation: &OperationId,
+        resource_uris: &[String],
+    ) -> FcpResult<CapabilityToken<Verified>> {
+        let claims = self.verify_claims(token, required_capability, operation, resource_uris)?;
+
+        Ok(CapabilityToken {
+            raw: token.raw.clone(),
+            verified_claims: Some(claims),
+            _state: std::marker::PhantomData,
+        })
+    }
+
+    /// Verify a capability token by reference, returning just the claims.
+    ///
+    /// This is the non-consuming variant — it validates the token and returns
+    /// the verified claims without producing a `CapabilityToken<Verified>`.
+    /// Prefer [`verify()`](Self::verify) when you need compile-time proof
+    /// that the token has been verified.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the signature is invalid, claims are missing/expired,
+    /// zone binding fails, or the operation is not granted.
+    pub fn verify_claims(
         &self,
         token: &CapabilityToken,
         required_capability: &CapabilityId,
@@ -1634,7 +1785,7 @@ mod tests {
             .expect("Failed to sign token");
 
         // 3. Wrap in CapabilityToken
-        let token = CapabilityToken { raw: cose_token };
+        let token = CapabilityToken::from_raw(cose_token);
 
         // 4. Verify
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
@@ -1642,11 +1793,11 @@ mod tests {
         let op = OperationId::new("op.test").unwrap();
         let cap = CapabilityId::new("cap.test").unwrap();
 
-        let claims = verifier
+        let verified = verifier
             .verify(&token, &cap, &op, &[])
             .expect("Verification failed");
 
-        assert_eq!(claims.get_capability_id(), Some("cap.test"));
+        assert_eq!(verified.claims().get_capability_id(), Some("cap.test"));
     }
 
     #[test]
@@ -1667,7 +1818,7 @@ mod tests {
             .sign(&signing_key)
             .unwrap();
 
-        let token = CapabilityToken { raw: cose_token };
+        let token = CapabilityToken::from_raw(cose_token);
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
 
         let op = OperationId::new("op.test").unwrap();
@@ -1695,7 +1846,7 @@ mod tests {
             .sign(&signing_key)
             .unwrap();
 
-        let token = CapabilityToken { raw: cose_token };
+        let token = CapabilityToken::from_raw(cose_token);
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::new("op.test").unwrap();
         let cap = CapabilityId::new("cap.test").unwrap();
@@ -1721,7 +1872,7 @@ mod tests {
             .sign(&signing_key)
             .unwrap();
 
-        let token = CapabilityToken { raw: cose_token };
+        let token = CapabilityToken::from_raw(cose_token);
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
         let op = OperationId::new("op.test").unwrap();
         let cap = CapabilityId::new("cap.test").unwrap();
@@ -3576,7 +3727,7 @@ mod tests {
             .sign(&signing_key)
             .unwrap();
 
-        let token = CapabilityToken { raw: cose_token };
+        let token = CapabilityToken::from_raw(cose_token);
         let verifier = CapabilityVerifier::new(wrong_pub, ZoneId::work(), InstanceId::new());
         let op = OperationId::new("op.test").unwrap();
         let cap = CapabilityId::new("cap.test").unwrap();
@@ -3632,5 +3783,225 @@ mod tests {
         let a = RiskLevel::High;
         let b = a;
         assert_eq!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Phantom Type Verification State Tests (C3.1)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn phantom_type_default_is_unverified() {
+        // CapabilityToken without type parameter defaults to Unverified
+        let token: CapabilityToken = CapabilityToken::test_token();
+        let _: CapabilityToken<Unverified> = token;
+    }
+
+    #[test]
+    fn phantom_type_verify_produces_verified() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let pub_bytes = verifying_key.to_bytes();
+        let now = Utc::now();
+
+        let cose_token = CapabilityTokenBuilder::new()
+            .capability_id("cap.test")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.test"])
+            .issuer("node:primary")
+            .validity(now, now + Duration::hours(1))
+            .sign(&signing_key)
+            .unwrap();
+
+        let unverified: CapabilityToken<Unverified> = CapabilityToken::from_raw(cose_token);
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
+
+        // verify() produces Verified from Unverified reference
+        let verified: CapabilityToken<Verified> =
+            verifier.verify(&unverified, &cap, &op, &[]).unwrap();
+
+        // Verified token has claims
+        assert!(verified.claims().get_capability_id().is_some());
+    }
+
+    #[test]
+    fn phantom_type_verified_token_has_claims() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let pub_bytes = verifying_key.to_bytes();
+        let now = Utc::now();
+
+        let cose_token = CapabilityTokenBuilder::new()
+            .capability_id("cap.phantom")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.read"])
+            .issuer("node:primary")
+            .validity(now, now + Duration::hours(1))
+            .sign(&signing_key)
+            .unwrap();
+
+        let token = CapabilityToken::from_raw(cose_token);
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let op = OperationId::new("op.read").unwrap();
+        let cap = CapabilityId::new("cap.phantom").unwrap();
+
+        let verified = verifier.verify(&token, &cap, &op, &[]).unwrap();
+        assert_eq!(verified.claims().get_capability_id(), Some("cap.phantom"));
+        assert_eq!(verified.claims().get_zone_id(), Some("z:work"));
+    }
+
+    #[test]
+    fn phantom_type_raw_accessible_on_both_states() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let pub_bytes = verifying_key.to_bytes();
+        let now = Utc::now();
+
+        let cose_token = CapabilityTokenBuilder::new()
+            .capability_id("cap.raw")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.raw"])
+            .issuer("node:primary")
+            .validity(now, now + Duration::hours(1))
+            .sign(&signing_key)
+            .unwrap();
+
+        // raw() works on Unverified
+        let unverified = CapabilityToken::from_raw(cose_token);
+        let _raw_unverified = unverified.raw().to_cbor().unwrap();
+
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let op = OperationId::new("op.raw").unwrap();
+        let cap = CapabilityId::new("cap.raw").unwrap();
+
+        // raw() also works on Verified
+        let verified = verifier.verify(&unverified, &cap, &op, &[]).unwrap();
+        let _raw_verified = verified.raw().to_cbor().unwrap();
+    }
+
+    #[test]
+    fn phantom_type_downgrade_verified_to_unverified() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let pub_bytes = verifying_key.to_bytes();
+        let now = Utc::now();
+
+        let cose_token = CapabilityTokenBuilder::new()
+            .capability_id("cap.down")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.down"])
+            .issuer("node:primary")
+            .validity(now, now + Duration::hours(1))
+            .sign(&signing_key)
+            .unwrap();
+
+        let token = CapabilityToken::from_raw(cose_token);
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let op = OperationId::new("op.down").unwrap();
+        let cap = CapabilityId::new("cap.down").unwrap();
+
+        let verified = verifier.verify(&token, &cap, &op, &[]).unwrap();
+        let downgraded: CapabilityToken<Unverified> = verified.downgrade();
+
+        // Downgraded token can be re-verified
+        let re_verified = verifier.verify(&downgraded, &cap, &op, &[]).unwrap();
+        assert_eq!(re_verified.claims().get_capability_id(), Some("cap.down"));
+    }
+
+    #[test]
+    fn phantom_type_verify_claims_ref_api() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let pub_bytes = verifying_key.to_bytes();
+        let now = Utc::now();
+
+        let cose_token = CapabilityTokenBuilder::new()
+            .capability_id("cap.ref")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.ref"])
+            .issuer("node:primary")
+            .validity(now, now + Duration::hours(1))
+            .sign(&signing_key)
+            .unwrap();
+
+        let token = CapabilityToken::from_raw(cose_token);
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let op = OperationId::new("op.ref").unwrap();
+        let cap = CapabilityId::new("cap.ref").unwrap();
+
+        // verify_claims() borrows the token and returns claims
+        let claims = verifier.verify_claims(&token, &cap, &op, &[]).unwrap();
+        assert_eq!(claims.get_capability_id(), Some("cap.ref"));
+
+        // Token is still usable (not consumed)
+        let _raw = token.raw().to_cbor().unwrap();
+    }
+
+    #[test]
+    fn phantom_type_type_aliases_work() {
+        let token: UnverifiedToken = CapabilityToken::test_token();
+        assert!(!token.raw().to_cbor().unwrap().is_empty());
+    }
+
+    #[test]
+    fn phantom_type_clone_preserves_state() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let pub_bytes = verifying_key.to_bytes();
+        let now = Utc::now();
+
+        let cose_token = CapabilityTokenBuilder::new()
+            .capability_id("cap.clone")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.clone"])
+            .issuer("node:primary")
+            .validity(now, now + Duration::hours(1))
+            .sign(&signing_key)
+            .unwrap();
+
+        let token = CapabilityToken::from_raw(cose_token);
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let op = OperationId::new("op.clone").unwrap();
+        let cap = CapabilityId::new("cap.clone").unwrap();
+
+        let verified = verifier.verify(&token, &cap, &op, &[]).unwrap();
+
+        // Clone a verified token - clone preserves Verified state
+        let cloned = verified.clone();
+        assert_eq!(cloned.claims().get_capability_id(), Some("cap.clone"));
+    }
+
+    #[test]
+    fn phantom_type_test_token_is_unverified() {
+        let token = CapabilityToken::test_token();
+        // test_token() returns CapabilityToken<Unverified>
+        let _: &CapabilityToken<Unverified> = &token;
+        // raw() is accessible
+        assert!(!token.raw().to_cbor().unwrap().is_empty());
+    }
+
+    #[test]
+    fn phantom_type_from_raw_creates_unverified() {
+        let signing_key = Ed25519SigningKey::generate();
+        let now = Utc::now();
+        let cose = CapabilityTokenBuilder::new()
+            .capability_id("cap.raw")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.raw"])
+            .issuer("node:primary")
+            .validity(now, now + Duration::hours(1))
+            .sign(&signing_key)
+            .unwrap();
+
+        let token = CapabilityToken::from_raw(cose);
+        let _: &CapabilityToken<Unverified> = &token;
     }
 }

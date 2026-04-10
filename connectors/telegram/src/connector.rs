@@ -1157,7 +1157,7 @@ impl TelegramConnector {
         }
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(&token, &cap_id, &op_id, &resource_uris)?;
+            verifier.verify(token, &cap_id, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }

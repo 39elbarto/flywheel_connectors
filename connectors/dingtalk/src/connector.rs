@@ -237,7 +237,7 @@ impl DingTalkConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         let capability = required_capability(req.operation.as_str())?;
-        verifier.verify(&req.capability_token, &capability, &req.operation, &[])?;
+        verifier.verify(req.capability_token, &capability, &req.operation, &[])?;
 
         let output = match req.operation.as_str() {
             OP_SEND_TEXT => {
@@ -545,7 +545,7 @@ impl FcpConnector for DingTalkConnector {
                 FcpError::NotHandshaken.error_code(),
             ));
         };
-        if let Err(error) = verifier.verify(&req.capability_token, &capability, &req.operation, &[])
+        if let Err(error) = verifier.verify(req.capability_token, &capability, &req.operation, &[])
         {
             let mut response =
                 SimulateResponse::denied(req.id, error.to_string(), error.error_code());

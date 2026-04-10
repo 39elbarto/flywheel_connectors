@@ -91,7 +91,7 @@ impl LlmRouterConnector {
                         code: 1003,
                         message: "Invalid operation ID format".into(),
                     })?;
-                verifier.verify(&token, &cap_id, &op_id, &[])?;
+                verifier.verify(token, &cap_id, &op_id, &[])?;
             }
             return Ok(());
         }

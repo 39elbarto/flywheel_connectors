@@ -1383,7 +1383,7 @@ impl CloudflareConnector {
                     });
                 }
             };
-            verifier.verify(&req.capability_token, &cap, &req.operation, &[])?;
+            verifier.verify(req.capability_token, &cap, &req.operation, &[])?;
         } else {
             return Err(FcpError::Internal {
                 message: "connector ready state missing capability verifier".into(),

@@ -354,7 +354,7 @@ impl OutlookConnector {
         self.base.check_ready()?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         let cap = required_capability(req.operation.as_str())?;
-        verifier.verify(&req.capability_token, &cap, &req.operation, &[])?;
+        verifier.verify(req.capability_token, &cap, &req.operation, &[])?;
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
         let output = match req.operation.as_str() {
@@ -621,7 +621,7 @@ impl FcpConnector for OutlookConnector {
                 FcpError::NotHandshaken.error_code(),
             ));
         };
-        if let Err(e) = verifier.verify(&req.capability_token, &cap, &req.operation, &[]) {
+        if let Err(e) = verifier.verify(req.capability_token, &cap, &req.operation, &[]) {
             let mut response = SimulateResponse::denied(req.id, e.to_string(), e.error_code());
             if e.error_code() == "FCP-3001" {
                 response = response.with_missing_capabilities(vec![cap.as_str().to_string()]);

@@ -1304,7 +1304,7 @@ impl DiscordConnector {
                 message: "connector ready state missing capability verifier".into(),
             });
         };
-        verifier.verify(&token, &cap_id, &op_id, &resource_uris)?;
+        verifier.verify(token, &cap_id, &op_id, &resource_uris)?;
 
         match operation {
             "discord.send_message" => self.invoke_send_message(input).await,

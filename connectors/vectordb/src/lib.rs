@@ -463,7 +463,7 @@ impl VectorDbConnector {
             message: "Invalid operation ID format".into(),
         })?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
-        verifier.verify(&token, &required_capability, &op_id, &[])?;
+        verifier.verify(token, &required_capability, &op_id, &[])?;
 
         match operation {
             "vectordb.list_collections" => Self::invoke_list_collections(input),

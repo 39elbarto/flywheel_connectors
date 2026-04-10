@@ -761,7 +761,7 @@ impl BlueBubblesConnector {
                     });
                 }
             };
-            verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
+            verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
         } else {
             return Err(FcpError::NotConfigured);
         }

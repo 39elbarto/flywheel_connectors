@@ -449,7 +449,7 @@ impl FcpConnector for GooglePlacesConnector {
                 FcpError::NotHandshaken.error_code(),
             ));
         };
-        if let Err(error) = verifier.verify(&req.capability_token, &capability, &req.operation, &[])
+        if let Err(error) = verifier.verify(req.capability_token, &capability, &req.operation, &[])
         {
             let mut response =
                 SimulateResponse::denied(req.id, error.to_string(), error.error_code());

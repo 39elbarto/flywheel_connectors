@@ -169,7 +169,7 @@ impl FcpConnector for TerraformConnectorAdapter {
             message: "terraform verifier not initialized; handshake required".into(),
         })?;
         let required_cap = required_capability(req.operation.as_str())?;
-        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
+        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
 
         let request_id = req.id.clone();
         let value = self
@@ -187,7 +187,7 @@ impl FcpConnector for TerraformConnectorAdapter {
             message: "terraform verifier not initialized; handshake required".into(),
         })?;
         let required_cap = required_capability(req.operation.as_str())?;
-        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
+        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
 
         let value = self
             .connector

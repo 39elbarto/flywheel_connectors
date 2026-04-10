@@ -254,7 +254,7 @@ impl HueConnector {
                 });
             }
         };
-        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
+        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
         let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
         let output = match req.operation.as_str() {
             OP_HEALTH => json!({
@@ -469,7 +469,7 @@ impl FcpConnector for HueConnector {
                 FcpError::NotHandshaken.error_code(),
             ));
         };
-        if let Err(error) = verifier.verify(&req.capability_token, &capability, &req.operation, &[])
+        if let Err(error) = verifier.verify(req.capability_token, &capability, &req.operation, &[])
         {
             let mut response =
                 SimulateResponse::denied(req.id, error.to_string(), error.error_code());

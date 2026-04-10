@@ -569,7 +569,7 @@ impl VercelConnector {
                 message: format!("Unknown operation: {operation}"),
             });
         };
-        verifier.verify(&req.capability_token, &capability, &req.operation, &[])?;
+        verifier.verify(req.capability_token, &capability, &req.operation, &[])?;
 
         let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
             message: "connector ready state missing Vercel client".into(),

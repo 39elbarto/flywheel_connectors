@@ -1402,7 +1402,7 @@ impl MatrixConnector {
         let verifier = self.verifier.as_ref().ok_or_else(|| FcpError::Internal {
             message: "connector ready state missing capability verifier".into(),
         })?;
-        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
+        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
 
         let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
             message: "connector ready state missing Matrix client".into(),

@@ -160,7 +160,7 @@ impl FcpConnector for MondayConnectorAdapter {
             message: "Monday verifier not initialized; handshake required".into(),
         })?;
         let cap = required_capability(req.operation.as_str())?;
-        verifier.verify(&req.capability_token, &cap, &req.operation, &[])?;
+        verifier.verify(req.capability_token, &cap, &req.operation, &[])?;
 
         let request_id = req.id.clone();
         let value = self
@@ -178,7 +178,7 @@ impl FcpConnector for MondayConnectorAdapter {
             message: "Monday verifier not initialized; handshake required".into(),
         })?;
         let cap = required_capability(req.operation.as_str())?;
-        verifier.verify(&req.capability_token, &cap, &req.operation, &[])?;
+        verifier.verify(req.capability_token, &cap, &req.operation, &[])?;
 
         let value = self
             .connector

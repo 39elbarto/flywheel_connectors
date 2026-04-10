@@ -2153,7 +2153,7 @@ impl FcpConnector for {struct_name}Connector {{
         }};
 
         let required_cap = CapabilityId::from_static(CAP_SCAFFOLD_STATUS);
-        if let Err(error) = verifier.verify(&req.capability_token, &required_cap, &req.operation, &[]) {{
+        if let Err(error) = verifier.verify(req.capability_token, &required_cap, &req.operation, &[]) {{
             let mut response =
                 SimulateResponse::denied(req.id, error.to_string(), error.error_code());
             if error.error_code() == "FCP-3001" {{
@@ -2210,7 +2210,7 @@ impl FcpConnector for {struct_name}Connector {{
         self.base.check_ready()?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         let required_cap = CapabilityId::from_static(CAP_SCAFFOLD_STATUS);
-        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
+        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
         self.enforce_limits(&req.input)?;
         let runtime = self.runtime.as_ref().ok_or(FcpError::NotConfigured)?;
         let ctx = runtime.request_context();

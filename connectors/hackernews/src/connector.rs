@@ -947,7 +947,7 @@ impl HackerNewsConnector {
                 });
             }
         };
-        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
+        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
 
         let runtime = self.runtime.as_ref().ok_or(FcpError::Internal {
             message: "Connector runtime missing after configure".into(),

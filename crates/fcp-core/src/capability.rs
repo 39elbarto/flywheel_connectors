@@ -1194,16 +1194,16 @@ impl CapabilityVerifier {
     /// zone binding fails, or the operation is not granted.
     pub fn verify(
         &self,
-        token: &CapabilityToken,
+        token: CapabilityToken,
         required_capability: &CapabilityId,
         operation: &OperationId,
         resource_uris: &[String],
     ) -> FcpResult<CapabilityToken<Verified>> {
         let claims =
-            self.verify_claims_inner(token, required_capability, operation, resource_uris)?;
+            self.verify_claims_inner(&token, required_capability, operation, resource_uris)?;
 
         Ok(CapabilityToken {
-            raw: token.raw.clone(),
+            raw: token.raw,
             verified_claims: Some(claims),
             _state: std::marker::PhantomData,
         })
@@ -1806,7 +1806,7 @@ mod tests {
         let cap = CapabilityId::new("cap.test").unwrap();
 
         let verified = verifier
-            .verify(&token, &cap, &op, &[])
+            .verify(token, &cap, &op, &[])
             .expect("Verification failed");
 
         assert_eq!(verified.claims().get_capability_id(), Some("cap.test"));
@@ -1837,7 +1837,7 @@ mod tests {
         // We TRY to use "cap.critical"
         let required_cap = CapabilityId::new("cap.critical").unwrap();
 
-        let result = verifier.verify(&token, &required_cap, &op, &[]);
+        let result = verifier.verify(token, &required_cap, &op, &[]);
         assert!(matches!(result, Err(FcpError::OperationNotGranted { .. })));
     }
 
@@ -1863,7 +1863,7 @@ mod tests {
         let op = OperationId::new("op.test").unwrap();
         let cap = CapabilityId::new("cap.test").unwrap();
 
-        let result = verifier.verify(&token, &cap, &op, &[]);
+        let result = verifier.verify(token, &cap, &op, &[]);
         assert!(matches!(result, Err(FcpError::ZoneViolation { .. })));
     }
 
@@ -1889,7 +1889,7 @@ mod tests {
         let op = OperationId::new("op.test").unwrap();
         let cap = CapabilityId::new("cap.test").unwrap();
 
-        let result = verifier.verify(&token, &cap, &op, &[]);
+        let result = verifier.verify(token, &cap, &op, &[]);
         assert!(matches!(result, Err(FcpError::TokenExpired)));
     }
 
@@ -3744,7 +3744,7 @@ mod tests {
         let op = OperationId::new("op.test").unwrap();
         let cap = CapabilityId::new("cap.test").unwrap();
 
-        let result = verifier.verify(&token, &cap, &op, &[]);
+        let result = verifier.verify(token, &cap, &op, &[]);
         assert!(result.is_err());
     }
 
@@ -3832,7 +3832,7 @@ mod tests {
 
         // verify() consumes the Unverified token and produces Verified
         let verified: CapabilityToken<Verified> =
-            verifier.verify(&unverified, &cap, &op, &[]).unwrap();
+            verifier.verify(unverified, &cap, &op, &[]).unwrap();
 
         // Verified token has claims
         assert!(verified.claims().get_capability_id().is_some());
@@ -3860,7 +3860,7 @@ mod tests {
         let op = OperationId::new("op.read").unwrap();
         let cap = CapabilityId::new("cap.phantom").unwrap();
 
-        let verified = verifier.verify(&token, &cap, &op, &[]).unwrap();
+        let verified = verifier.verify(token, &cap, &op, &[]).unwrap();
         assert_eq!(verified.claims().get_capability_id(), Some("cap.phantom"));
         assert_eq!(verified.claims().get_zone_id(), Some("z:work"));
     }
@@ -3891,7 +3891,7 @@ mod tests {
         let cap = CapabilityId::new("cap.raw").unwrap();
 
         // raw() also works on Verified (verify consumes the unverified token)
-        let verified = verifier.verify(&unverified, &cap, &op, &[]).unwrap();
+        let verified = verifier.verify(unverified, &cap, &op, &[]).unwrap();
         let _raw_verified = verified.raw().to_cbor().unwrap();
     }
 
@@ -3917,11 +3917,11 @@ mod tests {
         let op = OperationId::new("op.down").unwrap();
         let cap = CapabilityId::new("cap.down").unwrap();
 
-        let verified = verifier.verify(&token, &cap, &op, &[]).unwrap();
+        let verified = verifier.verify(token, &cap, &op, &[]).unwrap();
         let downgraded: CapabilityToken<Unverified> = verified.downgrade();
 
         // Downgraded token can be re-verified (verify consumes it)
-        let re_verified = verifier.verify(&downgraded, &cap, &op, &[]).unwrap();
+        let re_verified = verifier.verify(downgraded, &cap, &op, &[]).unwrap();
         assert_eq!(re_verified.claims().get_capability_id(), Some("cap.down"));
     }
 
@@ -3983,7 +3983,7 @@ mod tests {
         let op = OperationId::new("op.clone").unwrap();
         let cap = CapabilityId::new("cap.clone").unwrap();
 
-        let verified = verifier.verify(&token, &cap, &op, &[]).unwrap();
+        let verified = verifier.verify(token, &cap, &op, &[]).unwrap();
 
         // Clone a verified token - clone preserves Verified state
         let cloned = verified.clone();
@@ -4043,7 +4043,7 @@ mod tests {
         let cap = CapabilityId::new("cap.consume").unwrap();
 
         // verify() takes ownership — `token` is moved here
-        let verified = verifier.verify(&token, &cap, &op, &[]).unwrap();
+        let verified = verifier.verify(token, &cap, &op, &[]).unwrap();
 
         // `token` cannot be used after this point (compiler enforces)
         // Verified token works:
@@ -4083,7 +4083,7 @@ mod tests {
 
         // Token is still usable — can call raw() or verify() again
         let _raw = token.raw().to_cbor().unwrap();
-        let verified = verifier.verify(&token, &cap, &op, &[]).unwrap();
+        let verified = verifier.verify(token, &cap, &op, &[]).unwrap();
         assert_eq!(verified.claims().get_zone_id(), Some("z:work"));
     }
 
@@ -4111,7 +4111,7 @@ mod tests {
         let cap = CapabilityId::new("cap.serde").unwrap();
 
         // Verify first, then serialize the verified token
-        let verified = verifier.verify(&token, &cap, &op, &[]).unwrap();
+        let verified = verifier.verify(token, &cap, &op, &[]).unwrap();
         let bytes = verified.raw().to_cbor().unwrap();
 
         // Deserialize produces Unverified, not Verified
@@ -4150,7 +4150,7 @@ mod tests {
         let op = OperationId::new("op.expired").unwrap();
         let cap = CapabilityId::new("cap.expired").unwrap();
 
-        let result = verifier.verify(&token, &cap, &op, &[]);
+        let result = verifier.verify(token, &cap, &op, &[]);
         assert!(matches!(result, Err(FcpError::TokenExpired)));
     }
 
@@ -4178,7 +4178,7 @@ mod tests {
         let op = OperationId::new("op.zone").unwrap();
         let cap = CapabilityId::new("cap.zone").unwrap();
 
-        let result = verifier.verify(&token, &cap, &op, &[]);
+        let result = verifier.verify(token, &cap, &op, &[]);
         assert!(matches!(result, Err(FcpError::ZoneViolation { .. })));
     }
 
@@ -4206,7 +4206,7 @@ mod tests {
         let op = OperationId::new("op.sig").unwrap();
         let cap = CapabilityId::new("cap.sig").unwrap();
 
-        let result = verifier.verify(&token, &cap, &op, &[]);
+        let result = verifier.verify(token, &cap, &op, &[]);
         assert!(matches!(result, Err(FcpError::InvalidSignature)));
     }
 

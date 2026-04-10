@@ -156,7 +156,7 @@ impl FcpConnector for MixpanelConnectorAdapter {
             message: "Mixpanel verifier not initialized; handshake required".into(),
         })?;
         let cap = required_capability(req.operation.as_str())?;
-        verifier.verify(&req.capability_token, &cap, &req.operation, &[])?;
+        verifier.verify(req.capability_token, &cap, &req.operation, &[])?;
         let request_id = req.id.clone();
         let value = self
             .connector
@@ -170,7 +170,7 @@ impl FcpConnector for MixpanelConnectorAdapter {
             message: "Mixpanel verifier not initialized; handshake required".into(),
         })?;
         let cap = required_capability(req.operation.as_str())?;
-        verifier.verify(&req.capability_token, &cap, &req.operation, &[])?;
+        verifier.verify(req.capability_token, &cap, &req.operation, &[])?;
         let value = self
             .connector
             .handle_simulate(json!({"operation_id": req.operation.as_str(), "input": req.input}))

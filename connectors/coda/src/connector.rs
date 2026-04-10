@@ -1244,7 +1244,7 @@ impl CodaConnector {
                 code: 1004,
                 message: format!("Unknown operation: {operation}"),
             })?;
-        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
+        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
 
         let config = self.config.as_ref().ok_or(FcpError::Internal {
             message: "Connector config missing after configure".into(),

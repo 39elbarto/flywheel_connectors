@@ -765,7 +765,7 @@ impl MeshNode {
         request.validate_idempotency_key()?;
 
         let verified_token = verifier.verify(
-            &request.capability_token,
+            request.capability_token.clone(),
             required_capability,
             &request.operation,
             resource_uris,

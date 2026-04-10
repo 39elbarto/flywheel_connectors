@@ -1267,7 +1267,7 @@ impl M365Connector {
         })?;
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(&token, &cap_id, &op_id, &[])?;
+            verifier.verify(token, &cap_id, &op_id, &[])?;
         } else {
             return Err(FcpError::NotConfigured);
         }

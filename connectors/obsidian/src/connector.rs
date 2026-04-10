@@ -839,7 +839,7 @@ impl ObsidianConnector {
                 });
             }
         };
-        verifier.verify(&req.capability_token, &required_cap, &req.operation, &[])?;
+        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
 
         let client = self.client.as_ref().ok_or(FcpError::Internal {
             message: "Obsidian client missing after configure".into(),

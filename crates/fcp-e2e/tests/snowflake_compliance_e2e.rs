@@ -53,6 +53,8 @@ impl SnowflakeConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(SnowflakeConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for SnowflakeConnectorAdapter {
     fn id(&self) -> &ConnectorId {

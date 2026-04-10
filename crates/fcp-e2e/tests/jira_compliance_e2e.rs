@@ -51,6 +51,8 @@ impl JiraConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(JiraConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for JiraConnectorAdapter {
     fn id(&self) -> &ConnectorId {

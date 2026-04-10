@@ -619,6 +619,8 @@ fn operation_examples(id: &str) -> Vec<String> {
     }
 }
 
+fcp_core::impl_fcp_sealed!(PackageRegistryConnector);
+
 #[async_trait]
 impl FcpConnector for PackageRegistryConnector {
     fn id(&self) -> &ConnectorId {
@@ -807,7 +809,7 @@ impl PackageRegistryConnector {
             }
         };
         verifier.verify(
-            &req.capability_token,
+            req.capability_token.clone(),
             &required_capability,
             &req.operation,
             &[],

@@ -49,6 +49,8 @@ impl PineconeConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(PineconeConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for PineconeConnectorAdapter {
     fn id(&self) -> &ConnectorId {

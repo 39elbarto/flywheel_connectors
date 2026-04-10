@@ -50,6 +50,8 @@ impl ClickUpConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(ClickUpConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for ClickUpConnectorAdapter {
     fn id(&self) -> &ConnectorId {

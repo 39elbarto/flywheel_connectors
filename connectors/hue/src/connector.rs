@@ -307,6 +307,8 @@ impl Default for HueConnector {
     }
 }
 
+fcp_core::impl_fcp_sealed!(HueConnector);
+
 #[async_trait]
 impl FcpConnector for HueConnector {
     fn id(&self) -> &ConnectorId {

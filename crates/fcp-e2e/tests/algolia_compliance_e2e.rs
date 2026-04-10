@@ -53,6 +53,8 @@ impl AlgoliaConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(AlgoliaConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for AlgoliaConnectorAdapter {
     fn id(&self) -> &ConnectorId {

@@ -50,6 +50,8 @@ impl MakeConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(MakeConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for MakeConnectorAdapter {
     fn id(&self) -> &ConnectorId {

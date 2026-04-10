@@ -233,6 +233,8 @@ impl RateLimitedConnector {
     }
 }
 
+fcp_core::impl_fcp_sealed!(MinimalConnector);
+
 #[async_trait]
 impl FcpConnector for MinimalConnector {
     fn id(&self) -> &ConnectorId {
@@ -290,6 +292,8 @@ impl FcpConnector for MinimalConnector {
         Ok(())
     }
 }
+fcp_core::impl_fcp_sealed!(RateLimitedConnector);
+
 
 #[async_trait]
 impl FcpConnector for RateLimitedConnector {

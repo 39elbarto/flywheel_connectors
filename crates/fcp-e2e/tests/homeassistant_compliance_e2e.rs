@@ -50,6 +50,8 @@ impl HomeAssistantConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(HomeAssistantConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for HomeAssistantConnectorAdapter {
     fn id(&self) -> &ConnectorId {

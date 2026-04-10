@@ -817,6 +817,8 @@ impl Default for WeComConnector {
     }
 }
 
+fcp_core::impl_fcp_sealed!(WeComConnector);
+
 #[async_trait]
 impl FcpConnector for WeComConnector {
     fn id(&self) -> &ConnectorId {

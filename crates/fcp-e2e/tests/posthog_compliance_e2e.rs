@@ -49,6 +49,8 @@ impl PostHogConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(PostHogConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for PostHogConnectorAdapter {
     fn id(&self) -> &ConnectorId {

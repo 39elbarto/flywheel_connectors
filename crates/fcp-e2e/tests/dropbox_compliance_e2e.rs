@@ -53,6 +53,8 @@ impl DropboxConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(DropboxConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for DropboxConnectorAdapter {
     fn id(&self) -> &ConnectorId {

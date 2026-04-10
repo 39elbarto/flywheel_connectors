@@ -50,6 +50,8 @@ impl SlackConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(SlackConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for SlackConnectorAdapter {
     fn id(&self) -> &ConnectorId {

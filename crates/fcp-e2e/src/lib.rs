@@ -1535,6 +1535,8 @@ mod tests {
         }
     }
 
+fcp_core::impl_fcp_sealed!(RevocationFlowConnector);
+
     #[fcp_core::async_trait]
     impl FcpConnector for RevocationFlowConnector {
         fn id(&self) -> &fcp_core::ConnectorId {
@@ -1651,6 +1653,8 @@ mod tests {
             Ok(())
         }
     }
+fcp_core::impl_fcp_sealed!(DummyConnector);
+
 
     #[fcp_core::async_trait]
     impl FcpConnector for DummyConnector {
@@ -3376,6 +3380,8 @@ mod openai_e2e_tests {
         }
     }
 
+    fcp_core::impl_fcp_sealed!(OpenAiConnectorAdapter);
+
     #[fcp_core::async_trait]
     impl FcpConnector for OpenAiConnectorAdapter {
         fn id(&self) -> &ConnectorId {
@@ -3890,6 +3896,8 @@ mod slack_e2e_tests {
             }
         }
     }
+
+    fcp_core::impl_fcp_sealed!(SlackConnectorAdapter);
 
     #[fcp_core::async_trait]
     impl FcpConnector for SlackConnectorAdapter {

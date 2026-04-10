@@ -71,6 +71,8 @@ impl DocuSignConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(DocuSignConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for DocuSignConnectorAdapter {
     fn id(&self) -> &ConnectorId {

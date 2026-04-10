@@ -53,6 +53,8 @@ impl BigQueryConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(BigQueryConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for BigQueryConnectorAdapter {
     fn id(&self) -> &ConnectorId {

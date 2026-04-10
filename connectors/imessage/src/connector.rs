@@ -611,6 +611,8 @@ fn message_to_sync_event(chat_guid: &str, message: &Message) -> serde_json::Valu
     })
 }
 
+fcp_core::impl_fcp_sealed!(BlueBubblesConnector);
+
 #[async_trait]
 impl FcpConnector for BlueBubblesConnector {
     fn id(&self) -> &ConnectorId {

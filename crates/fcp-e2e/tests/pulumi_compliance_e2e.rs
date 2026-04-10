@@ -50,6 +50,8 @@ impl PulumiConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(PulumiConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for PulumiConnectorAdapter {
     fn id(&self) -> &ConnectorId {

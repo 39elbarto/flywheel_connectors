@@ -51,6 +51,8 @@ impl M365ConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(M365ConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for M365ConnectorAdapter {
     fn id(&self) -> &ConnectorId {

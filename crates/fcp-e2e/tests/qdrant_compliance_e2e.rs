@@ -51,6 +51,8 @@ impl QdrantConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(QdrantConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for QdrantConnectorAdapter {
     fn id(&self) -> &ConnectorId {

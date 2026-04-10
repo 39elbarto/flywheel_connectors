@@ -50,6 +50,8 @@ impl AnnasArchiveConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(AnnasArchiveConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for AnnasArchiveConnectorAdapter {
     fn id(&self) -> &ConnectorId {

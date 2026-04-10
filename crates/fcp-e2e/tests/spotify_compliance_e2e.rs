@@ -74,6 +74,8 @@ impl SpotifyConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(SpotifyConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for SpotifyConnectorAdapter {
     fn id(&self) -> &ConnectorId {

@@ -307,6 +307,8 @@ impl Default for EmailGenericConnector {
     }
 }
 
+fcp_core::impl_fcp_sealed!(EmailGenericConnector);
+
 #[async_trait]
 impl FcpConnector for EmailGenericConnector {
     fn id(&self) -> &ConnectorId {

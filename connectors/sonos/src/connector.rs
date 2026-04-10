@@ -332,6 +332,8 @@ impl Default for SonosConnector {
     }
 }
 
+fcp_core::impl_fcp_sealed!(SonosConnector);
+
 #[async_trait]
 impl FcpConnector for SonosConnector {
     fn id(&self) -> &ConnectorId {

@@ -1129,6 +1129,8 @@ fn operations_info() -> Vec<OperationInfo> {
     ]
 }
 
+fcp_core::impl_fcp_sealed!(CloudflareConnector);
+
 #[async_trait]
 impl FcpConnector for CloudflareConnector {
     fn id(&self) -> &ConnectorId {

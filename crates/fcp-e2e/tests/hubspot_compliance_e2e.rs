@@ -50,6 +50,8 @@ impl HubSpotConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(HubSpotConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for HubSpotConnectorAdapter {
     fn id(&self) -> &ConnectorId {

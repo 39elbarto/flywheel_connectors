@@ -863,6 +863,8 @@ fn parse_content_range_total(content_range: &str) -> Option<u64> {
     content_range.split('/').nth(1)?.parse::<u64>().ok()
 }
 
+fcp_core::impl_fcp_sealed!(SupabaseConnector);
+
 #[async_trait]
 impl FcpConnector for SupabaseConnector {
     fn id(&self) -> &ConnectorId {

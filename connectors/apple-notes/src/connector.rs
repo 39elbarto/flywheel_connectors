@@ -316,6 +316,8 @@ impl Default for AppleNotesConnector {
     }
 }
 
+fcp_core::impl_fcp_sealed!(AppleNotesConnector);
+
 #[async_trait]
 impl FcpConnector for AppleNotesConnector {
     fn id(&self) -> &ConnectorId {

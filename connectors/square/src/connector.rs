@@ -965,6 +965,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
     ]
 }
 
+fcp_core::impl_fcp_sealed!(SquareConnector);
+
 #[async_trait]
 impl FcpConnector for SquareConnector {
     fn id(&self) -> &ConnectorId {

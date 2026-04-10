@@ -276,6 +276,8 @@ impl Default for NostrConnector {
     }
 }
 
+fcp_core::impl_fcp_sealed!(NostrConnector);
+
 #[async_trait]
 impl FcpConnector for NostrConnector {
     fn id(&self) -> &ConnectorId {

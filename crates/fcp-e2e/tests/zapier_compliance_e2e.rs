@@ -50,6 +50,8 @@ impl ZapierConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(ZapierConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for ZapierConnectorAdapter {
     fn id(&self) -> &ConnectorId {

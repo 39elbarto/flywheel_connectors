@@ -49,6 +49,8 @@ impl N8nConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(N8nConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for N8nConnectorAdapter {
     fn id(&self) -> &ConnectorId {

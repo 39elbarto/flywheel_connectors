@@ -50,6 +50,8 @@ impl GoogleCalendarConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(GoogleCalendarConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for GoogleCalendarConnectorAdapter {
     fn id(&self) -> &ConnectorId {

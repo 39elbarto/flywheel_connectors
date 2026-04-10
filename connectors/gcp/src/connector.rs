@@ -835,6 +835,8 @@ fn operations_info() -> Vec<OperationInfo> {
     ]
 }
 
+fcp_core::impl_fcp_sealed!(GcpConnector);
+
 #[async_trait]
 impl FcpConnector for GcpConnector {
     fn id(&self) -> &ConnectorId {

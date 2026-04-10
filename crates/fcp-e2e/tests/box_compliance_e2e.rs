@@ -50,6 +50,8 @@ impl BoxConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(BoxConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for BoxConnectorAdapter {
     fn id(&self) -> &ConnectorId {

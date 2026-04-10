@@ -50,6 +50,8 @@ impl PostgreSqlConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(PostgreSqlConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for PostgreSqlConnectorAdapter {
     fn id(&self) -> &ConnectorId {

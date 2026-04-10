@@ -460,6 +460,8 @@ mod tests {
         }
     }
 
+fcp_core::impl_fcp_sealed!(StubConnector);
+
     #[async_trait::async_trait]
     impl FcpConnector for StubConnector {
         fn id(&self) -> &fcp_core::ConnectorId {

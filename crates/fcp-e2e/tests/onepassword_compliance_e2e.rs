@@ -49,6 +49,8 @@ impl OnePasswordConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(OnePasswordConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for OnePasswordConnectorAdapter {
     fn id(&self) -> &ConnectorId {

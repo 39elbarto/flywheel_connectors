@@ -51,6 +51,8 @@ impl BrowserConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(BrowserConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for BrowserConnectorAdapter {
     fn id(&self) -> &ConnectorId {

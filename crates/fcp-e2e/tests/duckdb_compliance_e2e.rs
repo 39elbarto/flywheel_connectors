@@ -50,6 +50,8 @@ impl DuckDbConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(DuckDbConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for DuckDbConnectorAdapter {
     fn id(&self) -> &ConnectorId {

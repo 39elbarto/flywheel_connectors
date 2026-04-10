@@ -327,6 +327,8 @@ impl Default for QqConnector {
     }
 }
 
+fcp_core::impl_fcp_sealed!(QqConnector);
+
 #[async_trait]
 impl FcpConnector for QqConnector {
     fn id(&self) -> &ConnectorId {

@@ -50,6 +50,8 @@ impl YouTubeConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(YouTubeConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for YouTubeConnectorAdapter {
     fn id(&self) -> &ConnectorId {

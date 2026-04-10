@@ -52,6 +52,8 @@ impl SendGridConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(SendGridConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for SendGridConnectorAdapter {
     fn id(&self) -> &ConnectorId {

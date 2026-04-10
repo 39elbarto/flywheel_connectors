@@ -50,6 +50,8 @@ impl TodoistConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(TodoistConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for TodoistConnectorAdapter {
     fn id(&self) -> &ConnectorId {

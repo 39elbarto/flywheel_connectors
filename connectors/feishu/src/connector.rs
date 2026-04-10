@@ -1058,6 +1058,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
     ]
 }
 
+fcp_core::impl_fcp_sealed!(FeishuConnector);
+
 #[async_trait]
 impl FcpConnector for FeishuConnector {
     fn id(&self) -> &ConnectorId {

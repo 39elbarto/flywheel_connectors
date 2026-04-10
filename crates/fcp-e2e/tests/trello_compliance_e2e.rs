@@ -54,6 +54,8 @@ impl TrelloConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(TrelloConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for TrelloConnectorAdapter {
     fn id(&self) -> &ConnectorId {

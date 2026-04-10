@@ -496,6 +496,8 @@ fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
         .collect()
 }
 
+fcp_core::impl_fcp_sealed!(OutlookConnector);
+
 #[async_trait]
 impl FcpConnector for OutlookConnector {
     fn id(&self) -> &ConnectorId {

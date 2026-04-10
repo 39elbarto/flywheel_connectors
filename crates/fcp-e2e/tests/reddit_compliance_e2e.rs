@@ -50,6 +50,8 @@ impl RedditConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(RedditConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for RedditConnectorAdapter {
     fn id(&self) -> &ConnectorId {

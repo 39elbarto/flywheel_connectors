@@ -50,6 +50,8 @@ impl DatadogConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(DatadogConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for DatadogConnectorAdapter {
     fn id(&self) -> &ConnectorId {

@@ -1175,6 +1175,8 @@ fn project_sync_response(sync: &SyncResponse) -> SyncProjection {
     projection
 }
 
+fcp_core::impl_fcp_sealed!(MatrixConnector);
+
 #[async_trait]
 impl FcpConnector for MatrixConnector {
     fn id(&self) -> &ConnectorId {

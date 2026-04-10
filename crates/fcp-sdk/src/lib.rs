@@ -16,6 +16,8 @@
 //!     base: BaseConnector,
 //! }
 //!
+//! fcp_core::impl_fcp_sealed!(MyConnector);
+//!
 //! #[async_trait]
 //! impl FcpConnector for MyConnector {
 //!     fn id(&self) -> &ConnectorId {
@@ -180,6 +182,7 @@ pub use fcp_kernel::{
     UsageMetric,
     UsageMetricKind,
     Webhook,
+    sealed,
 };
 
 /// Policy, provenance, and evidence-adjacent types still re-exported from

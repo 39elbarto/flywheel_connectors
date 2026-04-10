@@ -797,6 +797,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
     ]
 }
 
+fcp_core::impl_fcp_sealed!(CalendlyConnector);
+
 #[async_trait]
 impl FcpConnector for CalendlyConnector {
     fn id(&self) -> &ConnectorId {

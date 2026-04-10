@@ -239,7 +239,7 @@ impl GooglePlacesConnector {
             capability_token,
             ..
         } = req;
-        verifier.verify(&capability_token, &required_cap, &operation, &[])?;
+        verifier.verify(capability_token, &required_cap, &operation, &[])?;
 
         let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
         let output = match operation.as_str() {
@@ -299,6 +299,8 @@ impl Default for GooglePlacesConnector {
         Self::new()
     }
 }
+
+fcp_core::impl_fcp_sealed!(GooglePlacesConnector);
 
 #[async_trait]
 impl FcpConnector for GooglePlacesConnector {

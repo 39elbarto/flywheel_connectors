@@ -49,6 +49,8 @@ impl SalesforceConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(SalesforceConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for SalesforceConnectorAdapter {
     fn id(&self) -> &ConnectorId {

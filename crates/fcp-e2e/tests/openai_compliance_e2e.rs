@@ -50,6 +50,8 @@ impl OpenAIConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(OpenAIConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for OpenAIConnectorAdapter {
     fn id(&self) -> &ConnectorId {

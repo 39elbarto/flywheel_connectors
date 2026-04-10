@@ -53,6 +53,8 @@ impl BitbucketConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(BitbucketConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for BitbucketConnectorAdapter {
     fn id(&self) -> &ConnectorId {

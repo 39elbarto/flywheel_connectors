@@ -53,6 +53,8 @@ impl GoogleAiConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(GoogleAiConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for GoogleAiConnectorAdapter {
     fn id(&self) -> &ConnectorId {

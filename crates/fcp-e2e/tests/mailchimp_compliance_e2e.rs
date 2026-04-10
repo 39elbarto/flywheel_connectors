@@ -53,6 +53,8 @@ impl MailchimpConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(MailchimpConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for MailchimpConnectorAdapter {
     fn id(&self) -> &ConnectorId {

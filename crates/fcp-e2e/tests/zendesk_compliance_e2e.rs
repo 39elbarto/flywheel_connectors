@@ -51,6 +51,8 @@ impl ZendeskConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(ZendeskConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for ZendeskConnectorAdapter {
     fn id(&self) -> &ConnectorId {

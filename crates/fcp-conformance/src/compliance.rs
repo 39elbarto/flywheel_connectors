@@ -682,6 +682,8 @@ mod tests {
         }
     }
 
+fcp_core::impl_fcp_sealed!(MockConnector);
+
     #[async_trait::async_trait]
     impl FcpConnector for MockConnector {
         fn id(&self) -> &ConnectorId {

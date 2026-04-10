@@ -50,6 +50,8 @@ impl ElasticsearchConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(ElasticsearchConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for ElasticsearchConnectorAdapter {
     fn id(&self) -> &ConnectorId {

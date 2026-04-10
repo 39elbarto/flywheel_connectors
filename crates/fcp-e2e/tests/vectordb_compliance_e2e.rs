@@ -47,6 +47,8 @@ impl VectorDbConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(VectorDbConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for VectorDbConnectorAdapter {
     fn id(&self) -> &ConnectorId {

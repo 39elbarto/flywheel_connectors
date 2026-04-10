@@ -53,6 +53,8 @@ impl GitLabConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(GitLabConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for GitLabConnectorAdapter {
     fn id(&self) -> &ConnectorId {

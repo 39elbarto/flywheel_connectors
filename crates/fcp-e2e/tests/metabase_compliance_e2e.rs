@@ -50,6 +50,8 @@ impl MetabaseConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(MetabaseConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for MetabaseConnectorAdapter {
     fn id(&self) -> &ConnectorId {

@@ -53,6 +53,8 @@ impl LinkedInConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(LinkedInConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for LinkedInConnectorAdapter {
     fn id(&self) -> &ConnectorId {

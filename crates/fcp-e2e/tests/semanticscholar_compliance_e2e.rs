@@ -45,6 +45,8 @@ impl SemanticScholarConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(SemanticScholarConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for SemanticScholarConnectorAdapter {
     fn id(&self) -> &ConnectorId {

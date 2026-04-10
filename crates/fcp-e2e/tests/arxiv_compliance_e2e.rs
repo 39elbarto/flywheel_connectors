@@ -52,6 +52,8 @@ impl ArxivConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(ArxivConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for ArxivConnectorAdapter {
     fn id(&self) -> &ConnectorId {

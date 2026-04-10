@@ -49,6 +49,8 @@ impl SegmentConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(SegmentConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for SegmentConnectorAdapter {
     fn id(&self) -> &ConnectorId {

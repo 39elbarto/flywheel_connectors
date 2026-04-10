@@ -48,6 +48,8 @@ impl IntercomConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(IntercomConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for IntercomConnectorAdapter {
     fn id(&self) -> &ConnectorId {

@@ -50,6 +50,8 @@ impl S3ConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(S3ConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for S3ConnectorAdapter {
     fn id(&self) -> &ConnectorId {

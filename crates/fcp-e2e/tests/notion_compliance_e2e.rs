@@ -50,6 +50,8 @@ impl NotionConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(NotionConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for NotionConnectorAdapter {
     fn id(&self) -> &ConnectorId {

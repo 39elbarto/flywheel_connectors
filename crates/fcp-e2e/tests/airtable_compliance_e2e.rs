@@ -51,6 +51,8 @@ impl AirtableConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(AirtableConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for AirtableConnectorAdapter {
     fn id(&self) -> &ConnectorId {

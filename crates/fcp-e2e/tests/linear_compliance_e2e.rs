@@ -50,6 +50,8 @@ impl LinearConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(LinearConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for LinearConnectorAdapter {
     fn id(&self) -> &ConnectorId {

@@ -50,6 +50,8 @@ impl GitHubConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(GitHubConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for GitHubConnectorAdapter {
     fn id(&self) -> &ConnectorId {

@@ -120,6 +120,8 @@ fn test_subscribe_request() -> SubscribeRequest {
     }
 }
 
+fcp_core::impl_fcp_sealed!(MockConnector);
+
 #[async_trait]
 impl FcpConnector for MockConnector {
     fn id(&self) -> &ConnectorId {

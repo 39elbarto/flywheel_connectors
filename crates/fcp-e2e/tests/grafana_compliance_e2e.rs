@@ -50,6 +50,8 @@ impl GrafanaConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(GrafanaConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for GrafanaConnectorAdapter {
     fn id(&self) -> &ConnectorId {

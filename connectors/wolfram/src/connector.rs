@@ -419,7 +419,7 @@ impl WolframConnector {
                     });
                 }
             });
-            verifier.verify(&cap_token, &required_cap, &op_id, &[])?;
+            verifier.verify(cap_token, &required_cap, &op_id, &[])?;
         }
 
         let query = input

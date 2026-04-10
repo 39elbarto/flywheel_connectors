@@ -603,6 +603,8 @@ where
     })
 }
 
+fcp_core::impl_fcp_sealed!(SignalConnector);
+
 #[async_trait]
 impl FcpConnector for SignalConnector {
     fn id(&self) -> &ConnectorId {

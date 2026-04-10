@@ -63,6 +63,8 @@ fn test_shutdown_request() -> ShutdownRequest {
     }
 }
 
+fcp_core::impl_fcp_sealed!(MinimalConnector);
+
 #[async_trait]
 impl FcpConnector for MinimalConnector {
     fn id(&self) -> &ConnectorId {
@@ -214,6 +216,8 @@ impl StreamingConnector {
         }
     }
 }
+fcp_core::impl_fcp_sealed!(StreamingConnector);
+
 
 #[async_trait]
 impl FcpConnector for StreamingConnector {

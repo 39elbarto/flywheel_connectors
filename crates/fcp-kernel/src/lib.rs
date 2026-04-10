@@ -70,7 +70,7 @@ pub use fcp_core::{
 
 pub use fcp_core::{
     BaseConnector, Bidirectional, ConnectorMetrics, FcpConnector, Polling, RequestResponse,
-    Streaming, Webhook,
+    Streaming, Webhook, sealed,
 };
 
 // ── Introspection / Operation Metadata ───────────────────────────

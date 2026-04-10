@@ -66,6 +66,8 @@ fn test_simulate_request(operation: &'static str) -> SimulateRequest {
     }
 }
 
+fcp_core::impl_fcp_sealed!(WriteDetectingConnector);
+
 #[async_trait]
 impl FcpConnector for WriteDetectingConnector {
     fn id(&self) -> &ConnectorId {
@@ -310,6 +312,8 @@ impl CapabilityCheckingConnector {
         }
     }
 }
+fcp_core::impl_fcp_sealed!(CapabilityCheckingConnector);
+
 
 #[async_trait]
 impl FcpConnector for CapabilityCheckingConnector {
@@ -477,6 +481,8 @@ impl TimeoutConnector {
     }
 }
 
+fcp_core::impl_fcp_sealed!(TimeoutConnector);
+
 #[async_trait]
 impl FcpConnector for TimeoutConnector {
     fn id(&self) -> &ConnectorId {
@@ -611,6 +617,8 @@ impl PolicyConnector {
         }
     }
 }
+
+fcp_core::impl_fcp_sealed!(PolicyConnector);
 
 #[async_trait]
 impl FcpConnector for PolicyConnector {

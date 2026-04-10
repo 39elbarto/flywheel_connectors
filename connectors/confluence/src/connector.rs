@@ -510,6 +510,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
     ]
 }
 
+fcp_core::impl_fcp_sealed!(ConfluenceConnector);
+
 #[async_trait]
 impl FcpConnector for ConfluenceConnector {
     fn id(&self) -> &ConnectorId {

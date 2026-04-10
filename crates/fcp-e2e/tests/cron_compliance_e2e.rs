@@ -49,6 +49,8 @@ impl CronConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(CronConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for CronConnectorAdapter {
     fn id(&self) -> &ConnectorId {

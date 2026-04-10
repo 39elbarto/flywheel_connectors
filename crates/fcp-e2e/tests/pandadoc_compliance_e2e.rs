@@ -50,6 +50,8 @@ impl PandaDocConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(PandaDocConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for PandaDocConnectorAdapter {
     fn id(&self) -> &ConnectorId {

@@ -832,6 +832,8 @@ impl VercelConnector {
     }
 }
 
+fcp_core::impl_fcp_sealed!(VercelConnector);
+
 #[async_trait]
 impl FcpConnector for VercelConnector {
     fn id(&self) -> &ConnectorId {

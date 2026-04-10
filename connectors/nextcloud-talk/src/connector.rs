@@ -842,6 +842,8 @@ fn required_capability(operation: &str) -> Option<&'static str> {
     }
 }
 
+fcp_core::impl_fcp_sealed!(NextcloudTalkConnector);
+
 #[async_trait]
 impl FcpConnector for NextcloudTalkConnector {
     fn id(&self) -> &ConnectorId {
@@ -1007,7 +1009,7 @@ impl NextcloudTalkConnector {
                     message: format!("Unknown operation: {operation_name}"),
                 })?;
             verifier.verify(
-                &capability_token,
+                capability_token,
                 &CapabilityId::from_static(capability),
                 &operation,
                 &[],

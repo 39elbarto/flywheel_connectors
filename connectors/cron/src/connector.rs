@@ -893,6 +893,8 @@ fn operations_info() -> Vec<OperationInfo> {
 
 // ── FcpConnector trait implementation (FCP3 execution model) ─────────────
 
+fcp_core::impl_fcp_sealed!(CronConnector);
+
 #[async_trait]
 impl FcpConnector for CronConnector {
     fn id(&self) -> &ConnectorId {

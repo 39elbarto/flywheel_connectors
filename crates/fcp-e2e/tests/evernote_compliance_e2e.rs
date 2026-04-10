@@ -49,6 +49,8 @@ impl EvernoteConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(EvernoteConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for EvernoteConnectorAdapter {
     fn id(&self) -> &ConnectorId {

@@ -299,7 +299,7 @@ impl MattermostConnector {
             message: "connector ready state missing capability verifier".into(),
         })?;
         verifier.verify(
-            &req.capability_token,
+            req.capability_token.clone(),
             &required_capability,
             &req.operation,
             &[],

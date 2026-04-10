@@ -50,6 +50,8 @@ impl StripeConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(StripeConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for StripeConnectorAdapter {
     fn id(&self) -> &ConnectorId {

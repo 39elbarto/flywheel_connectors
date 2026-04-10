@@ -636,6 +636,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
     ]
 }
 
+fcp_core::impl_fcp_sealed!(CircleCiConnector);
+
 #[async_trait]
 impl FcpConnector for CircleCiConnector {
     fn id(&self) -> &ConnectorId {

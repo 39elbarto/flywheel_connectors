@@ -54,6 +54,8 @@ impl FigmaConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(FigmaConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for FigmaConnectorAdapter {
     fn id(&self) -> &ConnectorId {

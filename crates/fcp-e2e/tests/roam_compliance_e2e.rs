@@ -49,6 +49,8 @@ impl RoamConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(RoamConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for RoamConnectorAdapter {
     fn id(&self) -> &ConnectorId {

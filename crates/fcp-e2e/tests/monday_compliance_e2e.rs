@@ -50,6 +50,8 @@ impl MondayConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(MondayConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for MondayConnectorAdapter {
     fn id(&self) -> &ConnectorId {

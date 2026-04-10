@@ -50,6 +50,8 @@ impl MixpanelConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(MixpanelConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for MixpanelConnectorAdapter {
     fn id(&self) -> &ConnectorId {

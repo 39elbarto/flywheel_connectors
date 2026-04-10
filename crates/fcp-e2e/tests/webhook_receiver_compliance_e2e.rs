@@ -47,6 +47,8 @@ impl WebhookReceiverConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(WebhookReceiverConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for WebhookReceiverConnectorAdapter {
     fn id(&self) -> &ConnectorId {

@@ -1240,6 +1240,8 @@ impl AzureConnector {
     }
 }
 
+fcp_core::impl_fcp_sealed!(AzureConnector);
+
 #[async_trait]
 impl FcpConnector for AzureConnector {
     fn id(&self) -> &ConnectorId {

@@ -284,6 +284,8 @@ impl Default for AppleRemindersConnector {
     }
 }
 
+fcp_core::impl_fcp_sealed!(AppleRemindersConnector);
+
 #[async_trait]
 impl FcpConnector for AppleRemindersConnector {
     fn id(&self) -> &ConnectorId {

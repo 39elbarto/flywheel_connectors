@@ -52,6 +52,8 @@ impl DiscordConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(DiscordConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for DiscordConnectorAdapter {
     fn id(&self) -> &ConnectorId {

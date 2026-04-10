@@ -54,6 +54,8 @@ impl TwilioConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(TwilioConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for TwilioConnectorAdapter {
     fn id(&self) -> &ConnectorId {

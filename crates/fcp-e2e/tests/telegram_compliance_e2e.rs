@@ -55,6 +55,8 @@ impl TelegramConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(TelegramConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for TelegramConnectorAdapter {
     fn id(&self) -> &ConnectorId {

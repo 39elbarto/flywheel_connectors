@@ -50,6 +50,8 @@ impl TwitterConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(TwitterConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for TwitterConnectorAdapter {
     fn id(&self) -> &ConnectorId {

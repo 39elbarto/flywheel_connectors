@@ -781,6 +781,8 @@ fn operations_info() -> Vec<OperationInfo> {
     ]
 }
 
+fcp_core::impl_fcp_sealed!(AwsConnector);
+
 #[async_trait]
 impl FcpConnector for AwsConnector {
     fn id(&self) -> &ConnectorId {

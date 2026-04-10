@@ -644,6 +644,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
     ]
 }
 
+fcp_core::impl_fcp_sealed!(ObsidianConnector);
+
 #[async_trait]
 impl FcpConnector for ObsidianConnector {
     fn id(&self) -> &ConnectorId {

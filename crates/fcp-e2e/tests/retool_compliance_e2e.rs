@@ -49,6 +49,8 @@ impl RetoolConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(RetoolConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for RetoolConnectorAdapter {
     fn id(&self) -> &ConnectorId {

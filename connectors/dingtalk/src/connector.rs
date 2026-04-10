@@ -408,6 +408,8 @@ impl Default for DingTalkConnector {
     }
 }
 
+fcp_core::impl_fcp_sealed!(DingTalkConnector);
+
 #[async_trait]
 impl FcpConnector for DingTalkConnector {
     fn id(&self) -> &ConnectorId {

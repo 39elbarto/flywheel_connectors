@@ -50,6 +50,8 @@ impl RedisConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(RedisConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for RedisConnectorAdapter {
     fn id(&self) -> &ConnectorId {

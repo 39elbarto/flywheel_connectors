@@ -48,6 +48,8 @@ impl BitwardenConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(BitwardenConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for BitwardenConnectorAdapter {
     fn id(&self) -> &ConnectorId {

@@ -443,6 +443,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
     ]
 }
 
+fcp_core::impl_fcp_sealed!(WhatsAppConnector);
+
 #[async_trait]
 impl FcpConnector for WhatsAppConnector {
     fn id(&self) -> &ConnectorId {

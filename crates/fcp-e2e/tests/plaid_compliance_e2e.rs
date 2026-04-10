@@ -50,6 +50,8 @@ impl PlaidConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(PlaidConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for PlaidConnectorAdapter {
     fn id(&self) -> &ConnectorId {

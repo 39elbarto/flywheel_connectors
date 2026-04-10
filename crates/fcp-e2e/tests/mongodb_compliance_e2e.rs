@@ -50,6 +50,8 @@ impl MongoDbConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(MongoDbConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for MongoDbConnectorAdapter {
     fn id(&self) -> &ConnectorId {

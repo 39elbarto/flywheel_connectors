@@ -51,6 +51,8 @@ impl LlmRouterConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(LlmRouterConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for LlmRouterConnectorAdapter {
     fn id(&self) -> &ConnectorId {

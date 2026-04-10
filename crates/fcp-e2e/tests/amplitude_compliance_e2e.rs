@@ -50,6 +50,8 @@ impl AmplitudeConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(AmplitudeConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for AmplitudeConnectorAdapter {
     fn id(&self) -> &ConnectorId {

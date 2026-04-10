@@ -55,6 +55,8 @@ impl TerraformConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(TerraformConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for TerraformConnectorAdapter {
     fn id(&self) -> &ConnectorId {

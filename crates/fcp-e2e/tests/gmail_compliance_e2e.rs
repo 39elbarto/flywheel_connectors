@@ -50,6 +50,8 @@ impl GmailConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(GmailConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for GmailConnectorAdapter {
     fn id(&self) -> &ConnectorId {

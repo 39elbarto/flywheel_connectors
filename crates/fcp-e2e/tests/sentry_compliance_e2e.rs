@@ -50,6 +50,8 @@ impl SentryConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(SentryConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for SentryConnectorAdapter {
     fn id(&self) -> &ConnectorId {

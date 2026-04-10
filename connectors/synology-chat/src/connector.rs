@@ -777,6 +777,8 @@ fn string_or_integer_value(value: &Value) -> Option<String> {
         .or_else(|| value.as_u64().map(|number| number.to_string()))
 }
 
+fcp_core::impl_fcp_sealed!(SynologyChatConnector);
+
 #[async_trait]
 impl FcpConnector for SynologyChatConnector {
     fn id(&self) -> &ConnectorId {

@@ -332,6 +332,8 @@ impl Default for IrcConnector {
     }
 }
 
+fcp_core::impl_fcp_sealed!(IrcConnector);
+
 #[async_trait]
 impl FcpConnector for IrcConnector {
     fn id(&self) -> &ConnectorId {

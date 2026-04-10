@@ -1809,6 +1809,8 @@ impl<'a> MessageTarget<'a> {
     }
 }
 
+fcp_core::impl_fcp_sealed!(TeamsConnector);
+
 #[async_trait]
 impl FcpConnector for TeamsConnector {
     fn id(&self) -> &ConnectorId {
@@ -2104,7 +2106,7 @@ impl TeamsConnector {
         let verifier = self.verifier.as_ref().ok_or_else(|| FcpError::Internal {
             message: "connector ready state missing capability verifier".into(),
         })?;
-        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
+        verifier.verify(req.capability_token.clone(), &required_cap, &req.operation, &[])?;
 
         let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
             message: "connector ready state missing Teams client".into(),

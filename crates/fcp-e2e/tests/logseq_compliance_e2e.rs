@@ -54,6 +54,8 @@ impl LogseqConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(LogseqConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for LogseqConnectorAdapter {
     fn id(&self) -> &ConnectorId {

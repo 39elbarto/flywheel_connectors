@@ -34,6 +34,8 @@ use serde_json::json;
 /// Standard healthy connector that passes all compliance checks.
 struct HealthyConnector;
 
+fcp_core::impl_fcp_sealed!(HealthyConnector);
+
 #[async_trait::async_trait]
 impl FcpConnector for HealthyConnector {
     fn id(&self) -> &ConnectorId {
@@ -168,6 +170,8 @@ impl FcpConnector for HealthyConnector {
 
 /// Connector that enforces default deny on capability-gated operations.
 struct DenyingConnector;
+fcp_core::impl_fcp_sealed!(DenyingConnector);
+
 
 #[async_trait::async_trait]
 impl FcpConnector for DenyingConnector {
@@ -315,6 +319,8 @@ impl UnstableConnector {
         }
     }
 }
+
+fcp_core::impl_fcp_sealed!(UnstableConnector);
 
 #[async_trait::async_trait]
 impl FcpConnector for UnstableConnector {

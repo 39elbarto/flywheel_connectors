@@ -444,6 +444,8 @@ fn operations_info() -> Vec<OperationInfo> {
 
 // ── FcpConnector trait impl ──
 
+fcp_core::impl_fcp_sealed!(PerplexitySearchConnector);
+
 #[async_trait]
 impl FcpConnector for PerplexitySearchConnector {
     fn id(&self) -> &ConnectorId {

@@ -475,6 +475,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
     ]
 }
 
+fcp_core::impl_fcp_sealed!(TwitchConnector);
+
 #[async_trait]
 impl FcpConnector for TwitchConnector {
     fn id(&self) -> &ConnectorId {

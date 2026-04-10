@@ -53,6 +53,8 @@ impl AsanaConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(AsanaConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for AsanaConnectorAdapter {
     fn id(&self) -> &ConnectorId {

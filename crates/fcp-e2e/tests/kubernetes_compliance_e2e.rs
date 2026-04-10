@@ -55,6 +55,8 @@ impl KubernetesConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(KubernetesConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for KubernetesConnectorAdapter {
     fn id(&self) -> &ConnectorId {

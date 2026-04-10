@@ -58,6 +58,8 @@ impl AnthropicConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(AnthropicConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for AnthropicConnectorAdapter {
     fn id(&self) -> &ConnectorId {

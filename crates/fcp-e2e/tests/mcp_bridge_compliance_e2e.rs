@@ -169,6 +169,8 @@ fn mcp_bridge_operations() -> Vec<OperationInfo> {
     ]
 }
 
+fcp_core::impl_fcp_sealed!(McpBridgeConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for McpBridgeConnectorAdapter {
     fn id(&self) -> &ConnectorId {

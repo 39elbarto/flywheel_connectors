@@ -50,6 +50,8 @@ impl WhisperConnectorAdapter {
     }
 }
 
+fcp_core::impl_fcp_sealed!(WhisperConnectorAdapter);
+
 #[fcp_core::async_trait]
 impl FcpConnector for WhisperConnectorAdapter {
     fn id(&self) -> &ConnectorId {

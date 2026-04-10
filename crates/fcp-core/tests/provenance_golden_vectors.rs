@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use fcp_core::{
     AdjustmentKind, ApprovalScope, ApprovalToken, ConfidentialityLevel, DeclassificationScope,
     ElevationScope, FlowCheckResult, IntegrityLevel, ObjectId, ProvenanceRecord, SafetyTier,
-    SanitizerReceipt, TaintFlag, TaintFlags, ZoneId,
+    SanitizerReceipt, TaintFlag, TaintFlags, TaintReduction, ZoneId,
 };
 
 /// Test logging structure per FCP2 requirements.
@@ -662,9 +662,14 @@ fn test_taint_reduction_vector_roundtrip() {
     flags.insert(TaintFlag::UnverifiedLink);
     flags.insert(TaintFlag::UserGenerated);
 
-    // Simulate reduction
-    flags.remove(TaintFlag::PublicInput);
-    flags.remove(TaintFlag::UnverifiedLink);
+    // Simulate reduction via proof-carrying API
+    let reduction = TaintReduction {
+        timestamp_ms: 1_000,
+        sanitizer_receipt_id: test_object_id("receipt-golden"),
+        cleared_flags: vec![TaintFlag::PublicInput, TaintFlag::UnverifiedLink],
+        covered_inputs: vec![test_object_id("input-golden")],
+    };
+    flags.reduce_with_proof(&reduction);
 
     // Verify expected remaining
     assert!(flags.contains(TaintFlag::UserGenerated));

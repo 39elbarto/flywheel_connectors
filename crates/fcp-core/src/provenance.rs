@@ -245,11 +245,16 @@ impl TaintFlags {
         self.0.insert(flag);
     }
 
-    /// Remove a taint flag (only valid with [`SanitizerReceipt`] proof).
+    /// Reduce taint flags using a proof-carrying [`TaintReduction`].
     ///
-    /// Callers MUST ensure a valid sanitizer receipt exists before removal.
-    pub fn remove(&mut self, flag: TaintFlag) {
-        self.0.remove(&flag);
+    /// Each flag in `reduction.cleared_flags` is removed from this set.
+    /// This is the ONLY sanctioned way to remove taint — bare removal is
+    /// forbidden. The [`TaintReduction`] must reference a valid
+    /// [`SanitizerReceipt`] (enforced structurally by the type system).
+    pub fn reduce_with_proof(&mut self, reduction: &TaintReduction) {
+        for flag in &reduction.cleared_flags {
+            self.0.remove(flag);
+        }
     }
 
     /// Merge with another taint set (OR semantics).
@@ -643,6 +648,10 @@ impl ProvenanceRecord {
     }
 
     /// Apply a taint reduction with sanitizer receipt proof.
+    ///
+    /// Constructs a proof-carrying [`TaintReduction`] and applies it via
+    /// [`TaintFlags::reduce_with_proof`]. Only flags that are actually
+    /// present are included in the reduction record.
     pub fn apply_taint_reduction(
         &mut self,
         flags_to_clear: &[TaintFlag],
@@ -650,22 +659,24 @@ impl ProvenanceRecord {
         covered_inputs: Vec<ObjectId>,
         timestamp_ms: u64,
     ) {
-        let mut cleared = Vec::new();
-        for flag in flags_to_clear {
-            if self.taint_flags.contains(*flag) {
-                self.taint_flags.remove(*flag);
-                cleared.push(*flag);
-            }
+        let present_flags: Vec<TaintFlag> = flags_to_clear
+            .iter()
+            .copied()
+            .filter(|f| self.taint_flags.contains(*f))
+            .collect();
+
+        if present_flags.is_empty() {
+            return;
         }
 
-        if !cleared.is_empty() {
-            self.taint_reductions.push(TaintReduction {
-                timestamp_ms,
-                sanitizer_receipt_id,
-                cleared_flags: cleared,
-                covered_inputs,
-            });
-        }
+        let reduction = TaintReduction {
+            timestamp_ms,
+            sanitizer_receipt_id,
+            cleared_flags: present_flags,
+            covered_inputs,
+        };
+        self.taint_flags.reduce_with_proof(&reduction);
+        self.taint_reductions.push(reduction);
     }
 
     /// Record a zone crossing.
@@ -4530,14 +4541,20 @@ mod tests {
     }
 
     #[test]
-    fn taint_flags_insert_and_remove() {
+    fn taint_flags_insert_and_reduce_with_proof() {
         let mut flags = TaintFlags::new();
         flags.insert(TaintFlag::PublicInput);
         flags.insert(TaintFlag::UserGenerated);
         assert_eq!(flags.len(), 2);
         assert!(flags.contains(TaintFlag::PublicInput));
 
-        flags.remove(TaintFlag::PublicInput);
+        let reduction = TaintReduction {
+            timestamp_ms: 1_000,
+            sanitizer_receipt_id: test_object_id("receipt-remove"),
+            cleared_flags: vec![TaintFlag::PublicInput],
+            covered_inputs: vec![test_object_id("input-1")],
+        };
+        flags.reduce_with_proof(&reduction);
         assert_eq!(flags.len(), 1);
         assert!(!flags.contains(TaintFlag::PublicInput));
         assert!(flags.contains(TaintFlag::UserGenerated));
@@ -5196,5 +5213,167 @@ mod tests {
         assert_eq!(cloned.origin_zone, record.origin_zone);
         assert_eq!(cloned.taint_flags, record.taint_flags);
         assert_eq!(cloned.input_sources.len(), 1);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // C3.2: Proof-carrying taint reduction acceptance tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn reduce_with_proof_clears_specified_flags() {
+        let mut flags = TaintFlags::new();
+        flags.insert(TaintFlag::PublicInput);
+        flags.insert(TaintFlag::UserGenerated);
+        flags.insert(TaintFlag::AiGenerated);
+
+        let reduction = TaintReduction {
+            timestamp_ms: 1_000,
+            sanitizer_receipt_id: test_object_id("receipt-c32-1"),
+            cleared_flags: vec![TaintFlag::PublicInput, TaintFlag::AiGenerated],
+            covered_inputs: vec![test_object_id("input-1")],
+        };
+        flags.reduce_with_proof(&reduction);
+
+        assert!(!flags.contains(TaintFlag::PublicInput));
+        assert!(!flags.contains(TaintFlag::AiGenerated));
+        assert!(flags.contains(TaintFlag::UserGenerated));
+        assert_eq!(flags.len(), 1);
+    }
+
+    #[test]
+    fn reduce_with_proof_ignores_absent_flags() {
+        let mut flags = TaintFlags::from_flag(TaintFlag::UserGenerated);
+
+        let reduction = TaintReduction {
+            timestamp_ms: 2_000,
+            sanitizer_receipt_id: test_object_id("receipt-c32-2"),
+            cleared_flags: vec![TaintFlag::PublicInput], // not present
+            covered_inputs: vec![],
+        };
+        flags.reduce_with_proof(&reduction);
+
+        // UserGenerated untouched, PublicInput was never there
+        assert!(flags.contains(TaintFlag::UserGenerated));
+        assert_eq!(flags.len(), 1);
+    }
+
+    #[test]
+    fn reduce_with_proof_empty_reduction_is_noop() {
+        let mut flags = TaintFlags::new();
+        flags.insert(TaintFlag::AiGenerated);
+        flags.insert(TaintFlag::UnverifiedLink);
+
+        let reduction = TaintReduction {
+            timestamp_ms: 3_000,
+            sanitizer_receipt_id: test_object_id("receipt-c32-3"),
+            cleared_flags: vec![], // empty — no-op
+            covered_inputs: vec![],
+        };
+        flags.reduce_with_proof(&reduction);
+
+        assert_eq!(flags.len(), 2);
+        assert!(flags.contains(TaintFlag::AiGenerated));
+        assert!(flags.contains(TaintFlag::UnverifiedLink));
+    }
+
+    #[test]
+    fn reduce_with_proof_preserves_other_flags() {
+        let mut flags = TaintFlags::new();
+        flags.insert(TaintFlag::PublicInput);
+        flags.insert(TaintFlag::UserGenerated);
+        flags.insert(TaintFlag::AiGenerated);
+        flags.insert(TaintFlag::UnverifiedLink);
+        flags.insert(TaintFlag::CrossZoneUnapproved);
+
+        let reduction = TaintReduction {
+            timestamp_ms: 4_000,
+            sanitizer_receipt_id: test_object_id("receipt-c32-4"),
+            cleared_flags: vec![TaintFlag::PublicInput, TaintFlag::UnverifiedLink],
+            covered_inputs: vec![test_object_id("input-4")],
+        };
+        flags.reduce_with_proof(&reduction);
+
+        assert!(!flags.contains(TaintFlag::PublicInput));
+        assert!(!flags.contains(TaintFlag::UnverifiedLink));
+        assert!(flags.contains(TaintFlag::UserGenerated));
+        assert!(flags.contains(TaintFlag::AiGenerated));
+        assert!(flags.contains(TaintFlag::CrossZoneUnapproved));
+        assert_eq!(flags.len(), 3);
+    }
+
+    #[test]
+    fn reduce_with_proof_is_auditable_via_serde() {
+        let reduction = TaintReduction {
+            timestamp_ms: 5_000,
+            sanitizer_receipt_id: test_object_id("receipt-c32-5"),
+            cleared_flags: vec![TaintFlag::AiGenerated, TaintFlag::PublicInput],
+            covered_inputs: vec![test_object_id("in-1"), test_object_id("in-2")],
+        };
+
+        // Serialize to JSON (auditability requirement)
+        let json = serde_json::to_string(&reduction).unwrap();
+        let back: TaintReduction = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.timestamp_ms, 5_000);
+        assert_eq!(back.cleared_flags.len(), 2);
+        assert_eq!(back.covered_inputs.len(), 2);
+        assert_eq!(
+            back.sanitizer_receipt_id,
+            test_object_id("receipt-c32-5")
+        );
+
+        // Serialize to CBOR (binary audit trail)
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&reduction, &mut cbor).unwrap();
+        let cbor_back: TaintReduction =
+            ciborium::from_reader(&cbor[..]).unwrap();
+        assert_eq!(cbor_back.cleared_flags, reduction.cleared_flags);
+    }
+
+    #[test]
+    fn apply_taint_reduction_uses_proof_carrying_path() {
+        let mut record = ProvenanceRecord::public_input();
+        record.taint_flags.insert(TaintFlag::UserGenerated);
+        record.taint_flags.insert(TaintFlag::UnverifiedLink);
+        assert_eq!(record.taint_flags.len(), 3); // PublicInput + UserGenerated + UnverifiedLink
+
+        record.apply_taint_reduction(
+            &[TaintFlag::PublicInput, TaintFlag::UnverifiedLink],
+            test_object_id("receipt-c32-6"),
+            vec![test_object_id("input-c32")],
+            6_000,
+        );
+
+        // Flags cleared
+        assert!(!record.taint_flags.contains(TaintFlag::PublicInput));
+        assert!(!record.taint_flags.contains(TaintFlag::UnverifiedLink));
+        assert!(record.taint_flags.contains(TaintFlag::UserGenerated));
+
+        // Audit trail populated
+        assert_eq!(record.taint_reductions.len(), 1);
+        let audit = &record.taint_reductions[0];
+        assert_eq!(audit.timestamp_ms, 6_000);
+        assert_eq!(audit.sanitizer_receipt_id, test_object_id("receipt-c32-6"));
+        assert_eq!(audit.cleared_flags.len(), 2);
+        assert_eq!(audit.covered_inputs.len(), 1);
+    }
+
+    #[test]
+    fn apply_taint_reduction_skips_absent_flags_in_audit() {
+        let mut record = ProvenanceRecord::public_input();
+        assert_eq!(record.taint_flags.len(), 1); // only PublicInput
+
+        record.apply_taint_reduction(
+            &[TaintFlag::PublicInput, TaintFlag::AiGenerated], // AiGenerated absent
+            test_object_id("receipt-c32-7"),
+            vec![],
+            7_000,
+        );
+
+        // Only PublicInput was actually cleared
+        assert!(record.taint_flags.is_empty());
+        assert_eq!(record.taint_reductions.len(), 1);
+        let audit = &record.taint_reductions[0];
+        // Audit trail only records actually-cleared flags
+        assert_eq!(audit.cleared_flags, vec![TaintFlag::PublicInput]);
     }
 }

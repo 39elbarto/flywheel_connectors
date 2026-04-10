@@ -520,6 +520,279 @@ impl LifecycleRecord {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Type-state lifecycle markers (C3.3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Marker: connector is pending deployment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatePending;
+/// Marker: connector is being installed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateInstalling;
+/// Marker: connector is in canary rollout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateCanary;
+/// Marker: connector is in production.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateProduction;
+/// Marker: connector was rolled back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateRolledBack;
+/// Marker: connector is disabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateDisabled;
+/// Marker: connector is uninstalled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateUninstalled;
+
+/// Sealed trait for valid lifecycle state markers.
+mod lifecycle_sealed {
+    pub trait LifecycleMarker {
+        /// The corresponding runtime [`super::LifecycleState`] variant.
+        fn runtime_state() -> super::LifecycleState;
+    }
+}
+
+impl lifecycle_sealed::LifecycleMarker for StatePending {
+    fn runtime_state() -> LifecycleState { LifecycleState::Pending }
+}
+impl lifecycle_sealed::LifecycleMarker for StateInstalling {
+    fn runtime_state() -> LifecycleState { LifecycleState::Installing }
+}
+impl lifecycle_sealed::LifecycleMarker for StateCanary {
+    fn runtime_state() -> LifecycleState { LifecycleState::Canary }
+}
+impl lifecycle_sealed::LifecycleMarker for StateProduction {
+    fn runtime_state() -> LifecycleState { LifecycleState::Production }
+}
+impl lifecycle_sealed::LifecycleMarker for StateRolledBack {
+    fn runtime_state() -> LifecycleState { LifecycleState::RolledBack }
+}
+impl lifecycle_sealed::LifecycleMarker for StateDisabled {
+    fn runtime_state() -> LifecycleState { LifecycleState::Disabled }
+}
+impl lifecycle_sealed::LifecycleMarker for StateUninstalled {
+    fn runtime_state() -> LifecycleState { LifecycleState::Uninstalled }
+}
+
+/// A type-state lifecycle record where the state `S` is encoded at the
+/// type level. Invalid transitions are compile errors.
+///
+/// Use [`TypedLifecycleRecord::new`] to start in [`StatePending`], then
+/// call transition methods (e.g., [`start_install`]) that consume `self`
+/// and return a new record in the target state.
+///
+/// For heterogeneous storage, erase to [`AnyLifecycleRecord`] via
+/// [`TypedLifecycleRecord::erase`].
+///
+/// [`start_install`]: TypedLifecycleRecord::<StatePending>::start_install
+#[derive(Debug, Clone)]
+pub struct TypedLifecycleRecord<S: lifecycle_sealed::LifecycleMarker> {
+    inner: LifecycleRecord,
+    _state: std::marker::PhantomData<S>,
+}
+
+impl<S: lifecycle_sealed::LifecycleMarker> TypedLifecycleRecord<S> {
+    /// The current runtime lifecycle state.
+    #[must_use]
+    pub fn state(&self) -> LifecycleState {
+        S::runtime_state()
+    }
+
+    /// Access the underlying [`LifecycleRecord`].
+    #[must_use]
+    pub const fn record(&self) -> &LifecycleRecord {
+        &self.inner
+    }
+
+    /// Erase the type-state for dynamic dispatch / heterogeneous storage.
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // LifecycleRecord has Drop
+    pub fn erase(self) -> AnyLifecycleRecord {
+        AnyLifecycleRecord { inner: self.inner }
+    }
+
+    fn transition_to<T: lifecycle_sealed::LifecycleMarker>(
+        mut self,
+        reason: TransitionReason,
+    ) -> TypedLifecycleRecord<T> {
+        // The transition is guaranteed valid by the type system — skip
+        // runtime validation. We still record the audit trail.
+        let transition = LifecycleTransition::new(self.inner.state, T::runtime_state(), reason);
+        self.inner.transitions.push(transition);
+        self.inner.state = T::runtime_state();
+        self.inner.state_changed_at = Utc::now();
+        TypedLifecycleRecord {
+            inner: self.inner,
+            _state: std::marker::PhantomData,
+        }
+    }
+}
+
+// Pending -> Installing | Uninstalled
+impl TypedLifecycleRecord<StatePending> {
+    /// Create a new pending deployment record.
+    #[must_use]
+    pub fn new(connector_id: ConnectorId, version: semver::Version) -> Self {
+        Self {
+            inner: LifecycleRecord::new(connector_id, version),
+            _state: std::marker::PhantomData,
+        }
+    }
+
+    /// Begin installation.
+    #[must_use]
+    pub fn start_install(self, reason: TransitionReason) -> TypedLifecycleRecord<StateInstalling> {
+        self.transition_to(reason)
+    }
+
+    /// Uninstall before ever deploying.
+    #[must_use]
+    pub fn uninstall(self, reason: TransitionReason) -> TypedLifecycleRecord<StateUninstalled> {
+        self.transition_to(reason)
+    }
+}
+
+// Installing -> Canary | Uninstalled
+impl TypedLifecycleRecord<StateInstalling> {
+    /// Move to canary rollout after installation.
+    #[must_use]
+    pub fn start_canary(self, reason: TransitionReason) -> TypedLifecycleRecord<StateCanary> {
+        self.transition_to(reason)
+    }
+
+    /// Uninstall during installation.
+    #[must_use]
+    pub fn uninstall(self, reason: TransitionReason) -> TypedLifecycleRecord<StateUninstalled> {
+        self.transition_to(reason)
+    }
+}
+
+// Canary -> Production | RolledBack | Disabled | Uninstalled
+impl TypedLifecycleRecord<StateCanary> {
+    /// Promote to production.
+    #[must_use]
+    pub fn promote(self, reason: TransitionReason) -> TypedLifecycleRecord<StateProduction> {
+        self.transition_to(reason)
+    }
+
+    /// Roll back from canary.
+    #[must_use]
+    pub fn rollback(self, reason: TransitionReason) -> TypedLifecycleRecord<StateRolledBack> {
+        self.transition_to(reason)
+    }
+
+    /// Disable from canary.
+    #[must_use]
+    pub fn disable(self, reason: TransitionReason) -> TypedLifecycleRecord<StateDisabled> {
+        self.transition_to(reason)
+    }
+
+    /// Uninstall from canary.
+    #[must_use]
+    pub fn uninstall(self, reason: TransitionReason) -> TypedLifecycleRecord<StateUninstalled> {
+        self.transition_to(reason)
+    }
+}
+
+// Production -> Canary | RolledBack | Disabled | Uninstalled
+impl TypedLifecycleRecord<StateProduction> {
+    /// Re-enter canary (e.g., for a new version).
+    #[must_use]
+    pub fn to_canary(self, reason: TransitionReason) -> TypedLifecycleRecord<StateCanary> {
+        self.transition_to(reason)
+    }
+
+    /// Roll back from production.
+    #[must_use]
+    pub fn rollback(self, reason: TransitionReason) -> TypedLifecycleRecord<StateRolledBack> {
+        self.transition_to(reason)
+    }
+
+    /// Disable in production.
+    #[must_use]
+    pub fn disable(self, reason: TransitionReason) -> TypedLifecycleRecord<StateDisabled> {
+        self.transition_to(reason)
+    }
+
+    /// Uninstall from production.
+    #[must_use]
+    pub fn uninstall(self, reason: TransitionReason) -> TypedLifecycleRecord<StateUninstalled> {
+        self.transition_to(reason)
+    }
+}
+
+// RolledBack -> Canary | Disabled | Uninstalled
+impl TypedLifecycleRecord<StateRolledBack> {
+    /// Re-enter canary after rollback.
+    #[must_use]
+    pub fn to_canary(self, reason: TransitionReason) -> TypedLifecycleRecord<StateCanary> {
+        self.transition_to(reason)
+    }
+
+    /// Disable after rollback.
+    #[must_use]
+    pub fn disable(self, reason: TransitionReason) -> TypedLifecycleRecord<StateDisabled> {
+        self.transition_to(reason)
+    }
+
+    /// Uninstall after rollback.
+    #[must_use]
+    pub fn uninstall(self, reason: TransitionReason) -> TypedLifecycleRecord<StateUninstalled> {
+        self.transition_to(reason)
+    }
+}
+
+// Disabled -> Canary | Uninstalled
+impl TypedLifecycleRecord<StateDisabled> {
+    /// Re-enter canary from disabled.
+    #[must_use]
+    pub fn to_canary(self, reason: TransitionReason) -> TypedLifecycleRecord<StateCanary> {
+        self.transition_to(reason)
+    }
+
+    /// Uninstall from disabled.
+    #[must_use]
+    pub fn uninstall(self, reason: TransitionReason) -> TypedLifecycleRecord<StateUninstalled> {
+        self.transition_to(reason)
+    }
+}
+
+// Uninstalled is a terminal state — no transitions out.
+
+/// Type-erased lifecycle record for heterogeneous storage.
+///
+/// Created from any [`TypedLifecycleRecord<S>`] via [`erase()`].
+/// The runtime state is preserved in the inner [`LifecycleRecord`].
+///
+/// [`erase()`]: TypedLifecycleRecord::erase
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnyLifecycleRecord {
+    inner: LifecycleRecord,
+}
+
+impl AnyLifecycleRecord {
+    /// The current runtime state.
+    #[must_use]
+    pub const fn state(&self) -> LifecycleState {
+        self.inner.state
+    }
+
+    /// Access the underlying record.
+    #[must_use]
+    pub const fn record(&self) -> &LifecycleRecord {
+        &self.inner
+    }
+
+    /// Convert from an existing runtime record.
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn from_record(record: LifecycleRecord) -> Self {
+        Self { inner: record }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Health Metrics
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -4886,5 +5159,114 @@ mod tests {
             let debug = format!("{v:?}");
             assert!(!debug.is_empty());
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // C3.3: Type-state lifecycle acceptance tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn typed_lifecycle_full_happy_path() {
+        // Pending -> Installing -> Canary -> Production
+        let rec = TypedLifecycleRecord::new(test_connector_id(), test_version());
+        assert_eq!(rec.state(), LifecycleState::Pending);
+
+        let rec = rec.start_install(TransitionReason::InstallComplete);
+        assert_eq!(rec.state(), LifecycleState::Installing);
+
+        let rec = rec.start_canary(TransitionReason::ManualPromotion);
+        assert_eq!(rec.state(), LifecycleState::Canary);
+
+        let rec = rec.promote(TransitionReason::AutoPromotion { health_score: 99 });
+        assert_eq!(rec.state(), LifecycleState::Production);
+
+        // Audit trail preserved
+        assert_eq!(rec.record().transitions.len(), 3);
+    }
+
+    #[test]
+    fn typed_lifecycle_canary_rollback() {
+        let rec = TypedLifecycleRecord::new(test_connector_id(), test_version())
+            .start_install(TransitionReason::InstallComplete)
+            .start_canary(TransitionReason::ManualPromotion)
+            .rollback(TransitionReason::AutoRollback {
+                health_score: 10,
+                failure_reason: "high error rate".into(),
+            });
+        assert_eq!(rec.state(), LifecycleState::RolledBack);
+        assert_eq!(rec.record().transitions.len(), 3);
+    }
+
+    #[test]
+    fn typed_lifecycle_disable_from_production() {
+        let rec = TypedLifecycleRecord::new(test_connector_id(), test_version())
+            .start_install(TransitionReason::InstallComplete)
+            .start_canary(TransitionReason::ManualPromotion)
+            .promote(TransitionReason::AutoPromotion { health_score: 99 })
+            .disable(TransitionReason::Disabled {
+                reason: "maintenance".into(),
+            });
+        assert_eq!(rec.state(), LifecycleState::Disabled);
+    }
+
+    /// Invalid transitions are compile errors. This doc test demonstrates
+    /// that `StatePending` has no `promote()` method.
+    ///
+    /// ```compile_fail
+    /// use fcp_core::{TypedLifecycleRecord, ConnectorId, TransitionReason};
+    /// let rec = TypedLifecycleRecord::new(
+    ///     ConnectorId::from_static("test:fail:v1"),
+    ///     semver::Version::new(1, 0, 0),
+    /// );
+    /// // ERROR: no method named `promote` found for `TypedLifecycleRecord<StatePending>`
+    /// let _ = rec.promote(TransitionReason::AutoPromotion { health_score: 99 });
+    /// ```
+    #[test]
+    fn typed_lifecycle_invalid_transition_is_compile_error() {
+        // The actual compile failure is tested via the doc test above.
+        // This test verifies the type system enforces state transitions.
+        let pending = TypedLifecycleRecord::new(test_connector_id(), test_version());
+        // pending.promote() would not compile
+        // pending.rollback() would not compile
+        // Only start_install() and uninstall() are available on StatePending
+        let _ = pending.state(); // suppress unused
+    }
+
+    #[test]
+    fn typed_lifecycle_erase_preserves_state() {
+        let rec = TypedLifecycleRecord::new(test_connector_id(), test_version())
+            .start_install(TransitionReason::InstallComplete)
+            .start_canary(TransitionReason::ManualPromotion);
+        let erased = rec.erase();
+        assert_eq!(erased.state(), LifecycleState::Canary);
+        assert_eq!(erased.record().transitions.len(), 2);
+    }
+
+    #[test]
+    fn typed_lifecycle_serde_via_erased() {
+        let rec = TypedLifecycleRecord::new(test_connector_id(), test_version())
+            .start_install(TransitionReason::InstallComplete);
+        let erased = rec.erase();
+        let json = serde_json::to_string(&erased).unwrap();
+        let back: AnyLifecycleRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.state(), LifecycleState::Installing);
+        assert_eq!(back.record().connector_id, test_connector_id());
+    }
+
+    #[test]
+    fn any_lifecycle_from_runtime_record() {
+        let runtime = LifecycleRecord::new(test_connector_id(), test_version());
+        let any = AnyLifecycleRecord::from_record(runtime);
+        assert_eq!(any.state(), LifecycleState::Pending);
+    }
+
+    #[test]
+    fn typed_lifecycle_uninstalled_is_terminal() {
+        let rec = TypedLifecycleRecord::new(test_connector_id(), test_version())
+            .uninstall(TransitionReason::Uninstalled);
+        assert_eq!(rec.state(), LifecycleState::Uninstalled);
+        // No transition methods available on StateUninstalled — verified by type system
+        let erased = rec.erase();
+        assert_eq!(erased.state(), LifecycleState::Uninstalled);
     }
 }

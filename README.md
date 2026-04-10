@@ -14,19 +14,17 @@ A secure connector protocol and Rust platform for AI agent operations across zon
 
 ## TL;DR
 
-**This repository currently spans three layers:**
+**Current operator path (V1 — Host-First):** the proven, operational way to use this platform today is `fwc -> fcp-host HTTP admin API -> connector subprocesses over supervised stdio/JSON-RPC`. The CLI distinguishes mesh-backed, host-backed, node-local, and offline answers instead of collapsing everything into a single fake "live" state. Start here.
 
-1. **FCP specifications and a still-migrating ownership split**: the mesh-native protocol model, security invariants, and the emerging FCP3 owner crates (`fcp-kernel`, `fcp-policy`, `fcp-evidence`) that currently still re-export much of `fcp-core`
+**This repository spans three layers:**
 
-2. **A truthful transition control plane**: today the concrete operator path is still `fwc -> fcp-host HTTP admin API -> connector subprocesses over supervised stdio/JSON-RPC`, but the CLI already distinguishes mesh-backed, host-backed, node-local, and offline answers instead of collapsing everything into a single fake "live" state
+1. **A host-first control plane and operator surface**: `fwc` (the sole CLI) talks to `fcp-host` (node-local supervisor) which manages connector subprocesses. This is the current proven operational boundary and the path all operators and agents should use today.
 
-3. **A broad but uneven connector workspace**: 150 connector crates covering messaging, cloud, databases, AI providers, dev tools, productivity, local-device control, and Google service integrations; all 150 currently ship manifests, tests, and `ConnectorErrorMapping`, while the depth of typed operation metadata and runtime proof still varies by connector
+2. **FCP specifications and an emerging ownership split**: the mesh-native protocol model, security invariants, and the FCP3 owner crates (`fcp-kernel`, `fcp-policy`, `fcp-evidence`) that currently still re-export much of `fcp-core`.
 
-**Steady-state mental model**: the mesh is the intended center of gravity. Mesh-backed answers are the highest-confidence runtime truth, host-backed answers are the current node-local control-plane view, and offline artifacts are preparation/debugging surfaces rather than runtime truth.
+3. **A broad but uneven connector workspace**: 150 connector crates covering messaging, cloud, databases, AI providers, dev tools, productivity, local-device control, and Google service integrations; all 150 currently ship manifests, tests, and `ConnectorErrorMapping`, while the depth of typed operation metadata and runtime proof still varies by connector.
 
-**Current reality**: the long-term vision is personal-device sovereignty, mesh durability, and capability-gated execution across your own infrastructure. Operators still commonly enter through the host-first `fwc -> fcp-host` stack, but that stack should be read as the current supervision boundary and truth-reporting surface, not as the final architectural teaching model.
-
-**The direction**: keep the strong zone/capability/evidence model, keep pushing toward the mesh-native design, and make the README teach mesh-backed steady-state operation first while describing host-first truthfulness as a transition constraint or fallback where that is still genuinely true.
+**Target architecture (V2 — Mesh-Native, NOT YET OPERATIONAL):** the long-term vision is personal-device sovereignty, mesh durability, and capability-gated execution across your own infrastructure. In the target model, mesh-backed answers are the highest-confidence runtime truth. This architecture is designed and partially implemented, but has zero production evidence. Do not assume mesh-native features are operational.
 
 **Registry Note**: Registries are just sources of signed manifests/binaries. Your mesh can mirror and pin connectors as content-addressed objects so installs/updates work offline and without upstream dependency.
 
@@ -40,38 +38,80 @@ A secure connector protocol and Rust platform for AI agent operations across zon
 
 ### Why Use FCP?
 
-Read the platform from the mesh outward. The table below starts with the steady-state properties FCP is trying to preserve, then calls out the current truthful operator surfaces that expose those properties during the transition.
+The table below starts with the current operational surface (what works today), then lists the security and protocol features, and finally the target architecture features that are designed but not yet operational.
 
 Status legend: `PROVEN` = backed by direct proof in the current repo, `IMPLEMENTED` = code and tests exist but wider end-to-end proof or production hardening is incomplete, `DESIGNED` = architectural target or type-level/runtime scaffolding exists but the operational story is not yet complete, `PLANNED` = intended direction with little or no built surface yet.
 
 | Feature | Status | What It Does |
 |---------|--------|--------------|
-| **Mesh-Native Architecture** | `DESIGNED` | Intended steady-state: every device is a peer and the mesh is the center of gravity; the current truthful operator surface is still host-first. |
-| **Symbol-First Protocol** | `IMPLEMENTED` | RaptorQ/object-symbol framing, reconstruction, and repair machinery exist in-tree for multipath aggregation and offline resilience. |
-| **Truthful Runtime Resolution** | `IMPLEMENTED` | `fwc` resolves runtime mode explicitly and can already classify answers as mesh-backed, host-backed, node-local, or offline instead of fabricating a single "live" answer. |
+| **Host-First Control Plane** | `IMPLEMENTED` | **Current operator path.** `fwc` + `fcp-host` is the proven operational boundary. All operator and agent interactions go through this path today. |
+| **Truthful Runtime Resolution** | `IMPLEMENTED` | `fwc` resolves runtime mode explicitly and classifies answers as mesh-backed, host-backed, node-local, or offline instead of fabricating a single "live" answer. |
 | **Zone Isolation** | `PROVEN` | Cryptographic namespaces with integrity/confidentiality axes and Tailscale ACL enforcement. |
-| **Mesh-Stored Policy Objects** | `IMPLEMENTED` | Zone definitions and policy bundles exist as owner-signed objects; the wider mesh-backed cutover remains in progress. |
 | **Capability Tokens (CWT/COSE)** | `PROVEN` | Provable authority with `grant_object_ids`; tokens are canonically CBOR-encoded and COSE-signed for interoperability. |
-| **Threshold Owner Key** | `IMPLEMENTED` | FROST ceremony/signing support exists in `fcp-bootstrap`, but it is not yet the universal operational default. |
-| **Threshold Secrets** | `IMPLEMENTED` | Shamir secret sharing exists for device-distributed recovery so raw secret material need not live on one machine. |
-| **Secretless Connectors** | `IMPLEMENTED` | Egress proxy and `credential_id` flows exist so connectors can rely on host-side credential injection; broader proof work is still open. |
-| **Computation Migration** | `DESIGNED` | Migration state machines and framework code exist, but automatic optimal-device execution is not yet an operational guarantee. |
-| **Offline Access** | `IMPLEMENTED` | `ObjectPlacementPolicy` and repair controllers exist for SLO-driven object durability and recovery. |
 | **Tamper-Evident Audit** | `PROVEN` | Hash-linked audit chain with monotonic sequence numbers and quorum-signed checkpoints. |
 | **Revocation** | `IMPLEMENTED` | First-class revocation objects and O(1)-style freshness checks exist in the current evidence/core surfaces. |
 | **Egress Proxy** | `IMPLEMENTED` | Connector network access is routed through manifest-aware guardrails with CIDR deny defaults; some end-to-end proof beads are still open. |
-| **Host-First Control Plane (Current)** | `IMPLEMENTED` | The current operator boundary is still `fwc` + `fcp-host`, and it exists to expose truthful runtime state while the wider mesh-native cutover continues. |
+| **Secretless Connectors** | `IMPLEMENTED` | Egress proxy and `credential_id` flows exist so connectors can rely on host-side credential injection; broader proof work is still open. |
+| **Threshold Owner Key** | `IMPLEMENTED` | FROST ceremony/signing support exists in `fcp-bootstrap`, but it is not yet the universal operational default. |
+| **Threshold Secrets** | `IMPLEMENTED` | Shamir secret sharing exists for device-distributed recovery so raw secret material need not live on one machine. |
 | **Supply Chain Attestations** | `IMPLEMENTED` | Registry-side attestation schemas and verification policy exist; packaging/release proof is still incomplete. |
+| **Offline Access** | `IMPLEMENTED` | `ObjectPlacementPolicy` and repair controllers exist for SLO-driven object durability and recovery. |
+| **Mesh-Stored Policy Objects** | `IMPLEMENTED` | Zone definitions and policy bundles exist as owner-signed objects; the wider mesh-backed cutover remains in progress. |
+| **Symbol-First Protocol** | `IMPLEMENTED` | RaptorQ/object-symbol framing, reconstruction, and repair machinery exist in-tree for multipath aggregation and offline resilience. |
+| **Mesh-Native Architecture** | `DESIGNED` | **STEADY-STATE TARGET (NOT YET OPERATIONAL).** Intended architecture: every device is a peer and the mesh is the center of gravity. Zero production evidence exists today. |
+| **Computation Migration** | `DESIGNED` | **TARGET ONLY.** Migration state machines and framework code exist, but automatic optimal-device execution is not yet an operational guarantee. |
 
-### Quick Example
+### Quick Example: Current Operator Path (Host-First)
 
-This diagram is the intended steady-state model. The current `fwc -> fcp-host`
-operator path is the transition control plane that explains whether a result is
-already mesh-backed or is still only host-backed/node-local.
+This is how you use FCP today. The `fwc` CLI talks to `fcp-host`, which
+supervises connector subprocesses via stdio/JSON-RPC.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              PERSONAL MESH                                  │
+│                        CURRENT OPERATOR PATH (V1)                           │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   Operator / AI Agent                                                       │
+│       │                                                                     │
+│       ▼                                                                     │
+│   ┌─────────────────────────────────────────────────────────────────────┐  │
+│   │  fwc (CLI)                                                          │  │
+│   │  --host http://127.0.0.1:8787                                      │  │
+│   │  Classifies answers: host-backed | node-local | offline             │  │
+│   └────────────────────────────┬────────────────────────────────────────┘  │
+│                                │  HTTP Admin API                           │
+│                                ▼                                            │
+│   ┌─────────────────────────────────────────────────────────────────────┐  │
+│   │  fcp-host (Supervisor)                                              │  │
+│   │  Zone check → Capability check → Revocation check                  │  │
+│   │  Connector lifecycle, health, rollout, sandboxing                   │  │
+│   └────────────────────────────┬────────────────────────────────────────┘  │
+│                                │  stdio / JSON-RPC                         │
+│                                ▼                                            │
+│   ┌─────────────┐     ┌─────────────┐     ┌─────────────┐                  │
+│   │  Connector  │     │  Connector  │     │  Connector  │                  │
+│   │   Gmail     │     │   GitHub    │     │   Slack     │                  │
+│   │ (sandboxed) │     │ (sandboxed) │     │ (sandboxed) │                  │
+│   └──────┬──────┘     └──────┬──────┘     └──────┬──────┘                  │
+│          │                   │                   │                          │
+│          ▼                   ▼                   ▼                          │
+│     Gmail API          GitHub API           Slack API                       │
+│                                                                             │
+│   Every operation: Receipt generated → Audit event logged                   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Target Architecture: Mesh-Native (STEADY-STATE TARGET — NOT YET OPERATIONAL)
+
+This is the intended long-term architecture. Every device becomes a peer in
+a personal mesh, with symbol-based data distribution and mesh-backed answers.
+This architecture is designed and partially implemented but has no production
+evidence yet.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    PERSONAL MESH (TARGET ARCHITECTURE)                       │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │   ┌──────────┐      ┌──────────┐      ┌──────────┐                         │
@@ -315,9 +355,9 @@ While FCPS handles high-throughput symbol delivery, FCPC provides reliable, orde
 
 ---
 
-## Mesh Architecture
+## Mesh Architecture (STEADY-STATE TARGET — NOT YET OPERATIONAL)
 
-Every device is a MeshNode. Collectively, they ARE the Hub.
+In the target architecture, every device is a MeshNode. Collectively, they ARE the Hub. Today the proven operator path is host-first (`fwc -> fcp-host`); the mesh layer below is designed and partially implemented but not yet the operational default.
 
 ### MeshNode Components
 
@@ -774,23 +814,24 @@ Reconnecting ──(max retries)────> Unhealthy
 cargo build -p fwc --bin fwc --release
 cp target/release/fwc ~/.local/bin/
 
-# Ask the runtime truth question first.
-# This path is acceptance-covered in crates/fwc/tests/cual_integration.rs
-# and grounded in the knowledge-state model in crates/fwc/src/truth.rs.
-fwc --host http://127.0.0.1:8787 mesh explain-availability github
+# Current operator path: fwc talks to fcp-host via --host flag.
+# This is the proven operational surface. Start here.
 fwc --host http://127.0.0.1:8787 status github
+fwc --host http://127.0.0.1:8787 list
 fwc --host http://127.0.0.1:8787 invoke github issues.create --file payload.json
+fwc --host http://127.0.0.1:8787 simulate github issues.create --file payload.json
 
-# Explicit offline preparation when you want artifact-backed data.
+# Ask what runtime truth source backs your answers:
+fwc --host http://127.0.0.1:8787 mesh explain-availability github
+
+# Offline mode: artifact-backed data without a running host.
 fwc list --offline
 fwc search "send message" --offline
 fwc show github --offline
 fwc ops github --offline
 fwc schema github issues.create --offline
 
-# Current transition control-plane workflows
-fwc --host http://127.0.0.1:8787 list
-fwc --host http://127.0.0.1:8787 simulate github issues.create --file payload.json
+# History and audit trail
 fwc history --connector github --limit 20
 ```
 
@@ -1313,12 +1354,13 @@ Delivers the core safety story ("zones + explicit authority + auditable operatio
 
 ## FWC Truth Model
 
-`fwc` still enforces a host-first control-plane truth contract, but the
-knowledge model it exposes is no longer host-centric.
+`fwc` enforces a host-first control-plane truth contract. The host-backed
+path (`fwc -> fcp-host`) is the current operational reality and the only
+proven operator surface.
 
 - The knowledge-state taxonomy lives in `crates/fwc/src/truth.rs` and explicitly distinguishes `mesh-backed`, `host-backed`, `node-local`, `offline`, `degraded`, and `fallback-derived` answers.
-- `mesh-backed` is the steady-state answer: when live runtime data is joined with placement/durability evidence, the CLI can elevate a result beyond merely node-local status.
-- `host-backed` is the current node-local authoritative control-plane view, which is why `fwc -> fcp-host` still matters operationally during the transition.
+- `host-backed` is the current authoritative answer: the node-local control-plane view provided by `fwc -> fcp-host`. This is what operators should rely on today.
+- `mesh-backed` is the target steady-state answer (NOT YET OPERATIONAL): when live runtime data is joined with mesh placement/durability evidence, the CLI will be able to elevate a result beyond node-local status.
 - The command-source classification matrix lives in `crates/fwc/src/catalog.rs` and explicitly marks commands as `live_host`, `offline_artifact`, `hybrid`, or `passthrough`.
 - Runtime resolution is performed before dispatch and yields `live`, `explicit-offline`, `degraded-offline`, or `refused` rather than allowing silent live-to-offline switching.
 - User-facing result semantics are carried by `CommandAvailability` in `crates/fwc/src/readiness.rs`, with explicit states such as `live-runtime`, `offline-artifact`, `unsupported`, `planned`, `unavailable`, `denied`, and `unknown`.

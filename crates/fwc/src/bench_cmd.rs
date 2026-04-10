@@ -1359,7 +1359,7 @@ fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
 
     let (percentiles, outliers) = run_benchmark_with_result(warmup, iterations, || {
         verifier
-            .verify(&capability, &cap, &op, &[])
+            .verify(capability.clone(), &cap, &op, &[])
             .expect("capability verification should succeed");
     });
 

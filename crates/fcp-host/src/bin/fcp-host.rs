@@ -1210,9 +1210,9 @@ async fn verify_live_request(
         request.zone_id.clone(),
         InstanceId::new(),
     );
-    let claims = verifier
+    let verified_token = verifier
         .verify(
-            &request.capability_token,
+            request.capability_token.clone(),
             &tool.capability,
             &request.operation,
             &[],
@@ -1221,7 +1221,7 @@ async fn verify_live_request(
             HostError::PreflightFailed(format!("capability token rejected: {error}"))
         })?;
 
-    let principal = claims_principal(&claims).ok_or_else(|| {
+    let principal = claims_principal(verified_token.claims()).ok_or_else(|| {
         HostError::PreflightFailed(
             "capability token is missing the subject or principal_id claim required for live execution".to_string(),
         )

@@ -57,6 +57,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "risky"
 
 [provides.operations."telegram.send_message".input_schema]
 type = "object"
@@ -110,6 +111,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "risky"
 
 [provides.operations."telegram.send_media".input_schema]
 type = "object"
@@ -170,6 +172,7 @@ capability = "telegram.read"
 risk_level = "low"
 safety_tier = "safe"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."telegram.get_file".input_schema]
 type = "object"
@@ -215,6 +218,7 @@ capability = "telegram.send"
 risk_level = "low"
 safety_tier = "safe"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations."telegram.answer_callback_query".input_schema]
 type = "object"

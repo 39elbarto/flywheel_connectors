@@ -40,6 +40,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "risky"
 
 [provides.operations."slack.post_message".input_schema]
 required = ["channel", "text"]
@@ -85,6 +86,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "risky"
 
 [provides.operations."slack.reply_thread".input_schema]
 required = ["channel", "thread_ts", "text"]
@@ -132,6 +134,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."slack.get_channel_history".input_schema]
 required = ["channel"]
@@ -177,6 +180,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."slack.search_messages".input_schema]
 required = ["query"]
@@ -224,6 +228,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."slack.list_channels".input_schema]
 required = []
@@ -270,6 +275,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."slack.get_user_info".input_schema]
 required = ["user"]
@@ -313,6 +319,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "risky"
 
 [provides.operations."slack.upload_file".input_schema]
 required = ["channels", "content_object_id", "resolved_content"]
@@ -366,6 +373,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."slack.add_reaction".input_schema]
 required = ["channel", "timestamp", "name"]
@@ -413,6 +421,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "strict"
+revocation_freshness = "risky"
 
 [provides.operations."slack.set_channel_topic".input_schema]
 required = ["channel", "topic"]
@@ -462,6 +471,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."slack.download_file".input_schema]
 required = ["file_id"]

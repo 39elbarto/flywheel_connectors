@@ -60,6 +60,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."pg.query".input_schema]
 type = "object"
@@ -118,6 +119,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "critical"
 
 [provides.operations."pg.execute".input_schema]
 type = "object"
@@ -172,6 +174,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."pg.explain".input_schema]
 type = "object"
@@ -226,6 +229,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."pg.schema.tables".input_schema]
 type = "object"
@@ -277,6 +281,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."pg.schema.columns".input_schema]
 type = "object"
@@ -328,6 +333,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."pg.schema.indexes".input_schema]
 type = "object"
@@ -379,6 +385,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations."pg.transaction.begin".input_schema]
 type = "object"
@@ -429,6 +436,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "best_effort"
+revocation_freshness = "safe"
 
 [provides.operations."pg.transaction.commit".input_schema]
 type = "object"
@@ -479,6 +487,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "best_effort"
+revocation_freshness = "safe"
 
 [provides.operations."pg.transaction.rollback".input_schema]
 type = "object"
@@ -529,6 +538,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "critical"
 
 [provides.operations."pg.batch".input_schema]
 type = "object"
@@ -586,6 +596,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "best_effort"
+revocation_freshness = "critical"
 
 [provides.operations."pg.prepared".input_schema]
 type = "object"
@@ -640,6 +651,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."pg.health".input_schema]
 type = "object"

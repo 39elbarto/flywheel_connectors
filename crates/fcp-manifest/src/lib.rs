@@ -17,13 +17,18 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use fcp_core::{
     ApprovalMode as CoreApprovalMode, CapabilityId, ConnectorId, IdValidationError,
     IdempotencyClass, ObjectId, RateLimitDeclarationError, RateLimitDeclarations, RateLimitPool,
-    RiskLevel, SafetyTier, ZoneId, ZoneIdError, validate_canonical_id,
+    RevocationFreshnessClass, RiskLevel, SafetyTier, ZoneId, ZoneIdError, validate_canonical_id,
 };
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
 const MANIFEST_FORMAT: &str = "fcp-connector-manifest";
 const INTERFACE_HASH_DOMAIN: &str = "fcp.interface.v2";
+
+/// Default freshness class for backward compatibility with pre-C1.3 manifests.
+const fn default_freshness_class() -> RevocationFreshnessClass {
+    RevocationFreshnessClass::Safe
+}
 
 #[derive(Debug, Serialize)]
 struct InterfaceDescriptorV2<'a> {
@@ -1443,6 +1448,12 @@ pub struct OperationSection {
     pub requires_approval: ManifestApprovalMode,
     pub rate_limit: Option<RateLimit>,
     pub idempotency: IdempotencyClass,
+    /// Revocation freshness class declared by the connector author.
+    ///
+    /// Determines the minimum [`FreshnessPolicy`] the host MUST enforce.
+    /// Defaults to `safe` for backward compatibility with pre-C1.3 manifests.
+    #[serde(default = "default_freshness_class")]
+    pub revocation_freshness: RevocationFreshnessClass,
     pub input_schema: serde_json::Value,
     pub output_schema: serde_json::Value,
     #[serde(default)]

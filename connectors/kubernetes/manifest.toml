@@ -61,6 +61,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "best_effort"
+revocation_freshness = "critical"
 
 [provides.operations."kubernetes.delete_pod".input_schema]
 required = [
@@ -125,6 +126,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "none"
+revocation_freshness = "critical"
 
 [provides.operations."kubernetes.create_pod".input_schema]
 required = [
@@ -193,6 +195,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "best_effort"
+revocation_freshness = "critical"
 
 [provides.operations."kubernetes.apply_deployment".input_schema]
 required = [
@@ -264,6 +267,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "best_effort"
+revocation_freshness = "critical"
 
 [provides.operations."kubernetes.delete_deployment".input_schema]
 required = [
@@ -325,6 +329,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."kubernetes.list_services".input_schema]
 required = ["namespace"]
@@ -382,6 +387,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."kubernetes.get_configmap".input_schema]
 required = [
@@ -443,6 +449,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."kubernetes.get_deployment".input_schema]
 required = [
@@ -504,6 +511,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."kubernetes.get_pod".input_schema]
 required = [
@@ -562,6 +570,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."kubernetes.get_pod_logs".input_schema]
 required = [
@@ -632,6 +641,7 @@ risk_level = "high"
 safety_tier = "risky"
 requires_approval = "interactive"
 idempotency = "strict"
+revocation_freshness = "critical"
 
 [provides.operations."kubernetes.get_secret".input_schema]
 required = [
@@ -693,6 +703,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."kubernetes.get_service".input_schema]
 required = [
@@ -751,6 +762,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."kubernetes.list_deployments".input_schema]
 required = ["namespace"]
@@ -809,6 +821,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."kubernetes.list_pods".input_schema]
 required = ["namespace"]
@@ -867,6 +880,7 @@ risk_level = "high"
 safety_tier = "risky"
 requires_approval = "interactive"
 idempotency = "none"
+revocation_freshness = "critical"
 
 [provides.operations."kubernetes.rollout_restart".input_schema]
 required = [
@@ -925,6 +939,7 @@ risk_level = "high"
 safety_tier = "risky"
 requires_approval = "interactive"
 idempotency = "best_effort"
+revocation_freshness = "critical"
 
 [provides.operations."kubernetes.scale_deployment".input_schema]
 required = [
@@ -990,6 +1005,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."kubernetes.stream_pod_logs".input_schema]
 required = [
@@ -1054,6 +1070,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "best_effort"
+revocation_freshness = "risky"
 
 [provides.operations."kubernetes.update_configmap".input_schema]
 required = [
@@ -1119,6 +1136,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."kubernetes.watch_events".input_schema]
 required = ["namespace"]
@@ -1174,6 +1192,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "none"
+revocation_freshness = "critical"
 
 [provides.operations."kubernetes.exec".input_schema]
 required = [
@@ -1246,6 +1265,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."kubernetes.configmap.list".input_schema]
 required = ["namespace"]
@@ -1301,6 +1321,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."kubernetes.configmap.get".input_schema]
 required = [
@@ -1359,6 +1380,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "none"
+revocation_freshness = "critical"
 
 [provides.operations."kubernetes.configmap.create".input_schema]
 required = [
@@ -1424,6 +1446,7 @@ risk_level = "medium"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "best_effort"
+revocation_freshness = "critical"
 
 [provides.operations."kubernetes.configmap.update".input_schema]
 required = [
@@ -1489,6 +1512,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "best_effort"
+revocation_freshness = "critical"
 
 [provides.operations."kubernetes.configmap.delete".input_schema]
 required = [
@@ -1547,6 +1571,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."kubernetes.secret.list".input_schema]
 required = ["namespace"]
@@ -1602,6 +1627,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "strict"
+revocation_freshness = "critical"
 
 [provides.operations."kubernetes.secret.get".input_schema]
 required = [
@@ -1663,6 +1689,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "none"
+revocation_freshness = "critical"
 
 [provides.operations."kubernetes.secret.create".input_schema]
 required = [
@@ -1734,6 +1761,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "best_effort"
+revocation_freshness = "critical"
 
 [provides.operations."kubernetes.secret.delete".input_schema]
 required = [
@@ -1792,6 +1820,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."kubernetes.rollout.status".input_schema]
 type = "object"
@@ -1851,6 +1880,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."kubernetes.rollout.history".input_schema]
 type = "object"
@@ -1909,6 +1939,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "best_effort"
+revocation_freshness = "critical"
 
 [provides.operations."kubernetes.rollout.rollback".input_schema]
 type = "object"

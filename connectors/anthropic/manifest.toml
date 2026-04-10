@@ -53,6 +53,7 @@ risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations."anthropic.chat".rate_limit]
 max = 120
@@ -176,6 +177,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."anthropic.get_usage".input_schema]
 type = "object"
@@ -223,6 +225,7 @@ risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations."anthropic.message".rate_limit]
 max = 120
@@ -394,6 +397,7 @@ risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations."anthropic.message.stream".rate_limit]
 max = 120

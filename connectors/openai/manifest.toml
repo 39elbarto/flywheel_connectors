@@ -57,6 +57,7 @@ risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations.chat.rate_limit]
 max = 100
@@ -194,6 +195,7 @@ risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations.simple_chat.rate_limit]
 max = 100
@@ -293,6 +295,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations.get_usage.rate_limit]
 max = 1000
@@ -342,6 +345,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations.embeddings.rate_limit]
 max = 200
@@ -449,6 +453,7 @@ risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations.images_generate.rate_limit]
 max = 50
@@ -550,6 +555,7 @@ risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations.audio_transcribe.rate_limit]
 max = 50
@@ -625,6 +631,7 @@ risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations.audio_tts.rate_limit]
 max = 50
@@ -723,6 +730,7 @@ risk_level = "high"
 safety_tier = "risky"
 requires_approval = "interactive"
 idempotency = "none"
+revocation_freshness = "critical"
 
 [provides.operations.finetune_create.rate_limit]
 max = 10
@@ -815,6 +823,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations.finetune_list.rate_limit]
 max = 100
@@ -884,6 +893,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations.finetune_get.rate_limit]
 max = 100
@@ -964,6 +974,7 @@ risk_level = "high"
 safety_tier = "risky"
 requires_approval = "interactive"
 idempotency = "none"
+revocation_freshness = "critical"
 
 [provides.operations.finetune_cancel.rate_limit]
 max = 10
@@ -1024,6 +1035,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations.finetune_events.rate_limit]
 max = 100
@@ -1097,6 +1109,7 @@ risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "risky"
 
 [provides.operations.assistants_create.rate_limit]
 max = 50
@@ -1181,6 +1194,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations.assistants_list.rate_limit]
 max = 100
@@ -1247,6 +1261,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations.assistants_get.rate_limit]
 max = 100
@@ -1313,6 +1328,7 @@ risk_level = "high"
 safety_tier = "risky"
 requires_approval = "interactive"
 idempotency = "none"
+revocation_freshness = "critical"
 
 [provides.operations.assistants_delete.rate_limit]
 max = 20
@@ -1373,6 +1389,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations.threads_create.rate_limit]
 max = 100
@@ -1436,6 +1453,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations.threads_get.rate_limit]
 max = 100
@@ -1496,6 +1514,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations.threads_messages_create.rate_limit]
 max = 100
@@ -1578,6 +1597,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations.threads_messages_list.rate_limit]
 max = 100
@@ -1649,6 +1669,7 @@ risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations.threads_runs_create.rate_limit]
 max = 50
@@ -1734,6 +1755,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations.threads_runs_get.rate_limit]
 max = 100
@@ -1813,6 +1835,7 @@ risk_level = "medium"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+revocation_freshness = "risky"
 
 [provides.operations.threads_runs_cancel.rate_limit]
 max = 50

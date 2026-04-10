@@ -40,6 +40,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "risky"
 
 [provides.operations."github.create_issue".input_schema]
 required = ["owner", "repo", "title"]
@@ -89,6 +90,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."github.get_issue".input_schema]
 required = ["owner", "repo", "issue_number"]
@@ -136,6 +138,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."github.search_issues".input_schema]
 required = ["query"]
@@ -181,6 +184,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "risky"
 
 [provides.operations."github.create_pull_request".input_schema]
 required = ["owner", "repo", "title", "head", "base"]
@@ -232,6 +236,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."github.get_pull_request".input_schema]
 required = ["owner", "repo", "pull_number"]
@@ -279,6 +284,7 @@ risk_level = "high"
 safety_tier = "risky"
 requires_approval = "interactive"
 idempotency = "none"
+revocation_freshness = "critical"
 
 [provides.operations."github.merge_pull_request".input_schema]
 required = ["owner", "repo", "pull_number"]
@@ -328,6 +334,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."github.get_repo".input_schema]
 required = ["owner", "repo"]
@@ -373,6 +380,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."github.search_repos".input_schema]
 required = ["query"]
@@ -418,6 +426,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."github.list_workflows".input_schema]
 required = ["owner", "repo"]
@@ -465,6 +474,7 @@ risk_level = "high"
 safety_tier = "risky"
 requires_approval = "interactive"
 idempotency = "none"
+revocation_freshness = "critical"
 
 [provides.operations."github.trigger_workflow".input_schema]
 required = ["owner", "repo", "workflow_id", "ref"]
@@ -514,6 +524,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."github.get_file_content".input_schema]
 required = ["owner", "repo", "path"]
@@ -561,6 +572,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."github.search_code".input_schema]
 required = ["query"]

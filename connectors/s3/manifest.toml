@@ -40,6 +40,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "strict"
+revocation_freshness = "risky"
 
 [provides.operations."s3.put_object".input_schema]
 required = ["bucket", "key", "body"]
@@ -87,6 +88,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."s3.get_object".input_schema]
 required = ["bucket", "key"]
@@ -134,6 +136,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "elevation_token"
 idempotency = "strict"
+revocation_freshness = "critical"
 
 [provides.operations."s3.delete_object".input_schema]
 required = ["bucket", "key"]
@@ -181,6 +184,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "elevation_token"
 idempotency = "strict"
+revocation_freshness = "critical"
 
 [provides.operations."s3.create_bucket".input_schema]
 required = ["bucket"]
@@ -228,6 +232,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "elevation_token"
 idempotency = "strict"
+revocation_freshness = "critical"
 
 [provides.operations."s3.delete_bucket".input_schema]
 required = ["bucket"]
@@ -275,6 +280,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."s3.list_objects".input_schema]
 required = ["bucket"]
@@ -324,6 +330,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."s3.head_object".input_schema]
 required = ["bucket", "key"]
@@ -371,6 +378,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "strict"
+revocation_freshness = "risky"
 
 [provides.operations."s3.copy_object".input_schema]
 required = ["source_bucket", "source_key", "dest_bucket", "dest_key"]
@@ -420,6 +428,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."s3.list_buckets".input_schema]
 required = []
@@ -461,6 +470,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "elevation_token"
 idempotency = "none"
+revocation_freshness = "critical"
 
 [provides.operations."s3.generate_presigned_url".input_schema]
 required = ["bucket", "key"]

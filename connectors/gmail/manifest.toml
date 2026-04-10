@@ -40,6 +40,7 @@ risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "none"
+revocation_freshness = "critical"
 
 [provides.operations."gmail.send_message".input_schema]
 required = ["to", "subject", "body"]
@@ -87,6 +88,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."gmail.get_message".input_schema]
 required = ["message_id"]
@@ -130,6 +132,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."gmail.list_messages".input_schema]
 required = []
@@ -175,6 +178,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."gmail.search_messages".input_schema]
 required = ["query"]
@@ -218,6 +222,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "risky"
 
 [provides.operations."gmail.create_draft".input_schema]
 required = ["to", "subject", "body"]
@@ -265,6 +270,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."gmail.modify_labels".input_schema]
 required = ["message_id"]
@@ -312,6 +318,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."gmail.list_labels".input_schema]
 required = []
@@ -353,6 +360,7 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "strict"
+revocation_freshness = "critical"
 
 [provides.operations."gmail.trash_message".input_schema]
 required = ["message_id"]

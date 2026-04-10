@@ -330,6 +330,80 @@ impl fmt::Display for FreshnessPolicy {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Revocation Freshness Class (manifest-declared, C1.3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Revocation freshness class declared in connector manifests (NORMATIVE).
+///
+/// The connector author sets this per-operation in `manifest.toml` to declare
+/// the minimum freshness guarantee the host MUST enforce. The host MUST NOT
+/// allow an operator to downgrade a `Critical` operation to `BestEffort`.
+///
+/// Mapping to [`FreshnessPolicy`]:
+/// - `Critical` → `Strict` (deny if stale)
+/// - `Risky` → `Warn` (log degradation)
+/// - `Safe` → `BestEffort` (proceed with stale cache)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevocationFreshnessClass {
+    /// Security-critical operation (secret access, zone key rotation, etc.).
+    /// Host MUST use `Strict` freshness. Deny if stale.
+    Critical,
+
+    /// Risk-bearing operation (writes, deletes, escalated reads).
+    /// Host MUST use at least `Warn` freshness. Log degradation.
+    Risky,
+
+    /// Low-risk read-only operation.
+    /// Host MAY use `BestEffort` freshness.
+    Safe,
+}
+
+impl RevocationFreshnessClass {
+    /// The minimum [`FreshnessPolicy`] this class requires.
+    #[must_use]
+    pub const fn minimum_policy(&self) -> FreshnessPolicy {
+        match self {
+            Self::Critical => FreshnessPolicy::Strict,
+            Self::Risky => FreshnessPolicy::Warn,
+            Self::Safe => FreshnessPolicy::BestEffort,
+        }
+    }
+
+    /// Check whether an operator-chosen policy satisfies this class.
+    ///
+    /// Returns `true` if `operator_policy` is at least as strict as the
+    /// class requires.
+    #[must_use]
+    pub const fn allows_policy(&self, operator_policy: FreshnessPolicy) -> bool {
+        // Strict > Warn > BestEffort  (lower ordinal = stricter)
+        // A policy satisfies a class if it is AT LEAST as strict.
+        match (self, operator_policy) {
+            (Self::Critical, FreshnessPolicy::Strict)
+            | (Self::Risky, FreshnessPolicy::Strict | FreshnessPolicy::Warn)
+            | (Self::Safe, _) => true,
+            (Self::Critical | Self::Risky, _) => false,
+        }
+    }
+
+    /// String representation for TOML/JSON.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Critical => "critical",
+            Self::Risky => "risky",
+            Self::Safe => "safe",
+        }
+    }
+}
+
+impl fmt::Display for RevocationFreshnessClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Revocation check result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevocationCheckResult {
@@ -1921,5 +1995,73 @@ mod tests {
         assert!(from_default.is_empty());
         assert_eq!(from_new.head_seq, from_default.head_seq);
         assert_eq!(from_new.last_updated, from_default.last_updated);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // C1.3: RevocationFreshnessClass tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn freshness_class_critical_rejects_besteffort() {
+        let class = RevocationFreshnessClass::Critical;
+        assert!(!class.allows_policy(FreshnessPolicy::BestEffort));
+        assert!(!class.allows_policy(FreshnessPolicy::Warn));
+        assert!(class.allows_policy(FreshnessPolicy::Strict));
+    }
+
+    #[test]
+    fn freshness_class_risky_accepts_warn_and_strict() {
+        let class = RevocationFreshnessClass::Risky;
+        assert!(!class.allows_policy(FreshnessPolicy::BestEffort));
+        assert!(class.allows_policy(FreshnessPolicy::Warn));
+        assert!(class.allows_policy(FreshnessPolicy::Strict));
+    }
+
+    #[test]
+    fn freshness_class_safe_accepts_all() {
+        let class = RevocationFreshnessClass::Safe;
+        assert!(class.allows_policy(FreshnessPolicy::BestEffort));
+        assert!(class.allows_policy(FreshnessPolicy::Warn));
+        assert!(class.allows_policy(FreshnessPolicy::Strict));
+    }
+
+    #[test]
+    fn freshness_class_minimum_policy_mapping() {
+        assert_eq!(
+            RevocationFreshnessClass::Critical.minimum_policy(),
+            FreshnessPolicy::Strict
+        );
+        assert_eq!(
+            RevocationFreshnessClass::Risky.minimum_policy(),
+            FreshnessPolicy::Warn
+        );
+        assert_eq!(
+            RevocationFreshnessClass::Safe.minimum_policy(),
+            FreshnessPolicy::BestEffort
+        );
+    }
+
+    #[test]
+    fn freshness_class_serde_roundtrip() {
+        for class in [
+            RevocationFreshnessClass::Critical,
+            RevocationFreshnessClass::Risky,
+            RevocationFreshnessClass::Safe,
+        ] {
+            let json = serde_json::to_string(&class).unwrap();
+            let back: RevocationFreshnessClass = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, class);
+        }
+    }
+
+    #[test]
+    fn freshness_class_display() {
+        assert_eq!(RevocationFreshnessClass::Critical.as_str(), "critical");
+        assert_eq!(RevocationFreshnessClass::Risky.as_str(), "risky");
+        assert_eq!(RevocationFreshnessClass::Safe.as_str(), "safe");
+        assert_eq!(
+            RevocationFreshnessClass::Critical.to_string(),
+            "critical"
+        );
     }
 }

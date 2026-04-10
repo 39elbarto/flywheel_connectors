@@ -252,6 +252,22 @@ impl CwtClaims {
         self
     }
 
+    /// Set FCP2 constraints claim from pre-serialized CBOR bytes.
+    ///
+    /// The bytes are deserialized into a `ciborium::Value` so they are
+    /// stored as a native CBOR map (not wrapped in a byte string).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `cbor_bytes` is not valid CBOR.
+    #[must_use]
+    pub fn constraints_cbor(mut self, cbor_bytes: &[u8]) -> Self {
+        let value: ciborium::Value =
+            ciborium::from_reader(cbor_bytes).expect("constraints_cbor: invalid CBOR");
+        self.claims.insert(fcp2_claims::CONSTRAINTS, value);
+        self
+    }
+
     /// Set custom claim.
     #[must_use]
     pub fn custom(mut self, key: i64, value: ciborium::Value) -> Self {
@@ -653,6 +669,16 @@ impl CapabilityTokenBuilder {
     #[must_use]
     pub fn issued_now(mut self) -> Self {
         self.claims = self.claims.issued_at(Utc::now());
+        self
+    }
+
+    /// Set constraints from pre-serialized CBOR bytes.
+    ///
+    /// Use `ciborium::into_writer(&constraints, &mut buf)` to serialize
+    /// a `CapabilityConstraints` before passing here.
+    #[must_use]
+    pub fn constraints_cbor(mut self, cbor_bytes: &[u8]) -> Self {
+        self.claims = self.claims.constraints_cbor(cbor_bytes);
         self
     }
 

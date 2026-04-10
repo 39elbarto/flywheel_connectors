@@ -1049,12 +1049,22 @@ impl CapabilityToken<Unverified> {
         let now = chrono::Utc::now();
         let expires = now + chrono::Duration::hours(1);
 
+        // C3.4: tokens MUST include constraints (default-deny)
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor)
+            .expect("Failed to serialize test constraints");
+
         let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.all")
             .zone_id("z:work")
             .principal("test-principal")
             .issuer("node:test")
             .validity(now, expires)
+            .constraints_cbor(&cbor)
             .sign(&signing_key)
             .expect("Failed to create test token");
 
@@ -1106,6 +1116,20 @@ pub struct CapabilityConstraints {
 }
 
 impl CapabilityConstraints {
+    /// Check whether this constraint set is empty (no restrictions at all).
+    ///
+    /// An empty constraint set means **deny all** — no resources are allowed.
+    /// This is the default-deny interpretation required by C3.4.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.resource_allow.is_empty()
+            && self.resource_deny.is_empty()
+            && self.max_calls.is_none()
+            && self.max_bytes.is_none()
+            && self.idempotency_key.is_none()
+            && self.credential_allow.is_empty()
+    }
+
     /// Check if a credential ID is allowed by this capability's constraints.
     ///
     /// Returns `true` only if the credential is explicitly listed in `credential_allow`.
@@ -1480,10 +1504,22 @@ impl CapabilityVerifier {
             }
         }
 
-        // 5. Enforce constraints
+        // 5. Enforce constraints (NORMATIVE — C3.4: mandatory, default-deny)
         if let Some(constr_val) = claims.get(fcp2_claims::CONSTRAINTS) {
             let constraints: CapabilityConstraints = Self::deserialize_cbor(constr_val)?;
+            if constraints.is_empty() {
+                return Err(FcpError::CapabilityDenied {
+                    capability: "constraints".into(),
+                    reason: "empty constraint set = deny all (C3.4 default-deny)".into(),
+                });
+            }
             Self::enforce_resource_constraints(&constraints, resource_uris)?;
+        } else {
+            // Missing constraints entirely — reject (C3.4)
+            return Err(FcpError::CapabilityDenied {
+                capability: "constraints".into(),
+                reason: "token has no constraints — null constraints are rejected (C3.4)".into(),
+            });
         }
 
         Ok(claims)
@@ -1888,6 +1924,17 @@ mod tests {
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
 
+    /// Helper: serialize default-allow constraints to CBOR bytes for test tokens.
+    fn test_constraints_cbor() -> Vec<u8> {
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&constraints, &mut buf).unwrap();
+        buf
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Canonical ID Validation Tests (FCP Spec §3.4.2)
     // ─────────────────────────────────────────────────────────────────────────
@@ -1930,6 +1977,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, expires)
+            .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .expect("Failed to sign token");
 
@@ -1964,6 +2012,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .unwrap();
 
@@ -1992,6 +2041,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .unwrap();
 
@@ -2018,6 +2068,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now - Duration::hours(2), now - Duration::hours(1)) // Expired
+            .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .unwrap();
 
@@ -3873,6 +3924,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .unwrap();
 
@@ -3959,6 +4011,7 @@ mod tests {
             .operations(&["op.test"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .unwrap();
 
@@ -3989,6 +4042,7 @@ mod tests {
             .operations(&["op.read"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .unwrap();
 
@@ -4016,6 +4070,7 @@ mod tests {
             .operations(&["op.raw"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .unwrap();
 
@@ -4046,6 +4101,7 @@ mod tests {
             .operations(&["op.down"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .unwrap();
 
@@ -4076,6 +4132,7 @@ mod tests {
             .operations(&["op.ref"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .unwrap();
 
@@ -4112,6 +4169,7 @@ mod tests {
             .operations(&["op.clone"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .unwrap();
 
@@ -4147,6 +4205,7 @@ mod tests {
             .operations(&["op.raw"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .unwrap();
 
@@ -4171,6 +4230,7 @@ mod tests {
             .operations(&["op.consume"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .unwrap();
 
@@ -4206,6 +4266,7 @@ mod tests {
             .operations(&["op.noncon"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .unwrap();
 
@@ -4239,6 +4300,7 @@ mod tests {
             .operations(&["op.serde"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .unwrap();
 
@@ -4279,6 +4341,7 @@ mod tests {
             .operations(&["op.expired"])
             .issuer("node:primary")
             .validity(now - Duration::hours(2), now - Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .unwrap();
 
@@ -4306,6 +4369,7 @@ mod tests {
             .operations(&["op.zone"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .unwrap();
 
@@ -4334,6 +4398,7 @@ mod tests {
             .operations(&["op.sig"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .unwrap();
 
@@ -4437,5 +4502,43 @@ mod tests {
         assert_eq!(cloned.zone_id(), &ZoneId::owner());
         // Cross-zone access still rejected on clone
         assert!(cloned.with_zone_check(&ZoneId::public(), |v| *v).is_err());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // C3.4: Mandatory capability constraints acceptance tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn capability_constraints_empty_is_deny_all() {
+        let empty = CapabilityConstraints::default();
+        assert!(empty.is_empty());
+        // Empty constraints = deny all — no resources allowed
+    }
+
+    #[test]
+    fn capability_constraints_with_allow_not_empty() {
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["repo:octocat/*".into()],
+            ..Default::default()
+        };
+        assert!(!constraints.is_empty());
+    }
+
+    #[test]
+    fn capability_constraints_with_max_calls_not_empty() {
+        let constraints = CapabilityConstraints {
+            max_calls: Some(100),
+            ..Default::default()
+        };
+        assert!(!constraints.is_empty());
+    }
+
+    #[test]
+    fn capability_constraints_with_credential_allow_not_empty() {
+        let constraints = CapabilityConstraints {
+            credential_allow: vec![CredentialId::new()],
+            ..Default::default()
+        };
+        assert!(!constraints.is_empty());
     }
 }

@@ -561,6 +561,143 @@ impl AsRef<str> for ZoneId {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ZoneBound<T> — type-level zone binding invariant
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A value `T` bound to a specific [`ZoneId`] at the API level.
+///
+/// `ZoneBound<T>` enforces that the inner value can only be accessed when the
+/// caller demonstrates zone membership — either via [`with_zone_check`] (which
+/// validates at runtime) or [`into_inner_unchecked`] (which is `#[doc(hidden)]`
+/// and intended only for migration / testing scaffolds).
+///
+/// # Security invariant
+///
+/// Once bound, the zone association is immutable. There is no `set_zone()`
+/// or `rebind()` — cross-zone transfer must go through the provenance system.
+///
+/// [`with_zone_check`]: ZoneBound::with_zone_check
+/// [`into_inner_unchecked`]: ZoneBound::into_inner_unchecked
+#[derive(Debug, Clone)]
+pub struct ZoneBound<T> {
+    inner: T,
+    zone_id: ZoneId,
+}
+
+impl<T> ZoneBound<T> {
+    /// Bind a value to a zone. Once bound, the zone is immutable.
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // T may have Drop
+    pub fn bind(inner: T, zone_id: ZoneId) -> Self {
+        Self { inner, zone_id }
+    }
+
+    /// The zone this value is bound to.
+    #[must_use]
+    pub const fn zone_id(&self) -> &ZoneId {
+        &self.zone_id
+    }
+
+    /// Access the inner value if the expected zone matches.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FcpError::ZoneViolation`] if `expected_zone` does not match
+    /// the binding.
+    pub fn with_zone_check<R>(
+        &self,
+        expected_zone: &ZoneId,
+        f: impl FnOnce(&T) -> R,
+    ) -> Result<R, FcpError> {
+        if &self.zone_id != expected_zone {
+            return Err(FcpError::ZoneViolation {
+                source_zone: self.zone_id.as_str().to_owned(),
+                target_zone: expected_zone.as_str().to_owned(),
+                message: "zone-bound value accessed from wrong zone".to_owned(),
+            });
+        }
+        Ok(f(&self.inner))
+    }
+
+    /// Mutably access the inner value if the expected zone matches.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FcpError::ZoneViolation`] on zone mismatch.
+    pub fn with_zone_check_mut<R>(
+        &mut self,
+        expected_zone: &ZoneId,
+        f: impl FnOnce(&mut T) -> R,
+    ) -> Result<R, FcpError> {
+        if &self.zone_id != expected_zone {
+            return Err(FcpError::ZoneViolation {
+                source_zone: self.zone_id.as_str().to_owned(),
+                target_zone: expected_zone.as_str().to_owned(),
+                message: "zone-bound value accessed from wrong zone".to_owned(),
+            });
+        }
+        Ok(f(&mut self.inner))
+    }
+
+    /// Consume the wrapper and return the inner value if the zone matches.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FcpError::ZoneViolation`] on zone mismatch.
+    pub fn into_inner(self, expected_zone: &ZoneId) -> Result<T, FcpError> {
+        if &self.zone_id != expected_zone {
+            return Err(FcpError::ZoneViolation {
+                source_zone: self.zone_id.as_str().to_owned(),
+                target_zone: expected_zone.as_str().to_owned(),
+                message: "zone-bound value unwrapped from wrong zone".to_owned(),
+            });
+        }
+        Ok(self.inner)
+    }
+
+    /// Consume without zone check (test/migration scaffolding only).
+    #[doc(hidden)]
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // T may have Drop
+    pub fn into_inner_unchecked(self) -> T {
+        self.inner
+    }
+}
+
+impl<T: PartialEq> PartialEq for ZoneBound<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.zone_id == other.zone_id && self.inner == other.inner
+    }
+}
+
+impl<T: Eq> Eq for ZoneBound<T> {}
+
+impl<T: Serialize> Serialize for ZoneBound<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("ZoneBound", 2)?;
+        s.serialize_field("zone_id", &self.zone_id)?;
+        s.serialize_field("inner", &self.inner)?;
+        s.end()
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for ZoneBound<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Helper<U> {
+            zone_id: ZoneId,
+            inner: U,
+        }
+        let h = Helper::<T>::deserialize(deserializer)?;
+        Ok(Self {
+            zone_id: h.zone_id,
+            inner: h.inner,
+        })
+    }
+}
+
 /// Principal identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -4221,5 +4358,84 @@ mod tests {
             std::mem::size_of::<std::marker::PhantomData<Unverified>>(),
             0
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // C3.7: ZoneBound<T> acceptance tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn zone_bound_bind_and_access_within_zone() {
+        let bound = ZoneBound::bind(42_u32, ZoneId::owner());
+        let result = bound.with_zone_check(&ZoneId::owner(), |v| *v);
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[test]
+    fn zone_bound_cross_zone_access_rejected() {
+        let bound = ZoneBound::bind("secret", ZoneId::private());
+        let result = bound.with_zone_check(&ZoneId::public(), |v| *v);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::ZoneViolation {
+                source_zone,
+                target_zone,
+                ..
+            } => {
+                assert_eq!(source_zone, "z:private");
+                assert_eq!(target_zone, "z:public");
+            }
+            other => panic!("expected ZoneViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zone_bound_zone_id_accessor() {
+        let bound = ZoneBound::bind(vec![1, 2, 3], ZoneId::work());
+        assert_eq!(bound.zone_id(), &ZoneId::work());
+    }
+
+    #[test]
+    fn zone_bound_serde_roundtrip() {
+        let bound = ZoneBound::bind(String::from("payload"), ZoneId::community());
+        let json = serde_json::to_string(&bound).unwrap();
+        let back: ZoneBound<String> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.zone_id(), &ZoneId::community());
+        let val = back.with_zone_check(&ZoneId::community(), |v| v.clone());
+        assert_eq!(val.unwrap(), "payload");
+    }
+
+    #[test]
+    fn zone_bound_into_inner_same_zone() {
+        let bound = ZoneBound::bind(99_i64, ZoneId::owner());
+        assert_eq!(bound.into_inner(&ZoneId::owner()).unwrap(), 99);
+    }
+
+    #[test]
+    fn zone_bound_into_inner_wrong_zone_rejected() {
+        let bound = ZoneBound::bind(99_i64, ZoneId::owner());
+        let err = bound.into_inner(&ZoneId::work()).unwrap_err();
+        assert!(matches!(err, FcpError::ZoneViolation { .. }));
+    }
+
+    #[test]
+    fn zone_bound_mut_access_within_zone() {
+        let mut bound = ZoneBound::bind(vec![1, 2], ZoneId::private());
+        bound
+            .with_zone_check_mut(&ZoneId::private(), |v| v.push(3))
+            .unwrap();
+        let result = bound.with_zone_check(&ZoneId::private(), |v| v.len());
+        assert_eq!(result.unwrap(), 3);
+    }
+
+    #[test]
+    fn zone_bound_zone_is_immutable() {
+        // ZoneBound has no set_zone() or rebind() — zone is fixed at construction.
+        // This test verifies the API surface by checking clone preserves zone.
+        let original = ZoneBound::bind(42_u32, ZoneId::owner());
+        let cloned = original.clone();
+        assert_eq!(cloned.zone_id(), &ZoneId::owner());
+        // Cross-zone access still rejected on clone
+        assert!(cloned.with_zone_check(&ZoneId::public(), |v| *v).is_err());
     }
 }

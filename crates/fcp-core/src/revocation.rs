@@ -2315,4 +2315,129 @@ mod tests {
         let validation = registry.validate_seal(&seal, &token_id);
         assert!(validation.is_valid());
     }
+
+    // ── C1.2 — Exact membership, no false-positive revocation ──────────
+
+    fn make_id_from_u32(i: u32) -> ObjectId {
+        let mut b = [0u8; 32];
+        b[..4].copy_from_slice(&i.to_le_bytes());
+        ObjectId::from_bytes(b)
+    }
+
+    fn make_revocation_single(id: ObjectId) -> RevocationObject {
+        RevocationObject {
+            header: test_header(),
+            revoked: vec![id],
+            scope: RevocationScope::Capability,
+            reason: "Test revocation".into(),
+            effective_at: 1_700_000_000,
+            expires_at: None,
+            signature: [0u8; 64],
+        }
+    }
+
+    #[test]
+    fn c1_2_exact_membership_no_false_positives() {
+        // Revocation checks use HashMap (exact), NOT probabilistic filters.
+        // With 10K revocations, zero false positives must occur.
+        let mut registry = RevocationRegistry::new();
+
+        let revoked_count = 10_000u32;
+        for i in 0..revoked_count {
+            let id = make_id_from_u32(i);
+            registry.add_revocation(&make_revocation_single(id));
+        }
+
+        // Every revoked ID must be found
+        for i in 0..revoked_count {
+            assert!(registry.is_revoked(&make_id_from_u32(i)));
+        }
+
+        // 10_000 non-revoked IDs must NOT be falsely revoked
+        let mut false_positives = 0u32;
+        for i in revoked_count..(revoked_count * 2) {
+            if registry.is_revoked(&make_id_from_u32(i)) {
+                false_positives += 1;
+            }
+        }
+        assert_eq!(false_positives, 0, "exact membership must have zero false positives");
+    }
+
+    #[test]
+    fn c1_2_collision_prone_ids_no_false_positive() {
+        // IDs that differ only in a single byte must not collide
+        let mut registry = RevocationRegistry::new();
+
+        let mut revoked_bytes = [0xFFu8; 32];
+        revoked_bytes[0] = 0x01;
+        let revoked_id = ObjectId::from_bytes(revoked_bytes);
+        registry.add_revocation(&make_revocation_single(revoked_id));
+
+        // Vary each byte position — none should false-positive
+        for pos in 0..32 {
+            let mut probe_bytes = revoked_bytes;
+            probe_bytes[pos] ^= 0x01;
+            let probe_id = ObjectId::from_bytes(probe_bytes);
+            assert!(
+                !registry.is_revoked(&probe_id),
+                "false positive at byte position {pos}"
+            );
+        }
+    }
+
+    #[test]
+    fn c1_2_seal_exact_check_with_10k_entries() {
+        // check_with_seal must also be exact (no false revocations via seal path)
+        let mut registry = RevocationRegistry::new();
+        registry.update_head(make_object_id(0x01), 1, 100);
+
+        for i in 0u32..1000 {
+            let id = make_id_from_u32(i);
+            registry.add_revocation(&make_revocation_single(id));
+        }
+        registry.update_head(make_object_id(0x02), 1001, 200);
+
+        // Non-revoked IDs via seal path: all must be NotRevoked
+        for i in 1000u32..2000 {
+            let seal = registry.check_with_seal(&make_id_from_u32(i), 300);
+            assert_eq!(
+                seal.decision,
+                RevocationDecision::NotRevoked,
+                "false revocation via seal for id {i}"
+            );
+        }
+
+        // Revoked IDs via seal path: all must be Revoked
+        for i in 0u32..1000 {
+            let seal = registry.check_with_seal(&make_id_from_u32(i), 300);
+            assert_eq!(
+                seal.decision,
+                RevocationDecision::Revoked,
+                "missed revocation via seal for id {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn c1_2_performance_10k_revocations() {
+        // Ensure revocation lookup is fast even with 10K entries
+        let mut registry = RevocationRegistry::new();
+
+        for i in 0u32..10_000 {
+            let id = make_id_from_u32(i);
+            registry.add_revocation(&make_revocation_single(id));
+        }
+
+        // 100K lookups (mix of hits and misses)
+        let start = std::time::Instant::now();
+        for i in 0u32..100_000 {
+            let _ = registry.is_revoked(&make_id_from_u32(i));
+        }
+        let elapsed = start.elapsed();
+        // HashMap O(1) lookups: 100K should finish well under 1 second
+        assert!(
+            elapsed.as_millis() < 1000,
+            "100K revocation lookups took {elapsed:?}, expected < 1s"
+        );
+    }
 }

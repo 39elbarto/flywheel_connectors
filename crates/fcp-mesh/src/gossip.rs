@@ -66,6 +66,14 @@ pub const MAX_OBJECT_IDS_PER_REQUEST: usize = 100;
 /// XOR filters are immutable after construction, so this wrapper accumulates
 /// u64 keys and lazily builds the `Xor8` on first query. The built filter is
 /// cached and invalidated when new items are inserted.
+///
+/// # Security Note — NOT for revocation checks
+///
+/// This filter is used exclusively for gossip set reconciliation (object
+/// availability, symbol routing) where false positives cause unnecessary
+/// transfers but NOT security failures. Revocation checks MUST use exact
+/// membership via [`RevocationRegistry::is_revoked`](fcp_core::RevocationRegistry::is_revoked)
+/// which is backed by `HashMap<ObjectId, RevocationObject>`. See MOR/C1.2.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct XorFilterPlaceholder {
     /// Deduped u64 keys derived from item bytes via Blake3.

@@ -25093,8 +25093,8 @@ Learn more:
   fwc guide                                   Command taxonomy and contracts
   fwc --help                                  Full argument reference
 
-Tip: Most commands need --offline without a running fcp-host.
-     Use --json for full-fidelity structured output."
+Tip: Truth hierarchy: mesh-backed > host-backed > node-local > offline.
+     Use --host for live truth, --offline for artifacts, --json for structured output."
         .to_owned()
 }
 

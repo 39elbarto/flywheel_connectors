@@ -1,13 +1,15 @@
 # Operational Model Versions
 
 > This document defines the two operational model versions for FCP, what each
-> provides, and which fwc commands require which version. When in doubt, assume
-> you are operating under V1.
+> provides, and which fwc commands require which version. V1 is the current
+> transitional provisioning boundary; V2 is the converging steady-state target.
+> The truth hierarchy already classifies answers as mesh-backed > host-backed >
+> node-local > offline regardless of which version the operator is using.
 
-## V1: Host-First (Current, Proven, Operational)
+## V1: Host-First (Current Provisioning Boundary, Transitional)
 
-V1 is the only proven operational model today. All operators and agents should
-assume V1 semantics unless explicitly told otherwise.
+V1 is the current provisioning and operational boundary. Operators use V1
+semantics today while the mesh-native cutover (V2) converges to steady state.
 
 ### What V1 Provides
 
@@ -44,11 +46,12 @@ assume V1 semantics unless explicitly told otherwise.
 
 ---
 
-## V2: Mesh-Native (Target, Designed, NOT YET OPERATIONAL)
+## V2: Mesh-Native (Steady-State Target, Converging)
 
-V2 is the intended long-term architecture. It is designed and partially
-implemented but has **zero production evidence**. No operator should rely on V2
-semantics today.
+V2 is the intended steady-state architecture. The mesh infrastructure (gossip,
+IBLT, XOR filters, LiveTruthResolver, KnowledgeState taxonomy, symbol-first
+object distribution) is built and tested. The remaining work is production
+evidence and cutover gating — see `docs/FCP3_Transition_Scorecard.md`.
 
 ### What V2 Will Provide (When Operational)
 
@@ -63,26 +66,29 @@ semantics today.
 | Automatic failover / placement | Designed | ObjectPlacementPolicy and RepairController exist |
 | Offline resilience via symbol locality | Designed | Probabilistic availability model, not yet E2E proven |
 
-### V2 Timeline
+### V2 Cutover Gates
 
-**No committed timeline.** The transition from V1 to V2 requires:
+The transition from V1 to V2 requires completing these gates:
 
 1. Production evidence that mesh-backed answers are correct and consistent.
 2. Zone-wide TruthPrecedencePolicy enforcement (all operators in a zone see the same answer).
 3. Proven multi-node placement and failover for at least one real workload.
-4. Mesh-native gossip as the primary state sync mechanism (not just available, but default).
-5. Operator documentation that teaches V2 as the primary path.
+4. Mesh-native gossip as the default state sync mechanism (not just available, but default).
+5. Operator documentation that teaches V2 as the primary path (this document is part of that rewrite).
 
 The FCP3 Transition Scorecard (`docs/FCP3_Transition_Scorecard.md`) tracks
-progress toward these milestones but does not commit to dates.
+progress toward these gates. Gate 5 is addressed by the current teaching-surface
+rewrite (bead z1nkz.1).
 
 ---
 
 ## FWC Command Version Requirements
 
-Every `fwc` command operates under V1 semantics today. The table below shows
-which commands are purely V1, which have V2-aware extensions, and which will
-only become meaningful under V2.
+Every `fwc` command operates under V1 provisioning semantics today, but the
+truth hierarchy (mesh-backed > host-backed > node-local > offline) already
+classifies answers regardless of version. The table below shows which commands
+are purely V1, which have V2-aware extensions, and which gain mesh-backed
+truth sources under V2.
 
 | Command | V1 (Host-First) | V2 (Mesh-Native) | Notes |
 |---------|-----------------|-------------------|-------|
@@ -154,8 +160,8 @@ fwc --host http://127.0.0.1:8787 mesh explain-availability <connector>
 
 ## References
 
-- [README.md](../README.md) — project overview with V1/V2 framing
-- [FWC_Host_First_Truthfulness_Playbook.md](FWC_Host_First_Truthfulness_Playbook.md) — V1-specific operator guide
-- [FCP3_Transition_Scorecard.md](FCP3_Transition_Scorecard.md) — V2 transition progress (no committed dates)
-- `crates/fwc/src/truth.rs` — KnowledgeState taxonomy implementation
+- [README.md](../README.md) — project overview with truth hierarchy framing
+- [FWC_Host_First_Truthfulness_Playbook.md](FWC_Host_First_Truthfulness_Playbook.md) — operator guide (transitional, converging toward mesh-native)
+- [FCP3_Transition_Scorecard.md](FCP3_Transition_Scorecard.md) — V2 cutover gate progress
+- `crates/fwc/src/truth.rs` — KnowledgeState taxonomy and LiveTruthResolver (mesh-backed resolution)
 - `crates/fwc/src/catalog.rs` — command source classification and runtime mode dispatch

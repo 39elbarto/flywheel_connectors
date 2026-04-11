@@ -1,17 +1,18 @@
-# FWC Host-First Truthfulness Playbook
+# FWC Truthfulness Playbook
 
-> Status: active operator/agent guide for the current `fwc` host-first truth contract (V1 operational model)
-> Operational model: **V1 (Host-First)** — see [OPERATIONAL_MODEL_VERSIONS.md](OPERATIONAL_MODEL_VERSIONS.md) for version definitions
+> Status: active operator/agent guide for the `fwc` truth contract (transitional V1 provisioning boundary, converging toward mesh-native V2 steady state)
+> Truth hierarchy: **mesh-backed > host-backed > node-local > offline**
+> Operational model: **V1 (Host-First, transitional)** — see [OPERATIONAL_MODEL_VERSIONS.md](OPERATIONAL_MODEL_VERSIONS.md) for version definitions and cutover gates
 > Primary beads: `flywheel_connectors-1g7z0.29.8`, `flywheel_connectors-1g7z0.29.8.3`
-> Implementation anchors: `crates/fwc/src/catalog.rs`, `crates/fwc/src/readiness.rs`, `crates/fwc/src/main.rs`, `crates/fwc/tests/cual_integration.rs`, `crates/fwc/src/test_observability.rs`, `docs/testing/e2e_log_schema.md`, `docs/testing/coverage-inventory.md`
+> Implementation anchors: `crates/fwc/src/catalog.rs`, `crates/fwc/src/readiness.rs`, `crates/fwc/src/truth.rs`, `crates/fwc/src/main.rs`, `crates/fwc/tests/cual_integration.rs`, `crates/fwc/src/test_observability.rs`, `docs/testing/e2e_log_schema.md`, `docs/testing/coverage-inventory.md`
 
 ## Purpose
 
-This playbook explains how `fwc` is supposed to behave now that the CLI follows a host-first truthful model.
+This playbook explains how `fwc` behaves under the current truthfulness model. The host-first provisioning boundary is transitional; the mesh-native truth resolver (`crates/fwc/src/truth.rs`) already supports mesh-backed, host-backed, node-local, and offline resolution strategies. As the cutover completes, mesh-backed answers will become the default highest-confidence source.
 
 The short version:
 
-- live runtime truth must come from a reachable `fcp-host`
+- live runtime truth comes from the highest-confidence available source: mesh-backed (preferred) or host-backed (current transitional default)
 - offline artifact work must be explicit
 - the no-fakes invariant is mandatory: placeholder runtime data, guessed capability bits, and hidden file-edit side channels are bugs
 - unknown, unsupported, denied, planned, and unavailable states must stay distinct
@@ -23,7 +24,7 @@ The canonical command classification lives in `crates/fwc/src/catalog.rs`.
 
 | Source class | Meaning | Example posture |
 |---|---|---|
-| `LiveHost` | Authoritative only when backed by a live host | `invoke`, `simulate`, lifecycle/config/admin verbs |
+| `LiveHost` | Authoritative only when backed by a live truth source (host-backed today, mesh-backed when cutover completes) | `invoke`, `simulate`, lifecycle/config/admin verbs |
 | `OfflineArtifact` | Purely local artifact or history workflow | `guide`, `task`, `plan`, `history` |
 | `Hybrid` | Live by default, but explicit offline artifact mode is allowed | `list`, `search`, `show`, `ops`, `schema`, `examples`, `suggest`, `template`, `validate`, `export-tools` |
 | `Passthrough` | Delegates to another subsystem with its own truth model | trace/audit style subsystems where the boundary is separate |
@@ -230,10 +231,12 @@ The enforcement types live in `crates/fwc/src/catalog.rs`:
 
 ## Production Deployment Runbook
 
-This section is the operator-facing deployment guide for the current truthful
-platform shape. It is intentionally narrower than the long-term mesh-native
-vision: it teaches how to run the system that exists now, without fabricating
-automatic multi-node properties that the codebase does not yet prove.
+This section is the operator-facing deployment guide for the current
+transitional platform shape. The host-first provisioning boundary is how
+systems come online today; the mesh-native infrastructure (gossip, IBLT,
+LiveTruthResolver, KnowledgeState taxonomy) is built and tested but not yet
+the production default. This guide teaches honest operation during the
+transition.
 
 ### Proof anchors
 
@@ -251,22 +254,23 @@ and update the guide.
 
 ### Current honest topology
 
-Treat production today as a **single-active-host, warm-standby mesh**.
+Treat production today as a **single-active-host, warm-standby mesh** — this is the transitional provisioning boundary while mesh-native failover and state convergence complete cutover gating.
 
-| Role | Must exist | Current truthful responsibility |
-|---|---|---|
-| Active host node | Yes | Runs `fcp-host`, supervises connectors, owns the authoritative live admin state |
-| Standby host-capable peer | Strongly recommended | Holds the same binaries, manifests, and deployment artifacts so promotion is deliberate and fast |
-| Mesh/object peers | Yes for mesh-backed claims | Supply placement/durability context that can elevate a live answer from host-backed to mesh-backed |
+| Role | Must exist | Current truthful responsibility | Post-cutover role |
+|---|---|---|---|
+| Active host node | Yes | Runs `fcp-host`, supervises connectors, owns the authoritative live admin state | Becomes one mesh peer among equals |
+| Standby host-capable peer | Strongly recommended | Holds the same binaries, manifests, and deployment artifacts so promotion is deliberate and fast | Automatic failover via mesh placement |
+| Mesh/object peers | Yes for mesh-backed claims | Supply placement/durability context that can elevate a live answer from host-backed to mesh-backed | Primary truth source (highest confidence) |
 
-Current assumptions that must stay explicit:
+Current transitional assumptions (will be superseded by mesh cutover):
 
 - all live operator mutations still flow through the active `fcp-host`
 - `FCP_HOST_CONNECTORS_FILE` is the live connector inventory mutation surface
 - `FCP_HOST_LIFECYCLE_STATE_FILE` is the local admin-state snapshot that must
   move with the promoted host
-- connector admin/lifecycle state is still node-local, so active/active
-  control-plane claims would be dishonest
+- connector admin/lifecycle state is still node-local; the mesh infrastructure
+  for automatic state convergence is built (`fcp-mesh` gossip, IBLT) but not
+  yet the production default
 
 ### Provisioning sequence
 
@@ -361,10 +365,13 @@ The stabilization check is always the same follow-up loop:
 
 ### Failover and promotion assumptions
 
-The current failover story is **supervised promotion**, not automatic mesh
-control-plane relocation.
+The current failover story is **supervised promotion** — the transitional
+boundary while automatic mesh-native failover completes cutover gating. The
+mesh infrastructure for automatic placement and state convergence is built
+(`fcp-mesh` gossip, `ObjectPlacementPolicy`, `RepairController`) but not yet
+the production default.
 
-Use this checklist:
+Use this checklist for the current transitional path:
 
 1. Confirm the current active host is degraded or unavailable via `status`,
    `doctor`, and `mesh explain-availability`.
@@ -374,11 +381,12 @@ Use this checklist:
 4. Only after the promoted host returns truthful live answers should you route
    normal operator traffic to it.
 
-Do not claim any of the following until new proof artifacts land:
+The following capabilities are built and tested but require cutover gate
+completion before production use (see `docs/FCP3_Transition_Scorecard.md`):
 
-- automatic lease handoff between nodes
-- automatic multi-node connector-state convergence
-- active/active host mutation safety
+- automatic lease handoff between nodes (mesh placement)
+- automatic multi-node connector-state convergence (gossip sync)
+- active/active host mutation safety (distributed consensus)
 - post-promotion equivalence without re-running the verification loop
 
 ### Evidence and diagnosis bundle

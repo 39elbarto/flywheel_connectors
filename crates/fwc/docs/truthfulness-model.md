@@ -1,10 +1,17 @@
-# FWC Host-First Truthful Runtime Model
+# FWC Truthful Runtime Model
 
 ## Overview
 
-Every `fwc` command output carries an **availability envelope** that tells the consumer exactly where the data came from and whether it can be trusted for live operations. The two fundamental modes are:
+Every `fwc` command output carries an **availability envelope** that tells the consumer exactly where the data came from and whether it can be trusted for live operations. The truth hierarchy ranks sources by confidence:
 
-- **`live-runtime`** — data fetched from a running `fcp-host` instance; authoritative for current state.
+- **`mesh-backed`** — data backed by distributed mesh state (gossip, placement, multi-node consensus); highest confidence. This is the target steady-state default; currently requires mesh peers with placement evidence.
+- **`host-backed`** — data fetched from a running `fcp-host` instance; authoritative for node-local state. This is the current transitional default.
+- **`node-local`** — data from the local node without host or mesh backing; intermediate confidence.
+- **`offline-artifact`** — data derived from workspace manifests and local files; useful for planning but not authoritative.
+
+The two fundamental modes remain:
+
+- **`live-runtime`** — data from a live truth source (mesh-backed or host-backed); authoritative for current state.
 - **`offline-artifact`** — data derived from workspace manifests and local files; useful for planning but not authoritative.
 
 The core invariant: **fwc never fabricates live-runtime data from offline artifacts**, and never silently falls back from one mode to the other.
@@ -33,7 +40,7 @@ The core invariant: **fwc never fabricates live-runtime data from offline artifa
 
 | State | Tag | Authoritative | Meaning |
 |-------|-----|---------------|---------|
-| Live Runtime | `live-runtime` | Yes | Data from a running fcp-host via admin API |
+| Live Runtime | `live-runtime` | Yes | Data from a live truth source: mesh-backed (highest confidence) or host-backed (transitional default) |
 | Offline Artifact | `offline-artifact` | No | Data from workspace manifests/local files |
 | Unsupported | `unsupported` | No | The connector/surface does not implement this |
 | Planned | `planned` | No | Feature exists as contract preview only |
@@ -82,7 +89,7 @@ The `MetadataProvenance` enum (`readiness.rs`) tracks where each metadata value 
 - `inferred-from-policy` — inferred from policy/zone/config
 - `unattributed` — origin not tracked (legacy path)
 
-Only `observed-by-host` and `measured-at-runtime` are considered authoritative for live operations.
+Only `observed-by-host`, `measured-at-runtime`, and mesh-backed observations are considered authoritative for live operations. When mesh-backed evidence is available, it supersedes host-only observations in the truth hierarchy.
 
 ## Operator Playbook
 

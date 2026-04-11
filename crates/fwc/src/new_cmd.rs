@@ -5693,6 +5693,232 @@ serde = "1"
         assert_eq!(actual, expected);
     }
 
+    // ---- golden fixtures for streaming archetype ----
+
+    fn canonical_truthful_streaming_bundle() -> serde_json::Value {
+        let connector_id = "fcp.truthful-stream";
+        let crate_path = "connectors/truthful-stream";
+        let files = generate_files(
+            connector_id,
+            "truthful-stream",
+            "fcp-truthful-stream",
+            ConnectorArchetype::Streaming,
+            "z:project:truthful-stream",
+            false,
+        )
+        .expect("fixture files");
+        let prechecks = run_prechecks(&files, connector_id, "z:project:truthful-stream");
+        let next_steps = generate_next_steps(
+            connector_id,
+            crate_path,
+            ConnectorArchetype::Streaming,
+            false,
+        );
+
+        serde_json::json!({
+            "connector_id": connector_id,
+            "crate_path": crate_path,
+            "archetype": "streaming",
+            "zone": "z:project:truthful-stream",
+            "prechecks": prechecks,
+            "next_steps": next_steps,
+            "files": files.iter().map(|(path, content, purpose)| serde_json::json!({
+                "path": path,
+                "purpose": purpose,
+                "content": content,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    #[test]
+    #[ignore = "fixture refresh helper; run explicitly with -- --ignored --nocapture"]
+    fn emit_truthful_streaming_fixture_bundle() {
+        let bundle = canonical_truthful_streaming_bundle();
+        if std::env::var_os("FCP_UPDATE_GOLDENS").is_some() {
+            write_generator_fixture_json(
+                "generator/truthful_streaming_bundle.json",
+                &bundle,
+            );
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&bundle).expect("fixture JSON")
+        );
+    }
+
+    #[test]
+    fn truthful_streaming_scaffold_matches_golden_bundle() {
+        let actual = canonical_truthful_streaming_bundle();
+        let expected =
+            load_generator_fixture_json("generator/truthful_streaming_bundle.json");
+        assert_eq!(actual, expected);
+    }
+
+    // ---- golden fixtures for webhook archetype ----
+
+    fn canonical_truthful_webhook_bundle() -> serde_json::Value {
+        let connector_id = "fcp.truthful-hook";
+        let crate_path = "connectors/truthful-hook";
+        let files = generate_files(
+            connector_id,
+            "truthful-hook",
+            "fcp-truthful-hook",
+            ConnectorArchetype::Webhook,
+            "z:project:truthful-hook",
+            false,
+        )
+        .expect("fixture files");
+        let prechecks = run_prechecks(&files, connector_id, "z:project:truthful-hook");
+        let next_steps = generate_next_steps(
+            connector_id,
+            crate_path,
+            ConnectorArchetype::Webhook,
+            false,
+        );
+
+        serde_json::json!({
+            "connector_id": connector_id,
+            "crate_path": crate_path,
+            "archetype": "webhook",
+            "zone": "z:project:truthful-hook",
+            "prechecks": prechecks,
+            "next_steps": next_steps,
+            "files": files.iter().map(|(path, content, purpose)| serde_json::json!({
+                "path": path,
+                "purpose": purpose,
+                "content": content,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    #[test]
+    #[ignore = "fixture refresh helper; run explicitly with -- --ignored --nocapture"]
+    fn emit_truthful_webhook_fixture_bundle() {
+        let bundle = canonical_truthful_webhook_bundle();
+        if std::env::var_os("FCP_UPDATE_GOLDENS").is_some() {
+            write_generator_fixture_json(
+                "generator/truthful_webhook_bundle.json",
+                &bundle,
+            );
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&bundle).expect("fixture JSON")
+        );
+    }
+
+    #[test]
+    fn truthful_webhook_scaffold_matches_golden_bundle() {
+        let actual = canonical_truthful_webhook_bundle();
+        let expected =
+            load_generator_fixture_json("generator/truthful_webhook_bundle.json");
+        assert_eq!(actual, expected);
+    }
+
+    // ---- cross-archetype scaffold-status metadata consistency ----
+
+    #[test]
+    fn all_archetypes_emit_incubating_status_in_manifest() {
+        for archetype in all_archetypes() {
+            let connector_id = format!("fcp.meta-{archetype}");
+            let short_name = format!("meta-{archetype}");
+            let crate_name = format!("fcp-meta-{archetype}");
+            let files = generate_files(
+                &connector_id,
+                &short_name,
+                &crate_name,
+                archetype,
+                "z:project:meta",
+                false,
+            )
+            .unwrap_or_else(|e| panic!("generate {archetype:?}: {e}"));
+
+            let manifest = files
+                .iter()
+                .find(|(p, _, _)| p == "manifest.toml")
+                .expect("manifest.toml must be generated");
+            assert!(
+                manifest.1.contains("status = \"incubating\""),
+                "{archetype:?} manifest must declare incubating status"
+            );
+        }
+    }
+
+    #[test]
+    fn all_archetypes_emit_truthful_connector_rs_with_scaffold_status() {
+        for archetype in all_archetypes() {
+            let connector_id = format!("fcp.truth-{archetype}");
+            let short_name = format!("truth-{archetype}");
+            let crate_name = format!("fcp-truth-{archetype}");
+            let files = generate_files(
+                &connector_id,
+                &short_name,
+                &crate_name,
+                archetype,
+                "z:project:truth",
+                false,
+            )
+            .unwrap_or_else(|e| panic!("generate {archetype:?}: {e}"));
+
+            let connector_rs = files
+                .iter()
+                .find(|(p, _, _)| p == "src/connector.rs")
+                .expect("src/connector.rs must be generated");
+            assert!(
+                connector_rs.1.contains("\"incubating\""),
+                "{archetype:?} connector.rs must reference incubating status"
+            );
+            assert!(
+                connector_rs.1.contains("scaffold_status"),
+                "{archetype:?} connector.rs must define scaffold_status operation"
+            );
+            assert!(
+                connector_rs.1.contains("live_requests_supported"),
+                "{archetype:?} connector.rs must declare live_requests_supported field"
+            );
+        }
+    }
+
+    #[test]
+    fn all_archetypes_emit_unit_tests_template() {
+        for archetype in all_archetypes() {
+            let connector_id = format!("fcp.tpl-{archetype}");
+            let short_name = format!("tpl-{archetype}");
+            let crate_name = format!("fcp-tpl-{archetype}");
+            let files = generate_files(
+                &connector_id,
+                &short_name,
+                &crate_name,
+                archetype,
+                "z:project:tpl",
+                false,
+            )
+            .unwrap_or_else(|e| panic!("generate {archetype:?}: {e}"));
+
+            let unit_tests = files
+                .iter()
+                .find(|(p, _, _)| p == "tests/unit_tests.rs")
+                .expect("tests/unit_tests.rs must be generated");
+            assert!(
+                unit_tests.1.contains("test_happy_path"),
+                "{archetype:?} unit tests must include happy path test"
+            );
+            assert!(
+                unit_tests.1.contains("test_error_mapping"),
+                "{archetype:?} unit tests must include error mapping test"
+            );
+
+            let e2e_tests = files
+                .iter()
+                .find(|(p, _, _)| p == "tests/e2e_tests.rs")
+                .expect("tests/e2e_tests.rs must be generated");
+            assert!(
+                e2e_tests.1.contains("test_e2e_handshake"),
+                "{archetype:?} e2e tests must include handshake test"
+            );
+        }
+    }
+
     #[test]
     fn generated_scaffolds_never_emit_legacy_placeholder_markers() {
         let banned_markers = [

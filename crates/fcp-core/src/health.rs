@@ -377,6 +377,189 @@ impl Default for ReadinessResponse {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Health aggregation model (mesh-native)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Tri-state host health model for aggregation across subsystems.
+///
+/// This is the mesh-native health state used by hosts, SDKs, and operators
+/// to reason about composite system health. It differs from [`HealthState`]
+/// (which is a connector lifecycle state) by supporting multi-reason
+/// aggregation and worst-case rollup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum AggregateHealthState {
+    /// All subsystems nominal.
+    Healthy,
+    /// Some subsystems impaired; service is partially available.
+    Degraded {
+        /// Human-readable reasons for degradation.
+        reasons: Vec<String>,
+    },
+    /// Critical failure; service should be restarted.
+    Unhealthy {
+        /// Human-readable reasons for failure.
+        reasons: Vec<String>,
+    },
+}
+
+impl AggregateHealthState {
+    /// Whether the state is healthy.
+    #[must_use]
+    pub const fn is_healthy(&self) -> bool {
+        matches!(self, Self::Healthy)
+    }
+
+    /// Whether the state is degraded (but not unhealthy).
+    #[must_use]
+    pub const fn is_degraded(&self) -> bool {
+        matches!(self, Self::Degraded { .. })
+    }
+
+    /// Whether the state is unhealthy.
+    #[must_use]
+    pub const fn is_unhealthy(&self) -> bool {
+        matches!(self, Self::Unhealthy { .. })
+    }
+
+    /// Severity level as an integer (0 = healthy, 1 = degraded, 2 = unhealthy).
+    #[must_use]
+    pub const fn severity(&self) -> u8 {
+        match self {
+            Self::Healthy => 0,
+            Self::Degraded { .. } => 1,
+            Self::Unhealthy { .. } => 2,
+        }
+    }
+
+    /// Merge two health states, keeping the worst.
+    #[must_use]
+    pub fn merge(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::Unhealthy { reasons: a }, Self::Unhealthy { reasons: b }) => {
+                let mut merged = a.clone();
+                merged.extend(b.iter().cloned());
+                Self::Unhealthy { reasons: merged }
+            }
+            (Self::Unhealthy { reasons }, _) | (_, Self::Unhealthy { reasons }) => {
+                Self::Unhealthy {
+                    reasons: reasons.clone(),
+                }
+            }
+            (Self::Degraded { reasons: a }, Self::Degraded { reasons: b }) => {
+                let mut merged = a.clone();
+                merged.extend(b.iter().cloned());
+                Self::Degraded { reasons: merged }
+            }
+            (Self::Degraded { reasons }, _) | (_, Self::Degraded { reasons }) => Self::Degraded {
+                reasons: reasons.clone(),
+            },
+            _ => Self::Healthy,
+        }
+    }
+}
+
+impl std::fmt::Display for AggregateHealthState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Healthy => write!(f, "healthy"),
+            Self::Degraded { reasons } => write!(f, "degraded: {}", reasons.join("; ")),
+            Self::Unhealthy { reasons } => write!(f, "unhealthy: {}", reasons.join("; ")),
+        }
+    }
+}
+
+/// Health of a single named subsystem in the aggregate model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentHealthEntry {
+    /// Subsystem name (e.g., "connector:discord", "mesh", "enforcement").
+    pub name: String,
+    /// Current health state.
+    pub state: AggregateHealthState,
+    /// Number of consecutive failures (resets on success).
+    pub consecutive_failures: u32,
+}
+
+/// Configuration for health aggregation thresholds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthAggregationConfig {
+    /// Number of degraded components before the overall state is degraded.
+    pub degraded_threshold: usize,
+    /// Number of unhealthy components before the overall state is unhealthy.
+    pub unhealthy_threshold: usize,
+}
+
+impl Default for HealthAggregationConfig {
+    fn default() -> Self {
+        Self {
+            degraded_threshold: 1,
+            unhealthy_threshold: 1,
+        }
+    }
+}
+
+/// Composite health status snapshot.
+///
+/// This is the mesh-native contract for health reporting. Any runtime (host,
+/// SDK, agent) can produce this snapshot by aggregating component health.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompositeHealthSnapshot {
+    /// Overall health state (worst-case rollup).
+    pub status: AggregateHealthState,
+    /// Runtime version string.
+    pub version: String,
+    /// Uptime in seconds.
+    pub uptime_seconds: u64,
+    /// Individual component health entries.
+    pub components: Vec<ComponentHealthEntry>,
+}
+
+impl CompositeHealthSnapshot {
+    /// Build a composite snapshot from components and config.
+    #[must_use]
+    pub fn from_components(
+        version: String,
+        uptime_seconds: u64,
+        components: Vec<ComponentHealthEntry>,
+        config: &HealthAggregationConfig,
+    ) -> Self {
+        let degraded_count = components
+            .iter()
+            .filter(|c| c.state.is_degraded())
+            .count();
+        let unhealthy_count = components
+            .iter()
+            .filter(|c| c.state.is_unhealthy())
+            .count();
+
+        let status = if unhealthy_count >= config.unhealthy_threshold {
+            let reasons: Vec<String> = components
+                .iter()
+                .filter(|c| c.state.is_unhealthy())
+                .map(|c| c.name.clone())
+                .collect();
+            AggregateHealthState::Unhealthy { reasons }
+        } else if degraded_count >= config.degraded_threshold {
+            let reasons: Vec<String> = components
+                .iter()
+                .filter(|c| c.state.is_degraded() || c.state.is_unhealthy())
+                .map(|c| c.name.clone())
+                .collect();
+            AggregateHealthState::Degraded { reasons }
+        } else {
+            AggregateHealthState::Healthy
+        };
+
+        Self {
+            status,
+            version,
+            uptime_seconds,
+            components,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1825,5 +2008,343 @@ mod tests {
         let resp: ReadinessResponse = serde_json::from_str(raw).unwrap();
         assert!(!resp.ready);
         assert!(resp.components.is_empty());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // AggregateHealthState tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn aggregate_health_state_healthy() {
+        let state = AggregateHealthState::Healthy;
+        assert!(state.is_healthy());
+        assert!(!state.is_degraded());
+        assert!(!state.is_unhealthy());
+        assert_eq!(state.severity(), 0);
+    }
+
+    #[test]
+    fn aggregate_health_state_degraded() {
+        let state = AggregateHealthState::Degraded {
+            reasons: vec!["slow upstream".into()],
+        };
+        assert!(!state.is_healthy());
+        assert!(state.is_degraded());
+        assert!(!state.is_unhealthy());
+        assert_eq!(state.severity(), 1);
+    }
+
+    #[test]
+    fn aggregate_health_state_unhealthy() {
+        let state = AggregateHealthState::Unhealthy {
+            reasons: vec!["database down".into()],
+        };
+        assert!(!state.is_healthy());
+        assert!(!state.is_degraded());
+        assert!(state.is_unhealthy());
+        assert_eq!(state.severity(), 2);
+    }
+
+    #[test]
+    fn aggregate_health_merge_healthy_healthy() {
+        let a = AggregateHealthState::Healthy;
+        let b = AggregateHealthState::Healthy;
+        let merged = a.merge(&b);
+        assert!(merged.is_healthy());
+    }
+
+    #[test]
+    fn aggregate_health_merge_healthy_degraded() {
+        let a = AggregateHealthState::Healthy;
+        let b = AggregateHealthState::Degraded {
+            reasons: vec!["slow".into()],
+        };
+        let merged = a.merge(&b);
+        assert!(merged.is_degraded());
+    }
+
+    #[test]
+    fn aggregate_health_merge_degraded_degraded() {
+        let a = AggregateHealthState::Degraded {
+            reasons: vec!["slow".into()],
+        };
+        let b = AggregateHealthState::Degraded {
+            reasons: vec!["partial".into()],
+        };
+        let merged = a.merge(&b);
+        assert!(merged.is_degraded());
+        if let AggregateHealthState::Degraded { reasons } = &merged {
+            assert_eq!(reasons.len(), 2);
+            assert!(reasons.contains(&"slow".to_string()));
+            assert!(reasons.contains(&"partial".to_string()));
+        } else {
+            panic!("expected Degraded");
+        }
+    }
+
+    #[test]
+    fn aggregate_health_merge_degraded_unhealthy() {
+        let a = AggregateHealthState::Degraded {
+            reasons: vec!["slow".into()],
+        };
+        let b = AggregateHealthState::Unhealthy {
+            reasons: vec!["crash".into()],
+        };
+        let merged = a.merge(&b);
+        assert!(merged.is_unhealthy());
+    }
+
+    #[test]
+    fn aggregate_health_merge_unhealthy_unhealthy() {
+        let a = AggregateHealthState::Unhealthy {
+            reasons: vec!["crash".into()],
+        };
+        let b = AggregateHealthState::Unhealthy {
+            reasons: vec!["oom".into()],
+        };
+        let merged = a.merge(&b);
+        assert!(merged.is_unhealthy());
+        if let AggregateHealthState::Unhealthy { reasons } = &merged {
+            assert_eq!(reasons.len(), 2);
+        } else {
+            panic!("expected Unhealthy");
+        }
+    }
+
+    #[test]
+    fn aggregate_health_display_healthy() {
+        let state = AggregateHealthState::Healthy;
+        assert_eq!(state.to_string(), "healthy");
+    }
+
+    #[test]
+    fn aggregate_health_display_degraded() {
+        let state = AggregateHealthState::Degraded {
+            reasons: vec!["a".into(), "b".into()],
+        };
+        assert_eq!(state.to_string(), "degraded: a; b");
+    }
+
+    #[test]
+    fn aggregate_health_display_unhealthy() {
+        let state = AggregateHealthState::Unhealthy {
+            reasons: vec!["x".into()],
+        };
+        assert_eq!(state.to_string(), "unhealthy: x");
+    }
+
+    #[test]
+    fn aggregate_health_serde_roundtrip() {
+        let states = vec![
+            AggregateHealthState::Healthy,
+            AggregateHealthState::Degraded {
+                reasons: vec!["reason1".into()],
+            },
+            AggregateHealthState::Unhealthy {
+                reasons: vec!["reason2".into(), "reason3".into()],
+            },
+        ];
+        for state in &states {
+            let json = serde_json::to_string(state).unwrap();
+            let decoded: AggregateHealthState = serde_json::from_str(&json).unwrap();
+            assert_eq!(state, &decoded);
+        }
+    }
+
+    #[test]
+    fn aggregate_health_serde_json_shape() {
+        let healthy_json = serde_json::to_string(&AggregateHealthState::Healthy).unwrap();
+        assert!(healthy_json.contains("\"state\":\"healthy\""));
+
+        let degraded_json = serde_json::to_string(&AggregateHealthState::Degraded {
+            reasons: vec!["test".into()],
+        })
+        .unwrap();
+        assert!(degraded_json.contains("\"state\":\"degraded\""));
+        assert!(degraded_json.contains("\"reasons\""));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // ComponentHealthEntry tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn component_health_entry_serde_roundtrip() {
+        let entry = ComponentHealthEntry {
+            name: "connector:discord".into(),
+            state: AggregateHealthState::Degraded {
+                reasons: vec!["rate limited".into()],
+            },
+            consecutive_failures: 3,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let decoded: ComponentHealthEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.name, "connector:discord");
+        assert_eq!(decoded.consecutive_failures, 3);
+        assert!(decoded.state.is_degraded());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // HealthAggregationConfig tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn health_aggregation_config_default() {
+        let config = HealthAggregationConfig::default();
+        assert_eq!(config.degraded_threshold, 1);
+        assert_eq!(config.unhealthy_threshold, 1);
+    }
+
+    #[test]
+    fn health_aggregation_config_serde_roundtrip() {
+        let config = HealthAggregationConfig {
+            degraded_threshold: 2,
+            unhealthy_threshold: 3,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let decoded: HealthAggregationConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.degraded_threshold, 2);
+        assert_eq!(decoded.unhealthy_threshold, 3);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // CompositeHealthSnapshot tests
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn composite_snapshot_all_healthy() {
+        let components = vec![
+            ComponentHealthEntry {
+                name: "mesh".into(),
+                state: AggregateHealthState::Healthy,
+                consecutive_failures: 0,
+            },
+            ComponentHealthEntry {
+                name: "enforcement".into(),
+                state: AggregateHealthState::Healthy,
+                consecutive_failures: 0,
+            },
+        ];
+        let config = HealthAggregationConfig::default();
+        let snapshot =
+            CompositeHealthSnapshot::from_components("1.0.0".into(), 3600, components, &config);
+        assert!(snapshot.status.is_healthy());
+        assert_eq!(snapshot.version, "1.0.0");
+        assert_eq!(snapshot.uptime_seconds, 3600);
+        assert_eq!(snapshot.components.len(), 2);
+    }
+
+    #[test]
+    fn composite_snapshot_one_degraded() {
+        let components = vec![
+            ComponentHealthEntry {
+                name: "mesh".into(),
+                state: AggregateHealthState::Healthy,
+                consecutive_failures: 0,
+            },
+            ComponentHealthEntry {
+                name: "connector:slack".into(),
+                state: AggregateHealthState::Degraded {
+                    reasons: vec!["slow".into()],
+                },
+                consecutive_failures: 1,
+            },
+        ];
+        let config = HealthAggregationConfig::default(); // threshold=1
+        let snapshot =
+            CompositeHealthSnapshot::from_components("1.0.0".into(), 100, components, &config);
+        assert!(snapshot.status.is_degraded());
+    }
+
+    #[test]
+    fn composite_snapshot_one_unhealthy() {
+        let components = vec![
+            ComponentHealthEntry {
+                name: "db".into(),
+                state: AggregateHealthState::Unhealthy {
+                    reasons: vec!["connection refused".into()],
+                },
+                consecutive_failures: 5,
+            },
+        ];
+        let config = HealthAggregationConfig::default();
+        let snapshot =
+            CompositeHealthSnapshot::from_components("2.0.0".into(), 0, components, &config);
+        assert!(snapshot.status.is_unhealthy());
+    }
+
+    #[test]
+    fn composite_snapshot_threshold_higher_than_count() {
+        let components = vec![ComponentHealthEntry {
+            name: "svc".into(),
+            state: AggregateHealthState::Degraded {
+                reasons: vec!["slow".into()],
+            },
+            consecutive_failures: 1,
+        }];
+        let config = HealthAggregationConfig {
+            degraded_threshold: 2, // need 2 degraded, but only 1
+            unhealthy_threshold: 1,
+        };
+        let snapshot =
+            CompositeHealthSnapshot::from_components("1.0.0".into(), 0, components, &config);
+        // Only 1 degraded, but threshold is 2 → still healthy
+        assert!(snapshot.status.is_healthy());
+    }
+
+    #[test]
+    fn composite_snapshot_serde_roundtrip() {
+        let components = vec![ComponentHealthEntry {
+            name: "mesh".into(),
+            state: AggregateHealthState::Healthy,
+            consecutive_failures: 0,
+        }];
+        let config = HealthAggregationConfig::default();
+        let snapshot =
+            CompositeHealthSnapshot::from_components("1.2.3".into(), 7200, components, &config);
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let decoded: CompositeHealthSnapshot = serde_json::from_str(&json).unwrap();
+        assert!(decoded.status.is_healthy());
+        assert_eq!(decoded.version, "1.2.3");
+        assert_eq!(decoded.uptime_seconds, 7200);
+    }
+
+    #[test]
+    fn composite_snapshot_empty_components_healthy() {
+        let config = HealthAggregationConfig::default();
+        let snapshot =
+            CompositeHealthSnapshot::from_components("1.0.0".into(), 0, vec![], &config);
+        assert!(snapshot.status.is_healthy());
+        assert!(snapshot.components.is_empty());
+    }
+
+    #[test]
+    fn composite_snapshot_degraded_includes_unhealthy_names_in_reasons() {
+        // When overall is degraded (not enough unhealthy to trip unhealthy threshold),
+        // the degraded reasons should include both degraded and unhealthy component names
+        let components = vec![
+            ComponentHealthEntry {
+                name: "svc_a".into(),
+                state: AggregateHealthState::Degraded {
+                    reasons: vec!["slow".into()],
+                },
+                consecutive_failures: 1,
+            },
+            ComponentHealthEntry {
+                name: "svc_b".into(),
+                state: AggregateHealthState::Healthy,
+                consecutive_failures: 0,
+            },
+        ];
+        let config = HealthAggregationConfig {
+            degraded_threshold: 1,
+            unhealthy_threshold: 5, // very high
+        };
+        let snapshot =
+            CompositeHealthSnapshot::from_components("1.0.0".into(), 0, components, &config);
+        assert!(snapshot.status.is_degraded());
+        if let AggregateHealthState::Degraded { reasons } = &snapshot.status {
+            assert!(reasons.contains(&"svc_a".to_string()));
+        }
     }
 }

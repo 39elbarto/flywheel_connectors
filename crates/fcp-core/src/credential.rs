@@ -351,6 +351,90 @@ impl fmt::Display for CredentialValidationError {
 
 impl std::error::Error for CredentialValidationError {}
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Credential backend trait (mesh-native contract)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Error from a credential backend operation.
+#[derive(Debug)]
+pub enum CredentialBackendError {
+    /// Credential not found.
+    NotFound { credential_id: CredentialId },
+    /// Backend storage error.
+    StorageError { message: String },
+    /// Credential validation failed.
+    Validation(CredentialValidationError),
+}
+
+impl fmt::Display for CredentialBackendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound { credential_id } => {
+                write!(f, "credential {credential_id} not found in backend")
+            }
+            Self::StorageError { message } => {
+                write!(f, "credential backend storage error: {message}")
+            }
+            Self::Validation(inner) => write!(f, "credential validation: {inner}"),
+        }
+    }
+}
+
+impl std::error::Error for CredentialBackendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Validation(inner) => Some(inner),
+            _ => None,
+        }
+    }
+}
+
+impl From<CredentialValidationError> for CredentialBackendError {
+    fn from(err: CredentialValidationError) -> Self {
+        Self::Validation(err)
+    }
+}
+
+/// Mesh-native credential storage trait (NORMATIVE).
+///
+/// Any runtime (host, SDK, agent) that manages credentials MUST implement
+/// this trait. The trait abstracts over the actual storage mechanism (in-memory,
+/// database, vault, mesh-replicated store).
+///
+/// **Security contract:**
+/// - Implementations MUST be zone-scoped: operations only see credentials
+///   within the caller's zone.
+/// - Implementations MUST NOT log or expose secret material.
+/// - Implementations SHOULD audit all access via `AuditEvent`.
+#[async_trait::async_trait]
+pub trait CredentialBackend: Send + Sync {
+    /// Retrieve a credential by ID within a zone.
+    async fn get(
+        &self,
+        zone_id: &ZoneId,
+        credential_id: &CredentialId,
+    ) -> Result<CredentialObject, CredentialBackendError>;
+
+    /// List all credentials within a zone.
+    async fn list(
+        &self,
+        zone_id: &ZoneId,
+    ) -> Result<Vec<CredentialObject>, CredentialBackendError>;
+
+    /// Store or update a credential.
+    async fn put(
+        &self,
+        credential: &CredentialObject,
+    ) -> Result<(), CredentialBackendError>;
+
+    /// Delete a credential by ID within a zone.
+    async fn delete(
+        &self,
+        zone_id: &ZoneId,
+        credential_id: &CredentialId,
+    ) -> Result<(), CredentialBackendError>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1571,5 +1655,83 @@ mod tests {
             credential_id: CredentialId::test_id([0x22; 16]),
         };
         assert_ne!(a, b);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CredentialBackendError tests
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn credential_backend_error_not_found_display() {
+        let err = CredentialBackendError::NotFound {
+            credential_id: CredentialId::test_id([0x11; 16]),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("not found"));
+        assert!(msg.contains("backend"));
+    }
+
+    #[test]
+    fn credential_backend_error_storage_display() {
+        let err = CredentialBackendError::StorageError {
+            message: "disk full".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("disk full"));
+        assert!(msg.contains("storage error"));
+    }
+
+    #[test]
+    fn credential_backend_error_validation_display() {
+        let inner = CredentialValidationError::Expired {
+            credential_id: CredentialId::test_id([0x22; 16]),
+        };
+        let err = CredentialBackendError::Validation(inner);
+        let msg = err.to_string();
+        assert!(msg.contains("validation"));
+        assert!(msg.contains("expired"));
+    }
+
+    #[test]
+    fn credential_backend_error_from_validation() {
+        let inner = CredentialValidationError::Expired {
+            credential_id: CredentialId::test_id([0x33; 16]),
+        };
+        let err: CredentialBackendError = inner.into();
+        assert!(matches!(err, CredentialBackendError::Validation(_)));
+    }
+
+    #[test]
+    fn credential_backend_error_source_not_found() {
+        let err = CredentialBackendError::NotFound {
+            credential_id: CredentialId::test_id([0x44; 16]),
+        };
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn credential_backend_error_source_storage() {
+        let err = CredentialBackendError::StorageError {
+            message: "io error".into(),
+        };
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn credential_backend_error_source_validation() {
+        let inner = CredentialValidationError::Expired {
+            credential_id: CredentialId::test_id([0x55; 16]),
+        };
+        let err = CredentialBackendError::Validation(inner);
+        assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[test]
+    fn credential_backend_error_debug_format() {
+        let err = CredentialBackendError::NotFound {
+            credential_id: CredentialId::test_id([0x66; 16]),
+        };
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("NotFound"));
     }
 }

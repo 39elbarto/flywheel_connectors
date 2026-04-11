@@ -907,6 +907,24 @@ git push                # Push to remote
 
 ---
 
+## Quarterly Claims-vs-Reality Debiasing
+
+Every quarter, an agent or human must produce a claims-vs-reality report
+comparing README.md feature status labels against current code evidence.
+
+**Process:**
+1. Use `docs/quarterly/TEMPLATE.md` as the starting point
+2. For each feature in the README table, verify status label against code evidence
+3. Record deltas from the prior quarter's report
+4. Flag overclaims (status higher than evidence) and underclaims
+5. Publish to `docs/quarterly/20XX-QN-claims-vs-reality.md`
+6. Update the README audit status note with the new report date
+
+**Reports:**
+- `docs/quarterly/2026-Q2-claims-vs-reality.md` — baseline (inaugural)
+
+---
+
 ## cass — Cross-Agent Session Search
 
 `cass` indexes prior agent conversations (Claude Code, Codex, Cursor, Gemini, ChatGPT, etc.) so we can reuse solved problems.

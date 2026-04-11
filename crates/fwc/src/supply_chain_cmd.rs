@@ -430,8 +430,8 @@ fn sign_bundle(args: &SignArgs) -> Result<SignOutput> {
         &key_id,
         &signing_key,
         &manifest_path,
-        &source_uri,
-        &source_commit,
+        source_uri.as_ref(),
+        source_commit.as_ref(),
         &input_manifest_blake3,
         &binary_blake3,
         &provenance_hash,
@@ -568,8 +568,8 @@ fn build_attestation(
     key_id: &str,
     signing_key: &Ed25519SigningKey,
     manifest_path: &Path,
-    source_uri: &Option<String>,
-    source_commit: &Option<String>,
+    source_uri: Option<&String>,
+    source_commit: Option<&String>,
     manifest_digest: &str,
     binary_digest: &str,
     provenance_hash: &str,
@@ -588,7 +588,7 @@ fn build_attestation(
             || source_uri.clone(),
             |commit| format!("{source_uri}#{commit}"),
         );
-        let digest_source = source_commit.as_deref().unwrap_or(source_uri);
+        let digest_source = source_commit.unwrap_or(source_uri);
         materials.push(AttestationMaterial {
             uri,
             digest: hash_blake3_prefixed(digest_source.as_bytes()),
@@ -729,7 +729,7 @@ fn discover_source_uri(start: &Path) -> Option<String> {
     run_git(start, &["rev-parse", "--show-toplevel"]).map(|root| {
         let path = PathBuf::from(root);
         Url::from_file_path(&path).map_or_else(
-            |_| format!("git+{}", path.display()),
+            |()| format!("git+{}", path.display()),
             |url| format!("git+{url}"),
         )
     })
@@ -752,7 +752,7 @@ fn run_git(start: &Path, args: &[&str]) -> Option<String> {
 
 fn file_uri(path: &Path) -> String {
     Url::from_file_path(path).map_or_else(
-        |_| format!("file://{}", path.display()),
+        |()| format!("file://{}", path.display()),
         |url| url.to_string(),
     )
 }

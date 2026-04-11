@@ -14589,7 +14589,7 @@ fn registry_endpoint_url(endpoint: &str, segments: &[&str]) -> Result<Url> {
     let mut url =
         Url::parse(endpoint).with_context(|| format!("invalid registry endpoint `{endpoint}`"))?;
     {
-        let mut path = url.path_segments_mut().map_err(|_| {
+        let mut path = url.path_segments_mut().map_err(|()| {
             anyhow::anyhow!("registry endpoint `{endpoint}` cannot be used as a base URL")
         })?;
         path.pop_if_empty();

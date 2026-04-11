@@ -171,6 +171,7 @@ pub struct IntentRequest {
     /// When set, the compiler will attempt to fetch live operation schemas from
     /// this fcp-host endpoint, supplementing or overriding local manifest data.
     /// Falls back to local manifests if the host is unreachable.
+    #[allow(dead_code)]
     pub host_url: Option<String>,
 }
 

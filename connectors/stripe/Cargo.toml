@@ -43,6 +43,7 @@ hex.workspace = true
 percent-encoding.workspace = true
 
 [dev-dependencies]
+ciborium.workspace = true
 wiremock.workspace = true
 futures-util.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }

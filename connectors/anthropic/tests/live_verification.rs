@@ -9,7 +9,7 @@
 //! key and confirms structured FCP error mapping.
 
 use fcp_anthropic::connector::AnthropicConnector;
-use fcp_core::CapabilityToken;
+use fcp_core::{CapabilityConstraints, CapabilityToken};
 use fcp_crypto::Ed25519SigningKey;
 use fcp_crypto::cose::CapabilityTokenBuilder;
 
@@ -44,6 +44,13 @@ macro_rules! skip_without_key {
 
 fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
     let now = Utc::now();
+    // C3.4: tokens MUST include constraints (default-deny)
+    let constraints = CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
     let cose = CapabilityTokenBuilder::new()
         .capability_id("anthropic.chat")
         .zone_id("z:work")
@@ -51,6 +58,7 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .operations(&[op])
         .issuer("node:live-test")
         .validity(now, now + Duration::hours(1))
+        .constraints_cbor(&cbor)
         .sign(signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)

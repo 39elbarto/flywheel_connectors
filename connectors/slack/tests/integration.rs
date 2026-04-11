@@ -22,6 +22,7 @@ use asupersync::net::websocket::{
 use chrono::{Duration, Utc};
 use fcp_async_core::channel::oneshot;
 use fcp_async_core::net::{TcpListener, TcpStream};
+use fcp_core::CapabilityConstraints;
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_testkit::AsyncTestContext;
@@ -53,6 +54,13 @@ fn generate_valid_token_for_operation(
     operation: &str,
 ) -> fcp_core::CapabilityToken {
     let now = Utc::now();
+    // C3.4: tokens MUST include constraints (default-deny)
+    let constraints = CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
@@ -60,6 +68,7 @@ fn generate_valid_token_for_operation(
         .operations(&[operation])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
+        .constraints_cbor(&cbor)
         .sign(signing_key)
         .unwrap();
     fcp_core::CapabilityToken::from_raw(cose)

@@ -9,7 +9,7 @@ use chrono::Utc;
 use fcp_airtable::{
     client::AirtableClient, connector::AirtableConnector, error::AirtableError, types::SortSpec,
 };
-use fcp_core::{CapabilityToken, FcpError};
+use fcp_core::{CapabilityConstraints, CapabilityToken, FcpError};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use serde_json::json;
@@ -36,6 +36,13 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         | "airtable.set_webhook_notifications" => "airtable.webhooks.manage",
         _ => "airtable.read",
     };
+    // C3.4: tokens MUST include constraints (default-deny)
+    let constraints = CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
@@ -43,6 +50,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + chrono::Duration::hours(1))
+        .constraints_cbor(&cbor)
         .sign(signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)

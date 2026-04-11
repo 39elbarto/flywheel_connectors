@@ -37,6 +37,7 @@ uuid.workspace = true
 chrono.workspace = true
 
 [dev-dependencies]
+ciborium.workspace = true
 wiremock.workspace = true
 fcp-async-core = { path = "../../crates/fcp-async-core" }
 fcp-crypto = { path = "../../crates/fcp-crypto" }

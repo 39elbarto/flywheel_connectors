@@ -11,8 +11,9 @@
 
 use chrono::{Duration, Utc};
 use fcp_core::{
-    CapabilityId, CapabilityToken, ConnectorId, FcpConnector, HandshakeRequest, IdempotencyClass,
-    InvokeRequest, InvokeStatus, OperationId, RequestId, ZoneId,
+    CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
+    HandshakeRequest, IdempotencyClass, InvokeRequest, InvokeStatus, OperationId, RequestId,
+    ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_hackernews::connector::{HackerNewsConnector, operations_info};
@@ -43,6 +44,13 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
 
 fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
     let now = Utc::now();
+    // C3.4: tokens MUST include constraints (default-deny)
+    let constraints = CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
     let raw = CapabilityTokenBuilder::new()
         .capability_id("hackernews.read")
         .zone_id("z:work")
@@ -50,6 +58,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
+        .constraints_cbor(&cbor)
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)

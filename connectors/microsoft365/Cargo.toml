@@ -44,6 +44,7 @@ zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 hex.workspace = true
 
 [dev-dependencies]
+ciborium.workspace = true
 wiremock.workspace = true
 futures-util.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }

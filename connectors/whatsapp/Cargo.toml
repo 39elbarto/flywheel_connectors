@@ -33,6 +33,7 @@ hmac.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
+ciborium.workspace = true
 chrono.workspace = true
 fcp-crypto.workspace = true
 fcp-testkit.workspace = true

@@ -13,7 +13,7 @@
 
 use chrono::{Duration, Utc};
 use fcp_core::ApprovalMode;
-use fcp_core::{CapabilityToken, FcpError};
+use fcp_core::{CapabilityConstraints, CapabilityToken, FcpError};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_google_discovery::{
     DiscoveryEndpointKind, DiscoveryServiceId, generator::generate_google_service_artifacts,
@@ -46,6 +46,13 @@ fn capability_for_operation(op: &str) -> &str {
 fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
     let cap = capability_for_operation(op);
     let now = Utc::now();
+    // C3.4: tokens MUST include constraints (default-deny)
+    let constraints = CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
@@ -53,6 +60,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
+        .constraints_cbor(&cbor)
         .sign(signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)

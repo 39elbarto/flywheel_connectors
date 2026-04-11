@@ -30,6 +30,7 @@ anyhow.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
+ciborium.workspace = true
 fcp-crypto.workspace = true
 fcp-testkit.workspace = true
 tempfile = "3.15"

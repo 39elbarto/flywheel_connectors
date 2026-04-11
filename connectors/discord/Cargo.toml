@@ -40,6 +40,7 @@ uuid.workspace = true
 testing = []
 
 [dev-dependencies]
+ciborium.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }

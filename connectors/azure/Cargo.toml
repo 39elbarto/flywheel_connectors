@@ -33,6 +33,7 @@ percent-encoding.workspace = true
 quick-xml = { version = "0.39.2", features = ["serialize"] }
 
 [dev-dependencies]
+ciborium.workspace = true
 chrono.workspace = true
 fcp-crypto.workspace = true
 fcp-testkit.workspace = true

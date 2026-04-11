@@ -1757,6 +1757,7 @@ fn epoch_replay_install_and_replay_events() {
         checkpoint_seq: 1,
         as_of_epoch: EpochId::new("epoch-1"),
         quorum_signatures: SignatureSet::new(),
+        revocation_freshness_sla_secs: 300,
     };
 
     assert_eq!(checkpoint.audit_seq, 4);

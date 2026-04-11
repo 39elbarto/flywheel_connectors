@@ -327,6 +327,7 @@ mod tests {
             checkpoint_seq: 7,
             as_of_epoch: EpochId::new("epoch-100"),
             quorum_signatures: SignatureSet::default(),
+            revocation_freshness_sla_secs: 300,
         };
 
         assert_eq!(checkpoint.zone_id(), &test_zone());
@@ -350,6 +351,7 @@ mod tests {
             checkpoint_seq: 3,
             as_of_epoch: EpochId::new("epoch-50"),
             quorum_signatures: SignatureSet::default(),
+            revocation_freshness_sla_secs: 300,
         };
 
         let json = serde_json::to_value(&checkpoint).unwrap();

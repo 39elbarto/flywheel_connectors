@@ -773,6 +773,88 @@ impl RevocationRegistry {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Revocation SLA Checker (C1.4 — Zone-Wide Revocation Freshness SLA)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The revocation freshness status of a zone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RevocationSlaStatus {
+    /// The zone's revocation frontier is within the SLA window.
+    Fresh,
+    /// The zone's revocation frontier is stale — SLA breached.
+    Breached {
+        /// How many seconds past the SLA the frontier is.
+        overdue_secs: u64,
+    },
+}
+
+impl RevocationSlaStatus {
+    /// Whether the zone's revocation is fresh.
+    #[must_use]
+    pub const fn is_fresh(&self) -> bool {
+        matches!(self, Self::Fresh)
+    }
+}
+
+/// Checks whether a zone's revocation frontier meets the declared SLA.
+///
+/// The SLA is declared in the [`ZoneCheckpoint`](crate::audit::ZoneCheckpoint)
+/// via `revocation_freshness_sla_secs`. This checker compares the checkpoint's
+/// `rev_seq` timestamp against the current time to determine if the zone is
+/// in DEGRADED revocation state.
+#[derive(Debug, Clone)]
+pub struct RevocationSlaChecker {
+    /// The `rev_seq` from the zone checkpoint.
+    pub checkpoint_rev_seq: u64,
+    /// When the checkpoint was last updated (UNIX epoch seconds).
+    pub checkpoint_updated_at: u64,
+    /// The SLA window in seconds.
+    pub sla_secs: u64,
+}
+
+impl RevocationSlaChecker {
+    /// Create a new SLA checker from checkpoint data.
+    #[must_use]
+    pub const fn new(checkpoint_rev_seq: u64, checkpoint_updated_at: u64, sla_secs: u64) -> Self {
+        Self {
+            checkpoint_rev_seq,
+            checkpoint_updated_at,
+            sla_secs,
+        }
+    }
+
+    /// Check whether the revocation SLA is met at the given time.
+    #[must_use]
+    pub const fn check_sla(&self, now: u64) -> RevocationSlaStatus {
+        let age = now.saturating_sub(self.checkpoint_updated_at);
+        if age <= self.sla_secs {
+            RevocationSlaStatus::Fresh
+        } else {
+            RevocationSlaStatus::Breached {
+                overdue_secs: age - self.sla_secs,
+            }
+        }
+    }
+
+    /// Whether an operation with the given freshness class may proceed.
+    ///
+    /// - `Critical` operations MUST abort when SLA is breached.
+    /// - `Risky` operations SHOULD warn but may proceed.
+    /// - `Safe` operations may always proceed.
+    #[must_use]
+    pub const fn may_proceed(
+        &self,
+        now: u64,
+        freshness_class: RevocationFreshnessClass,
+    ) -> bool {
+        match freshness_class {
+            RevocationFreshnessClass::Critical => self.check_sla(now).is_fresh(),
+            RevocationFreshnessClass::Risky | RevocationFreshnessClass::Safe => true,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2439,5 +2521,71 @@ mod tests {
             elapsed.as_millis() < 1000,
             "100K revocation lookups took {elapsed:?}, expected < 1s"
         );
+    }
+
+    // ── C1.4 — Zone-wide revocation SLA with quorum-signed frontier ────
+
+    #[test]
+    fn c1_4_sla_fresh_within_window() {
+        let checker = RevocationSlaChecker::new(100, 1_700_000_000, 300);
+        let status = checker.check_sla(1_700_000_200); // 200s < 300s SLA
+        assert_eq!(status, RevocationSlaStatus::Fresh);
+        assert!(status.is_fresh());
+    }
+
+    #[test]
+    fn c1_4_sla_breached_past_window() {
+        let checker = RevocationSlaChecker::new(100, 1_700_000_000, 300);
+        let status = checker.check_sla(1_700_000_500); // 500s > 300s SLA
+        assert_eq!(
+            status,
+            RevocationSlaStatus::Breached { overdue_secs: 200 }
+        );
+        assert!(!status.is_fresh());
+    }
+
+    #[test]
+    fn c1_4_critical_op_aborts_on_breach() {
+        let checker = RevocationSlaChecker::new(100, 1_700_000_000, 300);
+        // Within SLA — Critical may proceed
+        assert!(checker.may_proceed(1_700_000_200, RevocationFreshnessClass::Critical));
+        // SLA breached — Critical must NOT proceed
+        assert!(!checker.may_proceed(1_700_000_500, RevocationFreshnessClass::Critical));
+    }
+
+    #[test]
+    fn c1_4_risky_and_safe_ops_proceed_despite_breach() {
+        let checker = RevocationSlaChecker::new(100, 1_700_000_000, 300);
+        // Even when SLA breached, Risky and Safe may proceed
+        assert!(checker.may_proceed(1_700_000_500, RevocationFreshnessClass::Risky));
+        assert!(checker.may_proceed(1_700_000_500, RevocationFreshnessClass::Safe));
+    }
+
+    #[test]
+    fn c1_4_sla_at_exact_boundary() {
+        let checker = RevocationSlaChecker::new(100, 1_700_000_000, 300);
+        // Exactly at the SLA boundary — still Fresh
+        let status = checker.check_sla(1_700_000_300);
+        assert_eq!(status, RevocationSlaStatus::Fresh);
+
+        // One second past — Breached
+        let status = checker.check_sla(1_700_000_301);
+        assert_eq!(
+            status,
+            RevocationSlaStatus::Breached { overdue_secs: 1 }
+        );
+    }
+
+    #[test]
+    fn c1_4_sla_serialization_roundtrip() {
+        let status = RevocationSlaStatus::Breached { overdue_secs: 42 };
+        let json = serde_json::to_string(&status).unwrap();
+        let roundtripped: RevocationSlaStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(status, roundtripped);
+
+        let fresh = RevocationSlaStatus::Fresh;
+        let json = serde_json::to_string(&fresh).unwrap();
+        let roundtripped: RevocationSlaStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(fresh, roundtripped);
     }
 }

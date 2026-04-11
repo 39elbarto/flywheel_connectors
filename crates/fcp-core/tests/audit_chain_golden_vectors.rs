@@ -566,6 +566,7 @@ fn test_zone_checkpoint_binds_all_heads() {
         checkpoint_seq: 10,
         as_of_epoch: test_epoch(),
         quorum_signatures: create_signature_set(5),
+        revocation_freshness_sla_secs: 300,
     };
 
     // Verify all heads are bound
@@ -595,6 +596,7 @@ fn test_zone_checkpoint_seq_monotonic() {
         checkpoint_seq: 1,
         as_of_epoch: EpochId::new("epoch-1"),
         quorum_signatures: create_signature_set(3),
+        revocation_freshness_sla_secs: 300,
     };
 
     let cp2 = ZoneCheckpoint {
@@ -610,6 +612,7 @@ fn test_zone_checkpoint_seq_monotonic() {
         checkpoint_seq: 2,
         as_of_epoch: EpochId::new("epoch-2"),
         quorum_signatures: create_signature_set(3),
+        revocation_freshness_sla_secs: 300,
     };
 
     assert!(cp2.checkpoint_seq > cp1.checkpoint_seq);
@@ -637,6 +640,7 @@ fn test_zone_checkpoint_requires_quorum() {
         checkpoint_seq: 1,
         as_of_epoch: test_epoch(),
         quorum_signatures: create_signature_set(5),
+        revocation_freshness_sla_secs: 300,
     };
 
     assert_eq!(checkpoint.quorum_signatures.len(), 5);
@@ -1044,6 +1048,7 @@ fn test_zone_checkpoint_serialization() {
         checkpoint_seq: 5,
         as_of_epoch: test_epoch(),
         quorum_signatures: create_signature_set(5),
+        revocation_freshness_sla_secs: 300,
     };
 
     let json = serde_json::to_string(&checkpoint).expect("serialize");

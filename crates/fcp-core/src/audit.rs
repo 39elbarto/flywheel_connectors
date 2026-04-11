@@ -144,6 +144,11 @@ impl AuditHead {
     }
 }
 
+/// Default revocation SLA: 300 seconds (5 minutes).
+const fn default_revocation_sla() -> u64 {
+    300
+}
+
 /// Zone checkpoint for fast sync (NORMATIVE).
 ///
 /// Quorum-signed checkpoint of zone state for efficient synchronization.
@@ -166,6 +171,13 @@ pub struct ZoneCheckpoint {
     pub as_of_epoch: EpochId,
     /// Quorum-signed (Byzantine-resilient under n/f model).
     pub quorum_signatures: SignatureSet,
+    /// Maximum allowed age (in seconds) of the revocation frontier before
+    /// the zone enters DEGRADED revocation state. Operations with
+    /// [`RevocationFreshnessClass::Critical`](crate::RevocationFreshnessClass::Critical)
+    /// MUST abort when this SLA is breached.
+    /// Default: 300 seconds (5 minutes).
+    #[serde(default = "default_revocation_sla")]
+    pub revocation_freshness_sla_secs: u64,
 }
 
 impl ZoneCheckpoint {
@@ -365,6 +377,7 @@ mod tests {
             checkpoint_seq,
             as_of_epoch: test_epoch(),
             quorum_signatures: create_quorum_signature_set(sig_count),
+            revocation_freshness_sla_secs: default_revocation_sla(),
         }
     }
 

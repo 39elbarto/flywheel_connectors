@@ -231,6 +231,7 @@ mod tests {
             checkpoint_seq: 1,
             as_of_epoch: EpochId::new("epoch-10"),
             quorum_signatures: SignatureSet::default(),
+            revocation_freshness_sla_secs: 300,
         };
 
         let newer = ZoneCheckpoint {
@@ -277,6 +278,7 @@ mod tests {
             checkpoint_seq: 5,
             as_of_epoch: EpochId::new("epoch-50"),
             quorum_signatures: sigs,
+            revocation_freshness_sla_secs: 300,
         };
 
         assert_eq!(checkpoint.quorum_signatures.len(), 3);
@@ -301,6 +303,7 @@ mod tests {
             checkpoint_seq: 3,
             as_of_epoch: EpochId::new("epoch-30"),
             quorum_signatures: sigs,
+            revocation_freshness_sla_secs: 300,
         };
 
         // Serialize to JSON (simulating durable storage retrieval)

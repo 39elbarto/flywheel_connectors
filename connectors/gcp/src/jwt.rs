@@ -427,4 +427,194 @@ mod tests {
             .verify(signing_input.as_bytes(), &signature)
             .expect("RS256 signature verification should pass");
     }
+
+    // ── Cross-Cloud Auth Regression: GCP JWT ────────────────────
+
+    #[test]
+    fn cached_token_debug_redacts_access_token() {
+        let token = CachedToken {
+            access_token: "ya29.very-secret-token".into(),
+            expires_at_unix: 9999999999,
+        };
+        let debug = format!("{token:?}");
+        assert!(
+            debug.contains("[REDACTED]"),
+            "access_token must be redacted: {debug}"
+        );
+        assert!(
+            !debug.contains("ya29.very-secret-token"),
+            "raw access token must not appear in debug output: {debug}"
+        );
+    }
+
+    #[test]
+    fn cached_token_expired_at_exact_safety_margin_boundary() {
+        // Token expires exactly 60 seconds from now (the safety margin)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let token = CachedToken {
+            access_token: "ya29.test".into(),
+            expires_at_unix: now + 60,
+        };
+        // now + 60 >= now + 60 is true, so token is expired at boundary
+        assert!(
+            token.is_expired(),
+            "token at exact safety margin boundary should be considered expired"
+        );
+    }
+
+    #[test]
+    fn cached_token_not_expired_just_beyond_safety_margin() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let token = CachedToken {
+            access_token: "ya29.test".into(),
+            expires_at_unix: now + 120,
+        };
+        assert!(
+            !token.is_expired(),
+            "token well beyond safety margin should not be expired"
+        );
+    }
+
+    #[test]
+    fn jwt_exp_minus_iat_equals_lifetime_plus_skew() {
+        let pem = test_private_key_pem();
+        let jwt = build_jwt_assertion(
+            "svc@p.iam.gserviceaccount.com",
+            &pem,
+            crate::types::DEFAULT_GCP_SCOPES,
+            None,
+        )
+        .unwrap();
+
+        let parts: Vec<&str> = jwt.split('.').collect();
+        let claims_bytes = URL_SAFE_NO_PAD.decode(parts[1]).unwrap();
+        let claims: serde_json::Value = serde_json::from_slice(&claims_bytes).unwrap();
+
+        let iat = claims["iat"].as_u64().unwrap();
+        let exp = claims["exp"].as_u64().unwrap();
+        assert_eq!(
+            exp - iat,
+            DEFAULT_LIFETIME_SECS + CLOCK_SKEW_MARGIN_SECS,
+            "token lifetime must be DEFAULT_LIFETIME_SECS + CLOCK_SKEW_MARGIN_SECS"
+        );
+    }
+
+    #[test]
+    fn jwt_iat_is_backdated_by_clock_skew_margin() {
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let pem = test_private_key_pem();
+        let jwt = build_jwt_assertion(
+            "svc@p.iam.gserviceaccount.com",
+            &pem,
+            crate::types::DEFAULT_GCP_SCOPES,
+            None,
+        )
+        .unwrap();
+
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let parts: Vec<&str> = jwt.split('.').collect();
+        let claims_bytes = URL_SAFE_NO_PAD.decode(parts[1]).unwrap();
+        let claims: serde_json::Value = serde_json::from_slice(&claims_bytes).unwrap();
+        let iat = claims["iat"].as_u64().unwrap();
+
+        // iat should be now - CLOCK_SKEW_MARGIN_SECS ± 1 second
+        assert!(
+            iat >= before - CLOCK_SKEW_MARGIN_SECS - 1 && iat <= after - CLOCK_SKEW_MARGIN_SECS + 1,
+            "iat ({iat}) should be backdated by ~{CLOCK_SKEW_MARGIN_SECS}s from now ({before}-{after})"
+        );
+    }
+
+    #[test]
+    fn jwt_different_service_accounts_produce_different_tokens() {
+        let pem = test_private_key_pem();
+        let jwt1 = build_jwt_assertion(
+            "svc1@project.iam.gserviceaccount.com",
+            &pem,
+            crate::types::DEFAULT_GCP_SCOPES,
+            None,
+        )
+        .unwrap();
+        let jwt2 = build_jwt_assertion(
+            "svc2@project.iam.gserviceaccount.com",
+            &pem,
+            crate::types::DEFAULT_GCP_SCOPES,
+            None,
+        )
+        .unwrap();
+
+        // Claims differ (different iss/sub), so signatures differ
+        let parts1: Vec<&str> = jwt1.split('.').collect();
+        let parts2: Vec<&str> = jwt2.split('.').collect();
+        assert_ne!(
+            parts1[1], parts2[1],
+            "different service accounts must produce different claims"
+        );
+    }
+
+    #[test]
+    fn jwt_different_scopes_produce_different_claims() {
+        let pem = test_private_key_pem();
+        let jwt1 = build_jwt_assertion(
+            "svc@p.iam.gserviceaccount.com",
+            &pem,
+            "https://www.googleapis.com/auth/cloud-platform",
+            None,
+        )
+        .unwrap();
+        let jwt2 = build_jwt_assertion(
+            "svc@p.iam.gserviceaccount.com",
+            &pem,
+            "https://www.googleapis.com/auth/compute",
+            None,
+        )
+        .unwrap();
+
+        let decode_scope = |jwt: &str| -> String {
+            let parts: Vec<&str> = jwt.split('.').collect();
+            let bytes = URL_SAFE_NO_PAD.decode(parts[1]).unwrap();
+            let claims: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            claims["scope"].as_str().unwrap().to_owned()
+        };
+
+        assert_ne!(
+            decode_scope(&jwt1),
+            decode_scope(&jwt2),
+            "different scopes must produce different claims"
+        );
+    }
+
+    #[test]
+    fn urlencoded_handles_special_characters() {
+        assert_eq!(urlencoded("hello world"), "hello+world");
+        assert_eq!(urlencoded("a=b&c=d"), "a%3Db%26c%3Dd");
+        assert_eq!(urlencoded("safe-chars_here.tilde~"), "safe-chars_here.tilde~");
+    }
+
+    #[test]
+    fn jwt_rejects_pkcs1_format_pem() {
+        // PKCS#1 format starts with "-----BEGIN RSA PRIVATE KEY-----"
+        // Our implementation requires PKCS#8 format
+        let pkcs1_pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBogIBAAJBALRiMLAH\n-----END RSA PRIVATE KEY-----";
+        let result = build_jwt_assertion(
+            "svc@p.iam.gserviceaccount.com",
+            pkcs1_pem,
+            crate::types::DEFAULT_GCP_SCOPES,
+            None,
+        );
+        assert!(result.is_err(), "PKCS#1 format should be rejected (we require PKCS#8)");
+    }
 }

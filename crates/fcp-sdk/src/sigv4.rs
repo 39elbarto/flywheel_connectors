@@ -630,4 +630,153 @@ mod tests {
         assert!(encoded.starts_with('/'));
         assert!(encoded.contains('/'));
     }
+
+    // ── Cross-Cloud Auth Regression: SigV4 ──────────────────────
+
+    #[test]
+    fn presign_with_session_token_includes_security_token() {
+        let creds = AwsCredentials {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
+            session_token: Some("FwoGZXIvYXdzEBYaDHqa0AF".into()),
+        };
+        let signer = SigV4Signer::new(creds, test_scope()).with_fixed_time(fixed_time());
+        let request = SignableRequest {
+            method: "GET".into(),
+            uri: "/bucket/key".into(),
+            query_params: BTreeMap::new(),
+            headers: BTreeMap::from([("host".into(), "s3.amazonaws.com".into())]),
+            payload_hash: UNSIGNED_PAYLOAD.into(),
+        };
+        let presigned = signer.presign(&request, 3600);
+        assert!(
+            presigned.url.contains("X-Amz-Security-Token="),
+            "presigned URL must include session token: {}",
+            presigned.url
+        );
+    }
+
+    #[test]
+    fn presign_expiry_boundary_zero_produces_valid_url() {
+        let signer = test_signer();
+        let request = SignableRequest {
+            method: "GET".into(),
+            uri: "/bucket/key".into(),
+            query_params: BTreeMap::new(),
+            headers: BTreeMap::from([("host".into(), "s3.amazonaws.com".into())]),
+            payload_hash: UNSIGNED_PAYLOAD.into(),
+        };
+        let presigned = signer.presign(&request, 0);
+        assert!(presigned.url.contains("X-Amz-Expires=0"));
+        assert_eq!(presigned.expires_in_secs, 0);
+    }
+
+    #[test]
+    fn presign_max_expiry_604800_produces_valid_url() {
+        let signer = test_signer();
+        let request = SignableRequest {
+            method: "GET".into(),
+            uri: "/bucket/key".into(),
+            query_params: BTreeMap::new(),
+            headers: BTreeMap::from([("host".into(), "s3.amazonaws.com".into())]),
+            payload_hash: UNSIGNED_PAYLOAD.into(),
+        };
+        let presigned = signer.presign(&request, 604800);
+        assert!(presigned.url.contains("X-Amz-Expires=604800"));
+        assert_eq!(presigned.expires_in_secs, 604800);
+    }
+
+    #[test]
+    fn sign_different_payloads_produce_different_signatures() {
+        let signer = test_signer();
+        let make_request = |payload: &[u8]| SignableRequest {
+            method: "PUT".into(),
+            uri: "/bucket/key".into(),
+            query_params: BTreeMap::new(),
+            headers: BTreeMap::from([("host".into(), "s3.amazonaws.com".into())]),
+            payload_hash: SignableRequest::hash_payload(payload),
+        };
+
+        let signed_empty = signer.sign(&make_request(b""));
+        let signed_body = signer.sign(&make_request(b"hello world"));
+        assert_ne!(
+            signed_empty.authorization, signed_body.authorization,
+            "different payloads must produce different signatures"
+        );
+    }
+
+    #[test]
+    fn sign_different_methods_produce_different_signatures() {
+        let signer = test_signer();
+        let make_request = |method: &str| SignableRequest {
+            method: method.into(),
+            uri: "/bucket/key".into(),
+            query_params: BTreeMap::new(),
+            headers: BTreeMap::from([("host".into(), "s3.amazonaws.com".into())]),
+            payload_hash: EMPTY_PAYLOAD_HASH.into(),
+        };
+
+        let signed_get = signer.sign(&make_request("GET"));
+        let signed_put = signer.sign(&make_request("PUT"));
+        assert_ne!(signed_get.authorization, signed_put.authorization);
+    }
+
+    #[test]
+    fn presign_with_existing_query_params_preserves_them() {
+        let signer = test_signer();
+        let request = SignableRequest {
+            method: "GET".into(),
+            uri: "/bucket/key".into(),
+            query_params: BTreeMap::from([
+                ("response-content-type".into(), "application/json".into()),
+            ]),
+            headers: BTreeMap::from([("host".into(), "s3.amazonaws.com".into())]),
+            payload_hash: UNSIGNED_PAYLOAD.into(),
+        };
+        let presigned = signer.presign(&request, 3600);
+        assert!(
+            presigned.url.contains("response-content-type=application%2Fjson")
+                || presigned.url.contains("response-content-type=application/json"),
+            "existing query params must be preserved: {}",
+            presigned.url
+        );
+    }
+
+    #[test]
+    fn sign_credential_string_includes_scope_components() {
+        let signer = test_signer();
+        let request = SignableRequest {
+            method: "GET".into(),
+            uri: "/".into(),
+            query_params: BTreeMap::new(),
+            headers: BTreeMap::from([("host".into(), "example.amazonaws.com".into())]),
+            payload_hash: EMPTY_PAYLOAD_HASH.into(),
+        };
+        let signed = signer.sign(&request);
+        // Credential should contain: access_key/date/region/service/aws4_request
+        assert!(
+            signed.authorization.contains("20130524/us-east-1/s3/aws4_request"),
+            "credential scope must include date/region/service: {}",
+            signed.authorization
+        );
+    }
+
+    #[test]
+    fn uri_encode_special_characters() {
+        let encoded = uri_encode_path("/bucket/key with spaces/file@name.txt");
+        assert!(!encoded.contains(' '), "spaces must be percent-encoded");
+        assert!(
+            encoded.contains("%40") || encoded.contains('@'),
+            "@ should be handled: {encoded}"
+        );
+    }
+
+    #[test]
+    fn signing_key_is_exactly_32_bytes() {
+        let signer = test_signer();
+        for date in ["20130524", "20261231", "20000101"] {
+            let key = signer.derive_signing_key(date);
+            assert_eq!(key.len(), 32, "HMAC-SHA256 output must be 32 bytes for date {date}");
+        }
+    }
 }

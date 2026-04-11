@@ -1338,4 +1338,96 @@ mod tests {
         // Traversal attempt must be encoded
         assert!(!copy_source.contains("../"));
     }
+
+    // ── Cross-Cloud Auth Regression: S3 Presigning ──────────────
+
+    #[fcp_async_core::runtime::test]
+    async fn presigned_url_contains_credential_with_region() {
+        let client = S3Client::new("AKIAIOSFODNN7EXAMPLE", "secret", "eu-west-1")
+            .unwrap()
+            .with_base_url("https://s3.eu-west-1.amazonaws.com");
+
+        let result = client.generate_presigned_url("test-bucket", "test-key", 3600);
+        assert!(
+            result.url.contains("eu-west-1"),
+            "presigned URL credential must include region: {}",
+            result.url
+        );
+        assert!(
+            result.url.contains("AKIAIOSFODNN7EXAMPLE"),
+            "presigned URL must include access key: {}",
+            result.url
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn presigned_url_different_expiry_produces_different_signature() {
+        let client = S3Client::new("AKIAIOSFODNN7EXAMPLE", "secret", "us-east-1")
+            .unwrap()
+            .with_base_url("https://s3.amazonaws.com");
+
+        let url_300 = client.generate_presigned_url("bucket", "key", 300);
+        let url_3600 = client.generate_presigned_url("bucket", "key", 3600);
+
+        assert!(url_300.url.contains("X-Amz-Expires=300"));
+        assert!(url_3600.url.contains("X-Amz-Expires=3600"));
+
+        // Different expiry should produce different signatures (canonical request differs)
+        let sig_300 = url_300
+            .url
+            .split("X-Amz-Signature=")
+            .nth(1)
+            .unwrap_or("")
+            .split('&')
+            .next()
+            .unwrap_or("");
+        let sig_3600 = url_3600
+            .url
+            .split("X-Amz-Signature=")
+            .nth(1)
+            .unwrap_or("")
+            .split('&')
+            .next()
+            .unwrap_or("");
+        assert_ne!(
+            sig_300, sig_3600,
+            "different expiry values must produce different signatures"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn presigned_url_different_keys_produce_different_urls() {
+        let client = S3Client::new("AKIAEXAMPLE", "secret", "us-east-1")
+            .unwrap()
+            .with_base_url("https://s3.amazonaws.com");
+
+        let url1 = client.generate_presigned_url("bucket", "key1.txt", 3600);
+        let url2 = client.generate_presigned_url("bucket", "key2.txt", 3600);
+
+        assert_ne!(url1.url, url2.url, "different keys must produce different presigned URLs");
+    }
+
+    #[test]
+    fn s3_client_debug_redacts_credentials() {
+        let client = S3Client::new("AKIAEXAMPLE", "super-secret-key", "us-east-1").unwrap();
+        let debug = format!("{client:?}");
+        assert!(
+            !debug.contains("super-secret-key"),
+            "secret key must not appear in debug output: {debug}"
+        );
+    }
+
+    #[test]
+    fn presigned_url_key_with_special_chars_is_encoded() {
+        let client = S3Client::new("AKIAEXAMPLE", "secret", "us-east-1")
+            .unwrap()
+            .with_base_url("https://s3.amazonaws.com");
+
+        let result = client.generate_presigned_url("bucket", "path/to/file with spaces.txt", 3600);
+        assert!(
+            !result.url.contains(' '),
+            "presigned URL must not contain raw spaces: {}",
+            result.url
+        );
+    }
 }

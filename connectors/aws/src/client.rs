@@ -938,4 +938,68 @@ mod tests {
             Some("https://example.test/api".into())
         );
     }
+
+    // ── Cross-Cloud Auth Regression: AWS SigV4 Integration ──────
+
+    #[test]
+    fn sanitize_path_segment_blocks_traversal() {
+        assert!(sanitize_path_segment("../etc/passwd", "test").is_err());
+        assert!(sanitize_path_segment("..\\windows\\system32", "test").is_err());
+        assert!(sanitize_path_segment("valid-name-123", "test").is_ok());
+        assert!(sanitize_path_segment("%2F..%2F", "test").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_empty() {
+        assert!(sanitize_path_segment("", "test").is_err());
+        assert!(sanitize_path_segment("   ", "test").is_err());
+    }
+
+    #[test]
+    fn sanitize_query_param_blocks_injection() {
+        assert!(sanitize_query_param("normal-value", "test").is_ok());
+        assert!(sanitize_query_param("value&injected=true", "test").is_err());
+        assert!(sanitize_query_param("value#fragment", "test").is_err());
+        assert!(sanitize_query_param("value?param", "test").is_err());
+    }
+
+    #[test]
+    fn sanitize_object_key_allows_slashes_blocks_traversal() {
+        assert!(sanitize_object_key("path/to/file.txt", "test").is_ok());
+        assert!(sanitize_object_key("../etc/passwd", "test").is_err());
+        assert!(sanitize_object_key("path\\to\\file", "test").is_err());
+    }
+
+    #[test]
+    fn aws_auth_debug_redacts_all_secrets() {
+        let auth = AwsAuth {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG".into(),
+            session_token: Some("FwoGZXIvtoken123".into()),
+        };
+        let debug = format!("{auth:?}");
+        assert!(
+            !debug.contains("wJalrXUtnFEMI"),
+            "secret access key must not appear in debug: {debug}"
+        );
+        assert!(
+            !debug.contains("FwoGZXIvtoken123"),
+            "session token must not appear in debug: {debug}"
+        );
+    }
+
+    #[test]
+    fn aws_auth_debug_redacts_access_key_id() {
+        let auth = AwsAuth {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+            secret_access_key: "secret".into(),
+            session_token: None,
+        };
+        let debug = format!("{auth:?}");
+        assert!(
+            !debug.contains("AKIAIOSFODNN7EXAMPLE"),
+            "access key must be redacted in debug: {debug}"
+        );
+        assert!(debug.contains("[REDACTED]"));
+    }
 }

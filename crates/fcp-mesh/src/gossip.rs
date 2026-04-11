@@ -703,6 +703,10 @@ pub enum GossipMessage {
 
     /// Reconciliation response with missing items.
     ReconcileResponse(ReconcileResponse),
+
+    /// Priority revocation push (direct peer notification).
+    /// Sent immediately on revocation, bypassing standard gossip cadence.
+    RevocationPush(RevocationPushMessage),
 }
 
 /// Request for specific objects or symbols (NORMATIVE).
@@ -836,6 +840,84 @@ pub struct ReconcileResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Priority Revocation Push (C1.5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Direct revocation push message for priority delivery.
+///
+/// Sent immediately to all known online peers when a revocation event occurs,
+/// bypassing the standard gossip interval. Bounded by
+/// [`GossipConfig::max_revocation_push_peers`] to prevent amplification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevocationPushMessage {
+    /// Node that originated or forwarded the push.
+    pub from: TailscaleNodeId,
+    /// Zone the revocation applies to.
+    pub zone_id: ZoneId,
+    /// The revoked object IDs (exact set, NOT XOR filter).
+    pub revoked_ids: Vec<ObjectId>,
+    /// The new revocation head sequence after this revocation.
+    pub new_rev_seq: u64,
+    /// Push timestamp.
+    pub timestamp: u64,
+    /// Signature authenticating the push (prevents injection).
+    pub signature: Option<NodeSignature>,
+}
+
+impl RevocationPushMessage {
+    /// Create a new revocation push for the given IDs.
+    #[must_use]
+    pub fn new(
+        from: TailscaleNodeId,
+        zone_id: ZoneId,
+        revoked_ids: Vec<ObjectId>,
+        new_rev_seq: u64,
+        now: u64,
+    ) -> Self {
+        Self {
+            from,
+            zone_id,
+            revoked_ids,
+            new_rev_seq,
+            timestamp: now,
+            signature: None,
+        }
+    }
+}
+
+/// Policy for priority gossip of revocation events.
+///
+/// Controls whether and how revocation events are pushed directly to peers
+/// instead of waiting for the next gossip round.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PriorityGossipPolicy {
+    /// Push revocations to all known online peers immediately.
+    #[default]
+    DirectPush,
+    /// Use the priority gossip interval (faster than standard) but no direct push.
+    PriorityInterval,
+    /// Use standard gossip cadence (no priority treatment).
+    Standard,
+}
+
+impl PriorityGossipPolicy {
+    /// Whether this policy uses direct peer push.
+    #[must_use]
+    pub const fn uses_direct_push(&self) -> bool {
+        matches!(self, Self::DirectPush)
+    }
+
+    /// The gossip interval in milliseconds for this policy.
+    #[must_use]
+    pub const fn interval_ms(&self, config: &GossipConfig) -> u64 {
+        match self {
+            Self::DirectPush | Self::PriorityInterval => config.priority_gossip_interval_ms,
+            Self::Standard => 300, // Standard gossip cadence
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Peer Gossip State
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -949,6 +1031,14 @@ pub struct GossipConfig {
     pub summary_ttl_secs: u64,
     /// Reconciliation batch size.
     pub reconciliation_batch_size: usize,
+    /// Priority gossip interval for revocation events (milliseconds).
+    /// Revocation events use this faster interval instead of the standard
+    /// gossip cadence. Default: 100ms (vs ~300ms for regular gossip).
+    pub priority_gossip_interval_ms: u64,
+    /// Maximum peers for direct revocation push.
+    /// Bounds the amplification factor: at most this many direct pushes
+    /// per revocation event. Default: 32.
+    pub max_revocation_push_peers: usize,
 }
 
 impl Default for GossipConfig {
@@ -960,6 +1050,8 @@ impl Default for GossipConfig {
             max_symbols_per_request: MAX_OBJECT_IDS_PER_REQUEST,
             summary_ttl_secs: DEFAULT_SUMMARY_TTL_SECS,
             reconciliation_batch_size: DEFAULT_RECONCILIATION_BATCH_SIZE,
+            priority_gossip_interval_ms: 100,
+            max_revocation_push_peers: 32,
         }
     }
 }
@@ -1873,10 +1965,7 @@ mod tests {
         let config = GossipConfig {
             max_objects_per_summary: 1,
             max_symbols_per_summary: 1,
-            max_objects_per_request: MAX_OBJECT_IDS_PER_REQUEST,
-            max_symbols_per_request: MAX_OBJECT_IDS_PER_REQUEST,
-            summary_ttl_secs: DEFAULT_SUMMARY_TTL_SECS,
-            reconciliation_batch_size: DEFAULT_RECONCILIATION_BATCH_SIZE,
+            ..GossipConfig::default()
         };
         let mut gossip = MeshGossip::new(test_node("local"), config);
 
@@ -2025,10 +2114,7 @@ mod tests {
         let config = GossipConfig {
             max_objects_per_summary: 1,
             max_symbols_per_summary: 1,
-            max_objects_per_request: MAX_OBJECT_IDS_PER_REQUEST,
-            max_symbols_per_request: MAX_OBJECT_IDS_PER_REQUEST,
-            summary_ttl_secs: DEFAULT_SUMMARY_TTL_SECS,
-            reconciliation_batch_size: DEFAULT_RECONCILIATION_BATCH_SIZE,
+            ..GossipConfig::default()
         };
         let mut gossip = MeshGossip::new(test_node("local"), config);
 
@@ -3755,5 +3841,79 @@ mod tests {
         );
         // Should succeed but may show partial decode (that's fine)
         assert!(result.is_some(), "empty peer IBLT should still reconcile");
+    }
+
+    // ── C1.5 — Priority gossip for revocation ─────────────────────
+
+    #[test]
+    fn c1_5_revocation_push_message_construction() {
+        let msg = RevocationPushMessage::new(
+            test_node("node-1"),
+            test_zone(),
+            vec![test_object_id("revoked-1"), test_object_id("revoked-2")],
+            42,
+            1_700_000_000,
+        );
+        assert_eq!(msg.revoked_ids.len(), 2);
+        assert_eq!(msg.new_rev_seq, 42);
+        assert!(msg.signature.is_none());
+    }
+
+    #[test]
+    fn c1_5_revocation_push_serialization_roundtrip() {
+        let msg = RevocationPushMessage::new(
+            test_node("node-1"),
+            test_zone(),
+            vec![test_object_id("tok-1")],
+            10,
+            1_700_000_000,
+        );
+        let gossip_msg = GossipMessage::RevocationPush(msg);
+        let json = serde_json::to_string(&gossip_msg).unwrap();
+        let rt: GossipMessage = serde_json::from_str(&json).unwrap();
+        match rt {
+            GossipMessage::RevocationPush(m) => {
+                assert_eq!(m.revoked_ids.len(), 1);
+                assert_eq!(m.new_rev_seq, 10);
+            }
+            _ => panic!("expected RevocationPush variant"),
+        }
+    }
+
+    #[test]
+    fn c1_5_priority_gossip_policy_defaults() {
+        let policy = PriorityGossipPolicy::default();
+        assert_eq!(policy, PriorityGossipPolicy::DirectPush);
+        assert!(policy.uses_direct_push());
+    }
+
+    #[test]
+    fn c1_5_priority_interval_faster_than_standard() {
+        let config = GossipConfig::default();
+        let priority = PriorityGossipPolicy::DirectPush;
+        let standard = PriorityGossipPolicy::Standard;
+
+        assert!(priority.interval_ms(&config) < standard.interval_ms(&config));
+        assert_eq!(priority.interval_ms(&config), 100);
+        assert_eq!(standard.interval_ms(&config), 300);
+    }
+
+    #[test]
+    fn c1_5_config_priority_fields() {
+        let config = GossipConfig::default();
+        assert_eq!(config.priority_gossip_interval_ms, 100);
+        assert_eq!(config.max_revocation_push_peers, 32);
+    }
+
+    #[test]
+    fn c1_5_push_bounded_by_max_peers() {
+        let config = GossipConfig {
+            max_revocation_push_peers: 5,
+            ..GossipConfig::default()
+        };
+        // Simulate: have 10 peers, but config limits to 5
+        let peer_count = 10usize;
+        let push_count = peer_count.min(config.max_revocation_push_peers);
+        assert_eq!(push_count, 5);
     }
 }

@@ -5919,6 +5919,228 @@ serde = "1"
         }
     }
 
+    // ---- scanner integration: ensure generated code passes placeholder inventory ----
+
+    #[test]
+    fn generated_scaffolds_pass_placeholder_inventory_scan() {
+        // Load the real placeholder inventory and extract all runtime-blocker
+        // needles that the scanner would flag on generated code.
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let inventory_path = repo_root.join("docs/testing/placeholder-inventory.json");
+        let raw = fs::read_to_string(&inventory_path).expect("placeholder inventory should exist");
+        let inventory: serde_json::Value =
+            serde_json::from_str(&raw).expect("placeholder inventory should be valid JSON");
+
+        // Collect needles from runtime-blocker findings that are NOT approved exceptions
+        let mut scanner_needles: Vec<String> = Vec::new();
+        if let Some(findings) = inventory["findings"].as_array() {
+            for finding in findings {
+                let classification = finding["classification"].as_str().unwrap_or("");
+                let exception_class = finding["approved_exception_class"].as_str();
+                // Only check runtime blockers without approved exceptions
+                if classification == "runtime_blocker" && exception_class.is_none() {
+                    if let Some(anchors) = finding["anchors"].as_array() {
+                        for anchor in anchors {
+                            if let Some(needle) = anchor["needle"].as_str() {
+                                scanner_needles.push(needle.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            !scanner_needles.is_empty(),
+            "inventory should contain runtime-blocker needles to scan against"
+        );
+
+        // Also check generic placeholder patterns the scanner scans repo-wide for
+        let generic_markers = [
+            "planned_only",
+            "placeholder_operation",
+        ];
+
+        for (index, archetype) in all_archetypes().into_iter().enumerate() {
+            let connector_id = format!("fcp.scantest{index}");
+            let short_name = format!("scantest{index}");
+            let crate_name = format!("fcp-scantest{index}");
+            let files = generate_files(
+                &connector_id,
+                &short_name,
+                &crate_name,
+                archetype,
+                "z:project:scan",
+                false,
+            )
+            .unwrap_or_else(|error| panic!("generate {archetype:?}: {error}"));
+
+            for (path, content, _) in &files {
+                // Check scanner inventory needles
+                for needle in &scanner_needles {
+                    assert!(
+                        !content.contains(needle.as_str()),
+                        "{archetype:?} generated {path} contains scanner needle `{needle}`; \
+                         this would fail the placeholder inventory scan"
+                    );
+                }
+                // Check generic placeholder markers
+                for marker in generic_markers {
+                    assert!(
+                        !content.contains(marker),
+                        "{archetype:?} generated {path} contains generic marker `{marker}`; \
+                         the scanner performs repo-wide scans for this pattern"
+                    );
+                }
+            }
+        }
+    }
+
+    // ---- smoke harness: end-to-end generator flow validation ----
+
+    #[test]
+    fn generator_smoke_harness_full_flow() {
+        // Exercises the complete scaffold generation flow for every archetype
+        // and verifies: prechecks pass, scaffold_status metadata consistent,
+        // verification entrypoints present, and failure diagnostics clear.
+        for archetype in all_archetypes() {
+            let connector_id = format!("fcp.smoke-{archetype}");
+            let short_name = format!("smoke-{archetype}");
+            let crate_name = format!("fcp-smoke-{archetype}");
+            let zone = "z:project:smoke";
+
+            let files = generate_files(
+                &connector_id,
+                &short_name,
+                &crate_name,
+                archetype,
+                zone,
+                false,
+            )
+            .unwrap_or_else(|e| panic!("{archetype:?} generate failed: {e}"));
+
+            // 1. Prechecks must pass
+            let prechecks = run_prechecks(&files, &connector_id, zone);
+            assert!(
+                prechecks.passed,
+                "{archetype:?} prechecks failed: {:?}",
+                prechecks
+                    .checks
+                    .iter()
+                    .filter(|c| !c.passed)
+                    .map(|c| &c.id)
+                    .collect::<Vec<_>>()
+            );
+
+            // 2. Manifest metadata: status, zone, capabilities
+            let manifest_content = files
+                .iter()
+                .find(|(p, _, _)| p == "manifest.toml")
+                .map(|(_, c, _)| c.as_str())
+                .expect("manifest.toml must be generated");
+            assert!(
+                manifest_content.contains(&format!("id = \"{connector_id}\"")),
+                "{archetype:?} manifest must declare connector ID"
+            );
+            assert!(
+                manifest_content.contains(&format!("home = \"{zone}\"")),
+                "{archetype:?} manifest must declare the specified zone"
+            );
+
+            // 3. Connector.rs: scaffold_status operation + truthful state
+            let connector_content = files
+                .iter()
+                .find(|(p, _, _)| p == "src/connector.rs")
+                .map(|(_, c, _)| c.as_str())
+                .expect("src/connector.rs must be generated");
+            assert!(
+                connector_content.contains("scaffold_status"),
+                "{archetype:?} connector.rs must define scaffold_status"
+            );
+            // ConnectorErrorMapping lives in error.rs
+            let error_content = files
+                .iter()
+                .find(|(p, _, _)| p == "src/error.rs")
+                .map(|(_, c, _)| c.as_str())
+                .expect("src/error.rs must be generated");
+            assert!(
+                error_content.contains("ConnectorErrorMapping"),
+                "{archetype:?} error.rs must implement ConnectorErrorMapping"
+            );
+
+            // 4. Next steps must be non-empty and mention verification
+            let next_steps = generate_next_steps(
+                &connector_id,
+                &format!("connectors/smoke-{archetype}"),
+                archetype,
+                false,
+            );
+            assert!(
+                !next_steps.is_empty(),
+                "{archetype:?} must emit non-empty next_steps"
+            );
+            let steps_text = next_steps.join("\n");
+            assert!(
+                steps_text.contains("cargo test") || steps_text.contains("cargo clippy"),
+                "{archetype:?} next_steps must reference verification commands"
+            );
+
+            // 5. E2E tests template must reference the connector binary
+            let e2e_content = files
+                .iter()
+                .find(|(p, _, _)| p == "tests/e2e_tests.rs")
+                .map(|(_, c, _)| c.as_str())
+                .expect("tests/e2e_tests.rs must be generated");
+            assert!(
+                e2e_content.contains(&crate_name),
+                "{archetype:?} e2e_tests.rs must reference the crate binary name"
+            );
+        }
+    }
+
+    #[test]
+    fn generator_smoke_failure_diagnostic_ids_source() {
+        // Verify that precheck items identify the source (template, manifest, etc.)
+        // by checking the ids and descriptions in the precheck result structure.
+        let files = generate_files(
+            "fcp.diag-test",
+            "diag-test",
+            "fcp-diag-test",
+            ConnectorArchetype::RequestResponse,
+            "z:project:diag",
+            false,
+        )
+        .expect("files");
+        let prechecks = run_prechecks(&files, "fcp.diag-test", "z:project:diag");
+
+        // Verify each check has a non-empty id for diagnostic clarity
+        for check in &prechecks.checks {
+            assert!(
+                !check.id.is_empty(),
+                "precheck must have a non-empty diagnostic id"
+            );
+            assert!(
+                !check.description.is_empty(),
+                "precheck must have a non-empty description"
+            );
+        }
+
+        // Verify the check set covers known diagnostic categories
+        let ids: Vec<&str> = prechecks.checks.iter().map(|c| c.id.as_str()).collect();
+        assert!(
+            ids.iter().any(|id| id.contains("manifest")),
+            "prechecks must include manifest validation; got: {ids:?}"
+        );
+        assert!(
+            ids.iter().any(|id| id.contains("unsafe") || id.contains("forbid")),
+            "prechecks must include unsafe-code validation; got: {ids:?}"
+        );
+    }
+
     #[test]
     fn generated_scaffolds_never_emit_legacy_placeholder_markers() {
         let banned_markers = [

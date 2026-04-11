@@ -659,6 +659,120 @@ impl fmt::Display for FreshnessFailureReason {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Revocation Seal (C1.1 — Check-Use Atomicity)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The decision produced by a revocation check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RevocationDecision {
+    /// The object is NOT revoked at the time of the check.
+    NotRevoked,
+    /// The object IS revoked at the time of the check.
+    Revoked,
+}
+
+/// A sealed proof of a revocation check at a specific point in time.
+///
+/// The `RevocationSeal` binds a revocation check result to the registry's
+/// `head_seq` at check time. At operation commit time, the seal MUST be
+/// re-validated: if the registry's `head_seq` has advanced since the seal
+/// was created, the operation must be re-checked or aborted.
+///
+/// This is an optimistic concurrency control mechanism, NOT a lock. Most
+/// operations will find the seal still valid. Only operations that race
+/// with a revocation event will need re-checking.
+///
+/// # Invariant
+///
+/// A seal with `decision = NotRevoked` is only valid while
+/// `seal.head_seq == registry.head_seq`. If the registry has advanced,
+/// a new revocation may have been inserted for the sealed token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevocationSeal {
+    /// Timestamp when the check was performed (monotonic counter or UNIX epoch).
+    pub checked_at: u64,
+    /// The registry `head_seq` at the time of the check.
+    pub head_seq: u64,
+    /// The object ID that was checked.
+    pub token_id: ObjectId,
+    /// The decision: was the object revoked or not?
+    pub decision: RevocationDecision,
+}
+
+/// Result of validating a seal against the current registry state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SealValidation {
+    /// Seal is still valid — `head_seq` has not advanced.
+    Valid,
+    /// Seal is stale — `head_seq` has advanced, re-check required.
+    Stale {
+        /// The seal's `head_seq` at check time.
+        seal_seq: u64,
+        /// The current registry `head_seq`.
+        current_seq: u64,
+    },
+    /// Seal `token_id` does not match the expected token.
+    TokenMismatch,
+}
+
+impl SealValidation {
+    /// Whether the seal is still valid.
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        matches!(self, Self::Valid)
+    }
+}
+
+impl RevocationRegistry {
+    /// Check revocation status and return a sealed proof.
+    ///
+    /// The seal captures the registry's `head_seq` at check time, enabling
+    /// optimistic concurrency: the caller can proceed with the operation
+    /// and re-validate the seal at commit time.
+    #[must_use]
+    pub fn check_with_seal(&self, token_id: &ObjectId, now: u64) -> RevocationSeal {
+        let decision = if self.is_revoked(token_id) {
+            RevocationDecision::Revoked
+        } else {
+            RevocationDecision::NotRevoked
+        };
+
+        RevocationSeal {
+            checked_at: now,
+            head_seq: self.head_seq,
+            token_id: *token_id,
+            decision,
+        }
+    }
+
+    /// Validate a seal against the current registry state.
+    ///
+    /// Returns `SealValidation::Valid` if the seal's `head_seq` still matches
+    /// the registry. Returns `Stale` if the registry has advanced (meaning a
+    /// new revocation may have been inserted). Returns `TokenMismatch` if the
+    /// seal's `token_id` does not match the expected token.
+    #[must_use]
+    pub fn validate_seal(
+        &self,
+        seal: &RevocationSeal,
+        expected_token_id: &ObjectId,
+    ) -> SealValidation {
+        if seal.token_id != *expected_token_id {
+            return SealValidation::TokenMismatch;
+        }
+
+        if seal.head_seq == self.head_seq {
+            SealValidation::Valid
+        } else {
+            SealValidation::Stale {
+                seal_seq: seal.head_seq,
+                current_seq: self.head_seq,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2063,5 +2177,142 @@ mod tests {
             RevocationFreshnessClass::Critical.to_string(),
             "critical"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // C1.1: RevocationSeal acceptance tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    fn make_object_id(seed: u8) -> ObjectId {
+        ObjectId::from_bytes([seed; 32])
+    }
+
+    fn make_revocation_for(token_ids: &[ObjectId]) -> RevocationObject {
+        RevocationObject {
+            header: test_header(),
+            revoked: token_ids.to_vec(),
+            scope: RevocationScope::Capability,
+            reason: "Test revocation".into(),
+            effective_at: 1_700_000_000,
+            expires_at: None,
+            signature: [0u8; 64],
+        }
+    }
+
+    #[test]
+    fn c1_1_fresh_seal_passes_validation() {
+        let mut registry = RevocationRegistry::new();
+        let token_id = make_object_id(0xAB);
+        registry.update_head(make_object_id(0x01), 10, 1000);
+
+        let seal = registry.check_with_seal(&token_id, 1001);
+
+        assert_eq!(seal.decision, RevocationDecision::NotRevoked);
+        assert_eq!(seal.head_seq, 10);
+        assert_eq!(seal.token_id, token_id);
+
+        // Validate immediately — head hasn't advanced
+        let validation = registry.validate_seal(&seal, &token_id);
+        assert_eq!(validation, SealValidation::Valid);
+        assert!(validation.is_valid());
+    }
+
+    #[test]
+    fn c1_1_stale_seal_triggers_recheck() {
+        let mut registry = RevocationRegistry::new();
+        let token_id = make_object_id(0xCD);
+        registry.update_head(make_object_id(0x01), 10, 1000);
+
+        // Check at head_seq=10
+        let seal = registry.check_with_seal(&token_id, 1001);
+        assert_eq!(seal.decision, RevocationDecision::NotRevoked);
+
+        // Registry advances (new revocation inserted)
+        registry.update_head(make_object_id(0x02), 11, 1002);
+
+        // Seal is now stale
+        let validation = registry.validate_seal(&seal, &token_id);
+        assert_eq!(
+            validation,
+            SealValidation::Stale {
+                seal_seq: 10,
+                current_seq: 11
+            }
+        );
+        assert!(!validation.is_valid());
+    }
+
+    #[test]
+    fn c1_1_concurrent_revocation_detected() {
+        let mut registry = RevocationRegistry::new();
+        let token_id = make_object_id(0xEE);
+        registry.update_head(make_object_id(0x01), 5, 500);
+
+        // Check passes — token not revoked
+        let seal = registry.check_with_seal(&token_id, 501);
+        assert_eq!(seal.decision, RevocationDecision::NotRevoked);
+
+        // Between check and commit, someone revokes the token
+        let revocation = make_revocation_for(&[token_id]);
+        registry.add_revocation(&revocation);
+        registry.update_head(make_object_id(0x02), 6, 502);
+
+        // Seal is stale → re-check required
+        let validation = registry.validate_seal(&seal, &token_id);
+        assert!(!validation.is_valid());
+
+        // Re-check: token IS now revoked
+        let new_seal = registry.check_with_seal(&token_id, 503);
+        assert_eq!(new_seal.decision, RevocationDecision::Revoked);
+        assert_eq!(new_seal.head_seq, 6);
+    }
+
+    #[test]
+    fn c1_1_seal_wrong_token_id_rejected() {
+        let mut registry = RevocationRegistry::new();
+        let token_a = make_object_id(0xAA);
+        let token_b = make_object_id(0xBB);
+        registry.update_head(make_object_id(0x01), 1, 100);
+
+        let seal = registry.check_with_seal(&token_a, 101);
+
+        // Try to validate against a different token
+        let validation = registry.validate_seal(&seal, &token_b);
+        assert_eq!(validation, SealValidation::TokenMismatch);
+        assert!(!validation.is_valid());
+    }
+
+    #[test]
+    fn c1_1_seal_serialization_roundtrip() {
+        let mut registry = RevocationRegistry::new();
+        let token_id = make_object_id(0xDD);
+        registry.update_head(make_object_id(0x01), 42, 9999);
+
+        let seal = registry.check_with_seal(&token_id, 10000);
+
+        let json = serde_json::to_string(&seal).unwrap();
+        let roundtripped: RevocationSeal = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(seal, roundtripped);
+        assert_eq!(roundtripped.head_seq, 42);
+        assert_eq!(roundtripped.checked_at, 10000);
+        assert_eq!(roundtripped.decision, RevocationDecision::NotRevoked);
+    }
+
+    #[test]
+    fn c1_1_revoked_token_seal_carries_revoked_decision() {
+        let mut registry = RevocationRegistry::new();
+        let token_id = make_object_id(0xFF);
+        let revocation = make_revocation_for(&[token_id]);
+        registry.add_revocation(&revocation);
+        registry.update_head(make_object_id(0x01), 1, 100);
+
+        let seal = registry.check_with_seal(&token_id, 101);
+        assert_eq!(seal.decision, RevocationDecision::Revoked);
+
+        // Even a fresh seal with Revoked decision should validate as Valid
+        // (the seal is fresh, the token is just revoked)
+        let validation = registry.validate_seal(&seal, &token_id);
+        assert!(validation.is_valid());
     }
 }

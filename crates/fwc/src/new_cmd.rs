@@ -4686,8 +4686,6 @@ members = [
     fn generate_connector_rs_has_basic_structure() {
         let output = generate_connector_rs("fcp.test", "test", ConnectorArchetype::RequestResponse);
         assert!(output.contains("pub struct TestConnector"));
-fcp_core::impl_fcp_sealed!(TestConnector);
-
         assert!(output.contains("impl FcpConnector for TestConnector"));
         assert!(output.contains("MANIFEST_TOML"));
         assert!(output.contains("test.scaffold_status"));

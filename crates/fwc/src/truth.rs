@@ -1303,6 +1303,286 @@ impl RemediationOutput {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Zone-Wide Truth Precedence Policy (C2.3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Zone-wide truth precedence policy that defines the ordering of truth
+/// sources for a given zone.
+///
+/// Instead of each operator choosing a [`ResolutionStrategy`] independently,
+/// a zone-wide `TruthPrecedencePolicy` is loaded from zone configuration
+/// and enforced by *all* operators (fwc, host, remote agents) querying
+/// that zone. This guarantees that two operators in the same zone always
+/// resolve the same query to the same answer.
+///
+/// # Default Precedence
+///
+/// The default V1 (host-first) precedence is:
+///
+/// ```text
+/// HostBacked > MeshBacked > NodeLocal > Offline
+/// ```
+///
+/// The future V2 (mesh-native) precedence will be:
+///
+/// ```text
+/// MeshBacked > HostBacked > NodeLocal > Offline
+/// ```
+///
+/// # Zone-Specific Overrides
+///
+/// Individual zones can override the default precedence. For example,
+/// a `z:owner` zone might require mesh-backed answers exclusively, while
+/// a `z:public` zone might accept node-local answers as sufficient.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TruthPrecedencePolicy {
+    /// The zone this policy applies to, or `None` for the global default.
+    pub zone_id: Option<String>,
+    /// Ordered source precedence (highest-confidence first).
+    pub precedence: Vec<KnowledgeState>,
+    /// Minimum acceptable knowledge state. Answers below this threshold
+    /// are rejected rather than returned as degraded.
+    pub minimum_acceptable: KnowledgeState,
+    /// Whether to allow fallback to lower-precedence sources when
+    /// higher-precedence sources are unavailable.
+    pub allow_fallback: bool,
+    /// Operational model version this policy targets.
+    pub model_version: OperationalModelVersion,
+}
+
+/// Operational model version tag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum OperationalModelVersion {
+    /// V1: Host-first (current, proven).
+    V1HostFirst,
+    /// V2: Mesh-native (target, not yet operational).
+    V2MeshNative,
+}
+
+impl fmt::Display for OperationalModelVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::V1HostFirst => f.write_str("V1-host-first"),
+            Self::V2MeshNative => f.write_str("V2-mesh-native"),
+        }
+    }
+}
+
+impl TruthPrecedencePolicy {
+    /// Default V1 (host-first) policy — the current operational default.
+    ///
+    /// Precedence: HostBacked > MeshBacked > NodeLocal > Offline.
+    /// Accepts anything down to Offline. Fallback allowed.
+    #[must_use]
+    pub fn v1_default() -> Self {
+        Self {
+            zone_id: None,
+            precedence: vec![
+                KnowledgeState::HostBacked,
+                KnowledgeState::MeshBacked,
+                KnowledgeState::NodeLocal,
+                KnowledgeState::Offline,
+            ],
+            minimum_acceptable: KnowledgeState::Offline,
+            allow_fallback: true,
+            model_version: OperationalModelVersion::V1HostFirst,
+        }
+    }
+
+    /// Future V2 (mesh-native) policy — NOT YET OPERATIONAL.
+    ///
+    /// Precedence: MeshBacked > HostBacked > NodeLocal > Offline.
+    #[must_use]
+    pub fn v2_default() -> Self {
+        Self {
+            zone_id: None,
+            precedence: vec![
+                KnowledgeState::MeshBacked,
+                KnowledgeState::HostBacked,
+                KnowledgeState::NodeLocal,
+                KnowledgeState::Offline,
+            ],
+            minimum_acceptable: KnowledgeState::Offline,
+            allow_fallback: true,
+            model_version: OperationalModelVersion::V2MeshNative,
+        }
+    }
+
+    /// Create a zone-specific policy with custom precedence.
+    #[must_use]
+    pub fn for_zone(
+        zone_id: impl Into<String>,
+        precedence: Vec<KnowledgeState>,
+        minimum_acceptable: KnowledgeState,
+    ) -> Self {
+        Self {
+            zone_id: Some(zone_id.into()),
+            precedence,
+            minimum_acceptable,
+            allow_fallback: true,
+            model_version: OperationalModelVersion::V1HostFirst,
+        }
+    }
+
+    /// Convert this policy to a [`ResolutionStrategy`] for backward
+    /// compatibility with existing resolver code.
+    #[must_use]
+    pub fn to_resolution_strategy(&self) -> ResolutionStrategy {
+        if self.precedence.is_empty() {
+            return ResolutionStrategy::OfflineOnly;
+        }
+        match self.precedence[0] {
+            KnowledgeState::MeshBacked => ResolutionStrategy::BestAvailable,
+            KnowledgeState::HostBacked => ResolutionStrategy::PreferHost,
+            KnowledgeState::Offline => ResolutionStrategy::OfflineOnly,
+            KnowledgeState::NodeLocal => ResolutionStrategy::NodeLocalOnly,
+            _ => ResolutionStrategy::PreferHost,
+        }
+    }
+
+    /// Whether a given knowledge state meets the minimum acceptable threshold.
+    #[must_use]
+    pub fn is_acceptable(&self, state: KnowledgeState) -> bool {
+        // Acceptable if the state appears at or above minimum_acceptable in the
+        // precedence order, or is the minimum itself.
+        let min_rank = self
+            .precedence
+            .iter()
+            .position(|s| *s == self.minimum_acceptable);
+        let state_rank = self.precedence.iter().position(|s| *s == state);
+        match (state_rank, min_rank) {
+            (Some(sr), Some(mr)) => sr <= mr,
+            // If the state isn't in the precedence at all, check if it's
+            // Degraded or FallbackDerived — those are always below minimum.
+            _ => false,
+        }
+    }
+
+    /// The ordered source precedence as a slice.
+    #[must_use]
+    pub fn source_order(&self) -> &[KnowledgeState] {
+        &self.precedence
+    }
+}
+
+impl Default for TruthPrecedencePolicy {
+    fn default() -> Self {
+        Self::v1_default()
+    }
+}
+
+impl LiveTruthResolver {
+    /// Create a resolver constrained by a zone-wide precedence policy.
+    ///
+    /// The resolver will use the policy's source ordering instead of
+    /// allowing per-operator strategy selection. This ensures that all
+    /// operators in the same zone produce consistent answers.
+    #[must_use]
+    pub fn with_precedence_policy(config: ResolverConfig, policy: TruthPrecedencePolicy) -> Self {
+        let strategy = policy.to_resolution_strategy();
+        Self {
+            config: ResolverConfig {
+                default_strategy: strategy,
+                ..config
+            },
+        }
+    }
+
+    /// Resolve truth using a zone-wide precedence policy.
+    ///
+    /// This is the policy-aware resolution path. The resolver queries
+    /// sources in the policy's precedence order and rejects answers
+    /// that fall below the policy's minimum acceptable threshold.
+    pub fn resolve_with_policy<T, F>(
+        &self,
+        policy: &TruthPrecedencePolicy,
+        mut query_fn: F,
+    ) -> Result<TruthResolution<T>, ResolutionError>
+    where
+        F: FnMut(KnowledgeState) -> Option<T>,
+    {
+        let start = Instant::now();
+        let sources = policy.source_order();
+        let strategy = policy.to_resolution_strategy();
+        let mut attempts = Vec::with_capacity(sources.len());
+
+        for source in sources {
+            let attempt_start = Instant::now();
+            let result = query_fn(*source);
+            let attempt_elapsed = attempt_start.elapsed();
+
+            match result {
+                Some(value) => {
+                    // Check if this source meets the minimum acceptable threshold
+                    if !policy.is_acceptable(*source) {
+                        attempts.push(SourceAttempt {
+                            source: *source,
+                            outcome: SourceOutcome::Skipped,
+                            elapsed: attempt_elapsed,
+                            detail: Some(format!(
+                                "{} below minimum acceptable ({})",
+                                source.label(),
+                                policy.minimum_acceptable.label(),
+                            )),
+                        });
+                        continue;
+                    }
+
+                    attempts.push(SourceAttempt {
+                        source: *source,
+                        outcome: SourceOutcome::Success,
+                        elapsed: attempt_elapsed,
+                        detail: None,
+                    });
+
+                    let freshness =
+                        TruthFreshness::now(self.max_age_for(*source), start.elapsed());
+
+                    let trace = DecisionTrace {
+                        attempts,
+                        selected_source: *source,
+                        strategy,
+                        reason: format!(
+                            "{} returned answer (policy: {}, zone: {})",
+                            source.label(),
+                            policy.model_version,
+                            policy.zone_id.as_deref().unwrap_or("global"),
+                        ),
+                        used_fallback: *source != sources[0],
+                        correlation_id: Uuid::new_v4(),
+                    };
+
+                    return Ok(TruthResolution::new(value, *source, freshness, trace));
+                }
+                None => {
+                    attempts.push(SourceAttempt {
+                        source: *source,
+                        outcome: SourceOutcome::Unreachable,
+                        elapsed: attempt_elapsed,
+                        detail: Some(format!("{} did not return data", source.label())),
+                    });
+
+                    if !policy.allow_fallback {
+                        // Policy forbids fallback — stop after first source fails
+                        break;
+                    }
+                }
+            }
+        }
+
+        Err(ResolutionError {
+            strategy,
+            attempts,
+            reason: format!(
+                "all sources failed or were unavailable (policy: {}, zone: {})",
+                policy.model_version,
+                policy.zone_id.as_deref().unwrap_or("global"),
+            ),
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -3163,5 +3443,207 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // C2.3: TruthPrecedencePolicy acceptance tests
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn c2_3_same_zone_consistency() {
+        // Two operators in the same zone with the same policy must resolve
+        // to the same answer when given the same source availability.
+        let policy = TruthPrecedencePolicy::for_zone(
+            "z:work",
+            vec![
+                KnowledgeState::HostBacked,
+                KnowledgeState::NodeLocal,
+                KnowledgeState::Offline,
+            ],
+            KnowledgeState::Offline,
+        );
+
+        let resolver_a = LiveTruthResolver::with_precedence_policy(
+            ResolverConfig::default(),
+            policy.clone(),
+        );
+        let resolver_b = LiveTruthResolver::with_precedence_policy(
+            ResolverConfig::default(),
+            policy.clone(),
+        );
+
+        // Both see host-backed data available
+        let result_a = resolver_a
+            .resolve_with_policy(&policy, |source| match source {
+                KnowledgeState::HostBacked => Some("host-answer"),
+                KnowledgeState::Offline => Some("offline-answer"),
+                _ => None,
+            })
+            .unwrap();
+
+        let result_b = resolver_b
+            .resolve_with_policy(&policy, |source| match source {
+                KnowledgeState::HostBacked => Some("host-answer"),
+                KnowledgeState::Offline => Some("offline-answer"),
+                _ => None,
+            })
+            .unwrap();
+
+        // Same zone, same policy → same knowledge state and value
+        assert_eq!(result_a.knowledge_state, result_b.knowledge_state);
+        assert_eq!(result_a.value, result_b.value);
+        assert_eq!(result_a.knowledge_state, KnowledgeState::HostBacked);
+    }
+
+    #[test]
+    fn c2_3_policy_override_for_zone() {
+        // A zone-specific policy can override the default precedence order.
+        // z:owner requires mesh-backed only — no fallback to host or offline.
+        let strict_policy = TruthPrecedencePolicy {
+            zone_id: Some("z:owner".into()),
+            precedence: vec![KnowledgeState::MeshBacked],
+            minimum_acceptable: KnowledgeState::MeshBacked,
+            allow_fallback: false,
+            model_version: OperationalModelVersion::V1HostFirst,
+        };
+
+        let resolver = LiveTruthResolver::with_defaults();
+
+        // Mesh unavailable → resolution should fail
+        let result = resolver.resolve_with_policy(&strict_policy, |source| match source {
+            KnowledgeState::HostBacked => Some("host-only"),
+            _ => None,
+        });
+
+        assert!(result.is_err(), "strict mesh-only policy should reject host-only answers");
+
+        // Mesh available → should succeed
+        let result = resolver
+            .resolve_with_policy(&strict_policy, |source| match source {
+                KnowledgeState::MeshBacked => Some("mesh-answer"),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(result.knowledge_state, KnowledgeState::MeshBacked);
+        assert_eq!(result.value, "mesh-answer");
+    }
+
+    #[test]
+    fn c2_3_fallback_when_preferred_unavailable() {
+        // When higher-precedence source is unavailable and fallback is allowed,
+        // the policy should fall back to the next source in order.
+        let policy = TruthPrecedencePolicy::v1_default();
+        let resolver = LiveTruthResolver::with_defaults();
+
+        // Host unavailable, but mesh and offline available
+        let result = resolver
+            .resolve_with_policy(&policy, |source| match source {
+                KnowledgeState::HostBacked => None, // host down
+                KnowledgeState::MeshBacked => Some("mesh-fallback"),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(result.knowledge_state, KnowledgeState::MeshBacked);
+        assert!(result.trace.used_fallback, "should record that fallback was used");
+        assert_eq!(result.value, "mesh-fallback");
+    }
+
+    #[test]
+    fn c2_3_serialization_roundtrip() {
+        // TruthPrecedencePolicy must serialize and deserialize cleanly.
+        let policy = TruthPrecedencePolicy::for_zone(
+            "z:private",
+            vec![
+                KnowledgeState::HostBacked,
+                KnowledgeState::NodeLocal,
+                KnowledgeState::Offline,
+            ],
+            KnowledgeState::NodeLocal,
+        );
+
+        let json = serde_json::to_string(&policy).unwrap();
+        let roundtripped: TruthPrecedencePolicy = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(policy, roundtripped);
+        assert_eq!(roundtripped.zone_id.as_deref(), Some("z:private"));
+        assert_eq!(roundtripped.precedence.len(), 3);
+        assert_eq!(roundtripped.minimum_acceptable, KnowledgeState::NodeLocal);
+    }
+
+    #[test]
+    fn c2_3_v1_default_is_host_first() {
+        let policy = TruthPrecedencePolicy::v1_default();
+        assert_eq!(policy.precedence[0], KnowledgeState::HostBacked);
+        assert_eq!(policy.model_version, OperationalModelVersion::V1HostFirst);
+        assert_eq!(
+            policy.to_resolution_strategy(),
+            ResolutionStrategy::PreferHost
+        );
+    }
+
+    #[test]
+    fn c2_3_v2_default_is_mesh_first() {
+        let policy = TruthPrecedencePolicy::v2_default();
+        assert_eq!(policy.precedence[0], KnowledgeState::MeshBacked);
+        assert_eq!(policy.model_version, OperationalModelVersion::V2MeshNative);
+        assert_eq!(
+            policy.to_resolution_strategy(),
+            ResolutionStrategy::BestAvailable
+        );
+    }
+
+    #[test]
+    fn c2_3_is_acceptable_rejects_below_minimum() {
+        let policy = TruthPrecedencePolicy::for_zone(
+            "z:work",
+            vec![
+                KnowledgeState::HostBacked,
+                KnowledgeState::NodeLocal,
+            ],
+            KnowledgeState::NodeLocal,
+        );
+
+        assert!(policy.is_acceptable(KnowledgeState::HostBacked));
+        assert!(policy.is_acceptable(KnowledgeState::NodeLocal));
+        // Offline is not in the precedence list → not acceptable
+        assert!(!policy.is_acceptable(KnowledgeState::Offline));
+        assert!(!policy.is_acceptable(KnowledgeState::Degraded));
+        assert!(!policy.is_acceptable(KnowledgeState::FallbackDerived));
+    }
+
+    #[test]
+    fn c2_3_no_fallback_policy_stops_after_first_failure() {
+        let policy = TruthPrecedencePolicy {
+            zone_id: Some("z:strict".into()),
+            precedence: vec![
+                KnowledgeState::HostBacked,
+                KnowledgeState::NodeLocal,
+                KnowledgeState::Offline,
+            ],
+            minimum_acceptable: KnowledgeState::Offline,
+            allow_fallback: false,
+            model_version: OperationalModelVersion::V1HostFirst,
+        };
+
+        let resolver = LiveTruthResolver::with_defaults();
+
+        // Host succeeds → should work
+        let result = resolver
+            .resolve_with_policy(&policy, |source| match source {
+                KnowledgeState::HostBacked => Some("host"),
+                _ => Some("other"),
+            })
+            .unwrap();
+        assert_eq!(result.value, "host");
+
+        // Host fails → no-fallback should error even though NodeLocal is available
+        let result = resolver.resolve_with_policy(&policy, |source| match source {
+            KnowledgeState::HostBacked => None,
+            KnowledgeState::NodeLocal => Some("node-local"),
+            _ => None,
+        });
+        assert!(result.is_err(), "no-fallback policy should not try lower sources");
     }
 }

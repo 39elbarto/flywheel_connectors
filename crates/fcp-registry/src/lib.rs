@@ -1662,7 +1662,6 @@ impl LocalRegistryCatalog {
         ))
     }
 
-    #[must_use]
     pub fn router(self) -> Router {
         registry_router(Arc::new(self))
     }
@@ -1884,7 +1883,6 @@ impl LocalRegistryCatalog {
     }
 }
 
-#[must_use]
 pub fn registry_router(catalog: Arc<LocalRegistryCatalog>) -> Router {
     Router::new()
         .route("/health", get(registry_health_handler))

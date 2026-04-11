@@ -26395,7 +26395,7 @@ mod tests {
 
         let claims = auth
             .capability_token
-            .raw
+            .raw()
             .claims_unverified()
             .expect("claims should decode");
         assert_eq!(claims.get_capability_id(), Some("cap.all"));
@@ -26418,7 +26418,7 @@ mod tests {
 
         let claims = auth
             .capability_token
-            .raw
+            .raw()
             .claims_unverified()
             .expect("claims should decode");
         assert_eq!(claims.get_capability_id(), Some("cap.all"));

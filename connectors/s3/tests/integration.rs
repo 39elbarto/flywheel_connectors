@@ -6,7 +6,10 @@
 use std::time::Duration;
 
 use chrono::Utc;
-use fcp_core::{ApprovalScope, ApprovalToken, CapabilityToken, ExecutionScope, FcpError, ZoneId};
+use fcp_core::{
+    ApprovalScope, ApprovalToken, CapabilityConstraints, CapabilityToken, ExecutionScope, FcpError,
+    ZoneId,
+};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_s3::{client::S3Client, connector::S3Connector, error::S3Error};
@@ -23,6 +26,13 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         _ => "s3.read",
     };
     let now = Utc::now();
+    // C3.4: tokens MUST include constraints (default-deny)
+    let constraints = CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
@@ -30,6 +40,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + chrono::Duration::hours(1))
+        .constraints_cbor(&cbor)
         .sign(signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)

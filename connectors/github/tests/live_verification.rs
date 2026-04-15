@@ -4,7 +4,7 @@
 //! GitHub personal access token. When the token is absent, tests skip
 //! gracefully with a descriptive message.
 //!
-//! All operations are READ-ONLY (github.get_repo, github.search_repos) and
+//! All operations are READ-ONLY (`github.get_repo`, `github.search_repos`) and
 //! target public repositories — no side effects or write permissions needed.
 //!
 //! Bead: kzabz.1

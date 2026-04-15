@@ -4,7 +4,7 @@
 //! Slack bot token (xoxb-...). When the token is absent, tests skip gracefully
 //! with a descriptive message.
 //!
-//! All operations are READ-ONLY (slack.list_channels) and target the
+//! All operations are READ-ONLY (`slack.list_channels`) and target the
 //! workspace's public channels — no side effects or write permissions needed.
 
 use fcp_core::{CapabilityConstraints, CapabilityToken};

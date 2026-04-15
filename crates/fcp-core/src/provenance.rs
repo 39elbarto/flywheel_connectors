@@ -517,6 +517,8 @@ impl ProvenanceRecord {
     pub fn can_drive_operation(&self, tier: SafetyTier) -> Result<(), ProvenanceViolation> {
         match tier {
             SafetyTier::Safe => Ok(()),
+            // Forbidden operations are NEVER allowed regardless of provenance
+            SafetyTier::Forbidden => Err(ProvenanceViolation::ForbiddenOperation),
             SafetyTier::Risky => {
                 // PotentiallyMalicious input must never drive Risky operations
                 if self.taint_flags.contains(TaintFlag::PotentiallyMalicious) {
@@ -532,7 +534,7 @@ impl ProvenanceRecord {
                     Ok(())
                 }
             }
-            SafetyTier::Dangerous | SafetyTier::Forbidden | SafetyTier::Critical => {
+            SafetyTier::Dangerous | SafetyTier::Critical => {
                 // Dangerous/Critical operations MUST NOT be driven by public-tainted input
                 if self.taint_flags.contains(TaintFlag::PublicInput) {
                     return Err(ProvenanceViolation::PublicInputForDangerousOperation);
@@ -756,6 +758,9 @@ pub enum ProvenanceViolation {
 
     #[error("approval token expired or invalid")]
     ApprovalTokenInvalid,
+
+    #[error("forbidden operations are never allowed regardless of provenance")]
+    ForbiddenOperation,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2777,6 +2782,15 @@ mod tests {
         assert!(public.can_drive_operation(SafetyTier::Critical).is_err());
         assert!(work.can_drive_operation(SafetyTier::Critical).is_ok());
         assert!(owner.can_drive_operation(SafetyTier::Critical).is_ok());
+
+        // Forbidden tier: ALWAYS blocked regardless of provenance
+        assert!(public.can_drive_operation(SafetyTier::Forbidden).is_err());
+        assert!(work.can_drive_operation(SafetyTier::Forbidden).is_err());
+        assert!(owner.can_drive_operation(SafetyTier::Forbidden).is_err());
+        assert!(matches!(
+            owner.can_drive_operation(SafetyTier::Forbidden),
+            Err(ProvenanceViolation::ForbiddenOperation)
+        ));
 
         log_flow_test(
             "golden_vector_safety_tier_enforcement",
@@ -4900,6 +4914,15 @@ mod tests {
     fn provenance_violation_display_approval_invalid() {
         let v = ProvenanceViolation::ApprovalTokenInvalid;
         assert_eq!(v.to_string(), "approval token expired or invalid");
+    }
+
+    #[test]
+    fn provenance_violation_display_forbidden_operation() {
+        let v = ProvenanceViolation::ForbiddenOperation;
+        assert_eq!(
+            v.to_string(),
+            "forbidden operations are never allowed regardless of provenance"
+        );
     }
 
     #[test]

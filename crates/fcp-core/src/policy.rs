@@ -2091,6 +2091,7 @@ pub enum DecisionReasonCode {
     PostureAttestationInvalid,
     PostureRequirementNotMet,
     PostureVerifierNotAllowed,
+    OperationForbidden,
 }
 
 impl DecisionReasonCode {
@@ -2130,6 +2131,7 @@ impl DecisionReasonCode {
             Self::PostureAttestationInvalid => "posture.attestation_invalid",
             Self::PostureRequirementNotMet => "posture.requirement_not_met",
             Self::PostureVerifierNotAllowed => "posture.verifier_not_allowed",
+            Self::OperationForbidden => "operation.forbidden",
         }
     }
 
@@ -2155,6 +2157,7 @@ impl DecisionReasonCode {
                 Self::SanitizerCoverageInsufficient
             }
             ProvenanceViolation::ApprovalTokenInvalid => Self::ApprovalTokenInvalid,
+            ProvenanceViolation::ForbiddenOperation => Self::OperationForbidden,
         }
     }
 }

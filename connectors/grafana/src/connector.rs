@@ -1169,14 +1169,10 @@ mod tests {
         let input = json!({});
         let err = require_str(&input, "uid").unwrap_err();
         match err {
-            GrafanaError::Api {
-                status_code,
-                message,
-            } => {
-                assert_eq!(status_code, 400);
-                assert!(message.contains("uid"));
+            GrafanaError::InvalidInput(msg) => {
+                assert!(msg.contains("uid"));
             }
-            e => panic!("expected Api, got {e:?}"),
+            e => panic!("expected InvalidInput, got {e:?}"),
         }
     }
 
@@ -1656,14 +1652,10 @@ mod tests {
     fn require_str_error_message_contains_field() {
         let input = json!({});
         match require_str(&input, "dashboard_uid").unwrap_err() {
-            GrafanaError::Api {
-                status_code,
-                message,
-            } => {
-                assert_eq!(status_code, 400);
-                assert!(message.contains("dashboard_uid"));
+            GrafanaError::InvalidInput(msg) => {
+                assert!(msg.contains("dashboard_uid"));
             }
-            e => panic!("expected Api error, got {e:?}"),
+            e => panic!("expected InvalidInput error, got {e:?}"),
         }
     }
 

@@ -1308,8 +1308,8 @@ mod tests {
         let input = json!({});
         let err = require_str(&input, "campaign_id").unwrap_err();
         match err {
-            MailchimpError::Api { message, .. } => assert!(message.contains("campaign_id")),
-            _ => panic!("expected Api error"),
+            MailchimpError::InvalidInput(msg) => assert!(msg.contains("campaign_id")),
+            _ => panic!("expected InvalidInput error"),
         }
     }
 

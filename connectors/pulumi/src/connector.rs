@@ -1287,10 +1287,10 @@ mod tests {
         let input = json!({});
         let err = require_str(&input, "project").unwrap_err();
         match err {
-            PulumiError::Api { message, .. } => {
-                assert!(message.contains("project"));
+            PulumiError::InvalidInput(msg) => {
+                assert!(msg.contains("project"));
             }
-            e => panic!("expected Api, got {e:?}"),
+            e => panic!("expected InvalidInput, got {e:?}"),
         }
     }
 

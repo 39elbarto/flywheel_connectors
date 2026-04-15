@@ -1106,7 +1106,7 @@ mod tests {
     }
 
     #[test]
-    fn require_str_error_status_code_400() {
+    fn require_str_error_invalid_input() {
         let input = json!({});
         match require_str(&input, "query") {
             Err(AnnasArchiveError::InvalidInput(msg)) => {

@@ -1959,14 +1959,10 @@ mod tests {
         let input = json!({});
         let err = require_str(&input, "query").unwrap_err();
         match err {
-            RedditError::Api {
-                status_code,
-                message,
-            } => {
-                assert_eq!(status_code, 400);
-                assert!(message.contains("query"));
+            RedditError::InvalidInput(msg) => {
+                assert!(msg.contains("query"));
             }
-            _ => panic!("expected Api error"),
+            _ => panic!("expected InvalidInput error"),
         }
     }
 

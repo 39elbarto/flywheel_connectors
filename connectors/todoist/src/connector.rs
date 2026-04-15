@@ -1213,14 +1213,10 @@ mod tests {
     fn require_str_error_message() {
         let input = json!({});
         match require_str(&input, "content").unwrap_err() {
-            TodoistError::Api {
-                status_code,
-                message,
-            } => {
-                assert_eq!(status_code, 400);
-                assert!(message.contains("content"));
+            TodoistError::InvalidInput(msg) => {
+                assert!(msg.contains("content"));
             }
-            e => panic!("expected Api error, got {e:?}"),
+            e => panic!("expected InvalidInput, got {e:?}"),
         }
     }
 

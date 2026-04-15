@@ -676,7 +676,9 @@ mod tests {
     #[test]
     fn invalid_input_to_fcp_invalid_request() {
         match MixpanelError::InvalidInput("bad field".into()).to_fcp_error() {
-            FcpError::InvalidRequest { message, .. } => {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1005);
+                assert!(message.contains("Invalid input"));
                 assert!(message.contains("bad field"));
             }
             other => panic!("expected InvalidRequest, got {other:?}"),

@@ -912,14 +912,10 @@ mod tests {
         let input = json!({});
         let err = require_str(&input, "project_id").unwrap_err();
         match err {
-            GitLabError::Api {
-                status_code,
-                message,
-            } => {
-                assert_eq!(status_code, 400);
-                assert!(message.contains("project_id"));
+            GitLabError::InvalidInput(msg) => {
+                assert!(msg.contains("project_id"));
             }
-            _ => panic!("expected Api error"),
+            _ => panic!("expected InvalidInput error"),
         }
     }
 

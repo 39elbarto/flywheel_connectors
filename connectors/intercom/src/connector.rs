@@ -1377,14 +1377,10 @@ mod tests {
     fn require_str_error_message_content() {
         let input = json!({});
         match require_str(&input, "contact_id").unwrap_err() {
-            IntercomError::Api {
-                status_code,
-                message,
-            } => {
-                assert_eq!(status_code, 400);
-                assert!(message.contains("contact_id"));
+            IntercomError::InvalidInput(msg) => {
+                assert!(msg.contains("contact_id"));
             }
-            e => panic!("expected Api error, got {e:?}"),
+            e => panic!("expected InvalidInput, got {e:?}"),
         }
     }
 

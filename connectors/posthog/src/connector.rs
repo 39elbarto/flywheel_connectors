@@ -1472,8 +1472,8 @@ mod tests {
         let input = json!({});
         let err = require_str(&input, "my_field").unwrap_err();
         match err {
-            PostHogError::Api { message, .. } => assert!(message.contains("my_field")),
-            _ => panic!("expected Api error"),
+            PostHogError::InvalidInput(msg) => assert!(msg.contains("my_field")),
+            _ => panic!("expected InvalidInput error"),
         }
     }
 

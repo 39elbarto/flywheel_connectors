@@ -1471,14 +1471,10 @@ mod tests {
     fn require_str_error_message_content() {
         let input = json!({});
         match require_str(&input, "team_id").unwrap_err() {
-            MakeError::Api {
-                status_code,
-                message,
-            } => {
-                assert_eq!(status_code, 400);
-                assert!(message.contains("team_id"));
+            MakeError::InvalidInput(msg) => {
+                assert!(msg.contains("team_id"));
             }
-            e => panic!("expected Api error, got {e:?}"),
+            e => panic!("expected InvalidInput, got {e:?}"),
         }
     }
 

@@ -1486,14 +1486,10 @@ mod tests {
         let input = json!({});
         let err = require_str(&input, "account_id").unwrap_err();
         match err {
-            SalesforceError::Api {
-                status_code,
-                message,
-            } => {
-                assert_eq!(status_code, 400);
-                assert!(message.contains("account_id"));
+            SalesforceError::InvalidInput(msg) => {
+                assert!(msg.contains("account_id"));
             }
-            _ => panic!("expected Api error"),
+            _ => panic!("expected InvalidInput error"),
         }
     }
 
@@ -1879,8 +1875,8 @@ mod tests {
         let input = json!({});
         let err = require_str(&input, "my_field").unwrap_err();
         match err {
-            SalesforceError::Api { message, .. } => assert!(message.contains("my_field")),
-            _ => panic!("expected Api error"),
+            SalesforceError::InvalidInput(msg) => assert!(msg.contains("my_field")),
+            _ => panic!("expected InvalidInput error"),
         }
     }
 

@@ -1222,10 +1222,10 @@ mod tests {
         let input = json!({});
         let err = require_str(&input, "template_uuid").unwrap_err();
         match err {
-            PandaDocError::Api { message, .. } => {
-                assert!(message.contains("template_uuid"));
+            PandaDocError::InvalidInput(msg) => {
+                assert!(msg.contains("template_uuid"));
             }
-            e => panic!("expected Api, got {e:?}"),
+            e => panic!("expected InvalidInput, got {e:?}"),
         }
     }
 

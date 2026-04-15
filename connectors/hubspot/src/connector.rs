@@ -2728,10 +2728,10 @@ mod tests {
         let input = json!({});
         let err = require_str(&input, "contact_id").unwrap_err();
         match err {
-            HubSpotError::Api { message, .. } => {
-                assert!(message.contains("contact_id"));
+            HubSpotError::InvalidInput(msg) => {
+                assert!(msg.contains("contact_id"));
             }
-            e => panic!("expected Api, got {e:?}"),
+            e => panic!("expected InvalidInput, got {e:?}"),
         }
     }
 

@@ -618,7 +618,7 @@ mod tests {
     #[test]
     fn phase_clone_completed() {
         let phase = BootstrapPhase::Completed {
-            fingerprint: "SHA256:test".to_string(),
+            fingerprint: "BLAKE3:test".to_string(),
             completed_at: Utc::now(),
         };
         let cloned = phase.clone();
@@ -654,7 +654,7 @@ mod tests {
     #[test]
     fn phase_serde_roundtrip_completed() {
         let phase = BootstrapPhase::Completed {
-            fingerprint: "SHA256:fp123".to_string(),
+            fingerprint: "BLAKE3:fp123".to_string(),
             completed_at: Utc::now(),
         };
         let json = serde_json::to_string(&phase).unwrap();
@@ -774,7 +774,7 @@ mod tests {
     fn phase_lock_roundtrip_completed() {
         let dir = tempdir().unwrap();
         let phase = BootstrapPhase::Completed {
-            fingerprint: "SHA256:abc123".to_string(),
+            fingerprint: "BLAKE3:abc123".to_string(),
             completed_at: Utc::now(),
         };
         write_phase_lock(dir.path(), &phase).unwrap();
@@ -782,7 +782,7 @@ mod tests {
         // Completed phase should still be detectable from lock file
         match detected {
             BootstrapPhase::Completed { fingerprint, .. } => {
-                assert_eq!(fingerprint, "SHA256:abc123");
+                assert_eq!(fingerprint, "BLAKE3:abc123");
             }
             other => panic!("expected Completed, got {other}"),
         }
@@ -926,11 +926,11 @@ mod tests {
     #[test]
     fn display_completed_shows_fingerprint() {
         let phase = BootstrapPhase::Completed {
-            fingerprint: "SHA256:uniquevalue".into(),
+            fingerprint: "BLAKE3:uniquevalue".into(),
             completed_at: Utc::now(),
         };
         let display = format!("{phase}");
-        assert!(display.contains("SHA256:uniquevalue"));
+        assert!(display.contains("BLAKE3:uniquevalue"));
     }
 
     // ---- BootstrapPhase serde roundtrip for all simple variants ----

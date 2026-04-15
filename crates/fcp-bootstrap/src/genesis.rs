@@ -152,7 +152,7 @@ impl GenesisState {
     /// Compute the fingerprint of this genesis state.
     ///
     /// The fingerprint is a stable identifier for the mesh, computed as:
-    /// `SHA256:base64(blake3(owner_public_key || schema_version))`
+    /// `BLAKE3:base64(blake3(owner_public_key || schema_version))`
     #[must_use]
     pub fn fingerprint(&self) -> String {
         // Compute fingerprint from owner key and schema version
@@ -167,7 +167,7 @@ impl GenesisState {
         let short_hash = &hash_bytes[..12];
         let b64 = base64_encode(short_hash);
 
-        format!("SHA256:{b64}")
+        format!("BLAKE3:{b64}")
     }
 
     /// Validate this genesis state.
@@ -426,7 +426,7 @@ mod tests {
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
         let genesis = GenesisState::create(&verifying_key);
-        assert!(genesis.fingerprint().starts_with("SHA256:"));
+        assert!(genesis.fingerprint().starts_with("BLAKE3:"));
     }
 
     #[test]
@@ -525,7 +525,7 @@ mod tests {
         let cloned = genesis.clone();
         drop(genesis);
         assert!(cloned.validate().is_ok());
-        assert!(cloned.fingerprint().starts_with("SHA256:"));
+        assert!(cloned.fingerprint().starts_with("BLAKE3:"));
     }
 
     #[test]
@@ -831,8 +831,8 @@ mod tests {
         let signing_key = Ed25519SigningKey::generate();
         let genesis = GenesisState::create(&signing_key.verifying_key());
         let fp = genesis.fingerprint();
-        assert!(fp.starts_with("SHA256:"));
-        let b64_part = &fp["SHA256:".len()..];
+        assert!(fp.starts_with("BLAKE3:"));
+        let b64_part = &fp["BLAKE3:".len()..];
         // 12 bytes base64 URL-safe no padding = 16 chars
         assert_eq!(b64_part.len(), 16, "base64 part should be 16 chars");
         // Should only contain URL-safe base64 characters

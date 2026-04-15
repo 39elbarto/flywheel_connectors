@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn test_cold_recovery_fingerprint_mismatch() {
         let phrase = test_phrase();
-        let result = ColdRecovery::from_phrase(&phrase, Some("SHA256:wrongfingerprint"));
+        let result = ColdRecovery::from_phrase(&phrase, Some("BLAKE3:wrongfingerprint"));
 
         assert!(matches!(
             result,
@@ -359,12 +359,12 @@ mod tests {
     #[test]
     fn cold_recovery_error_display() {
         let err = ColdRecoveryError::FingerprintMismatch {
-            expected: "SHA256:abc".into(),
-            actual: "SHA256:xyz".into(),
+            expected: "BLAKE3:abc".into(),
+            actual: "BLAKE3:xyz".into(),
         };
         let s = err.to_string();
-        assert!(s.contains("SHA256:abc"));
-        assert!(s.contains("SHA256:xyz"));
+        assert!(s.contains("BLAKE3:abc"));
+        assert!(s.contains("BLAKE3:xyz"));
     }
 
     // ---- CLI module ----
@@ -517,7 +517,7 @@ mod tests {
         let prompts = super::cli::ColdRecoveryPrompts {
             confirmed_no_backup: true,
             confirmed_data_loss: false,
-            expected_fingerprint: Some("SHA256:test".to_string()),
+            expected_fingerprint: Some("BLAKE3:test".to_string()),
         };
         let debug = format!("{prompts:?}");
         assert!(debug.contains("ColdRecoveryPrompts"));
@@ -565,7 +565,7 @@ mod tests {
     fn cold_recovery_fingerprint_starts_with_sha256() {
         let phrase = test_phrase();
         let recovery = ColdRecovery::from_phrase(&phrase, None).unwrap();
-        assert!(recovery.fingerprint().starts_with("SHA256:"));
+        assert!(recovery.fingerprint().starts_with("BLAKE3:"));
     }
 
     #[test]
@@ -573,7 +573,7 @@ mod tests {
         let phrase = test_phrase();
         let recovery = ColdRecovery::from_phrase(&phrase, None).unwrap();
         let fp = recovery.fingerprint();
-        // "SHA256:" prefix + 16 chars base64
+        // "BLAKE3:" prefix + 16 chars base64
         assert_eq!(fp.len(), 7 + 16);
     }
 

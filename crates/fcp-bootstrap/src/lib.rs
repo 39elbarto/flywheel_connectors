@@ -63,7 +63,7 @@
 //! let phrase = RecoveryPhrase::from_mnemonic("abandon abandon ... about")?;
 //! let recovery = ColdRecovery::from_phrase(
 //!     &phrase,
-//!     Some("SHA256:expected_fingerprint"),
+//!     Some("BLAKE3:expected_fingerprint"),
 //! )?;
 //!
 //! for warning in &recovery.warnings {

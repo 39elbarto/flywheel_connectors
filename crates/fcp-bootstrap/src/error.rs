@@ -255,11 +255,11 @@ mod tests {
     #[test]
     fn debug_already_exists() {
         let err = BootstrapError::AlreadyExists {
-            fingerprint: "SHA256:deadbeef".into(),
+            fingerprint: "BLAKE3:deadbeef".into(),
         };
         let debug = format!("{err:?}");
         assert!(debug.contains("AlreadyExists"));
-        assert!(debug.contains("SHA256:deadbeef"));
+        assert!(debug.contains("BLAKE3:deadbeef"));
     }
 
     #[test]
@@ -275,8 +275,8 @@ mod tests {
     #[test]
     fn debug_fingerprint_mismatch() {
         let err = BootstrapError::FingerprintMismatch {
-            expected: "SHA256:aaa".into(),
-            actual: "SHA256:bbb".into(),
+            expected: "BLAKE3:aaa".into(),
+            actual: "BLAKE3:bbb".into(),
         };
         let debug = format!("{err:?}");
         assert!(debug.contains("FingerprintMismatch"));
@@ -380,12 +380,12 @@ mod tests {
     #[test]
     fn fingerprint_mismatch_contains_both_values() {
         let err = BootstrapError::FingerprintMismatch {
-            expected: "SHA256:AAAA".into(),
-            actual: "SHA256:BBBB".into(),
+            expected: "BLAKE3:AAAA".into(),
+            actual: "BLAKE3:BBBB".into(),
         };
         let s = err.to_string();
-        assert!(s.contains("SHA256:AAAA"));
-        assert!(s.contains("SHA256:BBBB"));
+        assert!(s.contains("BLAKE3:AAAA"));
+        assert!(s.contains("BLAKE3:BBBB"));
         assert!(s.contains("mismatch"));
     }
 
@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn already_exists_with_long_fingerprint() {
-        let fp = "SHA256:".to_string() + &"A".repeat(200);
+        let fp = "BLAKE3:".to_string() + &"A".repeat(200);
         let err = BootstrapError::AlreadyExists {
             fingerprint: fp.clone(),
         };

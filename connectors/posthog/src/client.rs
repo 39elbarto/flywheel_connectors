@@ -154,10 +154,21 @@ impl PostHogClient {
             429 => Err(PostHogError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(60) * 1000,
             }),
-            code => Err(PostHogError::Api {
-                status_code: code,
-                message: detail,
-            }),
+            code => {
+                if let Some(secs) = retry_after {
+                    if (500..=599).contains(&code) {
+                        return Err(PostHogError::RetryableApi {
+                            status_code: code,
+                            message: detail,
+                            retry_after_ms: secs * 1000,
+                        });
+                    }
+                }
+                Err(PostHogError::Api {
+                    status_code: code,
+                    message: detail,
+                })
+            }
         }
     }
 

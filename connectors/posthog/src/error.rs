@@ -27,6 +27,14 @@ pub enum PostHogError {
     #[error("PostHog API error ({status_code}): {message}")]
     Api { status_code: u16, message: String },
 
+    /// Server error with retry-after hint (5xx with Retry-After header)
+    #[error("PostHog API error ({status_code}): {message}")]
+    RetryableApi {
+        status_code: u16,
+        message: String,
+        retry_after_ms: u64,
+    },
+
     /// Rate limited (429)
     #[error("Rate limited, retry after {retry_after_ms}ms")]
     RateLimited { retry_after_ms: u64 },
@@ -52,7 +60,7 @@ impl PostHogError {
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
         match self {
-            Self::Http(_) | Self::RateLimited { .. } => true,
+            Self::Http(_) | Self::RateLimited { .. } | Self::RetryableApi { .. } => true,
             Self::Api { status_code, .. } => matches!(status_code, 500..=599 | 429),
             _ => false,
         }
@@ -61,7 +69,10 @@ impl PostHogError {
     #[must_use]
     pub const fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after_ms } => Some(Duration::from_millis(*retry_after_ms)),
+            Self::RateLimited { retry_after_ms, .. }
+            | Self::RetryableApi {
+                retry_after_ms, ..
+            } => Some(Duration::from_millis(*retry_after_ms)),
             _ => None,
         }
     }
@@ -88,6 +99,17 @@ impl PostHogError {
                 status_code: Some(*status_code),
                 retryable: self.is_retryable(),
                 retry_after: None,
+            },
+            Self::RetryableApi {
+                status_code,
+                message,
+                retry_after_ms,
+            } => FcpError::External {
+                service: "posthog".into(),
+                message: message.clone(),
+                status_code: Some(*status_code),
+                retryable: true,
+                retry_after: Some(Duration::from_millis(*retry_after_ms)),
             },
             Self::RateLimited { retry_after_ms } => FcpError::External {
                 service: "posthog".into(),

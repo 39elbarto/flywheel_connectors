@@ -383,7 +383,7 @@ impl GitHubClient {
                 {
                     Ok(response) => {
                         let status = response.status();
-                        if status == StatusCode::NO_CONTENT {
+                        if status == StatusCode::ACCEPTED {
                             return AttemptOutcome::Success(());
                         }
                         let retry_after_secs = response

@@ -523,7 +523,7 @@ async fn trigger_workflow_happy_path() {
         .and(path(
             "/repos/octocat/hello-world/actions/workflows/ci.yml/dispatches",
         ))
-        .respond_with(ResponseTemplate::new(204))
+        .respond_with(ResponseTemplate::new(202))
         .mount(&mock_server)
         .await;
 

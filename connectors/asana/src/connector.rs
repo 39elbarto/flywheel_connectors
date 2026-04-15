@@ -687,7 +687,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
         op_info(
             "asana.projects.list",
             "List projects in a workspace",
-            json!({"type": "object", "required": ["workspace"], "properties": {"workspace": {"type": "string", "description": "Workspace GID"}}}),
+            json!({"type": "object", "required": ["workspace_gid"], "properties": {"workspace_gid": {"type": "string", "description": "Workspace GID"}}}),
             json!({"type": "object", "required": ["data"], "properties": {"data": {"type": "array"}}}),
             "asana.projects.read",
             RiskLevel::Low,
@@ -695,8 +695,8 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "List projects in an Asana workspace.".into(),
-                common_mistakes: vec!["Passing a project GID instead of a workspace GID; the workspace parameter must be the workspace's numeric GID, not a project identifier.".into()],
-                examples: vec!["{\"workspace\": \"1234567890\"}".into()],
+                common_mistakes: vec!["Passing a project GID instead of a workspace GID; the workspace_gid parameter must be the workspace's numeric GID, not a project identifier.".into()],
+                examples: vec!["{\"workspace_gid\": \"1234567890\"}".into()],
                 related: vec![
                     CapabilityId::from_static("asana.workspaces.list"),
                     CapabilityId::from_static("asana.tasks.list"),
@@ -722,7 +722,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
         op_info(
             "asana.tasks.list",
             "List tasks in a project",
-            json!({"type": "object", "required": ["project"], "properties": {"project": {"type": "string", "description": "Project GID"}}}),
+            json!({"type": "object", "required": ["project_gid"], "properties": {"project_gid": {"type": "string", "description": "Project GID"}}}),
             json!({"type": "object", "required": ["data"], "properties": {"data": {"type": "array"}}}),
             "asana.tasks.read",
             RiskLevel::Low,
@@ -731,7 +731,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "List tasks in an Asana project.".into(),
                 common_mistakes: vec!["Only top-level tasks in the project are returned; subtasks are not included and must be fetched separately using the parent task's GID.".into()],
-                examples: vec!["{\"project\": \"1234567890\"}".into()],
+                examples: vec!["{\"project_gid\": \"1234567890\"}".into()],
                 related: vec![
                     CapabilityId::from_static("asana.tasks.create"),
                     CapabilityId::from_static("asana.projects.list"),
@@ -795,7 +795,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
         op_info(
             "asana.tasks.delete",
             "Delete a task",
-            json!({"type": "object", "required": ["task"], "properties": {"task": {"type": "string", "description": "Task GID"}}}),
+            json!({"type": "object", "required": ["task_gid"], "properties": {"task_gid": {"type": "string", "description": "Task GID"}}}),
             json!({"type": "object"}),
             "asana.tasks.write",
             RiskLevel::High,
@@ -804,7 +804,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Delete a task. Cannot be undone.".into(),
                 common_mistakes: vec!["Deleting a task also removes all of its subtasks permanently; verify the task has no subtasks you want to keep before deleting.".into()],
-                examples: vec!["{\"task\": \"1234567890\"}".into()],
+                examples: vec!["{\"task_gid\": \"1234567890\"}".into()],
                 related: vec![CapabilityId::from_static("asana.tasks.list")],
             },
         ),

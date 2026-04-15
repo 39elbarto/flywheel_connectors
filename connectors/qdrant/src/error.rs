@@ -43,6 +43,9 @@ pub enum QdrantError {
 
     #[error("Rate limited")]
     RateLimit { retry_after_ms: u64 },
+
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 pub type QdrantResult<T> = Result<T, QdrantError>;
@@ -54,7 +57,7 @@ impl QdrantError {
         match self {
             Self::Http(_) | Self::RateLimit { .. } => true,
             Self::Api { status_code, .. } => matches!(status_code, Some(500..=599 | 429)),
-            Self::Serialization(_) | Self::InvalidConfig { .. } => false,
+            Self::Serialization(_) | Self::InvalidConfig { .. } | Self::InvalidInput(_) => false,
         }
     }
 
@@ -114,6 +117,10 @@ impl QdrantError {
             Self::RateLimit { retry_after_ms } => FcpError::RateLimited {
                 retry_after_ms: *retry_after_ms,
                 violation: None,
+            },
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 1003,
+                message: sanitize(msg),
             },
         }
     }
@@ -855,5 +862,29 @@ mod tests {
             message: "test".into(),
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_input_not_retryable() {
+        let err = QdrantError::InvalidInput("bad segment".into());
+        assert!(!err.is_retryable());
+        assert!(err.retry_after().is_none());
+    }
+
+    #[test]
+    fn invalid_input_to_fcp_error() {
+        match QdrantError::InvalidInput("bad".into()).to_fcp_error() {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert!(message.contains("bad"));
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_input_display() {
+        let err = QdrantError::InvalidInput("foo/bar".into());
+        assert!(err.to_string().contains("foo/bar"));
     }
 }

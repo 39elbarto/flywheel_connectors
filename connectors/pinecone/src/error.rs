@@ -26,6 +26,9 @@ pub enum PineconeError {
 
     #[error("Rate limited")]
     RateLimit { retry_after_ms: u64 },
+
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 pub type PineconeResult<T> = Result<T, PineconeError>;
@@ -37,7 +40,7 @@ impl PineconeError {
         match self {
             Self::Http(_) | Self::RateLimit { .. } => true,
             Self::Api { status_code, .. } => matches!(status_code, Some(408 | 429 | 500..=599)),
-            Self::Serialization(_) | Self::InvalidConfig(_) => false,
+            Self::Serialization(_) | Self::InvalidConfig(_) | Self::InvalidInput(_) => false,
         }
     }
 
@@ -99,6 +102,10 @@ impl PineconeError {
             Self::RateLimit { retry_after_ms } => FcpError::RateLimited {
                 retry_after_ms: *retry_after_ms,
                 violation: None,
+            },
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 1003,
+                message: msg.clone(),
             },
         }
     }
@@ -879,5 +886,29 @@ mod tests {
             let display = format!("{v}");
             assert!(!display.is_empty(), "Display should not be empty");
         }
+    }
+
+    #[test]
+    fn invalid_input_not_retryable() {
+        let err = PineconeError::InvalidInput("bad segment".into());
+        assert!(!err.is_retryable());
+        assert!(err.retry_after().is_none());
+    }
+
+    #[test]
+    fn invalid_input_to_fcp_error() {
+        match PineconeError::InvalidInput("bad".into()).to_fcp_error() {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert!(message.contains("bad"));
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_input_display() {
+        let err = PineconeError::InvalidInput("../admin".into());
+        assert!(err.to_string().contains("../admin"));
     }
 }

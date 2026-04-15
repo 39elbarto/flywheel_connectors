@@ -25,6 +25,22 @@ use crate::{
 /// Default Pinecone control plane URL.
 pub const DEFAULT_CONTROL_PLANE_URL: &str = "https://api.pinecone.io";
 
+/// Validate a path segment to prevent path traversal attacks.
+fn sanitize_path_segment(segment: &str) -> PineconeResult<&str> {
+    if segment.trim().is_empty()
+        || segment.contains('/')
+        || segment.contains('\\')
+        || segment.contains('\0')
+        || segment == "."
+        || segment == ".."
+    {
+        return Err(PineconeError::InvalidInput(format!(
+            "Invalid path segment: {segment}"
+        )));
+    }
+    Ok(segment)
+}
+
 /// Authentication mode for Pinecone.
 #[derive(Clone)]
 pub enum PineconeAuth {
@@ -200,6 +216,7 @@ impl PineconeClient {
 
     /// Describe a specific index.
     pub async fn describe_index(&self, index_name: &str) -> PineconeResult<Index> {
+        let index_name = sanitize_path_segment(index_name)?;
         let url = format!("{}/indexes/{index_name}", self.control_plane_url);
         let data = self.get(&url).await?;
         Ok(serde_json::from_value(data)?)
@@ -213,6 +230,7 @@ impl PineconeClient {
         metric: &str,
         spec: Option<&serde_json::Value>,
     ) -> PineconeResult<Index> {
+        sanitize_path_segment(name)?;
         let url = format!("{}/indexes", self.control_plane_url);
         let mut body = serde_json::json!({
             "name": name,
@@ -228,6 +246,7 @@ impl PineconeClient {
 
     /// Delete an index by name.
     pub async fn delete_index(&self, index_name: &str) -> PineconeResult<()> {
+        let index_name = sanitize_path_segment(index_name)?;
         let url = format!("{}/indexes/{index_name}", self.control_plane_url);
         self.execute_delete(&url).await?;
         Ok(())
@@ -285,24 +304,23 @@ impl PineconeClient {
     }
 
     /// Fetch vectors by ID.
+    ///
+    /// Uses reqwest `.query()` for proper URL encoding of IDs and namespace.
     pub async fn fetch(
         &self,
         ids: &[String],
         namespace: Option<&str>,
     ) -> PineconeResult<FetchResponse> {
         let base = self.data_plane_base()?;
-        let mut url = format!("{base}/vectors/fetch");
-        let mut params = Vec::new();
+        let url = format!("{base}/vectors/fetch");
+        let mut query_params: Vec<(&str, &str)> = Vec::new();
         for id in ids {
-            params.push(format!("ids={id}"));
+            query_params.push(("ids", id.as_str()));
         }
         if let Some(ns) = namespace {
-            params.push(format!("namespace={ns}"));
+            query_params.push(("namespace", ns));
         }
-        if !params.is_empty() {
-            url = format!("{url}?{}", params.join("&"));
-        }
-        let data = self.get(&url).await?;
+        let data = self.get_with_query(&url, &query_params).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -352,6 +370,14 @@ impl PineconeClient {
 
     async fn get(&self, url: &str) -> PineconeResult<serde_json::Value> {
         self.execute(|| self.http.get(url)).await
+    }
+
+    async fn get_with_query(
+        &self,
+        url: &str,
+        query: &[(&str, &str)],
+    ) -> PineconeResult<serde_json::Value> {
+        self.execute(|| self.http.get(url).query(query)).await
     }
 
     async fn post_json(
@@ -1282,5 +1308,22 @@ mod tests {
         // delete_index calls execute_delete which returns empty body => json!({})
         let result = client.delete_index("empty-resp").await;
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn sanitize_rejects_path_traversal() {
+        assert!(sanitize_path_segment("..").is_err());
+        assert!(sanitize_path_segment(".").is_err());
+        assert!(sanitize_path_segment("foo/bar").is_err());
+        assert!(sanitize_path_segment("").is_err());
+        assert!(sanitize_path_segment("foo\0bar").is_err());
+        assert!(sanitize_path_segment("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn sanitize_accepts_valid_index_names() {
+        assert!(sanitize_path_segment("my-index").is_ok());
+        assert!(sanitize_path_segment("docs-1536").is_ok());
+        assert!(sanitize_path_segment("prod_embeddings").is_ok());
     }
 }

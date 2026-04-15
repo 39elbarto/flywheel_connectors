@@ -16,6 +16,22 @@ use crate::{
     types::{CollectionInfo, CountResult, ListCollectionsResult, ScrollResult},
 };
 
+/// Validate a path segment to prevent path traversal attacks.
+fn sanitize_path_segment(segment: &str) -> QdrantResult<&str> {
+    if segment.trim().is_empty()
+        || segment.contains('/')
+        || segment.contains('\\')
+        || segment.contains('\0')
+        || segment == "."
+        || segment == ".."
+    {
+        return Err(QdrantError::InvalidInput(format!(
+            "Invalid path segment: {segment}"
+        )));
+    }
+    Ok(segment)
+}
+
 /// Qdrant REST API client.
 pub struct QdrantClient {
     http: Client,
@@ -92,6 +108,7 @@ impl QdrantClient {
 
     /// Get collection info.
     pub async fn collection_info(&self, collection_name: &str) -> QdrantResult<CollectionInfo> {
+        let collection_name = sanitize_path_segment(collection_name)?;
         let url = format!("{}/collections/{collection_name}", self.base_url);
         let data = self.get(&url).await?;
         let result = data.get("result").cloned().unwrap_or(serde_json::json!({}));
@@ -104,6 +121,7 @@ impl QdrantClient {
         collection_name: &str,
         body: &serde_json::Value,
     ) -> QdrantResult<serde_json::Value> {
+        let collection_name = sanitize_path_segment(collection_name)?;
         let url = format!("{}/collections/{collection_name}", self.base_url);
         self.put_json(&url, body).await
     }
@@ -113,6 +131,7 @@ impl QdrantClient {
         &self,
         collection_name: &str,
     ) -> QdrantResult<serde_json::Value> {
+        let collection_name = sanitize_path_segment(collection_name)?;
         let url = format!("{}/collections/{collection_name}", self.base_url);
         self.delete(&url).await
     }
@@ -125,6 +144,7 @@ impl QdrantClient {
         collection_name: &str,
         body: &serde_json::Value,
     ) -> QdrantResult<Vec<serde_json::Value>> {
+        let collection_name = sanitize_path_segment(collection_name)?;
         let url = format!(
             "{}/collections/{collection_name}/points/search",
             self.base_url
@@ -144,6 +164,7 @@ impl QdrantClient {
         collection_name: &str,
         body: &serde_json::Value,
     ) -> QdrantResult<Vec<serde_json::Value>> {
+        let collection_name = sanitize_path_segment(collection_name)?;
         let url = format!(
             "{}/collections/{collection_name}/points/query",
             self.base_url
@@ -166,6 +187,7 @@ impl QdrantClient {
         collection_name: &str,
         queries: &[serde_json::Value],
     ) -> QdrantResult<Vec<serde_json::Value>> {
+        let collection_name = sanitize_path_segment(collection_name)?;
         let url = format!(
             "{}/collections/{collection_name}/points/query/batch",
             self.base_url
@@ -186,6 +208,7 @@ impl QdrantClient {
         collection_name: &str,
         body: &serde_json::Value,
     ) -> QdrantResult<Vec<serde_json::Value>> {
+        let collection_name = sanitize_path_segment(collection_name)?;
         let url = format!("{}/collections/{collection_name}/points", self.base_url);
         let data = self.post_json(&url, body).await?;
         let result = data
@@ -202,6 +225,7 @@ impl QdrantClient {
         collection_name: &str,
         body: &serde_json::Value,
     ) -> QdrantResult<ScrollResult> {
+        let collection_name = sanitize_path_segment(collection_name)?;
         let url = format!(
             "{}/collections/{collection_name}/points/scroll",
             self.base_url
@@ -220,6 +244,7 @@ impl QdrantClient {
         collection_name: &str,
         body: &serde_json::Value,
     ) -> QdrantResult<CountResult> {
+        let collection_name = sanitize_path_segment(collection_name)?;
         let url = format!(
             "{}/collections/{collection_name}/points/count",
             self.base_url
@@ -240,6 +265,7 @@ impl QdrantClient {
         collection_name: &str,
         body: &serde_json::Value,
     ) -> QdrantResult<serde_json::Value> {
+        let collection_name = sanitize_path_segment(collection_name)?;
         let url = format!("{}/collections/{collection_name}/points", self.base_url);
         let data = self.put_json(&url, body).await?;
         Ok(data)
@@ -251,6 +277,7 @@ impl QdrantClient {
         collection_name: &str,
         body: &serde_json::Value,
     ) -> QdrantResult<serde_json::Value> {
+        let collection_name = sanitize_path_segment(collection_name)?;
         let url = format!(
             "{}/collections/{collection_name}/points/delete",
             self.base_url
@@ -819,5 +846,22 @@ mod tests {
             status_code: Some(400),
         };
         assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn sanitize_rejects_path_traversal() {
+        assert!(sanitize_path_segment("..").is_err());
+        assert!(sanitize_path_segment(".").is_err());
+        assert!(sanitize_path_segment("foo/bar").is_err());
+        assert!(sanitize_path_segment("").is_err());
+        assert!(sanitize_path_segment("foo\0bar").is_err());
+        assert!(sanitize_path_segment("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn sanitize_accepts_valid_collection_names() {
+        assert!(sanitize_path_segment("docs").is_ok());
+        assert!(sanitize_path_segment("my-collection").is_ok());
+        assert!(sanitize_path_segment("embeddings_v2").is_ok());
     }
 }

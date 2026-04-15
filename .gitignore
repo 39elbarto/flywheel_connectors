@@ -117,6 +117,10 @@ artifacts/
 # Agent worktree and target directories
 .claude/worktrees/
 .codex-targets/
+
+# Claude Code runtime lock files
+.claude/*.lock
+.claude/scheduled_tasks.lock
 .target-*/
 
 # UBS (Ultimate Bug Scanner) reports

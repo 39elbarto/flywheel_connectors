@@ -117,9 +117,8 @@ impl MatrixError {
                 code: 2003,
                 message: format!("Forbidden: {msg}"),
             },
-            Self::NotFound(msg) => FcpError::InvalidRequest {
-                code: 1004,
-                message: format!("Not found: {msg}"),
+            Self::NotFound(msg) => FcpError::ResourceNotFound {
+                resource: msg.clone(),
             },
             Self::Config(msg) => FcpError::InvalidRequest {
                 code: 1001,

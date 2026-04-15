@@ -434,7 +434,7 @@ fn map_google_api_error(error: GoogleApiError) -> AdminReportsError {
     match error.status_code {
         code if code == StatusCode::UNAUTHORIZED.as_u16() => AdminReportsError::Unauthorized,
         code if code == StatusCode::TOO_MANY_REQUESTS.as_u16() => AdminReportsError::RateLimited {
-            retry_after_secs: 60,
+            retry_after_secs: error.retry_after_ms.map_or(60, |ms| ms / 1000),
         },
         code if code == StatusCode::FORBIDDEN.as_u16() => AdminReportsError::Forbidden {
             message: error.message,

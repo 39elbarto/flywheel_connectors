@@ -158,6 +158,8 @@ pub struct GoogleApiError {
     pub domain: Option<String>,
     /// Whether the error indicates API not enabled/configured.
     pub access_not_configured_hint: bool,
+    /// Parsed `Retry-After` header value in milliseconds, if present.
+    pub retry_after_ms: Option<u64>,
 }
 
 impl GoogleApiError {
@@ -180,7 +182,7 @@ impl GoogleApiError {
             }
         } else if self.status_code == 429 {
             fcp_core::FcpError::RateLimited {
-                retry_after_ms: 60_000,
+                retry_after_ms: self.retry_after_ms.unwrap_or(60_000),
                 violation: None,
             }
         } else {
@@ -504,7 +506,8 @@ impl GoogleRestExecutor {
             .map_err(|source| GoogleRestError::Http { source })?;
 
         if !status.is_success() {
-            let error = parse_google_api_error(status, &bytes);
+            let mut error = parse_google_api_error(status, &bytes);
+            error.retry_after_ms = parse_retry_after_header(&headers);
             return Err(GoogleRestError::Api {
                 status_code: error.status_code,
                 message: error.message.clone(),
@@ -1053,6 +1056,17 @@ fn apply_payload(
     Ok(builder)
 }
 
+/// Extract the `Retry-After` header value in milliseconds.
+///
+/// Supports the common integer-seconds format (RFC 7231 §7.1.3).
+fn parse_retry_after_header(headers: &[(String, String)]) -> Option<u64> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+        .and_then(|(_, value)| value.trim().parse::<u64>().ok())
+        .map(|secs| secs.saturating_mul(1000))
+}
+
 fn collect_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
     headers
         .iter()
@@ -1163,6 +1177,7 @@ pub fn parse_google_api_error(status: StatusCode, body: &[u8]) -> GoogleApiError
             reason,
             domain,
             access_not_configured_hint,
+            retry_after_ms: None,
         };
     }
 
@@ -1177,6 +1192,7 @@ pub fn parse_google_api_error(status: StatusCode, body: &[u8]) -> GoogleApiError
         reason: None,
         domain: None,
         access_not_configured_hint: false,
+        retry_after_ms: None,
     }
 }
 
@@ -1534,6 +1550,7 @@ mod tests {
             reason: Some("notFound".to_string()),
             domain: Some("global".to_string()),
             access_not_configured_hint: false,
+            retry_after_ms: None,
         };
         assert_eq!(error.status_code, 404);
         assert_eq!(error.message, "Not Found");
@@ -1582,6 +1599,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         };
         assert!(error.is_retryable());
     }
@@ -1595,6 +1613,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         };
         assert!(error.is_retryable());
     }
@@ -1608,6 +1627,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         };
         assert!(error.is_retryable());
     }
@@ -1621,6 +1641,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         };
         assert!(!error.is_retryable());
     }
@@ -1634,6 +1655,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         };
         assert!(!error.is_retryable());
     }
@@ -1647,6 +1669,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         };
         assert!(!error.is_retryable());
     }
@@ -1662,6 +1685,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         };
         match error.to_fcp_error("google-ai") {
             fcp_core::FcpError::Unauthorized { code, message } => {
@@ -1681,6 +1705,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         };
         match error.to_fcp_error("bigquery") {
             fcp_core::FcpError::Unauthorized { code, message } => {
@@ -1700,6 +1725,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         };
         match error.to_fcp_error("google-ai") {
             fcp_core::FcpError::RateLimited {
@@ -1714,6 +1740,56 @@ mod tests {
     }
 
     #[test]
+    fn api_error_to_fcp_error_429_uses_parsed_retry_after() {
+        let error = GoogleApiError {
+            status_code: 429,
+            message: "rate limited".to_string(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
+            retry_after_ms: Some(5_000),
+        };
+        match error.to_fcp_error("google-ai") {
+            fcp_core::FcpError::RateLimited {
+                retry_after_ms,
+                violation,
+            } => {
+                assert_eq!(retry_after_ms, 5_000);
+                assert!(violation.is_none());
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_retry_after_header_seconds() {
+        let headers = vec![
+            ("Content-Type".to_string(), "application/json".to_string()),
+            ("Retry-After".to_string(), "30".to_string()),
+        ];
+        assert_eq!(parse_retry_after_header(&headers), Some(30_000));
+    }
+
+    #[test]
+    fn parse_retry_after_header_missing() {
+        let headers = vec![("Content-Type".to_string(), "text/plain".to_string())];
+        assert_eq!(parse_retry_after_header(&headers), None);
+    }
+
+    #[test]
+    fn parse_retry_after_header_case_insensitive() {
+        let headers = vec![("retry-after".to_string(), "10".to_string())];
+        assert_eq!(parse_retry_after_header(&headers), Some(10_000));
+    }
+
+    #[test]
+    fn parse_retry_after_header_non_numeric_ignored() {
+        let headers = vec![("Retry-After".to_string(), "Thu, 01 Dec 1994".to_string())];
+        assert_eq!(parse_retry_after_header(&headers), None);
+    }
+
+    #[test]
     fn api_error_to_fcp_error_500_retryable_external() {
         let error = GoogleApiError {
             status_code: 500,
@@ -1722,6 +1798,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         };
         match error.to_fcp_error("bigquery") {
             fcp_core::FcpError::External {
@@ -1749,6 +1826,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         };
         match error.to_fcp_error("google-calendar") {
             fcp_core::FcpError::External {
@@ -1774,6 +1852,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         };
         match error.to_fcp_error("my-custom-service") {
             fcp_core::FcpError::External { service, .. } => {
@@ -1873,6 +1952,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         };
         let error = GoogleRestError::Api {
             status_code: 500,
@@ -3093,6 +3173,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         };
         let cloned = error.clone();
         assert_eq!(error, cloned);

@@ -483,7 +483,7 @@ fn map_google_api_error(error: GoogleApiError) -> GooglePeopleError {
             message: error.message,
         },
         code if code == StatusCode::TOO_MANY_REQUESTS.as_u16() => GooglePeopleError::RateLimited {
-            retry_after_secs: 60,
+            retry_after_secs: error.retry_after_ms.map_or(60, |ms| ms / 1000),
         },
         code => GooglePeopleError::Api {
             status_code: code,

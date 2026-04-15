@@ -755,7 +755,7 @@ fn map_google_api_error(error: GoogleApiError) -> YouTubeError {
 
     if error.status_code == StatusCode::TOO_MANY_REQUESTS.as_u16() {
         return YouTubeError::RateLimited {
-            retry_after_ms: 60_000,
+            retry_after_ms: error.retry_after_ms.unwrap_or(60_000),
         };
     }
 

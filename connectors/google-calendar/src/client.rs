@@ -547,7 +547,7 @@ fn map_google_api_error(error: GoogleApiError) -> GoogleCalendarError {
         code if code == StatusCode::UNAUTHORIZED.as_u16() => GoogleCalendarError::Unauthorized,
         code if code == StatusCode::TOO_MANY_REQUESTS.as_u16() => {
             GoogleCalendarError::RateLimited {
-                retry_after_secs: 60,
+                retry_after_secs: error.retry_after_ms.map_or(60, |ms| ms / 1000),
             }
         }
         code => GoogleCalendarError::Api {

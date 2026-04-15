@@ -316,7 +316,7 @@ fn map_google_api_error(error: GoogleApiError) -> DocsError {
             document_id: error.message,
         },
         429 => DocsError::RateLimited {
-            retry_after_ms: 60_000,
+            retry_after_ms: error.retry_after_ms.unwrap_or(60_000),
         },
         code => DocsError::Api {
             status_code: code,
@@ -338,6 +338,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         });
         assert!(matches!(err, DocsError::Unauthorized));
     }
@@ -351,6 +352,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         });
         assert!(matches!(err, DocsError::Forbidden { .. }));
     }
@@ -364,6 +366,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         });
         assert!(matches!(err, DocsError::DocumentNotFound { .. }));
     }
@@ -377,6 +380,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         });
         assert!(matches!(err, DocsError::RateLimited { .. }));
     }
@@ -390,6 +394,7 @@ mod tests {
             reason: None,
             domain: None,
             access_not_configured_hint: false,
+            retry_after_ms: None,
         });
         assert!(matches!(
             err,

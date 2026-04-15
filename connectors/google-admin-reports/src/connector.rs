@@ -504,7 +504,7 @@ impl AdminReportsConnector {
                         examples: vec![
                             r#"{"user_key":"all","application_name":"login","max_results":100}"#.into(),
                         ],
-                        related: vec![CapabilityId::from_static("admin.reports.usage.read")],
+                        related: vec![CapabilityId::from_static("admin.reports.audit.read")],
                     },
                 )?,
                 policy_backed_operation_info(
@@ -544,7 +544,7 @@ impl AdminReportsConnector {
                         examples: vec![
                             r#"{"user_key":"all","date":"2026-03-12"}"#.into(),
                         ],
-                        related: vec![CapabilityId::from_static("admin.reports.audit.read")],
+                        related: vec![CapabilityId::from_static("admin.reports.usage.read")],
                     },
                 )?,
                 policy_backed_operation_info(

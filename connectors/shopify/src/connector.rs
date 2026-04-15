@@ -1213,6 +1213,7 @@ impl ShopifyConnector {
         let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
             message: "connector ready state missing Shopify client".into(),
         })?;
+        let idempotency_key = req.idempotency_key.as_deref();
 
         let output = match operation {
             OP_PRODUCTS_LIST => {
@@ -1285,7 +1286,7 @@ impl ShopifyConnector {
                         .unwrap_or_default(),
                 };
                 let created = client
-                    .create_product(runtime, &product)
+                    .create_product(runtime, &product, idempotency_key)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(&created).map_err(|e| FcpError::Internal {
@@ -1327,7 +1328,7 @@ impl ShopifyConnector {
                         .map(String::from),
                 };
                 let updated = client
-                    .update_product(runtime, pid, &update)
+                    .update_product(runtime, pid, &update, idempotency_key)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(&updated).map_err(|e| FcpError::Internal {
@@ -1398,7 +1399,7 @@ impl ShopifyConnector {
                         .map(String::from),
                 };
                 let created = client
-                    .create_order(runtime, &order)
+                    .create_order(runtime, &order, idempotency_key)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(&created).map_err(|e| FcpError::Internal {

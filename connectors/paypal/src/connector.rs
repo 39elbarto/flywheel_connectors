@@ -208,7 +208,7 @@ fn contract_details(config: Option<&PayPalConfig>) -> serde_json::Value {
             "notes": [
                 "The connector targets PayPal REST endpoints for checkout orders, reporting transactions, captures, refunds, and invoicing.",
                 "The first slice is deliberately request-response only; there is no webhook or subscription event ingestion yet.",
-                "Mutating operations are currently best-effort for retries because the connector does not yet propagate InvokeRequest.idempotency_key into PayPal-specific request replay headers."
+                "Mutating operations propagate InvokeRequest.idempotency_key as the PayPal-Request-Id header when provided, enabling safe retries without duplicate side effects."
             ],
         },
         "auth_boundary": {
@@ -910,6 +910,7 @@ impl PayPalConnector {
         let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
             message: "connector ready state missing PayPal client".into(),
         })?;
+        let idempotency_key = req.idempotency_key.as_deref();
 
         let output = match operation {
             OP_ORDERS_CREATE => {
@@ -938,7 +939,7 @@ impl PayPalConnector {
                     }],
                 };
                 let created = client
-                    .create_order(runtime, &order)
+                    .create_order(runtime, &order, idempotency_key)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(&created).map_err(|e| FcpError::Internal {
@@ -958,7 +959,7 @@ impl PayPalConnector {
             OP_ORDERS_CAPTURE => {
                 let oid = Self::require_str(&req.input, "order_id")?;
                 let captured = client
-                    .capture_order(runtime, oid)
+                    .capture_order(runtime, oid, idempotency_key)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(&captured).map_err(|e| FcpError::Internal {
@@ -1000,7 +1001,7 @@ impl PayPalConnector {
                         .map(String::from),
                 };
                 let refund = client
-                    .refund_capture(runtime, cid, &refund_req)
+                    .refund_capture(runtime, cid, &refund_req, idempotency_key)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(&refund).map_err(|e| FcpError::Internal {
@@ -1078,7 +1079,7 @@ impl PayPalConnector {
                     items,
                 };
                 let created = client
-                    .create_invoice(runtime, &invoice)
+                    .create_invoice(runtime, &invoice, idempotency_key)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(&created).map_err(|e| FcpError::Internal {
@@ -1097,7 +1098,7 @@ impl PayPalConnector {
             OP_INVOICES_SEND => {
                 let iid = Self::require_str(&req.input, "invoice_id")?;
                 let sent = client
-                    .send_invoice(runtime, iid)
+                    .send_invoice(runtime, iid, idempotency_key)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(&sent).map_err(|e| FcpError::Internal {
@@ -1612,7 +1613,7 @@ mod tests {
                 .client
                 .as_ref()
                 .unwrap()
-                .send_invoice(connector.runtime.as_ref().unwrap(), "INV-123")
+                .send_invoice(connector.runtime.as_ref().unwrap(), "INV-123", None)
                 .await
                 .unwrap();
             assert_eq!(

@@ -296,12 +296,14 @@ impl PayPalClient {
         &self,
         runtime: &ConnectorRuntime,
         order: &CreateOrder,
+        idempotency_key: Option<&str>,
     ) -> PayPalResult<PayPalOrder> {
         let url = format!("{}/v2/checkout/orders", self.base_url);
         self.post_json(
             runtime,
             &url,
             &serde_json::to_value(order).map_err(PayPalError::Json)?,
+            idempotency_key,
         )
         .await
     }
@@ -320,10 +322,12 @@ impl PayPalClient {
         &self,
         runtime: &ConnectorRuntime,
         order_id: &str,
+        idempotency_key: Option<&str>,
     ) -> PayPalResult<PayPalOrder> {
         let order_id = sanitize_path_segment(order_id, "order_id")?;
         let url = format!("{}/v2/checkout/orders/{order_id}/capture", self.base_url);
-        self.post_json(runtime, &url, &json!({})).await
+        self.post_json(runtime, &url, &json!({}), idempotency_key)
+            .await
     }
 
     // ── Payments ──
@@ -358,6 +362,7 @@ impl PayPalClient {
         runtime: &ConnectorRuntime,
         capture_id: &str,
         refund_req: &RefundRequest,
+        idempotency_key: Option<&str>,
     ) -> PayPalResult<Refund> {
         let capture_id = sanitize_path_segment(capture_id, "capture_id")?;
         let url = format!("{}/v2/payments/captures/{capture_id}/refund", self.base_url);
@@ -365,6 +370,7 @@ impl PayPalClient {
             runtime,
             &url,
             &serde_json::to_value(refund_req).map_err(PayPalError::Json)?,
+            idempotency_key,
         )
         .await
     }
@@ -375,12 +381,14 @@ impl PayPalClient {
         &self,
         runtime: &ConnectorRuntime,
         invoice: &CreateInvoice,
+        idempotency_key: Option<&str>,
     ) -> PayPalResult<Invoice> {
         let url = format!("{}/v2/invoicing/invoices", self.base_url);
         self.post_json(
             runtime,
             &url,
             &serde_json::to_value(invoice).map_err(PayPalError::Json)?,
+            idempotency_key,
         )
         .await
     }
@@ -400,9 +408,11 @@ impl PayPalClient {
         &self,
         runtime: &ConnectorRuntime,
         invoice_id: &str,
+        idempotency_key: Option<&str>,
     ) -> PayPalResult<InvoiceSendResponse> {
         let invoice_id = sanitize_path_segment(invoice_id, "invoice_id")?;
         let url = format!("{}/v2/invoicing/invoices/{invoice_id}/send", self.base_url);
+        let idempotency_key = idempotency_key.map(String::from);
         let mut force_refresh = false;
 
         loop {
@@ -417,14 +427,17 @@ impl PayPalClient {
                 let url = url.clone();
                 let client = self.client.clone();
                 let token = token.clone();
+                let idempotency_key = idempotency_key.clone();
                 async move {
                     debug!(attempt, url = %url, "POST invoice send");
-                    let resp = match client
+                    let mut req = client
                         .post(&url)
                         .bearer_auth(&token)
-                        .json(&json!({}))
-                        .send()
-                        .await
+                        .json(&json!({}));
+                    if let Some(key) = &idempotency_key {
+                        req = req.header("PayPal-Request-Id", key.as_str());
+                    }
+                    let resp = match req.send().await
                     {
                         Ok(r) => r,
                         Err(e) => {
@@ -536,9 +549,11 @@ impl PayPalClient {
         runtime: &ConnectorRuntime,
         url: &str,
         body: &serde_json::Value,
+        idempotency_key: Option<&str>,
     ) -> PayPalResult<T> {
         let url = url.to_string();
         let body = body.clone();
+        let idempotency_key = idempotency_key.map(String::from);
         let mut force_refresh = false;
 
         loop {
@@ -554,9 +569,13 @@ impl PayPalClient {
                 let client = self.client.clone();
                 let token = token.clone();
                 let body = body.clone();
+                let idempotency_key = idempotency_key.clone();
                 async move {
                     debug!(attempt, url = %url, "POST");
-                    let req = client.post(&url).bearer_auth(&token).json(&body);
+                    let mut req = client.post(&url).bearer_auth(&token).json(&body);
+                    if let Some(key) = &idempotency_key {
+                        req = req.header("PayPal-Request-Id", key.as_str());
+                    }
                     handle_response::<T>(req, attempt).await
                 }
             })
@@ -914,7 +933,7 @@ mod tests {
         );
 
         let response = client
-            .send_invoice(&test_runtime(), "INV-123")
+            .send_invoice(&test_runtime(), "INV-123", None)
             .await
             .unwrap();
         assert_eq!(response, InvoiceSendResponse { sent: true });

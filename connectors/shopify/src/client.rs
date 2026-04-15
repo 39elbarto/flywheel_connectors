@@ -120,10 +120,11 @@ impl ShopifyClient {
         &self,
         runtime: &ConnectorRuntime,
         product: &CreateProduct,
+        idempotency_key: Option<&str>,
     ) -> ShopifyResult<Product> {
         let url = format!("{}/products.json", self.base_url);
         let body = json!({ "product": product });
-        self.post_wrapped::<ProductResponse>(runtime, &url, &body)
+        self.post_wrapped::<ProductResponse>(runtime, &url, &body, idempotency_key)
             .await
             .map(|r| r.product)
     }
@@ -133,10 +134,11 @@ impl ShopifyClient {
         runtime: &ConnectorRuntime,
         product_id: u64,
         product: &UpdateProduct,
+        idempotency_key: Option<&str>,
     ) -> ShopifyResult<Product> {
         let url = format!("{}/products/{product_id}.json", self.base_url);
         let body = json!({ "product": product });
-        self.put_wrapped::<ProductResponse>(runtime, &url, &body)
+        self.put_wrapped::<ProductResponse>(runtime, &url, &body, idempotency_key)
             .await
             .map(|r| r.product)
     }
@@ -174,10 +176,11 @@ impl ShopifyClient {
         &self,
         runtime: &ConnectorRuntime,
         order: &CreateOrder,
+        idempotency_key: Option<&str>,
     ) -> ShopifyResult<Order> {
         let url = format!("{}/orders.json", self.base_url);
         let body = json!({ "order": order });
-        self.post_wrapped::<OrderResponse>(runtime, &url, &body)
+        self.post_wrapped::<OrderResponse>(runtime, &url, &body, idempotency_key)
             .await
             .map(|r| r.order)
     }
@@ -247,20 +250,26 @@ impl ShopifyClient {
         runtime: &ConnectorRuntime,
         url: &str,
         body: &serde_json::Value,
+        idempotency_key: Option<&str>,
     ) -> ShopifyResult<T> {
         let url = url.to_string();
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let body = body.clone();
+        let idempotency_key = idempotency_key.map(String::from);
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
             let auth = self.auth.clone();
             let body = body.clone();
+            let idempotency_key = idempotency_key.clone();
             async move {
                 debug!(attempt, url = %url, "POST");
-                let req = authenticate(client.post(&url), &auth).json(&body);
+                let mut req = authenticate(client.post(&url), &auth).json(&body);
+                if let Some(key) = &idempotency_key {
+                    req = req.header("X-Shopify-Idempotency-Key", key.as_str());
+                }
                 handle_response::<T>(req, attempt).await
             }
         })
@@ -272,20 +281,26 @@ impl ShopifyClient {
         runtime: &ConnectorRuntime,
         url: &str,
         body: &serde_json::Value,
+        idempotency_key: Option<&str>,
     ) -> ShopifyResult<T> {
         let url = url.to_string();
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let body = body.clone();
+        let idempotency_key = idempotency_key.map(String::from);
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
             let auth = self.auth.clone();
             let body = body.clone();
+            let idempotency_key = idempotency_key.clone();
             async move {
                 debug!(attempt, url = %url, "PUT");
-                let req = authenticate(client.put(&url), &auth).json(&body);
+                let mut req = authenticate(client.put(&url), &auth).json(&body);
+                if let Some(key) = &idempotency_key {
+                    req = req.header("X-Shopify-Idempotency-Key", key.as_str());
+                }
                 handle_response::<T>(req, attempt).await
             }
         })

@@ -163,7 +163,7 @@ impl SynologyChatConnector {
                         "This connector delivers outbound webhook requests; it does not yet host the outgoing-webhook receive path.".into()
                     ],
                     examples: vec!["{\"text\":\"Hello from Flywheel\"}".into()],
-                    related: vec![CapabilityId::from_static(OP_HEALTH)],
+                    related: vec![CapabilityId::from_static(CAP_READ)],
                 },
                 rate_limit: None,
                 requires_approval: Some(ApprovalMode::None),
@@ -190,7 +190,7 @@ impl SynologyChatConnector {
                         "payload must be a JSON object that the Synology Chat webhook endpoint understands.".into()
                     ],
                     examples: vec!["{\"payload\":{\"text\":\"Hello\",\"attachments\":[{\"text\":\"Details\"}]}}".into()],
-                    related: vec![CapabilityId::from_static(OP_SEND_MESSAGE)],
+                    related: vec![CapabilityId::from_static(CAP_WRITE)],
                 },
                 rate_limit: None,
                 requires_approval: Some(ApprovalMode::None),
@@ -261,8 +261,8 @@ impl SynologyChatConnector {
                         "{\"payload\":{\"token\":\"shared-secret\",\"channel_id\":\"34\",\"channel_type\":\"1\",\"channel_name\":\"Labb\",\"user_id\":\"4\",\"username\":\"mikael\",\"post_id\":\"146028888128\",\"thread_id\":\"0\",\"timestamp\":\"1646827836131\",\"text\":\"Tjena\",\"trigger_word\":\"Tjena\"}}".into(),
                     ],
                     related: vec![
-                        CapabilityId::from_static(OP_HEALTH),
-                        CapabilityId::from_static(OP_SEND_MESSAGE),
+                        CapabilityId::from_static(CAP_READ),
+                        CapabilityId::from_static(CAP_WRITE),
                     ],
                 },
                 rate_limit: None,
@@ -318,8 +318,8 @@ impl SynologyChatConnector {
                         "{\"payload\":{\"token\":\"abc\",\"channel_id\":34,\"user_id\":4,\"username\":\"mikael\",\"text\":\"Hello\"}}".into(),
                     ],
                     related: vec![
-                        CapabilityId::from_static(OP_INGEST_OUTGOING_WEBHOOK),
-                        CapabilityId::from_static(OP_HEALTH),
+                        CapabilityId::from_static(CAP_WEBHOOK),
+                        CapabilityId::from_static(CAP_READ),
                     ],
                 },
                 rate_limit: None,
@@ -339,7 +339,7 @@ impl SynologyChatConnector {
                     when_to_use: "Use this before attempting outbound delivery.".into(),
                     common_mistakes: vec![],
                     examples: vec!["{}".into()],
-                    related: vec![CapabilityId::from_static(OP_SEND_MESSAGE)],
+                    related: vec![CapabilityId::from_static(CAP_WRITE)],
                 },
                 rate_limit: None,
                 requires_approval: Some(ApprovalMode::None),

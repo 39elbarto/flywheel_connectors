@@ -1933,9 +1933,7 @@ impl<C: PollingCursor> PollingSupervisor<C> {
     /// If `retry_after_ms` is provided and greater than the computed backoff,
     /// it takes precedence.
     fn compute_delay(&self, attempt: u32, retry_after_ms: Option<u64>) -> Duration {
-        // Generate a simple jitter factor based on attempt count
-        // In production, you'd want to use a proper RNG
-        let jitter = (f64::from(attempt) * 0.1).fract();
+        let jitter = pseudo_random_jitter(attempt);
         let backoff = self.config.compute_backoff_with_jitter(attempt, jitter);
 
         // Respect rate-limit Retry-After if present and larger
@@ -2010,11 +2008,11 @@ impl<C: PollingCursor> PollingSupervisor<C> {
             tracing::debug!(offset = ?offset, "Starting poll");
 
             let result = poll_fn(offset).await;
-            self.cursor.record_poll(Instant::now(), 0);
 
             match result {
                 PollResult::Success(items) => {
                     let item_count = items.len();
+                    self.cursor.record_poll(Instant::now(), item_count);
                     self.stats.successful_polls += 1;
                     self.stats.items_processed += item_count as u64;
                     consecutive_failures = 0;
@@ -2058,6 +2056,7 @@ impl<C: PollingCursor> PollingSupervisor<C> {
                     message,
                     retry_after_ms,
                 } => {
+                    self.cursor.record_poll(Instant::now(), 0);
                     self.stats.failed_polls += 1;
                     consecutive_failures = consecutive_failures.saturating_add(1);
 
@@ -2111,6 +2110,7 @@ impl<C: PollingCursor> PollingSupervisor<C> {
                 }
 
                 PollResult::FatalError { message } => {
+                    self.cursor.record_poll(Instant::now(), 0);
                     tracing::error!(error = %message, "Poll failed with fatal error");
                     self.health.transition(HealthTransition::ToUnhealthy {
                         reason: message.clone(),

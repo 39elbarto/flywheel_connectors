@@ -27,10 +27,9 @@ fn sanitize_path_segment(segment: &str) -> TodoistResult<&str> {
         || lower.contains("%2f")
         || lower.contains("%5c")
     {
-        return Err(TodoistError::Api {
-            status_code: 400,
-            message: "Invalid path segment: contains illegal characters".into(),
-        });
+        return Err(TodoistError::InvalidInput(
+            "Invalid path segment: contains illegal characters".into(),
+        ));
     }
     Ok(segment)
 }

@@ -79,12 +79,9 @@ fn sanitize_path_segment(value: &str, param_name: &str) -> DuckDbResult<()> {
         || lower.contains("%2f")
         || lower.contains("%5c")
     {
-        return Err(DuckDbError::Api {
-            status_code: 400,
-            message: format!(
-                "invalid {param_name}: must not contain '/', '\\', '..', or encoded traversal sequences"
-            ),
-        });
+        return Err(DuckDbError::InvalidInput(format!(
+            "invalid {param_name}: must not contain '/', '\\', '..', or encoded traversal sequences"
+        )));
     }
     Ok(())
 }

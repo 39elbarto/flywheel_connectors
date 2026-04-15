@@ -40,6 +40,10 @@ pub enum RedditError {
     /// Resource not found (404)
     #[error("Not found: {resource}")]
     NotFound { resource: String },
+
+    /// Invalid input (missing field, path traversal, etc.).
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl RedditError {
@@ -107,6 +111,10 @@ impl RedditError {
                 status_code: Some(404),
                 retryable: false,
                 retry_after: None,
+            },
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Invalid input: {msg}"),
             },
         }
     }

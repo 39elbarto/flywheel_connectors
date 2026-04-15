@@ -486,9 +486,8 @@ impl DatadogConnector {
         client: &DatadogClient,
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, DatadogError> {
-        let series = input.get("series").ok_or_else(|| DatadogError::Api {
-            status_code: 400,
-            message: "Missing required field: series".into(),
+        let series = input.get("series").ok_or_else(|| {
+            DatadogError::InvalidInput("Missing required field: series".into())
         })?;
         let body = json!({ "series": series });
         let data = client.submit_metrics(&body).await?;
@@ -531,10 +530,7 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
     input
         .get(field)
         .and_then(|v| v.as_str())
-        .ok_or_else(|| DatadogError::Api {
-            status_code: 400,
-            message: format!("Missing required field: {field}"),
-        })
+        .ok_or_else(|| DatadogError::InvalidInput(format!("Missing required field: {field}")))
 }
 
 /// Extract a required i64 field from input.
@@ -542,10 +538,7 @@ fn require_i64(input: &serde_json::Value, field: &str) -> Result<i64, DatadogErr
     input
         .get(field)
         .and_then(|v| v.as_i64())
-        .ok_or_else(|| DatadogError::Api {
-            status_code: 400,
-            message: format!("Missing required field: {field}"),
-        })
+        .ok_or_else(|| DatadogError::InvalidInput(format!("Missing required field: {field}")))
 }
 
 /// Build a single [`OperationInfo`] entry.

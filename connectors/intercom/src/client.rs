@@ -197,10 +197,9 @@ impl IntercomClient {
     /// Reject path-segment values that contain traversal characters.
     fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> IntercomResult<&'a str> {
         if value.trim().is_empty() {
-            return Err(IntercomError::Api {
-                status_code: 400,
-                message: format!("{field} must not be empty"),
-            });
+            return Err(IntercomError::InvalidInput(format!(
+                "{field} must not be empty",
+            )));
         }
         let lower = value.to_ascii_lowercase();
         if value.contains('/')
@@ -209,10 +208,9 @@ impl IntercomClient {
             || lower.contains("%2f")
             || lower.contains("%5c")
         {
-            return Err(IntercomError::Api {
-                status_code: 400,
-                message: format!("{field} contains path traversal characters"),
-            });
+            return Err(IntercomError::InvalidInput(format!(
+                "{field} contains path traversal characters",
+            )));
         }
         Ok(value)
     }

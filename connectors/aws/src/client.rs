@@ -235,6 +235,23 @@ impl AwsClient {
                 if let Some(outcome) = check_error_status::<S3GetObjectResponse>(status) {
                     return outcome;
                 }
+                if status == 429 || status == 503 {
+                    let retry_after = resp
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .map(Duration::from_secs);
+                    return AttemptOutcome::Retryable {
+                        error: AwsError::RateLimited {
+                            retry_after_ms: retry_after
+                                .unwrap_or(Duration::from_secs(30))
+                                .as_millis()
+                                as u64,
+                        },
+                        retry_after,
+                    };
+                }
                 let content_type = resp
                     .headers()
                     .get("content-type")
@@ -651,14 +668,6 @@ fn sign_request(
 }
 
 fn check_error_status<T>(status: u16) -> Option<AttemptOutcome<T, AwsError>> {
-    if status == 429 || status == 503 {
-        return Some(AttemptOutcome::Retryable {
-            error: AwsError::RateLimited {
-                retry_after_ms: 30_000,
-            },
-            retry_after: Some(Duration::from_secs(30)),
-        });
-    }
     if status == 401 || status == 403 {
         return Some(AttemptOutcome::Terminal(AwsError::Unauthorized(format!(
             "Authentication failed (HTTP {status})"

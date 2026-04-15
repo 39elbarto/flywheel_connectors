@@ -238,10 +238,9 @@ fn percentile_bps(sorted_samples: &[u32], percentile: usize) -> u32 {
         return 0;
     }
 
-    let rank = sorted_samples
-        .len()
-        .saturating_mul(percentile)
-        .div_ceil(100)
+    // Use u64 arithmetic to avoid overflow when len * percentile exceeds usize::MAX.
+    let numerator = (sorted_samples.len() as u64).saturating_mul(percentile as u64);
+    let rank = (numerator.div_ceil(100) as usize)
         .saturating_sub(1)
         .min(sorted_samples.len().saturating_sub(1));
     sorted_samples[rank]

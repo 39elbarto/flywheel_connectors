@@ -415,10 +415,12 @@ impl ObjectStore for MemoryObjectStore {
         let id = object.object_id;
         let zone_id = object.header.zone_id.clone();
         objects.insert(id, object);
+
+        // Maintain zone index BEFORE releasing the objects lock so that
+        // a concurrent delete() cannot create orphan zone_index entries.
+        self.zone_index.write().entry(zone_id).or_default().push(id);
         drop(objects);
 
-        // Maintain zone index for O(1) list_zone().
-        self.zone_index.write().entry(zone_id).or_default().push(id);
         self.used_bytes.fetch_add(size, Ordering::SeqCst);
 
         Ok(())

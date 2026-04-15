@@ -277,21 +277,25 @@ impl QuarantineStore {
         reason: &PromotionReason,
         schema_valid: bool,
     ) -> Result<QuarantinedObject, QuarantineError> {
+        // Early exit: NotFound takes precedence over all other errors so
+        // callers always learn "object absent" before "bad reason/schema".
+        // The race between this check and remove() is benign — if another
+        // thread removes the object in between, remove() itself returns
+        // NotFound atomically under its write lock.
         if !self.contains(object_id) {
             return Err(QuarantineError::NotFound(*object_id));
         }
 
-        // Validate promotion reason
+        // Validate promotion reason (does not require lock).
         self.validate_promotion_reason(object_id, reason)?;
 
-        // Check schema validation if required
+        // Check schema validation if required.
         if self.policy.require_schema_validation && !schema_valid {
             return Err(QuarantineError::SchemaValidationFailed {
                 reason: "Schema validation is required but object failed validation".into(),
             });
         }
 
-        // Remove from quarantine (promotion successful)
         self.remove(object_id)
     }
 

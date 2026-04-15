@@ -632,7 +632,15 @@ fn parse_retry_after(headers: &HeaderList) -> Option<Duration> {
 
 fn truncate_body(bytes: &[u8]) -> String {
     const MAX_LEN: usize = 4096;
-    let mut body = String::from_utf8_lossy(bytes).to_string();
+    // Truncate at the byte level BEFORE converting to UTF-8 to avoid
+    // allocating arbitrarily large strings from malicious responses.
+    // Add 4 bytes of headroom for multi-byte char boundary alignment.
+    let slice = if bytes.len() > MAX_LEN + 4 {
+        &bytes[..MAX_LEN + 4]
+    } else {
+        bytes
+    };
+    let mut body = String::from_utf8_lossy(slice).to_string();
     if body.len() > MAX_LEN {
         // Find a valid UTF-8 char boundary at or before MAX_LEN
         let mut end = MAX_LEN;

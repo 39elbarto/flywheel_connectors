@@ -632,7 +632,7 @@ impl TufVerifier for MockTufVerifier {
         pinned_root: &TufRootMetadata,
         target_path: &str,
     ) -> Result<TufVerificationResult, SupplyChainVerificationError> {
-        let now = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
+        let now = u64::try_from(Utc::now().timestamp()).expect("system clock before year 2262");
         if pinned_root.expires <= now || self.root.expires <= now {
             return Err(SupplyChainVerificationError::TufExpired);
         }
@@ -729,7 +729,7 @@ impl SigstoreVerifier for MockSigstoreVerifier {
 impl VerifiedConnectorBundle {
     #[must_use]
     pub fn report(&self, outcome: &str) -> RegistryVerificationReport {
-        let verified_at = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
+        let verified_at = u64::try_from(Utc::now().timestamp()).expect("system clock before year 2262");
         RegistryVerificationReport {
             connector_id: self.manifest.connector.id.to_string(),
             manifest_hash: self.manifest_hash.clone(),
@@ -921,7 +921,7 @@ impl RegistryVerifier {
         let binary_body = CanonicalSerializer::serialize(&binary_obj, &binary_schema)
             .map_err(RegistryError::Canonical)?;
 
-        let now = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
+        let now = u64::try_from(Utc::now().timestamp()).expect("system clock before year 2262");
         let provenance = Provenance::new(zone_id.clone());
 
         let manifest_header = ObjectHeader {
@@ -1013,7 +1013,7 @@ impl RegistryVerifier {
         let store_oti = ObjectTransmissionInfo::from(encoder.transmission_info());
         let source_symbols = encoder.source_symbols();
         let total_symbols = encoder.total_symbols();
-        let mirrored_at = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
+        let mirrored_at = u64::try_from(Utc::now().timestamp()).expect("system clock before year 2262");
 
         let symbol_meta = ObjectSymbolMeta {
             object_id: mirror.binary_object_id,
@@ -1484,7 +1484,7 @@ fn enforce_supply_chain_policy(
         || !policy.trusted_builders.is_empty();
     let attestation_evidence = if attestation_policy_active {
         let evidence = evidence.ok_or(RegistryError::AttestationEvidenceMissing)?;
-        let now = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
+        let now = u64::try_from(Utc::now().timestamp()).expect("system clock before year 2262");
         if let Some((attestation_type, expired_at)) = evidence
             .attestations
             .iter()
@@ -1547,7 +1547,7 @@ fn enforce_supply_chain_policy(
                 .attestations
                 .iter()
                 .find_map(|a| a.builder_id.clone())
-                .unwrap_or_default();
+                .unwrap_or_else(|| "<none>".to_string());
             return Err(RegistryError::UntrustedBuilder {
                 builder: first_builder,
             });

@@ -51,8 +51,9 @@ impl EmailGenericError {
             Self::Tls(error) => FcpError::Internal {
                 message: error.to_string(),
             },
-            Self::Address(error) => FcpError::Internal {
-                message: error.clone(),
+            Self::Address(error) => FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("invalid email address: {error}"),
             },
         }
     }
@@ -146,13 +147,14 @@ mod tests {
     }
 
     #[test]
-    fn address_error_maps_to_internal() {
+    fn address_error_maps_to_invalid_request() {
         let err = EmailGenericError::Address("invalid email".into());
         match err.to_fcp_error() {
-            FcpError::Internal { message } => {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1005);
                 assert!(message.contains("invalid email"));
             }
-            other => panic!("expected Internal, got {other:?}"),
+            other => panic!("expected InvalidRequest, got {other:?}"),
         }
     }
 

@@ -1664,6 +1664,12 @@ mod tests {
     /// calls pass verification. For write/manage operations, a separate token
     /// with the matching `capability_id` would be needed.
     fn test_token_for_key(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+        let constraints = fcp_core::CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
         let now = chrono::Utc::now();
         let expires = now + chrono::Duration::hours(1);
         let cose_token = CapabilityTokenBuilder::new()
@@ -1685,6 +1691,7 @@ mod tests {
                 OP_JOIN_ROOM,
                 OP_LEAVE_ROOM,
             ])
+            .constraints_cbor(&cbor)
             .sign(signing_key)
             .expect("Failed to create test token");
         CapabilityToken::from_raw(cose_token)

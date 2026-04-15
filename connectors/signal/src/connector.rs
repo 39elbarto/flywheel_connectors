@@ -948,6 +948,12 @@ mod tests {
         let now = Utc::now();
         let expires = now + ChronoDuration::hours(1);
 
+        let constraints = fcp_core::CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
         let token = CapabilityToken::from_raw(
             CapabilityTokenBuilder::new()
                 .capability_id(capability)
@@ -956,6 +962,7 @@ mod tests {
                 .operations(&[operation])
                 .issuer("node:test")
                 .validity(now, expires)
+                .constraints_cbor(&cbor)
                 .sign(&signing_key)
                 .expect("signed capability token"),
         );

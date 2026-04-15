@@ -3242,6 +3242,12 @@ mod tests {
         cap: &str,
         op: &str,
     ) -> CapabilityToken {
+        let constraints = fcp_core::CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
@@ -3250,6 +3256,7 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&cbor)
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)

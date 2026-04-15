@@ -145,7 +145,7 @@ impl GooglePlacesConnector {
                     examples: vec![
                         "{\"query\":\"coffee near Bryant Park\",\"max_result_count\":5}".into(),
                     ],
-                    related: vec![CapabilityId::from_static(OP_GET_PLACE)],
+                    related: vec![CapabilityId::from_static(CAP_READ)],
                 },
                 rate_limit: None,
                 requires_approval: Some(ApprovalMode::None),
@@ -172,7 +172,7 @@ impl GooglePlacesConnector {
                     when_to_use: "Use this while narrowing down an in-progress place search.".into(),
                     common_mistakes: vec![],
                     examples: vec!["{\"input\":\"sushi soho london\"}".into()],
-                    related: vec![CapabilityId::from_static(OP_SEARCH_TEXT)],
+                    related: vec![CapabilityId::from_static(CAP_READ)],
                 },
                 rate_limit: None,
                 requires_approval: Some(ApprovalMode::None),
@@ -201,7 +201,7 @@ impl GooglePlacesConnector {
                     examples: vec![
                         "{\"place\":\"places/ChIJN1t_tDeuEmsRUsoyG83frY4\"}".into(),
                     ],
-                    related: vec![CapabilityId::from_static(OP_SEARCH_TEXT)],
+                    related: vec![CapabilityId::from_static(CAP_READ)],
                 },
                 rate_limit: None,
                 requires_approval: Some(ApprovalMode::None),
@@ -220,7 +220,7 @@ impl GooglePlacesConnector {
                     when_to_use: "Use this before operational place queries.".into(),
                     common_mistakes: vec![],
                     examples: vec!["{}".into()],
-                    related: vec![CapabilityId::from_static(OP_SEARCH_TEXT)],
+                    related: vec![CapabilityId::from_static(CAP_READ)],
                 },
                 rate_limit: None,
                 requires_approval: Some(ApprovalMode::None),
@@ -499,7 +499,7 @@ fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
 #[cfg(test)]
 mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
-    use fcp_core::{CapabilityToken, RequestId, ZoneId};
+    use fcp_core::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 
     use super::*;
@@ -522,6 +522,12 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         operation: &'static str,
     ) -> CapabilityToken {
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
         let now = Utc::now();
         let raw = CapabilityTokenBuilder::new()
             .capability_id(CAP_READ)
@@ -530,6 +536,7 @@ mod tests {
             .operations(&[operation])
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
+            .constraints_cbor(&cbor)
             .sign(signing_key)
             .expect("token should sign");
         CapabilityToken::from_raw(raw)

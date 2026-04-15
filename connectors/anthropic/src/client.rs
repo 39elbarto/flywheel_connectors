@@ -240,11 +240,12 @@ impl AnthropicClient {
 
         let response = request.send().await?;
         let status = response.status();
+        let retry_after = extract_retry_after(&response);
         let bytes = response.bytes().await?;
         if status.is_success() {
             Ok(())
         } else {
-            Err(parse_error_response(status, &bytes))
+            Err(parse_error_response(status, &bytes, retry_after))
         }
     }
 
@@ -419,8 +420,9 @@ impl AnthropicClient {
 
         let status = response.status();
         if !status.is_success() {
+            let retry_after = extract_retry_after(&response);
             let bytes = response.bytes().await?;
-            return Err(parse_error_response(status, &bytes));
+            return Err(parse_error_response(status, &bytes, retry_after));
         }
 
         Ok(response)
@@ -432,18 +434,33 @@ impl AnthropicClient {
         R: serde::de::DeserializeOwned + Send,
     {
         let status = response.status();
+        let retry_after = extract_retry_after(&response);
         let bytes = response.bytes().await?;
 
         if status.is_success() {
             serde_json::from_slice(&bytes).map_err(AnthropicError::from)
         } else {
-            Err(parse_error_response(status, &bytes))
+            Err(parse_error_response(status, &bytes, retry_after))
         }
     }
 }
 
+/// Extract the `retry-after` header as milliseconds.
+fn extract_retry_after(response: &Response) -> Option<u64> {
+    response
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|secs| secs * 1000)
+}
+
 /// Parse an error response.
-fn parse_error_response(status: StatusCode, bytes: &Bytes) -> AnthropicError {
+fn parse_error_response(
+    status: StatusCode,
+    bytes: &Bytes,
+    retry_after_ms: Option<u64>,
+) -> AnthropicError {
     // Try to parse as API error
     #[derive(Deserialize)]
     struct ErrorWrapper {
@@ -455,15 +472,14 @@ fn parse_error_response(status: StatusCode, bytes: &Bytes) -> AnthropicError {
 
         // Check for specific error types
         if status == StatusCode::TOO_MANY_REQUESTS {
-            // Extract retry-after if present
             return AnthropicError::RateLimited {
-                retry_after_ms: 30_000, // Default 30s
+                retry_after_ms: retry_after_ms.unwrap_or(30_000),
             };
         }
 
         if status.as_u16() == 529 {
             return AnthropicError::Overloaded {
-                retry_after_ms: 60_000, // Default 60s
+                retry_after_ms: retry_after_ms.unwrap_or(60_000),
             };
         }
 
@@ -1211,15 +1227,24 @@ mod tests {
         let bytes = bytes::Bytes::from(
             r#"{"error":{"type":"rate_limit_error","message":"Rate limit exceeded"}}"#,
         );
-        let err = parse_error_response(StatusCode::TOO_MANY_REQUESTS, &bytes);
-        assert!(matches!(err, AnthropicError::RateLimited { .. }));
+        let err = parse_error_response(StatusCode::TOO_MANY_REQUESTS, &bytes, None);
+        assert!(matches!(err, AnthropicError::RateLimited { retry_after_ms: 30_000 }));
+    }
+
+    #[test]
+    fn parse_error_response_429_with_header() {
+        let bytes = bytes::Bytes::from(
+            r#"{"error":{"type":"rate_limit_error","message":"Rate limit exceeded"}}"#,
+        );
+        let err = parse_error_response(StatusCode::TOO_MANY_REQUESTS, &bytes, Some(5_000));
+        assert!(matches!(err, AnthropicError::RateLimited { retry_after_ms: 5_000 }));
     }
 
     #[test]
     fn parse_error_response_529() {
         let bytes =
             bytes::Bytes::from(r#"{"error":{"type":"overloaded_error","message":"Overloaded"}}"#);
-        let err = parse_error_response(StatusCode::from_u16(529).unwrap(), &bytes);
+        let err = parse_error_response(StatusCode::from_u16(529).unwrap(), &bytes, None);
         assert!(matches!(err, AnthropicError::Overloaded { .. }));
     }
 
@@ -1228,7 +1253,7 @@ mod tests {
         let bytes = bytes::Bytes::from(
             r#"{"error":{"type":"authentication_error","message":"Invalid key"}}"#,
         );
-        let err = parse_error_response(StatusCode::UNAUTHORIZED, &bytes);
+        let err = parse_error_response(StatusCode::UNAUTHORIZED, &bytes, None);
         assert!(matches!(err, AnthropicError::InvalidApiKey));
     }
 
@@ -1237,7 +1262,7 @@ mod tests {
         let bytes = bytes::Bytes::from(
             r#"{"error":{"type":"invalid_request_error","message":"context length exceeded"}}"#,
         );
-        let err = parse_error_response(StatusCode::BAD_REQUEST, &bytes);
+        let err = parse_error_response(StatusCode::BAD_REQUEST, &bytes, None);
         assert!(matches!(err, AnthropicError::ContextLengthExceeded { .. }));
     }
 
@@ -1246,7 +1271,7 @@ mod tests {
         let bytes = bytes::Bytes::from(
             r#"{"error":{"type":"not_found_error","message":"Model not found"}}"#,
         );
-        let err = parse_error_response(StatusCode::NOT_FOUND, &bytes);
+        let err = parse_error_response(StatusCode::NOT_FOUND, &bytes, None);
         match err {
             AnthropicError::Api {
                 error_type,
@@ -1264,7 +1289,7 @@ mod tests {
     #[test]
     fn parse_error_response_unparseable() {
         let bytes = bytes::Bytes::from("not json");
-        let err = parse_error_response(StatusCode::INTERNAL_SERVER_ERROR, &bytes);
+        let err = parse_error_response(StatusCode::INTERNAL_SERVER_ERROR, &bytes, None);
         match err {
             AnthropicError::Api {
                 error_type,

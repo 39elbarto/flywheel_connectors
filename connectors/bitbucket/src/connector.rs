@@ -838,7 +838,7 @@ fn operations_info() -> Vec<OperationInfo> {
                 ],
                 examples: vec![r#"{"workspace": "myteam", "repo_slug": "backend"}"#.into()],
                 related: vec![
-                    CapabilityId::from_static("bitbucket.repos.list"),
+                    CapabilityId::from_static("bitbucket.repositories.list"),
                     CapabilityId::from_static("bitbucket.pull_requests.create"),
                 ],
             },
@@ -891,7 +891,8 @@ fn operations_info() -> Vec<OperationInfo> {
                     "workspace": { "type": "string" },
                     "repo_slug": { "type": "string" },
                     "title": { "type": "string" },
-                    "source_branch": { "type": "string" }
+                    "source_branch": { "type": "string" },
+                    "destination_branch": { "type": "string", "description": "Target branch (defaults to main)" }
                 }
             }),
             output_schema: json!({
@@ -1011,7 +1012,7 @@ fn operations_info() -> Vec<OperationInfo> {
                     "Expecting pipelines on repos without a bitbucket-pipelines.yml — Pipelines must be configured in the repository before they can be listed.".into(),
                 ],
                 examples: vec![r#"{"workspace": "myteam", "repo_slug": "backend"}"#.into()],
-                related: vec![CapabilityId::from_static("bitbucket.repos.list")],
+                related: vec![CapabilityId::from_static("bitbucket.repositories.list")],
             },
             description: None,
             rate_limit: None,

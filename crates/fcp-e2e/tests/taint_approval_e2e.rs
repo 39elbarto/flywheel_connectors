@@ -1473,5 +1473,6 @@ fn owner_zone_record_drives_all_tiers() {
     assert!(record.can_drive_operation(SafetyTier::Risky).is_ok());
     assert!(record.can_drive_operation(SafetyTier::Dangerous).is_ok());
     assert!(record.can_drive_operation(SafetyTier::Critical).is_ok());
-    assert!(record.can_drive_operation(SafetyTier::Forbidden).is_ok());
+    // Forbidden operations are NEVER allowed, regardless of provenance
+    assert!(record.can_drive_operation(SafetyTier::Forbidden).is_err());
 }

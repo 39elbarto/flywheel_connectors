@@ -589,7 +589,7 @@ mod tests {
     async fn introspect_lists_operations() {
         let connector = HuggingfaceConnector::new();
         let intro = connector.handle_introspect().await.unwrap();
-        assert_eq!(intro["surface_status"], "live");
+        assert_eq!(intro["surface_status"], "incubating");
         let ops = intro["operations"].as_array().unwrap();
         assert_eq!(ops.len(), 3);
         assert!(ops.iter().all(|o| o["implemented"] == true));

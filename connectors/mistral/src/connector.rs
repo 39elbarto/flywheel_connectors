@@ -482,7 +482,10 @@ impl MistralConnector {
     }
 
     async fn invoke_embeddings(&self, client: &MistralClient, input: &Value) -> FcpResult<Value> {
-        let embeddings_input = input.get("input").cloned().unwrap_or_else(|| input.clone());
+        let embeddings_input = input.get("input").ok_or_else(|| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing required field: input".into(),
+        })?;
 
         let body = json!({
             "model": input

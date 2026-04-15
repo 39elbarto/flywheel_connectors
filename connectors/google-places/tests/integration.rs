@@ -16,8 +16,16 @@ use fcp_google_places::{
 };
 use fcp_sdk::prelude::*;
 use serde_json::json;
-use wiremock::matchers::{header, method, path, query_param};
+use wiremock::matchers::{header, header_regex, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// Build a regex that matches a field-mask value exactly. wiremock 0.6's
+/// `header()` exact matcher silently fails on comma-separated header values
+/// because hyper/http may fold them per RFC 7230 §3.2.6. `header_regex` is
+/// immune to this and matches the raw value correctly.
+fn fieldmask_regex(mask: &str) -> String {
+    format!("^{}$", mask.replace('.', r"\."))
+}
 
 fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
     let now = Utc::now();
@@ -112,7 +120,7 @@ async fn invoke_search_text_uses_default_operation_field_mask() {
     Mock::given(method("POST"))
         .and(path("/v1/places:searchText"))
         .and(header("x-goog-api-key", "test-key"))
-        .and(header("x-goog-fieldmask", DEFAULT_SEARCH_TEXT_FIELD_MASK))
+        .and(header_regex("x-goog-fieldmask", &fieldmask_regex(DEFAULT_SEARCH_TEXT_FIELD_MASK)))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "places": [
                 {
@@ -167,7 +175,7 @@ async fn invoke_autocomplete_uses_autocomplete_specific_field_mask() {
     Mock::given(method("POST"))
         .and(path("/v1/places:autocomplete"))
         .and(header("x-goog-api-key", "test-key"))
-        .and(header("x-goog-fieldmask", DEFAULT_AUTOCOMPLETE_FIELD_MASK))
+        .and(header_regex("x-goog-fieldmask", &fieldmask_regex(DEFAULT_AUTOCOMPLETE_FIELD_MASK)))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "suggestions": [
                 {
@@ -231,7 +239,7 @@ async fn invoke_get_place_uses_place_details_field_mask_and_language_code() {
         .and(path("/v1/places/ghi789"))
         .and(query_param("languageCode", "en"))
         .and(header("x-goog-api-key", "test-key"))
-        .and(header("x-goog-fieldmask", DEFAULT_PLACE_DETAILS_FIELD_MASK))
+        .and(header_regex("x-goog-fieldmask", &fieldmask_regex(DEFAULT_PLACE_DETAILS_FIELD_MASK)))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "ghi789",
             "name": "places/ghi789",
@@ -274,6 +282,51 @@ async fn invoke_get_place_uses_place_details_field_mask_and_language_code() {
     let output = result.result.expect("result should be present");
     assert_eq!(output["name"], "places/ghi789");
     assert_eq!(output["formattedAddress"], "1 History Way");
+}
+
+/// Regression: wiremock 0.6's `header()` exact matcher fails on comma-separated
+/// values like `x-goog-fieldmask`. The value is byte-identical in
+/// `received_requests()`, but `header(name, value)` returns 404.
+/// `header_regex()` works correctly. All fieldmask tests above use the
+/// `fieldmask_regex()` helper as a workaround.
+#[fcp_async_core::runtime::test]
+async fn wiremock_header_exact_fails_on_comma_separated_fieldmask() {
+    let server = MockServer::start().await;
+    // Exact matcher — known to fail with wiremock 0.6 + hyper for comma values
+    Mock::given(method("POST"))
+        .and(path("/exact"))
+        .and(header("x-goog-fieldmask", DEFAULT_SEARCH_TEXT_FIELD_MASK))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    // Regex matcher — works correctly
+    Mock::given(method("POST"))
+        .and(path("/regex"))
+        .and(header_regex(
+            "x-goog-fieldmask",
+            &fieldmask_regex(DEFAULT_SEARCH_TEXT_FIELD_MASK),
+        ))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let client = reqwest::Client::new();
+    let exact = client
+        .post(format!("{}/exact", server.uri()))
+        .header("X-Goog-FieldMask", DEFAULT_SEARCH_TEXT_FIELD_MASK)
+        .send()
+        .await
+        .expect("send");
+    let regex = client
+        .post(format!("{}/regex", server.uri()))
+        .header("X-Goog-FieldMask", DEFAULT_SEARCH_TEXT_FIELD_MASK)
+        .send()
+        .await
+        .expect("send");
+
+    // Document the bug: exact returns 404, regex returns 200
+    assert_eq!(exact.status().as_u16(), 404, "wiremock header() bug: exact match should 404");
+    assert_eq!(regex.status().as_u16(), 200, "header_regex workaround must succeed");
 }
 
 #[fcp_async_core::runtime::test]

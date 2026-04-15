@@ -1570,7 +1570,7 @@ impl CloudflareConnector {
 mod tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, Utc};
-    use fcp_core::{CapabilityToken, RequestId, ZoneId};
+    use fcp_core::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
 
@@ -1615,6 +1615,12 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         op: &'static str,
     ) -> CapabilityToken {
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
         let now = Utc::now();
         let raw = CapabilityTokenBuilder::new()
             .capability_id(capability_for_operation(op))
@@ -1623,6 +1629,7 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
+            .constraints_cbor(&cbor)
             .sign(signing_key)
             .expect("capability token should sign");
         CapabilityToken::from_raw(raw)

@@ -352,8 +352,13 @@ impl TokenStore {
         };
 
         if should_cleanup {
-            self.tokens.write().retain(|_, v| !v.tokens.is_expired());
-            *self.last_cleanup.write() = Instant::now();
+            // Re-check under write lock to prevent duplicate cleanups from
+            // concurrent callers that both passed the read-lock check above.
+            let mut last = self.last_cleanup.write();
+            if last.elapsed() >= self.cleanup_interval {
+                self.tokens.write().retain(|_, v| !v.tokens.is_expired());
+                *last = Instant::now();
+            }
         }
     }
 }

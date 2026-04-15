@@ -1809,7 +1809,7 @@ impl LocalRegistryCatalog {
         connector_id: &str,
     ) -> Option<Vec<(&String, &Vec<RegistryPackageRecord>)>> {
         let versions = self.connectors.get(connector_id)?;
-        let mut entries: Vec<_> = versions.iter().collect();
+        let mut entries: Vec<_> = versions.iter().filter(|(_, v)| !v.is_empty()).collect();
         entries.sort_by(|(_, left), (_, right)| right[0].version.cmp(&left[0].version));
         Some(entries)
     }
@@ -1841,26 +1841,30 @@ impl LocalRegistryCatalog {
         let os = record.manifest_signature.target.os.clone();
         let arch = record.manifest_signature.target.arch.clone();
         let target = record.manifest_signature.target.as_string();
+        let manifest_url = format!(
+            "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/manifest"
+        );
+        let binary_url = format!(
+            "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/binary"
+        );
+        let signature_url = format!(
+            "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/signature"
+        );
+        let attestation_url = record.attestation_json.as_ref().map(|_| {
+            format!(
+                "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/attestation"
+            )
+        });
         RegistryTargetDescriptor {
-            os: os.clone(),
-            arch: arch.clone(),
+            os,
+            arch,
             target,
             manifest_sha256: record.manifest_sha256.clone(),
             binary_sha256: record.binary_sha256.clone(),
-            manifest_url: format!(
-                "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/manifest"
-            ),
-            binary_url: format!(
-                "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/binary"
-            ),
-            signature_url: format!(
-                "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/signature"
-            ),
-            attestation_url: record.attestation_json.as_ref().map(|_| {
-                format!(
-                    "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/attestation"
-                )
-            }),
+            manifest_url,
+            binary_url,
+            signature_url,
+            attestation_url,
             signature: record.manifest_signature.clone(),
         }
     }

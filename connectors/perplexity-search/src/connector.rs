@@ -596,7 +596,9 @@ impl FcpConnector for PerplexitySearchConnector {
 mod tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, Utc};
-    use fcp_core::{CapabilityToken, ConnectorId, RequestId, SelfCheckStatus, ZoneId};
+    use fcp_core::{
+        CapabilityConstraints, CapabilityToken, ConnectorId, RequestId, SelfCheckStatus, ZoneId,
+    };
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
 
@@ -628,6 +630,13 @@ mod tests {
 
     fn generate_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         let now = Utc::now();
+        // C3.4: tokens MUST include constraints (default-deny)
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
         let raw = CapabilityTokenBuilder::new()
             .capability_id(CAP_SEARCH)
             .zone_id("z:work")
@@ -635,6 +644,7 @@ mod tests {
             .operations(&[OP_SEARCH])
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
+            .constraints_cbor(&cbor)
             .sign(signing_key)
             .expect("capability token signing should succeed");
         CapabilityToken::from_raw(raw)

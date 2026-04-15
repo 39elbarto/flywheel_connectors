@@ -21,8 +21,8 @@ use fcp_async_core::process::{
 use fcp_async_core::sync::Mutex;
 use fcp_async_core::task::JoinHandle as AsyncJoinHandle;
 use fcp_core::{
-    AttestationMaterial, AttestationMetadata, AttestationPredicateType, CapabilityToken,
-    CorrelationId, RollbackRules, RolloutPolicy, SBOM_SIGNED_FIELDS,
+    AttestationMaterial, AttestationMetadata, AttestationPredicateType, CapabilityConstraints,
+    CapabilityToken, CorrelationId, RollbackRules, RolloutPolicy, SBOM_SIGNED_FIELDS,
     SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent, SbomDependency, SuccessThresholds,
     TransitionReason, ZoneId,
 };
@@ -546,6 +546,17 @@ fn signing_key_from_hex(hex_key: &str) -> Ed25519SigningKey {
     Ed25519SigningKey::from_bytes(&key_bytes).expect("signing key bytes must be valid")
 }
 
+fn constraints_cbor_bytes() -> Vec<u8> {
+    // C3.4: tokens MUST include constraints (default-deny)
+    let constraints = CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+    cbor
+}
+
 fn build_live_capability_token(
     signing_key: &Ed25519SigningKey,
     capability_id: &str,
@@ -554,6 +565,7 @@ fn build_live_capability_token(
     zone_id: &ZoneId,
 ) -> CapabilityToken {
     let now = Utc::now();
+    let cbor = constraints_cbor_bytes();
     let raw = CapabilityTokenBuilder::new()
         .capability_id(capability_id)
         .zone_id(zone_id.as_str())
@@ -561,6 +573,7 @@ fn build_live_capability_token(
         .operations(&[operation])
         .issuer("node:test")
         .validity(now, now + chrono::Duration::hours(1))
+        .constraints_cbor(&cbor)
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)
@@ -575,6 +588,7 @@ fn build_live_capability_token_with_validity(
     not_before: chrono::DateTime<Utc>,
     expires: chrono::DateTime<Utc>,
 ) -> CapabilityToken {
+    let cbor = constraints_cbor_bytes();
     let raw = CapabilityTokenBuilder::new()
         .capability_id(capability_id)
         .zone_id(zone_id.as_str())
@@ -582,6 +596,7 @@ fn build_live_capability_token_with_validity(
         .operations(&[operation])
         .issuer("node:test")
         .validity(not_before, expires)
+        .constraints_cbor(&cbor)
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)

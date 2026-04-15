@@ -345,6 +345,7 @@ impl IntercomConnector {
                         "required": [],
                         "properties": {
                             "per_page": {"type": "integer", "maximum": 150},
+                            "starting_after": {"type": "string", "description": "Cursor for the next page of results"},
                             "query": {"type": "object", "description": "Search query object"}
                         }
                     }),

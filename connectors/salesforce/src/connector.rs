@@ -960,11 +960,11 @@ fn operations_info() -> Vec<OperationInfo> {
             }),
             json!({
                 "type": "object",
-                "required": ["account_id", "contact_id"],
+                "required": ["accountId", "contactId"],
                 "properties": {
-                    "account_id": {"type": "string"},
-                    "contact_id": {"type": "string"},
-                    "opportunity_id": {"type": "string"}
+                    "accountId": {"type": "string"},
+                    "contactId": {"type": "string"},
+                    "opportunityId": {"type": "string"}
                 }
             }),
             "salesforce.leads.write",
@@ -1178,10 +1178,10 @@ fn operations_info() -> Vec<OperationInfo> {
             }),
             json!({
                 "type": "object",
-                "required": ["report_metadata", "fact_map"],
+                "required": ["reportMetadata", "factMap"],
                 "properties": {
-                    "report_metadata": {"type": "object"},
-                    "fact_map": {"type": "object"}
+                    "reportMetadata": {"type": "object"},
+                    "factMap": {"type": "object"}
                 }
             }),
             "salesforce.reports.read",

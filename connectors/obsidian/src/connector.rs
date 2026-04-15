@@ -389,6 +389,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "content": { "type": "string" },
                     "size": { "type": "integer" },
                     "modified": { "type": "string" },
+                    "created": { "type": "string" },
                     "tags": { "type": "array", "items": { "type": "string" } }
                 }
             }),
@@ -430,7 +431,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             capability: CapabilityId::from_static(CAP_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
+            idempotency: IdempotencyClass::None,
             ai_hints: AgentHint {
                 when_to_use: "When you need to create a new note in the vault".into(),
                 common_mistakes: vec![

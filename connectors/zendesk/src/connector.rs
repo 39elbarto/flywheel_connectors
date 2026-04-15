@@ -1214,6 +1214,12 @@ mod tests {
             "zendesk.delete_ticket" => "zendesk.delete",
             _ => "zendesk.read",
         };
+        let constraints = fcp_core::CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).unwrap();
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
@@ -1221,6 +1227,7 @@ mod tests {
             .principal("user:test")
             .operations(&[op])
             .issuer("node:test")
+            .constraints_cbor(&cbor)
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)
             .unwrap();

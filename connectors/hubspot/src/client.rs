@@ -170,7 +170,7 @@ impl HubSpotClient {
             403 => Err(HubSpotError::Forbidden),
             404 => Err(HubSpotError::NotFound { resource: detail }),
             429 => Err(HubSpotError::RateLimited {
-                retry_after_ms: retry_after.unwrap_or(10) * 1000,
+                retry_after_ms: retry_after.unwrap_or(60) * 1000,
             }),
             code => Err(HubSpotError::Api {
                 status_code: code,

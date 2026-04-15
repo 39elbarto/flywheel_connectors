@@ -387,7 +387,7 @@ impl ElasticsearchClient {
     ) -> ElasticsearchResult<serde_json::Value> {
         let mut ndjson = String::new();
         for op in operations {
-            ndjson.push_str(&serde_json::to_string(op).unwrap_or_default());
+            ndjson.push_str(&serde_json::to_string(op)?);
             ndjson.push('\n');
         }
         self.post_ndjson("/_bulk", &ndjson).await

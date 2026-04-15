@@ -20718,7 +20718,7 @@ fn pipe_dispatch(args: &PipeArgs) -> Result<DispatchOutcome> {
                     format!("fwc pipe {} {} --map 'field_a -> field_b'", args.source, args.target),
                 ],
             }),
-            exit_code: CliExitCode::UnknownCommand,
+            exit_code: CliExitCode::Validation,
         });
     };
 

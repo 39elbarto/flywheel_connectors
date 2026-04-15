@@ -325,7 +325,7 @@ impl RetryController {
             Some(c) if !self.policy.is_retryable(c) => {
                 return RetryDecision::NonRetryable {
                     code: error.code.to_string(),
-                    reason: format!("{} errors are not retryable", error.category,),
+                    reason: format!("{} errors are not retryable", error.category),
                 };
             }
             None if !error.retryable => {

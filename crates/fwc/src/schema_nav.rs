@@ -445,7 +445,7 @@ fn walk_property(
     for property in collect_child_properties(&normalized) {
         let nested_path = format!("{path}.{}", property.name);
         let nested_constraints =
-            merge_constraint_lists(&inherited_child_constraints, property.notes.into_iter());
+            merge_constraint_lists(&inherited_child_constraints, property.notes);
         walk_property(
             &nested_path,
             &property.schema,
@@ -462,7 +462,7 @@ fn walk_property(
         for property in collect_child_properties(items) {
             let nested_path = format!("{item_path}.{}", property.name);
             let nested_constraints =
-                merge_constraint_lists(&inherited_child_constraints, property.notes.into_iter());
+                merge_constraint_lists(&inherited_child_constraints, property.notes);
             walk_property(
                 &nested_path,
                 &property.schema,

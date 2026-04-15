@@ -1557,8 +1557,8 @@ mod tests {
         let (round1_secret_1, round1_package_1) = dkg_part1_with_rng(1, 2, 2, &mut rng1).unwrap();
         let (round1_secret_2, round1_package_2) = dkg_part1_with_rng(2, 2, 2, &mut rng2).unwrap();
 
-        let round1_for_1 = BTreeMap::from([(2, round1_package_2.clone())]);
-        let round1_for_2 = BTreeMap::from([(1, round1_package_1.clone())]);
+        let round1_for_1 = BTreeMap::from([(2, round1_package_2)]);
+        let round1_for_2 = BTreeMap::from([(1, round1_package_1)]);
 
         let (round2_secret_1, outbound_1) = dkg_part2(&round1_secret_1, &round1_for_1).unwrap();
         let (_round2_secret_2, _outbound_2) = dkg_part2(&round1_secret_2, &round1_for_2).unwrap();

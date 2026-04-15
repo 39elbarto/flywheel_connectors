@@ -259,7 +259,7 @@ async fn live_introspect() {
     let has_message = ops.iter().any(|op| {
         op.get("id")
             .and_then(|id| id.as_str())
-            .map_or(false, |id| id == "anthropic.message")
+            == Some("anthropic.message")
     });
     assert!(
         has_message,

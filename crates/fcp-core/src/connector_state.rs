@@ -6195,7 +6195,7 @@ mod tests {
         (detector, fork)
     }
 
-    /// Scenario: conflict-heavy merge — two branches with different lease_seq
+    /// Scenario: conflict-heavy merge — two branches with different `lease_seq`
     /// values produce a deterministic winner with decision diagnostics.
     #[test]
     fn regression_lease_conflict_deterministic_winner() {

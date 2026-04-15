@@ -4,7 +4,7 @@
 //! Telegram bot token (e.g. `123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11`).
 //! When the token is absent, tests skip gracefully with a descriptive message.
 //!
-//! All operations are READ-ONLY (health check calls getMe, get_file with a
+//! All operations are READ-ONLY (health check calls `getMe`, `get_file` with a
 //! nonexistent ID) — no messages are sent.
 
 use fcp_core::{CapabilityConstraints, CapabilityToken};

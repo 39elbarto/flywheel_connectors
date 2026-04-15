@@ -1990,11 +1990,11 @@ mod tests {
         let op = OperationId::new("op.test").unwrap();
         let cap = CapabilityId::new("cap.test").unwrap();
 
-        let verified = verifier
+        let result = verifier
             .verify(token, &cap, &op, &[])
             .expect("Verification failed");
 
-        assert_eq!(verified.claims().get_capability_id(), Some("cap.test"));
+        assert_eq!(result.claims().get_capability_id(), Some("cap.test"));
     }
 
     #[test]
@@ -4021,11 +4021,11 @@ mod tests {
         let cap = CapabilityId::new("cap.test").unwrap();
 
         // verify() consumes the Unverified token and produces Verified
-        let verified: CapabilityToken<Verified> =
+        let result: CapabilityToken<Verified> =
             verifier.verify(unverified, &cap, &op, &[]).unwrap();
 
         // Verified token has claims
-        assert!(verified.claims().get_capability_id().is_some());
+        assert!(result.claims().get_capability_id().is_some());
     }
 
     #[test]
@@ -4051,9 +4051,9 @@ mod tests {
         let op = OperationId::new("op.read").unwrap();
         let cap = CapabilityId::new("cap.phantom").unwrap();
 
-        let verified = verifier.verify(token, &cap, &op, &[]).unwrap();
-        assert_eq!(verified.claims().get_capability_id(), Some("cap.phantom"));
-        assert_eq!(verified.claims().get_zone_id(), Some("z:work"));
+        let result = verifier.verify(token, &cap, &op, &[]).unwrap();
+        assert_eq!(result.claims().get_capability_id(), Some("cap.phantom"));
+        assert_eq!(result.claims().get_zone_id(), Some("z:work"));
     }
 
     #[test]
@@ -4083,8 +4083,8 @@ mod tests {
         let cap = CapabilityId::new("cap.raw").unwrap();
 
         // raw() also works on Verified (verify consumes the unverified token)
-        let verified = verifier.verify(unverified, &cap, &op, &[]).unwrap();
-        let _raw_verified = verified.raw().to_cbor().unwrap();
+        let result = verifier.verify(unverified, &cap, &op, &[]).unwrap();
+        let _raw_verified = result.raw().to_cbor().unwrap();
     }
 
     #[test]
@@ -4110,8 +4110,8 @@ mod tests {
         let op = OperationId::new("op.down").unwrap();
         let cap = CapabilityId::new("cap.down").unwrap();
 
-        let verified = verifier.verify(token, &cap, &op, &[]).unwrap();
-        let downgraded: CapabilityToken<Unverified> = verified.downgrade();
+        let result = verifier.verify(token, &cap, &op, &[]).unwrap();
+        let downgraded: CapabilityToken<Unverified> = result.downgrade();
 
         // Downgraded token can be re-verified (verify consumes it)
         let re_verified = verifier.verify(downgraded, &cap, &op, &[]).unwrap();
@@ -4178,10 +4178,10 @@ mod tests {
         let op = OperationId::new("op.clone").unwrap();
         let cap = CapabilityId::new("cap.clone").unwrap();
 
-        let verified = verifier.verify(token, &cap, &op, &[]).unwrap();
+        let result = verifier.verify(token, &cap, &op, &[]).unwrap();
 
         // Clone a verified token - clone preserves Verified state
-        let cloned = verified.clone();
+        let cloned = result;
         assert_eq!(cloned.claims().get_capability_id(), Some("cap.clone"));
     }
 
@@ -4240,12 +4240,12 @@ mod tests {
         let cap = CapabilityId::new("cap.consume").unwrap();
 
         // verify() takes ownership — `token` is moved here
-        let verified = verifier.verify(token, &cap, &op, &[]).unwrap();
+        let result = verifier.verify(token, &cap, &op, &[]).unwrap();
 
         // `token` cannot be used after this point (compiler enforces)
         // Verified token works:
         assert_eq!(
-            verified.claims().get_capability_id(),
+            result.claims().get_capability_id(),
             Some("cap.consume")
         );
     }
@@ -4281,8 +4281,8 @@ mod tests {
 
         // Token is still usable — can call raw() or verify() again
         let _raw = token.raw().to_cbor().unwrap();
-        let verified = verifier.verify(token, &cap, &op, &[]).unwrap();
-        assert_eq!(verified.claims().get_zone_id(), Some("z:work"));
+        let result = verifier.verify(token, &cap, &op, &[]).unwrap();
+        assert_eq!(result.claims().get_zone_id(), Some("z:work"));
     }
 
     #[test]
@@ -4310,8 +4310,8 @@ mod tests {
         let cap = CapabilityId::new("cap.serde").unwrap();
 
         // Verify first, then serialize the verified token
-        let verified = verifier.verify(token, &cap, &op, &[]).unwrap();
-        let bytes = verified.raw().to_cbor().unwrap();
+        let result = verifier.verify(token, &cap, &op, &[]).unwrap();
+        let bytes = result.raw().to_cbor().unwrap();
 
         // Deserialize produces Unverified, not Verified
         let raw = CoseToken::from_cbor(&bytes).unwrap();
@@ -4466,7 +4466,7 @@ mod tests {
         let json = serde_json::to_string(&bound).unwrap();
         let back: ZoneBound<String> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.zone_id(), &ZoneId::community());
-        let val = back.with_zone_check(&ZoneId::community(), |v| v.clone());
+        let val = back.with_zone_check(&ZoneId::community(), std::clone::Clone::clone);
         assert_eq!(val.unwrap(), "payload");
     }
 
@@ -4489,7 +4489,7 @@ mod tests {
         bound
             .with_zone_check_mut(&ZoneId::private(), |v| v.push(3))
             .unwrap();
-        let result = bound.with_zone_check(&ZoneId::private(), |v| v.len());
+        let result = bound.with_zone_check(&ZoneId::private(), std::vec::Vec::len);
         assert_eq!(result.unwrap(), 3);
     }
 
@@ -4498,7 +4498,7 @@ mod tests {
         // ZoneBound has no set_zone() or rebind() — zone is fixed at construction.
         // This test verifies the API surface by checking clone preserves zone.
         let original = ZoneBound::bind(42_u32, ZoneId::owner());
-        let cloned = original.clone();
+        let cloned = original;
         assert_eq!(cloned.zone_id(), &ZoneId::owner());
         // Cross-zone access still rejected on clone
         assert!(cloned.with_zone_check(&ZoneId::public(), |v| *v).is_err());

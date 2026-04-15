@@ -3154,8 +3154,7 @@ mod tests {
         let chosen = evidence.chosen_node.as_ref().unwrap();
         assert!(
             chosen.as_str().contains("work-node"),
-            "Chosen node should be the work-zone node, got: {}",
-            chosen
+            "Chosen node should be the work-zone node, got: {chosen}",
         );
         // The public-only node should not appear in candidate scores
         assert!(

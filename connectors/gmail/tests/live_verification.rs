@@ -1,10 +1,10 @@
 //! Live verification tests for the Gmail connector against the real Gmail API.
 //!
 //! These tests require a `GMAIL_ACCESS_TOKEN` environment variable with a valid
-//! OAuth2 access token. When the token is absent, tests skip gracefully with a
+//! `OAuth2` access token. When the token is absent, tests skip gracefully with a
 //! descriptive message.
 //!
-//! All operations are READ-ONLY (gmail.list_labels) and do not create, modify,
+//! All operations are READ-ONLY (`gmail.list_labels`) and do not create, modify,
 //! or delete any data.
 
 use fcp_core::{CapabilityConstraints, CapabilityToken};

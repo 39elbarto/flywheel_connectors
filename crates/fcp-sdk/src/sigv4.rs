@@ -681,9 +681,9 @@ mod tests {
             headers: BTreeMap::from([("host".into(), "s3.amazonaws.com".into())]),
             payload_hash: UNSIGNED_PAYLOAD.into(),
         };
-        let presigned = signer.presign(&request, 604800);
+        let presigned = signer.presign(&request, 604_800);
         assert!(presigned.url.contains("X-Amz-Expires=604800"));
-        assert_eq!(presigned.expires_in_secs, 604800);
+        assert_eq!(presigned.expires_in_secs, 604_800);
     }
 
     #[test]
@@ -752,12 +752,12 @@ mod tests {
             headers: BTreeMap::from([("host".into(), "example.amazonaws.com".into())]),
             payload_hash: EMPTY_PAYLOAD_HASH.into(),
         };
-        let signed = signer.sign(&request);
+        let sign_result = signer.sign(&request);
         // Credential should contain: access_key/date/region/service/aws4_request
         assert!(
-            signed.authorization.contains("20130524/us-east-1/s3/aws4_request"),
+            sign_result.authorization.contains("20130524/us-east-1/s3/aws4_request"),
             "credential scope must include date/region/service: {}",
-            signed.authorization
+            sign_result.authorization
         );
     }
 

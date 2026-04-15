@@ -1827,7 +1827,7 @@ mod tests {
     // Default simulate() — default-deny enforcement (MOR/C3.5)
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Minimal connector that does NOT override simulate(), relying on
+    /// Minimal connector that does NOT override `simulate()`, relying on
     /// the trait default to prove that it denies all operations.
     struct DefaultSimulateConnector {
         base: BaseConnector,
@@ -1902,7 +1902,7 @@ mod tests {
         }
     }
 
-    /// Connector that explicitly overrides simulate() to allow its
+    /// Connector that explicitly overrides `simulate()` to allow its
     /// known operation, proving the override pattern works.
     struct OverrideSimulateConnector {
         base: BaseConnector,

@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![allow(clippy::missing_errors_doc, clippy::too_many_lines)]
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
@@ -255,6 +256,7 @@ pub struct MultiNodeMeshHarness {
 }
 
 impl MultiNodeMeshHarness {
+    #[allow(clippy::unused_async)]
     pub async fn new_three_node(seed: u64) -> Result<Self, HarnessError> {
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_CHANNEL_CAPACITY);
         let mut tasks = TaskGroup::new();
@@ -306,7 +308,7 @@ impl MultiNodeMeshHarness {
     }
 
     #[must_use]
-    pub fn now_ms(&self) -> u64 {
+    pub const fn now_ms(&self) -> u64 {
         self.now_ms
     }
 
@@ -771,20 +773,13 @@ impl MultiNodeMeshHarness {
     }
 
     fn pump_outbound(&mut self) {
-        loop {
-            match self.outbound_rx.try_recv() {
-                Ok(outbound) => {
-                    let _ = self.schedule_message(
-                        &outbound.from,
-                        &outbound.to,
-                        outbound.message,
-                        outbound.created_at_ms,
-                    );
-                }
-                Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
-                    break;
-                }
-            }
+        while let Ok(outbound) = self.outbound_rx.try_recv() {
+            let _ = self.schedule_message(
+                &outbound.from,
+                &outbound.to,
+                outbound.message,
+                outbound.created_at_ms,
+            );
         }
     }
 
@@ -999,6 +994,7 @@ async fn run_node_task(
                     GossipMessage::Response(_response) => {}
                     GossipMessage::ReconcileRequest(_request) => {}
                     GossipMessage::ReconcileResponse(_response) => {}
+                    GossipMessage::RevocationPush(_push) => {}
                 }
 
                 observed_messages.push(observed);
@@ -1123,7 +1119,7 @@ fn test_symbol(
 async fn multi_node_harness_routes_real_gossip_messages() {
     let zone_id = ZoneId::work();
     let epoch = EpochId::new("epoch-harness");
-    let mut harness = MultiNodeMeshHarness::new_three_node(0xC0FFEE)
+    let mut harness = MultiNodeMeshHarness::new_three_node(0x00C0_FFEE)
         .await
         .unwrap();
     harness.register_all_peers().await.unwrap();
@@ -1219,7 +1215,7 @@ async fn multi_node_harness_routes_real_gossip_messages() {
 async fn multi_node_harness_enforces_latency_loss_and_partitions() {
     let zone_id = ZoneId::work();
     let epoch = EpochId::new("epoch-network-controls");
-    let mut harness = MultiNodeMeshHarness::new_three_node(0xBAD5EED)
+    let mut harness = MultiNodeMeshHarness::new_three_node(0x0BAD_5EED)
         .await
         .unwrap();
     harness.register_all_peers().await.unwrap();
@@ -1328,7 +1324,7 @@ async fn multi_node_harness_enforces_latency_loss_and_partitions() {
 async fn multi_node_harness_supports_symbol_store_seeding() {
     let zone_id = ZoneId::work();
     let object_id = test_object_id("symbol-seeding");
-    let mut harness = MultiNodeMeshHarness::new_three_node(0xFACEFEED)
+    let mut harness = MultiNodeMeshHarness::new_three_node(0xFACE_FEED)
         .await
         .unwrap();
     let node = harness.node_ids()[0].clone();
@@ -1366,7 +1362,7 @@ async fn multi_node_harness_supports_symbol_store_seeding() {
 async fn gossip_convergence_all_nodes_agree_after_exchange() {
     let zone_id = ZoneId::work();
     let epoch = EpochId::new("epoch-convergence");
-    let mut harness = MultiNodeMeshHarness::new_three_node(0xC0FFEE_01)
+    let mut harness = MultiNodeMeshHarness::new_three_node(0xC0FF_EE01)
         .await
         .unwrap();
     harness.register_all_peers().await.unwrap();
@@ -1537,8 +1533,8 @@ async fn symbol_distribution_across_three_nodes() {
         zone_id: zone_id.clone(),
         oti: fcp_store::ObjectTransmissionInfo::from(
             fcp_raptorq::ObjectTransmissionInformation::new(
-                (source_symbols as u64) * (symbol_size as u64),
-                symbol_size as u16,
+                u64::from(source_symbols) * (symbol_size as u64),
+                u16::try_from(symbol_size).expect("symbol_size fits in u16"),
                 1,
                 1,
                 1,
@@ -1654,8 +1650,8 @@ async fn object_reconstruction_from_distributed_symbols() {
         zone_id: zone_id.clone(),
         oti: fcp_store::ObjectTransmissionInfo::from(
             fcp_raptorq::ObjectTransmissionInformation::new(
-                (source_symbols as u64) * (symbol_size as u64),
-                symbol_size as u16,
+                u64::from(source_symbols) * (symbol_size as u64),
+                u16::try_from(symbol_size).expect("symbol_size fits in u16"),
                 1,
                 1,
                 1,
@@ -1731,7 +1727,7 @@ async fn object_reconstruction_from_distributed_symbols() {
 async fn partition_recovery_nodes_reconverge_after_healing() {
     let zone_id = ZoneId::work();
     let epoch = EpochId::new("epoch-partition");
-    let mut harness = MultiNodeMeshHarness::new_three_node(0xFADE_01)
+    let mut harness = MultiNodeMeshHarness::new_three_node(0x00FA_DE01)
         .await
         .unwrap();
     harness.register_all_peers().await.unwrap();

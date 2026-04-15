@@ -56,7 +56,7 @@ fn test_header() -> ObjectHeader {
     }
 }
 
-fn make_object_id(seed: u8) -> ObjectId {
+const fn make_object_id(seed: u8) -> ObjectId {
     ObjectId::from_bytes([seed; 32])
 }
 

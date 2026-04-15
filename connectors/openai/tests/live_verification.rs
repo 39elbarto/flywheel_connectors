@@ -1,7 +1,7 @@
-//! Live verification tests for the OpenAI connector against the real OpenAI API.
+//! Live verification tests for the `OpenAI` connector against the real `OpenAI` API.
 //!
 //! These tests require an `OPENAI_API_KEY` environment variable with a valid
-//! OpenAI API key. When the key is absent, tests skip gracefully with a
+//! `OpenAI` API key. When the key is absent, tests skip gracefully with a
 //! descriptive message.
 //!
 //! The chat completion test uses `openai.simple_chat` with a trivial prompt

@@ -4,7 +4,7 @@
 //! Stripe secret key (test-mode key recommended, e.g. `sk_test_...`). When the
 //! key is absent, tests skip gracefully with a descriptive message.
 //!
-//! All operations are READ-ONLY (stripe.list_customers, stripe.get_balance) and
+//! All operations are READ-ONLY (`stripe.list_customers`, `stripe.get_balance`) and
 //! do not create or mutate any resources.
 
 use fcp_core::{CapabilityConstraints, CapabilityToken};

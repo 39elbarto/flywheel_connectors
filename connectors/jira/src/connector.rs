@@ -3537,6 +3537,13 @@ mod tests {
             | "jira.sync.push_bead" => "jira.write",
             _ => "jira.read",
         };
+        let constraints = fcp_core::CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut constraints_cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut constraints_cbor).unwrap();
+
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
@@ -3545,6 +3552,7 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&constraints_cbor)
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)

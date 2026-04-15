@@ -806,11 +806,21 @@ impl KubernetesConnector {
                 status_code: 400,
                 message: "Missing required field: command (must be an array of strings)".into(),
             })?;
-        let command_strs: Vec<String> = command
-            .iter()
-            .filter_map(serde_json::Value::as_str)
-            .map(str::to_string)
-            .collect();
+        let mut command_strs: Vec<String> = Vec::with_capacity(command.len());
+        for (i, item) in command.iter().enumerate() {
+            match item.as_str() {
+                Some(s) => command_strs.push(s.to_string()),
+                None => {
+                    return Err(KubernetesError::Api {
+                        status_code: 400,
+                        message: format!(
+                            "command[{i}] must be a string, got {}",
+                            item_type_name(item)
+                        ),
+                    });
+                }
+            }
+        }
         if command_strs.is_empty() {
             return Err(KubernetesError::Api {
                 status_code: 400,
@@ -1133,6 +1143,18 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
             status_code: 400,
             message: format!("Missing required field: {field}"),
         })
+}
+
+/// Human-readable type name for a JSON value (used in error messages).
+const fn item_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 fn is_local_test_host(host: &str) -> bool {

@@ -620,7 +620,8 @@ impl NotionConnector {
                         "type": "object",
                         "properties": {
                             "results": { "type": "array" },
-                            "has_more": { "type": "boolean" }
+                            "has_more": { "type": "boolean" },
+                            "next_cursor": { "type": ["string", "null"], "description": "Cursor for the next page of results" }
                         }
                     }),
                     "notion.read",
@@ -656,6 +657,7 @@ impl NotionConnector {
                         "properties": {
                             "results": { "type": "array", "description": "Redacted search results" },
                             "has_more": { "type": "boolean" },
+                            "next_cursor": { "type": ["string", "null"], "description": "Cursor for the next page of results" },
                             "result_count": { "type": "integer" },
                             "sensitivity": { "type": "string" },
                             "provenance": { "type": "object" },
@@ -775,7 +777,8 @@ impl NotionConnector {
                         "type": "object",
                         "properties": {
                             "results": { "type": "array" },
-                            "has_more": { "type": "boolean" }
+                            "has_more": { "type": "boolean" },
+                            "next_cursor": { "type": ["string", "null"], "description": "Cursor for the next page of results" }
                         }
                     }),
                     "notion.read",
@@ -861,7 +864,8 @@ impl NotionConnector {
                         "type": "object",
                         "properties": {
                             "results": { "type": "array" },
-                            "has_more": { "type": "boolean" }
+                            "has_more": { "type": "boolean" },
+                            "next_cursor": { "type": ["string", "null"], "description": "Cursor for the next page of results" }
                         }
                     }),
                     "notion.read",
@@ -1227,7 +1231,8 @@ impl NotionConnector {
 
         Ok(json!({
             "results": result.results,
-            "has_more": result.has_more
+            "has_more": result.has_more,
+            "next_cursor": result.next_cursor
         }))
     }
 
@@ -1280,7 +1285,8 @@ impl NotionConnector {
 
         Ok(json!({
             "results": result.results,
-            "has_more": result.has_more
+            "has_more": result.has_more,
+            "next_cursor": result.next_cursor
         }))
     }
 
@@ -1418,6 +1424,15 @@ mod tests {
         cap: &str,
         operations: &[&str],
     ) -> CapabilityToken {
+        use fcp_core::CapabilityConstraints;
+
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut constraints_cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut constraints_cbor).unwrap();
+
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
@@ -1426,6 +1441,7 @@ mod tests {
             .operations(operations)
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&constraints_cbor)
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)

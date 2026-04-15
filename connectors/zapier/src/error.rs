@@ -87,12 +87,9 @@ impl ZapierError {
                 retryable: self.is_retryable(),
                 retry_after: None,
             },
-            Self::RateLimited { retry_after_ms } => FcpError::External {
-                service: "zapier".into(),
-                message: format!("Rate limited, retry after {retry_after_ms}ms"),
-                status_code: Some(429),
-                retryable: true,
-                retry_after: self.retry_after(),
+            Self::RateLimited { retry_after_ms } => FcpError::RateLimited {
+                retry_after_ms: *retry_after_ms,
+                violation: None,
             },
             Self::Unauthorized => FcpError::External {
                 service: "zapier".into(),
@@ -363,17 +360,14 @@ mod tests {
         })
         .to_fcp_error()
         {
-            FcpError::External {
-                status_code,
-                retryable,
-                retry_after,
-                ..
+            FcpError::RateLimited {
+                retry_after_ms,
+                violation,
             } => {
-                assert_eq!(status_code, Some(429));
-                assert!(retryable);
-                assert_eq!(retry_after, Some(Duration::from_secs(60)));
+                assert_eq!(retry_after_ms, 60_000);
+                assert!(violation.is_none());
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected RateLimited, got {other:?}"),
         }
     }
 
@@ -510,14 +504,16 @@ mod tests {
     }
 
     #[test]
-    fn rate_limited_to_fcp_error_has_service() {
+    fn rate_limited_to_fcp_error_has_retry_ms() {
         match (ZapierError::RateLimited {
             retry_after_ms: 1000,
         })
         .to_fcp_error()
         {
-            FcpError::External { service, .. } => assert_eq!(service, "zapier"),
-            other => panic!("expected External, got {other:?}"),
+            FcpError::RateLimited {
+                retry_after_ms, ..
+            } => assert_eq!(retry_after_ms, 1000),
+            other => panic!("expected RateLimited, got {other:?}"),
         }
     }
 

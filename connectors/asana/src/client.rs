@@ -16,6 +16,25 @@ use crate::{
 /// Default Asana REST API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://app.asana.com/api/1.0";
 
+/// Validate a path segment to prevent path traversal.
+fn sanitize_path_segment(segment: &str) -> AsanaResult<&str> {
+    let lower = segment.to_ascii_lowercase();
+    if segment.trim().is_empty()
+        || segment.contains('/')
+        || segment.contains('\\')
+        || segment.contains("..")
+        || segment.contains('\0')
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(AsanaError::Api {
+            status_code: 400,
+            message: "Invalid path segment: contains illegal characters".into(),
+        });
+    }
+    Ok(segment)
+}
+
 /// Authentication mode for the Asana API.
 #[derive(Clone)]
 pub enum AsanaAuth {
@@ -219,25 +238,28 @@ impl AsanaClient {
 
     /// List all projects in a workspace.
     pub async fn list_projects(&self, workspace_gid: &str) -> AsanaResult<serde_json::Value> {
-        self.get(&format!("/workspaces/{workspace_gid}/projects"))
-            .await
+        let safe_gid = sanitize_path_segment(workspace_gid)?;
+        self.get(&format!("/workspaces/{safe_gid}/projects")).await
     }
 
     /// Get a single project by GID.
     pub async fn get_project(&self, project_gid: &str) -> AsanaResult<serde_json::Value> {
-        self.get(&format!("/projects/{project_gid}")).await
+        let safe_gid = sanitize_path_segment(project_gid)?;
+        self.get(&format!("/projects/{safe_gid}")).await
     }
 
     // -- Tasks --
 
     /// List tasks in a project.
     pub async fn list_tasks(&self, project_gid: &str) -> AsanaResult<serde_json::Value> {
-        self.get(&format!("/projects/{project_gid}/tasks")).await
+        let safe_gid = sanitize_path_segment(project_gid)?;
+        self.get(&format!("/projects/{safe_gid}/tasks")).await
     }
 
     /// Get a single task by GID.
     pub async fn get_task(&self, task_gid: &str) -> AsanaResult<serde_json::Value> {
-        self.get(&format!("/tasks/{task_gid}")).await
+        let safe_gid = sanitize_path_segment(task_gid)?;
+        self.get(&format!("/tasks/{safe_gid}")).await
     }
 
     /// Create a new task.
@@ -251,19 +273,22 @@ impl AsanaClient {
         task_gid: &str,
         body: &serde_json::Value,
     ) -> AsanaResult<serde_json::Value> {
-        self.put(&format!("/tasks/{task_gid}"), body).await
+        let safe_gid = sanitize_path_segment(task_gid)?;
+        self.put(&format!("/tasks/{safe_gid}"), body).await
     }
 
     /// Delete a task.
     pub async fn delete_task(&self, task_gid: &str) -> AsanaResult<serde_json::Value> {
-        self.delete(&format!("/tasks/{task_gid}")).await
+        let safe_gid = sanitize_path_segment(task_gid)?;
+        self.delete(&format!("/tasks/{safe_gid}")).await
     }
 
     // -- Sections --
 
     /// List sections in a project.
     pub async fn list_sections(&self, project_gid: &str) -> AsanaResult<serde_json::Value> {
-        self.get(&format!("/projects/{project_gid}/sections")).await
+        let safe_gid = sanitize_path_segment(project_gid)?;
+        self.get(&format!("/projects/{safe_gid}/sections")).await
     }
 
     // -- Search --
@@ -274,9 +299,10 @@ impl AsanaClient {
         workspace_gid: &str,
         query: &str,
     ) -> AsanaResult<serde_json::Value> {
+        let safe_gid = sanitize_path_segment(workspace_gid)?;
         let encoded = urlencoding::encode(query);
         self.get(&format!(
-            "/workspaces/{workspace_gid}/tasks/search?text={encoded}"
+            "/workspaces/{safe_gid}/tasks/search?text={encoded}"
         ))
         .await
     }

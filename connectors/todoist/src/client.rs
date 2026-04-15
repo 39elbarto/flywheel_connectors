@@ -16,6 +16,25 @@ use crate::{
 /// Default `Todoist` REST API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.todoist.com/rest/v2";
 
+/// Validate a path segment to prevent path traversal.
+fn sanitize_path_segment(segment: &str) -> TodoistResult<&str> {
+    let lower = segment.to_ascii_lowercase();
+    if segment.trim().is_empty()
+        || segment.contains('/')
+        || segment.contains('\\')
+        || segment.contains("..")
+        || segment.contains('\0')
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(TodoistError::Api {
+            status_code: 400,
+            message: "Invalid path segment: contains illegal characters".into(),
+        });
+    }
+    Ok(segment)
+}
+
 /// Authentication mode for the `Todoist` API.
 #[derive(Clone)]
 pub enum TodoistAuth {
@@ -233,12 +252,14 @@ impl TodoistClient {
 
     /// Mark a task as complete (POST `/tasks/{task_id}/close`).
     pub async fn complete_task(&self, task_id: &str) -> TodoistResult<serde_json::Value> {
-        self.post_no_body(&format!("/tasks/{task_id}/close")).await
+        let safe_id = sanitize_path_segment(task_id)?;
+        self.post_no_body(&format!("/tasks/{safe_id}/close")).await
     }
 
     /// Delete a task.
     pub async fn delete_task(&self, task_id: &str) -> TodoistResult<serde_json::Value> {
-        self.delete(&format!("/tasks/{task_id}")).await
+        let safe_id = sanitize_path_segment(task_id)?;
+        self.delete(&format!("/tasks/{safe_id}")).await
     }
 }
 

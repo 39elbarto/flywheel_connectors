@@ -83,19 +83,13 @@ impl AsanaError {
                 retryable: self.is_retryable(),
                 retry_after: None,
             },
-            Self::RateLimited { retry_after_ms } => FcpError::External {
-                service: "asana".into(),
-                message: format!("Rate limited, retry after {retry_after_ms}ms"),
-                status_code: Some(429),
-                retryable: true,
-                retry_after: self.retry_after(),
+            Self::RateLimited { retry_after_ms } => FcpError::RateLimited {
+                retry_after_ms: *retry_after_ms,
+                violation: None,
             },
-            Self::Unauthorized => FcpError::External {
-                service: "asana".into(),
-                message: "Authentication failed".into(),
-                status_code: Some(401),
-                retryable: false,
-                retry_after: None,
+            Self::Unauthorized => FcpError::Unauthorized {
+                code: 2001,
+                message: "Authentication failed: invalid or expired access token".into(),
             },
             Self::Forbidden => FcpError::External {
                 service: "asana".into(),
@@ -104,12 +98,8 @@ impl AsanaError {
                 retryable: false,
                 retry_after: None,
             },
-            Self::NotFound { resource } => FcpError::External {
-                service: "asana".into(),
-                message: format!("Not found: {resource}"),
-                status_code: Some(404),
-                retryable: false,
-                retry_after: None,
+            Self::NotFound { resource } => FcpError::ResourceNotFound {
+                resource: resource.clone(),
             },
         }
     }
@@ -268,17 +258,11 @@ mod tests {
     #[test]
     fn unauthorized_to_fcp_error() {
         match AsanaError::Unauthorized.to_fcp_error() {
-            FcpError::External {
-                service,
-                status_code,
-                retryable,
-                ..
-            } => {
-                assert_eq!(service, "asana");
-                assert_eq!(status_code, Some(401));
-                assert!(!retryable);
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(message.contains("Authentication failed"));
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected Unauthorized, got {other:?}"),
         }
     }
 
@@ -306,17 +290,10 @@ mod tests {
         })
         .to_fcp_error()
         {
-            FcpError::External {
-                status_code,
-                message,
-                retryable,
-                ..
-            } => {
-                assert_eq!(status_code, Some(404));
-                assert!(message.contains("task_abc"));
-                assert!(!retryable);
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "task_abc");
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected ResourceNotFound, got {other:?}"),
         }
     }
 
@@ -327,17 +304,14 @@ mod tests {
         })
         .to_fcp_error()
         {
-            FcpError::External {
-                status_code,
-                retryable,
-                retry_after,
-                ..
+            FcpError::RateLimited {
+                retry_after_ms,
+                violation,
             } => {
-                assert_eq!(status_code, Some(429));
-                assert!(retryable);
-                assert_eq!(retry_after, Some(Duration::from_secs(60)));
+                assert_eq!(retry_after_ms, 60_000);
+                assert!(violation.is_none());
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected RateLimited, got {other:?}"),
         }
     }
 
@@ -545,19 +519,14 @@ mod tests {
         })
         .to_fcp_error()
         {
-            FcpError::External {
-                retry_after,
-                retryable,
-                status_code,
-                service,
-                ..
+            FcpError::RateLimited {
+                retry_after_ms,
+                violation,
             } => {
-                assert_eq!(retry_after, Some(Duration::from_secs(5)));
-                assert!(retryable);
-                assert_eq!(status_code, Some(429));
-                assert_eq!(service, "asana");
+                assert_eq!(retry_after_ms, 5000);
+                assert!(violation.is_none());
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected RateLimited, got {other:?}"),
         }
     }
 
@@ -579,10 +548,11 @@ mod tests {
     #[test]
     fn unauthorized_fcp_error_message() {
         match AsanaError::Unauthorized.to_fcp_error() {
-            FcpError::External { message, .. } => {
-                assert_eq!(message, "Authentication failed");
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(message.contains("Authentication failed"));
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected Unauthorized, got {other:?}"),
         }
     }
 
@@ -597,16 +567,16 @@ mod tests {
     }
 
     #[test]
-    fn not_found_fcp_error_message_format() {
+    fn not_found_fcp_error_is_resource_not_found() {
         match (AsanaError::NotFound {
             resource: "project_xyz".into(),
         })
         .to_fcp_error()
         {
-            FcpError::External { message, .. } => {
-                assert_eq!(message, "Not found: project_xyz");
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "project_xyz");
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected ResourceNotFound, got {other:?}"),
         }
     }
 

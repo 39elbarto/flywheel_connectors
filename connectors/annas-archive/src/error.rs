@@ -25,6 +25,10 @@ pub enum AnnasArchiveError {
 
     #[error("Service unavailable")]
     ServiceUnavailable,
+
+    /// Invalid input (missing field, path traversal, etc.).
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl AnnasArchiveError {
@@ -84,6 +88,10 @@ impl AnnasArchiveError {
                 status_code: Some(503),
                 retryable: true,
                 retry_after: self.retry_after(),
+            },
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Invalid input: {msg}"),
             },
         }
     }

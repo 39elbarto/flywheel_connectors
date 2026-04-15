@@ -667,10 +667,9 @@ impl ElasticsearchConnector {
     ) -> Result<serde_json::Value, ElasticsearchError> {
         let index = require_str(input, "index")?;
         let document_id = input.get("id").and_then(|v| v.as_str());
-        let document = input.get("document").ok_or(ElasticsearchError::Api {
-            status_code: 400,
-            message: "Missing required field: document".into(),
-        })?;
+        let document = input.get("document").ok_or(ElasticsearchError::InvalidInput(
+            "Missing required field: document".into(),
+        ))?;
         client.index_document(index, document_id, document).await
     }
 
@@ -683,10 +682,9 @@ impl ElasticsearchConnector {
             input
                 .get("operations")
                 .and_then(|v| v.as_array())
-                .ok_or(ElasticsearchError::Api {
-                    status_code: 400,
-                    message: "Missing required field: operations".into(),
-                })?;
+                .ok_or(ElasticsearchError::InvalidInput(
+                    "Missing required field: operations".into(),
+                ))?;
         client.bulk(operations).await
     }
 
@@ -725,10 +723,7 @@ fn require_str<'a>(
     input
         .get(field)
         .and_then(|v| v.as_str())
-        .ok_or_else(|| ElasticsearchError::Api {
-            status_code: 400,
-            message: format!("Missing required field: {field}"),
-        })
+        .ok_or_else(|| ElasticsearchError::InvalidInput(format!("Missing required field: {field}")))
 }
 
 /// Extract a required i64 field from input.
@@ -736,10 +731,7 @@ fn require_i64(input: &serde_json::Value, field: &str) -> Result<i64, Elasticsea
     input
         .get(field)
         .and_then(|v| v.as_i64())
-        .ok_or_else(|| ElasticsearchError::Api {
-            status_code: 400,
-            message: format!("Missing required field: {field}"),
-        })
+        .ok_or_else(|| ElasticsearchError::InvalidInput(format!("Missing required field: {field}")))
 }
 
 /// Build the operations info for introspection.

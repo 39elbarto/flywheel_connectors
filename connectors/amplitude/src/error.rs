@@ -115,7 +115,8 @@ impl AmplitudeError {
                 retryable: false,
                 retry_after: None,
             },
-            Self::InvalidInput(msg) => FcpError::Internal {
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 1005,
                 message: format!("Invalid input: {msg}"),
             },
         }
@@ -737,12 +738,14 @@ mod tests {
     }
 
     #[test]
-    fn invalid_input_to_fcp_internal() {
+    fn invalid_input_to_fcp_invalid_request() {
         match AmplitudeError::InvalidInput("bad field".into()).to_fcp_error() {
-            FcpError::Internal { message } => {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1005);
+                assert!(message.contains("Invalid input"));
                 assert!(message.contains("bad field"));
             }
-            other => panic!("expected Internal, got {other:?}"),
+            other => panic!("expected InvalidRequest, got {other:?}"),
         }
     }
 }

@@ -808,10 +808,9 @@ impl SendGridConnector {
     ) -> Result<serde_json::Value, SendGridError> {
         // Validate required top-level fields
         if input.get("personalizations").is_none() && input.get("to").is_none() {
-            return Err(SendGridError::Api {
-                status_code: 400,
-                message: "Missing required field: personalizations or to".into(),
-            });
+            return Err(SendGridError::InvalidInput(
+                "Missing required field: personalizations or to".into(),
+            ));
         }
         client.send_mail(input).await
     }
@@ -931,10 +930,7 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
     input
         .get(field)
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| SendGridError::Api {
-            status_code: 400,
-            message: format!("Missing required field: {field}"),
-        })
+        .ok_or_else(|| SendGridError::InvalidInput(format!("Missing required field: {field}")))
 }
 
 /// Build the provisioning recipe for the `SendGrid` connector.

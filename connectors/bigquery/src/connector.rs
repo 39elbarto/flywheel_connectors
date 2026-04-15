@@ -554,9 +554,10 @@ impl BigQueryConnector {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .or_else(|| self.config.as_ref().and_then(|c| c.project_id.as_deref()))
-            .ok_or_else(|| BigQueryError::Api {
-                status_code: 400,
-                message: "Missing required field: project_id (not in input or config)".into(),
+            .ok_or_else(|| {
+                BigQueryError::InvalidInput(
+                    "Missing required field: project_id (not in input or config)".into(),
+                )
             })
     }
 
@@ -608,17 +609,15 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
     let value = input
         .get(field)
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| BigQueryError::Api {
-            status_code: 400,
-            message: format!("Missing required field: {field}"),
+        .ok_or_else(|| {
+            BigQueryError::InvalidInput(format!("Missing required field: {field}"))
         })?;
 
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Err(BigQueryError::Api {
-            status_code: 400,
-            message: format!("Missing required field: {field}"),
-        });
+        return Err(BigQueryError::InvalidInput(format!(
+            "Missing required field: {field}"
+        )));
     }
 
     Ok(trimmed)

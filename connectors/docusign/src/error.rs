@@ -126,7 +126,8 @@ impl DocuSignError {
                 retryable: false,
                 retry_after: None,
             },
-            Self::InvalidInput(msg) => FcpError::Internal {
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 1005,
                 message: format!("Invalid input: {msg}"),
             },
         }
@@ -695,10 +696,12 @@ mod tests {
     #[test]
     fn invalid_input_to_fcp_error() {
         match DocuSignError::InvalidInput("path traversal".into()).to_fcp_error() {
-            FcpError::Internal { message } => {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1005);
+                assert!(message.contains("Invalid input"));
                 assert!(message.contains("path traversal"));
             }
-            other => panic!("expected Internal, got {other:?}"),
+            other => panic!("expected InvalidRequest, got {other:?}"),
         }
     }
 

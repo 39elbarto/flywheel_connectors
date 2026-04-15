@@ -219,10 +219,7 @@ impl BoxClient {
     /// Reject path-segment values that contain traversal characters.
     fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> BoxResult<&'a str> {
         if value.trim().is_empty() {
-            return Err(BoxError::Api {
-                status_code: 400,
-                message: format!("{field} must not be empty"),
-            });
+            return Err(BoxError::InvalidInput(format!("{field} must not be empty")));
         }
         let lower = value.to_ascii_lowercase();
         if value.contains('/')
@@ -231,10 +228,9 @@ impl BoxClient {
             || lower.contains("%2f")
             || lower.contains("%5c")
         {
-            return Err(BoxError::Api {
-                status_code: 400,
-                message: format!("{field} contains path traversal characters"),
-            });
+            return Err(BoxError::InvalidInput(format!(
+                "{field} contains path traversal characters"
+            )));
         }
         Ok(value)
     }

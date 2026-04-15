@@ -42,6 +42,10 @@ pub enum HomeAssistantError {
     /// Home Assistant unavailable (503)
     #[error("Home Assistant is unavailable")]
     Unavailable,
+
+    /// Invalid input (missing field, path traversal, etc.).
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl HomeAssistantError {
@@ -119,6 +123,10 @@ impl HomeAssistantError {
                 status_code: Some(503),
                 retryable: true,
                 retry_after: None,
+            },
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Invalid input: {msg}"),
             },
         }
     }

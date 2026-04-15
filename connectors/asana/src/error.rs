@@ -40,6 +40,10 @@ pub enum AsanaError {
     /// Resource not found (404)
     #[error("Not found: {resource}")]
     NotFound { resource: String },
+
+    /// Invalid input (missing field, path traversal, etc.).
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl AsanaError {
@@ -100,6 +104,10 @@ impl AsanaError {
             },
             Self::NotFound { resource } => FcpError::ResourceNotFound {
                 resource: resource.clone(),
+            },
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Invalid input: {msg}"),
             },
         }
     }

@@ -965,10 +965,7 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
     input
         .get(field)
         .and_then(|v| v.as_str())
-        .ok_or_else(|| SentryError::Api {
-            status_code: 400,
-            message: format!("Missing required field: {field}"),
-        })
+        .ok_or_else(|| SentryError::InvalidInput(format!("Missing required field: {field}")))
 }
 
 /// Build a single [`OperationInfo`] entry.

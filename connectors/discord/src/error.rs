@@ -221,7 +221,8 @@ impl DiscordError {
             Self::Json(e) => FcpError::Internal {
                 message: format!("JSON error: {e}"),
             },
-            Self::InvalidInput(msg) => FcpError::Internal {
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 1005,
                 message: format!("Invalid input: {msg}"),
             },
         }

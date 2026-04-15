@@ -766,10 +766,7 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
     input
         .get(field)
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| SnowflakeError::Api {
-            status_code: 400,
-            message: format!("Missing required field: {field}"),
-        })
+        .ok_or_else(|| SnowflakeError::InvalidInput(format!("Missing required field: {field}")))
 }
 
 /// Build the provisioning recipe for the Snowflake connector.

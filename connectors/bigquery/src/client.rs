@@ -71,12 +71,9 @@ fn sanitize_path_segment<'a>(value: &'a str, param_name: &str) -> BigQueryResult
         || lower.contains("%5c")
         || lower.contains("%2e")
     {
-        return Err(BigQueryError::Api {
-            status_code: 400,
-            message: format!(
-                "invalid {param_name}: must be non-empty and must not contain '/', '\\', '..', or encoded traversal sequences"
-            ),
-        });
+        return Err(BigQueryError::InvalidInput(format!(
+            "invalid {param_name}: must be non-empty and must not contain '/', '\\', '..', or encoded traversal sequences"
+        )));
     }
     Ok(trimmed)
 }
@@ -498,13 +495,7 @@ mod tests {
         let result = sanitize_path_segment("my/project", "project_id");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(
-            err,
-            BigQueryError::Api {
-                status_code: 400,
-                ..
-            }
-        ));
+        assert!(matches!(err, BigQueryError::InvalidInput(_)));
     }
 
     #[test]
@@ -582,10 +573,10 @@ mod tests {
     fn sanitize_error_message_contains_param_name() {
         let result = sanitize_path_segment("a/b", "dataset_id");
         match result.unwrap_err() {
-            BigQueryError::Api { message, .. } => {
-                assert!(message.contains("dataset_id"));
+            BigQueryError::InvalidInput(msg) => {
+                assert!(msg.contains("dataset_id"));
             }
-            other => panic!("expected Api error, got {other:?}"),
+            other => panic!("expected InvalidInput error, got {other:?}"),
         }
     }
 

@@ -44,6 +44,10 @@ pub enum TerraformError {
     /// Conflict (409) - e.g., run already in progress
     #[error("Conflict: {message}")]
     Conflict { message: String },
+
+    /// Invalid input (missing field, path traversal, etc.).
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl TerraformError {
@@ -121,6 +125,10 @@ impl TerraformError {
                 status_code: Some(409),
                 retryable: false,
                 retry_after: None,
+            },
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Invalid input: {msg}"),
             },
         }
     }

@@ -27,10 +27,9 @@ fn sanitize_path_segment(segment: &str) -> AsanaResult<&str> {
         || lower.contains("%2f")
         || lower.contains("%5c")
     {
-        return Err(AsanaError::Api {
-            status_code: 400,
-            message: "Invalid path segment: contains illegal characters".into(),
-        });
+        return Err(AsanaError::InvalidInput(
+            "Invalid path segment: contains illegal characters".into(),
+        ));
     }
     Ok(segment)
 }

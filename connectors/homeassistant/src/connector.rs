@@ -810,10 +810,7 @@ fn require_str<'a>(
     input
         .get(field)
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| HomeAssistantError::Api {
-            status_code: 400,
-            message: format!("Missing required field: {field}"),
-        })
+        .ok_or_else(|| HomeAssistantError::InvalidInput(format!("Missing required field: {field}")))
 }
 
 fn base_url_policy(base_url: &str) -> (bool, String) {

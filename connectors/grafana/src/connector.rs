@@ -422,10 +422,9 @@ impl GrafanaConnector {
         client: &GrafanaClient,
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, GrafanaError> {
-        let dashboard = input.get("dashboard").ok_or_else(|| GrafanaError::Api {
-            status_code: 400,
-            message: "Missing required field: dashboard".into(),
-        })?;
+        let dashboard = input
+            .get("dashboard")
+            .ok_or_else(|| GrafanaError::InvalidInput("Missing required field: dashboard".into()))?;
         let overwrite = input
             .get("overwrite")
             .and_then(|v| v.as_bool())
@@ -510,10 +509,9 @@ impl GrafanaConnector {
         client: &GrafanaClient,
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, GrafanaError> {
-        let rule = input.get("rule").ok_or_else(|| GrafanaError::Api {
-            status_code: 400,
-            message: "Missing required field: rule".into(),
-        })?;
+        let rule = input
+            .get("rule")
+            .ok_or_else(|| GrafanaError::InvalidInput("Missing required field: rule".into()))?;
         let data = client.create_alert_rule(rule).await?;
         Ok(json!({ "uid": data.get("uid").cloned().unwrap_or(json!(null)) }))
     }
@@ -544,10 +542,7 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
     input
         .get(field)
         .and_then(|v| v.as_str())
-        .ok_or_else(|| GrafanaError::Api {
-            status_code: 400,
-            message: format!("Missing required field: {field}"),
-        })
+        .ok_or_else(|| GrafanaError::InvalidInput(format!("Missing required field: {field}")))
 }
 
 /// Check whether a base URL's host matches the allowed Grafana manifest hosts.

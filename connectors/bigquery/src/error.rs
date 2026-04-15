@@ -44,6 +44,10 @@ pub enum BigQueryError {
     /// Connector configuration is invalid
     #[error("Configuration error: {0}")]
     Config(String),
+
+    /// Invalid input (missing field, path traversal, etc.).
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl BigQueryError {
@@ -118,6 +122,10 @@ impl BigQueryError {
             Self::Config(message) => FcpError::InvalidRequest {
                 code: 1001,
                 message: format!("Configuration error: {message}"),
+            },
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Invalid input: {msg}"),
             },
         }
     }

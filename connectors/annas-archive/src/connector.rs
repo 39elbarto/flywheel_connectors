@@ -272,9 +272,8 @@ fn require_str<'a>(
     input
         .get(field)
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| AnnasArchiveError::Api {
-            status_code: 400,
-            message: format!("Missing required field: {field}"),
+        .ok_or_else(|| {
+            AnnasArchiveError::InvalidInput(format!("Missing required field: {field}"))
         })
 }
 
@@ -1110,14 +1109,10 @@ mod tests {
     fn require_str_error_status_code_400() {
         let input = json!({});
         match require_str(&input, "query") {
-            Err(AnnasArchiveError::Api {
-                status_code,
-                message,
-            }) => {
-                assert_eq!(status_code, 400);
-                assert!(message.contains("query"));
+            Err(AnnasArchiveError::InvalidInput(msg)) => {
+                assert!(msg.contains("query"));
             }
-            other => panic!("expected Api error, got {other:?}"),
+            other => panic!("expected InvalidInput error, got {other:?}"),
         }
     }
 

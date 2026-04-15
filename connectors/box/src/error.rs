@@ -44,6 +44,10 @@ pub enum BoxError {
     /// Conflict (409)
     #[error("Conflict: {message}")]
     Conflict { message: String },
+
+    /// Invalid input (missing field, path traversal, etc.).
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl BoxError {
@@ -121,6 +125,10 @@ impl BoxError {
                 status_code: Some(409),
                 retryable: false,
                 retry_after: None,
+            },
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Invalid input: {msg}"),
             },
         }
     }

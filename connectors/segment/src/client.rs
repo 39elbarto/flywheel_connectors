@@ -250,10 +250,9 @@ impl SegmentClient {
 fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> SegmentResult<&'a str> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Err(SegmentError::Api {
-            status_code: 400,
-            message: format!("{field} must not be empty"),
-        });
+        return Err(SegmentError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
     }
     let lower = trimmed.to_ascii_lowercase();
     if trimmed.contains('/')
@@ -262,10 +261,9 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> SegmentResult<&'a s
         || lower.contains("%2f")
         || lower.contains("%5c")
     {
-        return Err(SegmentError::Api {
-            status_code: 400,
-            message: format!("{field} contains path traversal characters"),
-        });
+        return Err(SegmentError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
     }
     Ok(trimmed)
 }

@@ -134,7 +134,8 @@ impl TwitterError {
                 code: 5001,
                 message: format!("Configuration error: {msg}"),
             },
-            Self::InvalidInput(msg) => FcpError::Internal {
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 1005,
                 message: format!("Invalid input: {msg}"),
             },
             Self::NotConfigured => FcpError::NotConfigured,
@@ -674,12 +675,12 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_input_maps_to_internal() {
+    fn test_invalid_input_maps_to_invalid_request() {
         let err = TwitterError::InvalidInput("user_id must be numeric, got: abc".into());
         let fcp = err.to_fcp_error();
         assert!(matches!(
             fcp,
-            FcpError::Internal { message } if message.contains("Invalid input")
+            FcpError::InvalidRequest { code: 1005, message } if message.contains("Invalid input")
         ));
     }
 

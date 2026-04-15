@@ -44,6 +44,10 @@ pub enum LogseqError {
     /// Logseq server not reachable
     #[error("Logseq server not reachable at {url}")]
     ServerUnreachable { url: String },
+
+    /// Invalid input (missing field, path traversal, etc.).
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl LogseqError {
@@ -121,6 +125,10 @@ impl LogseqError {
                 status_code: None,
                 retryable: true,
                 retry_after: None,
+            },
+            Self::InvalidInput(msg) => FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Invalid input: {msg}"),
             },
         }
     }

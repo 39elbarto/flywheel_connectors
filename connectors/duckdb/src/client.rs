@@ -431,13 +431,7 @@ mod tests {
         let result = sanitize_path_segment("my/db", "db_name");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(
-            err,
-            DuckDbError::Api {
-                status_code: 400,
-                ..
-            }
-        ));
+        assert!(matches!(err, DuckDbError::InvalidInput(_)));
     }
 
     #[test]
@@ -495,10 +489,10 @@ mod tests {
     fn sanitize_error_message_contains_param_name() {
         let result = sanitize_path_segment("a/b", "table_name");
         match result.unwrap_err() {
-            DuckDbError::Api { message, .. } => {
-                assert!(message.contains("table_name"));
+            DuckDbError::InvalidInput(msg) => {
+                assert!(msg.contains("table_name"));
             }
-            other => panic!("expected Api error, got {other:?}"),
+            other => panic!("expected InvalidInput error, got {other:?}"),
         }
     }
 

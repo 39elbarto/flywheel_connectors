@@ -407,6 +407,9 @@ impl ClickUpConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("ClickUp connector shutting down");
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
         self.client = None;
         self.config = None;
         self.base.set_configured(false);

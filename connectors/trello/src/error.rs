@@ -40,6 +40,10 @@ pub enum TrelloError {
     /// Resource not found (404)
     #[error("Not found: {resource}")]
     NotFound { resource: String },
+
+    /// Invalid input (path traversal, malformed ID, etc.)
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl TrelloError {
@@ -110,6 +114,9 @@ impl TrelloError {
                 status_code: Some(404),
                 retryable: false,
                 retry_after: None,
+            },
+            Self::InvalidInput(msg) => FcpError::Internal {
+                message: format!("Invalid input: {msg}"),
             },
         }
     }
@@ -647,5 +654,29 @@ mod tests {
             retry_after_ms: 100,
         };
         assert_eq!(err.retry_after(), Some(Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn invalid_input_not_retryable() {
+        let err = TrelloError::InvalidInput("bad segment".into());
+        assert!(!err.is_retryable());
+        assert!(err.retry_after().is_none());
+    }
+
+    #[test]
+    fn invalid_input_to_fcp_error() {
+        match TrelloError::InvalidInput("bad".into()).to_fcp_error() {
+            FcpError::Internal { message } => {
+                assert!(message.contains("Invalid input"));
+                assert!(message.contains("bad"));
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_input_display() {
+        let err = TrelloError::InvalidInput("foo/bar".into());
+        assert!(err.to_string().contains("foo/bar"));
     }
 }

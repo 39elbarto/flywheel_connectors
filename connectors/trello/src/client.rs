@@ -16,6 +16,22 @@ use crate::{
 /// Default Trello REST API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.trello.com/1";
 
+/// Validate a path segment to prevent path traversal attacks.
+fn sanitize_path_segment(segment: &str) -> TrelloResult<&str> {
+    if segment.trim().is_empty()
+        || segment.contains('/')
+        || segment.contains('\\')
+        || segment.contains('\0')
+        || segment == "."
+        || segment == ".."
+    {
+        return Err(TrelloError::InvalidInput(format!(
+            "Invalid path segment: {segment}"
+        )));
+    }
+    Ok(segment)
+}
+
 /// Authentication mode for the Trello API.
 #[derive(Clone)]
 pub enum TrelloAuth {
@@ -99,21 +115,20 @@ impl TrelloClient {
         self.runtime.shutdown();
     }
 
-    /// Build the full URL with authentication query parameters (for API key/token auth).
+    /// Build the base URL for a request (without credentials).
     fn build_url(&self, path: &str) -> String {
-        let base = format!("{}{path}", self.base_url);
-        match &self.auth {
-            TrelloAuth::ApiKeyToken { api_key, token } => {
-                let sep = if base.contains('?') { '&' } else { '?' };
-                format!("{base}{sep}key={api_key}&token={token}")
-            }
-            TrelloAuth::CredentialId(_) => base,
-        }
+        format!("{}{path}", self.base_url)
     }
 
-    fn add_auth_headers(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    /// Add authentication to a request builder.
+    ///
+    /// For API key/token auth, credentials are added as query parameters
+    /// via reqwest's `.query()` to avoid embedding secrets in the URL string.
+    fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
-            TrelloAuth::ApiKeyToken { .. } => req, // auth is in query params
+            TrelloAuth::ApiKeyToken { api_key, token } => {
+                req.query(&[("key", api_key.as_str()), ("token", token.as_str())])
+            }
             TrelloAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
         }
     }
@@ -175,7 +190,7 @@ impl TrelloClient {
         let url = self.build_url(path);
         debug!(url = %url, "GET request");
         let req = self
-            .add_auth_headers(self.client.get(&url))
+            .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
         let resp = req.send().await?;
         self.handle_response(resp).await
@@ -186,7 +201,7 @@ impl TrelloClient {
         let url = self.build_url(path);
         debug!(url = %url, "POST request");
         let req = self
-            .add_auth_headers(self.client.post(&url))
+            .add_auth(self.client.post(&url))
             .header("Accept", "application/json")
             .json(body);
         let resp = req.send().await?;
@@ -198,7 +213,7 @@ impl TrelloClient {
         let url = self.build_url(path);
         debug!(url = %url, "PUT request");
         let req = self
-            .add_auth_headers(self.client.put(&url))
+            .add_auth(self.client.put(&url))
             .header("Accept", "application/json")
             .json(body);
         let resp = req.send().await?;
@@ -210,7 +225,7 @@ impl TrelloClient {
         let url = self.build_url(path);
         debug!(url = %url, "DELETE request");
         let req = self
-            .add_auth_headers(self.client.delete(&url))
+            .add_auth(self.client.delete(&url))
             .header("Accept", "application/json");
         let resp = req.send().await?;
         self.handle_response(resp).await
@@ -220,11 +235,13 @@ impl TrelloClient {
 
     /// List boards for a member.
     pub async fn list_boards(&self, member: &str) -> TrelloResult<serde_json::Value> {
+        let member = sanitize_path_segment(member)?;
         self.get(&format!("/members/{member}/boards")).await
     }
 
     /// Get a single board by ID.
     pub async fn get_board(&self, board_id: &str) -> TrelloResult<serde_json::Value> {
+        let board_id = sanitize_path_segment(board_id)?;
         self.get(&format!("/boards/{board_id}")).await
     }
 
@@ -232,6 +249,7 @@ impl TrelloClient {
 
     /// List all lists on a board.
     pub async fn list_lists(&self, board_id: &str) -> TrelloResult<serde_json::Value> {
+        let board_id = sanitize_path_segment(board_id)?;
         self.get(&format!("/boards/{board_id}/lists")).await
     }
 
@@ -239,11 +257,13 @@ impl TrelloClient {
 
     /// List cards on a list.
     pub async fn list_cards(&self, list_id: &str) -> TrelloResult<serde_json::Value> {
+        let list_id = sanitize_path_segment(list_id)?;
         self.get(&format!("/lists/{list_id}/cards")).await
     }
 
     /// Get a single card by ID.
     pub async fn get_card(&self, card_id: &str) -> TrelloResult<serde_json::Value> {
+        let card_id = sanitize_path_segment(card_id)?;
         self.get(&format!("/cards/{card_id}")).await
     }
 
@@ -258,11 +278,13 @@ impl TrelloClient {
         card_id: &str,
         body: &serde_json::Value,
     ) -> TrelloResult<serde_json::Value> {
+        let card_id = sanitize_path_segment(card_id)?;
         self.put(&format!("/cards/{card_id}"), body).await
     }
 
     /// Delete a card.
     pub async fn delete_card(&self, card_id: &str) -> TrelloResult<serde_json::Value> {
+        let card_id = sanitize_path_segment(card_id)?;
         self.delete(&format!("/cards/{card_id}")).await
     }
 
@@ -270,6 +292,7 @@ impl TrelloClient {
 
     /// List labels on a board.
     pub async fn list_labels(&self, board_id: &str) -> TrelloResult<serde_json::Value> {
+        let board_id = sanitize_path_segment(board_id)?;
         self.get(&format!("/boards/{board_id}/labels")).await
     }
 
@@ -277,6 +300,7 @@ impl TrelloClient {
 
     /// List members of a board.
     pub async fn list_members(&self, board_id: &str) -> TrelloResult<serde_json::Value> {
+        let board_id = sanitize_path_segment(board_id)?;
         self.get(&format!("/boards/{board_id}/members")).await
     }
 }
@@ -511,5 +535,38 @@ mod tests {
         assert!(!dbg.contains("xyzzy-token-99"));
         assert!(dbg.contains("TrelloClient"));
         assert!(dbg.contains("base_url"));
+    }
+
+    #[test]
+    fn build_url_does_not_embed_credentials() {
+        let client = TrelloClient::new(
+            TrelloAuth::ApiKeyToken {
+                api_key: "secret-key-abc".into(),
+                token: "secret-token-xyz".into(),
+            },
+            None,
+        )
+        .unwrap();
+        let url = client.build_url("/boards/123");
+        assert!(!url.contains("secret-key-abc"));
+        assert!(!url.contains("secret-token-xyz"));
+        assert!(url.contains("/boards/123"));
+    }
+
+    #[test]
+    fn sanitize_rejects_path_traversal() {
+        assert!(sanitize_path_segment("..").is_err());
+        assert!(sanitize_path_segment(".").is_err());
+        assert!(sanitize_path_segment("foo/bar").is_err());
+        assert!(sanitize_path_segment("").is_err());
+        assert!(sanitize_path_segment("foo\0bar").is_err());
+        assert!(sanitize_path_segment("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn sanitize_accepts_valid_ids() {
+        assert!(sanitize_path_segment("abc123").is_ok());
+        assert!(sanitize_path_segment("5f4e3d2c1b0a").is_ok());
+        assert!(sanitize_path_segment("my-board").is_ok());
     }
 }

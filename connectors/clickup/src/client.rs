@@ -16,6 +16,22 @@ use crate::{
 /// Default `ClickUp` REST API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.clickup.com/api/v2";
 
+/// Validate a path segment to prevent path traversal attacks.
+fn sanitize_path_segment(segment: &str) -> ClickUpResult<&str> {
+    if segment.trim().is_empty()
+        || segment.contains('/')
+        || segment.contains('\\')
+        || segment.contains('\0')
+        || segment == "."
+        || segment == ".."
+    {
+        return Err(ClickUpError::InvalidInput(format!(
+            "Invalid path segment: {segment}"
+        )));
+    }
+    Ok(segment)
+}
+
 /// Authentication mode for the `ClickUp` API.
 #[derive(Clone)]
 pub enum ClickUpAuth {
@@ -194,6 +210,7 @@ impl ClickUpClient {
 
     /// List all spaces in a team/workspace.
     pub async fn list_spaces(&self, team_id: &str) -> ClickUpResult<serde_json::Value> {
+        let team_id = sanitize_path_segment(team_id)?;
         self.get(&format!("/team/{team_id}/space")).await
     }
 
@@ -201,6 +218,7 @@ impl ClickUpClient {
 
     /// List all lists in a space.
     pub async fn list_lists(&self, space_id: &str) -> ClickUpResult<serde_json::Value> {
+        let space_id = sanitize_path_segment(space_id)?;
         self.get(&format!("/space/{space_id}/list")).await
     }
 
@@ -208,6 +226,7 @@ impl ClickUpClient {
 
     /// List tasks in a list.
     pub async fn list_tasks(&self, list_id: &str) -> ClickUpResult<serde_json::Value> {
+        let list_id = sanitize_path_segment(list_id)?;
         self.get(&format!("/list/{list_id}/task")).await
     }
 
@@ -217,11 +236,13 @@ impl ClickUpClient {
         list_id: &str,
         body: &serde_json::Value,
     ) -> ClickUpResult<serde_json::Value> {
+        let list_id = sanitize_path_segment(list_id)?;
         self.post(&format!("/list/{list_id}/task"), body).await
     }
 
     /// Delete a task.
     pub async fn delete_task(&self, task_id: &str) -> ClickUpResult<serde_json::Value> {
+        let task_id = sanitize_path_segment(task_id)?;
         self.delete(&format!("/task/{task_id}")).await
     }
 }
@@ -412,5 +433,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(client.base_url, "https://example.com");
+    }
+
+    #[test]
+    fn sanitize_rejects_path_traversal() {
+        assert!(sanitize_path_segment("..").is_err());
+        assert!(sanitize_path_segment(".").is_err());
+        assert!(sanitize_path_segment("foo/bar").is_err());
+        assert!(sanitize_path_segment("").is_err());
+        assert!(sanitize_path_segment("foo\0bar").is_err());
+        assert!(sanitize_path_segment("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn sanitize_accepts_valid_ids() {
+        assert!(sanitize_path_segment("12345").is_ok());
+        assert!(sanitize_path_segment("abc123def").is_ok());
+        assert!(sanitize_path_segment("task-id").is_ok());
     }
 }

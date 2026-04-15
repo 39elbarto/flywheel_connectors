@@ -40,6 +40,10 @@ pub enum ClickUpError {
     /// Resource not found (404)
     #[error("Not found: {resource}")]
     NotFound { resource: String },
+
+    /// Invalid input (path traversal, malformed ID, etc.)
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl ClickUpError {
@@ -110,6 +114,9 @@ impl ClickUpError {
                 status_code: Some(404),
                 retryable: false,
                 retry_after: None,
+            },
+            Self::InvalidInput(msg) => FcpError::Internal {
+                message: format!("Invalid input: {msg}"),
             },
         }
     }
@@ -693,5 +700,29 @@ mod tests {
             message: long.clone(),
         };
         assert!(err.to_string().contains(&long));
+    }
+
+    #[test]
+    fn invalid_input_not_retryable() {
+        let err = ClickUpError::InvalidInput("bad segment".into());
+        assert!(!err.is_retryable());
+        assert!(err.retry_after().is_none());
+    }
+
+    #[test]
+    fn invalid_input_to_fcp_error() {
+        match ClickUpError::InvalidInput("bad".into()).to_fcp_error() {
+            FcpError::Internal { message } => {
+                assert!(message.contains("Invalid input"));
+                assert!(message.contains("bad"));
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_input_display() {
+        let err = ClickUpError::InvalidInput("foo/bar".into());
+        assert!(err.to_string().contains("foo/bar"));
     }
 }

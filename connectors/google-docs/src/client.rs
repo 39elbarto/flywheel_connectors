@@ -1,22 +1,32 @@
 //! Google Docs API v1 client.
+//!
+//! Uses `fcp-google-discovery` shared auth substrate and retry infrastructure.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use fcp_google_discovery::auth::GoogleMaterializedAuth;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
-use reqwest::Client;
+use fcp_google_discovery::executor::{
+    GoogleApiError, GoogleExecuteRequest, GoogleExecuteResponse, GoogleResponseBody,
+    GoogleResponseMode, GoogleRestError, GoogleRestExecutor,
+};
+use fcp_google_discovery::{DiscoveryMethod, DiscoveryParameter};
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
+use reqwest::{Client, Url, header};
 use serde::de::DeserializeOwned;
-use tracing::{instrument, warn};
+use tracing::{debug, instrument};
 
 use crate::error::{DocsError, DocsResult};
-use crate::types::{ApiErrorDetail, ApiErrorResponse, BatchUpdateResponse, Document};
+use crate::types::{BatchUpdateResponse, Document};
 
 const DEFAULT_BASE_URL: &str = "https://docs.googleapis.com/v1";
 
 /// Google Docs API client.
 pub struct DocsClient {
-    client: Client,
+    executor: GoogleRestExecutor,
     auth: GoogleMaterializedAuth,
     base_url: String,
     total_requests: AtomicU64,
@@ -37,14 +47,18 @@ impl std::fmt::Debug for DocsClient {
 impl DocsClient {
     /// Create a new Docs client with the shared Google auth.
     pub fn new_with_auth(auth: GoogleMaterializedAuth) -> DocsResult<Self> {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(header::ACCEPT, "application/json".parse().unwrap());
+
         let client = Client::builder()
+            .default_headers(headers)
             .timeout(Duration::from_secs(30))
             .user_agent("fcp-google-docs/0.1.0")
             .build()
             .map_err(DocsError::Http)?;
 
         Ok(Self {
-            client,
+            executor: GoogleRestExecutor::new().with_client(client),
             auth,
             base_url: DEFAULT_BASE_URL.to_string(),
             total_requests: AtomicU64::new(0),
@@ -53,7 +67,9 @@ impl DocsClient {
             ),
             retry_config: HttpRetryConfig {
                 max_retries: 2,
-                ..HttpRetryConfig::default()
+                initial_delay_ms: 500,
+                max_delay_ms: 30_000,
+                jitter_enabled: true,
             },
         })
     }
@@ -115,62 +131,127 @@ impl DocsClient {
         self.total_requests.load(Ordering::Relaxed)
     }
 
-    fn bearer_token(&self) -> Option<&str> {
-        match &self.auth {
-            GoogleMaterializedAuth::BearerToken { access_token, .. } => Some(access_token),
-            GoogleMaterializedAuth::CredentialReference { .. } => None,
-        }
-    }
+    // ── Internal HTTP helpers ────────────────────────────────────
 
     async fn get_json<T: DeserializeOwned>(&self, url: &str) -> DocsResult<T> {
-        self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let token = self.bearer_token().ok_or(DocsError::Unauthorized)?;
-        let resp = self
-            .client
-            .get(url)
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(DocsError::Http)?;
-        self.handle_response(resp).await
+        let response = self
+            .execute_with_retry("GET", url, None, GoogleResponseMode::Json)
+            .await?;
+        decode_json_response(response)
     }
 
-    async fn post_json<T: DeserializeOwned, B: serde::Serialize>(
+    async fn post_json<T: DeserializeOwned>(
         &self,
         url: &str,
-        body: &B,
+        body: &serde_json::Value,
     ) -> DocsResult<T> {
-        self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let token = self.bearer_token().ok_or(DocsError::Unauthorized)?;
-        let resp = self
-            .client
-            .post(url)
-            .bearer_auth(token)
-            .json(body)
-            .send()
-            .await
-            .map_err(DocsError::Http)?;
-        self.handle_response(resp).await
+        let response = self
+            .execute_with_retry("POST", url, Some(body), GoogleResponseMode::Json)
+            .await?;
+        decode_json_response(response)
     }
 
-    async fn handle_response<T: DeserializeOwned>(&self, resp: reqwest::Response) -> DocsResult<T> {
-        let status = resp.status();
-        if status.is_success() {
-            return resp.json().await.map_err(DocsError::Http);
+    async fn execute_with_retry(
+        &self,
+        http_method: &'static str,
+        url: &str,
+        body: Option<&serde_json::Value>,
+        response_mode: GoogleResponseMode,
+    ) -> DocsResult<GoogleExecuteResponse> {
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| async move {
+            debug!(attempt, method = http_method, "docs request");
+
+            match self
+                .execute_once(http_method, url, body, response_mode)
+                .await
+            {
+                Ok(response) => AttemptOutcome::Success(response),
+                Err(error) if error.is_retryable() => AttemptOutcome::Retryable {
+                    retry_after: error.retry_after(),
+                    error,
+                },
+                Err(error) => AttemptOutcome::Terminal(error),
+            }
+        })
+        .await
+    }
+
+    async fn execute_once(
+        &self,
+        http_method: &'static str,
+        raw_url: &str,
+        body: Option<&serde_json::Value>,
+        response_mode: GoogleResponseMode,
+    ) -> DocsResult<GoogleExecuteResponse> {
+        let parsed_url = Url::parse(raw_url).map_err(|error| DocsError::Api {
+            status_code: 400,
+            message: format!("invalid request url: {error}"),
+        })?;
+
+        let mut parameters: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (name, value) in parsed_url.query_pairs() {
+            parameters
+                .entry(name.into_owned())
+                .or_default()
+                .push(value.into_owned());
         }
-        let code = status.as_u16();
-        let mut body = resp.text().await.unwrap_or_default();
-        body.truncate(2048);
-        if let Ok(api_err) = serde_json::from_str::<ApiErrorResponse>(&body) {
-            Err(map_api_error(api_err.error))
-        } else {
-            let preview: String = body.chars().take(200).collect();
-            warn!(status = code, body_preview = %preview, "Docs API error");
-            Err(DocsError::Api {
-                status_code: code,
-                message: body,
+
+        let method_parameters = parameters
+            .keys()
+            .map(|name| {
+                (
+                    name.clone(),
+                    DiscoveryParameter {
+                        location: Some("query".to_string()),
+                        required: false,
+                        repeated: true,
+                        type_name: Some("string".to_string()),
+                        format: None,
+                        description: None,
+                    },
+                )
             })
+            .collect::<BTreeMap<_, _>>();
+
+        let path = parsed_url.path().trim_start_matches('/').to_string();
+        let method = DiscoveryMethod {
+            key: format!("docs.transport.{}", http_method.to_ascii_lowercase()),
+            id: format!("docs.transport.{}", http_method.to_ascii_lowercase()),
+            http_method: http_method.to_string(),
+            path: path.clone(),
+            flat_path: None,
+            canonical_path: path,
+            resource_path: Vec::new(),
+            description: None,
+            scopes: Vec::new(),
+            request_ref: None,
+            response_ref: None,
+            parameters: method_parameters,
+            supports_media_download: false,
+            supports_media_upload: false,
+            media_upload: None,
+        };
+
+        let schemas = BTreeMap::new();
+        let mut base_url = parsed_url.origin().ascii_serialization();
+        if !base_url.ends_with('/') {
+            base_url.push('/');
         }
+
+        let mut request = GoogleExecuteRequest::new(&method, &schemas, &base_url);
+        request.parameters = parameters;
+        request.body = body.cloned();
+        request.response_mode = response_mode;
+        request.auth = Some(&self.auth);
+
+        self.executor
+            .execute(&request)
+            .await
+            .map_err(map_rest_error)
     }
 }
 
@@ -200,8 +281,33 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> DocsResult<&'a str>
     Ok(value)
 }
 
-fn map_api_error(error: ApiErrorDetail) -> DocsError {
-    match error.code {
+fn decode_json_response<T: DeserializeOwned>(response: GoogleExecuteResponse) -> DocsResult<T> {
+    match response.body {
+        GoogleResponseBody::Json(value) => serde_json::from_value(value).map_err(DocsError::Json),
+        GoogleResponseBody::Binary(bytes) => {
+            serde_json::from_slice(&bytes).map_err(DocsError::Json)
+        }
+        GoogleResponseBody::Empty => Err(DocsError::Api {
+            status_code: response.status_code,
+            message: "expected JSON response body".to_string(),
+        }),
+    }
+}
+
+fn map_rest_error(error: GoogleRestError) -> DocsError {
+    match error {
+        GoogleRestError::Http { source } => DocsError::Http(source),
+        GoogleRestError::JsonDecode { source } => DocsError::Json(source),
+        GoogleRestError::Api { error, .. } => map_google_api_error(error),
+        other => DocsError::Api {
+            status_code: 500,
+            message: other.to_string(),
+        },
+    }
+}
+
+fn map_google_api_error(error: GoogleApiError) -> DocsError {
+    match error.status_code {
         401 => DocsError::Unauthorized,
         403 => DocsError::Forbidden {
             message: error.message,
@@ -224,46 +330,66 @@ mod tests {
     use super::*;
 
     #[test]
-    fn map_api_error_401() {
-        let err = map_api_error(ApiErrorDetail {
-            code: 401,
+    fn map_google_api_error_401() {
+        let err = map_google_api_error(GoogleApiError {
+            status_code: 401,
             message: "bad token".into(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
         });
         assert!(matches!(err, DocsError::Unauthorized));
     }
 
     #[test]
-    fn map_api_error_403() {
-        let err = map_api_error(ApiErrorDetail {
-            code: 403,
+    fn map_google_api_error_403() {
+        let err = map_google_api_error(GoogleApiError {
+            status_code: 403,
             message: "forbidden".into(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
         });
         assert!(matches!(err, DocsError::Forbidden { .. }));
     }
 
     #[test]
-    fn map_api_error_404() {
-        let err = map_api_error(ApiErrorDetail {
-            code: 404,
+    fn map_google_api_error_404() {
+        let err = map_google_api_error(GoogleApiError {
+            status_code: 404,
             message: "not found".into(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
         });
         assert!(matches!(err, DocsError::DocumentNotFound { .. }));
     }
 
     #[test]
-    fn map_api_error_429() {
-        let err = map_api_error(ApiErrorDetail {
-            code: 429,
+    fn map_google_api_error_429() {
+        let err = map_google_api_error(GoogleApiError {
+            status_code: 429,
             message: "rate limited".into(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
         });
         assert!(matches!(err, DocsError::RateLimited { .. }));
     }
 
     #[test]
-    fn map_api_error_500() {
-        let err = map_api_error(ApiErrorDetail {
-            code: 500,
+    fn map_google_api_error_500() {
+        let err = map_google_api_error(GoogleApiError {
+            status_code: 500,
             message: "internal".into(),
+            status: None,
+            reason: None,
+            domain: None,
+            access_not_configured_hint: false,
         });
         assert!(matches!(
             err,

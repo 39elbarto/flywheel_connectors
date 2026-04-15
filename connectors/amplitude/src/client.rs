@@ -4,7 +4,9 @@ use std::fmt;
 use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -149,22 +151,63 @@ impl AmplitudeClient {
         }
     }
 
+    async fn request_with_retry(
+        &self,
+        http_method: &'static str,
+        url: &str,
+        body: Option<&serde_json::Value>,
+    ) -> AmplitudeResult<serde_json::Value> {
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| async move {
+            debug!(attempt, method = http_method, url, "amplitude request");
+
+            let req = match http_method {
+                "GET" => self.client.get(url),
+                "POST" => self.client.post(url),
+                _ => unreachable!(),
+            };
+            let req = self.add_auth(req).header("Accept", "application/json");
+            let req = if let Some(b) = body { req.json(b) } else { req };
+
+            match req.send().await {
+                Ok(resp) => match self.handle_response(resp).await {
+                    Ok(val) => AttemptOutcome::Success(val),
+                    Err(err) if err.is_retryable() => AttemptOutcome::Retryable {
+                        retry_after: err.retry_after(),
+                        error: err,
+                    },
+                    Err(err) => AttemptOutcome::Terminal(err),
+                },
+                Err(err) => {
+                    let err = AmplitudeError::Http(err);
+                    if err.is_retryable() {
+                        AttemptOutcome::Retryable {
+                            retry_after: err.retry_after(),
+                            error: err,
+                        }
+                    } else {
+                        AttemptOutcome::Terminal(err)
+                    }
+                }
+            }
+        })
+        .await
+    }
+
     #[instrument(skip(self), fields(url))]
     async fn get(&self, path: &str) -> AmplitudeResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET request");
-        let req = self
-            .add_auth(self.client.get(&url))
-            .header("Accept", "application/json");
-        let resp = req.send().await?;
-        self.handle_response(resp).await
+        self.request_with_retry("GET", &url, None).await
     }
 
     // -- Charts --
 
     /// Query a chart by ID.
     pub async fn query_chart(&self, chart_id: &str) -> AmplitudeResult<serde_json::Value> {
-        self.get(&format!("/charts/{chart_id}/query")).await
+        let safe_id = sanitize_path_segment(chart_id, "chart_id")?;
+        self.get(&format!("/charts/{safe_id}/query")).await
     }
 
     // -- Cohorts --
@@ -187,6 +230,31 @@ impl AmplitudeClient {
         self.get(&format!("/export?start={safe_start}&end={safe_end}"))
             .await
     }
+}
+
+/// Validate that a user-supplied ID is safe to interpolate into a URL path segment.
+///
+/// Rejects empty strings, path traversal sequences, slashes,
+/// and percent-encoded equivalents.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> AmplitudeResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(AmplitudeError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(AmplitudeError::InvalidInput(format!(
+            "{field} contains path traversal characters"
+        )));
+    }
+    Ok(trimmed)
 }
 
 /// Percent-encode a value for safe inclusion in a URL query string.
@@ -505,5 +573,53 @@ mod tests {
             encode_query_value("2026-01-01_v1.0~rc", "start").unwrap(),
             "2026-01-01_v1.0~rc"
         );
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(
+            sanitize_path_segment("chart_abc123", "chart_id").unwrap(),
+            "chart_abc123"
+        );
+    }
+
+    #[test]
+    fn sanitize_path_segment_trims_whitespace() {
+        assert_eq!(sanitize_path_segment("  abc  ", "f").unwrap(), "abc");
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_empty() {
+        assert!(sanitize_path_segment("", "chart_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_whitespace_only() {
+        assert!(sanitize_path_segment("   ", "chart_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_slash() {
+        assert!(sanitize_path_segment("../etc/passwd", "chart_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_backslash() {
+        assert!(sanitize_path_segment("foo\\bar", "chart_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_dot_dot() {
+        assert!(sanitize_path_segment("foo..bar", "chart_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_slash() {
+        assert!(sanitize_path_segment("foo%2fbar", "chart_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_backslash() {
+        assert!(sanitize_path_segment("foo%5Cbar", "chart_id").is_err());
     }
 }

@@ -4,7 +4,9 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_core::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
 
@@ -160,27 +162,61 @@ impl SegmentClient {
         }
     }
 
+    async fn request_with_retry(
+        &self,
+        http_method: &'static str,
+        url: &str,
+        body: Option<&serde_json::Value>,
+    ) -> SegmentResult<serde_json::Value> {
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| async move {
+            debug!(attempt, method = http_method, url, "segment request");
+
+            let req = match http_method {
+                "GET" => self.client.get(url),
+                "POST" => self.client.post(url),
+                _ => unreachable!(),
+            };
+            let req = self.add_auth(req).header("Accept", "application/json");
+            let req = if let Some(b) = body { req.json(b) } else { req };
+
+            match req.send().await {
+                Ok(resp) => match self.handle_response(resp).await {
+                    Ok(val) => AttemptOutcome::Success(val),
+                    Err(err) if err.is_retryable() => AttemptOutcome::Retryable {
+                        retry_after: err.retry_after(),
+                        error: err,
+                    },
+                    Err(err) => AttemptOutcome::Terminal(err),
+                },
+                Err(err) => {
+                    let err = SegmentError::Http(err);
+                    if err.is_retryable() {
+                        AttemptOutcome::Retryable {
+                            retry_after: err.retry_after(),
+                            error: err,
+                        }
+                    } else {
+                        AttemptOutcome::Terminal(err)
+                    }
+                }
+            }
+        })
+        .await
+    }
+
     #[instrument(skip(self), fields(url))]
     async fn get(&self, path: &str) -> SegmentResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET request");
-        let req = self
-            .add_auth(self.client.get(&url))
-            .header("Accept", "application/json");
-        let resp = req.send().await?;
-        self.handle_response(resp).await
+        self.request_with_retry("GET", &url, None).await
     }
 
     #[instrument(skip(self, body), fields(url))]
     async fn post(&self, path: &str, body: &serde_json::Value) -> SegmentResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "POST request");
-        let req = self
-            .add_auth(self.client.post(&url))
-            .header("Accept", "application/json")
-            .json(body);
-        let resp = req.send().await?;
-        self.handle_response(resp).await
+        self.request_with_retry("POST", &url, Some(body)).await
     }
 
     // -- Sources --
@@ -194,7 +230,8 @@ impl SegmentClient {
 
     /// List all destinations for a source.
     pub async fn list_destinations(&self, source_id: &str) -> SegmentResult<serde_json::Value> {
-        self.get(&format!("/sources/{source_id}/destinations"))
+        let safe_id = sanitize_path_segment(source_id, "source_id")?;
+        self.get(&format!("/sources/{safe_id}/destinations"))
             .await
     }
 
@@ -204,6 +241,33 @@ impl SegmentClient {
     pub async fn track(&self, event_body: &serde_json::Value) -> SegmentResult<serde_json::Value> {
         self.post("/track", event_body).await
     }
+}
+
+/// Validate that a user-supplied ID is safe to interpolate into a URL path segment.
+///
+/// Rejects empty strings, path traversal sequences, slashes,
+/// and percent-encoded equivalents.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> SegmentResult<&'a str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(SegmentError::Api {
+            status_code: 400,
+            message: format!("{field} must not be empty"),
+        });
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+    {
+        return Err(SegmentError::Api {
+            status_code: 400,
+            message: format!("{field} contains path traversal characters"),
+        });
+    }
+    Ok(trimmed)
 }
 
 #[cfg(test)]
@@ -322,5 +386,53 @@ mod tests {
     fn auth_credential_id_is_secretless() {
         let auth = SegmentAuth::CredentialId(CredentialId::new());
         assert!(auth.is_secretless());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert_eq!(
+            sanitize_path_segment("src_abc123", "source_id").unwrap(),
+            "src_abc123"
+        );
+    }
+
+    #[test]
+    fn sanitize_path_segment_trims_whitespace() {
+        assert_eq!(sanitize_path_segment("  abc  ", "f").unwrap(), "abc");
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_empty() {
+        assert!(sanitize_path_segment("", "source_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_whitespace_only() {
+        assert!(sanitize_path_segment("   ", "source_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_slash() {
+        assert!(sanitize_path_segment("../etc/passwd", "source_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_backslash() {
+        assert!(sanitize_path_segment("foo\\bar", "source_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_dot_dot() {
+        assert!(sanitize_path_segment("foo..bar", "source_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_slash() {
+        assert!(sanitize_path_segment("foo%2fbar", "source_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_encoded_backslash() {
+        assert!(sanitize_path_segment("foo%5Cbar", "source_id").is_err());
     }
 }

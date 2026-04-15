@@ -4,7 +4,9 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_core::CredentialId;
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
@@ -57,8 +59,6 @@ pub struct SentryClient {
     client: Client,
     auth: SentryAuth,
     base_url: String,
-    max_retries: u32,
-    initial_delay_ms: u64,
     runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
 }
@@ -88,8 +88,6 @@ impl SentryClient {
                 .unwrap_or(DEFAULT_BASE_URL)
                 .trim_end_matches('/')
                 .to_string(),
-            max_retries: 3,
-            initial_delay_ms: 500,
             runtime: ConnectorRuntime::new(
                 ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
             ),
@@ -106,8 +104,6 @@ impl SentryClient {
             client,
             auth,
             base_url: base_url.trim_end_matches('/').to_string(),
-            max_retries: 0,
-            initial_delay_ms: 0,
             runtime: ConnectorRuntime::new(
                 ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
             ),
@@ -175,48 +171,79 @@ impl SentryClient {
         }
     }
 
+    async fn request_with_retry(
+        &self,
+        http_method: &'static str,
+        url: &str,
+        body: Option<&serde_json::Value>,
+    ) -> SentryResult<serde_json::Value> {
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| async move {
+            debug!(attempt, method = http_method, url, "sentry request");
+
+            let req = match http_method {
+                "GET" => self.client.get(url),
+                "POST" => self.client.post(url),
+                "PUT" => self.client.put(url),
+                "DELETE" => self.client.delete(url),
+                _ => unreachable!(),
+            };
+            let req = if let Some(b) = body {
+                req.json(b)
+            } else {
+                req
+            };
+            let req = self.add_auth(req);
+
+            match req.send().await {
+                Ok(resp) => match self.handle_response(resp).await {
+                    Ok(val) => AttemptOutcome::Success(val),
+                    Err(err) if err.is_retryable() => AttemptOutcome::Retryable {
+                        retry_after: err.retry_after(),
+                        error: err,
+                    },
+                    Err(err) => AttemptOutcome::Terminal(err),
+                },
+                Err(err) => {
+                    let err = SentryError::Http(err);
+                    if err.is_retryable() {
+                        AttemptOutcome::Retryable {
+                            retry_after: err.retry_after(),
+                            error: err,
+                        }
+                    } else {
+                        AttemptOutcome::Terminal(err)
+                    }
+                }
+            }
+        })
+        .await
+    }
+
     #[instrument(skip(self), fields(url))]
     async fn get(&self, path: &str) -> SentryResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET request");
-
-        let req = self.client.get(&url);
-        let req = self.add_auth(req);
-        let resp = req.send().await?;
-        self.handle_response(resp).await
+        self.request_with_retry("GET", &url, None).await
     }
 
     #[instrument(skip(self, body), fields(url))]
     async fn post(&self, path: &str, body: &serde_json::Value) -> SentryResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "POST request");
-
-        let req = self.client.post(&url).json(body);
-        let req = self.add_auth(req);
-        let resp = req.send().await?;
-        self.handle_response(resp).await
+        self.request_with_retry("POST", &url, Some(body)).await
     }
 
     #[instrument(skip(self, body), fields(url))]
     async fn put(&self, path: &str, body: &serde_json::Value) -> SentryResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "PUT request");
-
-        let req = self.client.put(&url).json(body);
-        let req = self.add_auth(req);
-        let resp = req.send().await?;
-        self.handle_response(resp).await
+        self.request_with_retry("PUT", &url, Some(body)).await
     }
 
     #[instrument(skip(self), fields(url))]
     async fn delete(&self, path: &str) -> SentryResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "DELETE request");
-
-        let req = self.client.delete(&url);
-        let req = self.add_auth(req);
-        let resp = req.send().await?;
-        self.handle_response(resp).await
+        self.request_with_retry("DELETE", &url, None).await
     }
 
     // ── Projects ──────────────────────────────────────────────────────

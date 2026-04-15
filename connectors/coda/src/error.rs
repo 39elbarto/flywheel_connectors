@@ -97,9 +97,8 @@ impl CodaError {
                 code: 2001,
                 message: msg.clone(),
             },
-            Self::NotFound(msg) => FcpError::InvalidRequest {
-                code: 1006,
-                message: format!("Not found: {msg}"),
+            Self::NotFound(msg) => FcpError::ResourceNotFound {
+                resource: msg.clone(),
             },
             Self::Async(msg) => FcpError::Internal {
                 message: format!("Async error: {msg}"),
@@ -274,9 +273,9 @@ mod tests {
     }
 
     #[test]
-    fn not_found_maps_to_invalid_request() {
+    fn not_found_maps_to_resource_not_found() {
         let err = CodaError::NotFound("no such doc".into());
         let fcp_err = ConnectorErrorMapping::to_fcp_error(&err);
-        assert!(matches!(fcp_err, FcpError::InvalidRequest { .. }));
+        assert!(matches!(fcp_err, FcpError::ResourceNotFound { .. }));
     }
 }

@@ -87,19 +87,13 @@ impl DatadogError {
                 retryable: self.is_retryable(),
                 retry_after: None,
             },
-            Self::RateLimited { retry_after_ms } => FcpError::External {
-                service: "datadog".into(),
-                message: format!("Rate limited, retry after {retry_after_ms}ms"),
-                status_code: Some(429),
-                retryable: true,
-                retry_after: self.retry_after(),
+            Self::RateLimited { retry_after_ms } => FcpError::RateLimited {
+                retry_after_ms: *retry_after_ms,
+                violation: None,
             },
-            Self::Unauthorized => FcpError::External {
-                service: "datadog".into(),
-                message: "Authentication failed".into(),
-                status_code: Some(401),
-                retryable: false,
-                retry_after: None,
+            Self::Unauthorized => FcpError::Unauthorized {
+                code: 2001,
+                message: "Authentication failed: invalid API key".into(),
             },
             Self::Forbidden => FcpError::External {
                 service: "datadog".into(),
@@ -108,12 +102,8 @@ impl DatadogError {
                 retryable: false,
                 retry_after: None,
             },
-            Self::NotFound { resource } => FcpError::External {
-                service: "datadog".into(),
-                message: format!("Not found: {resource}"),
-                status_code: Some(404),
-                retryable: false,
-                retry_after: None,
+            Self::NotFound { resource } => FcpError::ResourceNotFound {
+                resource: resource.clone(),
             },
         }
     }
@@ -267,17 +257,11 @@ mod tests {
     fn unauthorized_to_fcp_error() {
         let fcp = DatadogError::Unauthorized.to_fcp_error();
         match &fcp {
-            FcpError::External {
-                service,
-                status_code,
-                retryable,
-                ..
-            } => {
-                assert_eq!(service, "datadog");
-                assert_eq!(*status_code, Some(401));
-                assert!(!retryable);
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(*code, 2001);
+                assert!(message.contains("Authentication failed"));
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected Unauthorized, got {other:?}"),
         }
     }
 
@@ -304,17 +288,10 @@ mod tests {
         }
         .to_fcp_error();
         match &fcp {
-            FcpError::External {
-                message,
-                status_code,
-                retryable,
-                ..
-            } => {
-                assert!(message.contains("monitor-123"));
-                assert_eq!(*status_code, Some(404));
-                assert!(!retryable);
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "monitor-123");
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected ResourceNotFound, got {other:?}"),
         }
     }
 
@@ -325,17 +302,14 @@ mod tests {
         }
         .to_fcp_error();
         match &fcp {
-            FcpError::External {
-                status_code,
-                retryable,
-                retry_after,
-                ..
+            FcpError::RateLimited {
+                retry_after_ms,
+                violation,
             } => {
-                assert_eq!(*status_code, Some(429));
-                assert!(retryable);
-                assert_eq!(*retry_after, Some(Duration::from_secs(60)));
+                assert_eq!(*retry_after_ms, 60_000);
+                assert!(violation.is_none());
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected RateLimited, got {other:?}"),
         }
     }
 
@@ -517,16 +491,9 @@ mod tests {
     // ── to_fcp_error service field ────────────────────────────────
 
     #[test]
-    fn all_fcp_errors_have_datadog_service() {
+    fn external_fcp_errors_have_datadog_service() {
         let errors: Vec<DatadogError> = vec![
-            DatadogError::Unauthorized,
             DatadogError::Forbidden,
-            DatadogError::NotFound {
-                resource: "x".into(),
-            },
-            DatadogError::RateLimited {
-                retry_after_ms: 1000,
-            },
             DatadogError::Api {
                 status_code: 500,
                 message: "err".into(),
@@ -546,10 +513,12 @@ mod tests {
             retry_after_ms: 45_000,
         };
         match err.to_fcp_error() {
-            FcpError::External { retry_after, .. } => {
-                assert_eq!(retry_after, Some(Duration::from_secs(45)));
+            FcpError::RateLimited {
+                retry_after_ms, ..
+            } => {
+                assert_eq!(retry_after_ms, 45_000);
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected RateLimited, got {other:?}"),
         }
     }
 
@@ -632,14 +601,16 @@ mod tests {
     }
 
     #[test]
-    fn not_found_fcp_error_not_retryable() {
+    fn not_found_fcp_error_is_resource_not_found() {
         let fcp = DatadogError::NotFound {
             resource: "dashboard-x".into(),
         }
         .to_fcp_error();
         match fcp {
-            FcpError::External { retryable, .. } => assert!(!retryable),
-            other => panic!("expected External, got {other:?}"),
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "dashboard-x");
+            }
+            other => panic!("expected ResourceNotFound, got {other:?}"),
         }
     }
 
@@ -647,7 +618,7 @@ mod tests {
     fn forbidden_fcp_error_service_is_datadog() {
         match DatadogError::Forbidden.to_fcp_error() {
             FcpError::External { service, .. } => assert_eq!(service, "datadog"),
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected External for Forbidden, got {other:?}"),
         }
     }
 }

@@ -87,19 +87,13 @@ impl SentryError {
                 retryable: self.is_retryable(),
                 retry_after: None,
             },
-            Self::RateLimited { retry_after_ms } => FcpError::External {
-                service: "sentry".into(),
-                message: format!("Rate limited, retry after {retry_after_ms}ms"),
-                status_code: Some(429),
-                retryable: true,
-                retry_after: self.retry_after(),
+            Self::RateLimited { retry_after_ms } => FcpError::RateLimited {
+                retry_after_ms: *retry_after_ms,
+                violation: None,
             },
-            Self::Unauthorized => FcpError::External {
-                service: "sentry".into(),
-                message: "Authentication failed".into(),
-                status_code: Some(401),
-                retryable: false,
-                retry_after: None,
+            Self::Unauthorized => FcpError::Unauthorized {
+                code: 2001,
+                message: "Authentication failed: invalid or expired auth token".into(),
             },
             Self::Forbidden => FcpError::External {
                 service: "sentry".into(),
@@ -108,12 +102,8 @@ impl SentryError {
                 retryable: false,
                 retry_after: None,
             },
-            Self::NotFound { resource } => FcpError::External {
-                service: "sentry".into(),
-                message: format!("Not found: {resource}"),
-                status_code: Some(404),
-                retryable: false,
-                retry_after: None,
+            Self::NotFound { resource } => FcpError::ResourceNotFound {
+                resource: resource.clone(),
             },
         }
     }
@@ -276,17 +266,11 @@ mod tests {
     fn unauthorized_to_fcp_error() {
         let fcp = SentryError::Unauthorized.to_fcp_error();
         match &fcp {
-            FcpError::External {
-                service,
-                status_code,
-                retryable,
-                ..
-            } => {
-                assert_eq!(service, "sentry");
-                assert_eq!(*status_code, Some(401));
-                assert!(!retryable);
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(*code, 2001);
+                assert!(message.contains("Authentication failed"));
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected Unauthorized, got {other:?}"),
         }
     }
 
@@ -313,17 +297,10 @@ mod tests {
         }
         .to_fcp_error();
         match &fcp {
-            FcpError::External {
-                message,
-                status_code,
-                retryable,
-                ..
-            } => {
-                assert!(message.contains("my-issue"));
-                assert_eq!(*status_code, Some(404));
-                assert!(!retryable);
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "my-issue");
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected ResourceNotFound, got {other:?}"),
         }
     }
 
@@ -334,17 +311,14 @@ mod tests {
         }
         .to_fcp_error();
         match &fcp {
-            FcpError::External {
-                status_code,
-                retryable,
-                retry_after,
-                ..
+            FcpError::RateLimited {
+                retry_after_ms,
+                violation,
             } => {
-                assert_eq!(*status_code, Some(429));
-                assert!(retryable);
-                assert_eq!(*retry_after, Some(Duration::from_secs(60)));
+                assert_eq!(*retry_after_ms, 60_000);
+                assert!(violation.is_none());
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected RateLimited, got {other:?}"),
         }
     }
 
@@ -534,16 +508,9 @@ mod tests {
     // ── to_fcp_error service field ────────────────────────────────
 
     #[test]
-    fn all_fcp_errors_have_sentry_service() {
+    fn external_fcp_errors_have_sentry_service() {
         let errors: Vec<SentryError> = vec![
-            SentryError::Unauthorized,
             SentryError::Forbidden,
-            SentryError::NotFound {
-                resource: "x".into(),
-            },
-            SentryError::RateLimited {
-                retry_after_ms: 1000,
-            },
             SentryError::Api {
                 status_code: 500,
                 message: "err".into(),
@@ -564,10 +531,12 @@ mod tests {
         })
         .to_fcp_error()
         {
-            FcpError::External { retry_after, .. } => {
-                assert_eq!(retry_after, Some(Duration::from_secs(45)));
+            FcpError::RateLimited {
+                retry_after_ms, ..
+            } => {
+                assert_eq!(retry_after_ms, 45_000);
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected RateLimited, got {other:?}"),
         }
     }
 
@@ -649,21 +618,16 @@ mod tests {
     }
 
     #[test]
-    fn not_found_fcp_error_no_retry_after() {
+    fn not_found_fcp_error_is_resource_not_found() {
         match (SentryError::NotFound {
             resource: "proj".into(),
         })
         .to_fcp_error()
         {
-            FcpError::External {
-                retry_after,
-                retryable,
-                ..
-            } => {
-                assert!(retry_after.is_none());
-                assert!(!retryable);
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "proj");
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected ResourceNotFound, got {other:?}"),
         }
     }
 }

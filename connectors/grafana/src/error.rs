@@ -87,19 +87,13 @@ impl GrafanaError {
                 retryable: self.is_retryable(),
                 retry_after: None,
             },
-            Self::RateLimited { retry_after_ms } => FcpError::External {
-                service: "grafana".into(),
-                message: format!("Rate limited, retry after {retry_after_ms}ms"),
-                status_code: Some(429),
-                retryable: true,
-                retry_after: self.retry_after(),
+            Self::RateLimited { retry_after_ms } => FcpError::RateLimited {
+                retry_after_ms: *retry_after_ms,
+                violation: None,
             },
-            Self::Unauthorized => FcpError::External {
-                service: "grafana".into(),
-                message: "Authentication failed".into(),
-                status_code: Some(401),
-                retryable: false,
-                retry_after: None,
+            Self::Unauthorized => FcpError::Unauthorized {
+                code: 2001,
+                message: "Authentication failed: invalid API key or token".into(),
             },
             Self::Forbidden => FcpError::External {
                 service: "grafana".into(),
@@ -108,12 +102,8 @@ impl GrafanaError {
                 retryable: false,
                 retry_after: None,
             },
-            Self::NotFound { resource } => FcpError::External {
-                service: "grafana".into(),
-                message: format!("Not found: {resource}"),
-                status_code: Some(404),
-                retryable: false,
-                retry_after: None,
+            Self::NotFound { resource } => FcpError::ResourceNotFound {
+                resource: resource.clone(),
             },
         }
     }
@@ -289,17 +279,11 @@ mod tests {
     #[test]
     fn unauthorized_to_fcp_error() {
         match GrafanaError::Unauthorized.to_fcp_error() {
-            FcpError::External {
-                service,
-                status_code,
-                retryable,
-                ..
-            } => {
-                assert_eq!(service, "grafana");
-                assert_eq!(status_code, Some(401));
-                assert!(!retryable);
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(message.contains("Authentication failed"));
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected Unauthorized, got {other:?}"),
         }
     }
 
@@ -327,17 +311,10 @@ mod tests {
         })
         .to_fcp_error()
         {
-            FcpError::External {
-                status_code,
-                message,
-                retryable,
-                ..
-            } => {
-                assert_eq!(status_code, Some(404));
-                assert!(message.contains("dashboard"));
-                assert!(!retryable);
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "dashboard");
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected ResourceNotFound, got {other:?}"),
         }
     }
 
@@ -348,17 +325,14 @@ mod tests {
         })
         .to_fcp_error()
         {
-            FcpError::External {
-                status_code,
-                retryable,
-                retry_after,
-                ..
+            FcpError::RateLimited {
+                retry_after_ms,
+                violation,
             } => {
-                assert_eq!(status_code, Some(429));
-                assert!(retryable);
-                assert_eq!(retry_after, Some(Duration::from_secs(60)));
+                assert_eq!(retry_after_ms, 60_000);
+                assert!(violation.is_none());
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected RateLimited, got {other:?}"),
         }
     }
 
@@ -582,15 +556,10 @@ mod tests {
             resource: "my-special-dashboard".into(),
         };
         match err.to_fcp_error() {
-            FcpError::External {
-                message,
-                retry_after,
-                ..
-            } => {
-                assert!(message.contains("my-special-dashboard"));
-                assert_eq!(retry_after, None);
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "my-special-dashboard");
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected ResourceNotFound, got {other:?}"),
         }
     }
 
@@ -600,10 +569,14 @@ mod tests {
             retry_after_ms: 5000,
         };
         match err.to_fcp_error() {
-            FcpError::External { retry_after, .. } => {
-                assert_eq!(retry_after, Some(Duration::from_secs(5)));
+            FcpError::RateLimited {
+                retry_after_ms,
+                violation,
+            } => {
+                assert_eq!(retry_after_ms, 5000);
+                assert!(violation.is_none());
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected RateLimited, got {other:?}"),
         }
     }
 
@@ -669,15 +642,11 @@ mod tests {
     #[test]
     fn unauthorized_fcp_error_message() {
         match GrafanaError::Unauthorized.to_fcp_error() {
-            FcpError::External {
-                message,
-                retry_after,
-                ..
-            } => {
-                assert_eq!(message, "Authentication failed");
-                assert!(retry_after.is_none());
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(message.contains("Authentication failed"));
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected Unauthorized, got {other:?}"),
         }
     }
 }

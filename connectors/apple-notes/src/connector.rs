@@ -506,7 +506,7 @@ fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
 #[cfg(test)]
 mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
-    use fcp_core::{CapabilityToken, RequestId, ZoneId};
+    use fcp_core::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 
     use super::*;
@@ -528,6 +528,16 @@ mod tests {
         }
     }
 
+    fn test_constraints_cbor() -> Vec<u8> {
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+        cbor
+    }
+
     fn capability_token(
         signing_key: &Ed25519SigningKey,
         capability: &'static str,
@@ -541,6 +551,7 @@ mod tests {
             .operations(&[operation])
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
             .sign(signing_key)
             .expect("token should sign");
         CapabilityToken::from_raw(raw)

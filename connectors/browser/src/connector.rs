@@ -1971,10 +1971,21 @@ fn op_info(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+    use fcp_core::CapabilityConstraints;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
     use std::path::PathBuf;
+
+    fn test_constraints_cbor() -> Vec<u8> {
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+        cbor
+    }
 
     fn generate_valid_token(
         signing_key: &Ed25519SigningKey,
@@ -1989,6 +2000,7 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)

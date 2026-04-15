@@ -162,6 +162,7 @@ impl RoamClient {
             code => Err(RoamError::Api {
                 status_code: code,
                 message: detail,
+                retry_after_ms: retry_after.map(|secs| secs * 1000),
             }),
         }
     }

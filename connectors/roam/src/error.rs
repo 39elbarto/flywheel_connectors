@@ -23,7 +23,11 @@ pub enum RoamError {
 
     /// `Roam Research` API returned an error
     #[error("Roam API error ({status_code}): {message}")]
-    Api { status_code: u16, message: String },
+    Api {
+        status_code: u16,
+        message: String,
+        retry_after_ms: Option<u64>,
+    },
 
     /// Rate limited (429)
     #[error("Rate limited, retry after {retry_after_ms}ms")]
@@ -63,7 +67,11 @@ impl RoamError {
     #[must_use]
     pub const fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::RateLimited { retry_after_ms } => Some(Duration::from_millis(*retry_after_ms)),
+            Self::RateLimited { retry_after_ms }
+            | Self::Api {
+                retry_after_ms: Some(retry_after_ms),
+                ..
+            } => Some(Duration::from_millis(*retry_after_ms)),
             _ => None,
         }
     }
@@ -84,12 +92,13 @@ impl RoamError {
             Self::Api {
                 status_code,
                 message,
+                ..
             } => FcpError::External {
                 service: "roam".into(),
                 message: message.clone(),
                 status_code: Some(*status_code),
                 retryable: self.is_retryable(),
-                retry_after: None,
+                retry_after: self.retry_after(),
             },
             Self::RateLimited { retry_after_ms } => FcpError::External {
                 service: "roam".into(),
@@ -140,14 +149,17 @@ impl ConnectorErrorMapping for RoamError {
             AsyncError::Timeout { timeout_ms } => Self::Api {
                 status_code: 408,
                 message: format!("deadline exceeded after {timeout_ms}ms"),
+                retry_after_ms: None,
             },
             AsyncError::Cancelled => Self::Api {
                 status_code: 0,
                 message: "request cancelled".into(),
+                retry_after_ms: None,
             },
             other => Self::Api {
                 status_code: 0,
                 message: other.to_string(),
+                retry_after_ms: None,
             },
         }
     }
@@ -184,7 +196,8 @@ mod tests {
         assert!(
             RoamError::Api {
                 status_code: 500,
-                message: "err".into()
+                message: "err".into(),
+                retry_after_ms: None,
             }
             .is_retryable()
         );
@@ -195,7 +208,8 @@ mod tests {
         assert!(
             RoamError::Api {
                 status_code: 503,
-                message: "unavailable".into()
+                message: "unavailable".into(),
+                retry_after_ms: None,
             }
             .is_retryable()
         );
@@ -206,7 +220,8 @@ mod tests {
         assert!(
             RoamError::Api {
                 status_code: 429,
-                message: "too many".into()
+                message: "too many".into(),
+                retry_after_ms: None,
             }
             .is_retryable()
         );
@@ -217,7 +232,8 @@ mod tests {
         assert!(
             RoamError::Api {
                 status_code: 502,
-                message: "bad gateway".into()
+                message: "bad gateway".into(),
+                retry_after_ms: None,
             }
             .is_retryable()
         );
@@ -248,7 +264,8 @@ mod tests {
         assert!(
             !RoamError::Api {
                 status_code: 400,
-                message: "bad request".into()
+                message: "bad request".into(),
+                retry_after_ms: None,
             }
             .is_retryable()
         );
@@ -287,7 +304,8 @@ mod tests {
         assert_eq!(
             RoamError::Api {
                 status_code: 500,
-                message: "err".into()
+                message: "err".into(),
+                retry_after_ms: None,
             }
             .retry_after(),
             None
@@ -417,6 +435,7 @@ mod tests {
         match (RoamError::Api {
             status_code: 503,
             message: "unavailable".into(),
+            retry_after_ms: None,
         })
         .to_fcp_error()
         {
@@ -450,6 +469,7 @@ mod tests {
         match (RoamError::Api {
             status_code: 400,
             message: "bad".into(),
+            retry_after_ms: None,
         })
         .to_fcp_error()
         {
@@ -508,7 +528,8 @@ mod tests {
         assert_eq!(
             RoamError::Api {
                 status_code: 500,
-                message: "Internal".into()
+                message: "Internal".into(),
+                retry_after_ms: None,
             }
             .to_string(),
             "Roam API error (500): Internal"
@@ -531,7 +552,8 @@ mod tests {
         assert!(
             RoamError::Api {
                 status_code: 599,
-                message: "err".into()
+                message: "err".into(),
+                retry_after_ms: None,
             }
             .is_retryable()
         );
@@ -542,7 +564,8 @@ mod tests {
         assert!(
             !RoamError::Api {
                 status_code: 200,
-                message: "ok".into()
+                message: "ok".into(),
+                retry_after_ms: None,
             }
             .is_retryable()
         );
@@ -604,7 +627,8 @@ mod tests {
             "{:?}",
             RoamError::Api {
                 status_code: 500,
-                message: "err".into()
+                message: "err".into(),
+                retry_after_ms: None,
             }
         );
         assert!(dbg.contains("Api"));
@@ -630,6 +654,7 @@ mod tests {
         let err = RoamError::Api {
             status_code: 408,
             message: "timeout".into(),
+            retry_after_ms: None,
         };
         assert!(err.to_string().contains("408"));
     }
@@ -639,7 +664,8 @@ mod tests {
         assert!(
             RoamError::Api {
                 status_code: 501,
-                message: "not impl".into()
+                message: "not impl".into(),
+                retry_after_ms: None,
             }
             .is_retryable()
         );
@@ -650,7 +676,8 @@ mod tests {
         assert!(
             RoamError::Api {
                 status_code: 504,
-                message: "gw timeout".into()
+                message: "gw timeout".into(),
+                retry_after_ms: None,
             }
             .is_retryable()
         );
@@ -661,7 +688,8 @@ mod tests {
         assert!(
             !RoamError::Api {
                 status_code: 403,
-                message: "no".into()
+                message: "no".into(),
+                retry_after_ms: None,
             }
             .is_retryable()
         );
@@ -672,7 +700,8 @@ mod tests {
         assert!(
             !RoamError::Api {
                 status_code: 404,
-                message: "miss".into()
+                message: "miss".into(),
+                retry_after_ms: None,
             }
             .is_retryable()
         );
@@ -683,7 +712,8 @@ mod tests {
         assert!(
             !RoamError::Api {
                 status_code: 422,
-                message: "unprocessable".into()
+                message: "unprocessable".into(),
+                retry_after_ms: None,
             }
             .is_retryable()
         );

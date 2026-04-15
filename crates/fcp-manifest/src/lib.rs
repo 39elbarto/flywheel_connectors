@@ -1941,6 +1941,15 @@ impl NetworkConstraints {
                 message: "timeouts must be > 0".into(),
             });
         }
+        if self.connect_timeout_ms > self.total_timeout_ms {
+            return Err(ManifestError::Invalid {
+                field: "provides.operations.*.network_constraints",
+                message: format!(
+                    "connect_timeout_ms ({}) must not exceed total_timeout_ms ({})",
+                    self.connect_timeout_ms, self.total_timeout_ms
+                ),
+            });
+        }
         if self.max_response_bytes == 0 {
             return Err(ManifestError::Invalid {
                 field: "provides.operations.*.network_constraints.max_response_bytes",
@@ -4640,6 +4649,54 @@ deny_ptrace = true
         };
         let err = nc.validate().unwrap_err();
         assert!(err.to_string().contains("timeout"));
+    }
+
+    #[test]
+    fn network_constraints_connect_exceeds_total_timeout_rejected() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 30_000,
+            total_timeout_ms: 10_000,
+            max_response_bytes: 10_485_760,
+        };
+        let err = nc.validate().unwrap_err();
+        assert!(err.to_string().contains("connect_timeout_ms"));
+        assert!(err.to_string().contains("must not exceed"));
+    }
+
+    #[test]
+    fn network_constraints_connect_equals_total_timeout_accepted() {
+        let nc = NetworkConstraints {
+            host_allow: vec!["api.example.com".into()],
+            port_allow: vec![443],
+            ip_allow: vec![],
+            cidr_deny: vec![],
+            deny_localhost: true,
+            deny_private_ranges: true,
+            deny_tailnet_ranges: true,
+            require_sni: true,
+            spki_pins: vec![],
+            deny_ip_literals: true,
+            require_host_canonicalization: false,
+            dns_max_ips: 16,
+            max_redirects: 5,
+            connect_timeout_ms: 60_000,
+            total_timeout_ms: 60_000,
+            max_response_bytes: 10_485_760,
+        };
+        assert!(nc.validate().is_ok());
     }
 
     #[test]

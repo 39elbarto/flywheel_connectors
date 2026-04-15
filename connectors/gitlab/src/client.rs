@@ -5,8 +5,27 @@ use std::time::Duration;
 
 use fcp_core::CredentialId;
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
+
+/// Characters that are NOT percent-encoded when encoding a single path segment.
+/// Keeps alphanumerics, hyphens, underscores, dots, and tildes (RFC 3986 unreserved).
+/// Slashes are NOT included — they must be encoded when a project ID is a namespace path.
+const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
+/// Percent-encode a value for use as a single URL path segment.
+///
+/// GitLab project IDs can be numeric (`12345`) or namespace paths (`group/subgroup/project`).
+/// When used in a URL like `/projects/{id}/issues`, the slashes must be encoded to
+/// `group%2Fsubgroup%2Fproject` so they aren't interpreted as path separators.
+fn encode_path_segment(value: &str) -> String {
+    utf8_percent_encode(value, PATH_SEGMENT_ENCODE_SET).to_string()
+}
 
 use crate::{
     error::{GitLabError, GitLabResult},
@@ -195,7 +214,8 @@ impl GitLabClient {
 
     /// List issues in a project.
     pub async fn list_issues(&self, project_id: &str) -> GitLabResult<serde_json::Value> {
-        self.get(&format!("/projects/{project_id}/issues")).await
+        let encoded = encode_path_segment(project_id);
+        self.get(&format!("/projects/{encoded}/issues")).await
     }
 
     /// Create an issue.
@@ -204,7 +224,8 @@ impl GitLabClient {
         project_id: &str,
         body: &serde_json::Value,
     ) -> GitLabResult<serde_json::Value> {
-        self.post(&format!("/projects/{project_id}/issues"), body)
+        let encoded = encode_path_segment(project_id);
+        self.post(&format!("/projects/{encoded}/issues"), body)
             .await
     }
 
@@ -212,7 +233,8 @@ impl GitLabClient {
 
     /// List merge requests.
     pub async fn list_merge_requests(&self, project_id: &str) -> GitLabResult<serde_json::Value> {
-        self.get(&format!("/projects/{project_id}/merge_requests"))
+        let encoded = encode_path_segment(project_id);
+        self.get(&format!("/projects/{encoded}/merge_requests"))
             .await
     }
 
@@ -220,7 +242,8 @@ impl GitLabClient {
 
     /// List pipelines.
     pub async fn list_pipelines(&self, project_id: &str) -> GitLabResult<serde_json::Value> {
-        self.get(&format!("/projects/{project_id}/pipelines")).await
+        let encoded = encode_path_segment(project_id);
+        self.get(&format!("/projects/{encoded}/pipelines")).await
     }
 }
 
@@ -379,6 +402,35 @@ mod tests {
         )
         .unwrap();
         assert!(!client.base_url.ends_with('/'));
+    }
+
+    // ── encode_path_segment tests ───────────────────────────────
+    #[test]
+    fn encode_path_segment_numeric_id_unchanged() {
+        assert_eq!(encode_path_segment("12345"), "12345");
+    }
+
+    #[test]
+    fn encode_path_segment_encodes_slashes() {
+        assert_eq!(
+            encode_path_segment("group/subgroup/project"),
+            "group%2Fsubgroup%2Fproject"
+        );
+    }
+
+    #[test]
+    fn encode_path_segment_encodes_spaces() {
+        assert_eq!(encode_path_segment("my project"), "my%20project");
+    }
+
+    #[test]
+    fn encode_path_segment_preserves_hyphens_underscores() {
+        assert_eq!(encode_path_segment("my-project_v2"), "my-project_v2");
+    }
+
+    #[test]
+    fn encode_path_segment_encodes_special_chars() {
+        assert_eq!(encode_path_segment("a?b#c"), "a%3Fb%23c");
     }
 
     #[test]

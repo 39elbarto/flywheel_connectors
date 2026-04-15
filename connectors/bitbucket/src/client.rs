@@ -5,8 +5,22 @@ use std::time::Duration;
 
 use fcp_core::CredentialId;
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
+
+/// Characters that are NOT percent-encoded when encoding a single path segment.
+/// Keeps alphanumerics, hyphens, underscores, dots, and tildes (RFC 3986 unreserved).
+const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
+/// Percent-encode a value for use as a single URL path segment.
+fn encode_path_segment(value: &str) -> String {
+    utf8_percent_encode(value, PATH_SEGMENT_ENCODE_SET).to_string()
+}
 
 use crate::{
     error::{BitbucketError, BitbucketResult},
@@ -222,7 +236,8 @@ impl BitbucketClient {
 
     /// List repositories in a workspace.
     pub async fn list_repositories(&self, workspace: &str) -> BitbucketResult<serde_json::Value> {
-        self.get(&format!("/repositories/{workspace}")).await
+        let ws = encode_path_segment(workspace);
+        self.get(&format!("/repositories/{ws}")).await
     }
 
     /// Get a single repository.
@@ -231,8 +246,9 @@ impl BitbucketClient {
         workspace: &str,
         repo_slug: &str,
     ) -> BitbucketResult<serde_json::Value> {
-        self.get(&format!("/repositories/{workspace}/{repo_slug}"))
-            .await
+        let ws = encode_path_segment(workspace);
+        let repo = encode_path_segment(repo_slug);
+        self.get(&format!("/repositories/{ws}/{repo}")).await
     }
 
     // -- Pull Requests --
@@ -243,10 +259,10 @@ impl BitbucketClient {
         workspace: &str,
         repo_slug: &str,
     ) -> BitbucketResult<serde_json::Value> {
-        self.get(&format!(
-            "/repositories/{workspace}/{repo_slug}/pullrequests"
-        ))
-        .await
+        let ws = encode_path_segment(workspace);
+        let repo = encode_path_segment(repo_slug);
+        self.get(&format!("/repositories/{ws}/{repo}/pullrequests"))
+            .await
     }
 
     /// Get a single pull request.
@@ -256,10 +272,11 @@ impl BitbucketClient {
         repo_slug: &str,
         pr_id: &str,
     ) -> BitbucketResult<serde_json::Value> {
-        self.get(&format!(
-            "/repositories/{workspace}/{repo_slug}/pullrequests/{pr_id}"
-        ))
-        .await
+        let ws = encode_path_segment(workspace);
+        let repo = encode_path_segment(repo_slug);
+        let id = encode_path_segment(pr_id);
+        self.get(&format!("/repositories/{ws}/{repo}/pullrequests/{id}"))
+            .await
     }
 
     /// Create a pull request.
@@ -269,8 +286,10 @@ impl BitbucketClient {
         repo_slug: &str,
         body: &serde_json::Value,
     ) -> BitbucketResult<serde_json::Value> {
+        let ws = encode_path_segment(workspace);
+        let repo = encode_path_segment(repo_slug);
         self.post(
-            &format!("/repositories/{workspace}/{repo_slug}/pullrequests"),
+            &format!("/repositories/{ws}/{repo}/pullrequests"),
             body,
         )
         .await
@@ -284,10 +303,10 @@ impl BitbucketClient {
         workspace: &str,
         repo_slug: &str,
     ) -> BitbucketResult<serde_json::Value> {
-        self.get(&format!(
-            "/repositories/{workspace}/{repo_slug}/refs/branches"
-        ))
-        .await
+        let ws = encode_path_segment(workspace);
+        let repo = encode_path_segment(repo_slug);
+        self.get(&format!("/repositories/{ws}/{repo}/refs/branches"))
+            .await
     }
 
     // -- Commits --
@@ -298,7 +317,9 @@ impl BitbucketClient {
         workspace: &str,
         repo_slug: &str,
     ) -> BitbucketResult<serde_json::Value> {
-        self.get(&format!("/repositories/{workspace}/{repo_slug}/commits"))
+        let ws = encode_path_segment(workspace);
+        let repo = encode_path_segment(repo_slug);
+        self.get(&format!("/repositories/{ws}/{repo}/commits"))
             .await
     }
 
@@ -310,7 +331,9 @@ impl BitbucketClient {
         workspace: &str,
         repo_slug: &str,
     ) -> BitbucketResult<serde_json::Value> {
-        self.get(&format!("/repositories/{workspace}/{repo_slug}/pipelines"))
+        let ws = encode_path_segment(workspace);
+        let repo = encode_path_segment(repo_slug);
+        self.get(&format!("/repositories/{ws}/{repo}/pipelines"))
             .await
     }
 }
@@ -318,6 +341,27 @@ impl BitbucketClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── encode_path_segment tests ───────────────────────────────
+    #[test]
+    fn encode_path_segment_simple_slug_unchanged() {
+        assert_eq!(encode_path_segment("my-team"), "my-team");
+    }
+
+    #[test]
+    fn encode_path_segment_encodes_slashes() {
+        assert_eq!(encode_path_segment("a/b/c"), "a%2Fb%2Fc");
+    }
+
+    #[test]
+    fn encode_path_segment_encodes_spaces() {
+        assert_eq!(encode_path_segment("my team"), "my%20team");
+    }
+
+    #[test]
+    fn encode_path_segment_encodes_special_chars() {
+        assert_eq!(encode_path_segment("repo?q=1"), "repo%3Fq%3D1");
+    }
 
     #[test]
     fn auth_debug_redacts_access_token() {

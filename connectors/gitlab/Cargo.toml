@@ -25,6 +25,7 @@ fcp-async-core = { path = "../../crates/fcp-async-core" }
 fcp-sdk = { path = "../../crates/fcp-sdk" }
 
 anyhow.workspace = true
+percent-encoding.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 reqwest = { workspace = true, features = ["stream"] }

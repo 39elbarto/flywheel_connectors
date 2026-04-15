@@ -1165,13 +1165,13 @@ impl DiscordConnector {
                             let mut size = 0;
 
                             // Title
-                            size += e.get("title").and_then(|v| v.as_str()).map_or(0, str::len);
+                            size += e.get("title").and_then(|v| v.as_str()).map_or(0, |s| s.chars().count());
 
                             // Description
                             size += e
                                 .get("description")
                                 .and_then(|v| v.as_str())
-                                .map_or(0, str::len);
+                                .map_or(0, |s| s.chars().count());
 
                             // Fields
                             if let Some(fields) = e.get("fields").and_then(|v| v.as_array()) {
@@ -1179,11 +1179,11 @@ impl DiscordConnector {
                                     size += field
                                         .get("name")
                                         .and_then(|v| v.as_str())
-                                        .map_or(0, str::len);
+                                        .map_or(0, |s| s.chars().count());
                                     size += field
                                         .get("value")
                                         .and_then(|v| v.as_str())
-                                        .map_or(0, str::len);
+                                        .map_or(0, |s| s.chars().count());
                                 }
                             }
 
@@ -1192,7 +1192,7 @@ impl DiscordConnector {
                                 size += footer
                                     .get("text")
                                     .and_then(|v| v.as_str())
-                                    .map_or(0, str::len);
+                                    .map_or(0, |s| s.chars().count());
                             }
 
                             // Author
@@ -1200,7 +1200,7 @@ impl DiscordConnector {
                                 size += author
                                     .get("name")
                                     .and_then(|v| v.as_str())
-                                    .map_or(0, str::len);
+                                    .map_or(0, |s| s.chars().count());
                             }
 
                             size

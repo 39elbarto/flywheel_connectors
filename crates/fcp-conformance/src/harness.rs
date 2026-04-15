@@ -61,10 +61,8 @@ struct Timer {
 
 impl Ord for Timer {
     fn cmp(&self, other: &Self) -> Ordering {
-        other
-            .when_ms
-            .cmp(&self.when_ms)
-            .then_with(|| self.when_ms.cmp(&other.when_ms))
+        // Reverse ordering for min-heap behavior (earliest timer first).
+        other.when_ms.cmp(&self.when_ms)
     }
 }
 

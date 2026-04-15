@@ -5815,6 +5815,189 @@ serde = "1"
         assert_eq!(actual, expected);
     }
 
+    // ---- golden fixtures for polling archetype ----
+
+    fn canonical_truthful_polling_bundle() -> serde_json::Value {
+        let connector_id = "fcp.truthful-poll";
+        let crate_path = "connectors/truthful-poll";
+        let files = generate_files(
+            connector_id,
+            "truthful-poll",
+            "fcp-truthful-poll",
+            ConnectorArchetype::Polling,
+            "z:project:truthful-poll",
+            false,
+        )
+        .expect("fixture files");
+        let prechecks = run_prechecks(&files, connector_id, "z:project:truthful-poll");
+        let next_steps = generate_next_steps(
+            connector_id,
+            crate_path,
+            ConnectorArchetype::Polling,
+            false,
+        );
+
+        serde_json::json!({
+            "connector_id": connector_id,
+            "crate_path": crate_path,
+            "archetype": "polling",
+            "zone": "z:project:truthful-poll",
+            "prechecks": prechecks,
+            "next_steps": next_steps,
+            "files": files.iter().map(|(path, content, purpose)| serde_json::json!({
+                "path": path,
+                "purpose": purpose,
+                "content": content,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    #[test]
+    #[ignore = "fixture refresh helper; run explicitly with -- --ignored --nocapture"]
+    fn emit_truthful_polling_fixture_bundle() {
+        let bundle = canonical_truthful_polling_bundle();
+        if std::env::var_os("FCP_UPDATE_GOLDENS").is_some() {
+            write_generator_fixture_json(
+                "generator/truthful_polling_bundle.json",
+                &bundle,
+            );
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&bundle).expect("fixture JSON")
+        );
+    }
+
+    #[test]
+    fn truthful_polling_scaffold_matches_golden_bundle() {
+        let actual = canonical_truthful_polling_bundle();
+        let expected =
+            load_generator_fixture_json("generator/truthful_polling_bundle.json");
+        assert_eq!(actual, expected);
+    }
+
+    // ---- golden fixtures for database archetype ----
+
+    fn canonical_truthful_database_bundle() -> serde_json::Value {
+        let connector_id = "fcp.truthful-db";
+        let crate_path = "connectors/truthful-db";
+        let files = generate_files(
+            connector_id,
+            "truthful-db",
+            "fcp-truthful-db",
+            ConnectorArchetype::Database,
+            "z:project:truthful-db",
+            false,
+        )
+        .expect("fixture files");
+        let prechecks = run_prechecks(&files, connector_id, "z:project:truthful-db");
+        let next_steps = generate_next_steps(
+            connector_id,
+            crate_path,
+            ConnectorArchetype::Database,
+            false,
+        );
+
+        serde_json::json!({
+            "connector_id": connector_id,
+            "crate_path": crate_path,
+            "archetype": "database",
+            "zone": "z:project:truthful-db",
+            "prechecks": prechecks,
+            "next_steps": next_steps,
+            "files": files.iter().map(|(path, content, purpose)| serde_json::json!({
+                "path": path,
+                "purpose": purpose,
+                "content": content,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    #[test]
+    #[ignore = "fixture refresh helper; run explicitly with -- --ignored --nocapture"]
+    fn emit_truthful_database_fixture_bundle() {
+        let bundle = canonical_truthful_database_bundle();
+        if std::env::var_os("FCP_UPDATE_GOLDENS").is_some() {
+            write_generator_fixture_json(
+                "generator/truthful_database_bundle.json",
+                &bundle,
+            );
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&bundle).expect("fixture JSON")
+        );
+    }
+
+    #[test]
+    fn truthful_database_scaffold_matches_golden_bundle() {
+        let actual = canonical_truthful_database_bundle();
+        let expected =
+            load_generator_fixture_json("generator/truthful_database_bundle.json");
+        assert_eq!(actual, expected);
+    }
+
+    // ---- golden fixtures for bidirectional archetype ----
+
+    fn canonical_truthful_bidirectional_bundle() -> serde_json::Value {
+        let connector_id = "fcp.truthful-bidir";
+        let crate_path = "connectors/truthful-bidir";
+        let files = generate_files(
+            connector_id,
+            "truthful-bidir",
+            "fcp-truthful-bidir",
+            ConnectorArchetype::Bidirectional,
+            "z:project:truthful-bidir",
+            false,
+        )
+        .expect("fixture files");
+        let prechecks = run_prechecks(&files, connector_id, "z:project:truthful-bidir");
+        let next_steps = generate_next_steps(
+            connector_id,
+            crate_path,
+            ConnectorArchetype::Bidirectional,
+            false,
+        );
+
+        serde_json::json!({
+            "connector_id": connector_id,
+            "crate_path": crate_path,
+            "archetype": "bidirectional",
+            "zone": "z:project:truthful-bidir",
+            "prechecks": prechecks,
+            "next_steps": next_steps,
+            "files": files.iter().map(|(path, content, purpose)| serde_json::json!({
+                "path": path,
+                "purpose": purpose,
+                "content": content,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    #[test]
+    #[ignore = "fixture refresh helper; run explicitly with -- --ignored --nocapture"]
+    fn emit_truthful_bidirectional_fixture_bundle() {
+        let bundle = canonical_truthful_bidirectional_bundle();
+        if std::env::var_os("FCP_UPDATE_GOLDENS").is_some() {
+            write_generator_fixture_json(
+                "generator/truthful_bidirectional_bundle.json",
+                &bundle,
+            );
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&bundle).expect("fixture JSON")
+        );
+    }
+
+    #[test]
+    fn truthful_bidirectional_scaffold_matches_golden_bundle() {
+        let actual = canonical_truthful_bidirectional_bundle();
+        let expected =
+            load_generator_fixture_json("generator/truthful_bidirectional_bundle.json");
+        assert_eq!(actual, expected);
+    }
+
     // ---- cross-archetype scaffold-status metadata consistency ----
 
     #[test]
@@ -6173,6 +6356,213 @@ serde = "1"
                     );
                 }
             }
+        }
+    }
+
+    // ---- regression gate: Rust placeholder macros in generated runtime code ----
+
+    #[test]
+    fn generated_scaffolds_reject_rust_placeholder_macros() {
+        // Regression gate: generated connectors must never contain Rust
+        // placeholder macros that would panic at runtime. This catches
+        // template regressions that reintroduce dead-end code paths.
+        let placeholder_macros = [
+            "todo!()",
+            "todo!(\"",
+            "unimplemented!()",
+            "unimplemented!(\"",
+            "panic!(\"not implemented",
+            "panic!(\"not yet implemented",
+            "panic!(\"unimplemented",
+        ];
+
+        for (index, archetype) in all_archetypes().into_iter().enumerate() {
+            let connector_id = format!("fcp.macrogate{index}");
+            let short_name = format!("macrogate{index}");
+            let crate_name = format!("fcp-macrogate{index}");
+            let files = generate_files(
+                &connector_id,
+                &short_name,
+                &crate_name,
+                archetype,
+                "z:project:macrogate",
+                false,
+            )
+            .unwrap_or_else(|error| panic!("generate {archetype:?}: {error}"));
+
+            for (path, content, _) in &files {
+                // Skip test scaffolds — they legitimately use todo!() as
+                // markers for the developer to fill in.
+                if path.starts_with("tests/") {
+                    continue;
+                }
+                for macro_pattern in &placeholder_macros {
+                    assert!(
+                        !content.contains(macro_pattern),
+                        "{archetype:?} generated runtime file {path} contains \
+                         placeholder macro `{macro_pattern}`; runtime code must \
+                         never ship with placeholder panics"
+                    );
+                }
+            }
+        }
+    }
+
+    // ---- regression gate: placeholder comments in generated runtime code ----
+
+    #[test]
+    fn generated_scaffolds_reject_dead_end_comments_in_runtime() {
+        // Regression gate: generated runtime code must not contain comments
+        // that indicate non-functional dead-end code. Instructional TODOs in
+        // working code (e.g., "TODO: Enforce monotonic cursor") are allowed
+        // because the code already functions — those are enhancement hints.
+        // Dead-end markers (FIXME, HACK, XXX) and dead-end TODO patterns
+        // (TODO: Implement, TODO: Not implemented) are banned.
+        let dead_end_patterns = [
+            "// FIXME:",
+            "// HACK:",
+            "// XXX:",
+            "/* FIXME:",
+            "/* HACK:",
+            "// TODO: Implement",
+            "// TODO: Not implemented",
+            "// TODO: Not yet implemented",
+            "// TODO: Replace placeholder",
+        ];
+
+        for (index, archetype) in all_archetypes().into_iter().enumerate() {
+            let connector_id = format!("fcp.commentgate{index}");
+            let short_name = format!("commentgate{index}");
+            let crate_name = format!("fcp-commentgate{index}");
+            let files = generate_files(
+                &connector_id,
+                &short_name,
+                &crate_name,
+                archetype,
+                "z:project:commentgate",
+                false,
+            )
+            .unwrap_or_else(|error| panic!("generate {archetype:?}: {error}"));
+
+            for (path, content, _) in &files {
+                // Skip test scaffolds and Cargo.toml
+                if path.starts_with("tests/") || path == "Cargo.toml" {
+                    continue;
+                }
+                for pattern in &dead_end_patterns {
+                    assert!(
+                        !content.contains(pattern),
+                        "{archetype:?} generated runtime file {path} contains \
+                         dead-end comment `{pattern}`; runtime code must not \
+                         ship with non-functional markers"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn generated_scaffolds_cap_instructional_todo_count() {
+        // Regression gate: freeze the total TODO comment count across all
+        // archetypes. If a template change adds new TODOs, this test fails
+        // and forces the author to justify the increase or convert the TODO
+        // into working code.
+        let mut total_todos: usize = 0;
+        for (index, archetype) in all_archetypes().into_iter().enumerate() {
+            let connector_id = format!("fcp.todocap{index}");
+            let short_name = format!("todocap{index}");
+            let crate_name = format!("fcp-todocap{index}");
+            let files = generate_files(
+                &connector_id,
+                &short_name,
+                &crate_name,
+                archetype,
+                "z:project:todocap",
+                false,
+            )
+            .unwrap_or_else(|error| panic!("generate {archetype:?}: {error}"));
+
+            for (path, content, _) in &files {
+                if path.starts_with("tests/") {
+                    continue;
+                }
+                total_todos += content.matches("// TODO:").count();
+            }
+        }
+
+        // Frozen cap: if this number grows, the template is drifting toward
+        // more placeholder debt. Update this constant only after verifying
+        // that every new TODO is a genuine instructional hint in working code.
+        const MAX_INSTRUCTIONAL_TODOS: usize = 60;
+        assert!(
+            total_todos <= MAX_INSTRUCTIONAL_TODOS,
+            "total instructional TODO count across all archetypes is {total_todos}, \
+             which exceeds the frozen cap of {MAX_INSTRUCTIONAL_TODOS}; \
+             either convert TODOs to working code or justify the increase"
+        );
+    }
+
+    // ---- regression gate: manifests reject placeholder operations ----
+
+    #[test]
+    fn generated_manifests_reject_placeholder_operations() {
+        // Regression gate: generated manifests must only declare the
+        // scaffold_status operation. Any additional placeholder operations
+        // indicate template drift toward dead-end code paths.
+        let banned_manifest_patterns = [
+            "placeholder_operation",
+            "planned_only",
+            "not_implemented",
+            "example_operation",
+            "dummy_operation",
+            "status = \"planned\"",
+        ];
+
+        for (index, archetype) in all_archetypes().into_iter().enumerate() {
+            let connector_id = format!("fcp.mfstgate{index}");
+            let short_name = format!("mfstgate{index}");
+            let crate_name = format!("fcp-mfstgate{index}");
+            let files = generate_files(
+                &connector_id,
+                &short_name,
+                &crate_name,
+                archetype,
+                "z:project:mfstgate",
+                false,
+            )
+            .unwrap_or_else(|error| panic!("generate {archetype:?}: {error}"));
+
+            let manifest = files
+                .iter()
+                .find(|(p, _, _)| p == "manifest.toml")
+                .expect("manifest.toml must be generated");
+
+            for pattern in &banned_manifest_patterns {
+                assert!(
+                    !manifest.1.contains(pattern),
+                    "{archetype:?} manifest.toml contains banned pattern `{pattern}`; \
+                     manifests must only declare truthful operations"
+                );
+            }
+
+            // Verify the only top-level operation is scaffold_status.
+            // Sub-tables like [provides.operations.scaffold_status.ai_hints]
+            // are allowed — they extend scaffold_status, not add operations.
+            let top_level_ops: Vec<&str> = manifest
+                .1
+                .lines()
+                .filter(|line| {
+                    line.starts_with("[provides.operations.")
+                        && line.matches('.').count() == 2
+                        && line.ends_with(']')
+                })
+                .collect();
+            assert!(
+                top_level_ops.len() == 1
+                    && top_level_ops[0] == "[provides.operations.scaffold_status]",
+                "{archetype:?} manifest must declare exactly one top-level operation \
+                 (scaffold_status); found: {top_level_ops:?}"
+            );
         }
     }
 

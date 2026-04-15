@@ -620,11 +620,20 @@ async fn send_json(request: RequestBuilder, service: &'static str) -> FcpResult<
             .text()
             .await
             .unwrap_or_else(|_| "<unreadable response body>".into());
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let retry_after_ms = retry_after.map_or(30_000, |d| {
+                u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+            });
+            return Err(FcpError::RateLimited {
+                retry_after_ms,
+                violation: None,
+            });
+        }
         return Err(FcpError::External {
             service: service.into(),
             message: format!("HTTP {status}: {body}"),
             status_code: Some(status.as_u16()),
-            retryable: status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error(),
+            retryable: status.is_server_error(),
             retry_after,
         });
     }
@@ -634,7 +643,7 @@ async fn send_json(request: RequestBuilder, service: &'static str) -> FcpResult<
         .map_err(|error| FcpError::External {
             service: service.into(),
             message: format!("Failed to decode JSON response: {error}"),
-            status_code: Some(status.as_u16()),
+            status_code: None,
             retryable: false,
             retry_after: None,
         })

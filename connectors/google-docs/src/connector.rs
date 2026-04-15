@@ -71,9 +71,7 @@ impl DocsConnector {
 
         let auth_label = client.auth_redacted_label();
         self.client = Some(client);
-        self.base
-            .configured
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.base.set_configured(true);
         info!(auth = %auth_label, status, "Google Docs connector configured");
 
         Ok(json!({ "status": status }))

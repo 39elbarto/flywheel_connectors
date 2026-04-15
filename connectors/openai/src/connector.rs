@@ -3330,6 +3330,13 @@ mod tests {
             _ => "openai.chat",
         };
         let now = Utc::now();
+        // C3.4: tokens MUST include constraints (default-deny)
+        let constraints = fcp_core::CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
@@ -3337,6 +3344,7 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&cbor)
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)

@@ -2243,6 +2243,13 @@ mod tests {
         operations: &[&str],
     ) -> CapabilityArtifact {
         let now = Utc::now();
+        // C3.4: tokens MUST include constraints (default-deny)
+        let constraints = fcp_core::CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
         let cose = CapabilityBuilder::new()
             .capability_id(capability_id)
             .zone_id("z:work")
@@ -2250,9 +2257,10 @@ mod tests {
             .operations(operations)
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&cbor)
             .sign(signing_key)
             .unwrap();
-        CapabilityArtifact { raw: cose }
+        CapabilityArtifact::from_raw(cose)
     }
 
     async fn mock_current_user_ok(mock_server: &MockServer, token: &str) {

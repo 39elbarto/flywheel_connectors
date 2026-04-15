@@ -302,6 +302,14 @@ mod token_field_validation {
         let sk = Ed25519SigningKey::generate();
         let pub_bytes = sk.verifying_key().to_bytes();
 
+        // C3.4: tokens MUST include constraints (default-deny)
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut constraints_cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut constraints_cbor).unwrap();
+
         let now = Utc::now();
         let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.test")
@@ -310,6 +318,7 @@ mod token_field_validation {
             .operations(&["op.read", "op.write", "op.delete"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&constraints_cbor)
             .sign(&sk)
             .unwrap();
 

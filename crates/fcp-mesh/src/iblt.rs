@@ -69,9 +69,12 @@ impl IbltCell {
 /// Errors returned by production IBLT operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum IbltError {
-    /// Cell count must be positive.
-    #[error("iblt cell count must be greater than zero")]
-    InvalidCellCount,
+    /// Cell count must be at least `IBLT_HASH_COUNT` (3).
+    #[error("iblt cell count must be at least 3 (IBLT_HASH_COUNT), got {got}")]
+    InvalidCellCount {
+        /// The invalid cell count that was provided.
+        got: usize,
+    },
     /// Two sketches must use the same cell budget before subtraction.
     #[error("iblt cell count mismatch: left={left}, right={right}")]
     CellCountMismatch { left: usize, right: usize },
@@ -124,11 +127,16 @@ impl Iblt {
 
     /// Build an IBLT with an explicit cell count.
     ///
+    /// The cell count must be at least [`IBLT_HASH_COUNT`] (3). Smaller values
+    /// cause [`Self::indices_for`] to silently produce duplicate hash positions,
+    /// which breaks the peeling invariant — a single insert would apply to the
+    /// same cell multiple times and decode would not recover.
+    ///
     /// # Errors
-    /// Returns [`IbltError::InvalidCellCount`] when `cell_count == 0`.
+    /// Returns [`IbltError::InvalidCellCount`] when `cell_count < IBLT_HASH_COUNT`.
     pub fn with_cell_count(cell_count: usize) -> Result<Self, IbltError> {
-        if cell_count == 0 {
-            return Err(IbltError::InvalidCellCount);
+        if cell_count < IBLT_HASH_COUNT {
+            return Err(IbltError::InvalidCellCount { got: cell_count });
         }
 
         Ok(Self {
@@ -386,6 +394,29 @@ mod tests {
     #[test]
     fn explicit_zero_cell_count_is_rejected() {
         let error = Iblt::with_cell_count(0).expect_err("zero cells must be rejected");
-        assert_eq!(error, IbltError::InvalidCellCount);
+        assert_eq!(error, IbltError::InvalidCellCount { got: 0 });
+    }
+
+    #[test]
+    fn cell_count_below_hash_count_is_rejected() {
+        // Cell counts 1 and 2 would cause indices_for() to silently return
+        // duplicate hash positions, breaking the peeling invariant.
+        for bad in 1..IBLT_HASH_COUNT {
+            let error = Iblt::with_cell_count(bad)
+                .expect_err("cell counts below IBLT_HASH_COUNT must be rejected");
+            assert_eq!(error, IbltError::InvalidCellCount { got: bad });
+        }
+    }
+
+    #[test]
+    fn cell_count_equal_to_hash_count_is_accepted() {
+        // The smallest valid IBLT has exactly IBLT_HASH_COUNT cells; with
+        // distinct hash positions, insert/decode still works.
+        let mut iblt = Iblt::with_cell_count(IBLT_HASH_COUNT).expect("IBLT_HASH_COUNT is valid");
+        let obj = object_id("min-cell-iblt");
+        iblt.insert(obj);
+        let decoded = iblt.decode();
+        assert!(decoded.is_complete());
+        assert_eq!(decoded.only_left, BTreeSet::from([obj]));
     }
 }

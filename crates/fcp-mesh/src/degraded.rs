@@ -1217,9 +1217,7 @@ mod tests {
             FcpsFrame {
                 header: FcpsFrameHeader {
                     version: FCPS_VERSION,
-                    flags: FrameFlags::ENCRYPTED
-                        | FrameFlags::RAPTORQ
-                        | FrameFlags::CONTROL_PLANE,
+                    flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE,
                     symbol_count: 1,
                     total_payload_len: wire_size,
                     object_id: ObjectId::from_bytes([object_id_byte; 32]),

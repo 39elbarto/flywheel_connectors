@@ -1068,6 +1068,9 @@ mod tests {
         // lease is nowhere near its renewal threshold, so should_renew
         // is false.
         let answer = coordinator.should_renew(&lease, 0);
-        assert!(!answer, "lease with u64::MAX remaining should not need renewal");
+        assert!(
+            !answer,
+            "lease with u64::MAX remaining should not need renewal"
+        );
     }
 }

@@ -514,8 +514,13 @@ impl LeaseCoordinator {
         if reference_ttl == 0 {
             return true;
         }
-        let remaining_bps = (remaining * 10_000) / reference_ttl;
-        remaining_bps <= u64::from(self.config.renew_threshold_bps)
+        // Use u128 intermediate to avoid overflow when remaining is near
+        // u64::MAX (can happen if an adversarial peer or buggy state machine
+        // reports expires_at == u64::MAX). `remaining * 10_000` overflows
+        // u64 for remaining > 1_844_674_407_370_955 seconds (~58B years),
+        // which is pathological but should not panic.
+        let remaining_bps = (u128::from(remaining) * 10_000) / u128::from(reference_ttl);
+        remaining_bps <= u128::from(self.config.renew_threshold_bps)
     }
 
     /// Get the current configuration.
@@ -541,11 +546,12 @@ impl LeaseCoordinator {
             .map(|observed| observed.lease.fencing_token)
             .max()
         {
-            self.next_seq = self.next_seq.max(
-                max_observed
-                    .checked_add(1)
-                    .expect("fencing token space exhausted"),
-            );
+            // A malicious/buggy peer reporting fencing_token == u64::MAX must
+            // not be able to panic the coordinator via this rebase path.
+            // saturating_add(1) pins next_seq at u64::MAX in that case;
+            // next_fencing_token() will later refuse to hand out the final
+            // token when the counter reaches u64::MAX.
+            self.next_seq = self.next_seq.max(max_observed.saturating_add(1));
         }
     }
 
@@ -1001,5 +1007,67 @@ mod tests {
         let rt: LeaseConflict = serde_json::from_value(json).unwrap();
         assert_eq!(rt.holders.len(), 2);
         assert_eq!(rt.severity, ConflictSeverity::Critical);
+    }
+
+    #[test]
+    fn rebase_next_seq_does_not_panic_on_u64_max_fencing_token() {
+        // Defensive guard: a malicious or buggy peer reporting fencing_token
+        // == u64::MAX must not cause the coordinator to panic via the rebase
+        // path. The acquire flow calls rebase_next_seq(existing_leases)
+        // before handing out a new token; an external peer influencing that
+        // input should never be able to crash us.
+        let mut coordinator = LeaseCoordinator::with_defaults();
+        let poisoned = vec![ObservedLeaseAuthority::new(
+            node("malicious-peer"),
+            HeldLease {
+                subject_id: subject(),
+                purpose: purpose(),
+                expires_at: u64::MAX,
+                fencing_token: u64::MAX,
+            },
+        )];
+
+        // Would previously panic via checked_add(1).expect("... exhausted").
+        let (outcome, _timeline) = coordinator.acquire(
+            &node("requester"),
+            &zone(),
+            &subject(),
+            &purpose(),
+            &poisoned,
+            &[node("requester"), node("malicious-peer")],
+            1_000,
+            Some(60),
+        );
+
+        // Since the poisoned lease is active (expires_at = u64::MAX > 1_000),
+        // the requester (who isn't the holder) is denied — but crucially we
+        // did not panic during the rebase path.
+        match outcome {
+            AcquireOutcome::Denied { current_holder, .. } => {
+                assert_eq!(current_holder, node("malicious-peer"));
+            }
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn should_renew_does_not_panic_on_u64_max_remaining() {
+        // Defensive guard: remaining * 10_000 as a u64 would overflow when
+        // expires_at is near u64::MAX. Using u128 intermediate, the function
+        // should return Some reasonable result instead of panicking.
+        let coordinator = LeaseCoordinator::with_defaults();
+        let lease = HeldLease {
+            subject_id: subject(),
+            purpose: purpose(),
+            expires_at: u64::MAX,
+            fencing_token: 1,
+        };
+
+        // This would previously panic in debug on arithmetic overflow.
+        // With a very-large remaining and a small reference TTL, the
+        // lease is nowhere near its renewal threshold, so should_renew
+        // is false.
+        let answer = coordinator.should_renew(&lease, 0);
+        assert!(!answer, "lease with u64::MAX remaining should not need renewal");
     }
 }

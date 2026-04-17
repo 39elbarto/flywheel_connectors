@@ -508,6 +508,24 @@ impl OAuth2Client {
         }
 
         let token_response: TokenResponse = response.json()?;
+
+        // Defensive: a misbehaving or compromised OAuth server may return
+        // {"access_token": "", "token_type": "Bearer", ...} with a 200
+        // status. Storing that produces an unusable token and downstream
+        // `authorization_header()` returns a bare "Bearer " that any
+        // resource server will reject, burning a refresh cycle for no
+        // reason. Fail fast here instead.
+        if token_response.access_token.is_empty() {
+            return Err(OAuthError::InvalidTokenResponse(
+                "server returned empty access_token".into(),
+            ));
+        }
+        if token_response.token_type.is_empty() {
+            return Err(OAuthError::InvalidTokenResponse(
+                "server returned empty token_type".into(),
+            ));
+        }
+
         Ok(OAuthTokens::from_response(token_response))
     }
 
@@ -901,6 +919,82 @@ mod tests {
             assert_eq!(tokens.access_token(), "access-123");
             assert_eq!(tokens.refresh_token(), Some("refresh-123"));
             assert_eq!(tokens.scopes(), &["read", "write"]);
+        });
+    }
+
+    #[test]
+    fn test_exchange_code_rejects_empty_access_token() {
+        // Defensive guard: a misbehaving/compromised OAuth server might
+        // return 200 OK with {"access_token": "", ...}. Storing that
+        // produces an unusable bearer token — fail the exchange fast
+        // instead of silently burning a refresh cycle.
+        run_with_test_runtime(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "",
+                    "token_type": "Bearer",
+                    "expires_in": 3600
+                })))
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "test_client_id",
+                "test_client_secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_redirect_uri("https://localhost:3000/callback");
+            let client = OAuth2Client::new(config).unwrap();
+
+            let err = client
+                .exchange_code("auth-code-empty")
+                .await
+                .expect_err("empty access_token must be rejected");
+            match err {
+                OAuthError::InvalidTokenResponse(msg) => {
+                    assert!(
+                        msg.contains("empty access_token"),
+                        "expected empty access_token message, got: {msg}"
+                    );
+                }
+                other => panic!("expected InvalidTokenResponse, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_exchange_code_rejects_empty_token_type() {
+        // Similarly, an empty token_type would produce a malformed
+        // Authorization header like " <access>".
+        run_with_test_runtime(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "ok",
+                    "token_type": "",
+                    "expires_in": 3600
+                })))
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "cid",
+                "csec",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_redirect_uri("https://localhost:3000/callback");
+            let client = OAuth2Client::new(config).unwrap();
+
+            let err = client
+                .exchange_code("auth-code-no-type")
+                .await
+                .expect_err("empty token_type must be rejected");
+            assert!(matches!(err, OAuthError::InvalidTokenResponse(_)));
         });
     }
 

@@ -207,7 +207,36 @@ impl LeaseCoordinator {
 
         // No active leases — grant immediately
         if active.is_empty() {
-            let token = self.next_fencing_token();
+            let Some(token) = self.next_fencing_token() else {
+                // Fencing token space exhausted. Unreachable via legitimate
+                // operation (u64 holds ~18e18 values) but reachable when an
+                // adversarial peer reports fencing_token = u64::MAX in
+                // existing_leases, which rebase_next_seq clamps into
+                // next_seq via saturating_add. Refuse gracefully instead of
+                // panicking the coordinator.
+                timeline.push(AuthorityTimelineEvent {
+                    observed_at_ms: now_secs * 1000,
+                    operation: "lease.acquire_refused".into(),
+                    subject_id: *subject_id,
+                    purpose: purpose.clone(),
+                    holder: None,
+                    coordinator: select_coordinator(zone_id, subject_id, eligible_nodes),
+                    reason_code: AuthorityReasonCode::LeaseConflictDetected,
+                    fencing_token: None,
+                    expires_at: None,
+                    explanation:
+                        "Fencing token space exhausted — refusing to grant lease".into(),
+                });
+
+                return (
+                    AcquireOutcome::Conflict {
+                        holders: Vec::new(),
+                        fencing_tokens: Vec::new(),
+                        reason: "fencing token space exhausted".into(),
+                    },
+                    timeline,
+                );
+            };
             let expires_at = now_secs + u64::from(ttl);
 
             timeline.push(AuthorityTimelineEvent {
@@ -531,13 +560,20 @@ impl LeaseCoordinator {
 
     // ── Internal ────────────────────────────────────────────────────
 
-    fn next_fencing_token(&mut self) -> u64 {
+    /// Hand out the next fencing token and advance the counter.
+    ///
+    /// Returns `None` when the counter has reached `u64::MAX` and cannot
+    /// produce another token without wrapping. Callers must treat this as
+    /// an unavailable-resource condition, not a panic. Normal operation
+    /// never reaches this (u64 fencing token space is ~18e18 values); the
+    /// `None` path guards against an adversarial peer pinning `next_seq`
+    /// at `u64::MAX` via a poisoned `existing_leases` observation (see
+    /// `rebase_next_seq`).
+    fn next_fencing_token(&mut self) -> Option<u64> {
+        let next = self.next_seq.checked_add(1)?;
         let token = self.next_seq;
-        self.next_seq = self
-            .next_seq
-            .checked_add(1)
-            .expect("fencing token space exhausted");
-        token
+        self.next_seq = next;
+        Some(token)
     }
 
     fn rebase_next_seq(&mut self, existing_leases: &[ObservedLeaseAuthority]) {
@@ -1047,6 +1083,51 @@ mod tests {
                 assert_eq!(current_holder, node("malicious-peer"));
             }
             other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn acquire_does_not_panic_on_u64_max_fencing_token_with_expired_lease() {
+        // Defensive guard against a subtler variant of the u64::MAX-poisoning
+        // attack: an adversarial peer reports a lease with
+        // fencing_token = u64::MAX but expires_at in the past (so the lease
+        // is INACTIVE). rebase_next_seq clamps next_seq at u64::MAX via
+        // saturating_add(1), the active-filter drops the poisoned lease, and
+        // the grant branch reaches next_fencing_token(). Previously this path
+        // panicked via checked_add(1).expect("... exhausted"). The fix makes
+        // next_fencing_token() return Option<u64> and refuses to grant when
+        // the space is exhausted, mapping to AcquireOutcome::Conflict with a
+        // clear reason string.
+        let mut coordinator = LeaseCoordinator::with_defaults();
+        let poisoned_expired = vec![ObservedLeaseAuthority::new(
+            node("adversary"),
+            HeldLease {
+                subject_id: subject(),
+                purpose: purpose(),
+                expires_at: 500, // already expired at now_secs=1_000
+                fencing_token: u64::MAX,
+            },
+        )];
+
+        let (outcome, _timeline) = coordinator.acquire(
+            &node("requester"),
+            &zone(),
+            &subject(),
+            &purpose(),
+            &poisoned_expired,
+            &[node("requester"), node("adversary")],
+            1_000,
+            Some(60),
+        );
+
+        match outcome {
+            AcquireOutcome::Conflict { reason, .. } => {
+                assert!(
+                    reason.contains("exhausted"),
+                    "expected exhausted reason, got {reason}"
+                );
+            }
+            other => panic!("expected Conflict(exhausted), got {other:?}"),
         }
     }
 

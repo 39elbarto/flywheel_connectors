@@ -1218,8 +1218,8 @@ impl MeshNode {
         self.sent_symbols.remove(&ack.object_id);
     }
 
-    /// Prune stale state (transfers, sent_symbols).
-    /// Returns total items pruned.
+    /// Prune stale state (transfers, sent_symbols, admission peers, gossip
+    /// peer_states). Returns total items pruned.
     pub fn prune_stale_state(&mut self, now_ms: u64) -> usize {
         let mut pruned = 0;
 
@@ -1239,6 +1239,13 @@ impl MeshNode {
         let initial_peers = self.admission.peer_count();
         self.admission.gc_stale_peers(now_ms, 300_000);
         pruned += initial_peers.saturating_sub(self.admission.peer_count());
+
+        // Prune stale gossip peer_states. Each handle_summary() call inserts
+        // or refreshes a PeerGossipState entry for the summary's source
+        // peer, so without a periodic prune the map grows with every new
+        // peer we ever interact with. gossip uses seconds-scale timestamps
+        // (summary_ttl_secs) internally, hence the /1000.
+        pruned += self.gossip.prune_stale_peers(now_ms / 1000);
 
         if pruned > 0 {
             debug!(pruned, "pruned stale mesh node state");

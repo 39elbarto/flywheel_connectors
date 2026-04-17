@@ -114,9 +114,9 @@ impl OAuthTokens {
             access_token: response.access_token,
             token_type: response.token_type,
             expires_at,
-            refresh_token: response.refresh_token,
+            refresh_token: response.refresh_token.filter(|rt| !rt.is_empty()),
             scopes,
-            id_token: response.id_token,
+            id_token: response.id_token.filter(|id| !id.is_empty()),
             issued_at: now,
         }
     }
@@ -207,8 +207,11 @@ impl OAuthTokens {
         });
         self.issued_at = now;
 
-        // Only update refresh token if a new one is provided
-        if let Some(rt) = response.refresh_token {
+        // Only update refresh token if a new non-empty one is provided.
+        // A malicious/compromised OAuth server could return refresh_token: ""
+        // which would otherwise overwrite the valid refresh token with an
+        // unusable empty string, permanently breaking the refresh loop.
+        if let Some(rt) = response.refresh_token.filter(|rt| !rt.is_empty()) {
             self.refresh_token = Some(rt);
         }
 
@@ -217,8 +220,8 @@ impl OAuthTokens {
             self.scopes = scope.split_whitespace().map(String::from).collect();
         }
 
-        // Update ID token if provided
-        if let Some(id) = response.id_token {
+        // Update ID token if provided (same empty-string guard as refresh token).
+        if let Some(id) = response.id_token.filter(|id| !id.is_empty()) {
             self.id_token = Some(id);
         }
     }
@@ -388,6 +391,54 @@ mod tests {
         assert_eq!(tokens.refresh_token(), Some("test_refresh_token"));
         assert_eq!(tokens.scopes(), &["read", "write"]);
         assert!(!tokens.is_expired());
+    }
+
+    #[test]
+    fn test_from_response_rejects_empty_refresh_token() {
+        // A malicious/compromised OAuth server returning refresh_token: ""
+        // must not produce a stored Some("") refresh token — the empty string
+        // would be useless on the wire and make is_refresh_valid() semantics
+        // ambiguous.
+        let response = TokenResponse {
+            access_token: "at".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: Some(String::new()),
+            scope: None,
+            id_token: Some(String::new()),
+        };
+        let tokens = OAuthTokens::from_response(response);
+        assert_eq!(tokens.refresh_token(), None);
+        assert_eq!(tokens.id_token(), None);
+    }
+
+    #[test]
+    fn test_update_from_response_rejects_empty_refresh_token() {
+        // Starting from valid tokens, a refresh response returning
+        // refresh_token: "" must NOT overwrite the existing refresh token.
+        // Without this guard, a compromised OAuth server could permanently
+        // break the client's refresh loop by returning an empty refresh token.
+        let initial = mock_token_response(Some(3600));
+        let mut tokens = OAuthTokens::from_response(initial);
+        assert_eq!(tokens.refresh_token(), Some("test_refresh_token"));
+
+        let refresh_response = TokenResponse {
+            access_token: "new_at".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: Some(String::new()),
+            scope: None,
+            id_token: Some(String::new()),
+        };
+        tokens.update_from_response(refresh_response);
+
+        assert_eq!(tokens.access_token(), "new_at");
+        assert_eq!(
+            tokens.refresh_token(),
+            Some("test_refresh_token"),
+            "empty refresh_token must not overwrite existing refresh token"
+        );
+        assert_eq!(tokens.id_token(), None);
     }
 
     #[test]

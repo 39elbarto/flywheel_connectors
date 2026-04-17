@@ -81,6 +81,13 @@ pub enum DegradedTransportError {
     /// Signature verification failed.
     #[error("signature verification failed")]
     SignatureVerificationFailed,
+
+    /// Too many concurrent pending reconstructions.
+    #[error(
+        "too many pending reconstructions: current {current}, limit {limit}; \
+         drop or call clear_pending() to free capacity"
+    )]
+    PendingLimitExceeded { current: usize, limit: usize },
 }
 
 /// Retention class for control-plane objects (NORMATIVE).
@@ -273,6 +280,16 @@ impl DegradedModeEncoder {
     }
 }
 
+/// Default cap on concurrent pending control-plane reconstructions.
+///
+/// An adversary can send FCPS frames with unique object_id/epoch_id tuples
+/// to create arbitrarily many distinct `PendingReconstructionKey` entries,
+/// each of which holds a RaptorQ decoder (multi-KiB). Without a bound the
+/// pending map would grow without limit. This cap is intentionally
+/// generous — legitimate control-plane bursts rarely exceed a few dozen
+/// concurrent in-flight reconstructions.
+pub const DEFAULT_MAX_PENDING_RECONSTRUCTIONS: usize = 256;
+
 /// Decoder for control-plane objects from FCPS frames.
 ///
 /// Accumulates symbols from FCPS frames with `CONTROL_PLANE` flag until
@@ -281,6 +298,9 @@ pub struct DegradedModeDecoder {
     config: RaptorQConfig,
     /// In-progress reconstructions keyed by object + transport context.
     pending: HashMap<PendingReconstructionKey, PendingReconstruction>,
+    /// Maximum concurrent pending reconstructions; enforced in
+    /// `process_frame` to bound memory use under adversarial input.
+    max_pending: usize,
 }
 
 /// Identity for an in-flight degraded-mode reconstruction.
@@ -323,12 +343,23 @@ struct PendingReconstruction {
 }
 
 impl DegradedModeDecoder {
-    /// Create a new degraded-mode decoder.
+    /// Create a new degraded-mode decoder with the default pending cap
+    /// ([`DEFAULT_MAX_PENDING_RECONSTRUCTIONS`]).
     #[must_use]
     pub fn new(config: RaptorQConfig) -> Self {
+        Self::with_max_pending(config, DEFAULT_MAX_PENDING_RECONSTRUCTIONS)
+    }
+
+    /// Create a new degraded-mode decoder with an explicit pending cap.
+    ///
+    /// `max_pending` is clamped to at least 1 so the decoder can always
+    /// make progress on a single object.
+    #[must_use]
+    pub fn with_max_pending(config: RaptorQConfig, max_pending: usize) -> Self {
         Self {
             config,
             pending: HashMap::new(),
+            max_pending: max_pending.max(1),
         }
     }
 
@@ -361,6 +392,26 @@ impl DegradedModeDecoder {
         let pending_key = PendingReconstructionKey::from_frame(frame)
             .ok_or(DegradedTransportError::EmptyControlPlaneFrame)?;
         let object_id = pending_key.object_id.clone();
+
+        // Bound concurrent pending reconstructions. An adversary sending
+        // frames with unique (object_id, epoch_id, ...) tuples could
+        // otherwise grow `self.pending` without limit. We allow adding
+        // symbols to an EXISTING reconstruction even when the map is full
+        // (it's progress, not a new allocation); we only reject truly new
+        // entries when we're already at capacity.
+        if !self.pending.contains_key(&pending_key) && self.pending.len() >= self.max_pending {
+            warn!(
+                object_id = %frame.header.object_id,
+                current = self.pending.len(),
+                limit = self.max_pending,
+                "degraded_mode: rejecting new pending reconstruction (limit reached)"
+            );
+            return Err(DegradedTransportError::PendingLimitExceeded {
+                current: self.pending.len(),
+                limit: self.max_pending,
+            });
+        }
+
         let completed_payload = {
             let pending = self.pending.entry(pending_key.clone()).or_insert_with(|| {
                 Self::new_pending_reconstruction(frame, expected_zone_id, retention, &self.config)
@@ -1136,6 +1187,93 @@ mod tests {
         // Nothing to clear initially
         assert!(!decoder.clear_pending(&object_id));
         assert_eq!(decoder.pending_count(), 0);
+    }
+
+    #[test]
+    fn decoder_rejects_new_pending_beyond_cap() {
+        // Defensive bound: with max_pending = 2, the decoder accepts only 2
+        // distinct reconstructions. A third distinct object must be rejected
+        // with PendingLimitExceeded rather than growing the pending map
+        // without limit. Without this cap, an adversary sending FCPS frames
+        // with unique object_id/epoch_id tuples could exhaust memory — each
+        // pending entry holds a multi-KiB RaptorQ decoder.
+        let config = test_config();
+        let mut decoder = DegradedModeDecoder::with_max_pending(config.clone(), 2);
+        let zone_id = test_zone_id();
+
+        // Build three distinct single-symbol frames (each with a unique
+        // object_id → unique PendingReconstructionKey). Each frame declares
+        // K=4 but carries only 1 symbol, so reconstruction cannot complete
+        // and the pending entry survives for the capacity check.
+        let make_frame = |object_id_byte: u8| -> FcpsFrame {
+            let symbol = SymbolRecord {
+                esi: 0,
+                k: 4,
+                data: vec![0u8; 64],
+                auth_tag: [0u8; 16],
+            };
+            let wire_size =
+                u32::try_from(symbol.wire_size()).expect("symbol wire size fits in u32");
+            FcpsFrame {
+                header: FcpsFrameHeader {
+                    version: FCPS_VERSION,
+                    flags: FrameFlags::ENCRYPTED
+                        | FrameFlags::RAPTORQ
+                        | FrameFlags::CONTROL_PLANE,
+                    symbol_count: 1,
+                    total_payload_len: wire_size,
+                    object_id: ObjectId::from_bytes([object_id_byte; 32]),
+                    symbol_size: 64,
+                    zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
+                    zone_id_hash: zone_id.hash(),
+                    epoch_id: u64::from(object_id_byte),
+                    sender_instance_id: 0,
+                    frame_seq: u64::from(object_id_byte),
+                },
+                symbols: vec![symbol],
+            }
+        };
+
+        let frame_a = make_frame(0xA0);
+        let frame_b = make_frame(0xB0);
+        let frame_c = make_frame(0xC0);
+
+        // First two distinct object_ids: accepted (new pending entries).
+        assert!(
+            decoder
+                .process_frame(&frame_a, &zone_id, RetentionClass::Required)
+                .is_ok(),
+            "first distinct object must be admitted"
+        );
+        assert!(
+            decoder
+                .process_frame(&frame_b, &zone_id, RetentionClass::Required)
+                .is_ok(),
+            "second distinct object must be admitted"
+        );
+        assert_eq!(decoder.pending_count(), 2);
+
+        // Third distinct object: rejected by the pending cap.
+        let err = decoder
+            .process_frame(&frame_c, &zone_id, RetentionClass::Required)
+            .expect_err("third distinct object must trip the pending cap");
+        match err {
+            DegradedTransportError::PendingLimitExceeded { current, limit } => {
+                assert_eq!(current, 2);
+                assert_eq!(limit, 2);
+            }
+            other => panic!("expected PendingLimitExceeded, got {other:?}"),
+        }
+
+        // Additional symbols for an EXISTING reconstruction still flow
+        // even when the map is at capacity (progress, not allocation).
+        assert!(
+            decoder
+                .process_frame(&frame_a, &zone_id, RetentionClass::Required)
+                .is_ok(),
+            "adding symbols to an existing reconstruction must be allowed at cap"
+        );
+        assert_eq!(decoder.pending_count(), 2);
     }
 
     #[test]

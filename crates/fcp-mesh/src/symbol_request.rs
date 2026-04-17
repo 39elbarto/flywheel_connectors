@@ -345,12 +345,36 @@ impl SymbolRequestHandler {
     /// Process a decode status update from a peer.
     ///
     /// Updates transfer state based on receiver feedback.
+    ///
+    /// Callers MUST verify `status.signature` against the sending peer's node
+    /// key BEFORE invoking this method. The handler only records state for
+    /// objects that were actually in `active_transfers`, so a forged status
+    /// for a random object_id cannot be used to fill `completed_awaiting_ack`
+    /// unboundedly between `prune_stale_state` cycles.
     pub fn process_decode_status(&mut self, status: &DecodeStatus, now_ms: u64) {
+        // Gate all state writes on "we actually have an active transfer for
+        // this object". A complete=true status for an unknown object would
+        // otherwise insert into completed_awaiting_ack — bounded only by the
+        // prune_stale_state cadence.
+        let Some(state) = self.active_transfers.get_mut(&status.object_id) else {
+            if status.complete {
+                warn!(
+                    object_id = %hex::encode(status.object_id.as_bytes()),
+                    received = status.received_unique,
+                    "DecodeStatus for unknown object_id — dropped"
+                );
+            }
+            return;
+        };
+
         let summary = DecodeStatusSummary {
             received_unique: status.received_unique,
             needed: status.needed,
             complete: status.complete,
         };
+
+        state.last_status = Some(summary);
+        state.last_activity = now_ms;
 
         if status.complete {
             info!(
@@ -358,16 +382,9 @@ impl SymbolRequestHandler {
                 received = status.received_unique,
                 "decode complete, awaiting SymbolAck"
             );
+            state.stopped = true;
             self.completed_awaiting_ack
                 .insert(status.object_id.clone(), now_ms);
-        }
-
-        if let Some(state) = self.active_transfers.get_mut(&status.object_id) {
-            state.last_status = Some(summary);
-            state.last_activity = now_ms;
-            if status.complete {
-                state.stopped = true;
-            }
         }
     }
 

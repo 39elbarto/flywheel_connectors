@@ -398,7 +398,32 @@ impl SymbolRequestHandler {
     /// Process a symbol acknowledgment (stop condition).
     ///
     /// Stops sending symbols for the acknowledged object.
+    ///
+    /// Callers MUST verify `ack.signature` against the sending peer's node key
+    /// BEFORE invoking this method. The handler itself trusts the ack's
+    /// `object_id` field at face value; an unauthenticated peer that reaches
+    /// this path could abort arbitrary transfers. Additionally, this method
+    /// only records state changes for objects that were actually known
+    /// (active transfer or already completed-awaiting-ack), so a fake ack for
+    /// a random object_id cannot be used to fill `completed_transfers`
+    /// unboundedly between `prune_stale_state` cycles.
     pub fn process_symbol_ack(&mut self, ack: &SymbolAck, now_ms: u64) {
+        let was_awaiting_ack = self.completed_awaiting_ack.remove(&ack.object_id).is_some();
+        let had_active = self.active_transfers.contains_key(&ack.object_id);
+
+        if !was_awaiting_ack && !had_active {
+            // An ack for an object we never transferred: either a buggy peer,
+            // a stale delivery, or a forged ack from a non-authenticated
+            // caller. Log and drop instead of polluting completed_transfers
+            // (which is bounded only by prune_stale_state cadence).
+            warn!(
+                object_id = %hex::encode(ack.object_id.as_bytes()),
+                reason = ?ack.reason,
+                "SymbolAck for unknown object_id — dropped"
+            );
+            return;
+        }
+
         info!(
             object_id = %hex::encode(ack.object_id.as_bytes()),
             reason = ?ack.reason,
@@ -406,7 +431,6 @@ impl SymbolRequestHandler {
             "received SymbolAck, stopping transfer"
         );
 
-        self.completed_awaiting_ack.remove(&ack.object_id);
         self.completed_transfers.insert(ack.object_id, now_ms);
 
         if let Some(state) = self.active_transfers.get_mut(&ack.object_id) {
@@ -1442,6 +1466,13 @@ mod tests {
         let mut handler = SymbolRequestHandler::new(policy);
         let object_id = ObjectId::from_bytes([0x11; 32]);
 
+        // Establish an active transfer first — process_symbol_ack only
+        // promotes known transfers into completed_transfers. See the
+        // `process_symbol_ack_unknown_object_is_dropped` test for the
+        // defensive guard this exercises.
+        let request = test_symbol_request(50, None);
+        handler.track_transfer(&request, 0..5, 0);
+
         // Process ack → moves to completed_transfers
         let ack = SymbolAck::new(
             test_object_header(),
@@ -2294,11 +2325,18 @@ mod tests {
     }
 
     #[test]
-    fn process_symbol_ack_unknown_object_is_noop() {
+    fn process_symbol_ack_unknown_object_is_dropped() {
+        // Defensive guard: an ack whose object_id was never in either
+        // `active_transfers` or `completed_awaiting_ack` is dropped rather
+        // than polluting `completed_transfers`. Without this guard, an
+        // unauthenticated/forged ack for a random object_id would fill
+        // completed_transfers unboundedly between prune_stale_state cycles
+        // and would cause should_stop() to lie about transfer state.
         let mut handler = SymbolRequestHandler::with_default_policy();
+        let unknown_id = ObjectId::from_bytes([0xFF; 32]);
         let ack = SymbolAck::new(
             test_object_header(),
-            ObjectId::from_bytes([0xFF; 32]),
+            unknown_id,
             test_zone_id(),
             ZoneKeyId::from_bytes([0x22; 8]),
             1000,
@@ -2306,8 +2344,12 @@ mod tests {
             0,
         );
         handler.process_symbol_ack(&ack, 0);
-        // Should not panic, completed_transfers now has this entry
-        assert!(handler.should_stop(&ObjectId::from_bytes([0xFF; 32])));
+
+        // completed_transfers must NOT have been populated for the unknown id.
+        assert!(
+            !handler.should_stop(&unknown_id),
+            "unknown-object ack must not register a stop condition"
+        );
     }
 
     // ── Track transfer updates total_needed ───────────────────────

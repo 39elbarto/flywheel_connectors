@@ -135,8 +135,11 @@ impl ReconnectHandler {
     }
 
     /// Record a failure (increment attempt count).
+    ///
+    /// Uses saturating addition so the counter cannot wrap from
+    /// `u32::MAX` back to zero, which would reset the retry budget.
     pub const fn record_failure(&mut self) {
-        self.attempts += 1;
+        self.attempts = self.attempts.saturating_add(1);
     }
 
     /// Check if reconnection is allowed.

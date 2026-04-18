@@ -440,7 +440,7 @@ impl BootstrapWorkflow {
         )
     }
 
-    fn run_hardware_token_bootstrap_with_driver<D: HardwareTokenSessionDriver>(
+    pub(crate) fn run_hardware_token_bootstrap_with_driver<D: HardwareTokenSessionDriver>(
         &mut self,
         token: &DetectedToken,
         detection_report: &TokenDetectionReport,

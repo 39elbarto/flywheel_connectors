@@ -91,6 +91,8 @@ pub mod genesis;
 pub mod hardware_token;
 pub mod phase;
 pub mod recovery_phrase;
+#[cfg(test)]
+mod soft_token;
 pub mod time_validation;
 pub mod workflow;
 

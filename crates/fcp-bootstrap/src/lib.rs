@@ -104,9 +104,11 @@ pub use cold_recovery::{ColdRecovery, ColdRecoveryError, ColdRecoveryWarning};
 pub use error::{BootstrapError, BootstrapResult};
 pub use genesis::{GenesisState, GenesisValidationError};
 pub use hardware_token::{
-    AuthenticatedSessionState, AuthenticatedTokenSession, DetectedToken, DetectionIssue,
-    DetectionStage, HardwareTokenPin, HardwareTokenProvider, ProviderDetectionResult,
-    SessionSelectionOutcome, TokenDetectionReport, TokenDetector,
+    AuthenticatedSessionState, AuthenticatedTokenSession, CertificateKeyPair,
+    CertificateSelectionRefusal, DetectedToken, DetectionIssue, DetectionStage,
+    HardwareTokenPin, HardwareTokenProvider, ProviderDetectionResult, ProvisioningMaterial,
+    SessionSelectionOutcome, TokenCertificate, TokenDetectionReport, TokenDetector,
+    TokenKeyInfo, TokenKeyType,
 };
 pub use phase::{BootstrapPhase, InitResult, InitSuggestion, PartialStateSuggestion};
 pub use recovery_phrase::{RecoveryPhrase, RecoveryPhraseError};

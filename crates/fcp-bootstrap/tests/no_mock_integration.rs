@@ -27,8 +27,14 @@ use fcp_bootstrap::{
     ColdRecoveryError,
     ColdRecoveryWarning,
     // Hardware token
+    CertificateKeyPair,
+    CertificateSelectionRefusal,
     DetectedToken,
     DetectionStage,
+    ProvisioningMaterial,
+    TokenCertificate,
+    TokenKeyInfo,
+    TokenKeyType,
     // Genesis
     GenesisState,
     GenesisValidationError,
@@ -1117,4 +1123,99 @@ fn recovery_phrase_debug_redacted() {
     let phrase = RecoveryPhrase::generate().unwrap();
     let debug = format!("{phrase:?}");
     assert_eq!(debug, "RecoveryPhrase { word_count: 24, .. }");
+}
+
+// ============================================================================
+// 19. Certificate selection types and provisioning boundary
+// ============================================================================
+
+#[test]
+fn match_certificate_key_pairs_across_module_boundary() {
+    let cert = TokenCertificate {
+        label: "agent-cert".to_string(),
+        id: vec![0x01, 0x02, 0x03],
+        der_bytes: vec![0x30, 0x82, 0x01],
+        subject: "CN=agent".to_string(),
+        issuer: "CN=TestCA".to_string(),
+        is_ca: false,
+    };
+    let key = TokenKeyInfo {
+        label: "agent-key".to_string(),
+        id: vec![0x01, 0x02, 0x03],
+        key_type: TokenKeyType::Ed25519,
+        can_sign: true,
+        can_derive: false,
+    };
+    let pairs = fcp_bootstrap::hardware_token::match_certificate_key_pairs(
+        &[cert.clone()],
+        &[key.clone()],
+    );
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(pairs[0].certificate.label, "agent-cert");
+    assert_eq!(pairs[0].key.key_type, TokenKeyType::Ed25519);
+}
+
+#[test]
+fn provisioning_material_serde_display_roundtrip() {
+    let cert = TokenCertificate {
+        label: "test-cert".to_string(),
+        id: vec![0xAB],
+        der_bytes: vec![0x30],
+        subject: "CN=test".to_string(),
+        issuer: "CN=CA".to_string(),
+        is_ca: false,
+    };
+    let key = TokenKeyInfo {
+        label: "test-key".to_string(),
+        id: vec![0xAB],
+        key_type: TokenKeyType::Ed25519,
+        can_sign: true,
+        can_derive: false,
+    };
+    let pair = CertificateKeyPair {
+        certificate: cert,
+        key,
+    };
+    let display = pair.to_string();
+    assert!(display.contains("test-cert"));
+    assert!(display.contains("Ed25519"));
+}
+
+#[test]
+fn token_key_type_serde_roundtrip_via_json() {
+    let variants = [
+        TokenKeyType::Ed25519,
+        TokenKeyType::X25519,
+        TokenKeyType::EcdsaP256,
+        TokenKeyType::EcdsaP384,
+        TokenKeyType::Rsa,
+        TokenKeyType::Other(42),
+    ];
+    for v in &variants {
+        let json = serde_json::to_string(v).unwrap();
+        let restored: TokenKeyType = serde_json::from_str(&json).unwrap();
+        assert_eq!(*v, restored);
+    }
+}
+
+#[test]
+fn certificate_selection_refusal_display_messages_are_distinct() {
+    let refusals = [
+        CertificateSelectionRefusal::NoCertificates,
+        CertificateSelectionRefusal::NoKeys,
+        CertificateSelectionRefusal::NoMatchingKeyPair,
+        CertificateSelectionRefusal::NoCompatibleKeyType {
+            found: vec![TokenKeyType::Rsa],
+        },
+        CertificateSelectionRefusal::AmbiguousSelection { count: 5 },
+    ];
+    let messages: Vec<_> = refusals.iter().map(|r| r.to_string()).collect();
+    // Each refusal variant should produce a unique message.
+    for (i, a) in messages.iter().enumerate() {
+        for (j, b) in messages.iter().enumerate() {
+            if i != j {
+                assert_ne!(a, b, "refusals {i} and {j} must have distinct messages");
+            }
+        }
+    }
 }

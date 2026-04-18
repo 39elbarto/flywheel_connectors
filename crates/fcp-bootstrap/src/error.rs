@@ -1,5 +1,6 @@
 //! Bootstrap error types.
 
+use std::time::Duration;
 use thiserror::Error;
 
 /// Result type for bootstrap operations.
@@ -62,6 +63,56 @@ pub enum BootstrapError {
     /// No hardware tokens found.
     #[error("no hardware tokens detected")]
     NoHardwareTokens,
+
+    /// Hardware token PIN is required for authentication.
+    #[error("hardware token PIN is required: provide via --hardware-token-pin or interactive prompt")]
+    HardwareTokenPinRequired,
+
+    /// Hardware token PIN was rejected by the token.
+    #[error("hardware token PIN was rejected: verify and retry; repeated failures will lock the token")]
+    HardwareTokenInvalidPin,
+
+    /// Hardware token PIN is locked after too many failed attempts.
+    #[error("hardware token PIN is locked: use the token vendor's management tool to reset it")]
+    HardwareTokenPinLocked,
+
+    /// Requested hardware token was not found during discovery.
+    #[error("hardware token not found: {locator} — verify token is connected and provider library is installed")]
+    HardwareTokenNotFound {
+        /// Locator string identifying the requested token.
+        locator: String,
+    },
+
+    /// Hardware token lacks a required cryptographic mechanism.
+    #[error("hardware token does not support {mechanism}: Ed25519 or EdDSA signing is required")]
+    HardwareTokenUnsupported {
+        /// The missing mechanism description.
+        mechanism: String,
+    },
+
+    /// Hardware token was disconnected during bootstrap.
+    #[error("hardware token disconnected: re-insert the token and retry")]
+    HardwareTokenDisconnected,
+
+    /// Hardware token session expired before the operation completed.
+    #[error("hardware token session expired after {elapsed:?} (timeout: {timeout:?}): retry or increase --session-timeout")]
+    HardwareTokenSessionExpired {
+        /// Elapsed time since session was opened.
+        elapsed: Duration,
+        /// The configured session timeout.
+        timeout: Duration,
+    },
+
+    /// Hardware token operation was cancelled by the user or the token.
+    #[error("hardware token operation was cancelled: retry when ready")]
+    HardwareTokenCancelled,
+
+    /// PKCS#11 provider reported an unrecoverable error.
+    #[error("hardware token provider fault: {detail} — check provider library and token firmware")]
+    HardwareTokenProviderFault {
+        /// Error detail from the PKCS#11 layer.
+        detail: String,
+    },
 
     /// Cryptographic error.
     #[error("cryptographic error: {0}")]
@@ -581,5 +632,191 @@ mod tests {
     fn bootstrap_result_unit_err() {
         let r: BootstrapResult<()> = Err(BootstrapError::Internal("fail".into()));
         assert!(r.is_err());
+    }
+
+    // ---- Typed hardware-token refusal variants ----
+
+    #[test]
+    fn display_hardware_token_pin_required() {
+        let err = BootstrapError::HardwareTokenPinRequired;
+        let s = err.to_string();
+        assert!(s.contains("PIN is required"));
+        assert!(s.contains("--hardware-token-pin"));
+    }
+
+    #[test]
+    fn display_hardware_token_invalid_pin() {
+        let err = BootstrapError::HardwareTokenInvalidPin;
+        let s = err.to_string();
+        assert!(s.contains("PIN was rejected"));
+        assert!(s.contains("lock"));
+    }
+
+    #[test]
+    fn display_hardware_token_pin_locked() {
+        let err = BootstrapError::HardwareTokenPinLocked;
+        let s = err.to_string();
+        assert!(s.contains("PIN is locked"));
+        assert!(s.contains("reset"));
+    }
+
+    #[test]
+    fn display_hardware_token_not_found() {
+        let err = BootstrapError::HardwareTokenNotFound {
+            locator: "YubiKey [SN001] via /usr/lib/ykcs11.so slot 0".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("not found"));
+        assert!(s.contains("YubiKey"));
+        assert!(s.contains("verify token is connected"));
+    }
+
+    #[test]
+    fn display_hardware_token_unsupported() {
+        let err = BootstrapError::HardwareTokenUnsupported {
+            mechanism: "Ed25519 signing".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("does not support"));
+        assert!(s.contains("Ed25519"));
+    }
+
+    #[test]
+    fn display_hardware_token_disconnected() {
+        let err = BootstrapError::HardwareTokenDisconnected;
+        let s = err.to_string();
+        assert!(s.contains("disconnected"));
+        assert!(s.contains("re-insert"));
+    }
+
+    #[test]
+    fn display_hardware_token_session_expired() {
+        let err = BootstrapError::HardwareTokenSessionExpired {
+            elapsed: Duration::from_secs(301),
+            timeout: Duration::from_secs(300),
+        };
+        let s = err.to_string();
+        assert!(s.contains("expired"));
+        assert!(s.contains("301"));
+        assert!(s.contains("--session-timeout"));
+    }
+
+    #[test]
+    fn display_hardware_token_cancelled() {
+        let err = BootstrapError::HardwareTokenCancelled;
+        let s = err.to_string();
+        assert!(s.contains("cancelled"));
+        assert!(s.contains("retry"));
+    }
+
+    #[test]
+    fn display_hardware_token_provider_fault() {
+        let err = BootstrapError::HardwareTokenProviderFault {
+            detail: "CKR_DEVICE_ERROR".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("provider fault"));
+        assert!(s.contains("CKR_DEVICE_ERROR"));
+        assert!(s.contains("firmware"));
+    }
+
+    // ---- Debug for typed hardware-token refusals ----
+
+    #[test]
+    fn debug_hardware_token_pin_required() {
+        let err = BootstrapError::HardwareTokenPinRequired;
+        let debug = format!("{err:?}");
+        assert!(debug.contains("HardwareTokenPinRequired"));
+    }
+
+    #[test]
+    fn debug_hardware_token_invalid_pin() {
+        let err = BootstrapError::HardwareTokenInvalidPin;
+        assert!(format!("{err:?}").contains("HardwareTokenInvalidPin"));
+    }
+
+    #[test]
+    fn debug_hardware_token_pin_locked() {
+        let err = BootstrapError::HardwareTokenPinLocked;
+        assert!(format!("{err:?}").contains("HardwareTokenPinLocked"));
+    }
+
+    #[test]
+    fn debug_hardware_token_not_found() {
+        let err = BootstrapError::HardwareTokenNotFound {
+            locator: "slot-3".into(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("HardwareTokenNotFound"));
+        assert!(debug.contains("slot-3"));
+    }
+
+    #[test]
+    fn debug_hardware_token_unsupported() {
+        let err = BootstrapError::HardwareTokenUnsupported {
+            mechanism: "RSA".into(),
+        };
+        assert!(format!("{err:?}").contains("HardwareTokenUnsupported"));
+    }
+
+    #[test]
+    fn debug_hardware_token_disconnected() {
+        let err = BootstrapError::HardwareTokenDisconnected;
+        assert!(format!("{err:?}").contains("HardwareTokenDisconnected"));
+    }
+
+    #[test]
+    fn debug_hardware_token_session_expired() {
+        let err = BootstrapError::HardwareTokenSessionExpired {
+            elapsed: Duration::from_secs(10),
+            timeout: Duration::from_secs(5),
+        };
+        assert!(format!("{err:?}").contains("HardwareTokenSessionExpired"));
+    }
+
+    #[test]
+    fn debug_hardware_token_cancelled() {
+        let err = BootstrapError::HardwareTokenCancelled;
+        assert!(format!("{err:?}").contains("HardwareTokenCancelled"));
+    }
+
+    #[test]
+    fn debug_hardware_token_provider_fault() {
+        let err = BootstrapError::HardwareTokenProviderFault {
+            detail: "init failed".into(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("HardwareTokenProviderFault"));
+        assert!(debug.contains("init failed"));
+    }
+
+    // ---- All typed refusal variants have no source ----
+
+    #[test]
+    fn hardware_token_refusal_variants_have_no_source() {
+        use std::error::Error;
+        let variants: Vec<BootstrapError> = vec![
+            BootstrapError::HardwareTokenPinRequired,
+            BootstrapError::HardwareTokenInvalidPin,
+            BootstrapError::HardwareTokenPinLocked,
+            BootstrapError::HardwareTokenNotFound {
+                locator: "x".into(),
+            },
+            BootstrapError::HardwareTokenUnsupported {
+                mechanism: "x".into(),
+            },
+            BootstrapError::HardwareTokenDisconnected,
+            BootstrapError::HardwareTokenSessionExpired {
+                elapsed: Duration::from_secs(1),
+                timeout: Duration::from_secs(1),
+            },
+            BootstrapError::HardwareTokenCancelled,
+            BootstrapError::HardwareTokenProviderFault {
+                detail: "x".into(),
+            },
+        ];
+        for err in &variants {
+            assert!(err.source().is_none(), "expected no source for {err:?}");
+        }
     }
 }

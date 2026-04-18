@@ -11,6 +11,7 @@ use crate::genesis::GenesisState;
 use crate::hardware_token::{
     DetectedToken, HardwareTokenPin, HardwareTokenSessionDriver, Pkcs11SessionDriver,
     TokenDetectionReport, TokenDetector, TokenError, select_and_authenticate,
+    select_certificate_for_provisioning,
 };
 use crate::phase::{BootstrapPhase, detect_partial_state, remove_phase_lock, write_phase_lock};
 use crate::recovery_phrase::RecoveryPhrase;
@@ -448,12 +449,11 @@ impl BootstrapWorkflow {
         self.phase = BootstrapPhase::KeyGeneration;
         write_phase_lock(&self.config.data_dir, &self.phase)?;
 
-        let pin = self.config.hardware_token_pin.as_ref().ok_or_else(|| {
-            BootstrapError::HardwareToken(
-                "hardware token PIN is required until interactive prompt plumbing is implemented"
-                    .to_string(),
-            )
-        })?;
+        let pin = self
+            .config
+            .hardware_token_pin
+            .as_ref()
+            .ok_or(BootstrapError::HardwareTokenPinRequired)?;
 
         let outcome =
             select_and_authenticate(token, pin, detection_report, driver, None)
@@ -470,16 +470,31 @@ impl BootstrapWorkflow {
             "Hardware-token session-selection complete; handing off to certificate selection"
         );
 
-        // Session-selection is complete. The session is live and authenticated.
-        // Certificate selection and provisioning handoff are the next beads.
+        // Enumerate certificates and keys, then select the best pair.
+        let provisioning_material = select_certificate_for_provisioning(
+            outcome.session.token(),
+            pin,
+            driver,
+        )
+        .map_err(|err| map_hardware_token_error(detection_report, err))?;
+
+        tracing::info!(
+            material = %provisioning_material,
+            "Certificate selected; closing session before provisioning handoff"
+        );
+
+        // Close the authenticated session — provisioning uses its own session.
         outcome.session.close().map_err(|err| {
             BootstrapError::HardwareToken(format!(
-                "hardware token session cleanup failed after authentication: {err}"
+                "hardware token session cleanup failed after certificate selection: {err}"
             ))
         })?;
 
+        // Provisioning handoff: the next bead (24llg.4.2.3) will consume the
+        // provisioning material to complete key provisioning and enrollment.
         Err(BootstrapError::HardwareToken(format!(
-            "authenticated hardware token session established for {token_display}, but certificate selection and provisioning handoff are not implemented yet"
+            "certificate selected for {token_display} ({provisioning_material}), \
+             but provisioning enrollment is not implemented yet"
         )))
     }
 
@@ -642,7 +657,31 @@ fn map_hardware_token_error(
             "no compatible hardware tokens detected: {}",
             summarize_detection_issues(detection_report)
         )),
-        other => BootstrapError::HardwareToken(other.to_string()),
+        TokenError::PinRequired => BootstrapError::HardwareTokenPinRequired,
+        TokenError::InvalidPin => BootstrapError::HardwareTokenInvalidPin,
+        TokenError::PinLocked => BootstrapError::HardwareTokenPinLocked,
+        TokenError::TokenNotFound(locator) => {
+            BootstrapError::HardwareTokenNotFound { locator }
+        }
+        TokenError::UnsupportedMechanism(mechanism) => {
+            BootstrapError::HardwareTokenUnsupported { mechanism }
+        }
+        TokenError::Disconnected => BootstrapError::HardwareTokenDisconnected,
+        TokenError::SessionExpired { elapsed, timeout } => {
+            BootstrapError::HardwareTokenSessionExpired { elapsed, timeout }
+        }
+        TokenError::Cancelled => BootstrapError::HardwareTokenCancelled,
+        TokenError::Pkcs11(detail) => {
+            BootstrapError::HardwareTokenProviderFault { detail }
+        }
+        TokenError::KeyNotFound(key) => BootstrapError::HardwareToken(format!(
+            "key not found on hardware token: {key}"
+        )),
+        TokenError::CertificateSelectionFailed(refusal) => {
+            BootstrapError::HardwareToken(format!(
+                "certificate selection failed: {refusal}"
+            ))
+        }
     }
 }
 
@@ -1369,11 +1408,7 @@ mod tests {
 
         let workflow = BootstrapWorkflow::new(config).unwrap();
         let result = workflow.run();
-        assert!(matches!(
-            result,
-            Err(BootstrapError::HardwareToken(message))
-                if message.contains("PIN is required")
-        ));
+        assert!(matches!(result, Err(BootstrapError::HardwareTokenPinRequired)));
     }
 
     #[test]
@@ -1410,12 +1445,14 @@ mod tests {
         let result =
             workflow.run_hardware_token_bootstrap_with_driver(&token, &detection_report, &driver);
 
+        // Mock returns empty certificates, so certificate selection fails with
+        // a typed mapping. Session is still cleaned up via Drop.
         assert!(matches!(
             result,
             Err(BootstrapError::HardwareToken(message))
-                if message.contains("authenticated hardware token session established")
-                    && message.contains("certificate selection and provisioning handoff")
+                if message.contains("certificate selection failed")
         ));
+        // Session cleanup happens via Drop when certificate selection fails.
         assert_eq!(driver.close_count(), 1);
     }
 
@@ -1602,5 +1639,235 @@ mod tests {
                 },
             ))
         }
+
+        fn enumerate_certificates(
+            &self,
+            _token: &DetectedToken,
+            _pin: &HardwareTokenPin,
+        ) -> Result<Vec<crate::hardware_token::TokenCertificate>, TokenError> {
+            Ok(Vec::new())
+        }
+
+        fn enumerate_keys(
+            &self,
+            _token: &DetectedToken,
+            _pin: &HardwareTokenPin,
+        ) -> Result<Vec<crate::hardware_token::TokenKeyInfo>, TokenError> {
+            Ok(Vec::new())
+        }
+    }
+
+    // ---- map_hardware_token_error typed mapping ----
+
+    fn empty_report() -> TokenDetectionReport {
+        TokenDetectionReport::default()
+    }
+
+    fn report_with_issues() -> TokenDetectionReport {
+        TokenDetectionReport {
+            providers: vec![ProviderDetectionResult {
+                provider: std::path::PathBuf::from("/missing.so"),
+                tokens: Vec::new(),
+                issues: vec![crate::hardware_token::DetectionIssue {
+                    provider: std::path::PathBuf::from("/missing.so"),
+                    stage: crate::hardware_token::DetectionStage::ProviderMissing,
+                    slot: None,
+                    message: "not found".to_string(),
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn map_error_no_tokens_without_issues_yields_no_hardware_tokens() {
+        let err = map_hardware_token_error(&empty_report(), TokenError::NoTokens);
+        assert!(matches!(err, BootstrapError::NoHardwareTokens));
+    }
+
+    #[test]
+    fn map_error_no_tokens_with_issues_yields_hardware_token_string() {
+        let err = map_hardware_token_error(&report_with_issues(), TokenError::NoTokens);
+        assert!(matches!(err, BootstrapError::HardwareToken(msg) if msg.contains("no compatible")));
+    }
+
+    #[test]
+    fn map_error_pin_required_yields_typed_variant() {
+        let err = map_hardware_token_error(&empty_report(), TokenError::PinRequired);
+        assert!(matches!(err, BootstrapError::HardwareTokenPinRequired));
+    }
+
+    #[test]
+    fn map_error_invalid_pin_yields_typed_variant() {
+        let err = map_hardware_token_error(&empty_report(), TokenError::InvalidPin);
+        assert!(matches!(err, BootstrapError::HardwareTokenInvalidPin));
+    }
+
+    #[test]
+    fn map_error_pin_locked_yields_typed_variant() {
+        let err = map_hardware_token_error(&empty_report(), TokenError::PinLocked);
+        assert!(matches!(err, BootstrapError::HardwareTokenPinLocked));
+    }
+
+    #[test]
+    fn map_error_token_not_found_yields_typed_variant() {
+        let err = map_hardware_token_error(
+            &empty_report(),
+            TokenError::TokenNotFound("YubiKey slot 0".into()),
+        );
+        assert!(matches!(
+            err,
+            BootstrapError::HardwareTokenNotFound { locator } if locator.contains("YubiKey")
+        ));
+    }
+
+    #[test]
+    fn map_error_unsupported_mechanism_yields_typed_variant() {
+        let err = map_hardware_token_error(
+            &empty_report(),
+            TokenError::UnsupportedMechanism("Ed25519 signing".into()),
+        );
+        assert!(matches!(
+            err,
+            BootstrapError::HardwareTokenUnsupported { mechanism } if mechanism.contains("Ed25519")
+        ));
+    }
+
+    #[test]
+    fn map_error_disconnected_yields_typed_variant() {
+        let err = map_hardware_token_error(&empty_report(), TokenError::Disconnected);
+        assert!(matches!(err, BootstrapError::HardwareTokenDisconnected));
+    }
+
+    #[test]
+    fn map_error_session_expired_yields_typed_variant() {
+        let err = map_hardware_token_error(
+            &empty_report(),
+            TokenError::SessionExpired {
+                elapsed: std::time::Duration::from_secs(301),
+                timeout: std::time::Duration::from_secs(300),
+            },
+        );
+        assert!(matches!(
+            err,
+            BootstrapError::HardwareTokenSessionExpired { elapsed, timeout }
+                if elapsed.as_secs() == 301 && timeout.as_secs() == 300
+        ));
+    }
+
+    #[test]
+    fn map_error_cancelled_yields_typed_variant() {
+        let err = map_hardware_token_error(&empty_report(), TokenError::Cancelled);
+        assert!(matches!(err, BootstrapError::HardwareTokenCancelled));
+    }
+
+    #[test]
+    fn map_error_pkcs11_yields_provider_fault() {
+        let err = map_hardware_token_error(
+            &empty_report(),
+            TokenError::Pkcs11("CKR_DEVICE_ERROR".into()),
+        );
+        assert!(matches!(
+            err,
+            BootstrapError::HardwareTokenProviderFault { detail } if detail.contains("CKR_DEVICE_ERROR")
+        ));
+    }
+
+    #[test]
+    fn map_error_key_not_found_yields_hardware_token_string() {
+        let err = map_hardware_token_error(
+            &empty_report(),
+            TokenError::KeyNotFound("owner-key".into()),
+        );
+        assert!(matches!(
+            err,
+            BootstrapError::HardwareToken(msg) if msg.contains("key not found") && msg.contains("owner-key")
+        ));
+    }
+
+    // ---- Session cleanup determinism ----
+
+    #[test]
+    fn session_cleanup_on_success_path() {
+        let token = DetectedToken {
+            provider: std::path::PathBuf::from("/test/pkcs11.so"),
+            slot: 0,
+            label: "TestToken".to_string(),
+            manufacturer: "TestMfg".to_string(),
+            serial: "SN123".to_string(),
+            mechanisms: vec!["CKM_ED25519".to_string()],
+        };
+        let driver = MockSessionDriver::default();
+        let pin = HardwareTokenPin::new("123456");
+        let report = TokenDetectionReport {
+            providers: vec![ProviderDetectionResult {
+                provider: token.provider.clone(),
+                tokens: vec![token.clone()],
+                issues: Vec::new(),
+            }],
+        };
+        let outcome =
+            crate::hardware_token::select_and_authenticate(&token, &pin, &report, &driver, None)
+                .unwrap();
+
+        // Explicit close: close_action runs exactly once.
+        outcome.session.close().unwrap();
+        assert_eq!(driver.close_count(), 1);
+    }
+
+    #[test]
+    fn session_cleanup_on_drop_path() {
+        let token = DetectedToken {
+            provider: std::path::PathBuf::from("/test/pkcs11.so"),
+            slot: 0,
+            label: "TestToken".to_string(),
+            manufacturer: "TestMfg".to_string(),
+            serial: "SN123".to_string(),
+            mechanisms: vec!["CKM_ED25519".to_string()],
+        };
+        let driver = MockSessionDriver::default();
+        let pin = HardwareTokenPin::new("123456");
+        let report = TokenDetectionReport {
+            providers: vec![ProviderDetectionResult {
+                provider: token.provider.clone(),
+                tokens: vec![token.clone()],
+                issues: Vec::new(),
+            }],
+        };
+        let outcome =
+            crate::hardware_token::select_and_authenticate(&token, &pin, &report, &driver, None)
+                .unwrap();
+
+        // Drop without explicit close: Drop runs close_action exactly once.
+        drop(outcome.session);
+        assert_eq!(driver.close_count(), 1);
+    }
+
+    #[test]
+    fn session_cleanup_deterministic_close_then_drop() {
+        let token = DetectedToken {
+            provider: std::path::PathBuf::from("/test/pkcs11.so"),
+            slot: 0,
+            label: "TestToken".to_string(),
+            manufacturer: "TestMfg".to_string(),
+            serial: "SN123".to_string(),
+            mechanisms: vec!["CKM_ED25519".to_string()],
+        };
+        let driver = MockSessionDriver::default();
+        let pin = HardwareTokenPin::new("123456");
+        let report = TokenDetectionReport {
+            providers: vec![ProviderDetectionResult {
+                provider: token.provider.clone(),
+                tokens: vec![token.clone()],
+                issues: Vec::new(),
+            }],
+        };
+        let outcome =
+            crate::hardware_token::select_and_authenticate(&token, &pin, &report, &driver, None)
+                .unwrap();
+
+        // Explicit close consumes the action; subsequent Drop is a no-op.
+        outcome.session.close().unwrap();
+        // driver.close_count() is exactly 1, not 2 (Drop didn't double-close).
+        assert_eq!(driver.close_count(), 1);
     }
 }

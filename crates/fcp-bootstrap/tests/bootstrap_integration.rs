@@ -635,7 +635,7 @@ fn test_bootstrap_workflow_hardware_token_returns_error() {
 
     let has_truthful_pin_refusal = matches!(
         &result,
-        Err(BootstrapError::HardwareToken(message)) if message.contains("PIN is required")
+        Err(BootstrapError::HardwareTokenPinRequired)
     );
     if let Err(err) = &result {
         log = log.with_error(err);

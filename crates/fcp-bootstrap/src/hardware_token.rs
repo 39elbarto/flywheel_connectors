@@ -5,6 +5,7 @@
 
 use cryptoki::context::{CInitializeArgs, CInitializeFlags, Pkcs11};
 use cryptoki::error::{Error as Pkcs11Error, RvError};
+use cryptoki::object::{Attribute, AttributeType, KeyType, ObjectClass, ObjectHandle};
 use cryptoki::session::{Session, SessionState, UserType};
 use cryptoki::slot::Slot;
 use cryptoki::types::AuthPin;
@@ -381,7 +382,8 @@ impl Drop for AuthenticatedTokenSession {
     }
 }
 
-/// Driver abstraction for opening authenticated hardware-token sessions.
+/// Driver abstraction for opening authenticated hardware-token sessions
+/// and enumerating certificate/key objects.
 pub(crate) trait HardwareTokenSessionDriver: Send + Sync {
     /// Open and authenticate a session for the selected token.
     ///
@@ -393,6 +395,28 @@ pub(crate) trait HardwareTokenSessionDriver: Send + Sync {
         token: &DetectedToken,
         pin: &HardwareTokenPin,
     ) -> Result<AuthenticatedTokenSession, TokenError>;
+
+    /// Enumerate all certificate objects visible in the authenticated session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a token error if the PKCS#11 find-objects call fails.
+    fn enumerate_certificates(
+        &self,
+        token: &DetectedToken,
+        pin: &HardwareTokenPin,
+    ) -> Result<Vec<TokenCertificate>, TokenError>;
+
+    /// Enumerate all private key objects visible in the authenticated session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a token error if the PKCS#11 find-objects call fails.
+    fn enumerate_keys(
+        &self,
+        token: &DetectedToken,
+        pin: &HardwareTokenPin,
+    ) -> Result<Vec<TokenKeyInfo>, TokenError>;
 }
 
 /// Real PKCS#11-backed session driver.
@@ -458,6 +482,209 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
                 close_result.and(finalize_result)
             },
         ))
+    }
+
+    fn enumerate_certificates(
+        &self,
+        token: &DetectedToken,
+        pin: &HardwareTokenPin,
+    ) -> Result<Vec<TokenCertificate>, TokenError> {
+        let session = open_enumeration_session(token, pin)?;
+        let template = [Attribute::Class(ObjectClass::CERTIFICATE)];
+        let handles = session
+            .find_objects(&template)
+            .map_err(map_pkcs11_error)?;
+
+        let mut certs = Vec::new();
+        for handle in handles {
+            match read_certificate_object(&session, handle) {
+                Ok(cert) => certs.push(cert),
+                Err(err) => {
+                    tracing::warn!(
+                        handle = ?handle,
+                        error = %err,
+                        "Skipping unreadable certificate object"
+                    );
+                }
+            }
+        }
+
+        let _ = session.close();
+        Ok(certs)
+    }
+
+    fn enumerate_keys(
+        &self,
+        token: &DetectedToken,
+        pin: &HardwareTokenPin,
+    ) -> Result<Vec<TokenKeyInfo>, TokenError> {
+        let session = open_enumeration_session(token, pin)?;
+        let template = [Attribute::Class(ObjectClass::PRIVATE_KEY)];
+        let handles = session
+            .find_objects(&template)
+            .map_err(map_pkcs11_error)?;
+
+        let mut keys = Vec::new();
+        for handle in handles {
+            match read_key_object(&session, handle) {
+                Ok(key) => keys.push(key),
+                Err(err) => {
+                    tracing::warn!(
+                        handle = ?handle,
+                        error = %err,
+                        "Skipping unreadable key object"
+                    );
+                }
+            }
+        }
+
+        let _ = session.close();
+        Ok(keys)
+    }
+}
+
+/// Open a temporary authenticated session for object enumeration.
+fn open_enumeration_session(
+    token: &DetectedToken,
+    pin: &HardwareTokenPin,
+) -> Result<Session, TokenError> {
+    let _guard = provider_probe_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let pkcs11 = Pkcs11::new(&token.provider).map_err(map_pkcs11_error)?;
+    match pkcs11.initialize(CInitializeArgs::new(
+        cryptoki::context::CInitializeFlags::OS_LOCKING_OK,
+    )) {
+        Ok(()) | Err(Pkcs11Error::Pkcs11(RvError::CryptokiAlreadyInitialized, _)) => {}
+        Err(err) => return Err(map_pkcs11_error(err)),
+    }
+
+    let slot = Slot::try_from(u64::from(token.slot))
+        .map_err(|err| TokenError::Pkcs11(err.to_string()))?;
+    let session = pkcs11.open_rw_session(slot).map_err(map_pkcs11_error)?;
+
+    let auth_pin = pin.to_auth_pin();
+    match session.login(UserType::User, Some(&auth_pin)) {
+        Ok(()) | Err(Pkcs11Error::Pkcs11(RvError::UserAlreadyLoggedIn, _)) => {}
+        Err(err) => return Err(map_pkcs11_error(err)),
+    }
+
+    Ok(session)
+}
+
+/// Read a certificate object's attributes from its handle.
+fn read_certificate_object(
+    session: &Session,
+    handle: ObjectHandle,
+) -> Result<TokenCertificate, TokenError> {
+    let attrs = session
+        .get_attributes(
+            handle,
+            &[
+                AttributeType::Label,
+                AttributeType::Id,
+                AttributeType::Value,
+                AttributeType::Subject,
+                AttributeType::Issuer,
+            ],
+        )
+        .map_err(map_pkcs11_error)?;
+
+    let mut label = String::new();
+    let mut id = Vec::new();
+    let mut der_bytes = Vec::new();
+    let mut subject = String::new();
+    let mut issuer = String::new();
+
+    for attr in attrs {
+        match attr {
+            Attribute::Label(v) => label = String::from_utf8_lossy(&v).into_owned(),
+            Attribute::Id(v) => id = v,
+            Attribute::Value(v) => der_bytes = v,
+            Attribute::Subject(v) => {
+                subject = String::from_utf8_lossy(&v).into_owned();
+            }
+            Attribute::Issuer(v) => {
+                issuer = String::from_utf8_lossy(&v).into_owned();
+            }
+            _ => {}
+        }
+    }
+
+    // Heuristic: if subject == issuer the certificate is likely self-signed / CA.
+    // CKA_CERTIFICATE_CATEGORY is not available in our cryptoki version.
+    let is_ca = !subject.is_empty() && subject == issuer;
+
+    Ok(TokenCertificate {
+        label,
+        id,
+        der_bytes,
+        subject,
+        issuer,
+        is_ca,
+    })
+}
+
+/// Read a private key object's attributes from its handle.
+fn read_key_object(
+    session: &Session,
+    handle: ObjectHandle,
+) -> Result<TokenKeyInfo, TokenError> {
+    let attrs = session
+        .get_attributes(
+            handle,
+            &[
+                AttributeType::Label,
+                AttributeType::Id,
+                AttributeType::KeyType,
+                AttributeType::Sign,
+                AttributeType::Derive,
+            ],
+        )
+        .map_err(map_pkcs11_error)?;
+
+    let mut label = String::new();
+    let mut id = Vec::new();
+    let mut key_type = TokenKeyType::Other(0);
+    let mut can_sign = false;
+    let mut can_derive = false;
+
+    for attr in attrs {
+        match attr {
+            Attribute::Label(v) => label = String::from_utf8_lossy(&v).into_owned(),
+            Attribute::Id(v) => id = v,
+            Attribute::KeyType(kt) => {
+                key_type = map_cryptoki_key_type(kt);
+            }
+            Attribute::Sign(v) => can_sign = v,
+            Attribute::Derive(v) => can_derive = v,
+            _ => {}
+        }
+    }
+
+    Ok(TokenKeyInfo {
+        label,
+        id,
+        key_type,
+        can_sign,
+        can_derive,
+    })
+}
+
+/// Map a cryptoki `KeyType` to our `TokenKeyType`.
+fn map_cryptoki_key_type(kt: KeyType) -> TokenKeyType {
+    if kt == KeyType::EC_EDWARDS {
+        TokenKeyType::Ed25519
+    } else if kt == KeyType::EC_MONTGOMERY {
+        TokenKeyType::X25519
+    } else if kt == KeyType::EC {
+        // EC could be P-256 or P-384; without OID inspection we classify as P-256.
+        TokenKeyType::EcdsaP256
+    } else if kt == KeyType::RSA {
+        TokenKeyType::Rsa
+    } else {
+        TokenKeyType::Other(0)
     }
 }
 
@@ -569,6 +796,188 @@ pub struct SessionSelectionOutcome {
     pub selected_token: DetectedToken,
 }
 
+// ── Certificate and key enumeration types ─────────────────────────────
+
+/// The cryptographic key type of a PKCS#11 object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TokenKeyType {
+    /// `Ed25519` signing key (`EdDSA`).
+    Ed25519,
+    /// X25519 key agreement.
+    X25519,
+    /// ECDSA with P-256 curve.
+    EcdsaP256,
+    /// ECDSA with P-384 curve.
+    EcdsaP384,
+    /// RSA key.
+    Rsa,
+    /// Unknown or unsupported key type.
+    Other(u32),
+}
+
+impl fmt::Display for TokenKeyType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ed25519 => write!(f, "Ed25519"),
+            Self::X25519 => write!(f, "X25519"),
+            Self::EcdsaP256 => write!(f, "ECDSA-P256"),
+            Self::EcdsaP384 => write!(f, "ECDSA-P384"),
+            Self::Rsa => write!(f, "RSA"),
+            Self::Other(id) => write!(f, "Other({id})"),
+        }
+    }
+}
+
+/// A certificate object discovered on a hardware token.
+///
+/// Abstracts away PKCS#11 object handles so downstream consumers
+/// do not need provider-specific trivia.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenCertificate {
+    /// Human-readable label assigned to the certificate object.
+    pub label: String,
+    /// Opaque PKCS#11 object identifier (`CKA_ID`).
+    pub id: Vec<u8>,
+    /// DER-encoded X.509 certificate bytes (`CKA_VALUE`).
+    pub der_bytes: Vec<u8>,
+    /// Certificate subject (common name or full DN string).
+    pub subject: String,
+    /// Certificate issuer (common name or full DN string).
+    pub issuer: String,
+    /// Whether this is a CA certificate.
+    pub is_ca: bool,
+}
+
+impl fmt::Display for TokenCertificate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let id_hex = hex::encode(&self.id);
+        if self.is_ca {
+            write!(f, "{} (CA, id={})", self.label, id_hex)
+        } else {
+            write!(f, "{} (id={})", self.label, id_hex)
+        }
+    }
+}
+
+/// A private key discovered on a hardware token.
+///
+/// The actual key material never leaves the token — this struct
+/// carries only metadata needed for selection and matching.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenKeyInfo {
+    /// Human-readable label.
+    pub label: String,
+    /// Opaque PKCS#11 object identifier (`CKA_ID`), used to match
+    /// certificates with their corresponding private keys.
+    pub id: Vec<u8>,
+    /// The key type.
+    pub key_type: TokenKeyType,
+    /// Whether the key supports signing operations.
+    pub can_sign: bool,
+    /// Whether the key supports key derivation / agreement.
+    pub can_derive: bool,
+}
+
+impl fmt::Display for TokenKeyInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let id_hex = hex::encode(&self.id);
+        write!(f, "{} ({}, id={})", self.label, self.key_type, id_hex)
+    }
+}
+
+/// A matched certificate–private-key pair on a hardware token.
+///
+/// The pairing is done by matching the PKCS#11 `CKA_ID` attribute
+/// between the certificate and private key objects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertificateKeyPair {
+    /// The certificate.
+    pub certificate: TokenCertificate,
+    /// The matching private key metadata.
+    pub key: TokenKeyInfo,
+}
+
+impl fmt::Display for CertificateKeyPair {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "cert={} key={}",
+            self.certificate.label, self.key
+        )
+    }
+}
+
+/// Validated cryptographic material ready for provisioning handoff.
+///
+/// This is the typed boundary between hardware-token bootstrap and
+/// the provisioning layer.  It carries enough information to proceed
+/// with enrollment without exposing PKCS#11 session internals.
+#[derive(Debug, Clone)]
+pub struct ProvisioningMaterial {
+    /// The selected certificate–key pair.
+    pub pair: CertificateKeyPair,
+    /// The token that holds the key material.
+    pub token: DetectedToken,
+    /// All candidate pairs that were considered (for audit logs).
+    pub candidates_considered: usize,
+    /// Human-readable reason for selecting this pair.
+    pub selection_reason: String,
+}
+
+impl fmt::Display for ProvisioningMaterial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "ProvisioningMaterial({}, selected from {} candidates: {})",
+            self.pair, self.candidates_considered, self.selection_reason
+        )
+    }
+}
+
+/// Reason why certificate selection could not produce provisioning material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CertificateSelectionRefusal {
+    /// No certificates found on the token.
+    NoCertificates,
+    /// No private keys found on the token.
+    NoKeys,
+    /// Certificates exist but none have a matching private key.
+    NoMatchingKeyPair,
+    /// Matching pairs exist but none have an FCP-compatible key type.
+    NoCompatibleKeyType {
+        /// The key types that were found.
+        found: Vec<TokenKeyType>,
+    },
+    /// Multiple ambiguous matches with no deterministic winner.
+    AmbiguousSelection {
+        /// The number of equally-ranked candidates.
+        count: usize,
+    },
+}
+
+impl fmt::Display for CertificateSelectionRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoCertificates => write!(f, "no certificates found on token"),
+            Self::NoKeys => write!(f, "no private keys found on token"),
+            Self::NoMatchingKeyPair => {
+                write!(f, "no certificate has a matching private key on this token")
+            }
+            Self::NoCompatibleKeyType { found } => {
+                let types: Vec<_> = found.iter().map(ToString::to_string).collect();
+                write!(
+                    f,
+                    "no FCP-compatible key type found (have: {})",
+                    types.join(", ")
+                )
+            }
+            Self::AmbiguousSelection { count } => {
+                write!(f, "{count} equally-ranked certificate candidates; cannot select deterministically")
+            }
+        }
+    }
+}
+
 /// Run the full session-selection state machine: detect → rank → select → authenticate.
 ///
 /// This is the canonical entry point for hardware-token bootstrap.  It returns a
@@ -634,6 +1043,136 @@ pub(crate) fn select_and_authenticate<D: HardwareTokenSessionDriver>(
         session,
         detection_report: detection_report.clone(),
         selected_token: selected,
+    })
+}
+
+// ── Certificate selection and provisioning handoff ────────────────────
+
+/// Match certificates with their private keys by `CKA_ID`.
+#[must_use]
+pub fn match_certificate_key_pairs(
+    certs: &[TokenCertificate],
+    keys: &[TokenKeyInfo],
+) -> Vec<CertificateKeyPair> {
+    let mut pairs = Vec::new();
+    for cert in certs {
+        if cert.is_ca || cert.id.is_empty() {
+            continue;
+        }
+        for key in keys {
+            if key.id == cert.id {
+                pairs.push(CertificateKeyPair {
+                    certificate: cert.clone(),
+                    key: key.clone(),
+                });
+                break; // one key per cert
+            }
+        }
+    }
+    pairs
+}
+
+/// FCP-compatible key type preference: Ed25519 > X25519 > ECDSA-P256 > ECDSA-P384.
+/// RSA and unknown types are not compatible.
+const fn fcp_key_type_rank(kt: TokenKeyType) -> Option<u8> {
+    match kt {
+        TokenKeyType::Ed25519 => Some(0),
+        TokenKeyType::X25519 => Some(1),
+        TokenKeyType::EcdsaP256 => Some(2),
+        TokenKeyType::EcdsaP384 => Some(3),
+        TokenKeyType::Rsa | TokenKeyType::Other(_) => None,
+    }
+}
+
+/// Select the best certificate–key pair for FCP provisioning.
+///
+/// Selection rules:
+/// 1. Only pairs with FCP-compatible key types are considered.
+/// 2. Ed25519 is preferred, then X25519, then ECDSA curves.
+/// 3. Among equal key types, signing-capable keys are preferred.
+/// 4. Final tiebreak: lexicographic on (label, id) for determinism.
+///
+/// # Errors
+///
+/// Returns a typed `TokenError::CertificateSelectionFailed` with the
+/// specific refusal reason if no suitable pair exists.
+pub(crate) fn select_certificate_for_provisioning<D: HardwareTokenSessionDriver>(
+    token: &DetectedToken,
+    pin: &HardwareTokenPin,
+    driver: &D,
+) -> Result<ProvisioningMaterial, TokenError> {
+    let certs = driver.enumerate_certificates(token, pin)?;
+    if certs.is_empty() {
+        return Err(TokenError::CertificateSelectionFailed(
+            CertificateSelectionRefusal::NoCertificates,
+        ));
+    }
+
+    let keys = driver.enumerate_keys(token, pin)?;
+    if keys.is_empty() {
+        return Err(TokenError::CertificateSelectionFailed(
+            CertificateSelectionRefusal::NoKeys,
+        ));
+    }
+
+    tracing::info!(
+        certs = certs.len(),
+        keys = keys.len(),
+        "Enumerating certificate-key pairs for provisioning"
+    );
+
+    let pairs = match_certificate_key_pairs(&certs, &keys);
+    if pairs.is_empty() {
+        return Err(TokenError::CertificateSelectionFailed(
+            CertificateSelectionRefusal::NoMatchingKeyPair,
+        ));
+    }
+
+    // Filter to FCP-compatible key types.
+    let mut compatible: Vec<_> = pairs
+        .iter()
+        .filter(|p| fcp_key_type_rank(p.key.key_type).is_some())
+        .collect();
+
+    if compatible.is_empty() {
+        let found: Vec<_> = pairs.iter().map(|p| p.key.key_type).collect();
+        return Err(TokenError::CertificateSelectionFailed(
+            CertificateSelectionRefusal::NoCompatibleKeyType { found },
+        ));
+    }
+
+    // Sort by preference: key type rank, then signing capability, then deterministic tiebreak.
+    compatible.sort_by(|a, b| {
+        let rank_a = fcp_key_type_rank(a.key.key_type).unwrap_or(u8::MAX);
+        let rank_b = fcp_key_type_rank(b.key.key_type).unwrap_or(u8::MAX);
+        rank_a
+            .cmp(&rank_b)
+            .then_with(|| b.key.can_sign.cmp(&a.key.can_sign))
+            .then_with(|| a.certificate.label.cmp(&b.certificate.label))
+            .then_with(|| a.key.id.cmp(&b.key.id))
+    });
+
+    let best = compatible[0];
+    let candidates_considered = compatible.len();
+
+    let selection_reason = format!(
+        "key type {} ranked best among {} compatible pair(s)",
+        best.key.key_type, candidates_considered
+    );
+
+    tracing::info!(
+        selected_cert = %best.certificate,
+        selected_key = %best.key,
+        candidates = candidates_considered,
+        reason = %selection_reason,
+        "Certificate selected for provisioning"
+    );
+
+    Ok(ProvisioningMaterial {
+        pair: best.clone(),
+        token: token.clone(),
+        candidates_considered,
+        selection_reason,
     })
 }
 
@@ -779,6 +1318,10 @@ pub enum TokenError {
     /// Token disconnected during operation.
     #[error("token disconnected")]
     Disconnected,
+
+    /// Certificate selection failed — no suitable identity on this token.
+    #[error("certificate selection failed: {0}")]
+    CertificateSelectionFailed(CertificateSelectionRefusal),
 
     /// Session expired due to timeout.
     #[error("hardware token session expired after {elapsed:?} (timeout: {timeout:?})")]
@@ -2125,11 +2668,24 @@ mod tests {
     #[derive(Default)]
     struct MockSessionDriver {
         close_count: Arc<AtomicUsize>,
+        certs: Arc<Mutex<Vec<TokenCertificate>>>,
+        keys: Arc<Mutex<Vec<TokenKeyInfo>>>,
     }
 
     impl MockSessionDriver {
         fn close_count(&self) -> usize {
             self.close_count.load(Ordering::SeqCst)
+        }
+
+        fn with_certs_and_keys(
+            certs: Vec<TokenCertificate>,
+            keys: Vec<TokenKeyInfo>,
+        ) -> Self {
+            Self {
+                close_count: Arc::new(AtomicUsize::new(0)),
+                certs: Arc::new(Mutex::new(certs)),
+                keys: Arc::new(Mutex::new(keys)),
+            }
         }
     }
 
@@ -2150,5 +2706,358 @@ mod tests {
                 },
             ))
         }
+
+        fn enumerate_certificates(
+            &self,
+            _token: &DetectedToken,
+            _pin: &HardwareTokenPin,
+        ) -> Result<Vec<TokenCertificate>, TokenError> {
+            Ok(self.certs.lock().unwrap().clone())
+        }
+
+        fn enumerate_keys(
+            &self,
+            _token: &DetectedToken,
+            _pin: &HardwareTokenPin,
+        ) -> Result<Vec<TokenKeyInfo>, TokenError> {
+            Ok(self.keys.lock().unwrap().clone())
+        }
+    }
+
+    // ── Test helpers for certificate selection ───────────────────────────
+
+    fn test_cert(label: &str, id: &[u8]) -> TokenCertificate {
+        TokenCertificate {
+            label: label.to_string(),
+            id: id.to_vec(),
+            der_bytes: vec![0x30, 0x82], // minimal DER stub
+            subject: format!("CN={label}"),
+            issuer: "CN=TestCA".to_string(),
+            is_ca: false,
+        }
+    }
+
+    fn test_key(label: &str, id: &[u8], key_type: TokenKeyType) -> TokenKeyInfo {
+        TokenKeyInfo {
+            label: label.to_string(),
+            id: id.to_vec(),
+            key_type,
+            can_sign: true,
+            can_derive: false,
+        }
+    }
+
+    // ── Certificate/key type tests ──────────────────────────────────────
+
+    #[test]
+    fn token_key_type_display_all_variants() {
+        assert_eq!(TokenKeyType::Ed25519.to_string(), "Ed25519");
+        assert_eq!(TokenKeyType::X25519.to_string(), "X25519");
+        assert_eq!(TokenKeyType::EcdsaP256.to_string(), "ECDSA-P256");
+        assert_eq!(TokenKeyType::EcdsaP384.to_string(), "ECDSA-P384");
+        assert_eq!(TokenKeyType::Rsa.to_string(), "RSA");
+        assert_eq!(TokenKeyType::Other(42).to_string(), "Other(42)");
+    }
+
+    #[test]
+    fn token_key_type_serde_roundtrip() {
+        let variants = [
+            TokenKeyType::Ed25519,
+            TokenKeyType::X25519,
+            TokenKeyType::EcdsaP256,
+            TokenKeyType::EcdsaP384,
+            TokenKeyType::Rsa,
+            TokenKeyType::Other(99),
+        ];
+        for v in &variants {
+            let json = serde_json::to_string(v).unwrap();
+            let restored: TokenKeyType = serde_json::from_str(&json).unwrap();
+            assert_eq!(*v, restored);
+        }
+    }
+
+    #[test]
+    fn token_certificate_display() {
+        let cert = test_cert("my-cert", &[0x01, 0x02]);
+        assert!(cert.to_string().contains("my-cert"));
+        assert!(cert.to_string().contains("0102"));
+    }
+
+    #[test]
+    fn token_certificate_ca_display() {
+        let mut cert = test_cert("root-ca", &[0xaa]);
+        cert.is_ca = true;
+        assert!(cert.to_string().contains("CA"));
+    }
+
+    #[test]
+    fn token_key_info_display() {
+        let key = test_key("my-key", &[0x01], TokenKeyType::Ed25519);
+        let display = key.to_string();
+        assert!(display.contains("my-key"));
+        assert!(display.contains("Ed25519"));
+    }
+
+    #[test]
+    fn certificate_key_pair_display() {
+        let pair = CertificateKeyPair {
+            certificate: test_cert("cert-1", &[0x01]),
+            key: test_key("key-1", &[0x01], TokenKeyType::Ed25519),
+        };
+        let display = pair.to_string();
+        assert!(display.contains("cert-1"));
+        assert!(display.contains("key-1"));
+    }
+
+    #[test]
+    fn provisioning_material_display() {
+        let mat = ProvisioningMaterial {
+            pair: CertificateKeyPair {
+                certificate: test_cert("c", &[1]),
+                key: test_key("k", &[1], TokenKeyType::Ed25519),
+            },
+            token: test_token(),
+            candidates_considered: 3,
+            selection_reason: "best key type".to_string(),
+        };
+        let display = mat.to_string();
+        assert!(display.contains("3 candidates"));
+    }
+
+    // ── match_certificate_key_pairs ─────────────────────────────────────
+
+    #[test]
+    fn match_pairs_by_id() {
+        let certs = vec![
+            test_cert("c1", &[0x01]),
+            test_cert("c2", &[0x02]),
+            test_cert("c3", &[0x03]),
+        ];
+        let keys = vec![
+            test_key("k2", &[0x02], TokenKeyType::Ed25519),
+            test_key("k3", &[0x03], TokenKeyType::X25519),
+        ];
+        let pairs = match_certificate_key_pairs(&certs, &keys);
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].certificate.label, "c2");
+        assert_eq!(pairs[1].certificate.label, "c3");
+    }
+
+    #[test]
+    fn match_pairs_skips_ca_certs() {
+        let mut ca = test_cert("ca", &[0x01]);
+        ca.is_ca = true;
+        let certs = vec![ca, test_cert("end", &[0x02])];
+        let keys = vec![
+            test_key("k1", &[0x01], TokenKeyType::Ed25519),
+            test_key("k2", &[0x02], TokenKeyType::Ed25519),
+        ];
+        let pairs = match_certificate_key_pairs(&certs, &keys);
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].certificate.label, "end");
+    }
+
+    #[test]
+    fn match_pairs_skips_empty_id_certs() {
+        let certs = vec![test_cert("no-id", &[])];
+        let keys = vec![test_key("k", &[], TokenKeyType::Ed25519)];
+        let pairs = match_certificate_key_pairs(&certs, &keys);
+        assert!(pairs.is_empty());
+    }
+
+    #[test]
+    fn match_pairs_no_overlap_returns_empty() {
+        let certs = vec![test_cert("c", &[0x01])];
+        let keys = vec![test_key("k", &[0x02], TokenKeyType::Ed25519)];
+        let pairs = match_certificate_key_pairs(&certs, &keys);
+        assert!(pairs.is_empty());
+    }
+
+    // ── select_certificate_for_provisioning ─────────────────────────────
+
+    #[test]
+    fn select_cert_no_certs_returns_refusal() {
+        let driver = MockSessionDriver::with_certs_and_keys(vec![], vec![]);
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+
+        let err = select_certificate_for_provisioning(&token, &pin, &driver).unwrap_err();
+        assert!(matches!(
+            err,
+            TokenError::CertificateSelectionFailed(CertificateSelectionRefusal::NoCertificates)
+        ));
+    }
+
+    #[test]
+    fn select_cert_no_keys_returns_refusal() {
+        let driver = MockSessionDriver::with_certs_and_keys(
+            vec![test_cert("c1", &[1])],
+            vec![],
+        );
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+
+        let err = select_certificate_for_provisioning(&token, &pin, &driver).unwrap_err();
+        assert!(matches!(
+            err,
+            TokenError::CertificateSelectionFailed(CertificateSelectionRefusal::NoKeys)
+        ));
+    }
+
+    #[test]
+    fn select_cert_no_matching_pair_returns_refusal() {
+        let driver = MockSessionDriver::with_certs_and_keys(
+            vec![test_cert("c1", &[1])],
+            vec![test_key("k1", &[2], TokenKeyType::Ed25519)],
+        );
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+
+        let err = select_certificate_for_provisioning(&token, &pin, &driver).unwrap_err();
+        assert!(matches!(
+            err,
+            TokenError::CertificateSelectionFailed(CertificateSelectionRefusal::NoMatchingKeyPair)
+        ));
+    }
+
+    #[test]
+    fn select_cert_incompatible_key_type_returns_refusal() {
+        let driver = MockSessionDriver::with_certs_and_keys(
+            vec![test_cert("c1", &[1])],
+            vec![test_key("k1", &[1], TokenKeyType::Rsa)],
+        );
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+
+        let err = select_certificate_for_provisioning(&token, &pin, &driver).unwrap_err();
+        match err {
+            TokenError::CertificateSelectionFailed(
+                CertificateSelectionRefusal::NoCompatibleKeyType { found },
+            ) => {
+                assert_eq!(found, vec![TokenKeyType::Rsa]);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn select_cert_prefers_ed25519_over_ecdsa() {
+        let driver = MockSessionDriver::with_certs_and_keys(
+            vec![test_cert("ecdsa-cert", &[1]), test_cert("ed-cert", &[2])],
+            vec![
+                test_key("ecdsa-key", &[1], TokenKeyType::EcdsaP256),
+                test_key("ed-key", &[2], TokenKeyType::Ed25519),
+            ],
+        );
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+
+        let material = select_certificate_for_provisioning(&token, &pin, &driver).unwrap();
+        assert_eq!(material.pair.key.key_type, TokenKeyType::Ed25519);
+        assert_eq!(material.pair.certificate.label, "ed-cert");
+        assert_eq!(material.candidates_considered, 2);
+    }
+
+    #[test]
+    fn select_cert_prefers_x25519_over_ecdsa() {
+        let driver = MockSessionDriver::with_certs_and_keys(
+            vec![test_cert("ec-cert", &[1]), test_cert("x-cert", &[2])],
+            vec![
+                test_key("ec-key", &[1], TokenKeyType::EcdsaP384),
+                test_key("x-key", &[2], TokenKeyType::X25519),
+            ],
+        );
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+
+        let material = select_certificate_for_provisioning(&token, &pin, &driver).unwrap();
+        assert_eq!(material.pair.key.key_type, TokenKeyType::X25519);
+    }
+
+    #[test]
+    fn select_cert_single_ed25519_pair_succeeds() {
+        let driver = MockSessionDriver::with_certs_and_keys(
+            vec![test_cert("my-cert", &[0xAB])],
+            vec![test_key("my-key", &[0xAB], TokenKeyType::Ed25519)],
+        );
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+
+        let material = select_certificate_for_provisioning(&token, &pin, &driver).unwrap();
+        assert_eq!(material.pair.certificate.label, "my-cert");
+        assert_eq!(material.pair.key.label, "my-key");
+        assert_eq!(material.pair.key.key_type, TokenKeyType::Ed25519);
+        assert_eq!(material.candidates_considered, 1);
+        assert_eq!(material.token, token);
+    }
+
+    #[test]
+    fn select_cert_signing_key_preferred_over_derive_only() {
+        let mut derive_key = test_key("derive-key", &[1], TokenKeyType::Ed25519);
+        derive_key.can_sign = false;
+        derive_key.can_derive = true;
+
+        let sign_key = test_key("sign-key", &[2], TokenKeyType::Ed25519);
+
+        let driver = MockSessionDriver::with_certs_and_keys(
+            vec![test_cert("d-cert", &[1]), test_cert("s-cert", &[2])],
+            vec![derive_key, sign_key],
+        );
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+
+        let material = select_certificate_for_provisioning(&token, &pin, &driver).unwrap();
+        assert_eq!(material.pair.certificate.label, "s-cert");
+        assert!(material.pair.key.can_sign);
+    }
+
+    #[test]
+    fn select_cert_deterministic_tiebreak_by_label() {
+        // Two Ed25519 signing keys — tiebreak by certificate label.
+        let driver = MockSessionDriver::with_certs_and_keys(
+            vec![test_cert("beta-cert", &[2]), test_cert("alpha-cert", &[1])],
+            vec![
+                test_key("k2", &[2], TokenKeyType::Ed25519),
+                test_key("k1", &[1], TokenKeyType::Ed25519),
+            ],
+        );
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+
+        let material = select_certificate_for_provisioning(&token, &pin, &driver).unwrap();
+        assert_eq!(material.pair.certificate.label, "alpha-cert");
+    }
+
+    // ── CertificateSelectionRefusal display ─────────────────────────────
+
+    #[test]
+    fn certificate_selection_refusal_display_all_variants() {
+        assert!(CertificateSelectionRefusal::NoCertificates
+            .to_string()
+            .contains("no certificates"));
+        assert!(CertificateSelectionRefusal::NoKeys
+            .to_string()
+            .contains("no private keys"));
+        assert!(CertificateSelectionRefusal::NoMatchingKeyPair
+            .to_string()
+            .contains("matching private key"));
+        let no_compat = CertificateSelectionRefusal::NoCompatibleKeyType {
+            found: vec![TokenKeyType::Rsa],
+        };
+        assert!(no_compat.to_string().contains("RSA"));
+        let ambig = CertificateSelectionRefusal::AmbiguousSelection { count: 3 };
+        assert!(ambig.to_string().contains('3'));
+    }
+
+    // ── TokenError::CertificateSelectionFailed display ──────────────────
+
+    #[test]
+    fn certificate_selection_failed_error_display() {
+        let err = TokenError::CertificateSelectionFailed(
+            CertificateSelectionRefusal::NoCertificates,
+        );
+        let display = err.to_string();
+        assert!(display.contains("certificate selection failed"));
+        assert!(display.contains("no certificates"));
     }
 }

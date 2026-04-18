@@ -10,7 +10,7 @@ use crate::error::{BootstrapError, BootstrapResult};
 use crate::genesis::GenesisState;
 use crate::hardware_token::{
     DetectedToken, HardwareTokenPin, HardwareTokenSessionDriver, Pkcs11SessionDriver,
-    TokenDetectionReport, TokenDetector, TokenError, authenticate_bootstrap_session_with_driver,
+    TokenDetectionReport, TokenDetector, TokenError, select_and_authenticate,
 };
 use crate::phase::{BootstrapPhase, detect_partial_state, remove_phase_lock, write_phase_lock};
 use crate::recovery_phrase::RecoveryPhrase;
@@ -455,36 +455,24 @@ impl BootstrapWorkflow {
             )
         })?;
 
-        let detected_tokens = detection_report.all_tokens();
-        tracing::info!(
-            requested_provider = %token.provider.display(),
-            requested_slot = token.slot,
-            detected_tokens = detected_tokens.len(),
-            detection_issues = detection_report.issues().len(),
-            "Preparing hardware-token bootstrap session"
-        );
-
-        let session =
-            authenticate_bootstrap_session_with_driver(token, &detected_tokens, pin, driver)
+        let outcome =
+            select_and_authenticate(token, pin, detection_report, driver, None)
                 .map_err(|err| map_hardware_token_error(detection_report, err))?;
 
-        let provider = session.token().provider.display().to_string();
-        let slot = session.token().slot;
-        let label = session.token().label.clone();
-        let token_display = session.token().to_string();
-        let session_state = session.session_state();
-        let read_write = session.read_write();
+        let token_display = outcome.session.token().to_string();
+        let session_state = outcome.session.session_state();
+        let read_write = outcome.session.read_write();
 
         tracing::info!(
-            provider = %provider,
-            slot,
-            label = %label,
+            token = %token_display,
             session_state = %session_state,
             read_write,
-            "Authenticated hardware-token session established"
+            "Hardware-token session-selection complete; handing off to certificate selection"
         );
 
-        session.close().map_err(|err| {
+        // Session-selection is complete. The session is live and authenticated.
+        // Certificate selection and provisioning handoff are the next beads.
+        outcome.session.close().map_err(|err| {
             BootstrapError::HardwareToken(format!(
                 "hardware token session cleanup failed after authentication: {err}"
             ))

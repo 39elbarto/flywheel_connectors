@@ -13,6 +13,7 @@ use std::cmp::Reverse;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Information about a detected hardware token.
@@ -254,11 +255,16 @@ impl fmt::Display for AuthenticatedSessionState {
     }
 }
 
+/// Default session timeout: 5 minutes.
+const DEFAULT_SESSION_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// A live authenticated hardware-token session with redaction-safe metadata.
 pub struct AuthenticatedTokenSession {
     token: DetectedToken,
     session_state: AuthenticatedSessionState,
     read_write: bool,
+    created_at: Instant,
+    timeout: Duration,
     close_action: Option<Box<dyn FnOnce() -> Result<(), TokenError>>>,
 }
 
@@ -284,6 +290,8 @@ impl AuthenticatedTokenSession {
             token,
             session_state,
             read_write,
+            created_at: Instant::now(),
+            timeout: DEFAULT_SESSION_TIMEOUT,
             close_action: Some(Box::new(close_action)),
         }
     }
@@ -304,6 +312,44 @@ impl AuthenticatedTokenSession {
     #[must_use]
     pub const fn read_write(&self) -> bool {
         self.read_write
+    }
+
+    /// Whether this session has exceeded its timeout.
+    #[must_use]
+    pub fn is_expired(&self) -> bool {
+        self.created_at.elapsed() > self.timeout
+    }
+
+    /// The elapsed time since this session was authenticated.
+    #[must_use]
+    pub fn elapsed(&self) -> Duration {
+        self.created_at.elapsed()
+    }
+
+    /// The configured session timeout.
+    #[must_use]
+    pub const fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    /// Set a custom session timeout.
+    pub const fn set_timeout(&mut self, timeout: Duration) {
+        self.timeout = timeout;
+    }
+
+    /// Check that the session is still valid (not expired) before use.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TokenError::Disconnected` if the session has expired.
+    pub fn check_alive(&self) -> Result<(), TokenError> {
+        if self.is_expired() {
+            return Err(TokenError::SessionExpired {
+                elapsed: self.created_at.elapsed(),
+                timeout: self.timeout,
+            });
+        }
+        Ok(())
     }
 
     /// Close the authenticated session immediately.
@@ -508,6 +554,89 @@ pub(crate) fn authenticate_bootstrap_session_with_driver<D: HardwareTokenSession
     driver.open_authenticated_session(&selected, pin)
 }
 
+/// The outcome of a hardware-token session-selection flow.
+///
+/// Captures both the authenticated session and the discovery context
+/// so downstream consumers (certificate selection, provisioning) can
+/// make decisions with full context.
+#[derive(Debug)]
+pub struct SessionSelectionOutcome {
+    /// The authenticated session, ready for downstream operations.
+    pub session: AuthenticatedTokenSession,
+    /// The full discovery report that produced the candidate list.
+    pub detection_report: TokenDetectionReport,
+    /// The token that was selected after ranking.
+    pub selected_token: DetectedToken,
+}
+
+/// Run the full session-selection state machine: detect → rank → select → authenticate.
+///
+/// This is the canonical entry point for hardware-token bootstrap.  It returns a
+/// live authenticated session or a typed refusal.  The caller is responsible for
+/// closing the session when done (via `session.close()` or `Drop`).
+///
+/// # Errors
+///
+/// Returns a typed `TokenError` if detection finds no tokens, the requested
+/// token is missing or incompatible, the PIN is missing/invalid, or the
+/// PKCS#11 login fails.
+pub(crate) fn select_and_authenticate<D: HardwareTokenSessionDriver>(
+    requested: &DetectedToken,
+    pin: &HardwareTokenPin,
+    detection_report: &TokenDetectionReport,
+    driver: &D,
+    session_timeout: Option<Duration>,
+) -> Result<SessionSelectionOutcome, TokenError> {
+    // Fail fast on missing PIN before any PKCS#11 work.
+    if pin.is_empty() {
+        return Err(TokenError::PinRequired);
+    }
+
+    let candidates = detection_report.all_tokens();
+
+    tracing::info!(
+        requested_provider = %requested.provider.display(),
+        requested_slot = requested.slot,
+        candidate_count = candidates.len(),
+        detection_issues = detection_report.issues().len(),
+        "Session-selection: ranking token candidates"
+    );
+
+    let selected = select_bootstrap_token(requested, &candidates)?;
+
+    tracing::info!(
+        provider = %selected.provider.display(),
+        slot = selected.slot,
+        label = %selected.label,
+        ed25519 = selected.supports_ed25519(),
+        x25519 = selected.supports_x25519(),
+        "Session-selection: opening authenticated session"
+    );
+
+    let mut session =
+        authenticate_bootstrap_session_with_driver(requested, &candidates, pin, driver)?;
+
+    if let Some(timeout) = session_timeout {
+        session.set_timeout(timeout);
+    }
+
+    tracing::info!(
+        provider = %session.token().provider.display(),
+        slot = session.token().slot,
+        label = %session.token().label,
+        session_state = %session.session_state(),
+        read_write = session.read_write(),
+        timeout_secs = session.timeout().as_secs(),
+        "Session-selection: authenticated session established"
+    );
+
+    Ok(SessionSelectionOutcome {
+        session,
+        detection_report: detection_report.clone(),
+        selected_token: selected,
+    })
+}
+
 fn token_locator(token: &DetectedToken) -> String {
     format!(
         "{} [{}] via {} slot {}",
@@ -650,6 +779,15 @@ pub enum TokenError {
     /// Token disconnected during operation.
     #[error("token disconnected")]
     Disconnected,
+
+    /// Session expired due to timeout.
+    #[error("hardware token session expired after {elapsed:?} (timeout: {timeout:?})")]
+    SessionExpired {
+        /// How long the session has been alive.
+        elapsed: Duration,
+        /// The configured timeout.
+        timeout: Duration,
+    },
 }
 
 /// Cross-platform token detector.
@@ -1601,7 +1739,7 @@ mod tests {
         };
 
         assert_eq!(report.all_tokens().len(), 1);
-        assert_eq!(report.all_tokens()[0], &good_token);
+        assert_eq!(report.all_tokens()[0], good_token);
         assert!(report.has_detected_tokens());
         assert_eq!(report.issues().len(), 1);
         assert_eq!(report.fcp_compatible_tokens().len(), 1);
@@ -1777,6 +1915,211 @@ mod tests {
             || Ok(()),
         );
         drop(session); // Should not panic
+    }
+
+    // ---- Session timeout ----
+
+    #[test]
+    fn session_not_expired_immediately() {
+        let session = AuthenticatedTokenSession::with_close_action(
+            test_token(),
+            AuthenticatedSessionState::ReadWriteUser,
+            true,
+            || Ok(()),
+        );
+        assert!(!session.is_expired());
+        session.check_alive().unwrap();
+    }
+
+    #[test]
+    fn session_expired_after_zero_timeout() {
+        let mut session = AuthenticatedTokenSession::with_close_action(
+            test_token(),
+            AuthenticatedSessionState::ReadWriteUser,
+            true,
+            || Ok(()),
+        );
+        session.set_timeout(Duration::ZERO);
+        // Even Duration::ZERO may not trigger immediately on fast CPUs,
+        // but with a tiny sleep it definitely will.
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(session.is_expired());
+        assert!(matches!(
+            session.check_alive(),
+            Err(TokenError::SessionExpired { .. })
+        ));
+    }
+
+    #[test]
+    fn session_default_timeout_is_5_minutes() {
+        let session = AuthenticatedTokenSession::with_close_action(
+            test_token(),
+            AuthenticatedSessionState::ReadWriteUser,
+            true,
+            || Ok(()),
+        );
+        assert_eq!(session.timeout(), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn session_custom_timeout() {
+        let mut session = AuthenticatedTokenSession::with_close_action(
+            test_token(),
+            AuthenticatedSessionState::ReadWriteUser,
+            true,
+            || Ok(()),
+        );
+        session.set_timeout(Duration::from_secs(60));
+        assert_eq!(session.timeout(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn session_elapsed_is_nonnegative() {
+        let session = AuthenticatedTokenSession::with_close_action(
+            test_token(),
+            AuthenticatedSessionState::ReadWriteUser,
+            true,
+            || Ok(()),
+        );
+        assert!(session.elapsed() < Duration::from_secs(5));
+    }
+
+    // ---- SessionExpired error display ----
+
+    #[test]
+    fn session_expired_error_display() {
+        let err = TokenError::SessionExpired {
+            elapsed: Duration::from_secs(301),
+            timeout: Duration::from_secs(300),
+        };
+        let display = err.to_string();
+        assert!(display.contains("expired"));
+        assert!(display.contains("301"));
+    }
+
+    #[test]
+    fn session_expired_error_debug() {
+        let err = TokenError::SessionExpired {
+            elapsed: Duration::from_secs(10),
+            timeout: Duration::from_secs(5),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("SessionExpired"));
+    }
+
+    // ---- select_and_authenticate state machine ----
+
+    #[test]
+    fn select_and_authenticate_returns_outcome_with_session() {
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+        let driver = MockSessionDriver::default();
+        let report = TokenDetectionReport {
+            providers: vec![ProviderDetectionResult {
+                provider: token.provider.clone(),
+                tokens: vec![token.clone()],
+                issues: Vec::new(),
+            }],
+        };
+
+        let outcome = select_and_authenticate(&token, &pin, &report, &driver, None).unwrap();
+        assert_eq!(outcome.selected_token, token);
+        assert_eq!(
+            outcome.session.session_state(),
+            AuthenticatedSessionState::ReadWriteUser
+        );
+        assert!(outcome.session.read_write());
+        assert!(!outcome.session.is_expired());
+        outcome.session.close().unwrap();
+        assert_eq!(driver.close_count(), 1);
+    }
+
+    #[test]
+    fn select_and_authenticate_applies_custom_timeout() {
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+        let driver = MockSessionDriver::default();
+        let report = TokenDetectionReport {
+            providers: vec![ProviderDetectionResult {
+                provider: token.provider.clone(),
+                tokens: vec![token.clone()],
+                issues: Vec::new(),
+            }],
+        };
+
+        let outcome = select_and_authenticate(
+            &token,
+            &pin,
+            &report,
+            &driver,
+            Some(Duration::from_secs(60)),
+        )
+        .unwrap();
+        assert_eq!(outcome.session.timeout(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn select_and_authenticate_refuses_empty_pin() {
+        let token = test_token();
+        let pin = HardwareTokenPin::new("");
+        let driver = MockSessionDriver::default();
+        let report = TokenDetectionReport::default();
+
+        let result = select_and_authenticate(&token, &pin, &report, &driver, None);
+        assert!(matches!(result, Err(TokenError::PinRequired)));
+    }
+
+    #[test]
+    fn select_and_authenticate_refuses_missing_token() {
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+        let driver = MockSessionDriver::default();
+        let report = TokenDetectionReport::default();
+
+        let result = select_and_authenticate(&token, &pin, &report, &driver, None);
+        assert!(matches!(result, Err(TokenError::NoTokens)));
+    }
+
+    #[test]
+    fn select_and_authenticate_refuses_incompatible_token() {
+        let mut token = test_token();
+        token.mechanisms = vec!["CKM_RSA_PKCS".to_string()];
+        let pin = HardwareTokenPin::new("123456");
+        let driver = MockSessionDriver::default();
+        let report = TokenDetectionReport {
+            providers: vec![ProviderDetectionResult {
+                provider: token.provider.clone(),
+                tokens: vec![token.clone()],
+                issues: Vec::new(),
+            }],
+        };
+
+        let result = select_and_authenticate(&token, &pin, &report, &driver, None);
+        assert!(matches!(result, Err(TokenError::UnsupportedMechanism(_))));
+    }
+
+    #[test]
+    fn select_and_authenticate_picks_best_from_multiple_candidates() {
+        let mut weaker = test_token();
+        weaker.slot = 1;
+        weaker.serial = "weak".to_string();
+        weaker.mechanisms = vec!["CKM_RSA_PKCS".to_string()];
+
+        let strong = test_token(); // has Ed25519 + ECDH
+
+        let pin = HardwareTokenPin::new("123456");
+        let driver = MockSessionDriver::default();
+        let report = TokenDetectionReport {
+            providers: vec![ProviderDetectionResult {
+                provider: strong.provider.clone(),
+                tokens: vec![weaker, strong.clone()],
+                issues: Vec::new(),
+            }],
+        };
+
+        let outcome =
+            select_and_authenticate(&strong, &pin, &report, &driver, None).unwrap();
+        assert_eq!(outcome.selected_token, strong);
     }
 
     #[derive(Default)]

@@ -106,7 +106,7 @@ pub use genesis::{GenesisState, GenesisValidationError};
 pub use hardware_token::{
     AuthenticatedSessionState, AuthenticatedTokenSession, DetectedToken, DetectionIssue,
     DetectionStage, HardwareTokenPin, HardwareTokenProvider, ProviderDetectionResult,
-    TokenDetectionReport, TokenDetector,
+    SessionSelectionOutcome, TokenDetectionReport, TokenDetector,
 };
 pub use phase::{BootstrapPhase, InitResult, InitSuggestion, PartialStateSuggestion};
 pub use recovery_phrase::{RecoveryPhrase, RecoveryPhraseError};

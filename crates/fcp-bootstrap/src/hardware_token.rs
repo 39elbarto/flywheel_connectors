@@ -1571,6 +1571,214 @@ mod tests {
         assert_eq!(key.len(), 32);
     }
 
+    // ---- Multi-provider discovery report ----
+
+    #[test]
+    fn token_detection_report_multi_provider_aggregates_tokens_and_issues() {
+        let mut good_token = test_token();
+        good_token.provider = PathBuf::from("/good/provider.so");
+
+        let issue = DetectionIssue::new(
+            Path::new("/bad/provider.so"),
+            DetectionStage::ProviderMissing,
+            None,
+            "provider not found",
+        );
+
+        let report = TokenDetectionReport {
+            providers: vec![
+                ProviderDetectionResult {
+                    provider: PathBuf::from("/good/provider.so"),
+                    tokens: vec![good_token.clone()],
+                    issues: Vec::new(),
+                },
+                ProviderDetectionResult {
+                    provider: PathBuf::from("/bad/provider.so"),
+                    tokens: Vec::new(),
+                    issues: vec![issue],
+                },
+            ],
+        };
+
+        assert_eq!(report.all_tokens().len(), 1);
+        assert_eq!(report.all_tokens()[0], &good_token);
+        assert!(report.has_detected_tokens());
+        assert_eq!(report.issues().len(), 1);
+        assert_eq!(report.fcp_compatible_tokens().len(), 1);
+    }
+
+    // ---- Token identity matching edge cases ----
+
+    #[test]
+    fn token_identity_matches_unknown_field_wildcards() {
+        let mut requested = test_token();
+        requested.label = "unknown".to_string();
+
+        let candidate = test_token();
+
+        // "unknown" in requested should match any candidate label
+        assert!(token_identity_matches(&requested, &candidate));
+    }
+
+    #[test]
+    fn token_identity_matches_unknown_candidate_wildcards() {
+        let requested = test_token();
+
+        let mut candidate = test_token();
+        candidate.manufacturer = "unknown".to_string();
+
+        // "unknown" in candidate should also wildcard
+        assert!(token_identity_matches(&requested, &candidate));
+    }
+
+    #[test]
+    fn token_identity_does_not_match_different_slot() {
+        let requested = test_token();
+        let mut candidate = test_token();
+        candidate.slot = 99;
+
+        assert!(!token_identity_matches(&requested, &candidate));
+    }
+
+    #[test]
+    fn token_identity_does_not_match_different_provider() {
+        let requested = test_token();
+        let mut candidate = test_token();
+        candidate.provider = PathBuf::from("/other/provider.so");
+
+        assert!(!token_identity_matches(&requested, &candidate));
+    }
+
+    // ---- AuthenticatedSessionState coverage ----
+
+    #[test]
+    fn authenticated_session_state_display_all_variants() {
+        assert_eq!(AuthenticatedSessionState::ReadOnlyPublic.to_string(), "ro-public");
+        assert_eq!(AuthenticatedSessionState::ReadOnlyUser.to_string(), "ro-user");
+        assert_eq!(AuthenticatedSessionState::ReadWritePublic.to_string(), "rw-public");
+        assert_eq!(AuthenticatedSessionState::ReadWriteUser.to_string(), "rw-user");
+        assert_eq!(
+            AuthenticatedSessionState::ReadWriteSecurityOfficer.to_string(),
+            "rw-so"
+        );
+    }
+
+    #[test]
+    fn authenticated_session_state_serde_roundtrip_all_variants() {
+        let variants = [
+            AuthenticatedSessionState::ReadOnlyPublic,
+            AuthenticatedSessionState::ReadOnlyUser,
+            AuthenticatedSessionState::ReadWritePublic,
+            AuthenticatedSessionState::ReadWriteUser,
+            AuthenticatedSessionState::ReadWriteSecurityOfficer,
+        ];
+        for variant in &variants {
+            let json = serde_json::to_string(variant).unwrap();
+            let restored: AuthenticatedSessionState = serde_json::from_str(&json).unwrap();
+            assert_eq!(*variant, restored);
+        }
+    }
+
+    // ---- TokenDetectionReport serde roundtrip ----
+
+    #[test]
+    fn token_detection_report_serde_roundtrip() {
+        let issue = DetectionIssue::new(
+            Path::new("/missing.so"),
+            DetectionStage::ProviderMissing,
+            None,
+            "not found",
+        );
+        let report = TokenDetectionReport {
+            providers: vec![
+                ProviderDetectionResult {
+                    provider: PathBuf::from("/good.so"),
+                    tokens: vec![test_token()],
+                    issues: Vec::new(),
+                },
+                ProviderDetectionResult {
+                    provider: PathBuf::from("/missing.so"),
+                    tokens: Vec::new(),
+                    issues: vec![issue],
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&report).unwrap();
+        let restored: TokenDetectionReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.providers.len(), 2);
+        assert_eq!(restored.all_tokens().len(), 1);
+        assert_eq!(restored.issues().len(), 1);
+    }
+
+    // ---- Select bootstrap token edge cases ----
+
+    #[test]
+    fn select_bootstrap_token_empty_candidates_returns_no_tokens() {
+        let result = select_bootstrap_token(&test_token(), &[]);
+        assert!(matches!(result, Err(TokenError::NoTokens)));
+    }
+
+    #[test]
+    fn select_bootstrap_token_not_found_returns_descriptive_error() {
+        let requested = test_token();
+        let mut other = test_token();
+        other.slot = 99;
+        other.serial = "different".to_string();
+        other.provider = PathBuf::from("/other.so");
+
+        let result = select_bootstrap_token(&requested, &[other]);
+        assert!(matches!(result, Err(TokenError::TokenNotFound(_))));
+    }
+
+    // ---- HardwareTokenPin ----
+
+    #[test]
+    fn hardware_token_pin_is_empty_for_empty_string() {
+        let pin = HardwareTokenPin::new("");
+        assert!(pin.is_empty());
+    }
+
+    #[test]
+    fn hardware_token_pin_is_not_empty_for_real_pin() {
+        let pin = HardwareTokenPin::new("123456");
+        assert!(!pin.is_empty());
+    }
+
+    // ---- DetectionStage serde roundtrip ----
+
+    #[test]
+    fn detection_stage_serde_roundtrip_all_variants() {
+        let stages = [
+            DetectionStage::ProviderMissing,
+            DetectionStage::LoadProvider,
+            DetectionStage::InitializeProvider,
+            DetectionStage::EnumerateSlots,
+            DetectionStage::NormalizeSlotId,
+            DetectionStage::ReadTokenInfo,
+            DetectionStage::ReadMechanisms,
+            DetectionStage::FinalizeProvider,
+        ];
+        for stage in &stages {
+            let json = serde_json::to_string(stage).unwrap();
+            let restored: DetectionStage = serde_json::from_str(&json).unwrap();
+            assert_eq!(*stage, restored);
+        }
+    }
+
+    // ---- Session drop does not panic without close action ----
+
+    #[test]
+    fn authenticated_session_drop_without_close_action_does_not_panic() {
+        let session = AuthenticatedTokenSession::with_close_action(
+            test_token(),
+            AuthenticatedSessionState::ReadWriteUser,
+            true,
+            || Ok(()),
+        );
+        drop(session); // Should not panic
+    }
+
     #[derive(Default)]
     struct MockSessionDriver {
         close_count: Arc<AtomicUsize>,

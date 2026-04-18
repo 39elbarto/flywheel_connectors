@@ -788,6 +788,67 @@ fn detected_token_serde_roundtrip() {
 }
 
 // ============================================================================
+// 9b. Multi-provider hardware token discovery
+// ============================================================================
+
+#[test]
+fn token_detector_multi_provider_report_aggregates_missing_and_broken() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing_provider = PathBuf::from("/definitely/missing/multi-test-provider.so");
+    let broken_provider = dir.path().join("broken-library.txt");
+    std::fs::write(&broken_provider, "not a shared library").unwrap();
+
+    let detector =
+        TokenDetector::from_provider_paths(vec![missing_provider.clone(), broken_provider.clone()]);
+    let report = detector.detect_report();
+
+    assert_eq!(report.providers.len(), 2);
+    assert!(!report.has_detected_tokens());
+
+    // First provider: missing
+    let missing_result = report
+        .providers
+        .iter()
+        .find(|p| p.provider == missing_provider)
+        .unwrap();
+    assert!(missing_result.tokens.is_empty());
+    assert!(
+        missing_result
+            .issues
+            .iter()
+            .any(|i| i.stage == DetectionStage::ProviderMissing)
+    );
+
+    // Second provider: load failure
+    let broken_result = report
+        .providers
+        .iter()
+        .find(|p| p.provider == broken_provider)
+        .unwrap();
+    assert!(broken_result.tokens.is_empty());
+    assert!(
+        broken_result
+            .issues
+            .iter()
+            .any(|i| i.stage == DetectionStage::LoadProvider)
+    );
+}
+
+#[test]
+fn token_detection_report_serde_roundtrip_via_json() {
+    let provider = PathBuf::from("/definitely/missing/serde-test-provider.so");
+    let detector = TokenDetector::from_provider_paths(vec![provider]);
+    let report = detector.detect_report();
+
+    let json = serde_json::to_string(&report).unwrap();
+    let restored: fcp_bootstrap::TokenDetectionReport = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(restored.providers.len(), report.providers.len());
+    assert_eq!(restored.all_tokens().len(), report.all_tokens().len());
+    assert_eq!(restored.issues().len(), report.issues().len());
+}
+
+// ============================================================================
 // 10. Workflow configuration
 // ============================================================================
 

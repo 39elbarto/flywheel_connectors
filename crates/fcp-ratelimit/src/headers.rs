@@ -269,17 +269,20 @@ fn parse_duration_string(s: &str) -> Option<Duration> {
     }
     if s.ends_with('s') && !s.ends_with("ms") {
         if let Ok(secs) = s.trim_end_matches('s').parse::<f64>() {
-            return Some(Duration::from_secs_f64(secs));
+            if secs >= 0.0 && secs.is_finite() && secs <= u64::MAX as f64 {
+                return Some(Duration::from_secs_f64(secs));
+            }
+            return None;
         }
     }
     if s.ends_with('m') {
         if let Ok(mins) = s.trim_end_matches('m').parse::<u64>() {
-            return Some(Duration::from_secs(mins * 60));
+            return mins.checked_mul(60).map(Duration::from_secs);
         }
     }
     if s.ends_with('h') {
         if let Ok(hours) = s.trim_end_matches('h').parse::<u64>() {
-            return Some(Duration::from_secs(hours * 3600));
+            return hours.checked_mul(3600).map(Duration::from_secs);
         }
     }
 
@@ -1120,6 +1123,26 @@ mod tests {
     #[test]
     fn parse_duration_string_negative_ms() {
         assert!(parse_duration_string("-100ms").is_none());
+    }
+
+    #[test]
+    fn parse_duration_string_negative_seconds_suffix_returns_none() {
+        // "-5s" parses as f64 = -5.0; must not panic in Duration::from_secs_f64
+        assert!(parse_duration_string("-5s").is_none());
+    }
+
+    #[test]
+    fn parse_duration_string_overflow_minutes_returns_none() {
+        // u64::MAX minutes would overflow when multiplied by 60
+        let huge = format!("{}m", u64::MAX);
+        assert!(parse_duration_string(&huge).is_none());
+    }
+
+    #[test]
+    fn parse_duration_string_overflow_hours_returns_none() {
+        // u64::MAX hours would overflow when multiplied by 3600
+        let huge = format!("{}h", u64::MAX);
+        assert!(parse_duration_string(&huge).is_none());
     }
 
     #[test]

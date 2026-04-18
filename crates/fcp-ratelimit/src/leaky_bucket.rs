@@ -98,7 +98,9 @@ impl LeakyBucket {
         } else {
             let overflow = (level + room_needed) - capacity;
             let secs = overflow / self.leak_rate;
-            if secs.is_finite() && secs >= 0.0 {
+            // Cap at Duration::MAX representable seconds to avoid panic in
+            // from_secs_f64 for extremely small leak rates.
+            if secs.is_finite() && secs >= 0.0 && secs <= u64::MAX as f64 {
                 Duration::from_secs_f64(secs)
             } else {
                 Duration::MAX
@@ -874,6 +876,17 @@ mod tests {
         // Manually set level to capacity
         *limiter.level.lock() = 2.0;
         assert_eq!(limiter.time_until_room(), Duration::MAX);
+    }
+
+    #[test]
+    fn leaky_bucket_time_until_room_extremely_small_leak_rate_does_not_panic() {
+        let limiter = LeakyBucket::new(2, 1e-308);
+        *limiter.level.lock() = 2.0;
+        // With an extremely small leak rate, overflow/leak_rate would exceed
+        // Duration::MAX representable seconds. The fix caps to Duration::MAX
+        // instead of panicking in Duration::from_secs_f64.
+        let wait = limiter.time_until_room();
+        assert_eq!(wait, Duration::MAX);
     }
 
     // ── Sync-only SmoothPacer tests ──────────────────────────────────

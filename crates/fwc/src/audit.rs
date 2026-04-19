@@ -844,9 +844,9 @@ fn validate_non_empty(label: &str, value: &str) -> anyhow::Result<()> {
 fn validate_placeholder_inventory_structure(
     inventory: &ProductionPlaceholderInventory,
 ) -> anyhow::Result<()> {
-    if inventory.version != 1 {
+    if !(1..=3).contains(&inventory.version) {
         anyhow::bail!(
-            "unsupported placeholder inventory version {}; expected 1",
+            "unsupported placeholder inventory version {}; expected 1..=3",
             inventory.version
         );
     }

@@ -613,6 +613,10 @@ pub trait ConnectorApp: FcpConnector {
     fn app_contract(&self) -> ConnectorAppContract {
         let introspection = self.contract_introspection();
         let mut description = self.describe();
+        // ConnectorApp::describe() is author-supplied metadata; normalize the
+        // published contract back to the runtime connector identity so a
+        // connector impl cannot accidentally publish a mismatched ID.
+        description.connector_id = self.id().clone();
         let capabilities = self.capability_catalog_for(&introspection);
         if capabilities.rate_limits.is_some() {
             description.budget.declares_rate_limits = true;
@@ -1022,6 +1026,99 @@ fcp_core::impl_fcp_sealed!(ContractTestConnector);
             "published app contracts must not deny rate-limit declarations while shipping them"
         );
         assert!(contract.capabilities.rate_limits.is_some());
+    }
+
+    #[derive(Debug, Default)]
+    struct MismatchedDescriptorConnector {
+        inner: ContractTestConnector,
+    }
+
+    fcp_core::impl_fcp_sealed!(MismatchedDescriptorConnector);
+
+    #[async_trait]
+    impl FcpConnector for MismatchedDescriptorConnector {
+        fn id(&self) -> &ConnectorId {
+            self.inner.id()
+        }
+
+        async fn configure(&mut self, config: serde_json::Value) -> crate::FcpResult<()> {
+            self.inner.configure(config).await
+        }
+
+        async fn handshake(
+            &mut self,
+            req: crate::HandshakeRequest,
+        ) -> crate::FcpResult<crate::HandshakeResponse> {
+            self.inner.handshake(req).await
+        }
+
+        async fn health(&self) -> HealthSnapshot {
+            self.inner.health().await
+        }
+
+        async fn self_check(&self) -> crate::FcpResult<SelfCheckReport> {
+            self.inner.self_check().await
+        }
+
+        fn metrics(&self) -> crate::ConnectorMetrics {
+            self.inner.metrics()
+        }
+
+        async fn shutdown(&mut self, req: crate::ShutdownRequest) -> crate::FcpResult<()> {
+            self.inner.shutdown(req).await
+        }
+
+        fn introspect(&self) -> Introspection {
+            self.inner.introspect()
+        }
+
+        fn rate_limits(&self) -> Option<RateLimitDeclarations> {
+            self.inner.rate_limits()
+        }
+
+        async fn invoke(&self, req: InvokeRequest) -> crate::FcpResult<InvokeResponse> {
+            self.inner.invoke(req).await
+        }
+
+        async fn simulate(&self, req: SimulateRequest) -> crate::FcpResult<SimulateResponse> {
+            self.inner.simulate(req).await
+        }
+
+        async fn subscribe(&self, req: SubscribeRequest) -> crate::FcpResult<SubscribeResponse> {
+            self.inner.subscribe(req).await
+        }
+
+        async fn unsubscribe(&self, req: UnsubscribeRequest) -> crate::FcpResult<()> {
+            self.inner.unsubscribe(req).await
+        }
+
+        async fn ack(&self, ack: crate::EventAck) -> crate::FcpResult<()> {
+            self.inner.ack(ack).await
+        }
+
+        async fn nack(&self, nack: crate::EventNack) -> crate::FcpResult<()> {
+            self.inner.nack(nack).await
+        }
+    }
+
+    impl ConnectorApp for MismatchedDescriptorConnector {
+        fn describe(&self) -> ConnectorAppDescriptor {
+            ConnectorAppDescriptor::new(ConnectorId::from_static(
+                "fcp.test.mismatched:utility:1.0.0",
+            ))
+        }
+    }
+
+    #[test]
+    fn app_contract_normalizes_runtime_connector_id() {
+        let connector = MismatchedDescriptorConnector::default();
+        let contract = connector.app_contract();
+
+        assert_eq!(contract.description.connector_id, connector.id().clone());
+        assert_ne!(
+            contract.description.connector_id,
+            ConnectorId::from_static("fcp.test.mismatched:utility:1.0.0")
+        );
     }
 
     #[test]

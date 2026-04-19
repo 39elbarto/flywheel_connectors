@@ -2409,10 +2409,17 @@ mod tests {
     }
 
     #[test]
-    fn hrw_hash_zero_length_inputs_still_deterministic() {
+    fn hrw_hash_minimal_inputs_still_deterministic() {
+        // The original "zero-length inputs" variant of this test passed an
+        // empty TailscaleNodeId, which is no longer constructible after the
+        // canonical-id check landed (`TailscaleNodeId::new("")` now panics
+        // with `Empty`). The property under test is hash determinism for
+        // boundary-thin inputs, not "zero-length" per se — exercise it with
+        // single-character canonical ids that still represent the smallest
+        // legal node and epoch identifiers.
         let zone: ZoneId = "z:".parse().unwrap_or_else(|_| ZoneId::work());
-        let epoch = EpochId::new("");
-        let node = TailscaleNodeId::new("");
+        let epoch = EpochId::new("a");
+        let node = TailscaleNodeId::new("n");
         let h1 = hrw_hash_checkpoint(&zone, &epoch, &node);
         let h2 = hrw_hash_checkpoint(&zone, &epoch, &node);
         assert_eq!(h1, h2);

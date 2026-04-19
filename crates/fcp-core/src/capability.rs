@@ -754,14 +754,55 @@ impl AsRef<str> for PrincipalId {
 }
 
 /// Tailscale Node ID.
+///
+/// Untrusted-input paths (`TryFrom<String>`, `FromStr`, serde
+/// deserialization through `try_from = "String"`) validate against the
+/// same canonical-id rules every other identifier type in this module
+/// uses (`validate_canonical_id`): ASCII-only, no uppercase, no
+/// whitespace or control characters, no Unicode lookalikes, length ≤
+/// 128 bytes, `^[a-z0-9][a-z0-9._:-]*$` shape.
+///
+/// The pre-existing infallible constructors (`new`, `From<String>`)
+/// remain available for compile-time-known identifiers (every call
+/// site in the workspace today passes a literal like
+/// `"node-initiator"`, and several internal tests deliberately
+/// construct unusual fixtures such as empty or oversized ids to
+/// exercise downstream-layer guards). Wire-supplied identifiers MUST
+/// arrive through the validating path so that a malformed
+/// `FcpsFrame.source_id`, `OperationReceipt.executed_by`, or peer
+/// identifier in a session message cannot smuggle empty,
+/// whitespace-only, NUL-embedded, bidi-override
+/// (`"\u{202E}revil-node"`), or namespace-collision (`"z:owner"`)
+/// payloads through the audit chain.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct TailscaleNodeId(std::sync::Arc<str>);
 
 impl TailscaleNodeId {
+    /// Construct from a compile-time-known or trusted identifier.
+    ///
+    /// Does NOT validate — kept infallible so existing fixture and
+    /// downstream-rejection tests can build fixtures (e.g. oversized
+    /// source ids that exercise a frame-encoder guard) without going
+    /// through the canonical-id gate. Use [`Self::try_new`] on any
+    /// caller-supplied or wire-supplied input.
     pub fn new(id: impl Into<String>) -> Self {
         let s: String = id.into();
         Self(s.into())
+    }
+
+    /// Validating constructor for caller-supplied input.
+    ///
+    /// Applies the canonical-id rules; returns
+    /// [`IdValidationError`] on rejection so callers can fail closed
+    /// instead of silently accepting malformed identifiers.
+    ///
+    /// # Errors
+    /// Returns any error returned by [`validate_canonical_id`].
+    pub fn try_new(id: impl Into<String>) -> Result<Self, IdValidationError> {
+        let s: String = id.into();
+        validate_canonical_id(&s)?;
+        Ok(Self(s.into()))
     }
 
     #[must_use]
@@ -770,9 +811,22 @@ impl TailscaleNodeId {
     }
 }
 
-impl From<String> for TailscaleNodeId {
-    fn from(s: String) -> Self {
-        Self(s.into())
+impl TryFrom<String> for TailscaleNodeId {
+    type Error = IdValidationError;
+
+    /// Validating conversion — used by serde and other deserialization
+    /// paths so wire-supplied identifiers are gated.
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        validate_canonical_id(&value)?;
+        Ok(Self(value.into()))
+    }
+}
+
+impl std::str::FromStr for TailscaleNodeId {
+    type Err = IdValidationError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_from(s.to_owned())
     }
 }
 
@@ -3614,9 +3668,74 @@ mod tests {
     }
 
     #[test]
-    fn tailscale_node_id_from_string() {
-        let node: TailscaleNodeId = String::from("ts-node-42").into();
+    fn tailscale_node_id_try_from_string() {
+        // Was `let node: TailscaleNodeId = String::from(...).into()` against
+        // the bypass-prone `From<String>` impl that accepted any input.
+        // Replaced with `try_from` to exercise the new canonical-id check.
+        let node = TailscaleNodeId::try_from(String::from("ts-node-42")).unwrap();
         assert_eq!(node.as_str(), "ts-node-42");
+    }
+
+    #[test]
+    fn tailscale_node_id_rejects_uncanonical_strings() {
+        // Regression: previously every one of these constructed a
+        // TailscaleNodeId verbatim. Now each must surface an
+        // IdValidationError. The list mirrors the attack surface in the
+        // type docstring (empty, whitespace, control bytes,
+        // bidi-override, namespace-collision lookalike, uppercase).
+        let cases: &[(&str, fn(&IdValidationError) -> bool)] = &[
+            ("", |e| matches!(e, IdValidationError::Empty)),
+            ("   ", |e| matches!(e, IdValidationError::InvalidStartChar { .. })),
+            ("node-bad ", |e| matches!(e, IdValidationError::InvalidChar { .. })),
+            ("node\nbad", |e| matches!(e, IdValidationError::InvalidChar { .. })),
+            ("node\0bad", |e| matches!(e, IdValidationError::InvalidChar { .. })),
+            ("\u{202E}revil-node", |e| matches!(e, IdValidationError::NonAscii)),
+            ("node-Café", |e| matches!(e, IdValidationError::NonAscii)),
+            ("Node-UPPER", |e| matches!(e, IdValidationError::UppercaseNotAllowed)),
+            ("/etc/passwd", |e| matches!(e, IdValidationError::InvalidStartChar { .. })),
+        ];
+        for (input, predicate) in cases {
+            let err = TailscaleNodeId::try_from((*input).to_owned())
+                .expect_err(&format!("input {input:?} must be rejected"));
+            assert!(
+                predicate(&err),
+                "input {input:?} produced unexpected error variant: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tailscale_node_id_try_new_validates_input() {
+        // `new` is intentionally infallible (used by trusted/test fixtures);
+        // `try_new` is the path for caller-supplied input — it returns the
+        // canonical-id error variant rather than silently accepting.
+        let err = TailscaleNodeId::try_new("Bad ID").unwrap_err();
+        // "Bad ID" has uppercase 'B' which the dedicated UppercaseNotAllowed
+        // check fires before reaching the per-char loop.
+        assert!(matches!(err, IdValidationError::UppercaseNotAllowed));
+        // A lowercase-but-still-illegal character also surfaces an error.
+        let err = TailscaleNodeId::try_new("node bad").unwrap_err();
+        assert!(matches!(err, IdValidationError::InvalidChar { .. }));
+        // Happy path still produces a valid id.
+        let ok = TailscaleNodeId::try_new("node-ok").expect("canonical id");
+        assert_eq!(ok.as_str(), "node-ok");
+    }
+
+    #[test]
+    fn tailscale_node_id_serde_rejects_uncanonical_payload() {
+        // Pre-fix: serde deserialization went through the auto-derived
+        // TryFrom (from From<String>) and accepted anything. Post-fix:
+        // the manual TryFrom validates, so a JSON string carrying a
+        // non-canonical id must surface a deserialization error.
+        let payload = r#""\u202Erevil-node""#;
+        assert!(
+            serde_json::from_str::<TailscaleNodeId>(payload).is_err(),
+            "bidi-override Unicode in node id must fail to deserialize"
+        );
+        assert!(
+            serde_json::from_str::<TailscaleNodeId>(r#""""#).is_err(),
+            "empty string must fail to deserialize"
+        );
     }
 
     #[test]

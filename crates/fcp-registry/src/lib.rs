@@ -164,6 +164,11 @@ pub enum RegistryCatalogError {
         version: String,
         target: String,
     },
+    #[error("path traversal in binary_name: `{binary_name}`")]
+    PathTraversal {
+        /// The rejected binary name from the signature metadata.
+        binary_name: String,
+    },
 }
 
 /// Registry verification failures.
@@ -1754,7 +1759,21 @@ impl LocalRegistryCatalog {
                 }
             })?;
 
-        let binary_path = package_dir.join(&signature.binary_name);
+        // Reject path traversal in binary_name from deserialized signature JSON.
+        let binary_file = std::path::Path::new(&signature.binary_name);
+        if binary_file.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::RootDir
+            )
+        }) || binary_file.is_absolute()
+        {
+            return Err(RegistryCatalogError::PathTraversal {
+                binary_name: signature.binary_name.clone(),
+            });
+        }
+
+        let binary_path = package_dir.join(binary_file);
         let binary_bytes = std::fs::read(&binary_path).map_err(|source| {
             if source.kind() == std::io::ErrorKind::NotFound {
                 RegistryCatalogError::MissingBinary {
@@ -11433,6 +11452,69 @@ trusted_builders = ["trusted-ci"]
             connector.versions[0].targets[0]
                 .signature_url
                 .contains("/targets/darwin/arm64/signature")
+        );
+    }
+
+    #[test]
+    fn local_registry_catalog_rejects_path_traversal_in_binary_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = ConnectorTarget {
+            os: "linux".to_string(),
+            arch: "amd64".to_string(),
+        };
+
+        let package_dir = write_signed_package_dir(
+            temp.path(),
+            "fcp.traversal-test",
+            "1.0.0",
+            target,
+            "legit-binary",
+            b"binary-content",
+        );
+
+        // Tamper with the signature JSON to inject a path-traversal binary_name.
+        let sig_path = package_dir.join(REGISTRY_MANIFEST_SIGNATURE_FILENAME);
+        let sig_json = std::fs::read_to_string(&sig_path).expect("read signature");
+        let poisoned = sig_json.replace("legit-binary", "../../etc/passwd");
+        std::fs::write(&sig_path, poisoned).expect("write poisoned signature");
+
+        let err = LocalRegistryCatalog::from_signed_package_dirs(&[package_dir])
+            .expect_err("path traversal should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("path traversal"),
+            "expected PathTraversal error, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn local_registry_catalog_rejects_absolute_binary_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = ConnectorTarget {
+            os: "linux".to_string(),
+            arch: "amd64".to_string(),
+        };
+
+        let package_dir = write_signed_package_dir(
+            temp.path(),
+            "fcp.abs-test",
+            "1.0.0",
+            target,
+            "legit-binary",
+            b"binary-content",
+        );
+
+        let sig_path = package_dir.join(REGISTRY_MANIFEST_SIGNATURE_FILENAME);
+        let sig_json = std::fs::read_to_string(&sig_path).expect("read signature");
+        let poisoned = sig_json.replace("legit-binary", "/etc/shadow");
+        std::fs::write(&sig_path, poisoned).expect("write poisoned signature");
+
+        let err = LocalRegistryCatalog::from_signed_package_dirs(&[package_dir])
+            .expect_err("absolute path should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("path traversal"),
+            "expected PathTraversal error, got: {msg}",
         );
     }
 

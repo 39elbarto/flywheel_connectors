@@ -1689,7 +1689,7 @@ mod tests {
     use crate::device::DeviceProfileBuilder;
     use crate::planner::{LeasePurpose, PlannerContext};
     use bytes::Bytes;
-    use fcp_core::{ObjectId, ZoneId, ZoneKeyId};
+    use fcp_core::{EpochId, ObjectId, TailscaleNodeId, ZoneId, ZoneKeyId};
     use fcp_crypto::Ed25519SigningKey;
     use fcp_protocol::session::{
         MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, TransportLimits,

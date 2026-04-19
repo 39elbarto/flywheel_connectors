@@ -192,6 +192,13 @@ pub enum MeshNodeError {
         actual: String,
     },
 
+    /// Gossip control-plane message timestamp is outside the allowed freshness window.
+    #[error("stale {message_kind} from {peer}")]
+    StaleGossipMessage {
+        peer: String,
+        message_kind: &'static str,
+    },
+
     /// Trace capture not enabled.
     #[error("trace capture not enabled")]
     TraceNotEnabled,
@@ -1346,7 +1353,7 @@ impl MeshNode {
     ) -> Result<VerifiedRevocationPush, MeshNodeError> {
         self.verify_revocation_push_signature(&push)?;
         if now_secs.saturating_sub(push.timestamp) > self.gossip.summary_ttl_secs() {
-            return Err(MeshNodeError::PeerSignatureInvalid {
+            return Err(MeshNodeError::StaleGossipMessage {
                 peer: push.from.as_str().to_string(),
                 message_kind: "revocation push",
             });
@@ -2537,6 +2544,38 @@ mod tests {
             .expect("push should verify");
         assert_eq!(verified.new_rev_seq, 42);
         assert_eq!(verified.revoked_ids.len(), 1);
+    }
+
+    #[test]
+    fn handle_revocation_push_rejects_stale_message() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+
+        let mut push = RevocationPushMessage::new(
+            TailscaleNodeId::new("peer-1"),
+            ZoneId::work(),
+            vec![ObjectId::from_bytes([0xCD; 32])],
+            7,
+            100,
+        );
+        push.signature = Some(fcp_core::NodeSignature::new(
+            peer,
+            signing_key.sign(&push.signing_bytes()).to_bytes(),
+            100,
+        ));
+
+        let err = node
+            .handle_revocation_push(push, 100 + GossipConfig::default().summary_ttl_secs + 1)
+            .expect_err("stale push must be rejected");
+        assert!(matches!(
+            err,
+            MeshNodeError::StaleGossipMessage {
+                message_kind: "revocation push",
+                ..
+            }
+        ));
     }
 
     // ---- Metrics tests ----

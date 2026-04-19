@@ -842,6 +842,12 @@ fn noop_sandbox_verify_file_access() {
     sandbox
         .verify_file_access(&policy, Path::new("/etc/ssl/certs/ca-bundle.crt"), false)
         .unwrap();
+
+    assert!(
+        sandbox
+            .verify_file_access(&policy, Path::new("/etc/passwd"), false)
+            .is_err()
+    );
 }
 
 #[test]
@@ -849,7 +855,7 @@ fn noop_sandbox_verify_exec() {
     let sandbox = NoOpSandbox;
     let section = strict_sandbox_section();
     let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
-    sandbox.verify_exec_allowed(&policy).unwrap();
+    assert!(sandbox.verify_exec_allowed(&policy).is_err());
 }
 
 #[test]

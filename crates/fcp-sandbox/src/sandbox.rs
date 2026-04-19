@@ -431,6 +431,59 @@ pub fn resolve_policy_path(path: &Path) -> PathBuf {
     normalize_path(path)
 }
 
+fn verify_file_access_policy(
+    policy: &CompiledPolicy,
+    path: &Path,
+    write: bool,
+) -> Result<(), SandboxError> {
+    let path = resolve_policy_path(path);
+
+    if write {
+        for writable in &policy.writable_paths {
+            let writable = resolve_policy_path(writable);
+            if path.starts_with(&writable) {
+                return Ok(());
+            }
+        }
+        return Err(SandboxError::ApplyFailed(format!(
+            "write access denied to path: {}",
+            path.display()
+        )));
+    }
+
+    for readable in policy.readonly_paths.iter().chain(&policy.writable_paths) {
+        let readable = resolve_policy_path(readable);
+        if path.starts_with(&readable) {
+            return Ok(());
+        }
+    }
+
+    Err(SandboxError::ApplyFailed(format!(
+        "read access denied to path: {}",
+        path.display()
+    )))
+}
+
+fn verify_exec_policy(policy: &CompiledPolicy) -> Result<(), SandboxError> {
+    if policy.deny_exec {
+        Err(SandboxError::ApplyFailed(
+            "process spawning is denied by sandbox policy".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn verify_network_policy(policy: &CompiledPolicy) -> Result<(), SandboxError> {
+    if policy.block_direct_network {
+        Ok(())
+    } else {
+        Err(SandboxError::ApplyFailed(
+            "direct network access is permitted by sandbox policy".into(),
+        ))
+    }
+}
+
 // ============================================================================
 // Factory
 // ============================================================================
@@ -494,21 +547,19 @@ impl Sandbox for NoOpSandbox {
 
     fn verify_file_access(
         &self,
-        _policy: &CompiledPolicy,
-        _path: &std::path::Path,
-        _write: bool,
+        policy: &CompiledPolicy,
+        path: &std::path::Path,
+        write: bool,
     ) -> Result<(), SandboxError> {
-        // NoOp intentionally skips all policy enforcement. Callers that need
-        // path validation must use a real platform backend.
-        Ok(())
+        verify_file_access_policy(policy, path, write)
     }
 
-    fn verify_exec_allowed(&self, _policy: &CompiledPolicy) -> Result<(), SandboxError> {
-        Ok(())
+    fn verify_exec_allowed(&self, policy: &CompiledPolicy) -> Result<(), SandboxError> {
+        verify_exec_policy(policy)
     }
 
-    fn verify_network_blocked(&self, _policy: &CompiledPolicy) -> Result<(), SandboxError> {
-        Ok(())
+    fn verify_network_blocked(&self, policy: &CompiledPolicy) -> Result<(), SandboxError> {
+        verify_network_policy(policy)
     }
 }
 
@@ -760,16 +811,24 @@ mod tests {
         let sandbox = NoOpSandbox;
         let section = test_sandbox_section();
         let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
-        // NoOp always allows
         assert!(
             sandbox
-                .verify_file_access(&policy, std::path::Path::new("/anything"), true)
+                .verify_file_access(&policy, std::path::Path::new("/usr/lib/libc.so"), false)
+                .is_ok()
+        );
+        assert!(
+            sandbox
+                .verify_file_access(
+                    &policy,
+                    std::path::Path::new("/var/lib/fcp/connectors/test/cache.db"),
+                    true,
+                )
                 .is_ok()
         );
         assert!(
             sandbox
                 .verify_file_access(&policy, std::path::Path::new("/anything"), false)
-                .is_ok()
+                .is_err()
         );
     }
 
@@ -867,7 +926,7 @@ mod tests {
         let sandbox = NoOpSandbox;
         let section = test_sandbox_section();
         let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
-        assert!(sandbox.verify_exec_allowed(&policy).is_ok());
+        assert!(sandbox.verify_exec_allowed(&policy).is_err());
         assert!(sandbox.verify_network_blocked(&policy).is_ok());
     }
 
@@ -1422,18 +1481,26 @@ mod tests {
         let section = test_sandbox_section();
         let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
 
-        // All verifications should pass for NoOp
+        assert!(
+            sandbox
+                .verify_file_access(&policy, std::path::Path::new("/usr/bin/test"), false)
+                .is_ok()
+        );
+        assert!(
+            sandbox
+                .verify_file_access(
+                    &policy,
+                    std::path::Path::new("/var/lib/fcp/connectors/test/cache.db"),
+                    true,
+                )
+                .is_ok()
+        );
         assert!(
             sandbox
                 .verify_file_access(&policy, std::path::Path::new("/etc/secret"), true)
-                .is_ok()
+                .is_err()
         );
-        assert!(
-            sandbox
-                .verify_file_access(&policy, std::path::Path::new("/nonexistent"), false)
-                .is_ok()
-        );
-        assert!(sandbox.verify_exec_allowed(&policy).is_ok());
+        assert!(sandbox.verify_exec_allowed(&policy).is_err());
         assert!(sandbox.verify_network_blocked(&policy).is_ok());
         assert!(sandbox.apply(&policy).is_ok());
     }

@@ -19,7 +19,7 @@ use fcp_sdk::retry::RetryDecision;
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn async_timeout_maps_to_external_408() {
+fn async_timeout_maps_to_retryable_gateway_timeout() {
     let err = AsyncError::Timeout { timeout_ms: 5000 };
     let fcp = map_async_to_fcp_error(&err);
     match &fcp {
@@ -30,12 +30,13 @@ fn async_timeout_maps_to_external_408() {
             ..
         } => {
             assert_eq!(service, "runtime");
-            assert_eq!(*status_code, Some(408));
-            assert!(!retryable, "deadline timeout should not be auto-retried");
+            assert_eq!(*status_code, Some(504));
+            assert!(*retryable, "deadline timeout should preserve FCP timeout retry semantics");
         }
         other => panic!("Expected External, got {other:?}"),
     }
     assert_eq!(fcp.category(), ErrorCategory::External);
+    assert_eq!(fcp.error_code(), "FCP-7002");
 }
 
 #[test]
@@ -671,7 +672,8 @@ fn timeout_full_chain_async_to_wire() {
 
     // Wire response contract
     assert!(resp.code.starts_with("FCP-"));
-    assert!(!resp.retryable, "timeout response should not be retryable");
+    assert_eq!(resp.code, "FCP-7002");
+    assert!(resp.retryable, "timeout response should preserve timeout retryability");
     assert!(
         resp.message.contains("30000"),
         "response should include timeout value"

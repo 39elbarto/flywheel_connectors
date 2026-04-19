@@ -141,7 +141,7 @@
 //!             AsyncError::Timeout { timeout_ms } => Self::Api {
 //!                 error_type: "deadline_timeout".into(),
 //!                 message: format!("deadline exceeded after {timeout_ms}ms"),
-//!                 status_code: Some(408),
+//!                 status_code: Some(504),
 //!             },
 //!             AsyncError::Cancelled => Self::Api {
 //!                 error_type: "request_cancelled".into(),
@@ -239,6 +239,7 @@ use crate::retry::{RetryDecision, RetryPolicy};
 pub struct ConnectorRuntime {
     config: ConnectorRuntimeConfig,
     background_ctx: ExecutionContext,
+    request_ctx_root: ExecutionContext,
 }
 
 const MANIFEST_REQUEST_TIMEOUT_ENV_VAR: &str = "FCP_REQUEST_TIMEOUT_MS";
@@ -409,19 +410,22 @@ impl ConnectorRuntime {
         Self {
             config,
             background_ctx: ExecutionContext::background(),
+            request_ctx_root: ExecutionContext::request_scoped(Duration::MAX),
         }
     }
 
     /// Create a request-scoped execution context with the configured timeout.
     #[must_use]
     pub fn request_context(&self) -> ExecutionContext {
-        ExecutionContext::request_scoped(self.config.request_timeout)
+        self.request_ctx_root
+            .child()
+            .with_deadline(self.config.request_timeout)
     }
 
     /// Create a request-scoped context with a custom timeout.
     #[must_use]
     pub fn request_context_with_timeout(&self, timeout: Duration) -> ExecutionContext {
-        ExecutionContext::request_scoped(timeout)
+        self.request_ctx_root.child().with_deadline(timeout)
     }
 
     /// Get a child of the background context for long-lived operations.
@@ -433,6 +437,7 @@ impl ConnectorRuntime {
     /// Trigger graceful shutdown of all contexts.
     pub fn shutdown(&self) {
         self.background_ctx.cancel();
+        self.request_ctx_root.cancel();
     }
 
     /// Whether shutdown has been requested.
@@ -794,8 +799,8 @@ pub fn map_async_to_fcp_error(error: &AsyncError) -> FcpError {
         AsyncError::Timeout { timeout_ms } => FcpError::External {
             service: "runtime".into(),
             message: format!("request deadline exceeded after {timeout_ms}ms"),
-            status_code: Some(408),
-            retryable: false,
+            status_code: Some(504),
+            retryable: true,
             retry_after: None,
         },
         AsyncError::Cancelled => FcpError::External {
@@ -904,6 +909,7 @@ deny_ptrace = true
         let ctx = runtime.request_context();
         assert!(!ctx.is_cancelled());
         assert!(ctx.remaining_budget().is_some());
+        assert_eq!(ctx.scope(), fcp_async_core::ContextScope::Request);
     }
 
     #[test]
@@ -918,13 +924,16 @@ deny_ptrace = true
     fn runtime_shutdown_propagates() {
         let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
         let bg = runtime.background_context();
+        let req = runtime.request_context();
         assert!(!runtime.is_shutting_down());
         assert!(!bg.is_cancelled());
+        assert!(!req.is_cancelled());
 
         runtime.shutdown();
 
         assert!(runtime.is_shutting_down());
         assert!(bg.is_cancelled());
+        assert!(req.is_cancelled());
     }
 
     #[test]
@@ -1003,7 +1012,7 @@ deny_ptrace = true
         let fcp_err = map_async_to_fcp_error(&err);
         match fcp_err {
             FcpError::External { status_code, .. } => {
-                assert_eq!(status_code, Some(408));
+                assert_eq!(status_code, Some(504));
             }
             other => panic!("expected External, got {other:?}"),
         }
@@ -1681,15 +1690,21 @@ deny_ptrace = true
     }
 
     #[test]
-    fn runtime_request_context_independent_of_shutdown() {
+    fn runtime_request_context_is_cancelled_by_shutdown() {
         let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
-        // Request contexts created before shutdown are independent
         let ctx_before = runtime.request_context();
         assert!(!ctx_before.is_cancelled());
         runtime.shutdown();
-        // Request context created before shutdown is NOT cancelled
-        // (it has its own deadline, not tied to background)
-        assert!(!ctx_before.is_cancelled());
+        assert!(ctx_before.is_cancelled());
+    }
+
+    #[test]
+    fn runtime_request_context_created_after_shutdown_starts_cancelled() {
+        let runtime = ConnectorRuntime::new(ConnectorRuntimeConfig::default());
+        runtime.shutdown();
+
+        let ctx = runtime.request_context();
+        assert!(ctx.is_cancelled());
     }
 
     #[test]
@@ -1888,8 +1903,8 @@ deny_ptrace = true
                 message,
                 ..
             } => {
-                assert_eq!(status_code, Some(408));
-                assert!(!retryable);
+                assert_eq!(status_code, Some(504));
+                assert!(retryable);
                 assert!(message.contains('0'));
             }
             other => panic!("expected External, got {other:?}"),
@@ -1956,12 +1971,12 @@ deny_ptrace = true
     }
 
     #[test]
-    fn map_timeout_not_retryable() {
+    fn map_timeout_is_retryable_timeout() {
         let err = AsyncError::Timeout { timeout_ms: 5000 };
         let fcp_err = map_async_to_fcp_error(&err);
         match fcp_err {
             FcpError::External { retryable, .. } => {
-                assert!(!retryable);
+                assert!(retryable);
             }
             other => panic!("expected External, got {other:?}"),
         }
@@ -2182,12 +2197,17 @@ deny_ptrace = true
     }
 
     #[test]
-    fn test_error_to_fcp_deadline_maps_to_external() {
+    fn test_error_to_fcp_deadline_maps_to_retryable_timeout() {
         let err = TestError::DeadlineExceeded("10s".into());
         let fcp = err.to_fcp_error();
         match fcp {
-            FcpError::External { status_code, .. } => {
-                assert_eq!(status_code, Some(408));
+            FcpError::External {
+                status_code,
+                retryable,
+                ..
+            } => {
+                assert_eq!(status_code, Some(504));
+                assert!(retryable);
             }
             other => panic!("expected External, got {other:?}"),
         }

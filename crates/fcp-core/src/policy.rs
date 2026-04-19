@@ -3030,13 +3030,35 @@ fn receipt_covers_inputs(receipt: &SanitizerReceipt, inputs: &[ObjectId]) -> boo
 }
 
 fn approval_token_object_id(token: &ApprovalToken) -> ObjectId {
-    // SECURITY: Use content-addressed ID to prevent malleability.
-    // We use the full canonical encoding of the token.
-    // Note: We use from_unscoped_bytes here because we don't have the Zone ObjectIdKey available
-    // in this context, but this still ensures the ID is bound to the token content.
-    let bytes =
-        fcp_cbor::to_canonical_cbor(token).unwrap_or_else(|_| token.token_id.as_bytes().to_vec());
-    ObjectId::from_unscoped_bytes(&bytes)
+    // SECURITY: Use a content-addressed ID to prevent malleability.
+    // Primary path: canonical CBOR — this is the stable wire encoding.
+    if let Ok(bytes) = fcp_cbor::to_canonical_cbor(token) {
+        return ObjectId::from_unscoped_bytes(&bytes);
+    }
+    // Fallback: canonical CBOR can fail when a token exceeds
+    // MAX_CANONICAL_OBJECT_BYTES (e.g., an attacker-supplied oversized
+    // signature). The previous fallback hashed only `token_id`, letting two
+    // distinct tokens collide on a value the attacker controls. Hash every
+    // field through length-delimited framing so the fallback ID still binds
+    // to the full token content.
+    let mut buf = Vec::with_capacity(256);
+    buf.extend_from_slice(b"FCP/ApprovalToken/fallback/v1");
+    let mut push = |field: &[u8]| {
+        buf.extend_from_slice(&(field.len() as u64).to_le_bytes());
+        buf.extend_from_slice(field);
+    };
+    push(token.token_id.as_bytes());
+    push(&token.issued_at_ms.to_le_bytes());
+    push(&token.expires_at_ms.to_le_bytes());
+    push(token.issuer.as_bytes());
+    push(token.zone_id.as_str().as_bytes());
+    let scope_bytes = serde_json::to_vec(&token.scope).unwrap_or_default();
+    push(&scope_bytes);
+    push(token.signature.as_deref().unwrap_or_default());
+    // Distinguish None vs Some(empty) for `signature`.
+    drop(push);
+    buf.push(u8::from(token.signature.is_some()));
+    ObjectId::from_unscoped_bytes(&buf)
 }
 
 fn sanitizer_receipt_object_id(receipt: &SanitizerReceipt) -> ObjectId {

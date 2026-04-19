@@ -249,6 +249,24 @@ impl MemorySymbolStore {
     fn has_required_symbols(symbol_count: usize, source_symbols: u32) -> bool {
         u32::try_from(symbol_count).map_or(true, |count| count >= source_symbols)
     }
+
+    fn symbol_matches_meta(meta: &ObjectSymbolMeta, symbol: &StoredSymbol) -> bool {
+        symbol.meta.object_id == meta.object_id
+            && symbol.meta.zone_id == meta.zone_id
+            && symbol.data.len() == usize::from(meta.oti.symbol_size)
+    }
+
+    fn scrub_corrupt_symbols_locked(obj: &mut ObjectSymbols) -> u64 {
+        let mut removed_bytes = 0_u64;
+        obj.symbols.retain(|_, symbol| {
+            let keep = Self::symbol_matches_meta(&obj.meta, symbol);
+            if !keep {
+                removed_bytes = removed_bytes.saturating_add(Self::symbol_size(symbol));
+            }
+            keep
+        });
+        removed_bytes
+    }
 }
 
 #[async_trait]
@@ -332,18 +350,23 @@ impl SymbolStore for MemorySymbolStore {
         object_id: &ObjectId,
         esi: u32,
     ) -> Result<StoredSymbol, SymbolStoreError> {
-        let objects = self.objects.read();
+        let mut objects = self.objects.write();
         let obj = objects
-            .get(object_id)
+            .get_mut(object_id)
             .ok_or(SymbolStoreError::ObjectNotFound(*object_id))?;
+        let removed_bytes = Self::scrub_corrupt_symbols_locked(obj);
+        let symbol = obj.symbols.get(&esi).cloned();
+        drop(objects);
 
-        obj.symbols
-            .get(&esi)
-            .cloned()
-            .ok_or(SymbolStoreError::NotFound {
-                object_id: *object_id,
-                esi,
-            })
+        if removed_bytes > 0 {
+            let mut used = self.used_bytes.write();
+            *used = used.saturating_sub(removed_bytes);
+        }
+
+        symbol.ok_or(SymbolStoreError::NotFound {
+            object_id: *object_id,
+            esi,
+        })
     }
 
     async fn get_object_meta(
@@ -358,21 +381,38 @@ impl SymbolStore for MemorySymbolStore {
     }
 
     async fn get_all_symbols(&self, object_id: &ObjectId) -> Vec<StoredSymbol> {
-        self.objects
-            .read()
-            .get(object_id)
-            .map(|obj| {
-                let mut symbols: Vec<_> = obj.symbols.values().cloned().collect();
-                symbols.sort_unstable_by_key(|symbol| symbol.meta.esi);
-                symbols
-            })
-            .unwrap_or_default()
+        let mut objects = self.objects.write();
+        let Some(obj) = objects.get_mut(object_id) else {
+            return Vec::new();
+        };
+        let removed_bytes = Self::scrub_corrupt_symbols_locked(obj);
+        let mut symbols: Vec<_> = obj.symbols.values().cloned().collect();
+        drop(objects);
+
+        if removed_bytes > 0 {
+            let mut used = self.used_bytes.write();
+            *used = used.saturating_sub(removed_bytes);
+        }
+
+        symbols.sort_unstable_by_key(|symbol| symbol.meta.esi);
+        symbols
     }
 
     async fn symbol_count(&self, object_id: &ObjectId) -> u32 {
-        self.objects.read().get(object_id).map_or(0, |obj| {
-            u32::try_from(obj.symbols.len()).unwrap_or(u32::MAX)
-        })
+        let mut objects = self.objects.write();
+        let Some(obj) = objects.get_mut(object_id) else {
+            return 0;
+        };
+        let removed_bytes = Self::scrub_corrupt_symbols_locked(obj);
+        let count = u32::try_from(obj.symbols.len()).unwrap_or(u32::MAX);
+        drop(objects);
+
+        if removed_bytes > 0 {
+            let mut used = self.used_bytes.write();
+            *used = used.saturating_sub(removed_bytes);
+        }
+
+        count
     }
 
     async fn delete_object(&self, object_id: &ObjectId) -> Result<(), SymbolStoreError> {
@@ -407,8 +447,9 @@ impl SymbolStore for MemorySymbolStore {
     }
 
     async fn get_distribution(&self, object_id: &ObjectId) -> Option<SymbolDistribution> {
-        let objects = self.objects.read();
-        let obj = objects.get(object_id)?;
+        let mut objects = self.objects.write();
+        let obj = objects.get_mut(object_id)?;
+        let removed_bytes = Self::scrub_corrupt_symbols_locked(obj);
 
         let mut dist = SymbolDistribution::new(obj.meta.source_symbols);
 
@@ -417,6 +458,12 @@ impl SymbolStore for MemorySymbolStore {
             #[allow(clippy::cast_possible_truncation)]
             let size = symbol.data.len() as u64;
             dist.add_symbol(node_id, size);
+        }
+        drop(objects);
+
+        if removed_bytes > 0 {
+            let mut used = self.used_bytes.write();
+            *used = used.saturating_sub(removed_bytes);
         }
 
         Some(dist)
@@ -440,13 +487,20 @@ impl SymbolStore for MemorySymbolStore {
     }
 
     async fn can_reconstruct(&self, object_id: &ObjectId) -> bool {
-        let objects = self.objects.read();
-        if let Some(obj) = objects.get(object_id) {
-            // RaptorQ needs K' ≈ K × 1.002 symbols, we approximate with K
-            Self::has_required_symbols(obj.symbols.len(), obj.meta.source_symbols)
-        } else {
-            false
+        let mut objects = self.objects.write();
+        let Some(obj) = objects.get_mut(object_id) else {
+            return false;
+        };
+        let removed_bytes = Self::scrub_corrupt_symbols_locked(obj);
+        let reconstructable = Self::has_required_symbols(obj.symbols.len(), obj.meta.source_symbols);
+        drop(objects);
+
+        if removed_bytes > 0 {
+            let mut used = self.used_bytes.write();
+            *used = used.saturating_sub(removed_bytes);
         }
+
+        reconstructable
     }
 
     async fn can_reconstruct_with_policy(
@@ -980,6 +1034,63 @@ mod tests {
                 ..StoreLogData::default()
             }
         });
+    }
+
+    #[test]
+    fn scrub_corrupt_symbol_before_reconstruct_and_distribution() {
+        run_store_test(
+            "scrub_corrupt_symbol_before_reconstruct_and_distribution",
+            "recovery",
+            "symbol_store",
+            6,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+                let meta = test_object_meta();
+                store.put_object_meta(meta.clone()).await.unwrap();
+
+                {
+                    let mut objects = store.objects.write();
+                    let obj = objects.get_mut(&meta.object_id).unwrap();
+                    obj.symbols.insert(
+                        0,
+                        StoredSymbol {
+                            meta: SymbolMeta {
+                                object_id: meta.object_id,
+                                esi: 0,
+                                zone_id: meta.zone_id.clone(),
+                                source_node: Some(1),
+                                stored_at: 1_000_000,
+                            },
+                            data: Bytes::from(vec![0xAA; 63]),
+                        },
+                    );
+                    *store.used_bytes.write() = MemorySymbolStore::symbol_size(&obj.symbols[&0]);
+                }
+
+                assert_eq!(store.symbol_count(&meta.object_id).await, 0);
+                assert!(!store.can_reconstruct(&meta.object_id).await);
+                assert!(store.get_all_symbols(&meta.object_id).await.is_empty());
+                assert_eq!(store.storage_used().await, 0);
+
+                let dist = store.get_distribution(&meta.object_id).await.unwrap();
+                assert_eq!(dist.total_symbols, 0);
+
+                assert!(matches!(
+                    store.get_symbol(&meta.object_id, 0).await,
+                    Err(SymbolStoreError::NotFound { .. })
+                ));
+
+                StoreLogData {
+                    object_id: Some(meta.object_id),
+                    symbol_count: Some(0),
+                    coverage_bps: Some(
+                        CoverageEvaluation::from_distribution(meta.object_id, &dist).coverage_bps,
+                    ),
+                    details: Some(json!({"scrubbed_corrupt_symbol": true})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
     #[test]

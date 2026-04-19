@@ -691,7 +691,7 @@ impl GossipSummary {
         let signature = self
             .signature
             .as_ref()
-            .ok_or(CryptoError::VerificationFailed)?;
+            .ok_or_else(|| CryptoError::MissingField("signature".into()))?;
         let signature = Ed25519Signature::from_bytes(&signature.signature);
         verifying_key.verify(&self.signing_bytes(), &signature)
     }
@@ -951,7 +951,7 @@ impl RevocationPushMessage {
         let signature = self
             .signature
             .as_ref()
-            .ok_or(CryptoError::VerificationFailed)?;
+            .ok_or_else(|| CryptoError::MissingField("signature".into()))?;
         let signature = Ed25519Signature::from_bytes(&signature.signature);
         verifying_key.verify(&self.signing_bytes(), &signature)
     }

@@ -2871,7 +2871,10 @@ mod tests {
     fn pipeline_evaluate_deny_at_budget() {
         let pipeline = EnforcementPipeline::new();
         let mut ctx = test_context();
-        ctx.budget_used = Some(1000);
+        // Commit 53323189 changed BudgetCheck to Allow at exact equality
+        // (used == limit is the closing request, matching BudgetTracker).
+        // Use used > limit so this test keeps exercising the Deny branch.
+        ctx.budget_used = Some(1001);
         ctx.budget_limit = Some(1000);
         let decision = pipeline.evaluate(&ctx);
         assert!(!decision.is_allowed());
@@ -2897,9 +2900,12 @@ mod tests {
     fn pipeline_deny_budget_before_rate_limit() {
         let pipeline = EnforcementPipeline::new();
         let mut ctx = test_context();
-        ctx.budget_used = Some(1000);
+        // Both checks must be in the Deny branch to validate ordering.
+        // Budget at exact equality is now Allow (commit 53323189), so push
+        // both budget and rate strictly over their limits.
+        ctx.budget_used = Some(1001);
         ctx.budget_limit = Some(1000);
-        ctx.rate_count = Some(100);
+        ctx.rate_count = Some(101);
         ctx.rate_limit = Some(100);
         let decision = pipeline.evaluate(&ctx);
         assert!(!decision.is_allowed());

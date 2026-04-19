@@ -697,6 +697,26 @@ impl CapabilityTokenBuilder {
         self
     }
 
+    /// Set the audience (`aud`) claim — typically the connector ID this
+    /// token is intended for. Surfaces the underlying `CwtClaims::audience`
+    /// builder hook so host-side persisted-state verifiers can match
+    /// `audience` against the inbound `connector_id`.
+    #[must_use]
+    pub fn audience(mut self, aud: &str) -> Self {
+        self.claims = self.claims.audience(aud);
+        self
+    }
+
+    /// Set the JWT/COSE token ID (`cti`) claim. Required when the host
+    /// needs to revoke or audit-trace a specific issued token, so the
+    /// caller can plumb the token-id bytes returned by the issuance API
+    /// straight into the signed token.
+    #[must_use]
+    pub fn token_id(mut self, cti: &[u8]) -> Self {
+        self.claims = self.claims.token_id(cti);
+        self
+    }
+
     /// Set validity period.
     #[must_use]
     pub fn validity(mut self, not_before: DateTime<Utc>, expires: DateTime<Utc>) -> Self {

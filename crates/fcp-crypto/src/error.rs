@@ -91,6 +91,20 @@ pub enum CryptoError {
     /// Missing required field.
     #[error("missing required field: {0}")]
     MissingField(String),
+
+    /// COSE protected-header algorithm did not match what the verifier expects.
+    #[error("algorithm mismatch: expected {expected}, got {got}")]
+    AlgorithmMismatch {
+        /// Expected algorithm description (e.g. `"EdDSA"`).
+        expected: &'static str,
+        /// Actual algorithm description from the protected header.
+        got: String,
+    },
+
+    /// COSE protected header lists a critical header label this verifier
+    /// does not understand (RFC 8152 §3.1 — message MUST be rejected).
+    #[error("unsupported critical header: {0}")]
+    UnsupportedCriticalHeader(String),
 }
 
 /// Result type alias for cryptographic operations.

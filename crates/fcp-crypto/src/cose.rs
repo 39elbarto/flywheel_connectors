@@ -13,7 +13,8 @@ use crate::error::{CryptoError, CryptoResult};
 use crate::kid::KeyId;
 use chrono::{DateTime, Utc};
 use coset::{
-    CborSerializable, CoseSign1, CoseSign1Builder, HeaderBuilder, TaggedCborSerializable, iana,
+    Algorithm, CborSerializable, CoseSign1, CoseSign1Builder, HeaderBuilder,
+    RegisteredLabelWithPrivate, TaggedCborSerializable, iana,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -457,10 +458,48 @@ impl CoseToken {
     /// **IMPORTANT:** This verifies the signature BEFORE returning claims,
     /// as required by the spec.
     ///
+    /// Per RFC 8152 §4.4 and §3.1, this rejects:
+    /// - tokens whose protected-header `alg` is missing or anything other
+    ///   than `EdDSA` (the only algorithm this verifier supports), and
+    /// - tokens whose protected-header `crit` set lists any label this
+    ///   verifier does not understand.
+    ///
     /// # Errors
     ///
     /// Returns an error if verification fails.
     pub fn verify(&self, verifying_key: &Ed25519VerifyingKey) -> CryptoResult<CwtClaims> {
+        // RFC 8152 §4.4: bind the verifier to a specific algorithm.
+        // Without this, alg is only implicitly bound through the TBS bytes,
+        // which works for our single-algorithm registry but is brittle once
+        // additional verifiers (or downgrade-prone callers) appear.
+        match &self.inner.protected.header.alg {
+            Some(Algorithm::Assigned(iana::Algorithm::EdDSA)) => {}
+            Some(other) => {
+                return Err(CryptoError::AlgorithmMismatch {
+                    expected: "EdDSA",
+                    got: format!("{other:?}"),
+                });
+            }
+            None => {
+                return Err(CryptoError::MissingField("alg in protected header".into()));
+            }
+        }
+
+        // RFC 8152 §3.1: every label in `crit` MUST be one the recipient
+        // understands; otherwise the message MUST be rejected. We process
+        // only `Alg` and `Kid` from the protected header, so any other
+        // label — assigned, private-use, or text — is unhandled.
+        for label in &self.inner.protected.header.crit {
+            match label {
+                RegisteredLabelWithPrivate::Assigned(
+                    iana::HeaderParameter::Alg | iana::HeaderParameter::Kid,
+                ) => {}
+                other => {
+                    return Err(CryptoError::UnsupportedCriticalHeader(format!("{other:?}")));
+                }
+            }
+        }
+
         // Extract signature
         let signature = Ed25519Signature::try_from_slice(&self.inner.signature)?;
 
@@ -856,6 +895,99 @@ mod tests {
 
         // BTreeMap ensures deterministic order regardless of insertion order
         assert_eq!(claims1.to_cbor().unwrap(), claims2.to_cbor().unwrap());
+    }
+
+    /// Build a CoseSign1 with a caller-chosen protected `Header` and sign it
+    /// with `signing_key` over the resulting TBS bytes. Used by the
+    /// algorithm-confusion / crit-handling tests below.
+    fn build_signed_token(signing_key: &Ed25519SigningKey, header: coset::Header) -> CoseToken {
+        let claims = CwtClaims::new().issuer("test").capability_id("cap:test.read");
+        let payload = claims.to_cbor().unwrap();
+        let mut inner = CoseSign1Builder::new()
+            .protected(header)
+            .payload(payload)
+            .build();
+        let tbs = inner.tbs_data(&[]);
+        let signature = signing_key.sign(&tbs);
+        inner.signature = signature.to_bytes().to_vec();
+        CoseToken { inner }
+    }
+
+    #[test]
+    fn verify_rejects_token_with_no_alg_in_protected_header() {
+        // RFC 8152 §4.4: alg MUST be present and match what the verifier
+        // expects. A token with no alg field (only kid) must be rejected
+        // even if the Ed25519 signature is otherwise valid.
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let header = HeaderBuilder::new()
+            .key_id(sk.key_id().as_bytes().to_vec())
+            .build();
+        let token = build_signed_token(&sk, header);
+        let err = token.verify(&pk).unwrap_err();
+        assert!(
+            matches!(err, CryptoError::MissingField(ref s) if s.contains("alg")),
+            "expected MissingField(alg…), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_token_with_wrong_algorithm() {
+        // Sign with our Ed25519 key but advertise alg=ES256 in the
+        // protected header. The TBS bytes still cover alg, so the sig
+        // verifies — but the verifier MUST refuse the algorithm mismatch
+        // before that point so a future multi-alg key directory cannot be
+        // tricked into running the wrong primitive.
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let header = HeaderBuilder::new()
+            .algorithm(iana::Algorithm::ES256)
+            .key_id(sk.key_id().as_bytes().to_vec())
+            .build();
+        let token = build_signed_token(&sk, header);
+        let err = token.verify(&pk).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CryptoError::AlgorithmMismatch { expected: "EdDSA", .. }
+            ),
+            "expected AlgorithmMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_token_with_unknown_critical_header() {
+        // RFC 8152 §3.1: if `crit` lists a header label the recipient does
+        // not understand, the message MUST be rejected. Mark a private-use
+        // label critical and expect rejection even though signing succeeds.
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let header = HeaderBuilder::new()
+            .algorithm(iana::Algorithm::EdDSA)
+            .key_id(sk.key_id().as_bytes().to_vec())
+            .add_critical_label(RegisteredLabelWithPrivate::PrivateUse(-99_999))
+            .build();
+        let token = build_signed_token(&sk, header);
+        let err = token.verify(&pk).unwrap_err();
+        assert!(
+            matches!(err, CryptoError::UnsupportedCriticalHeader(_)),
+            "expected UnsupportedCriticalHeader, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_accepts_alg_kid_in_crit_when_understood() {
+        // crit listing only labels the verifier handles is permitted.
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let header = HeaderBuilder::new()
+            .algorithm(iana::Algorithm::EdDSA)
+            .key_id(sk.key_id().as_bytes().to_vec())
+            .add_critical(iana::HeaderParameter::Alg)
+            .add_critical(iana::HeaderParameter::Kid)
+            .build();
+        let token = build_signed_token(&sk, header);
+        token.verify(&pk).expect("verify should succeed");
     }
 
     // ---- CwtClaims builder coverage ----

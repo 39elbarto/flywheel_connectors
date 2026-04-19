@@ -1434,20 +1434,34 @@ impl CapabilityVerifier {
             });
         }
 
-        // 3.5. Check instance binding if present
+        // 3.5. Check instance binding if present.
+        //
+        // The previous implementation silently fell through when the
+        // INSTANCE_ID claim was present but not a CBOR Text value (e.g. an
+        // Integer, Bytes, Array, or Map). The legitimate builder paths
+        // (`CapabilityTokenBuilder::target_instance`,
+        // `CwtClaims::target_instance`) only ever emit Text, so a non-Text
+        // INSTANCE_ID indicates either a malformed token or an attacker
+        // setting the claim to a type that bypasses the binding check
+        // entirely. Either way, fail closed: a non-Text INSTANCE_ID claim
+        // must be rejected, not treated as "no binding declared". The
+        // sibling zone check (lines above) already gets this right via
+        // `claims.get_zone_id()`, which filters to Text and returns None
+        // otherwise — keep instance binding consistent.
         if let Some(inst_val) = claims.get(fcp2_claims::INSTANCE_ID) {
-            if let Some(inst_str) = inst_val.as_text() {
-                if inst_str != self.instance_id.as_str() {
-                    return Err(FcpError::ZoneViolation {
-                        source_zone: self.zone_id.0.to_string(),
-                        target_zone: self.zone_id.0.to_string(),
-                        message: format!(
-                            "Token instance mismatch: expected {}, got {}",
-                            self.instance_id.as_str(),
-                            inst_str
-                        ),
-                    });
-                }
+            let inst_str = inst_val.as_text().ok_or_else(|| FcpError::MissingField {
+                field: "instance_id (must be CBOR text)".into(),
+            })?;
+            if inst_str != self.instance_id.as_str() {
+                return Err(FcpError::ZoneViolation {
+                    source_zone: self.zone_id.0.to_string(),
+                    target_zone: self.zone_id.0.to_string(),
+                    message: format!(
+                        "Token instance mismatch: expected {}, got {}",
+                        self.instance_id.as_str(),
+                        inst_str
+                    ),
+                });
             }
         }
 
@@ -2079,6 +2093,92 @@ mod tests {
 
         let result = verifier.verify(token, &cap, &op, &[]);
         assert!(matches!(result, Err(FcpError::TokenExpired)));
+    }
+
+    #[test]
+    fn verify_rejects_non_text_instance_id_claim() {
+        // The previous instance-binding check used a nested
+        // `if let Some(inst_str) = inst_val.as_text()` and silently fell
+        // through when INSTANCE_ID was present but not a CBOR Text. That
+        // let an attacker bypass instance binding by emitting the claim
+        // as an Integer (or Bytes/Array/Map/Bool) — the type-confusion
+        // pattern that has bitten other CBOR consumers. With the fix,
+        // any non-Text INSTANCE_ID must produce MissingField rather than
+        // pass.
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let pub_bytes = verifying_key.to_bytes();
+
+        let now = Utc::now();
+        let claims = fcp_crypto::cose::CwtClaims::new()
+            .capability_id("cap.test")
+            .zone_id("z:work")
+            .principal_id("user:test")
+            .issuer("node:primary")
+            .not_before(now)
+            .expiration(now + Duration::hours(1))
+            .operations(&["op.test"])
+            .constraints_cbor(&test_constraints_cbor())
+            // Set INSTANCE_ID as an Integer instead of Text — pre-fix this
+            // would let any verifier accept the token regardless of its
+            // configured instance_id.
+            .custom(
+                fcp_crypto::cose::fcp2_claims::INSTANCE_ID,
+                ciborium::Value::Integer(0_i64.into()),
+            );
+        let cose_token =
+            fcp_crypto::cose::CoseToken::sign(&signing_key, &claims).expect("sign");
+        let token = CapabilityToken::from_raw(cose_token);
+
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
+
+        let err = verifier
+            .verify(token, &cap, &op, &[])
+            .expect_err("non-Text INSTANCE_ID must be rejected");
+        match err {
+            FcpError::MissingField { ref field } => {
+                assert!(
+                    field.contains("instance_id"),
+                    "expected MissingField with instance_id mention, got {field}"
+                );
+            }
+            other => panic!("expected MissingField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_accepts_text_instance_id_claim_when_matching() {
+        // Companion to the non-text rejection test: a properly-typed
+        // INSTANCE_ID claim that matches the verifier's instance_id must
+        // still pass cleanly. Establishes that the fix did not over-tighten.
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let pub_bytes = verifying_key.to_bytes();
+
+        let instance_id = InstanceId::new();
+        let now = Utc::now();
+        let cose_token = CapabilityTokenBuilder::new()
+            .capability_id("cap.test")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.test"])
+            .issuer("node:primary")
+            .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
+            .target_instance(instance_id.as_str())
+            .sign(&signing_key)
+            .unwrap();
+        let token = CapabilityToken::from_raw(cose_token);
+
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), instance_id);
+        let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
+
+        verifier
+            .verify(token, &cap, &op, &[])
+            .expect("matching Text INSTANCE_ID must verify");
     }
 
     // ─────────────────────────────────────────────────────────────────────────

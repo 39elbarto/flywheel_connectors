@@ -1,250 +1,141 @@
 # FCP3 Semantic Ownership Inventory
 
-> **Bead**: `flywheel_connectors-2d0vg` — [FCP3/P1.1]
-> **Author**: WhiteCompass (SunnyMoose session, 2026-03-27)
-> **Purpose**: Authoritative inventory of semantic ownership across the FCP codebase. Later refactor beads reference this instead of rediscovering leakage from scratch.
+> **Bead**: `flywheel_connectors-0aczd.1` — [FCP3/P7.4]
+> **Author**: SandyBridge (2026-04-19)
+> **Supersedes**: the earlier phase-1 inventory in this file
+> **Purpose**: Explicitly inventory the semantic ownership still trapped in `fcp-core`, distinguish acceptable shared residue from ownership blur, and name the intended long-term owner for every remaining meaning.
 
 ---
 
-## 1. Domain Taxonomy
+## 1. Current Boundary Snapshot
 
-Every major noun is classified into one of six semantic domains:
+The repository now has three explicit semantic owner crates:
 
-| Domain | Definition | Primary Owner Today |
-|--------|-----------|-------------------|
-| **Execution** | Connect, handshake, invoke, cancel, shutdown lifecycle | fcp-core (types), fcp-host (process supervision) |
-| **Policy** | Zones, capabilities, provenance, budgets, transport constraints | fcp-core (types + PolicyEngine), fcp-host (enforcement pipeline) |
-| **Evidence** | Audit events, decision receipts, health snapshots, provenance records | fcp-core (types), fcp-host (aggregation) |
-| **Durability** | Store invariants, FCPS framing, idempotency, checkpoints, leases | fcp-core (types), fcp-store (persistence) |
-| **Placement** | Mesh routing, node identity, lease coordination, zone assignment | fcp-core (types), fcp-mesh (gossip + routing) |
-| **Operator** | CLI commands, connector inventory, MCP tool export, host admin | fwc (CLI), fcp-host (admin API + discovery) |
+| Semantic domain | Intended owner crate | Current physical definition reality |
+|-----------------|----------------------|-------------------------------------|
+| Execution / connector lifecycle | `fcp-kernel` | Mostly still defined in `fcp-core`, then re-exported by `fcp-kernel` |
+| Zone / capability / provenance policy | `fcp-policy` | Mostly still defined in `fcp-core`, then re-exported by `fcp-policy` |
+| Audit / revocation / checkpoints / supply chain evidence | `fcp-evidence` | Mostly still defined in `fcp-core`, then re-exported by `fcp-evidence` |
 
----
-
-## 2. fcp-core: The Type Authority (230+ public types)
-
-fcp-core defines the canonical types consumed by every other crate. Key counts by domain:
-
-- **Execution**: 24 major types (ConnectorId, SessionId, InvokeRequest/Response, FcpConnector trait, ...)
-- **Policy**: 28 major types (CapabilityToken, PolicyEngine, PolicyDecision, ZoneTransportPolicy, ...)
-- **Evidence**: 62 major types (AuditEvent, Provenance, HealthSnapshot, DecisionReceipt, ...)
-- **Durability**: 41 major types (OperationIntent/Receipt, Lease, CheckpointProposal, ConnectorStateRoot, ...)
-- **Placement**: 9 major types (ZoneId, NodeId, LeasePurpose, ObjectPlacementPolicy, ...)
-
-### Critical Decision Points in fcp-core (28 types that gate behavior)
-
-| Type | Domain | What It Gates |
-|------|--------|---------------|
-| CapabilityToken | policy | Invoke authorization |
-| CapabilityVerifier | policy | Token validity |
-| PolicyDecision | policy | Operation permission |
-| PolicyEngine | policy | Access evaluation |
-| ZoneTransportPolicy | policy | Transport method selection |
-| UsageBudgetPolicy | policy | Rate limit enforcement |
-| RateLimitEnforcement | policy | Rate-limit action |
-| HandshakeRequest/Response | execution | Connector initialization |
-| InvokeRequest/Response | execution | Operation initiation/completion |
-| InvokeStatus | execution | Result interpretation |
-| FcpConnector trait | execution | Connector protocol contract |
-| LifecycleState | durability | Operational readiness |
-| LifecycleManager trait | durability | State transition enforcement |
-| OperationIntent | durability | Pre-commit exactly-once gate |
-| OperationReceipt | durability | Terminal operation marker |
-| LeaseResponse | placement | Lease ownership change |
-| ForkDetectionResult | durability | State divergence detection |
-| CheckpointAdvanceState | durability | Checkpoint publication |
-| FreshnessResult | durability | Stale revocation handling |
-| RetentionClass | durability | Retention policy |
-| DeviceEnrollmentApproval | policy | Node admission |
-| PrerequisiteStatus | evidence | Prerequisite fulfillment |
-| PostureCheckResult | policy | Posture validation |
-| ProvisioningStatus | execution | Provisioning progression |
-| SecretAccessToken | durability | Secret access |
-| DegradedModeState | durability | Fallback behavior |
+That means `fcp-core` is no longer just a shared primitive crate. It is still the physical definition site for most platform semantics, while the split crates act as the semantic facade. This bead inventories what remains there and which residues are acceptable versus still architecturally blurry.
 
 ---
 
-## 3. fcp-host: Process Supervision + Enforcement (150+ types)
+## 2. What Counts As Acceptable Residue
 
-fcp-host is the runtime orchestrator. It owns process-level concerns and the enforcement pipeline.
+Only the following kinds of meaning are acceptable to remain in `fcp-core` after the larger carve-out:
 
-### Host-Owned Domains
+| Residue class | Examples in `fcp-core` | Why acceptable |
+|---------------|------------------------|----------------|
+| Shared error/result primitives | `error.rs`, `FcpError`, `FcpResult` | Cross-cut every crate; narrow, mechanical, and not domain-owning |
+| Mechanical helper surfaces | `tool_schema`, `util` | Support code generation / schema plumbing without owning business semantics |
+| External type convenience re-exports | `async_trait`, `DateTime`, `Utc`, `Uuid` | Ergonomic compatibility only; not protocol semantics |
 
-| Module | Domain | Owned Concepts |
-|--------|--------|---------------|
-| supervisor.rs | execution | ProcessState machine (Starting→Running→Stopping→Stopped/Failed), RestartPolicy, ShutdownCoordinator, HealthCheckScheduler, ResourceLimits |
-| enforcement.rs | policy | 11-stage enforcement pipeline (CanonicalDecode → ZoneMembership → CapabilityVerify → HolderProof → CheckpointFreshness → RevocationFreshness → TaintApproval → PolicyCeiling → ConnectorManifest → RateLimit → Budget) |
-| resilience.rs | execution | CircuitBreaker (Closed→Open→HalfOpen), Bulkhead, LoadShedder (priority-based), HealthRouter |
-| health.rs | evidence | HealthAggregator, ComponentHealth, ConnectorHealth, MeshHealth |
-| rollout.rs | placement | RolloutController (Scheduled→Hold→Promote→Rollback), RolloutEvidence, crash-loop detection |
-| cancellation.rs | execution | CancellationController, CancelReason, CleanupBehavior |
-| progress.rs | evidence | ProgressController, ProgressUpdate, PhaseTransition |
-| budget.rs | policy | BudgetTracker (per-zone windowed usage), BudgetPolicyEngine |
-| discovery.rs | evidence | DiscoveryEndpoint, ToolDescriptor, PreflightRequest/Response, DiscoveryCache |
-| admin_state.rs | operator | ManagedConnectorConfig, ConnectorInventoryMutation, DesiredRuntimeState |
-| doctor.rs | evidence | DoctorReport, DoctorService, CheckResult |
-| supply_chain.rs | policy | SupplyChainGate (wraps fcp-core VerificationPipeline with caching) |
-| batch.rs | execution | BatchInvokeRequest, dependency-ordered multi-tool execution |
-| agent_api.rs | execution | MCP 2025 protocol surface |
-
-### Host-Local Process State (NOT shared)
-
-These exist only in fcp-host process memory:
-- ProcessState, RestartTracker, ExponentialBackoff, ShutdownCoordinator
-- CircuitBreaker, Bulkhead, LoadShedder internal state
-- DiscoveryCache (LRU), OutputCapture (ring buffer)
-- SubprocessRegistry, ConnectorProcessRunner
-
-### Reach-Through Edges (fcp-host → fcp-core)
-
-| fcp-host Module | fcp-core Types Consumed | Decision Impact |
-|-----------------|------------------------|-----------------|
-| rollout.rs | LifecycleManager, LifecycleState, RolloutPolicy, CanaryPolicy, ConnectorHealth, SelfCheckReport | Controls promotion/rollback |
-| enforcement.rs | Zone memberships, capability tokens, checkpoint freshness, revocation, taint approvals, policy ceilings, rate limits, budgets | 11-stage authorization gate |
-| budget.rs | UsageBudgetPolicy, UsageBudgetUsage, BudgetEnforcement | Allow/Warn/Deny decisions |
-| supply_chain.rs | VerificationPipeline, SupplyChainVerificationPolicy, VerificationDecision | Artifact trust gate |
-| discovery.rs | OperationInfo, RateLimit, SafetyTier | Tool catalog construction |
-| resilience.rs | ConnectorHealth | Health-based routing |
-
-### Types That Should Move to fcp-core
-
-| Candidate | Current Location | Rationale |
-|-----------|-----------------|-----------|
-| RolloutObservation | fcp-host::rollout | Observation schema is platform-agnostic; SDKs need it |
-| RolloutEvidence | fcp-host::rollout | Audit evidence should be canonical across implementations |
-| RolloutDecision | fcp-host::rollout | Decision semantics (Scheduled/Hold/Promote/Rollback) are platform-neutral |
-| ProgressUpdate | fcp-host::progress | Progress schema is deployment-agnostic |
-| CancelReason | fcp-host::cancellation | Cancellation reason codes are platform-agnostic |
-| CleanupBehavior | fcp-host::cancellation | Cleanup modes are platform policy |
+Everything else below should be treated as temporary migration residue, not as a justified permanent home.
 
 ---
 
-## 4. fwc: Operator Surface + Metadata Provenance (34k+ lines main.rs)
+## 3. Assigned Semantics Still Physically Trapped In `fcp-core`
 
-fwc is the CLI tool. It owns operator-facing concerns and metadata provenance tracking.
+These domains already have an intended owner crate, but `fcp-core` is still the place where the types actually live.
 
-### fwc-Owned Domains
+| `fcp-core` module group | Semantic payload still trapped there | Intended owner | Status |
+|-------------------------|--------------------------------------|----------------|--------|
+| `connector`, `protocol`, `operation`, `provisioning` | invocation requests/responses, sessions, connector traits, operation metadata, provisioning contracts | `fcp-kernel` | Assigned owner, still physically trapped |
+| `event`, `health`, `lifecycle`, `connector_descriptors` | subscription/event contracts, self-check and readiness contracts, lifecycle state machine, descriptor/readiness metadata | `fcp-kernel` | Assigned owner, still physically trapped |
+| `capability`, `policy`, `provenance`, `zone_keys`, `posture`, `enrollment` | zone model, capabilities, taint/provenance, zone keys, posture / admission semantics | `fcp-policy` | Assigned owner, still physically trapped |
+| `audit`, `checkpoint`, `revocation`, `supply_chain` | audit chain, receipts, checkpoints, revocation, verification evidence | `fcp-evidence` | Assigned owner, still physically trapped |
 
-| Module | Domain | Owned Concepts |
-|--------|--------|---------------|
-| catalog.rs | operator | CommandTruthSource (LiveHost/OfflineArtifact/Hybrid/Passthrough), CommandExecutionMode, HostAbsentBehavior |
-| readiness.rs | operator | MetadataProvenance (5 origins), MetadataField<T> (Known/Unknown/Unsupported/Unreachable), ReadinessLevel, CommandAvailability |
-| search.rs | operator | Cross-connector semantic search with scoring weights, faceted filters |
-| schema_nav.rs | operator | JSON Schema walker, scaffold template generation |
-| pipe.rs | operator | Two-operation pipe planning, MapRule, MappingSpec |
-| intent.rs | operator | Semantic intent compilation, WorkflowTruth, IntentMode |
-| workflow.rs | operator | Multi-step approval workflows, ExecutionReceipt, ClarificationPrompt |
-| routing.rs | operator | Smart connector auto-routing (health → rate limit → history → safety) |
-| zone_scope.rs | policy | Per-zone MCP tool scoping, capability enforcement |
-| policy_cmd.rs | policy | Policy simulation, bundle diffing (heavy fcp-core reach-through) |
-| credential_store.rs | operator | Keychain-first credential store, AuthMethod detection |
-| session.rs | operator | Agent session management (~/.fwc/sessions/) |
-| history.rs | evidence | Operation history with audit chain (~/.fwc/history/) |
-| replay.rs | operator | Operation replay from history with TTL |
-| lifecycle_mutations.rs | execution | Enable/Disable/Start/Stop/Restart state machine |
-| prerequisite.rs | evidence | Prerequisite checking, repair, drift detection |
-| audit.rs | evidence | Connector metadata gap audit matrix |
-| validate.rs | operator | Pre-invoke JSON Schema validation with fix suggestions |
-| extract.rs | operator | jq-style field extraction for --extract |
-| batch.rs | operator | Map-over-inputs parallel execution |
-| reactive_rules.rs | operator | Event-triggered operation execution |
-| event_stream.rs | operator | Event streaming with backpressure |
-| rate_limit.rs | evidence | Rate limit status (Ok/Warning/Critical thresholds) |
-| rate_forecast.rs | operator | Rate limit consumption forecasting |
-
-### fwc Host-Local State
-
-| State | Location | Persistence |
-|-------|----------|-------------|
-| Credentials | ~/.fwc/credentials.enc | Encrypted file |
-| Sessions | ~/.fwc/sessions/*.json | Per-session files |
-| Operation locks | ~/.fwc/locks/*.json | Advisory locks with TTL |
-| History | ~/.fwc/history/*.json | Operation audit trail |
-| Replay inputs | ~/.fwc/replay/*.json | 7-day TTL |
-| Connector cache | In-memory | Session-scoped |
-| Search index | In-memory | Session-scoped |
-| Rate limit cache | Local cache | Refreshed from host |
-
-### fwc Reach-Through Edges
-
-| Module | What It Reaches Into | Concern |
-|--------|---------------------|---------|
-| readiness.rs | fcp-core ConnectorDescriptor, OperationInfo, ReadinessDescriptor | Metadata import for readiness |
-| policy_cmd.rs | fcp-core PolicyBundle, ZonePolicyObject, DecisionReceipt + fcp-crypto Ed25519 | Policy simulation (heavy) |
-| new_cmd.rs | fcp-core validate_canonical_id() | Connector ID validation |
-| manifest_cmd.rs | fcp-manifest ConnectorManifest | Manifest parsing + hashing |
-| supply_chain_cmd.rs | fcp-core VerificationPipeline | Attestation validation |
+These are not ownership mysteries anymore. They are migration debt: the owner is known, but the definitions have not yet moved.
 
 ---
 
-## 5. Semantic Leakage Map
+## 4. Remaining Ownership Blur Inside `fcp-core`
 
-These are the most significant reach-through edges where ownership is blurred:
+This is the actual phase-7 residue that still makes `fcp-core` a semantic junk drawer. Each row names the still-live meaning, the best current target owner, and whether that target is settled or still provisional.
 
-### Critical Leakage Points
+| `fcp-core` module | Still-live meaning | Intended long-term owner | Why it is still blur |
+|-------------------|--------------------|--------------------------|----------------------|
+| `connector_state` | connector state roots, snapshots, deltas, resumable state contracts | dedicated durability/state contract, with `fcp-kernel` as temporary facade | state durability is not a shared primitive and not purely execution |
+| `crdt` | replicated state merge semantics | dedicated durability/state contract | CRDT semantics are durable data-model ownership, not generic core glue |
+| `object` | content-addressed object metadata, retention, placement hooks | dedicated object/durability contract, likely adjacent to `fcp-store` | object semantics are still bundled into the compatibility barrel |
+| `lease` | execution / migration lease contracts and transfer semantics | temporary `fcp-kernel`, eventual dedicated placement/execution contract if the split continues | lease semantics straddle execution and placement today |
+| `quorum` | node signatures, quorum policy, degraded-mode safety contracts | temporary `fcp-kernel`, eventual trust/placement contract if needed | trust coordination still lives in the generic barrel |
+| `credential` | credential references and access semantics | dedicated credential / secret-management contract | credentials are neither operator-only nor shared primitive |
+| `secret` | secret material semantics and recovery/share boundaries | bootstrap / secret-management contract | secret handling should not remain an unowned core grab-bag |
+| `ratelimit` | rate limit declarations, enforcement modes, throttle signals | split between `fcp-policy` policy semantics and `fcp-kernel` execution reporting, or a future dedicated `fcp-ratelimit` contract | currently mixes governance semantics with execution-facing status types |
+| `release` | release / rollout metadata beyond pure execution control | supply-chain / registry-facing contract | release semantics are distinct from the kernel lifecycle core |
+| `connector_artifacts` | connector package / artifact metadata | registry / supply-chain contract | artifact identity and packaging are not general core primitives |
+| `telemetry` | telemetry value contracts and reporting semantics | `fcp-telemetry` | domain already exists, but the semantic surface still sits in `fcp-core` |
+| `enforcement` | canonical enforcement result and ordering semantics | `fcp-policy` | implementation lives in `fcp-host`, but canonical ordering/results still need a clean policy-owned surface |
 
-1. **fcp-host rollout.rs ↔ fcp-core LifecycleManager**: Host makes rollout decisions using core lifecycle state. The observation, evidence, and decision types are host-local but should be platform-canonical.
-
-2. **fcp-host enforcement.rs ↔ fcp-core PolicyEngine**: The 11-stage enforcement pipeline lives in fcp-host but evaluates fcp-core policy types. The pipeline ORDER and SHORT-CIRCUIT logic is host-local knowledge that should be platform-owned.
-
-3. **fwc policy_cmd.rs ↔ fcp-core PolicyBundle**: The CLI directly manipulates policy bundles, computes hashes, signs with Ed25519. This should go through fcp-host RPC, not direct crypto access.
-
-4. **fwc readiness.rs ↔ fcp-core introspection types**: The CLI builds its own readiness model by importing fcp-core types. The readiness CONTRACT should be defined in fcp-core, not reimplemented in fwc.
-
-5. **fcp-host health.rs re-defines HealthState**: fcp-core already has HealthState/SelfCheckReport but fcp-host defines its own ComponentHealth/ConnectorHealth/MeshHealth aggregation types. The aggregation model should be platform-canonical.
-
-### Forbidden Overlaps (for P1.2 owner map)
-
-| Concept | Current Owners | Recommended Single Owner |
-|---------|---------------|------------------------|
-| Health aggregation | fcp-core (HealthSnapshot), fcp-host (HealthAggregator) | fcp-core should own the aggregation model |
-| Rollout decision semantics | fcp-core (LifecycleState), fcp-host (RolloutDecision) | fcp-core should own the decision enum |
-| Enforcement pipeline order | fcp-host only | Should be declared in fcp-core as canonical check ordering |
-| Progress schema | fcp-host only | fcp-core should own ProgressUpdate |
-| Cancellation reasons | fcp-host only | fcp-core should own CancelReason |
-| Readiness model | fcp-core (ReadinessDescriptor), fwc (ReadinessLevel) | fcp-core should own the full readiness model |
-| Credential storage | fwc only | fcp-core should define CredentialStore trait |
+None of these rows qualify as acceptable permanent residue. Each still represents either missing crate carving or an unresolved owner boundary.
 
 ---
 
-## 6. State Machines
+## 5. Residue Classification
 
-### Process Lifecycle (fcp-host supervisor.rs)
-```
-Starting → Running → Stopping → Stopped
-                  ↘              ↗
-                    → Failed
-```
+This is the final phase-7 classification for `fcp-core`.
 
-### Circuit Breaker (fcp-host resilience.rs)
-```
-Closed ──[failure threshold]──→ Open ──[timeout]──→ HalfOpen
-  ↑                                                      ↓
-  └────────────────[success]───────────────────────────────┘
-```
+### Acceptable Shared Primitive Residue
 
-### Connector Lifecycle (fcp-core, evaluated by fcp-host rollout.rs)
-```
-Pending → Installing → Canary → Production
-                         ↓         ↓
-                      RolledBack  RolledBack
-```
+- `error.rs`
+- `tool_schema`
+- `util`
+- external convenience re-exports (`async_trait`, `DateTime`, `Utc`, `Uuid`)
 
-### Cancellation (fcp-host cancellation.rs)
-```
-Requested → [cleanup] → Completed | PartialSuccess | Failed
-```
+### Assigned But Still Physically Trapped
 
----
+- Execution semantics already claimed by `fcp-kernel`
+- Policy semantics already claimed by `fcp-policy`
+- Evidence semantics already claimed by `fcp-evidence`
 
-## 7. Summary Statistics
+### Still Ownership-Blurred And Must Move Or Be Narrowed
 
-| Crate | Public Types | Decision Points | Reach-Through Edges | Host-Local State Items |
-|-------|-------------|-----------------|--------------------|-----------------------|
-| fcp-core | 230+ | 28 | 0 (origin) | 0 |
-| fcp-host | 150+ | 11 (pipeline) + 8 (other) | 6 major modules | 20+ internal types |
-| fwc | N/A (CLI) | 9 command gates | 5 modules | 10 storage locations |
+- `connector_state`
+- `crdt`
+- `object`
+- `lease`
+- `quorum`
+- `credential`
+- `secret`
+- `ratelimit`
+- `release`
+- `connector_artifacts`
+- `telemetry`
+- canonical enforcement-order/result types currently implied by `enforcement`
 
 ---
 
-*This inventory is the authoritative reference for FCP3 Phase 1. Subsequent beads (P1.2 owner map, P1.3 guardrails, P2.x crate carving) should cite this document rather than re-analyzing the codebase.*
+## 6. Why `fcp-core` Still Functions As A Semantic Junk Drawer
+
+Three active mechanisms keep `fcp-core` in that role:
+
+1. `crates/fcp-core/src/lib.rs` still wildcard re-exports nearly every internal module, so importing `fcp_core::*` continues to expose almost the entire platform semantic surface.
+2. The split owner crates (`fcp-kernel`, `fcp-policy`, `fcp-evidence`) currently re-export from `fcp-core`, which means semantic ownership is declared socially but not yet enforced mechanically.
+3. Several non-primitive domains do not yet have a crisp owner crate at all (`connector_state`, `object`, `credential`, `secret`, `telemetry`, parts of rate limiting / release / leases).
+
+Until those three conditions change, `fcp-core` remains more than a primitive substrate.
+
+---
+
+## 7. Concrete Exit Criteria For `fcp-core`
+
+`fcp-core` stops being a semantic junk drawer only when all of the following are true:
+
+- The split owner crates define their own types instead of re-exporting them from `fcp-core`.
+- `fcp-core` no longer wildcard re-exports domain modules that belong to `fcp-kernel`, `fcp-policy`, or `fcp-evidence`.
+- Every blurred module in Section 4 is either moved to a real owner crate or explicitly reduced to a narrow shared primitive with a documented justification.
+- New work follows `docs/FCP3_Transition_Guardrails.md` and does not add fresh semantic surface to `fcp-core` except documented shared primitives.
+
+---
+
+## 8. Recommended Follow-On Work
+
+This inventory implies the next migration slices:
+
+1. Move physically trapped execution/policy/evidence definitions out of `fcp-core` and invert the re-export direction.
+2. Create or name the missing long-term homes for state/object/credential/secret/telemetry semantics.
+3. Replace `fcp-core` wildcard exports with a deliberately narrow primitive surface.
+
+This document is the phase-7 reference for `flywheel_connectors-0aczd.2`: everything in Section 4 must move, narrow, or be deleted.

@@ -1,9 +1,12 @@
-//! FCP Core - Core types and traits for the Flywheel Connector Protocol
+//! FCP Core - legacy compatibility barrel for shared FCP primitives and
+//! not-yet-carved platform semantics.
 //!
-//! This crate provides the foundational types, traits, and error handling for
-//! FCP connectors.
+//! During the FCP3 split, the semantic owner crates are `fcp-kernel`,
+//! `fcp-policy`, and `fcp-evidence`, but many of their type definitions still
+//! physically live here and are re-exported outward. The long-term goal is for
+//! `fcp-core` to shrink to a narrow shared-primitive surface.
 //!
-//! This crate implements the `FCP_Specification_V3.md` foundational semantics.
+//! See `docs/FCP3_Semantic_Ownership_Inventory.md` for the current residue map.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
@@ -44,6 +47,8 @@ pub mod tool_schema;
 pub mod util;
 mod zone_keys;
 
+// Legacy wildcard barrel during the FCP3 carve-out. New semantic ownership
+// should be assigned to the split owner crates, not added here by default.
 pub use audit::*;
 pub use capability::*;
 pub use checkpoint::*;

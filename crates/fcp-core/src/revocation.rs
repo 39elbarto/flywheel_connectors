@@ -502,9 +502,22 @@ impl RevocationRegistry {
     }
 
     /// Add a revocation to the registry.
+    ///
+    /// If an object_id is already revoked, the entry with the **earliest**
+    /// `effective_at` is kept. This prevents an attacker (with owner-key
+    /// access) from suppressing an active revocation by replaying one with a
+    /// far-future `effective_at`, which `is_revoked_at(now)` would otherwise
+    /// treat as not-yet-active.
     pub fn add_revocation(&mut self, revocation: &RevocationObject) {
         for object_id in &revocation.revoked {
-            self.revocations.insert(*object_id, revocation.clone());
+            match self.revocations.get(object_id) {
+                Some(existing) if existing.effective_at <= revocation.effective_at => {
+                    // Keep the earlier (or equal) effective revocation.
+                }
+                _ => {
+                    self.revocations.insert(*object_id, revocation.clone());
+                }
+            }
         }
     }
 
@@ -2006,6 +2019,56 @@ mod tests {
         assert!(registry.is_revoked(&id1));
         assert!(registry.is_revoked(&id2));
         assert!(registry.is_revoked(&id3));
+    }
+
+    #[test]
+    fn registry_later_revocation_does_not_defer_active_one() {
+        // A second revocation for the same object_id with a far-future
+        // effective_at MUST NOT replace an active earlier revocation;
+        // otherwise is_revoked_at(now) would return false until the new
+        // effective_at, suppressing an active revocation.
+        let mut registry = RevocationRegistry::new();
+        let id = ObjectId::from_bytes([42u8; 32]);
+
+        let mut early = test_revocation();
+        early.revoked = vec![id];
+        early.effective_at = 1_700_000_000;
+
+        let mut late = test_revocation();
+        late.revoked = vec![id];
+        late.effective_at = u64::MAX;
+        late.reason = "deferred".into();
+
+        registry.add_revocation(&early);
+        registry.add_revocation(&late);
+
+        // The earlier (active) revocation must win.
+        let stored = registry.get_revocation(&id).expect("entry exists");
+        assert_eq!(stored.effective_at, 1_700_000_000);
+        assert!(registry.is_revoked_at(&id, 1_700_000_001));
+    }
+
+    #[test]
+    fn registry_earlier_revocation_replaces_later_one() {
+        // The opposite case: if a later-effective revocation is added first
+        // and a stricter (earlier-effective) one arrives second, the earlier
+        // one MUST take effect.
+        let mut registry = RevocationRegistry::new();
+        let id = ObjectId::from_bytes([43u8; 32]);
+
+        let mut late = test_revocation();
+        late.revoked = vec![id];
+        late.effective_at = 2_000_000_000;
+
+        let mut early = test_revocation();
+        early.revoked = vec![id];
+        early.effective_at = 1_700_000_000;
+
+        registry.add_revocation(&late);
+        registry.add_revocation(&early);
+
+        let stored = registry.get_revocation(&id).expect("entry exists");
+        assert_eq!(stored.effective_at, 1_700_000_000);
     }
 
     #[test]

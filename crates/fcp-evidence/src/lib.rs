@@ -25,7 +25,7 @@
 
 // ── Audit Chain ────────────────────────────────────────────────────
 
-pub use fcp_core::{AuditEvent, AuditHead};
+pub use fcp_core::{AuditEvent, AuditHead, DecisionReceipt};
 
 // ── Revocation ─────────────────────────────────────────────────────
 
@@ -77,7 +77,7 @@ mod tests {
     #[test]
     fn evidence_exports_audit_types() {
         // Verify AuditEvent and AuditHead are accessible
-        fn _audit_exists(_e: AuditEvent, _h: AuditHead) {}
+        fn _audit_exists(_e: AuditEvent, _h: AuditHead, _r: DecisionReceipt) {}
     }
 
     #[test]

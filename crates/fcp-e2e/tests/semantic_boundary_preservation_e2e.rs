@@ -6,9 +6,8 @@
 //!
 //! Bead: flywheel_connectors-qvsq8 [FCP3/P2.5]
 //!
-//! NOTE: Some tests below reference types that are still being migrated to their
-//! new crate homes (PolicyEngine, DecisionReceipt, EventEnvelope). These tests
-//! will compile once the FCP3 migration is complete.
+//! NOTE: Event streaming types remain owned by `fcp-kernel`; the tests below
+//! focus on owner-crate re-export coverage for the semantic carve-out.
 
 // ── fcp-kernel exports execution types ────────────────────────────
 
@@ -93,20 +92,18 @@ fn policy_owns_risk_classification() {
 }
 
 #[test]
-#[ignore = "PolicyEngine not yet migrated to fcp-policy"]
 fn policy_owns_decision_types() {
     let _ = std::any::type_name::<fcp_policy::PolicyDecision>();
-    // let _ = std::any::type_name::<fcp_policy::PolicyEngine>();
+    let _ = std::any::type_name::<fcp_policy::PolicyEngine>();
 }
 
 // ── fcp-evidence exports evidence types ───────────────────────────
 
 #[test]
-#[ignore = "DecisionReceipt not yet migrated to fcp-evidence"]
 fn evidence_owns_audit_types() {
     let _ = std::any::type_name::<fcp_evidence::AuditEvent>();
     let _ = std::any::type_name::<fcp_evidence::AuditHead>();
-    // let _ = std::any::type_name::<fcp_evidence::DecisionReceipt>();
+    let _ = std::any::type_name::<fcp_evidence::DecisionReceipt>();
 }
 
 #[test]

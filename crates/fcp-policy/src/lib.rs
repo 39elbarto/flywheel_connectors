@@ -69,7 +69,7 @@ pub use fcp_core::{
 pub use fcp_core::{
     DecisionReceiptPolicy, PolicyBundle, PolicyBundleBuilder, PolicyBundleError,
     PolicyBundleObject, PolicyBundlePolicyRef, PolicyBundleResolved, PolicyBundleSignature,
-    PolicyDecision, PolicyPattern,
+    PolicyDecision, PolicyEngine, PolicyPattern,
 };
 
 // ── Policy Diffs ───────────────────────────────────────────────────
@@ -164,6 +164,17 @@ mod tests {
     fn policy_exports_risk_types() {
         let _: RiskLevel = RiskLevel::Low;
         let _: RiskLevel = RiskLevel::High;
+    }
+
+    #[test]
+    fn policy_exports_policy_engine_types() {
+        fn _engine_exists(_engine: PolicyEngine) {}
+        let _ = _engine_exists;
+        let decision = PolicyDecision::deny(
+            fcp_core::DecisionReasonCode::CapabilityInsufficient,
+            Vec::new(),
+        );
+        assert_eq!(decision.decision, fcp_core::Decision::Deny);
     }
 
     #[test]

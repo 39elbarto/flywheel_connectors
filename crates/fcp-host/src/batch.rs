@@ -239,12 +239,11 @@ impl BatchZoneValidator {
         }
     }
 
-    fn effective_zone<'a>(&'a self, operation: &'a BatchOperation) -> &'a ZoneId {
+    fn effective_zone<'a>(&'a self, operation: &'a BatchOperation) -> Option<&'a ZoneId> {
         operation
             .zone
             .as_ref()
             .or_else(|| self.registry.get_zone(&operation.tool))
-            .unwrap_or(&self.agent_zone)
     }
 
     /// Validate all operations are zone-accessible.
@@ -256,18 +255,29 @@ impl BatchZoneValidator {
     /// zone boundary that the current agent zone cannot access.
     pub fn validate(&self, operations: &[BatchOperation]) -> HostResult<()> {
         let mut violations = Vec::new();
+        let mut unknown_tools = Vec::new();
         for op in operations {
-            if !zone_accessible(&self.agent_zone, self.effective_zone(op)) {
-                violations.push(op.id.clone());
+            match self.effective_zone(op) {
+                Some(zone) => {
+                    if !zone_accessible(&self.agent_zone, zone) {
+                        violations.push(op.id.clone());
+                    }
+                }
+                None => unknown_tools.push(op.id.clone()),
             }
         }
-        if violations.is_empty() {
-            Ok(())
-        } else {
+        if !unknown_tools.is_empty() {
+            Err(HostError::PreflightFailed(format!(
+                "missing zone mapping for operations: {}",
+                unknown_tools.join(", ")
+            )))
+        } else if !violations.is_empty() {
             Err(HostError::PreflightFailed(format!(
                 "zone boundary violations for operations: {}",
                 violations.join(", ")
             )))
+        } else {
+            Ok(())
         }
     }
 
@@ -276,7 +286,9 @@ impl BatchZoneValidator {
     pub fn group_by_zone(&self, operations: &[BatchOperation]) -> BTreeMap<String, Vec<String>> {
         let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for op in operations {
-            let zone_str = self.effective_zone(op).as_str().to_string();
+            let zone_str = self
+                .effective_zone(op)
+                .map_or_else(|| "<unresolved>".to_string(), |zone| zone.as_str().to_string());
             groups.entry(zone_str).or_default().push(op.id.clone());
         }
         groups
@@ -1300,11 +1312,13 @@ mod tests {
     }
 
     #[test]
-    fn zone_validator_unknown_tool_passes() {
+    fn zone_validator_unknown_tool_rejects_missing_mapping() {
         let reg = ZoneRegistry::new();
         let validator = BatchZoneValidator::new(ZoneId::work(), reg);
         let ops = vec![op("a", "unknown.tool", &[])];
-        assert!(validator.validate(&ops).is_ok());
+        let err = validator.validate(&ops).unwrap_err();
+        assert!(err.to_string().contains("missing zone mapping"));
+        assert!(err.to_string().contains('a'));
     }
 
     #[test]
@@ -1343,11 +1357,12 @@ mod tests {
             op("c", "unknown.tool", &[]),
         ];
         let groups = validator.group_by_zone(&ops);
-        assert_eq!(groups.len(), 2); // public, work (unknown defaults to agent zone = work)
+        assert_eq!(groups.len(), 3);
+        assert!(groups.contains_key("<unresolved>"));
         assert!(groups.contains_key("z:public"));
         assert!(groups.contains_key("z:work"));
-        // work group should contain both the work.tool op and the unknown.tool op
-        assert_eq!(groups["z:work"].len(), 2);
+        assert_eq!(groups["z:work"], vec!["b"]);
+        assert_eq!(groups["<unresolved>"], vec!["c"]);
     }
 
     #[test]
@@ -2771,14 +2786,14 @@ mod tests {
     }
 
     #[test]
-    fn zone_group_by_zone_all_unknown_tools_uses_agent_zone() {
+    fn zone_group_by_zone_all_unknown_tools_stay_unresolved() {
         let reg = ZoneRegistry::new();
         let validator = BatchZoneValidator::new(ZoneId::private(), reg);
         let ops = vec![op("a", "x", &[]), op("b", "y", &[])];
         let groups = validator.group_by_zone(&ops);
         assert_eq!(groups.len(), 1);
-        assert!(groups.contains_key("z:private"));
-        assert_eq!(groups["z:private"].len(), 2);
+        assert!(groups.contains_key("<unresolved>"));
+        assert_eq!(groups["<unresolved>"].len(), 2);
     }
 
     #[test]

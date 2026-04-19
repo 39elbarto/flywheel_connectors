@@ -27,7 +27,7 @@ allowed_targets = ["z:work"]
 forbidden = ["z:public"]
 
 [capabilities]
-required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+required = ["network.dns", "network.egress", "network.tls.sni"]
 optional = ["media.download"]
 forbidden = ["system.exec", "network.listen"]
 
@@ -609,6 +609,35 @@ common_mistakes = ["Not scoping to a repo or org"]
 examples = ['{"query": "addClass repo:octocat/hello-world"}']
 related = ["github.get_file_content", "github.search_repos"]
 
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."github.process_webhook"]
+description = "Process a pre-verified GitHub webhook payload forwarded by fcp-host"
+capability = "github.process_webhook"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."github.process_webhook".input_schema]
+required = ["payload"]
+type = "object"
+[provides.operations."github.process_webhook".input_schema.properties.payload]
+type = "object"
+
+[provides.operations."github.process_webhook".output_schema]
+required = ["event"]
+type = "object"
+[provides.operations."github.process_webhook".output_schema.properties.event]
+type = "object"
+
+[provides.operations."github.process_webhook".ai_hints]
+when_to_use = "Process a pre-verified GitHub webhook payload forwarded by fcp-host."
+common_mistakes = ["Sending raw HTTP bodies instead of the structured webhook payload object."]
+examples = ['{"payload": {"event_type": "issues", "delivery_id": "d-1", "data": {"action": "opened"}}}']
+related = ["github.get_issue", "github.get_pull_request"]
+
 # ── Events ──────────────────────────────────────────────────────
 
 [event_caps]
@@ -624,7 +653,6 @@ memory_mb = 256
 cpu_percent = 50
 wall_clock_timeout_ms = 120000
 fs_readonly_paths = ["/usr", "/lib"]
-fs_writable_paths = ["$CONNECTOR_STATE"]
 deny_exec = true
 deny_ptrace = true
 
@@ -671,3 +699,4 @@ scope = "instance"
 "github.trigger_workflow" = ["github.admin"]
 "github.get_file_content" = ["github.read"]
 "github.search_code" = ["github.search"]
+"github.process_webhook" = ["github.read"]

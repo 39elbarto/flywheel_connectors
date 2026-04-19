@@ -27,7 +27,7 @@ allowed_targets = ["z:private"]
 forbidden = ["z:public", "z:work"]
 
 [capabilities]
-required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+required = ["network.dns", "network.egress", "network.tls.sni"]
 optional = []
 forbidden = ["system.exec", "network.listen"]
 
@@ -365,6 +365,157 @@ when_to_use = "Check status of a payment intent."
 common_mistakes = ["Not checking the status field — a payment_intent can be requires_action, processing, or canceled, not just succeeded."]
 examples = ['{"payment_intent_id": "pi_abc123"}']
 related = ["stripe.create_payment_intent"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."stripe.confirm_payment_intent"]
+description = "Confirm a payment intent to proceed with payment"
+capability = "stripe.payment"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+revocation_freshness = "critical"
+
+[provides.operations."stripe.confirm_payment_intent".input_schema]
+required = ["payment_intent_id"]
+type = "object"
+[provides.operations."stripe.confirm_payment_intent".input_schema.properties.payment_intent_id]
+type = "string"
+[provides.operations."stripe.confirm_payment_intent".input_schema.properties.payment_method]
+type = "string"
+[provides.operations."stripe.confirm_payment_intent".input_schema.properties.idempotency_key]
+type = "string"
+
+[provides.operations."stripe.confirm_payment_intent".output_schema]
+required = ["payment_intent", "audit"]
+type = "object"
+[provides.operations."stripe.confirm_payment_intent".output_schema.properties.payment_intent]
+type = "object"
+[provides.operations."stripe.confirm_payment_intent".output_schema.properties.audit]
+type = "object"
+
+[provides.operations."stripe.confirm_payment_intent".network_constraints]
+host_allow = ["api.stripe.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."stripe.confirm_payment_intent".ai_hints]
+when_to_use = "Confirm a payment intent after the customer has provided payment details."
+common_mistakes = ["Confirming without a valid payment method attached"]
+examples = ['{"payment_intent_id": "pi_abc123", "payment_method": "pm_card_visa"}']
+related = ["stripe.create_payment_intent", "stripe.capture_payment_intent"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."stripe.capture_payment_intent"]
+description = "Capture a previously authorized payment intent"
+capability = "stripe.payment"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+revocation_freshness = "critical"
+
+[provides.operations."stripe.capture_payment_intent".input_schema]
+required = ["payment_intent_id"]
+type = "object"
+[provides.operations."stripe.capture_payment_intent".input_schema.properties.payment_intent_id]
+type = "string"
+[provides.operations."stripe.capture_payment_intent".input_schema.properties.amount_to_capture]
+type = "integer"
+[provides.operations."stripe.capture_payment_intent".input_schema.properties.idempotency_key]
+type = "string"
+
+[provides.operations."stripe.capture_payment_intent".output_schema]
+required = ["payment_intent", "audit"]
+type = "object"
+[provides.operations."stripe.capture_payment_intent".output_schema.properties.payment_intent]
+type = "object"
+[provides.operations."stripe.capture_payment_intent".output_schema.properties.audit]
+type = "object"
+
+[provides.operations."stripe.capture_payment_intent".network_constraints]
+host_allow = ["api.stripe.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."stripe.capture_payment_intent".ai_hints]
+when_to_use = "Capture funds from a payment intent that was created with capture_method=manual."
+common_mistakes = ["Capturing more than the authorized amount"]
+examples = ['{"payment_intent_id": "pi_abc123", "amount_to_capture": 1500}']
+related = ["stripe.confirm_payment_intent", "stripe.cancel_payment_intent"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."stripe.cancel_payment_intent"]
+description = "Cancel a payment intent"
+capability = "stripe.payment"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+revocation_freshness = "critical"
+
+[provides.operations."stripe.cancel_payment_intent".input_schema]
+required = ["payment_intent_id"]
+type = "object"
+[provides.operations."stripe.cancel_payment_intent".input_schema.properties.payment_intent_id]
+type = "string"
+[provides.operations."stripe.cancel_payment_intent".input_schema.properties.cancellation_reason]
+type = "string"
+enum = ["duplicate", "fraudulent", "requested_by_customer", "abandoned"]
+[provides.operations."stripe.cancel_payment_intent".input_schema.properties.idempotency_key]
+type = "string"
+
+[provides.operations."stripe.cancel_payment_intent".output_schema]
+required = ["payment_intent", "audit"]
+type = "object"
+[provides.operations."stripe.cancel_payment_intent".output_schema.properties.payment_intent]
+type = "object"
+[provides.operations."stripe.cancel_payment_intent".output_schema.properties.audit]
+type = "object"
+
+[provides.operations."stripe.cancel_payment_intent".network_constraints]
+host_allow = ["api.stripe.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."stripe.cancel_payment_intent".ai_hints]
+when_to_use = "Cancel a payment intent that has not yet been captured."
+common_mistakes = ["Cancelling an already captured payment intent instead of issuing a refund"]
+examples = ['{"payment_intent_id": "pi_abc123", "cancellation_reason": "requested_by_customer"}']
+related = ["stripe.create_refund", "stripe.get_payment_intent"]
 
 # ────────────────────────────────────────────────────────────────
 
@@ -806,7 +957,6 @@ memory_mb = 128
 cpu_percent = 25
 wall_clock_timeout_ms = 60000
 fs_readonly_paths = ["/usr", "/lib"]
-fs_writable_paths = ["$CONNECTOR_STATE"]
 deny_exec = true
 deny_ptrace = true
 
@@ -849,6 +999,9 @@ scope = "instance"
 "stripe.create_payment_intent" = ["stripe.payment"]
 "stripe.get_payment_intent" = ["stripe.read"]
 "stripe.create_refund" = ["stripe.payment"]
+"stripe.confirm_payment_intent" = ["stripe.payment"]
+"stripe.capture_payment_intent" = ["stripe.payment"]
+"stripe.cancel_payment_intent" = ["stripe.payment"]
 "stripe.create_subscription" = ["stripe.payment"]
 "stripe.get_subscription" = ["stripe.read"]
 "stripe.list_subscriptions" = ["stripe.read"]

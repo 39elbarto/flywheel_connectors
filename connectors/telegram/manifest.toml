@@ -41,6 +41,7 @@ required = [
     "network.dns",
     "network.egress",
     "network.tls.sni",
+    "storage.state",
 ]
 optional = []
 forbidden = [
@@ -274,6 +275,16 @@ replay = false
 description = "Callback query from an inline keyboard button press"
 streaming = true
 replay = false
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
 
 # --- Rate Limits ---
 

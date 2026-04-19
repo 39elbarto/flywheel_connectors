@@ -27,7 +27,7 @@ allowed_targets = ["z:work"]
 forbidden = ["z:public"]
 
 [capabilities]
-required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+required = ["network.dns", "network.egress", "network.tls.sni"]
 optional = ["media.download", "media.upload"]
 forbidden = ["system.exec", "network.listen"]
 
@@ -551,7 +551,6 @@ memory_mb = 256
 cpu_percent = 50
 wall_clock_timeout_ms = 120000
 fs_readonly_paths = ["/usr", "/lib"]
-fs_writable_paths = ["$CONNECTOR_STATE"]
 deny_exec = true
 deny_ptrace = true
 

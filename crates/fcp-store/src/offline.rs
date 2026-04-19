@@ -70,7 +70,9 @@ impl OfflineAccess {
     #[must_use]
     pub const fn coverage_bps(&self) -> u32 {
         if self.k == 0 {
-            return 0;
+            // Zero-symbol objects are trivially reconstructable (no data to
+            // reconstruct), matching can_access() which returns true for k==0.
+            return 10_000;
         }
         // coverage_bps = (local_symbols / k) * 10000
         let bps = self.local_symbols as u64 * 10000 / self.k as u64;
@@ -89,7 +91,9 @@ impl OfflineAccess {
     #[must_use]
     pub fn coverage(&self) -> f64 {
         if self.k == 0 {
-            return 0.0;
+            // Consistent with coverage_bps() and can_access(): k==0 means
+            // the object is trivially complete.
+            return 1.0;
         }
         f64::from(self.local_symbols) / f64::from(self.k)
     }
@@ -1189,16 +1193,16 @@ mod tests {
             4,
             || {
                 let object_id = test_object_id();
-                // k=0 is an edge case - should return 0 coverage and can_access true (no symbols needed)
+                // k=0 is an edge case - zero-symbol objects are already complete.
                 let access = OfflineAccess::new(object_id, 0, 0, 1024);
 
                 // With k=0, can_access should be true (0 >= 0)
                 assert!(access.can_access());
-                // Coverage should be 0 (division by zero protection)
-                assert_eq!(access.coverage_bps(), 0);
-                #[allow(clippy::float_cmp)] // exact zero is valid for k=0 edge case
+                // Coverage should report 100% for a trivially complete object.
+                assert_eq!(access.coverage_bps(), 10_000);
+                #[allow(clippy::float_cmp)] // exact one is valid for k=0 edge case
                 {
-                    assert_eq!(access.coverage(), 0.0);
+                    assert_eq!(access.coverage(), 1.0);
                 }
                 // No symbols needed
                 assert_eq!(access.symbols_needed(), 0);
@@ -1615,8 +1619,9 @@ mod tests {
 
                 // k=0 means can_access is always true (0 >= 0 threshold)
                 assert!(access.can_access());
-                // coverage_bps returns 0 when k=0 (division by zero guard)
-                assert_eq!(access.coverage_bps(), 0);
+                // k=0 means the object is trivially complete regardless of
+                // local symbol count.
+                assert_eq!(access.coverage_bps(), 10_000);
                 // symbols_needed saturates: k(0) - local(5) = 0
                 assert_eq!(access.symbols_needed(), 0);
 
@@ -1624,7 +1629,7 @@ mod tests {
                     object_id: Some(object_id),
                     local_symbols: Some(5),
                     k: Some(0),
-                    coverage_bps: Some(0),
+                    coverage_bps: Some(10_000),
                     details: Some(json!({"edge_case": "k=0_with_symbols"})),
                 }
             },
@@ -2594,8 +2599,8 @@ mod tests {
     fn offline_access_coverage_k_zero() {
         let id = ObjectId::from_bytes([3; 32]);
         let access = OfflineAccess::new(id, 0, 0, 64);
-        assert_eq!(access.coverage_bps(), 0);
-        assert!(access.coverage() < f64::EPSILON);
+        assert_eq!(access.coverage_bps(), 10_000);
+        assert!((access.coverage() - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -2715,13 +2720,13 @@ mod tests {
     #[test]
     fn offline_access_coverage_bps_zero_k() {
         let access = OfflineAccess::new(ObjectId::from_bytes([1; 32]), 0, 10, 64);
-        assert_eq!(access.coverage_bps(), 0);
+        assert_eq!(access.coverage_bps(), 10_000);
     }
 
     #[test]
     fn offline_access_coverage_float_zero_k() {
         let access = OfflineAccess::new(ObjectId::from_bytes([1; 32]), 0, 10, 64);
-        assert!(access.coverage().abs() < f64::EPSILON);
+        assert!((access.coverage() - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]

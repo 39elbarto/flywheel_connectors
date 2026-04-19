@@ -3,7 +3,7 @@
 > **Bead**: `flywheel_connectors-mm3q4` — [FCP3/P1.5]
 > **Author**: WhiteCompass (SunnyMoose session, 2026-03-27)
 > **Last reconciled**: SunnyMoose, 2026-04-07 (pl7pj.3)
-> **Purpose**: Living scorecard tracking legacy buckets, shims, host-first teaching, and migration status.
+> **Purpose**: Living scorecard tracking legacy buckets, shims, mesh-first cutover holdouts, and migration status.
 
 ---
 
@@ -13,7 +13,7 @@
 |----------|------------|----------|---------|---------|
 | Legacy broad buckets | 3 | 3 | 0 | 0 |
 | Compatibility shims | 2 | 0 | 2 | 0 |
-| Host-first teaching | 8 | 5 | 3 | 0 |
+| Mesh-first cutover holdouts | 8 | 5 | 3 | 0 |
 | Forbidden overlap debt | 7 | 4 | 3 | 0 |
 | Type MOVE candidates | 9 | 6 | 3 | 0 |
 
@@ -40,10 +40,15 @@
 
 ---
 
-## 3. Host-First Teaching (to become mesh-native)
+## 3. Mesh-First Cutover Holdouts
 
-| Teaching | Current Owner | Target Owner | Impact | Status |
-|----------|--------------|-------------|--------|--------|
+The teaching-surface rewrite bead `flywheel_connectors-z1nkz.1` is already
+closed. The rows below are not onboarding prose that still tells contributors
+to build host-first systems; they are runtime and ownership seams that still
+block the final mesh-first cutover.
+
+| Holdout | Current Owner | Target Owner | Impact | Status |
+|---------|--------------|-------------|--------|--------|
 | Enforcement pipeline ordering | fcp-host (enforcement.rs) | fcp-core (canonical order) | SDKs can't replicate enforcement | PENDING |
 | Health aggregation model | fcp-host (health.rs) | fcp-core (HealthAggregation) | SDKs can't aggregate health | PENDING |
 | Rollout decision logic | fcp-host (rollout.rs) | fcp-kernel (RolloutDecision) | Non-host platforms can't evaluate rollouts | MIGRATED (fcp-kernel/src/execution_control.rs) |
@@ -94,6 +99,8 @@ Key evidence backing this scorecard:
 - **Live verification**: kzabz epic (5 children CLOSED) - 7 connectors verified
 - **Performance**: tr2xx epic (6 children CLOSED) - benchmarks + CI gate
 - **Gossip upgrade**: br21t epic (6 children CLOSED) - XOR filter + IBLT production
+- **Teaching-surface rewrite**: `flywheel_connectors-z1nkz.1` (CLOSED, 2026-04-11) - surviving docs now frame host-first as a transitional boundary rather than the long-term architecture
+- **Runtime scaffolding deletion**: `flywheel_connectors-z1nkz.2` (2026-04-19) - deleted deprecated `ChaCha20Nonce::generate()`, migrated raw `asupersync::signal` in fcp-host to `fcp_async_core::signal`, cleaned raw `asupersync::` test imports in fcp-graphql, updated kill list scoreboard from `owner-bead-closed` to `deleted`/`quarantine-blessed` reflecting actual code state
 - **Bead graph**: 68 open beads remaining (from 2200+), 24 actionable
 
 ---
@@ -103,7 +110,7 @@ Key evidence backing this scorecard:
 This scorecard should be updated:
 - After each crate carving (P2.x) -- mark items as MIGRATED
 - After each compatibility shim removal -- mark as DELETED
-- After each host-first teaching migration -- mark as MIGRATED
+- After each mesh-first cutover holdout migration -- mark as MIGRATED
 - After each forbidden overlap resolution -- mark as RESOLVED
 
 **Format**: `| item | ... | MIGRATED (2026-XX-XX, commit abc123) |`

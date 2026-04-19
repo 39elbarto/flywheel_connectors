@@ -5,6 +5,10 @@
 > transitional provisioning boundary; V2 is the converging steady-state target.
 > The truth hierarchy already classifies answers as mesh-backed > host-backed >
 > node-local > offline regardless of which version the operator is using.
+>
+> This is a cutover-audit reference, not the preferred onboarding story. Use it
+> to see which operator workflows still depend on the transitional host-backed
+> boundary and which ones already have a mesh-backed destination.
 
 ## V1: Host-First (Current Provisioning Boundary, Transitional)
 
@@ -37,6 +41,9 @@ semantics today while the mesh-native cutover (V2) converges to steady state.
 - Mesh-native gossip-based state sync as the primary truth source
 
 ### V1 Operator Contract
+
+Treat this as the minimum honest contract for the boundary that still exists
+today, not as the architecture contributors should optimize around long term.
 
 1. Start `fcp-host` on the node where connectors will run.
 2. Use `fwc --host http://<host>:<port>` for all live operations.
@@ -82,13 +89,14 @@ rewrite (bead z1nkz.1).
 
 ---
 
-## FWC Command Version Requirements
+## FWC Command Truth-Source Matrix
 
-Every `fwc` command operates under V1 provisioning semantics today, but the
-truth hierarchy (mesh-backed > host-backed > node-local > offline) already
-classifies answers regardless of version. The table below shows which commands
-are purely V1, which have V2-aware extensions, and which gain mesh-backed
-truth sources under V2.
+Every `fwc` command still executes against the current provisioning boundary
+today, but the truth hierarchy (mesh-backed > host-backed > node-local >
+offline) already classifies answers regardless of version. The table below is a
+cutover map: it shows which commands still depend on host-backed execution,
+which ones are already honest offline artifact workflows, and where mesh-backed
+truth is expected to replace the transitional path.
 
 | Command | V1 (Host-First) | V2 (Mesh-Native) | Notes |
 |---------|-----------------|-------------------|-------|

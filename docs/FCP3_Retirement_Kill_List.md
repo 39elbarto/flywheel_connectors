@@ -21,12 +21,13 @@ The codebase has successfully migrated from Tokio to Asupersync via the
 `fcp-async-core` abstraction layer. The infrastructure is mature and correct.
 What remains is:
 
-1. **Adopting `ConnectorRuntime`** across all 89 connector crates (currently 2
-   direct call sites in connector code)
+1. **Maintaining the last blessed compatibility seams** until their
+   replacements are proven and the quarantine rows can be deleted
 2. **Consolidating raw `asupersync::` imports** behind `fcp-async-core`
    wrappers
 3. **Maintaining Tokio compat bridges** until test infrastructure goes native
-4. **Fixing one `tokio::` holdout** in `fwc/src/serve_mcp.rs`
+4. **Capturing deletion proof** so Phase 7 can retire seams without losing
+   operator-visible workflows
 
 There is **no ExceptionLedger abstraction** in the codebase. The
 "exception-ledger thinking" to retire is the pattern of hand-rolled,
@@ -47,11 +48,15 @@ per-connector error handling that `ConnectorErrorMapping` replaces.
 Phase 7 treats this kill list plus `docs/testing/placeholder-inventory.json`
 as one scoreboard.
 
-- This file tracks the broad compatibility seams, host-first teaching holdouts,
-  and transitional adapters that still survive after phase 6.
+- This file tracks the broad compatibility seams, runtime holdouts, and
+  transitional adapters that still survive after phase 6.
 - `docs/testing/placeholder-inventory.json` tracks the concrete runtime
   placeholders, status drift, and operator gaps that still block truthful
   cutover.
+- The teaching-surface rewrite wave under `flywheel_connectors-z1nkz.1` is
+  already closed. Any surviving host-first language referenced here should be
+  read as a quarantined runtime constraint or proof obligation, not as the
+  preferred architecture to teach.
 
 Every surviving seam row must record:
 
@@ -68,22 +73,22 @@ Every surviving seam row must record:
 
 | Seam | Current status | Owner bead | User-visible impact | Replacement path | Proof artifacts |
 |---|---|---|---|---|---|
-| Raw `tokio::io` import in `crates/fwc/src/serve_mcp.rs` | `owner-bead-closed` | `flywheel_connectors-9syku.11.2` (CLOSED) | MCP stdio transport still depends on Tokio-only I/O traits. | Extend `fcp_async_core::io` with the missing trait and `lines()` support. | `crates/fwc/tests/cual_integration.rs`; `scripts/ci/asupersync_tokio_guard.sh` |
-| Hand-rolled exception-ledger style error handling | `owner-bead-closed` | `flywheel_connectors-9syku.11.3` (CLOSED) | ConnectorErrorMapping adopted across all 150 connectors. | Migration complete. Bespoke paths largely retired. | `crates/fcp-sdk/src/migration.rs`; representative connector archetype tests |
-| `get_or_create_tokio_compat_handle` | `owner-bead-closed` | `flywheel_connectors-18irp` (CLOSED) | Reqwest/wiremock compat bridge remains for now. | Asupersync resolved the compile break; compat handle deletion deferred to runtime team. | `crates/fcp-testkit/src/mock_server.rs`; `crates/fcp-host/tests/host_connector_integration.rs` |
-| `TokioContextFuture` wrapper | `owner-bead-closed` | `flywheel_connectors-18irp` (CLOSED) | Wrapper still present but owner bead is closed. | Remove alongside compat handle when safe. | `crates/fcp-testkit/src/mock_server.rs` |
-| `asupersync-tokio-compat` bridge in `fcp-host` | `owner-bead-closed` | `flywheel_connectors-18irp` (CLOSED) | Host admin HTTP bridge still uses Tokio compat. | Blessed as acceptable for now; native replacement deferred. | `crates/fcp-host/src/bin/fcp-host.rs` |
-| Workspace `tokio` dependency retained for compatibility | `owner-bead-closed` | `flywheel_connectors-18irp` (CLOSED) | Tokio still in workspace deps due to compat bridges. | Will be removed when compat bridges are deleted. | `Cargo.toml` |
-| Raw `asupersync::` imports in non-core crates | `owner-bead-closed` | `flywheel_connectors-9syku.11.2` (CLOSED) | Some crates still use direct asupersync imports. | Wrapping deferred; owner bead closed with acceptable state. | `crates/fcp-streaming/src/websocket.rs` |
-| Incomplete `ConnectorRuntime` adoption across connector families | `owner-bead-closed` | `flywheel_connectors-9syku.11.3` (CLOSED) | ConnectorRuntime adopted across all connector families. | Migration waves complete. | `crates/fcp-sdk/src/migration.rs`; migrated connector family tests |
+| Raw `tokio::io` import in `crates/fwc/src/serve_mcp.rs` | `deleted` | `flywheel_connectors-9syku.11.2` (CLOSED) | Import removed. `fcp_async_core::io` now provides all needed traits. | Completed. No raw `tokio::` imports remain in `serve_mcp.rs`. | `grep -r 'tokio' crates/fwc/src/serve_mcp.rs` returns no matches |
+| Hand-rolled exception-ledger style error handling | `deleted` | `flywheel_connectors-9syku.11.3` (CLOSED) | ConnectorErrorMapping adopted across all 150 connectors. | Migration complete. Bespoke paths retired. | `crates/fcp-sdk/src/migration.rs`; representative connector archetype tests |
+| `get_or_create_tokio_compat_handle` | `quarantine-blessed` | `flywheel_connectors-18irp` (CLOSED) | Reqwest/wiremock compat bridge remains (blessed). | Stays until reqwest/wiremock replaced with async-core-native equivalents. | `crates/fcp-async-core/src/lib.rs`; `crates/fcp-testkit/src/mock_server.rs` |
+| `TokioContextFuture` wrapper | `quarantine-blessed` | `flywheel_connectors-18irp` (CLOSED) | Coupled to compat handle (blessed). | Remove alongside compat handle when safe. | `crates/fcp-async-core/src/lib.rs` |
+| `asupersync-tokio-compat` bridge in `fcp-host` | `deleted` | `flywheel_connectors-18irp` (CLOSED) | fcp-host fully migrated to native `fcp_async_core::hyper_bridge`. No tokio compat dependency remains. | Completed. fcp-host uses `HyperExecutor` and `HyperIo` natively. | `crates/fcp-host/src/bin/fcp-host.rs`; `crates/fcp-host/Cargo.toml` has no tokio/compat dep |
+| Workspace `tokio` dependency retained for compatibility | `quarantine-blessed` | `flywheel_connectors-18irp` (CLOSED) | Tokio remains for: (1) compat handle in fcp-async-core, (2) fcp-registry-server binary (axum framework dep). | Remove when compat handle deleted and registry server migrated. | `Cargo.toml` |
+| Raw `asupersync::` imports in non-core crates | `mostly-deleted` | `flywheel_connectors-9syku.11.2` (CLOSED) | Production code clean. Only `fcp-graphql/tests/client.rs` retains server-side WebSocket test types (`ServerWebSocket`, `WebSocketAcceptor`) not re-exported by fcp-async-core. | `Cx`, `AsyncRead`, `ReadBuf` migrated to `fcp_async_core::`. Server-side test types acceptable as direct import. | `grep -r 'use asupersync::' crates/` shows only fcp-async-core (expected) and fcp-graphql test server types |
+| Incomplete `ConnectorRuntime` adoption across connector families | `deleted` | `flywheel_connectors-9syku.11.3` (CLOSED) | ConnectorRuntime adopted across all connector families. | Migration waves complete. | `crates/fcp-sdk/src/migration.rs`; migrated connector family tests |
 
 ### Phase-7 Row Gates And Proof
 
 #### Raw `tokio::io` import in `crates/fwc/src/serve_mcp.rs`
 
-- Deletion gate: Close `flywheel_connectors-9syku.11.2` only after `fcp_async_core::io` exports the missing `AsyncWrite` and `lines()` surface, the raw Tokio import disappears from `crates/fwc/src/serve_mcp.rs`, and the Tokio guard remains green.
-- Proof obligations: Unit: async-core I/O wrapper tests for the missing trait and line-stream behavior. Integration: `crates/fwc/tests/cual_integration.rs` coverage for the MCP stdio path. E2E: replayable `fwc serve-mcp` proof showing the stdio workflow stays truthful without direct Tokio I/O.
-- Workflow artifacts: Before: the current guard or grep evidence that `serve_mcp` still imports `tokio::io`. After: `trace.jsonl`, `summary.json`, `environment.json`, and `replay.sh` for the MCP stdio scenario.
+- **Status: DELETED.** The raw `tokio::io` import has been removed. `fcp_async_core::io` now provides `AsyncWrite`, `AsyncBufReadExt`, and all needed I/O traits. `serve_mcp.rs` no longer references `tokio` at all.
+- Deletion gate: **CLEARED.** Owner bead `9syku.11.2` closed; import removed.
+- Evidence: `grep -r 'tokio' crates/fwc/src/serve_mcp.rs` returns no matches.
 
 #### Hand-rolled exception-ledger style error handling
 
@@ -105,9 +110,9 @@ Every surviving seam row must record:
 
 #### `asupersync-tokio-compat` bridge in `fcp-host`
 
-- Deletion gate: Close `flywheel_connectors-18irp` only after the host admin API is served through an async-core-native stack or a deliberately blessed permanent bridge, with the current quarantine removed from `crates/fcp-host/src/bin/fcp-host.rs`.
-- Proof obligations: Unit: executor or server-stack tests for the replacement HTTP surface. Integration: `crates/fcp-host/tests/host_connector_integration.rs` proving admin discovery, status, and invoke paths survive the swap. E2E: host-backed admin API transcripts showing the node-local supervision root remains truthful through the new server stack.
-- Workflow artifacts: Before: current host-admin trace and code anchors showing the Tokio bridge. After: host-backed replay bundle proving the replacement server stack and artifact schema.
+- **Status: DELETED.** `fcp-host` has been fully migrated to native `fcp_async_core::hyper_bridge`. The binary uses `HyperExecutor` and `HyperIo` for connection serving, `fcp_async_core::net::TcpListener` for binding, and `fcp_async_core::signal::ctrl_c()` for shutdown. No `asupersync-tokio-compat` dependency remains in `fcp-host/Cargo.toml`.
+- Deletion gate: **CLEARED.** Owner bead `18irp` closed; compat bridge deleted; native bridge proven.
+- Evidence: `crates/fcp-host/Cargo.toml` has no tokio or compat dependency; `crates/fcp-host/src/bin/fcp-host.rs` uses only `fcp_async_core::*` imports (plus `hyper`/`hyper_util` which are runtime-agnostic).
 
 #### Workspace `tokio` dependency retained for compatibility
 
@@ -150,29 +155,11 @@ These are the FCP3 target patterns. They stay and expand:
 
 ### 2.1 Raw `tokio::` imports in `fwc/src/serve_mcp.rs`
 
-**File:** `crates/fwc/src/serve_mcp.rs:13`
-```rust
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
-```
+**Status: DELETED.** The raw `tokio::io` import has been removed from
+`serve_mcp.rs`. `fcp-async-core::io` now provides all needed I/O traits
+including `AsyncWrite`, `AsyncBufReadExt`, and `lines()` support.
 
-**Classification:** DELETE (after prerequisite)
-
-**Why:** This is the only non-test production file that directly imports
-`tokio::io`. However, `fcp-async-core::io` does NOT yet re-export all needed
-types:
-- `AsyncBufRead` — available in fcp-async-core
-- `AsyncWriteExt` — available in fcp-async-core
-- `AsyncWrite` (the trait, used as a bound) — **NOT yet re-exported**
-- `AsyncBufReadExt` with `.lines()` — **NOT yet available** (fcp-async-core's
-  `AsyncBufReadExt` only provides `read_line`, not `lines()`)
-
-**Prerequisite:** Add `AsyncWrite` re-export and a `lines()` method to
-`fcp-async-core::io` before this import can be replaced.
-
-**Cutover signal:** After fcp-async-core::io extension, replace import with
-`use fcp_async_core::io::*` and verify MCP stdio server still works.
-
-**Deletion trigger:** One PR after the prerequisite, low risk.
+**Evidence:** `grep -r 'tokio' crates/fwc/src/serve_mcp.rs` returns no matches.
 
 ### 2.2 Exception-ledger thinking (hand-rolled error handling)
 
@@ -286,35 +273,20 @@ tokio = { version = "1", default-features = false, features = ["rt"] }
 
 ### 4.1 Raw `asupersync::` imports in non-core crates
 
-**Affected crates** (direct `asupersync::` imports instead of `fcp-async-core`):
+**Status: MOSTLY DELETED.** Production code no longer contains raw
+`asupersync::` imports outside `fcp-async-core`. The only remaining direct
+import is in `fcp-graphql/tests/client.rs` for server-side WebSocket test
+types (`ServerWebSocket`, `WebSocketAcceptor`) which are not re-exported by
+`fcp-async-core` because they are test-infrastructure-only.
 
-| Crate | Files | Imports |
-|-------|-------|---------|
-| `fcp-streaming` | `websocket.rs` | `asupersync::net::TcpStream`, `asupersync::tls::*`, `asupersync::net::websocket::*` |
-| `fcp-oauth` | `oauth2.rs`, `oauth1.rs` | `asupersync::net::*` |
-| `fcp-graphql` | `client.rs`, `retry.rs`, `subscription.rs` | `asupersync::net::*` |
-| `fcp-raptorq` | `decode.rs`, `encode.rs` | `asupersync::runtime::*` |
-| `fcp-tailscale` | `client.rs` | `asupersync::net::*` |
-| `fcp-telemetry` | `context.rs` | `asupersync::*` |
+**Evidence:** `grep -r 'use asupersync::' crates/ --include='*.rs'` returns
+only `fcp-async-core/src/lib.rs` (expected) and `fcp-graphql/tests/client.rs`
+(acceptable test infrastructure).
 
-**Classification:** REPLACE
-
-**Why:** These crates bypass the `fcp-async-core` abstraction layer. If
-asupersync APIs change, these break independently (as happened with the
-`socket.close(&Cx)` signature change in fcp-streaming).
-
-**Replacement pattern:** Replace `asupersync::net::TcpStream` with
-`fcp_async_core::net::TcpStream`, etc. For types not yet wrapped by
-fcp-async-core (like TLS, WebSocket), add thin wrappers.
-
-**Pilot:** Migrate `fcp-streaming/src/websocket.rs` first as a proof point.
-If successful, migrate remaining crates in batch.
-
-**Cutover signal:** fcp-streaming websocket module compiles and passes tests
-using only `fcp-async-core` imports.
-
-**Deletion trigger:** When zero non-test Rust files outside `fcp-async-core`
-contain `use asupersync::`.
+**Remaining:** The `fcp-graphql` test file's `Cx`, `AsyncRead`, and `ReadBuf`
+imports were migrated to `fcp_async_core::` equivalents in z1nkz.2. Only
+`ServerWebSocket` and `WebSocketAcceptor` remain as direct imports because they
+are server-side test types not part of fcp-async-core's public surface.
 
 ### 4.2 89 connector crates → ConnectorRuntime adoption
 

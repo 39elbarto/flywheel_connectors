@@ -185,41 +185,26 @@ pub use fcp_kernel::{
     sealed,
 };
 
-/// Policy, provenance, and evidence-adjacent types still re-exported from
-/// their lower-level crates while consumer rewiring continues.
+/// Shared primitives and protocol helpers still surfaced from `fcp-core`
+/// while the owner-crate cutover continues.
 pub use fcp_core::{
-    CapabilityGrant,
-    CapabilityId,
-    CapabilityToken,
-    CorrelationId,
-    CostEstimateConfidence,
-    CurrencyCost,
-    ErrorCategory,
-    // Events
-    FcpErrorResponse,
-    LivenessResponse,
-    ObjectId,
-    Principal,
-    // Provenance
-    Provenance,
-    ProvenanceStep,
-    RateLimitConfig,
-    RateLimitEnforcement,
-    RateLimitPool,
-    RateLimitScope,
-    RateLimitStatus,
+    CorrelationId, CostEstimateConfidence, CurrencyCost, ErrorCategory, FcpErrorResponse,
+    LivenessResponse, ReadinessResponse, ThreadInfo, ThreadKind, TraceContext,
+};
+
+/// Policy-owned types for connector authoring.
+pub use fcp_policy::{
+    CapabilityGrant, CapabilityId, CapabilityToken, Principal, Provenance, ProvenanceStep,
+    RiskLevel, SafetyTier, TaintFlag, TaintLevel, TrustLevel, ZoneId,
+};
+
+/// Evidence-owned content-addressed object types.
+pub use fcp_evidence::ObjectId;
+
+/// Rate-limit control types owned by `fcp-kernel`.
+pub use fcp_kernel::{
+    RateLimitConfig, RateLimitEnforcement, RateLimitPool, RateLimitScope, RateLimitStatus,
     RateLimitUnit,
-    ReadinessResponse,
-    RiskLevel,
-    // Observability
-    SafetyTier,
-    TaintFlag,
-    TaintLevel,
-    ThreadInfo,
-    ThreadKind,
-    TraceContext,
-    TrustLevel,
-    ZoneId,
 };
 
 /// Re-exports from fcp-manifest for connector configuration.

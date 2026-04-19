@@ -2,7 +2,7 @@
 //!
 //! Provides pre-built test data and factory functions.
 
-use fcp_core::{CapabilityToken, ConnectorId, HealthSnapshot};
+use fcp_sdk::{CapabilityToken, ConnectorId, HealthSnapshot};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Connector Fixtures

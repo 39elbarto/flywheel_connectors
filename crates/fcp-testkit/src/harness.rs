@@ -7,7 +7,7 @@
 
 use std::time::Instant;
 
-use fcp_core::{FcpConnector, FcpResult, HealthSnapshot};
+use fcp_sdk::{FcpConnector, FcpResult, HealthSnapshot};
 use tracing::{debug, info};
 
 /// Recorded operation for test inspection.

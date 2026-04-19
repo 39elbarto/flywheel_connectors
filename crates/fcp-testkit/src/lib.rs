@@ -77,5 +77,5 @@ pub use mock_server::*;
 pub use supervisor_examples::*;
 pub use tracing_config::*;
 
-// Re-export core types for convenience
-pub use fcp_core::{FcpConnector, FcpError, FcpResult, HealthSnapshot, HealthState};
+// Re-export SDK-owned connector surface for convenience.
+pub use fcp_sdk::{FcpConnector, FcpError, FcpResult, HealthSnapshot, HealthState};

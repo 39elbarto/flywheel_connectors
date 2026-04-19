@@ -10,11 +10,10 @@
 //! - Introspection generation
 
 use async_trait::async_trait;
-use fcp_core::EventInfo;
 use fcp_sdk::prelude::*;
 use fcp_sdk::{
-    OperationId, RateLimitDeclarations, ReplayBufferInfo, SelfCheckReport, SelfCheckStatus,
-    SessionId, SubscribeResult,
+    EventInfo, OperationId, RateLimitDeclarations, ReplayBufferInfo, SelfCheckReport,
+    SelfCheckStatus, SessionId, SubscribeResult,
 };
 use serde_json::json;
 
@@ -193,6 +192,26 @@ impl ConnectorApp for MinimalConnector {
         ConnectorCapabilityCatalog::from_introspection_and_rate_limits(introspection, None)
             .with_policy_assumption("requires a zone-scoped capability token")
     }
+}
+
+#[test]
+fn sdk_reexports_match_owner_crates() {
+    assert_eq!(
+        std::any::TypeId::of::<fcp_sdk::CapabilityToken>(),
+        std::any::TypeId::of::<fcp_policy::CapabilityToken>()
+    );
+    assert_eq!(
+        std::any::TypeId::of::<fcp_sdk::ZoneId>(),
+        std::any::TypeId::of::<fcp_policy::ZoneId>()
+    );
+    assert_eq!(
+        std::any::TypeId::of::<fcp_sdk::ObjectId>(),
+        std::any::TypeId::of::<fcp_evidence::ObjectId>()
+    );
+    assert_eq!(
+        std::any::TypeId::of::<fcp_sdk::RateLimitConfig>(),
+        std::any::TypeId::of::<fcp_kernel::RateLimitConfig>()
+    );
 }
 
 /// Streaming connector for testing streaming-specific functionality.

@@ -2,7 +2,7 @@
 //!
 //! Provides convenient assertion macros and functions for common test patterns.
 
-use fcp_core::{FcpError, FcpResult, HealthSnapshot, HealthState, InvokeResponse};
+use fcp_sdk::{FcpError, FcpResult, HealthSnapshot, HealthState, InvokeResponse};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Result Assertions

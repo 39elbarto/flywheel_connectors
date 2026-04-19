@@ -624,6 +624,16 @@ fn check_initialization_state(
         }
     }
 
+    if force_overwrite {
+        if let Some(phase) = partial_state {
+            tracing::warn!(
+                phase = %phase,
+                "Force overwrite enabled, ignoring partial bootstrap markers"
+            );
+        }
+        return Ok(InitCheckResult::Fresh);
+    }
+
     // Check for partial state
     if let Some(phase) = partial_state {
         return Ok(InitCheckResult::PartialState { phase });
@@ -1554,6 +1564,16 @@ mod tests {
     }
 
     #[test]
+    fn test_check_init_state_force_overwrite_ignores_partial_state_markers() {
+        let dir = tempdir().unwrap();
+        let phase = BootstrapPhase::KeyGeneration;
+        crate::phase::write_phase_lock(dir.path(), &phase).unwrap();
+
+        let result = check_initialization_state(dir.path(), true).unwrap();
+        assert!(matches!(result, InitCheckResult::Fresh));
+    }
+
+    #[test]
     fn test_check_init_state_corrupt_genesis_with_partial_state_prefers_recovery_marker() {
         let dir = tempdir().unwrap();
         let phase = BootstrapPhase::GenesisCreate;
@@ -1567,6 +1587,18 @@ mod tests {
                 phase: BootstrapPhase::GenesisCreate
             }
         ));
+    }
+
+    #[test]
+    fn test_check_init_state_force_overwrite_ignores_corrupt_genesis_partial_state() {
+        let dir = tempdir().unwrap();
+        let phase = BootstrapPhase::GenesisCreate;
+        crate::phase::write_phase_lock(dir.path(), &phase).unwrap();
+        std::fs::write(dir.path().join("genesis.cbor"), b"not cbor").unwrap();
+
+        let result = check_initialization_state(dir.path(), true).unwrap();
+        assert!(matches!(result, InitCheckResult::Fresh));
+        assert!(!dir.path().join("genesis.cbor").exists());
     }
 
     #[test]

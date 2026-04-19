@@ -159,6 +159,28 @@ async fn query_rejects_mutating_statements() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn execute_rejects_user_supplied_savepoint() {
+    // The Write policy allows the batch wrapper's internal SAVEPOINT
+    // `fcp_sqlite_batch`, but any other savepoint name supplied directly by a
+    // caller must still be rejected so users cannot open nested transactions.
+    let mut connector = setup_memory_connector().await;
+    let error = connector
+        .handle_invoke(json!({
+            "operation_id": "sqlite.execute",
+            "input": {
+                "sql": "SAVEPOINT user_sp"
+            }
+        }))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("safety policy")
+            || error.to_string().contains("denied"),
+        "expected savepoint rejection, got: {error}",
+    );
+}
+
+#[fcp_async_core::runtime::test]
 async fn execute_creates_table_and_inserts_rows() {
     let mut connector = setup_memory_connector().await;
     connector

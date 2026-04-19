@@ -79,10 +79,16 @@ fn authorize(policy: AuthorizerPolicy, ctx: AuthContext<'_>) -> Authorization {
             AuthorizerPolicy::ReadOnly | AuthorizerPolicy::Write => Authorization::Deny,
         },
         AuthAction::Transaction { .. } => Authorization::Deny,
-        AuthAction::Savepoint { .. } => match policy {
-            AuthorizerPolicy::Write => Authorization::Allow,
-            AuthorizerPolicy::ReadOnly | AuthorizerPolicy::PragmaRead => Authorization::Deny,
-        },
+        // Only allow the batch wrapper's own savepoint under Write; reject all
+        // user-supplied SAVEPOINT/RELEASE/ROLLBACK TO statements so callers
+        // cannot implicitly open nested transactions.
+        AuthAction::Savepoint { savepoint_name, .. }
+            if matches!(policy, AuthorizerPolicy::Write)
+                && savepoint_name == "fcp_sqlite_batch" =>
+        {
+            Authorization::Allow
+        }
+        AuthAction::Savepoint { .. } => Authorization::Deny,
         AuthAction::Select | AuthAction::Read { .. } | AuthAction::Recursive => {
             Authorization::Allow
         }

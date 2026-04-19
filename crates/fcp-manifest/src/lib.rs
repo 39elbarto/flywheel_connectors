@@ -188,6 +188,40 @@ impl ConnectorManifest {
             })?;
         }
 
+        let declared_capabilities: HashSet<&str> = self
+            .capabilities
+            .required
+            .iter()
+            .chain(self.capabilities.optional.iter())
+            .map(CapabilityId::as_str)
+            .collect();
+        let forbidden_capabilities: HashSet<&str> = self
+            .capabilities
+            .forbidden
+            .iter()
+            .map(CapabilityId::as_str)
+            .collect();
+        for (op_id, op) in &self.provides.operations {
+            let capability = op.capability.as_str();
+            if forbidden_capabilities.contains(capability) {
+                return Err(ManifestError::Invalid {
+                    field: "provides.operations.*.capability",
+                    message: format!(
+                        "operation `{op_id}` references forbidden capability `{capability}`"
+                    ),
+                });
+            }
+            if !declared_capabilities.contains(capability) {
+                return Err(ManifestError::Invalid {
+                    field: "provides.operations.*.capability",
+                    message: format!(
+                        "operation `{op_id}` capability `{capability}` must appear in \
+                         capabilities.required or capabilities.optional"
+                    ),
+                });
+            }
+        }
+
         // NORMATIVE: interface_hash must be well-formed and match computed value.
         let expected = self.compute_interface_hash()?;
         if self.manifest.interface_hash != expected {
@@ -2807,6 +2841,66 @@ deny_ptrace = true
         assert!(
             matches!(err, ManifestError::Invalid { field, .. } if field == "event_caps.min_buffer_events")
         );
+    }
+
+    #[test]
+    fn rejects_operation_capability_missing_from_declared_capabilities() {
+        let _log = TestLog::new(
+            "rejects_operation_capability_missing_from_declared_capabilities",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder).replace(
+            "required = [\"telegram.send_message\"]",
+            "required = [\"telegram.read_message\"]",
+        );
+
+        let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+        let hash = unchecked.compute_interface_hash().expect("compute hash");
+        let with_hash = test_manifest_toml(&hash.to_string()).replace(
+            "required = [\"telegram.send_message\"]",
+            "required = [\"telegram.read_message\"]",
+        );
+
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::Invalid { field, .. } if field == "provides.operations.*.capability"
+        ));
+        assert!(err.to_string().contains("must appear in capabilities.required"));
+    }
+
+    #[test]
+    fn rejects_operation_capability_marked_forbidden() {
+        let _log = TestLog::new(
+            "rejects_operation_capability_marked_forbidden",
+            "fcp-manifest",
+            Some("fcp.telegram"),
+            Some("2026.1.0"),
+            Some(4),
+        );
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder).replace(
+            "forbidden = [\"system.exec\"]",
+            "forbidden = [\"system.exec\", \"telegram.send_message\"]",
+        );
+
+        let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
+        let hash = unchecked.compute_interface_hash().expect("compute hash");
+        let with_hash = test_manifest_toml(&hash.to_string()).replace(
+            "forbidden = [\"system.exec\"]",
+            "forbidden = [\"system.exec\", \"telegram.send_message\"]",
+        );
+
+        let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::Invalid { field, .. } if field == "provides.operations.*.capability"
+        ));
+        assert!(err.to_string().contains("references forbidden capability"));
     }
 
     #[test]

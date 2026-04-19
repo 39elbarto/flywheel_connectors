@@ -222,6 +222,9 @@ impl StripeWebhook {
             .with_headers(headers.clone()))
     }
 
+    /// Maximum number of `v1=` signatures accepted from a single header.
+    const MAX_STRIPE_SIGNATURES: usize = 10;
+
     /// Parse Stripe signature header.
     fn parse_stripe_signature(header: &str) -> WebhookResult<(String, i64, Vec<String>)> {
         let mut timestamp = None;
@@ -232,6 +235,11 @@ impl StripeWebhook {
             if let Some(ts) = part.strip_prefix("t=") {
                 timestamp = ts.parse().ok().map(|parsed| (ts.to_string(), parsed));
             } else if let Some(sig) = part.strip_prefix("v1=") {
+                if signatures.len() >= Self::MAX_STRIPE_SIGNATURES {
+                    return Err(WebhookError::InvalidPayload(
+                        "too many signatures in Stripe-Signature header".into(),
+                    ));
+                }
                 signatures.push(sig.to_string());
             }
         }
@@ -1421,6 +1429,33 @@ mod tests {
         assert_eq!(sigs.len(), 2);
         assert_eq!(sigs[0], "sig1");
         assert_eq!(sigs[1], "sig2");
+    }
+
+    #[test]
+    fn test_stripe_parse_signature_rejects_excessive_v1_signatures() {
+        // Build a header with MAX_STRIPE_SIGNATURES + 1 v1= entries.
+        let sigs: Vec<String> = (0..=StripeWebhook::MAX_STRIPE_SIGNATURES)
+            .map(|i| format!("v1=sig{i}"))
+            .collect();
+        let header = format!("t=1234567890,{}", sigs.join(","));
+        let result = StripeWebhook::parse_stripe_signature(&header);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("too many signatures"),
+            "expected 'too many signatures' error, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn test_stripe_parse_signature_accepts_max_v1_signatures() {
+        // Exactly MAX_STRIPE_SIGNATURES should succeed.
+        let sigs: Vec<String> = (0..StripeWebhook::MAX_STRIPE_SIGNATURES)
+            .map(|i| format!("v1=sig{i}"))
+            .collect();
+        let header = format!("t=1234567890,{}", sigs.join(","));
+        let (_, _, parsed) = StripeWebhook::parse_stripe_signature(&header).unwrap();
+        assert_eq!(parsed.len(), StripeWebhook::MAX_STRIPE_SIGNATURES);
     }
 
     #[test]

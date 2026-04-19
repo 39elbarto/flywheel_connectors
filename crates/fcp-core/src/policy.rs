@@ -3079,7 +3079,55 @@ fn approval_token_object_id(token: &ApprovalToken) -> ObjectId {
 }
 
 fn sanitizer_receipt_object_id(receipt: &SanitizerReceipt) -> ObjectId {
-    ObjectId::from_unscoped_bytes(receipt.receipt_id.as_bytes())
+    // SECURITY: Content-address the full receipt to prevent two distinct
+    // receipts that happen to share `receipt_id` from collapsing onto the
+    // same ObjectId. The previous implementation hashed only `receipt_id`,
+    // so an issuer that minted two receipts with the same id (different
+    // covered_inputs, sanitizer_zone, signature, or cleared_flags) would
+    // produce indistinguishable ObjectIds. Once a content-addressed
+    // receipt store ships (the docstring on `receipt_id` calls it out as
+    // "becomes ObjectId when stored"), that collision becomes an actual
+    // overwrite — and even today, the audit chain stores the ObjectId in
+    // `TaintReduction.sanitizer_receipt_id` so a duplicate id makes
+    // post-hoc receipt lookup ambiguous.
+    //
+    // Mirrors the same primary/fallback split used by
+    // `approval_token_object_id` so the two evidence types follow the
+    // same content-addressing contract.
+    if let Ok(bytes) = fcp_cbor::to_canonical_cbor(receipt) {
+        return ObjectId::from_unscoped_bytes(&bytes);
+    }
+    // Fallback: canonical CBOR can fail when an attacker-supplied
+    // signature pushes the receipt past MAX_CANONICAL_OBJECT_BYTES.
+    // Length-delimit every field so the fallback hash also depends on
+    // the full content, not just `receipt_id`.
+    let mut buf = Vec::with_capacity(256);
+    buf.extend_from_slice(b"FCP/SanitizerReceipt/fallback/v1");
+    let auth_bytes = serde_json::to_vec(&receipt.authorized_flags).unwrap_or_default();
+    let cleared_bytes = serde_json::to_vec(&receipt.cleared_flags).unwrap_or_default();
+    let covered_bytes = serde_json::to_vec(&receipt.covered_inputs).unwrap_or_default();
+    let sig_bytes: Vec<u8> = receipt
+        .signature
+        .as_deref()
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
+    let fields: [&[u8]; 8] = [
+        receipt.receipt_id.as_bytes(),
+        &receipt.timestamp_ms.to_le_bytes(),
+        receipt.sanitizer_id.as_bytes(),
+        receipt.sanitizer_zone.as_str().as_bytes(),
+        &auth_bytes,
+        &cleared_bytes,
+        &covered_bytes,
+        &sig_bytes,
+    ];
+    for field in fields {
+        buf.extend_from_slice(&(field.len() as u64).to_le_bytes());
+        buf.extend_from_slice(field);
+    }
+    // Distinguish `None` vs `Some(empty)` for `signature`.
+    buf.push(u8::from(receipt.signature.is_some()));
+    ObjectId::from_unscoped_bytes(&buf)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3367,6 +3415,67 @@ mod tests {
 
         assert_ne!(id1, id2);
         assert_ne!(id1, ObjectId::from_unscoped_bytes(b"test-token-123"));
+    }
+
+    #[test]
+    fn test_sanitizer_receipt_object_id_collision_resistance() {
+        // Two distinct receipts that share `receipt_id` but cover different
+        // inputs MUST produce different ObjectIds. The previous behavior
+        // hashed only `receipt_id`, so an issuer minting "rcpt-x" twice
+        // with different `covered_inputs` got the same ObjectId — and that
+        // ObjectId was then stored in `TaintReduction.sanitizer_receipt_id`
+        // as the audit reference, making the two events indistinguishable
+        // in the audit trail and primed for an actual data overwrite the
+        // moment a content-addressed receipt store ships.
+        let base = SanitizerReceipt {
+            receipt_id: "rcpt-collision".to_string(),
+            timestamp_ms: 1_700_000_000_000,
+            sanitizer_id: "sanitizer-a".to_string(),
+            sanitizer_zone: ZoneId::work(),
+            authorized_flags: vec![TaintFlag::PublicInput],
+            covered_inputs: vec![ObjectId::from_unscoped_bytes(b"input-A")],
+            cleared_flags: vec![TaintFlag::PublicInput],
+            signature: None,
+        };
+        let mut other = base.clone();
+        other.covered_inputs = vec![ObjectId::from_unscoped_bytes(b"input-B")];
+
+        let id_base = sanitizer_receipt_object_id(&base);
+        let id_other = sanitizer_receipt_object_id(&other);
+
+        assert_ne!(
+            id_base, id_other,
+            "receipts that differ only in covered_inputs MUST get distinct ObjectIds"
+        );
+        assert_ne!(
+            id_base,
+            ObjectId::from_unscoped_bytes(b"rcpt-collision"),
+            "ObjectId MUST NOT be derivable from receipt_id alone"
+        );
+
+        // Same receipt_id, same covered_inputs, different sanitizer_zone:
+        // also must differ.
+        let mut other_zone = base.clone();
+        other_zone.sanitizer_zone = ZoneId::owner();
+        let id_other_zone = sanitizer_receipt_object_id(&other_zone);
+        assert_ne!(
+            id_base, id_other_zone,
+            "receipts that differ only in sanitizer_zone MUST get distinct ObjectIds"
+        );
+
+        // Same receipt_id, same covered_inputs, signature added:
+        // also must differ. This is the standard "issuer re-signed an
+        // existing receipt id" attack surface.
+        let mut other_sig = base.clone();
+        other_sig.signature = Some(vec![0xAA; 64]);
+        let id_other_sig = sanitizer_receipt_object_id(&other_sig);
+        assert_ne!(
+            id_base, id_other_sig,
+            "receipts that differ only in signature presence MUST get distinct ObjectIds"
+        );
+
+        // Determinism: same receipt → same id across calls.
+        assert_eq!(id_base, sanitizer_receipt_object_id(&base));
     }
 
     // ── TransportMode ──────────────────────────────────────────────────────

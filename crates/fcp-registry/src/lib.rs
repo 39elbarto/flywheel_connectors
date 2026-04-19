@@ -158,6 +158,24 @@ pub enum RegistryCatalogError {
         artifact_hash: String,
         actual_hash: String,
     },
+    #[error("signed package `{path}` failed to compute manifest signing bytes: {message}")]
+    ManifestSigningBytes { path: PathBuf, message: String },
+    #[error(
+        "signed package `{path}` manifest signing digest mismatch (artifact {artifact_hash}, actual {actual_hash})"
+    )]
+    ManifestSigningHashMismatch {
+        path: PathBuf,
+        artifact_hash: String,
+        actual_hash: String,
+    },
+    #[error("signed package `{path}` has unsupported signature context `{context}`")]
+    SignatureContextMismatch { path: PathBuf, context: String },
+    #[error("signed package `{path}` has invalid verifying key encoding")]
+    SignatureVerifyingKeyInvalid { path: PathBuf },
+    #[error("signed package `{path}` has invalid signature bytes")]
+    SignatureBytesInvalid { path: PathBuf },
+    #[error("signed package `{path}` manifest signature verification failed")]
+    SignatureInvalid { path: PathBuf },
     #[error("duplicate signed package for `{connector_id}` version `{version}` target `{target}`")]
     DuplicateTarget {
         connector_id: String,
@@ -734,7 +752,8 @@ impl SigstoreVerifier for MockSigstoreVerifier {
 impl VerifiedConnectorBundle {
     #[must_use]
     pub fn report(&self, outcome: &str) -> RegistryVerificationReport {
-        let verified_at = u64::try_from(Utc::now().timestamp()).expect("system clock before year 2262");
+        let verified_at =
+            u64::try_from(Utc::now().timestamp()).expect("system clock before year 2262");
         RegistryVerificationReport {
             connector_id: self.manifest.connector.id.to_string(),
             manifest_hash: self.manifest_hash.clone(),
@@ -1018,7 +1037,8 @@ impl RegistryVerifier {
         let store_oti = ObjectTransmissionInfo::from(encoder.transmission_info());
         let source_symbols = encoder.source_symbols();
         let total_symbols = encoder.total_symbols();
-        let mirrored_at = u64::try_from(Utc::now().timestamp()).expect("system clock before year 2262");
+        let mirrored_at =
+            u64::try_from(Utc::now().timestamp()).expect("system clock before year 2262");
 
         let symbol_meta = ObjectSymbolMeta {
             object_id: mirror.binary_object_id,
@@ -1758,6 +1778,26 @@ impl LocalRegistryCatalog {
                     source,
                 }
             })?;
+        let signing_bytes = manifest_signing_bytes(&manifest).map_err(|error| {
+            RegistryCatalogError::ManifestSigningBytes {
+                path: package_dir.to_path_buf(),
+                message: error.to_string(),
+            }
+        })?;
+        let actual_manifest_signing_hash = hash_bytes(&signing_bytes);
+        if actual_manifest_signing_hash != signature.manifest_signing_hash {
+            return Err(RegistryCatalogError::ManifestSigningHashMismatch {
+                path: package_dir.to_path_buf(),
+                artifact_hash: signature.manifest_signing_hash.clone(),
+                actual_hash: actual_manifest_signing_hash,
+            });
+        }
+        if signature.context.as_bytes() != MANIFEST_SIGNATURE_CONTEXT {
+            return Err(RegistryCatalogError::SignatureContextMismatch {
+                path: package_dir.to_path_buf(),
+                context: signature.context.clone(),
+            });
+        }
 
         // Reject path traversal in binary_name from deserialized signature JSON.
         let binary_file = std::path::Path::new(&signature.binary_name);
@@ -1795,6 +1835,38 @@ impl LocalRegistryCatalog {
                 actual_hash: binary_sha256,
             });
         }
+        let verifying_key_vec = hex::decode(&signature.verifying_key).map_err(|_| {
+            RegistryCatalogError::SignatureVerifyingKeyInvalid {
+                path: package_dir.to_path_buf(),
+            }
+        })?;
+        let verifying_key_bytes: [u8; 32] =
+            verifying_key_vec.as_slice().try_into().map_err(|_| {
+                RegistryCatalogError::SignatureVerifyingKeyInvalid {
+                    path: package_dir.to_path_buf(),
+                }
+            })?;
+        let verifying_key =
+            Ed25519VerifyingKey::from_bytes(&verifying_key_bytes).map_err(|_| {
+                RegistryCatalogError::SignatureVerifyingKeyInvalid {
+                    path: package_dir.to_path_buf(),
+                }
+            })?;
+        let signature_bytes = Base64Bytes::try_from(signature.signature.clone()).map_err(|_| {
+            RegistryCatalogError::SignatureBytesInvalid {
+                path: package_dir.to_path_buf(),
+            }
+        })?;
+        let detached_signature = Ed25519Signature::try_from_slice(signature_bytes.as_bytes())
+            .map_err(|_| RegistryCatalogError::SignatureBytesInvalid {
+                path: package_dir.to_path_buf(),
+            })?;
+        let message = signature_message(&signing_bytes, &signature.binary_hash);
+        verifying_key
+            .verify_with_context(MANIFEST_SIGNATURE_CONTEXT, &message, &detached_signature)
+            .map_err(|_| RegistryCatalogError::SignatureInvalid {
+                path: package_dir.to_path_buf(),
+            })?;
 
         let attestation_path = package_dir.join(REGISTRY_ATTESTATION_FILENAME);
         let attestation_json = std::fs::read_to_string(&attestation_path)
@@ -1863,9 +1935,8 @@ impl LocalRegistryCatalog {
         let manifest_url = format!(
             "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/manifest"
         );
-        let binary_url = format!(
-            "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/binary"
-        );
+        let binary_url =
+            format!("/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/binary");
         let signature_url = format!(
             "/v1/connectors/{connector_id}/versions/{version}/targets/{os}/{arch}/signature"
         );
@@ -11515,6 +11586,86 @@ trusted_builders = ["trusted-ci"]
         assert!(
             msg.contains("path traversal"),
             "expected PathTraversal error, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn local_registry_catalog_rejects_manifest_signing_hash_mismatch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = ConnectorTarget {
+            os: "linux".to_string(),
+            arch: "amd64".to_string(),
+        };
+
+        let package_dir = write_signed_package_dir(
+            temp.path(),
+            "fcp.hash-test",
+            "1.0.0",
+            target,
+            "legit-binary",
+            b"binary-content",
+        );
+
+        let sig_path = package_dir.join(REGISTRY_MANIFEST_SIGNATURE_FILENAME);
+        let mut artifact: ManifestSignatureArtifact =
+            serde_json::from_str(&std::fs::read_to_string(&sig_path).expect("read signature"))
+                .expect("parse signature artifact");
+        artifact.manifest_signing_hash = "sha256:deadbeef".to_string();
+        std::fs::write(
+            &sig_path,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&artifact).expect("serialize signature artifact")
+            ),
+        )
+        .expect("write poisoned signature");
+
+        let err = LocalRegistryCatalog::from_signed_package_dirs(&[package_dir])
+            .expect_err("manifest signing hash mismatch should be rejected");
+        assert!(
+            err.to_string().contains("manifest signing digest mismatch"),
+            "expected manifest signing hash rejection, got: {err}",
+        );
+    }
+
+    #[test]
+    fn local_registry_catalog_rejects_invalid_detached_manifest_signature() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = ConnectorTarget {
+            os: "linux".to_string(),
+            arch: "amd64".to_string(),
+        };
+
+        let package_dir = write_signed_package_dir(
+            temp.path(),
+            "fcp.sig-test",
+            "1.0.0",
+            target,
+            "legit-binary",
+            b"binary-content",
+        );
+
+        let sig_path = package_dir.join(REGISTRY_MANIFEST_SIGNATURE_FILENAME);
+        let mut artifact: ManifestSignatureArtifact =
+            serde_json::from_str(&std::fs::read_to_string(&sig_path).expect("read signature"))
+                .expect("parse signature artifact");
+        artifact.signature = "base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string();
+        std::fs::write(
+            &sig_path,
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&artifact).expect("serialize signature artifact")
+            ),
+        )
+        .expect("write poisoned signature");
+
+        let err = LocalRegistryCatalog::from_signed_package_dirs(&[package_dir])
+            .expect_err("invalid detached signature should be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("manifest signature verification failed")
+                || message.contains("invalid signature bytes"),
+            "expected detached signature rejection, got: {message}",
         );
     }
 

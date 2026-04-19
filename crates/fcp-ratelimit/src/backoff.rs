@@ -214,7 +214,8 @@ impl LinearBackoff {
 
 impl BackoffStrategy for LinearBackoff {
     fn next_backoff(&mut self, attempt: u32) -> Duration {
-        let delay = self.initial + self.increment * attempt;
+        let increment = self.increment.checked_mul(attempt).unwrap_or(self.max);
+        let delay = self.initial.checked_add(increment).unwrap_or(self.max);
         delay.min(self.max)
     }
 
@@ -1260,6 +1261,19 @@ mod tests {
         );
         assert_eq!(backoff.next_backoff(0), Duration::from_secs(5));
         assert_eq!(backoff.next_backoff(1), Duration::from_secs(5)); // capped
+    }
+
+    #[test]
+    fn linear_backoff_overflow_caps_at_max() {
+        let max = Duration::MAX.saturating_sub(Duration::from_millis(1));
+        let mut backoff = LinearBackoff::new(
+            Duration::MAX.saturating_sub(Duration::from_secs(1)),
+            Duration::from_secs(2),
+            max,
+        );
+
+        assert_eq!(backoff.next_backoff(1), max);
+        assert_eq!(backoff.next_backoff(u32::MAX), max);
     }
 
     #[test]

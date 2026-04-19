@@ -364,7 +364,9 @@ fn canonicalize_map(
     use std::cmp::Ordering;
 
     // Pre-allocate scratch buffer. Typical CBOR map keys are 10-50 bytes each.
-    let mut scratch = Vec::with_capacity(entries.len() * 32);
+    // Cap allocation to prevent memory amplification from maps with many tiny entries.
+    let scratch_cap = entries.len().saturating_mul(32).min(MAX_CANONICAL_OBJECT_BYTES);
+    let mut scratch = Vec::with_capacity(scratch_cap);
     let mut with_keys = Vec::with_capacity(entries.len());
 
     for (mut key, mut value) in std::mem::take(entries) {

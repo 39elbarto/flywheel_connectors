@@ -170,7 +170,7 @@ impl ReconnectHandler {
         );
 
         sleep(delay).await;
-        self.attempts += 1;
+        self.attempts = self.attempts.saturating_add(1);
 
         Ok(())
     }

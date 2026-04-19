@@ -925,7 +925,27 @@ pub fn verify_chain(
 
         let mut prev = first;
         for entry in iter {
-            let expected_seq = prev.seq.saturating_add(1);
+            // Use checked_add so seq == u64::MAX is correctly treated as a
+            // terminal state, consistent with AuditEntry::follows().
+            // saturating_add would silently accept a stalled chain.
+            let expected_seq = match prev.seq.checked_add(1) {
+                Some(next) => next,
+                None => {
+                    issues.push(
+                        VerifyIssue::new(
+                            "audit.seq_overflow",
+                            format!(
+                                "sequence number overflow: previous seq {} cannot be incremented",
+                                prev.seq
+                            ),
+                        )
+                        .with_seq(prev.seq)
+                        .with_entry_id(&prev.id),
+                    );
+                    // Cannot validate further entries after overflow.
+                    break;
+                }
+            };
             if entry.seq != expected_seq {
                 issues.push(
                     VerifyIssue::new(
@@ -2567,6 +2587,29 @@ mod tests {
         let report = verify_chain(&entries, None, None);
         assert!(report.status.is_ok());
         assert_eq!(report.chain_len, 3);
+    }
+
+    #[test]
+    fn verify_chain_seq_overflow_stops_validation() {
+        let mut e0 = genesis_entry();
+        e0.seq = u64::MAX;
+        let e1 = chain_entry(7, "entry-0");
+
+        let report = verify_chain(&[e0, e1], None, None);
+
+        assert_eq!(report.status, VerifyStatus::Fail);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "audit.seq_overflow"),
+            "expected audit.seq_overflow issue, got {:?}",
+            report.issues
+        );
+        assert!(
+            !report.issues.iter().any(|issue| issue.code == "audit.seq_gap"),
+            "overflow should terminate chain validation before seq-gap checks"
+        );
     }
 
     #[test]

@@ -38,9 +38,9 @@ impl SymbolDistribution {
     /// Record a symbol stored on a node.
     pub fn add_symbol(&mut self, node_id: u64, symbol_bytes: u64) {
         let entry = self.nodes.entry(node_id).or_insert((0, 0));
-        entry.0 += 1;
-        entry.1 += symbol_bytes;
-        self.total_symbols += 1;
+        entry.0 = entry.0.saturating_add(1);
+        entry.1 = entry.1.saturating_add(symbol_bytes);
+        self.total_symbols = self.total_symbols.saturating_add(1);
         // O(1) max update: new count can only increase the max.
         if entry.0 > self.cached_max {
             self.cached_max = entry.0;

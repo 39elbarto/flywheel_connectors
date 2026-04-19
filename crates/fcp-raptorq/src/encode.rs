@@ -113,7 +113,7 @@ impl RaptorQEncoder {
     /// Get total symbols (source + repair).
     #[must_use]
     pub fn total_symbols(&self) -> u32 {
-        self.source_symbols() + self.repair_symbols()
+        self.source_symbols().saturating_add(self.repair_symbols())
     }
 
     /// Generate all source + repair symbols.

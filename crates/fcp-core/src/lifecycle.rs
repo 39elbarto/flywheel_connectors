@@ -458,7 +458,7 @@ impl LifecycleRecord {
         if self.health.samples > 0 {
             let rate =
                 (self.health.successes as f64 / self.health.samples as f64 * 100.0).min(100.0);
-            self.health.success_rate = rate as u8;
+            self.health.success_rate = rate.round() as u8;
         }
 
         // Update latency tracking

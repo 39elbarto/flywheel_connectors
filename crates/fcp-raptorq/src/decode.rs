@@ -454,8 +454,10 @@ impl RaptorQDecoder {
     /// K' is approximately K x 1.002.
     #[must_use]
     pub fn needed(&self) -> u32 {
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let k_prime = (f64::from(self.k) * 1.002).ceil() as u32;
+        // K' ≈ ceil(K × 1.002) using integer arithmetic to avoid f64
+        // precision loss for large K values.
+        let overhead = (u64::from(self.k) * 2 + 999) / 1000;
+        let k_prime = u32::try_from(u64::from(self.k) + overhead).unwrap_or(u32::MAX);
         k_prime.max(1)
     }
 

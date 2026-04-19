@@ -6,12 +6,12 @@
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
 
-use fcp_core::{ObjectId, RetentionClass, ZoneId};
+use fcp_core::{ObjectId, RetentionClass, StoredObject, ZoneId};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{GcError, ObjectStoreError, SymbolStoreError};
 use crate::object_store::ObjectStore;
-use crate::symbol_store::{ObjectSymbolMeta, StoredSymbol, SymbolStore};
+use crate::symbol_store::SymbolStore;
 
 #[derive(Debug)]
 struct SweepCandidate {
@@ -28,9 +28,8 @@ struct SweepPlan {
 }
 
 #[derive(Debug)]
-struct SymbolSnapshot {
-    meta: ObjectSymbolMeta,
-    symbols: Vec<StoredSymbol>,
+struct ObjectSnapshot {
+    object: StoredObject,
 }
 
 /// Action taken for an object during a GC sweep.
@@ -336,19 +335,23 @@ impl GarbageCollector {
         let mut expired_leases = 0;
 
         for candidate in &plan.candidates {
-            let symbol_snapshot = load_symbol_snapshot(symbol_store, &candidate.object_id).await?;
+            let object_snapshot = load_object_snapshot(store, &candidate.object_id).await?;
 
-            // Snapshot symbol data so we can roll back if object deletion fails
-            // after symbol pruning.
-            match symbol_store.delete_object(&candidate.object_id).await {
-                Ok(()) | Err(SymbolStoreError::ObjectNotFound(_)) => {}
-                Err(err) => return Err(GcError::SymbolStore(err)),
-            }
-            if let Err(err) = store.delete(&candidate.object_id).await {
-                if let Some(snapshot) = symbol_snapshot {
-                    restore_symbol_snapshot(symbol_store, snapshot).await?;
+            // Delete the object before pruning symbols so concurrent readers do
+            // not observe a live object with a missing coverage index.
+            match store.delete(&candidate.object_id).await {
+                Ok(()) | Err(ObjectStoreError::NotFound(_)) => {}
+                Err(err) => {
+                    return Err(GcError::ObjectStore(err));
                 }
-                return Err(GcError::ObjectStore(err));
+            }
+            if let Err(err) = symbol_store.delete_object(&candidate.object_id).await {
+                if let Some(snapshot) = object_snapshot {
+                    restore_object_snapshot(store, snapshot).await?;
+                }
+                if !matches!(err, SymbolStoreError::ObjectNotFound(_)) {
+                    return Err(GcError::SymbolStore(err));
+                }
             }
 
             evicted += 1;
@@ -549,29 +552,25 @@ impl GarbageCollector {
     }
 }
 
-async fn load_symbol_snapshot(
-    symbol_store: &dyn SymbolStore,
+async fn load_object_snapshot(
+    store: &dyn ObjectStore,
     object_id: &ObjectId,
-) -> Result<Option<SymbolSnapshot>, SymbolStoreError> {
-    match symbol_store.get_object_meta(object_id).await {
-        Ok(meta) => Ok(Some(SymbolSnapshot {
-            meta,
-            symbols: symbol_store.get_all_symbols(object_id).await,
-        })),
-        Err(SymbolStoreError::ObjectNotFound(_)) => Ok(None),
+) -> Result<Option<ObjectSnapshot>, ObjectStoreError> {
+    match store.get(object_id).await {
+        Ok(object) => Ok(Some(ObjectSnapshot { object })),
+        Err(ObjectStoreError::NotFound(_)) => Ok(None),
         Err(err) => Err(err),
     }
 }
 
-async fn restore_symbol_snapshot(
-    symbol_store: &dyn SymbolStore,
-    snapshot: SymbolSnapshot,
-) -> Result<(), SymbolStoreError> {
-    symbol_store.put_object_meta(snapshot.meta).await?;
-    for symbol in snapshot.symbols {
-        symbol_store.put_symbol(symbol).await?;
+async fn restore_object_snapshot(
+    store: &dyn ObjectStore,
+    snapshot: ObjectSnapshot,
+) -> Result<(), ObjectStoreError> {
+    match store.put(snapshot.object).await {
+        Ok(()) | Err(ObjectStoreError::AlreadyExists(_)) => Ok(()),
+        Err(err) => Err(err),
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -691,6 +690,104 @@ mod tests {
 
         async fn storage_quota(&self) -> u64 {
             self.inner.storage_quota().await
+        }
+    }
+
+    struct FaultInjectingSymbolStore {
+        inner: MemorySymbolStore,
+        fail_delete_io: Option<ObjectId>,
+    }
+
+    impl FaultInjectingSymbolStore {
+        fn new(inner: MemorySymbolStore) -> Self {
+            Self {
+                inner,
+                fail_delete_io: None,
+            }
+        }
+
+        fn with_delete_io(mut self, object_id: ObjectId) -> Self {
+            self.fail_delete_io = Some(object_id);
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SymbolStore for FaultInjectingSymbolStore {
+        async fn put_symbol(&self, symbol: StoredSymbol) -> Result<(), SymbolStoreError> {
+            self.inner.put_symbol(symbol).await
+        }
+
+        async fn put_object_meta(&self, meta: ObjectSymbolMeta) -> Result<(), SymbolStoreError> {
+            self.inner.put_object_meta(meta).await
+        }
+
+        async fn get_symbol(
+            &self,
+            object_id: &ObjectId,
+            esi: u32,
+        ) -> Result<StoredSymbol, SymbolStoreError> {
+            self.inner.get_symbol(object_id, esi).await
+        }
+
+        async fn get_object_meta(
+            &self,
+            object_id: &ObjectId,
+        ) -> Result<ObjectSymbolMeta, SymbolStoreError> {
+            self.inner.get_object_meta(object_id).await
+        }
+
+        async fn get_all_symbols(&self, object_id: &ObjectId) -> Vec<StoredSymbol> {
+            self.inner.get_all_symbols(object_id).await
+        }
+
+        async fn symbol_count(&self, object_id: &ObjectId) -> u32 {
+            self.inner.symbol_count(object_id).await
+        }
+
+        async fn delete_object(&self, object_id: &ObjectId) -> Result<(), SymbolStoreError> {
+            if self.fail_delete_io == Some(*object_id) {
+                return Err(SymbolStoreError::Io("delete unavailable".to_owned()));
+            }
+            self.inner.delete_object(object_id).await
+        }
+
+        async fn delete_symbol(
+            &self,
+            object_id: &ObjectId,
+            esi: u32,
+        ) -> Result<(), SymbolStoreError> {
+            self.inner.delete_symbol(object_id, esi).await
+        }
+
+        async fn get_distribution(&self, object_id: &ObjectId) -> Option<crate::SymbolDistribution> {
+            self.inner.get_distribution(object_id).await
+        }
+
+        async fn list_zone(&self, zone_id: &ZoneId) -> Vec<ObjectId> {
+            self.inner.list_zone(zone_id).await
+        }
+
+        async fn storage_used(&self) -> u64 {
+            self.inner.storage_used().await
+        }
+
+        async fn storage_quota(&self) -> u64 {
+            self.inner.storage_quota().await
+        }
+
+        async fn can_reconstruct(&self, object_id: &ObjectId) -> bool {
+            self.inner.can_reconstruct(object_id).await
+        }
+
+        async fn can_reconstruct_with_policy(
+            &self,
+            object_id: &ObjectId,
+            policy: &fcp_core::ObjectPlacementPolicy,
+        ) -> bool {
+            self.inner
+                .can_reconstruct_with_policy(object_id, policy)
+                .await
         }
     }
 
@@ -2025,6 +2122,96 @@ mod tests {
                         "error": "delete unavailable",
                         "object_preserved": true,
                         "symbols_restored": true
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn gc_collect_and_prune_symbols_restores_object_when_symbol_delete_fails() {
+        run_store_test(
+            "gc_collect_and_prune_symbols_restores_object_when_symbol_delete_fails",
+            "adversarial",
+            "gc",
+            6,
+            || async {
+                let object_id = ObjectId::from_bytes([8; 32]);
+                let object_store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                object_store
+                    .put(test_object(8, vec![], RetentionClass::Ephemeral))
+                    .await
+                    .unwrap();
+                let symbol_store = FaultInjectingSymbolStore::new(MemorySymbolStore::new(
+                    MemorySymbolStoreConfig::default(),
+                ))
+                .with_delete_io(object_id);
+                let gc = GarbageCollector::new(GcConfig::default());
+
+                let meta = ObjectSymbolMeta {
+                    object_id,
+                    zone_id: test_zone(),
+                    oti: ObjectTransmissionInfo {
+                        transfer_length: 256,
+                        symbol_size: 64,
+                        source_blocks: 1,
+                        sub_blocks: 1,
+                        alignment: 8,
+                        payload_hash: None,
+                    },
+                    source_symbols: 1,
+                    first_symbol_at: 3_000_000,
+                };
+                symbol_store.put_object_meta(meta.clone()).await.unwrap();
+                let stored_symbol = StoredSymbol {
+                    meta: SymbolMeta {
+                        object_id,
+                        esi: 0,
+                        zone_id: test_zone(),
+                        source_node: Some(8),
+                        stored_at: 3_000_000,
+                    },
+                    data: Bytes::from(vec![8_u8; 64]),
+                };
+                symbol_store
+                    .put_symbol(stored_symbol.clone())
+                    .await
+                    .unwrap();
+
+                let result = gc
+                    .collect_and_prune_symbols(
+                        &test_zone(),
+                        &GcRoots::new(),
+                        &object_store,
+                        &symbol_store,
+                        0,
+                    )
+                    .await;
+
+                assert!(
+                    matches!(result, Err(GcError::SymbolStore(SymbolStoreError::Io(message))) if message == "delete unavailable")
+                );
+                assert!(object_store.exists(&object_id).await);
+                assert_eq!(
+                    symbol_store.get_object_meta(&object_id).await.unwrap(),
+                    meta
+                );
+                let preserved_symbol = symbol_store.get_symbol(&object_id, 0).await.unwrap();
+                assert_eq!(preserved_symbol.meta.object_id, stored_symbol.meta.object_id);
+                assert_eq!(preserved_symbol.meta.esi, stored_symbol.meta.esi);
+                assert_eq!(preserved_symbol.meta.zone_id, stored_symbol.meta.zone_id);
+                assert_eq!(
+                    preserved_symbol.meta.source_node,
+                    stored_symbol.meta.source_node
+                );
+                assert_eq!(preserved_symbol.data, stored_symbol.data);
+
+                StoreLogData {
+                    details: Some(json!({
+                        "error": "delete unavailable",
+                        "object_restored": true,
+                        "symbols_preserved": true
                     })),
                     ..StoreLogData::default()
                 }

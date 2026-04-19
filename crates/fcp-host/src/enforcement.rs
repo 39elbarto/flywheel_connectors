@@ -993,7 +993,7 @@ impl EnforcementCheck for BudgetCheck {
             (None, _) | (_, None) => CheckOutcome::Skip {
                 reason: "budget data not available".into(),
             },
-            (Some(used), Some(limit)) if used < limit => CheckOutcome::Allow,
+            (Some(used), Some(limit)) if used <= limit => CheckOutcome::Allow,
             (Some(used), Some(limit)) => CheckOutcome::Deny {
                 reason_code: "BUDGET_EXCEEDED".into(),
                 explanation: format!("budget used {used} has reached limit {limit}"),
@@ -2527,16 +2527,13 @@ mod tests {
     }
 
     #[test]
-    fn budget_deny_at_limit() {
+    fn budget_allow_at_limit() {
         let mut ctx = test_context();
         ctx.budget_used = Some(1000);
         ctx.budget_limit = Some(1000);
         let config = EnforcementConfig::default();
         let outcome = BudgetCheck.check(&ctx, &config);
-        assert!(outcome.is_deny());
-        if let CheckOutcome::Deny { reason_code, .. } = &outcome {
-            assert_eq!(reason_code, "BUDGET_EXCEEDED");
-        }
+        assert!(outcome.is_allow());
     }
 
     #[test]
@@ -2562,13 +2559,38 @@ mod tests {
     #[test]
     fn budget_deny_explanation_includes_numbers() {
         let mut ctx = test_context();
-        ctx.budget_used = Some(50);
+        ctx.budget_used = Some(51);
         ctx.budget_limit = Some(50);
         let config = EnforcementConfig::default();
         let outcome = BudgetCheck.check(&ctx, &config);
         if let CheckOutcome::Deny { explanation, .. } = &outcome {
             assert!(explanation.contains("50"));
         }
+    }
+
+    #[test]
+    fn budget_check_matches_budget_tracker_at_limit_semantics() {
+        let zone = fcp_policy::ZoneId::work();
+        let policy = fcp_kernel::UsageBudgetPolicy {
+            enforcement: fcp_kernel::BudgetEnforcement::Deny,
+            budgets: vec![fcp_kernel::UsageBudgetLimit {
+                metric: fcp_kernel::UsageMetricKind::Tokens,
+                limit: 100,
+                window_seconds: 60,
+            }],
+        };
+        let mut tracker = crate::budget::BudgetTracker::new();
+        let eval = tracker.record_usage(&zone, &policy, &[fcp_kernel::UsageMetric::tokens(100)]);
+        assert_eq!(eval.action, crate::budget::BudgetAction::Allow);
+
+        let mut ctx = test_context();
+        ctx.budget_used = Some(eval.snapshot.budgets[0].used);
+        ctx.budget_limit = Some(eval.snapshot.budgets[0].limit);
+        let outcome = BudgetCheck.check(&ctx, &EnforcementConfig::default());
+        assert!(
+            outcome.is_allow(),
+            "budget enforcement must agree with budget tracker exact-limit semantics"
+        );
     }
 
     // ── RateLimitCheck ──

@@ -60,6 +60,11 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git "$GITHUB_WORKSPACE/../asupersync"
           git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git "$GITHUB_WORKSPACE/../toon_rust"
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
       - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
@@ -127,6 +132,11 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git "$GITHUB_WORKSPACE/../asupersync"
           git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git "$GITHUB_WORKSPACE/../toon_rust"
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
       - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
@@ -272,6 +282,11 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git "$GITHUB_WORKSPACE/../asupersync"
           git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git "$GITHUB_WORKSPACE/../toon_rust"
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libdbus-1-dev
       - uses: dtolnay/rust-toolchain@nightly
 
       - name: Publish crates (dry-run)

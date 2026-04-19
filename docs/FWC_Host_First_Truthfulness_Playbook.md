@@ -5,6 +5,10 @@
 > Operational model: **V1 (Host-First, transitional)** — see [OPERATIONAL_MODEL_VERSIONS.md](OPERATIONAL_MODEL_VERSIONS.md) for version definitions and cutover gates
 > Primary beads: `flywheel_connectors-1g7z0.29.8`, `flywheel_connectors-1g7z0.29.8.3`
 > Implementation anchors: `crates/fwc/src/catalog.rs`, `crates/fwc/src/readiness.rs`, `crates/fwc/src/truth.rs`, `crates/fwc/src/main.rs`, `crates/fwc/tests/cual_integration.rs`, `crates/fwc/src/test_observability.rs`, `docs/testing/e2e_log_schema.md`, `docs/testing/coverage-inventory.md`
+>
+> This playbook is a truth-contract and cutover-audit reference. It documents
+> the still-real host-backed boundary honestly, but it is not the preferred
+> long-term architecture to teach new contributors as the end state.
 
 ## Purpose
 

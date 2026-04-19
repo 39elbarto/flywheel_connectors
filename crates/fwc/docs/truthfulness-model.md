@@ -1,5 +1,10 @@
 # FWC Truthful Runtime Model
 
+This is the runtime truth contract for `fwc`, not a recommendation to keep the
+current host-backed provisioning boundary as the permanent center of the
+architecture. Use it to distinguish what is authoritative today from what is
+still transitional on the path to mesh-backed steady state.
+
 ## Overview
 
 Every `fwc` command output carries an **availability envelope** that tells the consumer exactly where the data came from and whether it can be trusted for live operations. The truth hierarchy ranks sources by confidence:

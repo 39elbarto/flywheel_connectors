@@ -126,7 +126,10 @@ impl CoverageEvaluation {
             let bps = u64::from(dist.total_symbols) * 10_000 / u64::from(dist.source_symbols);
             u32::try_from(bps).unwrap_or(u32::MAX)
         } else {
-            0
+            // Zero-symbol objects are trivially reconstructable (no data to
+            // reconstruct), matching OfflineAccess::coverage_bps() which
+            // returns 10_000 for k==0.
+            10_000
         };
 
         // Object is available if we have at least K symbols (coverage >= 10000 bps)
@@ -868,14 +871,14 @@ mod tests {
             let dist = SymbolDistribution::new(0);
             let eval = CoverageEvaluation::from_distribution(object_id, &dist);
 
-            assert_eq!(eval.coverage_bps, 0);
+            assert_eq!(eval.coverage_bps, 10_000); // k=0 is trivially complete
             assert_eq!(eval.max_node_fraction_bps, 0);
             // 0 >= 0 is true: zero-source objects are trivially available
             assert!(eval.is_available);
 
             StoreLogData {
                 object_id: Some(object_id),
-                coverage_bps: Some(0),
+                coverage_bps: Some(10_000),
                 details: Some(json!({"zero_source": true})),
                 ..StoreLogData::default()
             }
@@ -1644,7 +1647,7 @@ mod tests {
     fn coverage_evaluation_zero_source_symbols() {
         let dist = SymbolDistribution::new(0);
         let eval = CoverageEvaluation::from_distribution(test_object_id(), &dist);
-        assert_eq!(eval.coverage_bps, 0);
+        assert_eq!(eval.coverage_bps, 10_000); // k=0 is trivially complete
         assert!(eval.is_available); // 0 >= 0
     }
 

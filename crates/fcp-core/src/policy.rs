@@ -3132,18 +3132,40 @@ fn sanitizer_receipt_object_id(receipt: &SanitizerReceipt) -> ObjectId {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Direct Zone Policy Preview (would-allow without bundle resolution)
+//
+// VISIBILITY NOTE: every type and free function in this section is
+// gated behind `#[cfg(test)]`. The canonical public preview API is
+// `preview_policy_bundles` (line 1937 above), which is what fwc and
+// every other external consumer call — `Grep "PolicyPreviewSample\|
+// preview_policy_bundles" crates` lists fwc/src/policy_cmd.rs and the
+// internal tests, no other site. The "direct zone policy preview"
+// surface here was originally exposed `pub` and re-exported through
+// `crates/fcp-core/src/lib.rs:78`'s wildcard, but it has no production
+// caller in the workspace today; its only users are the four
+// `direct_preview_*` tests below in this file's `tests` module
+// (lines 5364, 5405, 5442, 5457). Gating the whole section on
+// `#[cfg(test)]` (a) removes the parallel `Preview*`/`PolicyPreview*`
+// type-family duplication from the public API surface so future
+// migration of fcp-core to its FCP3 owner crates is not blocked by
+// downstream consumers reaching for the wrong family, and (b) keeps
+// dead-code analysis honest — these items are genuinely test-only
+// today. If a real consumer materialises later, lifting each item out
+// from behind the `#[cfg(test)]` guard and giving it appropriate
+// visibility is a localized change.
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[cfg(test)]
 /// Outcome of a single sample in the direct zone policy preview.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PreviewOutcome {
+pub(crate) enum PreviewOutcome {
     /// The policy allows the operation.
     Allow,
     /// The policy denies the operation.
     Deny,
 }
 
+#[cfg(test)]
 impl From<Decision> for PreviewOutcome {
     fn from(d: Decision) -> Self {
         match d {
@@ -3153,9 +3175,10 @@ impl From<Decision> for PreviewOutcome {
     }
 }
 
+#[cfg(test)]
 /// A single row in the preview delta report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PreviewDeltaEntry {
+pub(crate) struct PreviewDeltaEntry {
     /// Index of the sample in the input list.
     pub sample_index: usize,
     /// Decision under the *current* (baseline) policy.
@@ -3170,9 +3193,10 @@ pub struct PreviewDeltaEntry {
     pub changed: bool,
 }
 
+#[cfg(test)]
 /// Aggregate summary of changes in a preview evaluation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PreviewSummary {
+pub(crate) struct PreviewSummary {
     /// Total samples evaluated.
     pub total_samples: usize,
     /// Samples whose decision changed.
@@ -3185,22 +3209,24 @@ pub struct PreviewSummary {
     pub unchanged: usize,
 }
 
+#[cfg(test)]
 /// Full result of a preview evaluation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PreviewResult {
+pub(crate) struct PreviewResult {
     /// Per-sample delta entries.
     pub deltas: Vec<PreviewDeltaEntry>,
     /// Aggregate summary.
     pub summary: PreviewSummary,
 }
 
+#[cfg(test)]
 /// Input for the preview evaluator.
 ///
 /// Compares a *baseline* (current) policy against a *proposed* policy
 /// using a set of sample operations. The evaluator is read-only and
 /// never mutates state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PreviewInput {
+pub(crate) struct PreviewInput {
     /// Current policy in effect.
     pub baseline_policy: ZonePolicyObject,
     /// Proposed replacement policy.
@@ -3219,7 +3245,8 @@ pub struct PreviewInput {
 ///
 /// Returns [`PolicySimulationError`] if any sample cannot be evaluated
 /// (e.g., missing required token claims).
-pub fn preview_policy_changes(
+#[cfg(test)]
+pub(crate) fn preview_policy_changes(
     input: &PreviewInput,
 ) -> Result<PreviewResult, PolicySimulationError> {
     let mut deltas = Vec::with_capacity(input.samples.len());

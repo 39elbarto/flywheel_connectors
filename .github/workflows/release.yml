@@ -14,8 +14,9 @@ permissions:
   contents: write
 
 concurrency:
-  group: release
-  cancel-in-progress: false
+  # Let a fresh manual retry on the same ref cancel a stale queued release run.
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always

@@ -3043,20 +3043,26 @@ fn approval_token_object_id(token: &ApprovalToken) -> ObjectId {
     // to the full token content.
     let mut buf = Vec::with_capacity(256);
     buf.extend_from_slice(b"FCP/ApprovalToken/fallback/v1");
-    let mut push = |field: &[u8]| {
+    let scope_bytes = serde_json::to_vec(&token.scope).unwrap_or_default();
+    let sig_bytes: Vec<u8> = token
+        .signature
+        .as_deref()
+        .map(<[u8]>::to_vec)
+        .unwrap_or_default();
+    let fields: [&[u8]; 7] = [
+        token.token_id.as_bytes(),
+        &token.issued_at_ms.to_le_bytes(),
+        &token.expires_at_ms.to_le_bytes(),
+        token.issuer.as_bytes(),
+        token.zone_id.as_str().as_bytes(),
+        &scope_bytes,
+        &sig_bytes,
+    ];
+    for field in fields {
         buf.extend_from_slice(&(field.len() as u64).to_le_bytes());
         buf.extend_from_slice(field);
-    };
-    push(token.token_id.as_bytes());
-    push(&token.issued_at_ms.to_le_bytes());
-    push(&token.expires_at_ms.to_le_bytes());
-    push(token.issuer.as_bytes());
-    push(token.zone_id.as_str().as_bytes());
-    let scope_bytes = serde_json::to_vec(&token.scope).unwrap_or_default();
-    push(&scope_bytes);
-    push(token.signature.as_deref().unwrap_or_default());
+    }
     // Distinguish None vs Some(empty) for `signature`.
-    drop(push);
     buf.push(u8::from(token.signature.is_some()));
     ObjectId::from_unscoped_bytes(&buf)
 }

@@ -4313,8 +4313,8 @@ mod tests {
         record.update_health(true, None);
         record.update_health(true, None);
         record.update_health(false, None);
-        // 2/3 = 66.66% -> truncated to 66
-        assert_eq!(record.health.success_rate, 66);
+        // 2/3 = 66.67% -> rounded to 67 (clamped at 100 by update_health).
+        assert_eq!(record.health.success_rate, 67);
     }
 
     #[test]

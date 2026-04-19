@@ -51,6 +51,14 @@ fn kernel_owns_operation_metadata() {
 }
 
 #[test]
+fn kernel_owns_event_types() {
+    let _ = std::any::type_name::<fcp_kernel::EventEnvelope>();
+    let _ = std::any::type_name::<fcp_kernel::EventData>();
+    let _ = std::any::type_name::<fcp_kernel::EventAck>();
+    let _ = std::any::type_name::<fcp_kernel::EventNack>();
+}
+
+#[test]
 fn kernel_owns_health_types() {
     let _: fcp_kernel::HealthState = fcp_kernel::HealthState::Ready;
     let _: fcp_kernel::SelfCheckStatus = fcp_kernel::SelfCheckStatus::Ok;
@@ -104,13 +112,6 @@ fn evidence_owns_audit_types() {
     let _ = std::any::type_name::<fcp_evidence::AuditEvent>();
     let _ = std::any::type_name::<fcp_evidence::AuditHead>();
     let _ = std::any::type_name::<fcp_evidence::DecisionReceipt>();
-}
-
-#[test]
-#[ignore = "EventEnvelope/EventData not yet migrated to fcp-evidence"]
-fn evidence_owns_event_types() {
-    // let _ = std::any::type_name::<fcp_evidence::EventEnvelope>();
-    // let _ = std::any::type_name::<fcp_evidence::EventData>();
 }
 
 #[test]

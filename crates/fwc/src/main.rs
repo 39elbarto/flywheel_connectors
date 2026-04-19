@@ -15280,7 +15280,7 @@ fn resolve_package_output(
                 .unwrap_or_else(|| "unknown".to_owned())
         );
     }
-    let manifest_path = PathBuf::from(&connector.manifest_path);
+    let manifest_path = readiness::workspace_root().join(&connector.manifest_path);
     let crate_path = manifest_path.parent().with_context(|| {
         format!(
             "workspace manifest `{}` has no parent directory",
@@ -22596,7 +22596,7 @@ fn map_dispatch(args: &MapArgs, explicit_host: Option<&str>) -> Result<DispatchO
                     ),
                 ],
             }),
-            exit_code: CliExitCode::UnknownCommand,
+            exit_code: CliExitCode::Validation,
         });
     };
 
@@ -35237,7 +35237,7 @@ depends_on = ["missing"]
         ]);
 
         server.join().expect("mock host thread should complete");
-        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(exit_code, CliExitCode::Connector.into());
         assert_eq!(payload["command"], "map");
         assert_eq!(payload["response"]["completed"], 1);
         assert_eq!(payload["response"]["failed"], 1);
@@ -35277,7 +35277,7 @@ depends_on = ["missing"]
         ]);
 
         server.join().expect("mock host thread should complete");
-        assert_eq!(exit_code, CliExitCode::Success.into());
+        assert_eq!(exit_code, CliExitCode::Connector.into());
         assert_eq!(payload["command"], "map");
         assert_eq!(payload["response"]["completed"], 0);
         assert_eq!(payload["response"]["failed"], 2);
@@ -35516,12 +35516,13 @@ depends_on = ["missing"]
             "--set",
             "repo=hello-world",
             "--set",
-            "number=42",
+            "issue_number=42",
         ]);
 
-        assert_eq!(exit_code, CliExitCode::Success.into());
-        // The number field should be coerced to an integer, not a string
-        assert_eq!(payload["input_authoring"]["payload"]["number"], 42);
+        // Valid payload but no host configured → Transport exit code
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        // The issue_number field should be coerced to an integer, not a string
+        assert_eq!(payload["input_authoring"]["payload"]["issue_number"], 42);
         assert_eq!(payload["input_authoring"]["payload"]["owner"], "octocat");
         assert_eq!(payload["input_authoring"]["primary_source"], "binding-set");
         assert_eq!(payload["input_authoring"]["binding_count"], 3);

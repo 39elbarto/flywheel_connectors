@@ -1575,7 +1575,7 @@ mod tests {
         let store = store();
         let task = store
             .create(WorkflowRequest {
-                intent: "disable the slack connector in z:work".to_owned(),
+                intent: "defragment the database shards across all zones".to_owned(),
                 connector_override: None,
                 zone_override: None,
             })
@@ -1600,7 +1600,7 @@ mod tests {
         let store = store();
         let task = store
             .create(WorkflowRequest {
-                intent: "restart some connector".to_owned(),
+                intent: "defragment the shard topology".to_owned(),
                 connector_override: None,
                 zone_override: None,
             })

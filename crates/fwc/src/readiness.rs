@@ -2494,16 +2494,12 @@ fn discovered_connector_from_toml(
         .strip_prefix("fcp.")
         .unwrap_or(connector_id.as_str())
         .to_owned();
+    let empty_ops = toml::map::Map::new();
     let operations_table = document
         .get("provides")
         .and_then(|provides| provides.get("operations"))
         .and_then(toml::Value::as_table)
-        .with_context(|| {
-            format!(
-                "{} is missing [provides.operations]",
-                manifest_path.display()
-            )
-        })?;
+        .unwrap_or(&empty_ops);
     let mut operations = operations_table
         .iter()
         .map(|(operation_id, operation)| {
@@ -2901,7 +2897,7 @@ impl SelectorError {
     }
 }
 
-fn workspace_root() -> PathBuf {
+pub(crate) fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)

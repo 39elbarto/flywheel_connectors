@@ -1328,6 +1328,8 @@ fn bench_object_id(iterations: u32, warmup: u32) -> BenchmarkResult {
 }
 
 fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
+    use fcp_cbor::to_canonical_cbor;
+    use fcp_core::CapabilityConstraints;
     use fcp_crypto::{CapabilityTokenBuilder as CapabilityBuilder, Ed25519SigningKey};
     use fcp_kernel::{InstanceId, OperationId, ZoneId};
     use fcp_policy::{CapabilityToken as CapabilityArtifact, CapabilityVerifier};
@@ -1341,6 +1343,13 @@ fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
     let zone = ZoneId::work();
     let ops = ["op.test"];
 
+    let constraints = CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let constraints_cbor = to_canonical_cbor(&constraints)
+        .expect("constraints should serialize");
+
     let cose_capability = CapabilityBuilder::new()
         .capability_id("cap.test")
         .zone_id(zone.as_str())
@@ -1348,6 +1357,7 @@ fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
         .operations(&ops)
         .issuer("node:test")
         .validity(now, expires)
+        .constraints_cbor(&constraints_cbor)
         .sign(&signing_key)
         .expect("capability token should sign");
 

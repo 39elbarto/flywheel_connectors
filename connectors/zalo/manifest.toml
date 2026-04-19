@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:zalo-first-slice"
+interface_hash = "blake3-256:fcp.interface.v2:670ae7679635ecdf03d79cd18e4b238187a63106da1bbf2e161474d0e45af095"
 
 [connector]
 id = "fcp.zalo"
@@ -38,4 +38,36 @@ cpu_percent = 25
 wall_clock_timeout_ms = 60000
 deny_exec = true
 deny_ptrace = true
+
+[provides.operations."zalo.send_message"]
+description = "Send a message to a Zalo user via the Bot API"
+capability = "zalo.send"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."zalo.send_message".input_schema]
+required = ["recipient_id", "message"]
+type = "object"
+
+[provides.operations."zalo.send_message".input_schema.properties.recipient_id]
+description = "Zalo user ID of the recipient"
+type = "string"
+
+[provides.operations."zalo.send_message".input_schema.properties.message]
+description = "Message text to send"
+type = "string"
+
+[provides.operations."zalo.send_message".output_schema]
+type = "object"
+
+[provides.operations."zalo.send_message".output_schema.properties.message_id]
+type = "string"
+
+[provides.operations."zalo.send_message".ai_hints]
+when_to_use = "When you need to send a message to a Zalo user through the bot."
+common_mistakes = []
+examples = []
+related = []
 

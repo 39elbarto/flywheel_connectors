@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:tlon-first-slice"
+interface_hash = "blake3-256:fcp.interface.v2:e4a7a6eed25c30cd27fb27a316a6a56b09d88fa871be3f8f1b4f9f74f1a2588e"
 
 [connector]
 id = "fcp.tlon"
@@ -38,4 +38,36 @@ cpu_percent = 25
 wall_clock_timeout_ms = 60000
 deny_exec = true
 deny_ptrace = true
+
+[provides.operations."tlon.send_dm"]
+description = "Send a direct message to a ship on the Tlon network"
+capability = "tlon.send"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."tlon.send_dm".input_schema]
+required = ["ship", "message"]
+type = "object"
+
+[provides.operations."tlon.send_dm".input_schema.properties.ship]
+description = "Target ship name (e.g. ~zod)"
+type = "string"
+
+[provides.operations."tlon.send_dm".input_schema.properties.message]
+description = "Message text to send"
+type = "string"
+
+[provides.operations."tlon.send_dm".output_schema]
+type = "object"
+
+[provides.operations."tlon.send_dm".output_schema.properties.ok]
+type = "boolean"
+
+[provides.operations."tlon.send_dm".ai_hints]
+when_to_use = "When you need to send a direct message to a ship on the Tlon/Urbit network."
+common_mistakes = ["Omitting the ~ prefix on ship names."]
+examples = []
+related = []
 

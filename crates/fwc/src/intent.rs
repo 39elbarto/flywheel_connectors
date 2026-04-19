@@ -1729,6 +1729,24 @@ fn infer_action(normalized_intent: &str) -> ActionSignals {
         };
     }
 
+    // Infrastructure verbs that have no truthful fwc primitive.
+    static UNSUPPORTED: &[(&str, &str)] = &[
+        ("defragment", "defragment"),
+        ("vacuum", "vacuum"),
+        ("fsck", "fsck"),
+    ];
+    if let Some((matched, verb)) = match_first(normalized_intent, UNSUPPORTED) {
+        return ActionSignals {
+            family: "unsupported",
+            verb,
+            resource: None,
+            risk: "high",
+            mutating: true,
+            matched_terms: vec![matched.to_owned()],
+            needs_lookup: false,
+        };
+    }
+
     ActionSignals {
         family: "discovery",
         verb: "discover",

@@ -189,8 +189,17 @@ impl TokenDetectionReport {
 }
 
 /// Redacted PIN material for hardware-token login.
-#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct HardwareTokenPin(String);
+
+impl PartialEq for HardwareTokenPin {
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
+    }
+}
+
+impl Eq for HardwareTokenPin {}
 
 impl HardwareTokenPin {
     /// Create a new hardware-token PIN wrapper.

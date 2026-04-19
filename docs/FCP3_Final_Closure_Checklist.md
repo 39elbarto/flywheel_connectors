@@ -16,7 +16,7 @@
 | Placeholder closure audit | `flywheel_connectors-24llg.1.3`, scanner tests, repo-wide grep evidence | PASS | Closure audit comment on 2026-04-19 records all 13 placeholder families as resolved or approved test-only exceptions |
 | Quarantine scoreboard synchronized | `flywheel_connectors-etp8q.3`, `docs/FCP3_Retirement_Kill_List.md`, `docs/FCP3_Transition_Scorecard.md` | PASS | Scoreboard rows carry deletion gates, proof obligations, and current seam state |
 | Deletion-wave preservation artifacts indexed | `flywheel_connectors-z1nkz`, `docs/FCP3_Workflow_Preservation_Evidence.md`, `docs/FCP3_Pre_Cutover_Baseline.md` | PASS | Teaching rewrite, runtime deletion, and preservation index are all documented and cross-linked |
-| Operational evidence bundle indexed | `flywheel_connectors-8bqme.2` | OPEN | Needed before the final proof manifest can cite a complete operator/deployment section |
+| Operational evidence bundle indexed | `flywheel_connectors-8bqme.2`, `docs/FCP3_Operational_Proof_Index.md` | PASS | Operator/deployment/workflow-preservation section is now indexed in one reviewer-facing document; final proof manifest still needs to cite it |
 | Semantic and conformance evidence bundle indexed | `flywheel_connectors-8bqme.1` | OPEN | Needed before the final proof manifest can cite a complete semantic/conformance section |
 | Before/after benchmark comparison published | `flywheel_connectors-ukr33.2` | OPEN | Harness exists, but comparison tables and review thresholds are not yet published |
 | Final proof manifest published | `flywheel_connectors-8bqme.3` | OPEN | This is the canonical remaining closure-grade blocker for final review |
@@ -29,7 +29,7 @@
 |------|---------------|-----------------|-------|---------------|-----------------|
 | Final proof manifest is not yet published | `flywheel_connectors-8bqme.3` | Requirements documented; manifest artifact itself absent | `jemanuel` | `br show flywheel_connectors-8bqme.3` | Finish the proof-manifest doc and wire it to the section indexes below |
 | Semantic/conformance proof section still open | `flywheel_connectors-8bqme.1` | Inputs exist in owner-map, conformance, and deletion evidence docs; final section index absent | `jemanuel` | `br show flywheel_connectors-8bqme.1` | Publish a reviewer-facing semantic/conformance index |
-| Operational/deployment/workflow-preservation section still open | `flywheel_connectors-8bqme.2` | Inputs exist in operator-evidence and preservation docs; final section index absent | `jemanuel` | `br show flywheel_connectors-8bqme.2` | Publish a reviewer-facing operational proof index |
+| Operational/deployment/workflow-preservation section still open | `flywheel_connectors-8bqme.2` | Section index now exists in `docs/FCP3_Operational_Proof_Index.md`, but the bead/manifest wiring is still open | `jemanuel` | `br show flywheel_connectors-8bqme.2` | Cite the operational proof index from the final proof manifest and close the bead |
 | Before/after performance comparison still open | `flywheel_connectors-ukr33.2` | Benchmark harness exists; comparison and thresholds absent | `jemanuel` | `br show flywheel_connectors-ukr33.2` | Publish comparison tables and explicit pass/review thresholds |
 | Semantic retirement proof remains incomplete upstream of the proof manifest | `flywheel_connectors-0aczd.3` via `8bqme.1` | Retirement track still needs final crate-graph/import-surface proof | `jemanuel` | `br show flywheel_connectors-0aczd.3` | Close the remaining fcp-core retirement proof so semantic indexing can finish |
 
@@ -42,6 +42,7 @@
 | Placeholder eradication | `flywheel_connectors-24llg.1.3` bead comments | Closure audit records scanner output, audited family table, and approved exceptions |
 | Quarantine scoreboard | `docs/FCP3_Retirement_Kill_List.md`, `docs/FCP3_Transition_Scorecard.md` | Live rows reflect actual deleted/quarantined seam state instead of stale transition prose |
 | Deletion-wave preservation | `docs/FCP3_Workflow_Preservation_Evidence.md` | Per-wave before/after surfaces, rerun commands, and artifact pointers are indexed |
+| Operational proof index | `docs/FCP3_Operational_Proof_Index.md` | Deployment, operator-journey, replay-bundle, and workflow-preservation evidence are gathered in one reviewer-facing section |
 | Pre-cutover comparison baseline | `docs/FCP3_Pre_Cutover_Baseline.md` | Canonical scenarios and deletion-wave anchors are frozen for later comparison |
 | Closure-gate dependency hygiene | `flywheel_connectors-z1nkz`, `flywheel_connectors-etp8q.3`, `flywheel_connectors-24llg.1.3` | All are closed and can be treated as satisfied review prerequisites |
 

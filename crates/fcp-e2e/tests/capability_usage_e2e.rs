@@ -9,14 +9,12 @@
 //! These tests exercise the complete CAP pipeline from event ingestion
 //! through to actionable least-privilege recommendations.
 
-use fcp_core::{
-    CapabilityId, CapabilityUsageEvent, CapabilityUsageOutcome, ConnectorId, OperationId,
-    PrincipalId, SafetyTier, ZoneId,
-};
+use fcp_core::{CapabilityId, ConnectorId, OperationId, PrincipalId, SafetyTier, ZoneId};
 use fcp_e2e::{AssertionsSummary, E2eLogEntry, E2eLogger};
 use fcp_telemetry::{
-    CapabilityRecommendationReport, CapabilitySuggestionKind, CapabilityUsageStore,
-    RecommendationConfig, UsageTelemetryConfig, recommend_capabilities,
+    CapabilityRecommendationReport, CapabilitySuggestionKind, CapabilityUsageEvent,
+    CapabilityUsageKey, CapabilityUsageOutcome, CapabilityUsageStore, RecommendationConfig,
+    UsageTelemetryConfig, recommend_capabilities,
 };
 
 // ---------------------------------------------------------------------------
@@ -32,18 +30,18 @@ fn make_event(
     outcome: CapabilityUsageOutcome,
     occurred_at: u64,
 ) -> CapabilityUsageEvent {
-    CapabilityUsageEvent {
-        format: "fcp-capability-usage".to_string(),
-        schema_version: "1.0".to_string(),
-        zone_id: zone,
-        connector_id: ConnectorId::from_static(connector),
-        capability_id: CapabilityId::from_static(capability),
-        principal_id: PrincipalId::new("e2e-agent").expect("valid principal"),
-        risk_tier: tier,
-        operation: OperationId::from_static(operation),
+    CapabilityUsageEvent::new(
+        CapabilityUsageKey::new(
+            zone,
+            ConnectorId::from_static(connector),
+            CapabilityId::from_static(capability),
+        ),
+        PrincipalId::new("e2e-agent").expect("valid principal"),
+        tier,
+        OperationId::from_static(operation),
         outcome,
         occurred_at,
-    }
+    )
 }
 
 fn new_store() -> CapabilityUsageStore {

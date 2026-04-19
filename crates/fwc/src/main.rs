@@ -290,7 +290,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use fcp_core::{ApprovalToken, CapabilityToken, CapabilityUsageKey, ConnectorTarget, ZoneId};
+use fcp_core::{ApprovalToken, CapabilityToken, ConnectorTarget, ZoneId};
 use fcp_crypto::{
     Ed25519Signature, Ed25519VerifyingKey, canonicalize::to_deterministic_cbor, cose::CoseToken,
 };
@@ -330,6 +330,7 @@ use fcp_registry::{
 };
 use fcp_telemetry::{
     CapabilityRecommendation, CapabilitySuggestionKind, CapabilityUsageAggregate,
+    CapabilityUsageKey,
     RecommendationConfig, recommend_capabilities,
 };
 

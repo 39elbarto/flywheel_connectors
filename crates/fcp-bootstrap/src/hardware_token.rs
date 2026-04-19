@@ -438,6 +438,10 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
         token: &DetectedToken,
         pin: &HardwareTokenPin,
     ) -> Result<AuthenticatedTokenSession, TokenError> {
+        if pin.is_empty() {
+            return Err(TokenError::PinRequired);
+        }
+
         let provider_guard = provider_probe_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -498,6 +502,10 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
         token: &DetectedToken,
         pin: &HardwareTokenPin,
     ) -> Result<Vec<TokenCertificate>, TokenError> {
+        if pin.is_empty() {
+            return Err(TokenError::PinRequired);
+        }
+
         let session = open_enumeration_session(token, pin)?;
         let template = [Attribute::Class(ObjectClass::CERTIFICATE)];
         let handles = session
@@ -527,6 +535,10 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
         token: &DetectedToken,
         pin: &HardwareTokenPin,
     ) -> Result<Vec<TokenKeyInfo>, TokenError> {
+        if pin.is_empty() {
+            return Err(TokenError::PinRequired);
+        }
+
         let session = open_enumeration_session(token, pin)?;
         let template = [Attribute::Class(ObjectClass::PRIVATE_KEY)];
         let handles = session
@@ -557,6 +569,10 @@ fn open_enumeration_session(
     token: &DetectedToken,
     pin: &HardwareTokenPin,
 ) -> Result<Session, TokenError> {
+    if pin.is_empty() {
+        return Err(TokenError::PinRequired);
+    }
+
     let _guard = provider_probe_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1110,6 +1126,10 @@ pub(crate) fn select_certificate_for_provisioning<D: HardwareTokenSessionDriver>
     pin: &HardwareTokenPin,
     driver: &D,
 ) -> Result<ProvisioningMaterial, TokenError> {
+    if pin.is_empty() {
+        return Err(TokenError::PinRequired);
+    }
+
     let certs = driver.enumerate_certificates(token, pin)?;
     if certs.is_empty() {
         return Err(TokenError::CertificateSelectionFailed(
@@ -2895,6 +2915,19 @@ mod tests {
             err,
             TokenError::CertificateSelectionFailed(CertificateSelectionRefusal::NoCertificates)
         ));
+    }
+
+    #[test]
+    fn select_cert_empty_pin_returns_pin_required() {
+        let driver = MockSessionDriver::with_certs_and_keys(
+            vec![test_cert("c1", &[1])],
+            vec![test_key("k1", &[1], TokenKeyType::Ed25519)],
+        );
+        let token = test_token();
+        let pin = HardwareTokenPin::new("");
+
+        let err = select_certificate_for_provisioning(&token, &pin, &driver).unwrap_err();
+        assert!(matches!(err, TokenError::PinRequired));
     }
 
     #[test]

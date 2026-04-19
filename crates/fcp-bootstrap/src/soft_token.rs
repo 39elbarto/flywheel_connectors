@@ -236,7 +236,7 @@ impl SoftTokenDriver {
     }
 
     /// Build a `HardwareTokenPin` with the wrong value (for negative tests).
-    pub fn wrong_pin(&self) -> HardwareTokenPin {
+    pub fn wrong_pin() -> HardwareTokenPin {
         HardwareTokenPin::new("WRONG-PIN")
     }
 }
@@ -399,11 +399,6 @@ impl SoftTokenHarness {
         Self { drivers }
     }
 
-    /// Get the driver for a specific slot.
-    pub fn driver(&self, slot: u32) -> Option<&SoftTokenDriver> {
-        self.drivers.get(&slot)
-    }
-
     /// Build a combined detection report from all tokens.
     pub fn detection_report(&self) -> crate::hardware_token::TokenDetectionReport {
         let mut providers = Vec::new();
@@ -500,7 +495,7 @@ mod tests {
     fn wrong_pin_returns_invalid_pin() {
         let driver = SoftTokenDriver::deterministic(SoftTokenConfig::default());
         let token = driver.detected_token().clone();
-        let pin = driver.wrong_pin();
+        let pin = SoftTokenDriver::wrong_pin();
 
         let err = driver
             .open_authenticated_session(&token, &pin)
@@ -1018,5 +1013,657 @@ mod tests {
 
         assert_eq!(outcome.session.timeout(), Duration::from_secs(10));
         outcome.session.close().unwrap();
+    }
+}
+
+// ── Verification pack: evidence-bearing scenario tests ─────────────────
+//
+// These tests exercise every required scenario from bead 24llg.4.3.2 and
+// emit structured JSON evidence records that conform to the shared
+// fcp-verification-bundle/v1 schema defined in fcp-e2e.
+//
+// Rerun commands:
+//   Local:  CARGO_TARGET_DIR=/tmp/fcp-sm cargo test -p fcp-bootstrap --lib soft_token::verification_pack
+//   CI:     rch exec -- cargo test -p fcp-bootstrap --lib soft_token::verification_pack
+
+#[cfg(test)]
+mod verification_pack {
+    use super::*;
+    use crate::error::BootstrapError;
+    use crate::hardware_token::{
+        select_and_authenticate, select_certificate_for_provisioning, CertificateSelectionRefusal,
+    };
+    use crate::workflow::{BootstrapConfig, BootstrapMode, BootstrapWorkflow};
+    use serde::Serialize;
+    use std::time::Instant;
+
+    /// Convert `Duration::as_millis()` (u128) to u64, saturating on overflow.
+    fn millis_u64(d: std::time::Duration) -> u64 {
+        u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// Lightweight verification record matching fcp-verification-bundle/v1 schema.
+    ///
+    /// Serializable to JSON for audit consumption without requiring the full
+    /// fcp-e2e crate as a dependency.
+    #[derive(Debug, Serialize)]
+    struct VerificationRecord {
+        schema_version: &'static str,
+        scenario_id: String,
+        layer: &'static str,
+        outcome: &'static str,
+        steps: Vec<VerificationStep>,
+        replay_command: &'static str,
+        redacted_fields: Vec<&'static str>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct VerificationStep {
+        index: u32,
+        kind: &'static str,
+        description: String,
+        passed: bool,
+        duration_ms: u64,
+        evidence: Vec<String>,
+    }
+
+    impl VerificationRecord {
+        fn new(scenario_id: &str) -> Self {
+            Self {
+                schema_version: "fcp-verification-bundle/v1",
+                scenario_id: scenario_id.to_string(),
+                layer: "integration",
+                outcome: "pending",
+                steps: Vec::new(),
+                replay_command: "CARGO_TARGET_DIR=/tmp/fcp-sm cargo test -p fcp-bootstrap --lib soft_token::verification_pack",
+                redacted_fields: vec!["pin", "signing_key_bytes"],
+            }
+        }
+
+        fn add_step(&mut self, kind: &'static str, description: &str) -> &mut VerificationStep {
+            let index = u32::try_from(self.steps.len()).unwrap_or(u32::MAX);
+            self.steps.push(VerificationStep {
+                index,
+                kind,
+                description: description.to_string(),
+                passed: false,
+                duration_ms: 0,
+                evidence: Vec::new(),
+            });
+            self.steps.last_mut().unwrap()
+        }
+
+        fn finalize(&mut self) {
+            let all_passed = self.steps.iter().all(|s| s.passed);
+            self.outcome = if all_passed { "pass" } else { "fail" };
+        }
+
+        fn assert_pass(&self) {
+            assert_eq!(
+                self.outcome, "pass",
+                "scenario {} failed: {:?}",
+                self.scenario_id,
+                self.steps.iter().filter(|s| !s.passed).collect::<Vec<_>>()
+            );
+            // Validate the record is well-formed JSON
+            let json = serde_json::to_string_pretty(self).expect("evidence must serialize");
+            assert!(
+                json.contains("fcp-verification-bundle/v1"),
+                "schema version missing from evidence JSON"
+            );
+        }
+    }
+
+    // ── Scenario 1: Successful onboarding ──────────────────────────────
+
+    #[test]
+    fn scenario_successful_onboarding() {
+        let mut record = VerificationRecord::new("hwtoken-success-onboarding");
+
+        // Setup: create soft token with Ed25519 identity
+        let t = Instant::now();
+        let config = SoftTokenConfig {
+            identities: vec![SoftTokenIdentitySpec::ed25519("fcp-owner", "FCP Owner Key")],
+            ..SoftTokenConfig::default()
+        };
+        let driver = SoftTokenDriver::deterministic(config);
+        let token = driver.detected_token().clone();
+        let pin = driver.pin();
+        let report = driver.detection_report();
+        {
+            let step = record.add_step("setup", "Provision deterministic soft-token with Ed25519 identity");
+            step.passed = true;
+            step.duration_ms = millis_u64(t.elapsed());
+            step.evidence.push(format!("token_label={}", token.label));
+            step.evidence.push(format!("token_serial={}", token.serial));
+            step.evidence.push(format!("mechanisms={}", token.mechanisms.join(",")));
+        }
+
+        // Action: select and authenticate
+        let t = Instant::now();
+        let outcome = select_and_authenticate(&token, &pin, &report, &driver, None).unwrap();
+        {
+            let step = record.add_step("action", "Select and authenticate hardware-token session");
+            step.passed = true;
+            step.duration_ms = millis_u64(t.elapsed());
+            step.evidence.push(format!("session_state={}", outcome.session.session_state()));
+            step.evidence.push(format!("read_write={}", outcome.session.read_write()));
+            step.evidence.push(format!("selected_token={}", outcome.selected_token));
+        }
+
+        // Action: certificate selection for provisioning
+        let t = Instant::now();
+        let material = select_certificate_for_provisioning(&token, &pin, &driver).unwrap();
+        {
+            let step = record.add_step("action", "Select certificate-key pair for FCP provisioning");
+            step.passed = true;
+            step.duration_ms = millis_u64(t.elapsed());
+            step.evidence.push(format!("selected_key_type={}", material.pair.key.key_type));
+            step.evidence.push(format!("selected_cert_label={}", material.pair.certificate.label));
+            step.evidence.push(format!("candidates_considered={}", material.candidates_considered));
+            step.evidence.push(format!("selection_reason={}", material.selection_reason));
+        }
+
+        // Assert: verify provisioning material
+        {
+            let step = record.add_step("assert", "Verify provisioning material correctness");
+            step.passed = material.pair.key.key_type == TokenKeyType::Ed25519
+                && material.pair.key.can_sign
+                && !material.pair.certificate.is_ca
+                && !material.pair.certificate.der_bytes.is_empty();
+            step.evidence.push(format!("key_can_sign={}", material.pair.key.can_sign));
+            step.evidence.push(format!("cert_is_ca={}", material.pair.certificate.is_ca));
+            step.evidence.push(format!("cert_der_len={}", material.pair.certificate.der_bytes.len()));
+        }
+
+        // Teardown: close session
+        let t = Instant::now();
+        outcome.session.close().unwrap();
+        {
+            let step = record.add_step("teardown", "Close authenticated session and verify cleanup");
+            step.passed = driver.close_count() == 1;
+            step.duration_ms = millis_u64(t.elapsed());
+            step.evidence.push(format!("close_count={}", driver.close_count()));
+        }
+
+        record.finalize();
+        record.assert_pass();
+    }
+
+    // ── Scenario 2: Wrong PIN ──────────────────────────────────────────
+
+    #[test]
+    fn scenario_wrong_pin_refusal() {
+        let mut record = VerificationRecord::new("hwtoken-wrong-pin");
+
+        let driver = SoftTokenDriver::deterministic(SoftTokenConfig::default());
+        let token = driver.detected_token().clone();
+        let wrong_pin = SoftTokenDriver::wrong_pin();
+        let report = driver.detection_report();
+
+        {
+            let step = record.add_step("setup", "Provision soft-token with known PIN");
+            step.passed = true;
+        }
+
+        let t = Instant::now();
+        let err = select_and_authenticate(&token, &wrong_pin, &report, &driver, None).unwrap_err();
+        {
+            let step = record.add_step("negative", "Attempt authentication with wrong PIN");
+            step.passed = matches!(err, TokenError::InvalidPin);
+            step.duration_ms = millis_u64(t.elapsed());
+            step.evidence.push(format!("error={err}"));
+            step.evidence.push("error_type=InvalidPin".to_string());
+        }
+
+        // Assert: mapped through workflow produces typed BootstrapError
+        {
+            let step = record.add_step("assert", "Verify error maps to HardwareTokenInvalidPin");
+            let dir = tempfile::tempdir().unwrap();
+            let config = BootstrapConfig::builder()
+                .data_dir(dir.path())
+                .mode(BootstrapMode::SingleDevice)
+                .hardware_token_pin("WRONG")
+                .build()
+                .unwrap();
+            let mut workflow = BootstrapWorkflow::new(config).unwrap();
+            let workflow_err = workflow
+                .run_hardware_token_bootstrap_with_driver(&token, &report, &driver)
+                .unwrap_err();
+            step.passed = matches!(workflow_err, BootstrapError::HardwareTokenInvalidPin);
+            step.evidence.push(format!("workflow_error={workflow_err}"));
+        }
+
+        {
+            let step = record.add_step("teardown", "Verify no session leaked");
+            step.passed = driver.close_count() == 0;
+            step.evidence.push(format!("close_count={}", driver.close_count()));
+        }
+
+        record.finalize();
+        record.assert_pass();
+    }
+
+    // ── Scenario 3: Missing PIN ────────────────────────────────────────
+
+    #[test]
+    fn scenario_missing_pin_refusal() {
+        let mut record = VerificationRecord::new("hwtoken-missing-pin");
+
+        let driver = SoftTokenDriver::deterministic(SoftTokenConfig::default());
+        let token = driver.detected_token().clone();
+        let report = driver.detection_report();
+
+        {
+            let step = record.add_step("setup", "Provision soft-token, omit PIN from config");
+            step.passed = true;
+        }
+
+        let t = Instant::now();
+        let empty_pin = HardwareTokenPin::new("");
+        let err = select_and_authenticate(&token, &empty_pin, &report, &driver, None).unwrap_err();
+        {
+            let step = record.add_step("negative", "Attempt authentication without PIN");
+            step.passed = matches!(err, TokenError::PinRequired);
+            step.duration_ms = millis_u64(t.elapsed());
+            step.evidence.push(format!("error={err}"));
+        }
+
+        {
+            let step = record.add_step("assert", "Workflow maps to HardwareTokenPinRequired");
+            let dir = tempfile::tempdir().unwrap();
+            let config = BootstrapConfig::builder()
+                .data_dir(dir.path())
+                .mode(BootstrapMode::SingleDevice)
+                .build()
+                .unwrap();
+            let mut workflow = BootstrapWorkflow::new(config).unwrap();
+            let workflow_err = workflow
+                .run_hardware_token_bootstrap_with_driver(&token, &report, &driver)
+                .unwrap_err();
+            step.passed = matches!(workflow_err, BootstrapError::HardwareTokenPinRequired);
+            step.evidence.push(format!("workflow_error={workflow_err}"));
+        }
+
+        record.finalize();
+        record.assert_pass();
+    }
+
+    // ── Scenario 4: Missing slot / token not found ─────────────────────
+
+    #[test]
+    fn scenario_missing_slot_refusal() {
+        let mut record = VerificationRecord::new("hwtoken-missing-slot");
+
+        let driver = SoftTokenDriver::deterministic(SoftTokenConfig::default());
+        let mut wrong_token = driver.detected_token().clone();
+        wrong_token.slot = 99;
+        wrong_token.label = "NonexistentToken".to_string();
+        let pin = driver.pin();
+        let report = driver.detection_report();
+
+        {
+            let step = record.add_step("setup", "Provision soft-token on slot 0, request slot 99");
+            step.passed = true;
+            step.evidence.push("actual_slot=0".to_string());
+            step.evidence.push("requested_slot=99".to_string());
+        }
+
+        let t = Instant::now();
+        let err = select_and_authenticate(&wrong_token, &pin, &report, &driver, None).unwrap_err();
+        {
+            let step = record.add_step("negative", "Attempt to select non-existent token");
+            step.passed = matches!(err, TokenError::TokenNotFound(_));
+            step.duration_ms = millis_u64(t.elapsed());
+            step.evidence.push(format!("error={err}"));
+        }
+
+        record.finalize();
+        record.assert_pass();
+    }
+
+    // ── Scenario 5: Provisioning refusal (RSA-only token) ──────────────
+
+    #[test]
+    fn scenario_incompatible_key_type_refusal() {
+        let mut record = VerificationRecord::new("hwtoken-incompatible-key-type");
+
+        let config = SoftTokenConfig {
+            identities: vec![SoftTokenIdentitySpec::rsa("legacy-rsa", "Legacy RSA Key")],
+            mechanisms: vec!["CKM_RSA_PKCS".into()],
+            ..SoftTokenConfig::default()
+        };
+        let driver = SoftTokenDriver::deterministic(config);
+        let token = driver.detected_token().clone();
+        let pin = driver.pin();
+
+        {
+            let step = record.add_step("setup", "Provision soft-token with RSA-only identity");
+            step.passed = true;
+            step.evidence.push("key_type=RSA".to_string());
+        }
+
+        let t = Instant::now();
+        let err = select_certificate_for_provisioning(&token, &pin, &driver).unwrap_err();
+        {
+            let step = record.add_step("negative", "Attempt certificate selection with RSA-only key");
+            step.passed = matches!(
+                err,
+                TokenError::CertificateSelectionFailed(CertificateSelectionRefusal::NoCompatibleKeyType { .. })
+            );
+            step.duration_ms = millis_u64(t.elapsed());
+            step.evidence.push(format!("error={err}"));
+            step.evidence.push("refusal_type=NoCompatibleKeyType".to_string());
+        }
+
+        {
+            let step = record.add_step("assert", "Verify error identifies the incompatible type");
+            let msg = err.to_string();
+            step.passed = msg.contains("RSA") || msg.contains("no FCP-compatible");
+            step.evidence.push(format!("error_message={msg}"));
+        }
+
+        record.finalize();
+        record.assert_pass();
+    }
+
+    // ── Scenario 6: CA-only token (no usable end-entity cert) ──────────
+
+    #[test]
+    fn scenario_ca_only_refusal() {
+        let mut record = VerificationRecord::new("hwtoken-ca-only-token");
+
+        let config = SoftTokenConfig {
+            identities: vec![SoftTokenIdentitySpec::ed25519("root-ca", "Root CA").into_ca()],
+            ..SoftTokenConfig::default()
+        };
+        let driver = SoftTokenDriver::deterministic(config);
+        let token = driver.detected_token().clone();
+        let pin = driver.pin();
+
+        {
+            let step = record.add_step("setup", "Provision soft-token with CA certificate only");
+            step.passed = true;
+        }
+
+        let t = Instant::now();
+        let err = select_certificate_for_provisioning(&token, &pin, &driver).unwrap_err();
+        {
+            let step = record.add_step("negative", "Attempt provisioning with CA-only certificate");
+            step.passed = matches!(
+                err,
+                TokenError::CertificateSelectionFailed(CertificateSelectionRefusal::NoMatchingKeyPair)
+            );
+            step.duration_ms = millis_u64(t.elapsed());
+            step.evidence.push(format!("error={err}"));
+            step.evidence.push("refusal_type=NoMatchingKeyPair".to_string());
+        }
+
+        record.finalize();
+        record.assert_pass();
+    }
+
+    // ── Scenario 7: Empty token (no certs at all) ──────────────────────
+
+    #[test]
+    fn scenario_empty_token_refusal() {
+        let mut record = VerificationRecord::new("hwtoken-empty-token");
+
+        let config = SoftTokenConfig {
+            identities: vec![],
+            ..SoftTokenConfig::default()
+        };
+        let driver = SoftTokenDriver::deterministic(config);
+        let token = driver.detected_token().clone();
+        let pin = driver.pin();
+
+        {
+            let step = record.add_step("setup", "Provision soft-token with no identities");
+            step.passed = true;
+        }
+
+        let t = Instant::now();
+        let err = select_certificate_for_provisioning(&token, &pin, &driver).unwrap_err();
+        {
+            let step = record.add_step("negative", "Attempt provisioning on empty token");
+            step.passed = matches!(
+                err,
+                TokenError::CertificateSelectionFailed(CertificateSelectionRefusal::NoCertificates)
+            );
+            step.duration_ms = millis_u64(t.elapsed());
+            step.evidence.push(format!("error={err}"));
+        }
+
+        record.finalize();
+        record.assert_pass();
+    }
+
+    // ── Scenario 8: Cleanup determinism ────────────────────────────────
+
+    #[test]
+    fn scenario_cleanup_determinism() {
+        let mut record = VerificationRecord::new("hwtoken-cleanup-determinism");
+
+        let driver = SoftTokenDriver::deterministic(SoftTokenConfig::default());
+        let token = driver.detected_token().clone();
+        let pin = driver.pin();
+
+        {
+            let step = record.add_step("setup", "Provision soft-token with close-action tracking");
+            step.passed = true;
+            step.evidence.push(format!("initial_close_count={}", driver.close_count()));
+        }
+
+        // Path A: explicit close
+        let t = Instant::now();
+        let session = driver.open_authenticated_session(&token, &pin).unwrap();
+        session.close().unwrap();
+        {
+            let step = record.add_step("action", "Open and explicitly close session");
+            step.passed = driver.close_count() == 1;
+            step.duration_ms = millis_u64(t.elapsed());
+            step.evidence.push(format!("close_count_after_explicit={}", driver.close_count()));
+        }
+
+        // Path B: Drop-based cleanup (separate driver to isolate count)
+        let driver2 = SoftTokenDriver::deterministic(SoftTokenConfig::default());
+        let t = Instant::now();
+        {
+            let _session = driver2.open_authenticated_session(&token, &pin).unwrap();
+            // session dropped here
+        }
+        {
+            let step = record.add_step("action", "Open session and let Drop invoke cleanup");
+            step.passed = driver2.close_count() == 1;
+            step.duration_ms = millis_u64(t.elapsed());
+            step.evidence.push(format!("close_count_after_drop={}", driver2.close_count()));
+        }
+
+        // Path C: close-then-drop must not double-close
+        let driver3 = SoftTokenDriver::deterministic(SoftTokenConfig::default());
+        let session = driver3.open_authenticated_session(&token, &pin).unwrap();
+        session.close().unwrap();
+        // Drop runs here but close_action is already consumed
+        {
+            let step = record.add_step("assert", "Close-then-Drop invokes cleanup exactly once");
+            step.passed = driver3.close_count() == 1;
+            step.evidence.push(format!("close_count_after_close_then_drop={}", driver3.close_count()));
+        }
+
+        // Path D: error path (wrong PIN) must not leak sessions
+        let driver4 = SoftTokenDriver::deterministic(SoftTokenConfig::default());
+        let wrong = SoftTokenDriver::wrong_pin();
+        let _ = driver4.open_authenticated_session(&token, &wrong);
+        {
+            let step = record.add_step("assert", "Failed authentication does not leak session");
+            step.passed = driver4.close_count() == 0;
+            step.evidence.push(format!("close_count_after_error={}", driver4.close_count()));
+        }
+
+        record.finalize();
+        record.assert_pass();
+    }
+
+    // ── Scenario 9: Workflow-level success path ────────────────────────
+
+    #[test]
+    fn scenario_workflow_success_path() {
+        let mut record = VerificationRecord::new("hwtoken-workflow-success");
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .hardware_token_pin("654321")
+            .build()
+            .unwrap();
+        let mut workflow = BootstrapWorkflow::new(config).unwrap();
+
+        let soft = SoftTokenDriver::deterministic(SoftTokenConfig::default());
+        let token = soft.detected_token().clone();
+        let report = soft.detection_report();
+
+        {
+            let step = record.add_step("setup", "Configure workflow with soft-token and correct PIN");
+            step.passed = true;
+        }
+
+        let t = Instant::now();
+        let result = workflow.run_hardware_token_bootstrap_with_driver(&token, &report, &soft);
+        {
+            let step = record.add_step("action", "Run hardware-token bootstrap workflow");
+            // Expect provisioning-not-implemented boundary (proves upstream pipeline works)
+            let reached_provisioning = matches!(
+                &result,
+                Err(BootstrapError::HardwareToken(msg)) if msg.contains("provisioning enrollment is not implemented")
+            );
+            step.passed = reached_provisioning;
+            step.duration_ms = millis_u64(t.elapsed());
+            match &result {
+                Ok(_) => step.evidence.push("result=genesis_created".to_string()),
+                Err(e) => step.evidence.push(format!("result={e}")),
+            }
+        }
+
+        {
+            let step = record.add_step("assert", "Session cleanup occurred during workflow");
+            step.passed = soft.close_count() == 1;
+            step.evidence.push(format!("close_count={}", soft.close_count()));
+        }
+
+        record.finalize();
+        record.assert_pass();
+    }
+
+    // ── Scenario 10: Multi-key selection preference ────────────────────
+
+    #[test]
+    fn scenario_multi_key_selection_preference() {
+        let mut record = VerificationRecord::new("hwtoken-multi-key-preference");
+
+        let config = SoftTokenConfig {
+            identities: vec![
+                SoftTokenIdentitySpec::rsa("rsa-legacy", "Legacy RSA"),
+                SoftTokenIdentitySpec::x25519("x25519-agree", "X25519 Agreement"),
+                SoftTokenIdentitySpec::ed25519("ed25519-sign", "Ed25519 Signer"),
+            ],
+            ..SoftTokenConfig::default()
+        };
+        let driver = SoftTokenDriver::deterministic(config);
+        let token = driver.detected_token().clone();
+        let pin = driver.pin();
+
+        {
+            let step = record.add_step("setup", "Provision soft-token with RSA + X25519 + Ed25519 identities");
+            step.passed = true;
+            step.evidence.push("identity_count=3".to_string());
+        }
+
+        let t = Instant::now();
+        let material = select_certificate_for_provisioning(&token, &pin, &driver).unwrap();
+        {
+            let step = record.add_step("action", "Select certificate for provisioning from mixed keys");
+            step.passed = true;
+            step.duration_ms = millis_u64(t.elapsed());
+            step.evidence.push(format!("selected_key_type={}", material.pair.key.key_type));
+            step.evidence.push(format!("selected_label={}", material.pair.certificate.label));
+            step.evidence.push(format!("candidates_considered={}", material.candidates_considered));
+        }
+
+        {
+            let step = record.add_step("assert", "Ed25519 selected over X25519 and RSA");
+            step.passed = material.pair.key.key_type == TokenKeyType::Ed25519
+                && material.pair.certificate.label == "ed25519-sign";
+            step.evidence.push(format!("expected_type=Ed25519, actual={}", material.pair.key.key_type));
+            step.evidence.push(format!(
+                "expected_label=ed25519-sign, actual={}",
+                material.pair.certificate.label
+            ));
+        }
+
+        // Verify RSA is excluded from candidate count (only Ed25519 + X25519 are FCP-compatible)
+        {
+            let step = record.add_step("assert", "RSA excluded from compatible candidates");
+            step.passed = material.candidates_considered == 2; // Ed25519 + X25519
+            step.evidence.push(format!("compatible_count={}", material.candidates_considered));
+        }
+
+        record.finalize();
+        record.assert_pass();
+    }
+
+    // ── Scenario 11: Deterministic rerun ───────────────────────────────
+
+    #[test]
+    fn scenario_deterministic_rerun() {
+        let mut record = VerificationRecord::new("hwtoken-deterministic-rerun");
+
+        {
+            let step = record.add_step("setup", "Prepare two independent soft-token instantiations");
+            step.passed = true;
+        }
+
+        let config = SoftTokenConfig {
+            identities: vec![
+                SoftTokenIdentitySpec::ed25519("owner", "Owner Key"),
+                SoftTokenIdentitySpec::x25519("agreement", "Agreement"),
+            ],
+            ..SoftTokenConfig::default()
+        };
+
+        let d1 = SoftTokenDriver::deterministic(config.clone());
+        let d2 = SoftTokenDriver::deterministic(config);
+
+        let t1 = d1.detected_token().clone();
+        let t2 = d2.detected_token().clone();
+        let p1 = d1.pin();
+        let p2 = d2.pin();
+
+        let m1 = select_certificate_for_provisioning(&t1, &p1, &d1).unwrap();
+        let m2 = select_certificate_for_provisioning(&t2, &p2, &d2).unwrap();
+
+        {
+            let step = record.add_step("assert", "Certificate IDs match across runs");
+            step.passed = m1.pair.certificate.id == m2.pair.certificate.id;
+            step.evidence.push(format!("run1_cert_id={}", hex::encode(&m1.pair.certificate.id)));
+            step.evidence.push(format!("run2_cert_id={}", hex::encode(&m2.pair.certificate.id)));
+        }
+
+        {
+            let step = record.add_step("assert", "DER bytes match across runs");
+            step.passed = m1.pair.certificate.der_bytes == m2.pair.certificate.der_bytes;
+            step.evidence.push(format!("run1_der_len={}", m1.pair.certificate.der_bytes.len()));
+            step.evidence.push(format!("run2_der_len={}", m2.pair.certificate.der_bytes.len()));
+        }
+
+        {
+            let step = record.add_step("assert", "Selection reason matches across runs");
+            step.passed = m1.selection_reason == m2.selection_reason;
+            step.evidence.push(format!("run1_reason={}", m1.selection_reason));
+            step.evidence.push(format!("run2_reason={}", m2.selection_reason));
+        }
+
+        record.finalize();
+        record.assert_pass();
     }
 }

@@ -208,11 +208,18 @@ impl OAuthTokens {
         if !response.token_type.is_empty() {
             self.token_type = response.token_type;
         }
-        self.expires_at = response.expires_in.map(|secs| {
-            now + chrono::Duration::seconds(
-                i64::try_from(secs.min(u64::from(u32::MAX))).unwrap_or(i64::MAX),
-            )
-        });
+        // Only update expires_at if the response provides expires_in.
+        // Some providers omit expires_in on refresh responses; unconditionally
+        // setting expires_at = None would silently clear the previous expiry,
+        // making the token appear never-expiring and permanently stopping the
+        // refresh loop.
+        if let Some(secs) = response.expires_in {
+            self.expires_at = Some(
+                now + chrono::Duration::seconds(
+                    i64::try_from(secs.min(u64::from(u32::MAX))).unwrap_or(i64::MAX),
+                ),
+            );
+        }
         self.issued_at = now;
 
         // Only update refresh token if a new non-empty one is provided.
@@ -447,6 +454,32 @@ mod tests {
             "empty refresh_token must not overwrite existing refresh token"
         );
         assert_eq!(tokens.id_token(), None);
+    }
+
+    #[test]
+    fn test_update_from_response_preserves_expiry_when_omitted() {
+        // Some OAuth providers omit expires_in on refresh responses.
+        // The existing expiry must be preserved, not silently cleared to None
+        // (which would make the token appear never-expiring).
+        let initial = mock_token_response(Some(3600));
+        let mut tokens = OAuthTokens::from_response(initial);
+        assert!(tokens.expires_at.is_some(), "initial expiry must be set");
+
+        let refresh_response = TokenResponse {
+            access_token: "refreshed_at".into(),
+            token_type: "Bearer".into(),
+            expires_in: None, // Provider omits expires_in
+            refresh_token: Some("new_rt".into()),
+            scope: None,
+            id_token: None,
+        };
+        tokens.update_from_response(refresh_response);
+
+        assert_eq!(tokens.access_token(), "refreshed_at");
+        assert!(
+            tokens.expires_at.is_some(),
+            "expires_at must be preserved when refresh response omits expires_in"
+        );
     }
 
     #[test]

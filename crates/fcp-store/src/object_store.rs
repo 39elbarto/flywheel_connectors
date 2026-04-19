@@ -232,13 +232,14 @@ pub async fn snapshot_zone_lifecycle(
                 let evaluation = CoverageEvaluation::from_distribution(object_id, &distribution);
                 if let Some(policy) = object.header.placement.as_ref() {
                     meets_placement_policy = Some(evaluation.meets_policy(policy));
-                    reconstructable = Some(
-                        symbol_store
-                            .can_reconstruct_with_policy(&object_id, policy)
-                            .await,
-                    );
+                    // Use the evaluation we already built instead of re-querying
+                    // the symbol store via can_reconstruct_with_policy — the second
+                    // get_distribution call would acquire the write lock again and
+                    // could see a different snapshot (TOCTOU).
+                    reconstructable =
+                        Some(evaluation.meets_diversity_for_reconstruction(policy));
                 } else {
-                    reconstructable = Some(symbol_store.can_reconstruct(&object_id).await);
+                    reconstructable = Some(evaluation.is_available);
                 }
                 coverage = Some(evaluation);
             } else {

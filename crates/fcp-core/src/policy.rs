@@ -2495,12 +2495,23 @@ impl PolicyEngine {
             return PolicyDecision::deny(reason, Vec::new());
         }
 
-        // Check posture requirements
+        // Check posture requirements.
+        //
+        // Run check_posture whenever the zone policy declares
+        // `requires_posture: Some(_)` — including the case where the
+        // attribute-level `requirements` Vec happens to be empty. Such a
+        // bundle still meaningfully constrains attestations through
+        // `allowed_verifiers` (whitelist of acceptable verifier IDs) and
+        // `max_attestation_age_secs` (default 24h ceiling). Gating on
+        // `posture_requirements.is_empty()` here would skip those checks
+        // and silently accept requests with no attestation at all,
+        // attestations from arbitrary verifiers, or attestations days old.
+        // The Some/None distinction on `requires_posture` is the
+        // enforcement signal; once the admin opts into Some(_), every
+        // declared constraint must run.
         if let Some(ref posture_requirements) = self.zone_policy.requires_posture {
-            if !posture_requirements.is_empty() {
-                if let Some(reason) = check_posture(posture_requirements, input) {
-                    return PolicyDecision::deny(reason, Vec::new());
-                }
+            if let Some(reason) = check_posture(posture_requirements, input) {
+                return PolicyDecision::deny(reason, Vec::new());
             }
         }
 
@@ -4491,6 +4502,34 @@ mod tests {
         assert_eq!(
             decision.reason_code,
             DecisionReasonCode::ZonePolicyCapabilityDenied
+        );
+    }
+
+    #[test]
+    fn engine_deny_posture_with_empty_requirements_still_runs_check() {
+        // Regression for the short-circuit where
+        // `if !posture_requirements.is_empty()` skipped check_posture when
+        // the attribute-level `requirements` Vec was empty — even though
+        // the same struct could still impose `allowed_verifiers` and
+        // `max_attestation_age_secs` constraints. With an empty
+        // requirements list and no attestation supplied, the engine MUST
+        // surface PostureAttestationMissing rather than allow the request.
+        let mut policy = minimal_zone_policy();
+        policy.requires_posture = Some(crate::posture::PostureRequirements {
+            requirements: Vec::new(),
+            max_attestation_age_secs: 3600,
+            allowed_verifiers: vec!["intel-tdx-verifier".to_string()],
+        });
+        let engine = PolicyEngine {
+            zone_policy: policy,
+        };
+        let mut input = minimal_decision_input();
+        input.posture_attestation = None;
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Deny);
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::PostureAttestationMissing
         );
     }
 

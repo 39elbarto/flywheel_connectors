@@ -1332,6 +1332,10 @@ impl MeshGossip {
     }
 
     /// Handle received summary from a peer.
+    ///
+    /// Callers on an untrusted network path must verify `summary.signature`
+    /// before invoking this lower-level state mutator.
+    /// [`crate::node::MeshNode`] provides the authenticated dispatch entrypoint.
     pub fn handle_summary(&mut self, summary: GossipSummary, now: u64) {
         if summary.is_stale(now, self.config.summary_ttl_secs) {
             let age_secs = now.saturating_sub(summary.timestamp);

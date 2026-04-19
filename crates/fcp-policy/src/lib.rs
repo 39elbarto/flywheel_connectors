@@ -69,7 +69,7 @@ pub use fcp_core::{
 pub use fcp_core::{
     DecisionReceiptPolicy, PolicyBundle, PolicyBundleBuilder, PolicyBundleError,
     PolicyBundleObject, PolicyBundlePolicyRef, PolicyBundleResolved, PolicyBundleSignature,
-    PolicyDecision, PolicyEngine, PolicyPattern,
+    DecisionReasonCode, PolicyDecision, PolicyEngine, PolicyPattern,
 };
 
 // ── Policy Diffs ───────────────────────────────────────────────────
@@ -171,10 +171,10 @@ mod tests {
         fn _engine_exists(_engine: PolicyEngine) {}
         let _ = _engine_exists;
         let decision = PolicyDecision::deny(
-            fcp_core::DecisionReasonCode::CapabilityInsufficient,
+            DecisionReasonCode::CapabilityInsufficient,
             Vec::new(),
         );
-        assert_eq!(decision.decision, fcp_core::Decision::Deny);
+        assert_eq!(decision.reason_code, DecisionReasonCode::CapabilityInsufficient);
     }
 
     #[test]

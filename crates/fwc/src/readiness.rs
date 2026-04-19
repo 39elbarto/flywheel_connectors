@@ -2494,12 +2494,16 @@ fn discovered_connector_from_toml(
         .strip_prefix("fcp.")
         .unwrap_or(connector_id.as_str())
         .to_owned();
-    let empty_ops = toml::map::Map::new();
     let operations_table = document
         .get("provides")
         .and_then(|provides| provides.get("operations"))
         .and_then(toml::Value::as_table)
-        .unwrap_or(&empty_ops);
+        .with_context(|| {
+            format!(
+                "{} is missing [provides.operations]",
+                manifest_path.display()
+            )
+        })?;
     let mut operations = operations_table
         .iter()
         .map(|(operation_id, operation)| {
@@ -7914,6 +7918,57 @@ deny_ptrace = true
         assert_eq!(
             discovered.detail.summary.has_events.as_known(),
             Some(&false)
+        );
+    }
+
+    #[test]
+    fn toml_fallback_requires_provides_operations_table() {
+        let document: toml::Value = toml::from_str(
+            r#"
+[connector]
+id = "fcp.truthful-missing-ops"
+name = "Truthful Missing Ops"
+version = "0.1.0"
+description = "Fallback manifest missing operations"
+format = "wasi"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+forbidden = []
+
+[capabilities]
+required = []
+optional = []
+forbidden = []
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 20
+wall_clock_timeout_ms = 1000
+fs_readonly_paths = ["/usr"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+"#,
+        )
+        .expect("fallback document should parse");
+
+        let error = discovered_connector_from_toml(
+            "truthful-missing-ops",
+            Path::new("connectors/truthful-missing-ops/manifest.toml"),
+            &document,
+            "strict manifest parsing failed",
+        )
+        .expect_err("discovery should fail without [provides.operations]");
+
+        assert!(
+            error
+                .to_string()
+                .contains("missing [provides.operations]"),
+            "unexpected error: {error:?}"
         );
     }
 

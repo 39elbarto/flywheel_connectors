@@ -431,8 +431,7 @@ fn update_workspace_members(
 ) -> Result<Option<CreatedFile>> {
     let manifest_path = workspace_root.join("Cargo.toml");
     let content = fs::read_to_string(&manifest_path)?;
-    let needle = format!("\"{member_path}\"");
-    if content.contains(&needle) {
+    if workspace_members_contains(&content, member_path) {
         return Ok(None);
     }
 
@@ -446,6 +445,30 @@ fn update_workspace_members(
         purpose: "Workspace members update".to_string(),
         size: updated.len(),
     }))
+}
+
+fn workspace_members_contains(content: &str, member_path: &str) -> bool {
+    let mut in_workspace = false;
+    let needle = format!("\"{member_path}\"");
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("[workspace]") {
+            in_workspace = true;
+            continue;
+        }
+        if in_workspace && trimmed.starts_with('[') && !trimmed.starts_with("[workspace]") {
+            in_workspace = false;
+        }
+        if in_workspace && trimmed.starts_with("members") && trimmed.contains(&needle) {
+            return true;
+        }
+        if in_workspace && trimmed.starts_with('"') && trimmed.contains(&needle) {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn insert_workspace_member(content: &str, member_path: &str) -> Result<String> {
@@ -2688,7 +2711,7 @@ async fn test_error_codes_correct() {{
 
 #[test]
 fn test_error_mapping_rate_limit() {{
-    use crate::error::{struct_name}Error;
+    use {crate_ident}::error::{struct_name}Error;
     use fcp_sdk::migration::ConnectorErrorMapping;
 
     let err = {struct_name}Error::RateLimited {{ retry_after_ms: 5000 }};
@@ -2701,7 +2724,7 @@ fn test_error_mapping_rate_limit() {{
 
 #[test]
 fn test_error_mapping_config() {{
-    use crate::error::{struct_name}Error;
+    use {crate_ident}::error::{struct_name}Error;
     use fcp_sdk::migration::ConnectorErrorMapping;
 
     let err = {struct_name}Error::Config("bad key".into());
@@ -2714,7 +2737,7 @@ fn test_error_mapping_config() {{
 
 #[test]
 fn test_error_mapping_runtime() {{
-    use crate::error::{struct_name}Error;
+    use {crate_ident}::error::{struct_name}Error;
     use fcp_sdk::migration::ConnectorErrorMapping;
 
     let err = {struct_name}Error::Runtime("cancelled".into());
@@ -2726,7 +2749,7 @@ fn test_error_mapping_runtime() {{
 
 #[test]
 fn test_error_mapping_from_async_timeout() {{
-    use crate::error::{struct_name}Error;
+    use {crate_ident}::error::{struct_name}Error;
     use fcp_async_core::AsyncError;
     use fcp_sdk::migration::ConnectorErrorMapping;
 
@@ -2737,7 +2760,7 @@ fn test_error_mapping_from_async_timeout() {{
 
 #[test]
 fn test_error_mapping_from_async_cancelled() {{
-    use crate::error::{struct_name}Error;
+    use {crate_ident}::error::{struct_name}Error;
     use fcp_async_core::AsyncError;
     use fcp_sdk::migration::ConnectorErrorMapping;
 
@@ -2825,7 +2848,88 @@ fn generate_e2e_tests_rs(connector_id: &str, short_name: &str, crate_name: &str)
 
 use std::process::{{Command, Stdio}};
 use std::io::{{BufRead, BufReader, Write}};
+use anyhow::Result;
 use assert_cmd::cargo::cargo_bin;
+use fcp_sdk::prelude::*;
+
+const OP_SCAFFOLD_STATUS: &str = "{short_name}.scaffold_status";
+const CAP_SCAFFOLD_STATUS: &str = "{short_name}.scaffold_status";
+
+fn test_signing_key() -> fcp_crypto::ed25519::Ed25519SigningKey {{
+    fcp_crypto::ed25519::Ed25519SigningKey::generate()
+}}
+
+fn test_capability_token(
+    signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+    operation: &str,
+) -> CapabilityToken {{
+    let now = chrono::Utc::now();
+    CapabilityToken::from_raw(
+        fcp_crypto::cose::CapabilityTokenBuilder::new()
+            .capability_id(CAP_SCAFFOLD_STATUS)
+            .zone_id("z:work")
+            .principal("user:test")
+            .issuer("node:test")
+            .operations(&[operation])
+            .validity(now, now + chrono::Duration::hours(1))
+            .sign(signing_key)
+            .expect("test capability token should sign"),
+    )
+}}
+
+fn base_handshake(signing_key: &fcp_crypto::ed25519::Ed25519SigningKey) -> HandshakeRequest {{
+    HandshakeRequest {{
+        protocol_version: "2.0.0".into(),
+        zone: ZoneId::work(),
+        zone_dir: None,
+        host_public_key: signing_key.verifying_key().to_bytes(),
+        nonce: [0u8; 32],
+        capabilities_requested: vec![CapabilityId::from_static(CAP_SCAFFOLD_STATUS)],
+        host: None,
+        transport_caps: None,
+        requested_instance_id: None,
+    }}
+}}
+
+fn base_invoke(
+    signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+) -> InvokeRequest {{
+    InvokeRequest {{
+        r#type: "invoke".into(),
+        id: RequestId::new("req_1"),
+        connector_id: ConnectorId::from_static("{connector_id}"),
+        operation: OperationId::from_static(OP_SCAFFOLD_STATUS),
+        zone_id: ZoneId::work(),
+        input: serde_json::json!({{}}),
+        capability_token: test_capability_token(signing_key, OP_SCAFFOLD_STATUS),
+        holder_proof: None,
+        context: None,
+        idempotency_key: None,
+        lease_seq: None,
+        deadline_ms: None,
+        correlation_id: None,
+        provenance: None,
+        approval_tokens: Vec::new(),
+    }}
+}}
+
+fn base_simulate(
+    signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+) -> SimulateRequest {{
+    SimulateRequest {{
+        r#type: "simulate".into(),
+        id: RequestId::new("sim_1"),
+        connector_id: ConnectorId::from_static("{connector_id}"),
+        operation: OperationId::from_static(OP_SCAFFOLD_STATUS),
+        zone_id: ZoneId::work(),
+        input: serde_json::json!({{}}),
+        capability_token: test_capability_token(signing_key, OP_SCAFFOLD_STATUS),
+        estimate_cost: false,
+        check_availability: false,
+        context: None,
+        correlation_id: None,
+    }}
+}}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // E2E test harness
@@ -2847,7 +2951,7 @@ struct ConnectorProcess {{
 }}
 
 impl ConnectorProcess {{
-    fn send(&mut self, request: &serde_json::Value) -> std::io::Result<serde_json::Value> {{
+    fn send(&mut self, request: &serde_json::Value) -> Result<serde_json::Value> {{
         let stdin = self.child.stdin.as_mut().expect("stdin");
         writeln!(stdin, "{{}}", serde_json::to_string(request)?)?;
         stdin.flush()?;
@@ -2875,13 +2979,23 @@ impl Drop for ConnectorProcess {{
 #[ignore = "requires built binary"]
 fn test_e2e_handshake() {{
     let mut connector = spawn_connector().expect("spawn connector");
+    let signing_key = test_signing_key();
+
+    connector
+        .send(&serde_json::json!({{
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "configure",
+            "params": {{}}
+        }}))
+        .expect("configure");
 
     let response = connector
         .send(&serde_json::json!({{
             "jsonrpc": "2.0",
-            "id": 1,
+            "id": 2,
             "method": "handshake",
-            "params": {{}}
+            "params": serde_json::to_value(base_handshake(&signing_key)).expect("serialize handshake")
         }}))
         .expect("handshake");
 
@@ -2896,6 +3010,7 @@ fn test_e2e_handshake() {{
 #[ignore = "requires built binary"]
 fn test_e2e_configure_and_invoke() {{
     let mut connector = spawn_connector().expect("spawn connector");
+    let signing_key = test_signing_key();
 
     // Configure
     let config_response = connector
@@ -2908,15 +3023,23 @@ fn test_e2e_configure_and_invoke() {{
         .expect("configure");
     assert!(config_response.get("result").is_some());
 
+    let handshake_response = connector
+        .send(&serde_json::json!({{
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "handshake",
+            "params": serde_json::to_value(base_handshake(&signing_key)).expect("serialize handshake")
+        }}))
+        .expect("handshake");
+    assert!(handshake_response.get("result").is_some());
+
     // Invoke scaffold status
     let invoke_response = connector
         .send(&serde_json::json!({{
             "jsonrpc": "2.0",
-            "id": 2,
+            "id": 3,
             "method": "invoke",
-            "params": {{
-                "operation": "{short_name}.scaffold_status"
-            }}
+            "params": serde_json::to_value(base_invoke(&signing_key)).expect("serialize invoke")
         }}))
         .expect("invoke");
     assert!(invoke_response.get("result").is_some());
@@ -3019,6 +3142,7 @@ fn test_e2e_self_check() {{
 #[ignore = "requires built binary"]
 fn test_e2e_simulate() {{
     let mut connector = spawn_connector().expect("spawn connector");
+    let signing_key = test_signing_key();
 
     // Configure first
     connector
@@ -3030,18 +3154,21 @@ fn test_e2e_simulate() {{
         }}))
         .expect("configure");
 
-    let response = connector
+    connector
         .send(&serde_json::json!({{
             "jsonrpc": "2.0",
             "id": 2,
+            "method": "handshake",
+            "params": serde_json::to_value(base_handshake(&signing_key)).expect("serialize handshake")
+        }}))
+        .expect("handshake");
+
+    let response = connector
+        .send(&serde_json::json!({{
+            "jsonrpc": "2.0",
+            "id": 3,
             "method": "simulate",
-            "params": {{
-                "id": "sim_1",
-                "operation": "{short_name}.scaffold_status",
-                "input": {{}},
-                "zone_id": "z:work",
-                "capability_token": {{}}
-            }}
+            "params": serde_json::to_value(base_simulate(&signing_key)).expect("serialize simulate")
         }}))
         .expect("simulate");
 
@@ -4833,6 +4960,19 @@ members = [
         assert!(output.contains("test_happy_path_scaffold_status"));
         assert!(output.contains("test_missing_capability_denied"));
         assert!(output.contains("test_error_codes_correct"));
+        assert!(output.contains("use fcp_test::error::TestError;"));
+        assert!(!output.contains("use crate::error::TestError;"));
+    }
+
+    #[test]
+    fn generate_e2e_tests_rs_uses_protocol_shaped_requests() {
+        let output = generate_e2e_tests_rs("fcp.test", "test", "fcp_test");
+        assert!(output.contains("use anyhow::Result;"));
+        assert!(output.contains("use fcp_sdk::prelude::*;"));
+        assert!(output.contains("fn send(&mut self, request: &serde_json::Value) -> Result<serde_json::Value>"));
+        assert!(output.contains("serde_json::to_value(base_handshake(&signing_key))"));
+        assert!(output.contains("serde_json::to_value(base_invoke(&signing_key))"));
+        assert!(output.contains("serde_json::to_value(base_simulate(&signing_key))"));
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -5459,6 +5599,29 @@ members = ["crates/alpha", "crates/beta"]
         assert!(result.contains("\"crates/beta\""));
         assert!(result.contains("\"connectors/new\""));
         assert!(result.contains("members = ["));
+    }
+
+    #[test]
+    fn workspace_members_contains_ignores_dependency_paths() {
+        let content = r#"[workspace]
+members = [
+    "crates/alpha",
+]
+
+[dependencies]
+fcp-alpha = { path = "connectors/new" }
+"#;
+
+        assert!(!workspace_members_contains(content, "connectors/new"));
+    }
+
+    #[test]
+    fn workspace_members_contains_detects_single_line_members() {
+        let content = r#"[workspace]
+members = ["crates/alpha", "connectors/new"]
+"#;
+
+        assert!(workspace_members_contains(content, "connectors/new"));
     }
 
     // ---- generate_next_steps expanded ----

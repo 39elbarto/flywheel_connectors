@@ -28,6 +28,7 @@ use xorf::Filter as _;
 use crate::admission::ObjectAdmissionClass;
 use crate::iblt::{Iblt, IbltDecodeResult};
 use fcp_core::{EpochId, NodeSignature, ObjectId, TailscaleNodeId, ZoneId};
+use fcp_crypto::{CryptoError, Ed25519Signature, Ed25519VerifyingKey};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants (NORMATIVE defaults)
@@ -679,6 +680,21 @@ impl GossipSummary {
         self.signature = Some(signature);
         self
     }
+
+    /// Verify the attached node signature against the canonical transcript.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the summary is unsigned or the signature fails to
+    /// validate against `verifying_key`.
+    pub fn verify_signature(&self, verifying_key: &Ed25519VerifyingKey) -> Result<(), CryptoError> {
+        let signature = self
+            .signature
+            .as_ref()
+            .ok_or(CryptoError::VerificationFailed)?;
+        let signature = Ed25519Signature::from_bytes(&signature.signature);
+        verifying_key.verify(&self.signing_bytes(), &signature)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -882,6 +898,62 @@ impl RevocationPushMessage {
             timestamp: now,
             signature: None,
         }
+    }
+
+    /// Get bytes for signing.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any encoded variable-length field exceeds `u32::MAX`.
+    #[must_use]
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let estimated = 128usize.saturating_add(self.revoked_ids.len().saturating_mul(32));
+        let mut bytes = Vec::with_capacity(estimated);
+        bytes.extend_from_slice(b"FCP2-REVOCATION-PUSH-V1");
+
+        let from_bytes = self.from.as_str().as_bytes();
+        bytes.extend_from_slice(
+            &u32::try_from(from_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(from_bytes);
+
+        let zone_bytes = self.zone_id.as_bytes();
+        bytes.extend_from_slice(
+            &u32::try_from(zone_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(zone_bytes);
+
+        bytes.extend_from_slice(
+            &u32::try_from(self.revoked_ids.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        for object_id in &self.revoked_ids {
+            bytes.extend_from_slice(object_id.as_bytes());
+        }
+
+        bytes.extend_from_slice(&self.new_rev_seq.to_le_bytes());
+        bytes.extend_from_slice(&self.timestamp.to_le_bytes());
+        bytes
+    }
+
+    /// Verify the attached node signature against the canonical transcript.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the push is unsigned or the signature fails to
+    /// validate against `verifying_key`.
+    pub fn verify_signature(&self, verifying_key: &Ed25519VerifyingKey) -> Result<(), CryptoError> {
+        let signature = self
+            .signature
+            .as_ref()
+            .ok_or(CryptoError::VerificationFailed)?;
+        let signature = Ed25519Signature::from_bytes(&signature.signature);
+        verifying_key.verify(&self.signing_bytes(), &signature)
     }
 }
 
@@ -1094,6 +1166,12 @@ impl MeshGossip {
     #[must_use]
     pub fn with_defaults(local_node: TailscaleNodeId) -> Self {
         Self::new(local_node, GossipConfig::default())
+    }
+
+    /// Summary freshness window, in seconds.
+    #[must_use]
+    pub const fn summary_ttl_secs(&self) -> u64 {
+        self.config.summary_ttl_secs
     }
 
     /// Get or create zone state.

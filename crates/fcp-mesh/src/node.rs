@@ -40,7 +40,7 @@ use crate::degraded::{
     DegradedTransportError, RetentionClass,
 };
 use crate::device::DeviceProfile;
-use crate::gossip::{GossipConfig, MeshGossip};
+use crate::gossip::{GossipConfig, GossipMessage, GossipSummary, MeshGossip, RevocationPushMessage};
 use crate::planner::{
     CandidateNode, ExecutionPlanner, HeldLease, LeasePurpose, NodeInfo, PlannerContext,
     PlannerInput,
@@ -173,6 +173,25 @@ pub enum MeshNodeError {
     #[error("enforcement error: {0}")]
     Enforcement(#[from] MeshNodeEnforcementError),
 
+    /// Required peer signing key is not registered.
+    #[error("missing peer signing key for {peer}")]
+    PeerSigningKeyMissing { peer: String },
+
+    /// Control-plane peer signature verification failed.
+    #[error("invalid {message_kind} signature from {peer}")]
+    PeerSignatureInvalid {
+        peer: String,
+        message_kind: &'static str,
+    },
+
+    /// Attached node signature is bound to the wrong node identifier.
+    #[error("{message_kind} signature node mismatch: expected {expected}, got {actual}")]
+    SignatureNodeMismatch {
+        message_kind: &'static str,
+        expected: String,
+        actual: String,
+    },
+
     /// Trace capture not enabled.
     #[error("trace capture not enabled")]
     TraceNotEnabled,
@@ -246,6 +265,21 @@ pub struct MeshNodeMetrics {
     pub gossip_updates: u64,
     /// Peer updates applied.
     pub peer_updates: u64,
+}
+
+/// Verified revocation push ready to apply to a revocation registry fetch path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedRevocationPush {
+    /// Source peer that authenticated the push.
+    pub from: NodeId,
+    /// Zone the revocation applies to.
+    pub zone_id: ZoneId,
+    /// Revoked object IDs advertised by the peer.
+    pub revoked_ids: Vec<ObjectId>,
+    /// Peer's advertised revocation head sequence.
+    pub new_rev_seq: u64,
+    /// Push timestamp.
+    pub timestamp: u64,
 }
 
 /// MeshNode orchestration entrypoint.
@@ -1175,6 +1209,78 @@ impl MeshNode {
             .map_err(|_| SymbolRequestError::SignatureInvalid)
     }
 
+    fn peer_signing_key(&self, peer: &NodeId) -> Result<&Ed25519VerifyingKey, MeshNodeError> {
+        self.peer_signing_keys
+            .get(peer)
+            .ok_or_else(|| MeshNodeError::PeerSigningKeyMissing {
+                peer: peer.as_str().to_string(),
+            })
+    }
+
+    fn verify_summary_signature(&self, summary: &GossipSummary) -> Result<NodeId, MeshNodeError> {
+        let signature = summary
+            .signature
+            .as_ref()
+            .ok_or_else(|| MeshNodeError::PeerSignatureInvalid {
+                peer: summary.from.as_str().to_string(),
+                message_kind: "gossip summary",
+            })?;
+        if signature.node_id.as_str() != summary.from.as_str() {
+            return Err(MeshNodeError::SignatureNodeMismatch {
+                message_kind: "gossip summary",
+                expected: summary.from.as_str().to_string(),
+                actual: signature.node_id.as_str().to_string(),
+            });
+        }
+
+        let peer = NodeId::new(summary.from.as_str());
+        let key = self.peer_signing_keys.get(&peer).ok_or_else(|| {
+            MeshNodeError::PeerSigningKeyMissing {
+                peer: summary.from.as_str().to_string(),
+            }
+        })?;
+        summary
+            .verify_signature(key)
+            .map_err(|_| MeshNodeError::PeerSignatureInvalid {
+                peer: summary.from.as_str().to_string(),
+                message_kind: "gossip summary",
+            })?;
+        Ok(peer)
+    }
+
+    fn verify_revocation_push_signature(
+        &self,
+        push: &RevocationPushMessage,
+    ) -> Result<NodeId, MeshNodeError> {
+        let signature = push
+            .signature
+            .as_ref()
+            .ok_or_else(|| MeshNodeError::PeerSignatureInvalid {
+                peer: push.from.as_str().to_string(),
+                message_kind: "revocation push",
+            })?;
+        if signature.node_id.as_str() != push.from.as_str() {
+            return Err(MeshNodeError::SignatureNodeMismatch {
+                message_kind: "revocation push",
+                expected: push.from.as_str().to_string(),
+                actual: signature.node_id.as_str().to_string(),
+            });
+        }
+
+        let peer = NodeId::new(push.from.as_str());
+        let key = self.peer_signing_keys.get(&peer).ok_or_else(|| {
+            MeshNodeError::PeerSigningKeyMissing {
+                peer: push.from.as_str().to_string(),
+            }
+        })?;
+        push.verify_signature(key)
+            .map_err(|_| MeshNodeError::PeerSignatureInvalid {
+                peer: push.from.as_str().to_string(),
+                message_kind: "revocation push",
+            })?;
+        Ok(peer)
+    }
+
     async fn load_symbol_meta(
         &self,
         request: &SymbolRequest,
@@ -1206,16 +1312,113 @@ impl MeshNode {
         Ok(meta)
     }
 
+    /// Apply a verified gossip summary from a peer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the summary is unsigned, bound to the wrong node
+    /// ID, or fails signature verification against the registered peer key.
+    pub fn handle_summary(
+        &mut self,
+        summary: GossipSummary,
+        now_secs: u64,
+    ) -> Result<(), MeshNodeError> {
+        self.verify_summary_signature(&summary)?;
+        self.gossip.handle_summary(summary, now_secs);
+        self.metrics.gossip_updates = self.metrics.gossip_updates.saturating_add(1);
+        Ok(())
+    }
+
+    /// Verify and dispatch a priority revocation push.
+    ///
+    /// The mesh node does not own a revocation registry, so this returns a
+    /// verified push descriptor for the caller to apply or reconcile.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the push is unsigned, stale, bound to the wrong
+    /// node ID, or fails signature verification against the registered peer
+    /// key.
+    pub fn handle_revocation_push(
+        &mut self,
+        push: RevocationPushMessage,
+        now_secs: u64,
+    ) -> Result<VerifiedRevocationPush, MeshNodeError> {
+        self.verify_revocation_push_signature(&push)?;
+        if now_secs.saturating_sub(push.timestamp) > self.gossip.summary_ttl_secs() {
+            return Err(MeshNodeError::PeerSignatureInvalid {
+                peer: push.from.as_str().to_string(),
+                message_kind: "revocation push",
+            });
+        }
+        self.metrics.gossip_updates = self.metrics.gossip_updates.saturating_add(1);
+        Ok(VerifiedRevocationPush {
+            from: NodeId::new(push.from.as_str()),
+            zone_id: push.zone_id,
+            revoked_ids: push.revoked_ids,
+            new_rev_seq: push.new_rev_seq,
+            timestamp: push.timestamp,
+        })
+    }
+
+    /// Dispatch a gossip control-plane message through the verified node entrypoint.
+    ///
+    /// Returns a verified revocation push when the message carries one.
+    pub fn handle_gossip_message(
+        &mut self,
+        message: GossipMessage,
+        now_secs: u64,
+    ) -> Result<Option<VerifiedRevocationPush>, MeshNodeError> {
+        match message {
+            GossipMessage::Summary(summary) => {
+                self.handle_summary(summary, now_secs)?;
+                Ok(None)
+            }
+            GossipMessage::RevocationPush(push) => {
+                self.handle_revocation_push(push, now_secs).map(Some)
+            }
+            GossipMessage::Request(_)
+            | GossipMessage::Response(_)
+            | GossipMessage::ReconcileRequest(_)
+            | GossipMessage::ReconcileResponse(_) => Ok(None),
+        }
+    }
+
     /// Apply a decode status update (targeted repair feedback).
-    pub fn handle_decode_status(&mut self, status: &DecodeStatus, now_ms: u64) {
+    pub fn handle_decode_status(
+        &mut self,
+        peer: &NodeId,
+        status: &DecodeStatus,
+        now_ms: u64,
+    ) -> Result<(), MeshNodeError> {
+        let key = self.peer_signing_key(peer)?;
+        status
+            .verify(key)
+            .map_err(|_| MeshNodeError::PeerSignatureInvalid {
+                peer: peer.as_str().to_string(),
+                message_kind: "decode status",
+            })?;
         self.symbol_requests.process_decode_status(status, now_ms);
+        Ok(())
     }
 
     /// Apply a SymbolAck and stop further sends.
-    pub fn handle_symbol_ack(&mut self, ack: &SymbolAck, now_ms: u64) {
+    pub fn handle_symbol_ack(
+        &mut self,
+        peer: &NodeId,
+        ack: &SymbolAck,
+        now_ms: u64,
+    ) -> Result<(), MeshNodeError> {
+        let key = self.peer_signing_key(peer)?;
+        ack.verify(key)
+            .map_err(|_| MeshNodeError::PeerSignatureInvalid {
+                peer: peer.as_str().to_string(),
+                message_kind: "symbol ack",
+            })?;
         self.symbol_requests.process_symbol_ack(ack, now_ms);
         self.symbol_metrics.record_ack();
         self.sent_symbols.remove(&ack.object_id);
+        Ok(())
     }
 
     /// Prune stale state (transfers, sent_symbols, admission peers, gossip
@@ -2187,9 +2390,12 @@ mod tests {
     #[test]
     fn handle_decode_status_delegates_to_handler() {
         let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
         let object_id = ObjectId::from_bytes([0x44; 32]);
 
-        let status = DecodeStatus {
+        let mut status = DecodeStatus {
             header: test_object_header(),
             object_id,
             zone_id: ZoneId::work(),
@@ -2201,17 +2407,20 @@ mod tests {
             missing_hint: None,
             signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
         };
+        status.sign(&signing_key);
 
-        // Should not panic
-        node.handle_decode_status(&status, 1000);
+        node.handle_decode_status(&peer, &status, 1000).expect("status should verify");
     }
 
     #[test]
     fn handle_symbol_ack_increments_ack_metric() {
         let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
         let object_id = ObjectId::from_bytes([0x66; 32]);
 
-        let ack = SymbolAck::new(
+        let mut ack = SymbolAck::new(
             test_object_header(),
             object_id,
             ZoneId::work(),
@@ -2220,9 +2429,114 @@ mod tests {
             SymbolAckReason::Complete,
             5,
         );
+        ack.sign(&signing_key);
 
-        node.handle_symbol_ack(&ack, 1000);
+        node.handle_symbol_ack(&peer, &ack, 1000)
+            .expect("ack should verify");
         assert_eq!(node.metrics().symbol_requests.acks_received, 1);
+    }
+
+    #[test]
+    fn handle_summary_requires_valid_signature() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+
+        let summary = GossipSummary {
+            from: TailscaleNodeId::new("peer-1"),
+            zone_id: ZoneId::work(),
+            epoch_id: EpochId::new("epoch-1"),
+            object_filter_digest: [0x11; 32],
+            symbol_filter_digest: [0x22; 32],
+            object_count: 3,
+            symbol_count: 7,
+            iblt: b"[]".to_vec(),
+            timestamp: 1_000,
+            signature: Some(fcp_core::NodeSignature::new(
+                peer.clone(),
+                signing_key.sign(
+                    &GossipSummary {
+                        from: TailscaleNodeId::new("peer-1"),
+                        zone_id: ZoneId::work(),
+                        epoch_id: EpochId::new("epoch-1"),
+                        object_filter_digest: [0x11; 32],
+                        symbol_filter_digest: [0x22; 32],
+                        object_count: 3,
+                        symbol_count: 7,
+                        iblt: b"[]".to_vec(),
+                        timestamp: 1_000,
+                        signature: None,
+                    }
+                    .signing_bytes(),
+                )
+                .to_bytes(),
+                1_000,
+            )),
+        };
+
+        node.handle_summary(summary, 1_000)
+            .expect("summary should verify");
+        assert_eq!(node.metrics().gossip_updates, 1);
+    }
+
+    #[test]
+    fn handle_summary_rejects_missing_signature() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer, signing_key.verifying_key());
+
+        let summary = GossipSummary {
+            from: TailscaleNodeId::new("peer-1"),
+            zone_id: ZoneId::work(),
+            epoch_id: EpochId::new("epoch-1"),
+            object_filter_digest: [0x11; 32],
+            symbol_filter_digest: [0x22; 32],
+            object_count: 3,
+            symbol_count: 7,
+            iblt: b"[]".to_vec(),
+            timestamp: 1_000,
+            signature: None,
+        };
+
+        let err = node
+            .handle_summary(summary, 1_000)
+            .expect_err("unsigned summary must be rejected");
+        assert!(matches!(
+            err,
+            MeshNodeError::PeerSignatureInvalid {
+                message_kind: "gossip summary",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn handle_revocation_push_returns_verified_descriptor() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+
+        let mut push = RevocationPushMessage::new(
+            TailscaleNodeId::new("peer-1"),
+            ZoneId::work(),
+            vec![ObjectId::from_bytes([0xAB; 32])],
+            42,
+            1_000,
+        );
+        push.signature = Some(fcp_core::NodeSignature::new(
+            peer,
+            signing_key.sign(&push.signing_bytes()).to_bytes(),
+            1_000,
+        ));
+
+        let verified = node
+            .handle_revocation_push(push, 1_000)
+            .expect("push should verify");
+        assert_eq!(verified.new_rev_seq, 42);
+        assert_eq!(verified.revoked_ids.len(), 1);
     }
 
     // ---- Metrics tests ----
@@ -2736,11 +3050,14 @@ mod tests {
     #[test]
     fn multiple_acks_accumulate_metric() {
         let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
         let zone_id = ZoneId::work();
 
         for i in 0..3_u8 {
             let object_id = ObjectId::from_bytes([i; 32]);
-            let ack = SymbolAck::new(
+            let mut ack = SymbolAck::new(
                 test_object_header(),
                 object_id,
                 zone_id.clone(),
@@ -2749,7 +3066,9 @@ mod tests {
                 SymbolAckReason::Complete,
                 5,
             );
-            node.handle_symbol_ack(&ack, 1000);
+            ack.sign(&signing_key);
+            node.handle_symbol_ack(&peer, &ack, 1000)
+                .expect("ack should verify");
         }
         assert_eq!(node.metrics().symbol_requests.acks_received, 3);
     }

@@ -503,20 +503,19 @@ impl RevocationRegistry {
 
     /// Add a revocation to the registry.
     ///
-    /// If an object_id is already revoked, the entry with the **earliest**
+    /// If an `object_id` is already revoked, the entry with the **earliest**
     /// `effective_at` is kept. This prevents an attacker (with owner-key
     /// access) from suppressing an active revocation by replaying one with a
     /// far-future `effective_at`, which `is_revoked_at(now)` would otherwise
     /// treat as not-yet-active.
     pub fn add_revocation(&mut self, revocation: &RevocationObject) {
         for object_id in &revocation.revoked {
-            match self.revocations.get(object_id) {
-                Some(existing) if existing.effective_at <= revocation.effective_at => {
-                    // Keep the earlier (or equal) effective revocation.
-                }
-                _ => {
-                    self.revocations.insert(*object_id, revocation.clone());
-                }
+            let should_replace = self
+                .revocations
+                .get(object_id)
+                .is_none_or(|existing| existing.effective_at > revocation.effective_at);
+            if should_replace {
+                self.revocations.insert(*object_id, revocation.clone());
             }
         }
     }

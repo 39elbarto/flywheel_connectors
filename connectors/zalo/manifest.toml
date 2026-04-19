@@ -39,35 +39,214 @@ wall_clock_timeout_ms = 60000
 deny_exec = true
 deny_ptrace = true
 
-[provides.operations."zalo.send_message"]
-description = "Send a message to a Zalo user via the Bot API"
-capability = "zalo.send"
-risk_level = "medium"
-safety_tier = "risky"
+[provides.operations."zalo.self.get_me"]
+description = "Get the current Zalo bot identity"
+capability = "zalo.messages"
+risk_level = "low"
+safety_tier = "safe"
 requires_approval = "none"
-idempotency = "none"
+idempotency = "strict"
 
-[provides.operations."zalo.send_message".input_schema]
-required = ["recipient_id", "message"]
+[provides.operations."zalo.self.get_me".input_schema]
 type = "object"
 
-[provides.operations."zalo.send_message".input_schema.properties.recipient_id]
-description = "Zalo user ID of the recipient"
-type = "string"
-
-[provides.operations."zalo.send_message".input_schema.properties.message]
-description = "Message text to send"
-type = "string"
-
-[provides.operations."zalo.send_message".output_schema]
+[provides.operations."zalo.self.get_me".output_schema]
 type = "object"
 
-[provides.operations."zalo.send_message".output_schema.properties.message_id]
+[provides.operations."zalo.self.get_me".output_schema.properties.bot_id]
 type = "string"
 
-[provides.operations."zalo.send_message".ai_hints]
-when_to_use = "When you need to send a message to a Zalo user through the bot."
+[provides.operations."zalo.self.get_me".ai_hints]
+when_to_use = "When you need to confirm which Zalo bot account is active."
 common_mistakes = []
 examples = []
 related = []
 
+[provides.operations."zalo.messages.send"]
+description = "Send a message to a Zalo user via the Bot API"
+capability = "zalo.messages"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."zalo.messages.send".input_schema]
+required = ["recipient_id", "message"]
+type = "object"
+
+[provides.operations."zalo.messages.send".input_schema.properties.recipient_id]
+description = "Zalo user ID of the recipient"
+type = "string"
+
+[provides.operations."zalo.messages.send".input_schema.properties.message]
+description = "Message text to send"
+type = "string"
+
+[provides.operations."zalo.messages.send".output_schema]
+type = "object"
+
+[provides.operations."zalo.messages.send".output_schema.properties.message_id]
+type = "string"
+
+[provides.operations."zalo.messages.send".ai_hints]
+when_to_use = "When you need to send a text message to a Zalo user through the bot."
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."zalo.messages.send_photo"]
+description = "Send a photo message to a Zalo user via the Bot API"
+capability = "zalo.messages"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."zalo.messages.send_photo".input_schema]
+required = ["recipient_id", "photo_url"]
+type = "object"
+
+[provides.operations."zalo.messages.send_photo".input_schema.properties.recipient_id]
+description = "Zalo user ID of the recipient"
+type = "string"
+
+[provides.operations."zalo.messages.send_photo".input_schema.properties.photo_url]
+description = "HTTPS URL of the photo to send"
+type = "string"
+
+[provides.operations."zalo.messages.send_photo".output_schema]
+type = "object"
+
+[provides.operations."zalo.messages.send_photo".output_schema.properties.message_id]
+type = "string"
+
+[provides.operations."zalo.messages.send_photo".ai_hints]
+when_to_use = "When you need to send a photo message through the Zalo bot."
+common_mistakes = ["Passing a non-HTTPS photo URL."]
+examples = []
+related = []
+
+[provides.operations."zalo.updates.poll"]
+description = "Poll for one pending Zalo update"
+capability = "zalo.updates"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."zalo.updates.poll".input_schema]
+type = "object"
+
+[provides.operations."zalo.updates.poll".output_schema]
+type = "object"
+
+[provides.operations."zalo.updates.poll".output_schema.properties.update_id]
+type = "string"
+
+[provides.operations."zalo.updates.poll".ai_hints]
+when_to_use = "When you need to consume one pending Zalo update from long polling."
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."zalo.webhook.set"]
+description = "Set the Zalo webhook URL"
+capability = "zalo.webhook"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."zalo.webhook.set".input_schema]
+required = ["url"]
+type = "object"
+
+[provides.operations."zalo.webhook.set".input_schema.properties.url]
+description = "HTTPS webhook URL to register"
+type = "string"
+
+[provides.operations."zalo.webhook.set".output_schema]
+type = "object"
+
+[provides.operations."zalo.webhook.set".output_schema.properties.ok]
+type = "boolean"
+
+[provides.operations."zalo.webhook.set".ai_hints]
+when_to_use = "When you need to configure webhook delivery for the Zalo bot."
+common_mistakes = ["Using a non-HTTPS webhook URL."]
+examples = []
+related = []
+
+[provides.operations."zalo.webhook.delete"]
+description = "Delete the configured Zalo webhook"
+capability = "zalo.webhook"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."zalo.webhook.delete".input_schema]
+type = "object"
+
+[provides.operations."zalo.webhook.delete".output_schema]
+type = "object"
+
+[provides.operations."zalo.webhook.delete".output_schema.properties.ok]
+type = "boolean"
+
+[provides.operations."zalo.webhook.delete".ai_hints]
+when_to_use = "When you need to remove the Zalo webhook configuration."
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."zalo.webhook.info"]
+description = "Get the current Zalo webhook configuration"
+capability = "zalo.webhook"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."zalo.webhook.info".input_schema]
+type = "object"
+
+[provides.operations."zalo.webhook.info".output_schema]
+type = "object"
+
+[provides.operations."zalo.webhook.info".output_schema.properties.url]
+type = "string"
+
+[provides.operations."zalo.webhook.info".ai_hints]
+when_to_use = "When you need to inspect the current Zalo webhook target."
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."zalo.webhook.verify"]
+description = "Verify a Zalo webhook secret token against local config"
+capability = "zalo.webhook"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."zalo.webhook.verify".input_schema]
+required = ["token"]
+type = "object"
+
+[provides.operations."zalo.webhook.verify".input_schema.properties.token]
+description = "Webhook verification token to compare"
+type = "string"
+
+[provides.operations."zalo.webhook.verify".output_schema]
+type = "object"
+
+[provides.operations."zalo.webhook.verify".output_schema.properties.verified]
+type = "boolean"
+
+[provides.operations."zalo.webhook.verify".ai_hints]
+when_to_use = "When you need to verify an inbound webhook token against configured expectations."
+common_mistakes = []
+examples = []
+related = []

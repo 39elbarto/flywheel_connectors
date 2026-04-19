@@ -39,29 +39,30 @@ wall_clock_timeout_ms = 60000
 deny_exec = false
 deny_ptrace = true
 
-[provides.operations."zalouser.get_status"]
-description = "Check the status of the Zalo personal-account helper process"
-capability = "zalouser.read"
-risk_level = "low"
-safety_tier = "safe"
+[provides.operations."zalouser.helper.exec"]
+description = "Execute one guarded helper operation against the Zalo personal-account runtime"
+capability = "zalouser.helper"
+risk_level = "high"
+safety_tier = "risky"
 requires_approval = "none"
-idempotency = "strict"
+idempotency = "none"
 
-[provides.operations."zalouser.get_status".input_schema]
+[provides.operations."zalouser.helper.exec".input_schema]
+required = ["action"]
 type = "object"
 
-[provides.operations."zalouser.get_status".output_schema]
+[provides.operations."zalouser.helper.exec".input_schema.properties.action]
+description = "Guarded helper action to execute"
+type = "string"
+
+[provides.operations."zalouser.helper.exec".output_schema]
 type = "object"
 
-[provides.operations."zalouser.get_status".output_schema.properties.running]
+[provides.operations."zalouser.helper.exec".output_schema.properties.ok]
 type = "boolean"
 
-[provides.operations."zalouser.get_status".output_schema.properties.pid]
-type = "integer"
-
-[provides.operations."zalouser.get_status".ai_hints]
-when_to_use = "When you need to check if the Zalo helper process is running."
+[provides.operations."zalouser.helper.exec".ai_hints]
+when_to_use = "When you intentionally need to drive the guarded Zalo helper process."
 common_mistakes = []
 examples = []
 related = []
-

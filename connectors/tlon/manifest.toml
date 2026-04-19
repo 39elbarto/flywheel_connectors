@@ -39,35 +39,94 @@ wall_clock_timeout_ms = 60000
 deny_exec = true
 deny_ptrace = true
 
-[provides.operations."tlon.send_dm"]
+[provides.operations."tlon.dm.send"]
 description = "Send a direct message to a ship on the Tlon network"
-capability = "tlon.send"
+capability = "tlon.dm"
 risk_level = "medium"
-safety_tier = "risky"
+safety_tier = "safe"
 requires_approval = "none"
-idempotency = "none"
+idempotency = "best_effort"
 
-[provides.operations."tlon.send_dm".input_schema]
+[provides.operations."tlon.dm.send".input_schema]
 required = ["ship", "message"]
 type = "object"
 
-[provides.operations."tlon.send_dm".input_schema.properties.ship]
+[provides.operations."tlon.dm.send".input_schema.properties.ship]
 description = "Target ship name (e.g. ~zod)"
 type = "string"
 
-[provides.operations."tlon.send_dm".input_schema.properties.message]
+[provides.operations."tlon.dm.send".input_schema.properties.message]
 description = "Message text to send"
 type = "string"
 
-[provides.operations."tlon.send_dm".output_schema]
+[provides.operations."tlon.dm.send".output_schema]
 type = "object"
 
-[provides.operations."tlon.send_dm".output_schema.properties.ok]
+[provides.operations."tlon.dm.send".output_schema.properties.ok]
 type = "boolean"
 
-[provides.operations."tlon.send_dm".ai_hints]
+[provides.operations."tlon.dm.send".ai_hints]
 when_to_use = "When you need to send a direct message to a ship on the Tlon/Urbit network."
 common_mistakes = ["Omitting the ~ prefix on ship names."]
 examples = []
 related = []
 
+[provides.operations."tlon.channel.send"]
+description = "Send a channel message on the Tlon network"
+capability = "tlon.channel"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."tlon.channel.send".input_schema]
+required = ["channel", "message"]
+type = "object"
+
+[provides.operations."tlon.channel.send".input_schema.properties.channel]
+description = "Target channel path or identifier"
+type = "string"
+
+[provides.operations."tlon.channel.send".input_schema.properties.message]
+description = "Message text to send"
+type = "string"
+
+[provides.operations."tlon.channel.send".output_schema]
+type = "object"
+
+[provides.operations."tlon.channel.send".output_schema.properties.ok]
+type = "boolean"
+
+[provides.operations."tlon.channel.send".ai_hints]
+when_to_use = "When you need to send a message into a Tlon/Urbit channel."
+common_mistakes = ["Using a DM target where a channel path is required."]
+examples = []
+related = []
+
+[provides.operations."tlon.target.resolve"]
+description = "Resolve a Tlon DM or channel target before sending"
+capability = "tlon.channel"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."tlon.target.resolve".input_schema]
+required = ["target"]
+type = "object"
+
+[provides.operations."tlon.target.resolve".input_schema.properties.target]
+description = "Human-friendly DM or channel target to resolve"
+type = "string"
+
+[provides.operations."tlon.target.resolve".output_schema]
+type = "object"
+
+[provides.operations."tlon.target.resolve".output_schema.properties.resolved]
+type = "boolean"
+
+[provides.operations."tlon.target.resolve".ai_hints]
+when_to_use = "When you need to normalize or validate a Tlon target before sending."
+common_mistakes = []
+examples = []
+related = []

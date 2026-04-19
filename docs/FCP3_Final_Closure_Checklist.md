@@ -18,8 +18,8 @@
 | Deletion-wave preservation artifacts indexed | `flywheel_connectors-z1nkz`, `docs/FCP3_Workflow_Preservation_Evidence.md`, `docs/FCP3_Pre_Cutover_Baseline.md` | PASS | Teaching rewrite, runtime deletion, and preservation index are all documented and cross-linked |
 | Operational evidence bundle indexed | `flywheel_connectors-8bqme.2`, `docs/FCP3_Operational_Proof_Index.md` | PASS | Operator/deployment/workflow-preservation section is now indexed in one reviewer-facing document; final proof manifest still needs to cite it |
 | Semantic and conformance evidence bundle indexed | `flywheel_connectors-8bqme.1`, `docs/FCP3_Semantic_Conformance_Proof_Index.md` | PASS | Owner-map, crate-graph, conformance harness, and deletion-preservation proof are now gathered in one reviewer-facing section |
-| Before/after benchmark comparison published | `flywheel_connectors-ukr33.2`, `docs/FCP3_Benchmark_Comparison.md` | PASS | Comparison table, thresholds, and a successful 2026-04-19 current-tree cutover-harness rerun are now attached |
-| Final proof manifest published | `flywheel_connectors-8bqme.3` | OPEN | This is the canonical remaining closure-grade blocker for final review |
+| Before/after benchmark comparison published | `flywheel_connectors-ukr33.2`, `docs/FCP3_Benchmark_Comparison.md` | PASS | Comparison table, thresholds, and a successful 2026-04-19 current-tree cutover-harness rerun are now attached with the requested `CARGO_TARGET_DIR=/tmp/fcp-mg-cod4` remote execution note |
+| Final proof manifest published | `flywheel_connectors-8bqme.3`, `docs/FCP3_Final_Proof_Manifest.md` | PASS | Manifest enumerates 7 proof sections, 25 artifacts, consolidated rerun commands, tooling prerequisites, and review verdict protocol |
 
 ---
 
@@ -27,7 +27,7 @@
 
 | Item | Blocking bead | Evidence status | Owner | Rerun command | Decision needed |
 |------|---------------|-----------------|-------|---------------|-----------------|
-| Final proof manifest is not yet published | `flywheel_connectors-8bqme.3` | Semantic, operational, and benchmark sections now exist, but the canonical manifest that cites them is still in progress | `jemanuel` | `br show flywheel_connectors-8bqme.3` | Finish the proof-manifest doc and wire it to the published section indexes |
+| *(none remaining)* | -- | All section indexes and the final proof manifest are now published | -- | -- | -- |
 
 ---
 
@@ -84,22 +84,21 @@ supporting docs:
   index published
 - `flywheel_connectors-ukr33.2`: `CLOSED` with current-tree benchmark rerun
   evidence attached
-- `flywheel_connectors-8bqme.3`: still `IN_PROGRESS`, which remains the sole
-  checklist blocker
+- `flywheel_connectors-8bqme.3`: `CLOSED` with final proof manifest published
+  at `docs/FCP3_Final_Proof_Manifest.md`
 
 ---
 
 ## Review Outcome
 
-As of 2026-04-19, **final cutover closure is not ready**. The review gate is
-partially satisfied:
+As of 2026-04-19, **all 7 closure gates are PASS**:
 
-- placeholder closure audit: complete
-- quarantine scoreboard: complete
-- deletion-wave preservation evidence: complete
-- semantic and conformance proof index: complete
-- final proof manifest and its supporting index sections: incomplete
-- before/after benchmark comparison and rerun evidence: complete
+- placeholder closure audit: PASS
+- quarantine scoreboard: PASS
+- deletion-wave preservation evidence: PASS
+- operational evidence bundle indexed: PASS
+- semantic and conformance proof index: PASS
+- before/after benchmark comparison: PASS
+- final proof manifest published: PASS
 
-The correct next action is to complete the open proof-bundle and comparison
-beads, then revisit this checklist before any go-or-no-go record is published.
+The canonical review entry point is `docs/FCP3_Final_Proof_Manifest.md`.

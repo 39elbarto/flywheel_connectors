@@ -46,6 +46,7 @@ use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
     BatchOptions, BatchStatus, BudgetAction, BudgetPolicyEngine, BudgetReportRequest,
     BudgetReportResponse, CacheMetadata, CacheValidator, CancellationController,
+    CapabilityTokenVerifyRequest,
     CancellationRequest, CancellationResponse, ConfigRevisionRecord, ConnectorAdminState,
     ConnectorAdminStatus, ConnectorArchetype, ConnectorArtifactMetadataResponse,
     ConnectorArtifactRegistrationRequest, ConnectorArtifactRegistrationResponse,
@@ -1182,6 +1183,13 @@ fn claims_principal(claims: &fcp_crypto::cose::CwtClaims) -> Option<&str> {
         })
 }
 
+fn capability_token_b64(token: &fcp_core::CapabilityToken) -> HostResult<String> {
+    let bytes = token.raw().to_cbor().map_err(|error| {
+        HostError::Internal(format!("failed to serialize capability token for verification: {error}"))
+    })?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
 async fn verify_live_request(
     state: &AppState,
     request: &InvokeRequest,
@@ -1220,6 +1228,32 @@ async fn verify_live_request(
         .map_err(|error| {
             HostError::PreflightFailed(format!("capability token rejected: {error}"))
         })?;
+
+    let persisted_verify = state
+        .lifecycle
+        .verify_capability_token(&CapabilityTokenVerifyRequest {
+            token_cbor_b64: capability_token_b64(&request.capability_token)?,
+            operation_id: Some(request.operation.to_string()),
+            connector_id: Some(request.connector_id.to_string()),
+        })
+        .await
+        .map_err(|error| {
+            HostError::PreflightFailed(format!(
+                "persisted capability verification failed: {error}"
+            ))
+        })?;
+    if !persisted_verify.valid {
+        let reason = persisted_verify
+            .rejection_reasons
+            .first()
+            .cloned()
+            .unwrap_or_else(|| {
+                "persisted capability verification rejected the live request".to_string()
+            });
+        return Err(HostError::PreflightFailed(format!(
+            "capability token rejected by host state: {reason}"
+        )));
+    }
 
     let principal = claims_principal(verified_token.claims()).ok_or_else(|| {
         HostError::PreflightFailed(
@@ -4924,6 +4958,30 @@ mod tests {
         )
     }
 
+    fn test_capability_token_with_token_id(
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+        capability_id: &str,
+        operation_id: &str,
+        zone_id: &str,
+        connector_id: &str,
+        token_id: &[u8],
+    ) -> fcp_core::CapabilityToken {
+        let now = Utc::now();
+        fcp_core::CapabilityToken::from_raw(
+            fcp_crypto::cose::CapabilityTokenBuilder::new()
+                .capability_id(capability_id)
+                .zone_id(zone_id)
+                .principal("user:test")
+                .audience(connector_id)
+                .issuer("host:test")
+                .operations(&[operation_id])
+                .token_id(token_id)
+                .validity(now, now + chrono::Duration::hours(1))
+                .sign(signing_key)
+                .expect("test capability token with explicit token id should sign"),
+        )
+    }
+
     fn failing_admin_state_path(dir: &tempfile::TempDir) -> std::path::PathBuf {
         let blocker = dir.path().join("admin-state-blocker");
         std::fs::write(&blocker, "block persistence here").expect("write blocker file");
@@ -4965,6 +5023,94 @@ mod tests {
             connectors_file: Some(connectors_file),
             started_at: Instant::now(),
         })
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn verify_live_request_rejects_token_revoked_in_host_state() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping revoked live token test");
+            return;
+        }
+
+        let connector_id = "fcp.test.revoked-live:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let issued = lifecycle
+            .issue_capability_token(
+                &fcp_host::CapabilityIssuanceRequest {
+                    connector_id: connector_id.to_string(),
+                    zone_id: ZoneId::work().to_string(),
+                    principal_id: "user:test".to_string(),
+                    operations: vec!["test.echo".to_string()],
+                    ttl_secs: 3600,
+                    not_before_delay_secs: None,
+                    holder_node: None,
+                    max_delegation_depth: 0,
+                    resource_allow: Vec::new(),
+                    resource_deny: Vec::new(),
+                    max_calls: None,
+                    max_bytes: None,
+                    credential_allow: Vec::new(),
+                    dry_run: false,
+                },
+                &signing_key,
+            )
+            .await
+            .expect("issue token for revocation ledger");
+        lifecycle
+            .revoke_token(&fcp_host::TokenRevocationRequest {
+                token_id: issued.token_id.clone(),
+                reason: Some("test revocation".to_string()),
+            })
+            .await
+            .expect("revoke token");
+
+        let token_id = hex::decode(&issued.token_id).expect("issued token id should be hex");
+        let revoked_live_token = test_capability_token_with_token_id(
+            &signing_key,
+            "cap.test.echo",
+            "test.echo",
+            ZoneId::work().as_str(),
+            connector_id,
+            &token_id,
+        );
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![subprocess_test_connector_config(connector_id)],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            ..(*base_state).clone()
+        });
+
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "revoked token should fail" }),
+            capability_token: revoked_live_token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let error = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("revoked token should be rejected before live execution");
+        assert!(error.to_string().contains("host state"));
+        assert!(error.to_string().contains("revoked"));
     }
 
     fn rollout_handler_test_policy() -> RolloutPolicy {

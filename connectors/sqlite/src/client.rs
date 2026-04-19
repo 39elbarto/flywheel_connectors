@@ -78,10 +78,10 @@ fn authorize(policy: AuthorizerPolicy, ctx: AuthContext<'_>) -> Authorization {
             AuthorizerPolicy::PragmaRead => Authorization::Allow,
             AuthorizerPolicy::ReadOnly | AuthorizerPolicy::Write => Authorization::Deny,
         },
-        AuthAction::Transaction { .. } | AuthAction::Savepoint { .. } => match policy {
-            AuthorizerPolicy::ReadOnly | AuthorizerPolicy::Write | AuthorizerPolicy::PragmaRead => {
-                Authorization::Deny
-            }
+        AuthAction::Transaction { .. } => Authorization::Deny,
+        AuthAction::Savepoint { .. } => match policy {
+            AuthorizerPolicy::Write => Authorization::Allow,
+            AuthorizerPolicy::ReadOnly | AuthorizerPolicy::PragmaRead => Authorization::Deny,
         },
         AuthAction::Select | AuthAction::Read { .. } | AuthAction::Recursive => {
             Authorization::Allow

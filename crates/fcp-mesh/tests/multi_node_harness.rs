@@ -9,7 +9,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use fcp_async_core::channel::{mpsc, oneshot};
 use fcp_async_core::{AsyncError, TaskGroup, task, time};
-use fcp_core::{EpochId, ObjectId, TailscaleNodeId, ZoneId};
+use fcp_core::{EpochId, NodeSignature, ObjectId, TailscaleNodeId, ZoneId};
 use fcp_crypto::{Ed25519SigningKey, Ed25519VerifyingKey, X25519PublicKey, X25519SecretKey};
 use fcp_mesh::{
     AvailabilityProfile, CpuArch, DeviceProfile, GossipMessage, GossipRequest, LatencyClass,
@@ -917,7 +917,17 @@ async fn run_node_task(
                     epoch_id,
                     reply,
                 } => {
-                    let summary = mesh.gossip_mut().create_summary(&zone_id, epoch_id);
+                    let summary = mesh.gossip_mut().create_summary(&zone_id, epoch_id).map(
+                        |mut summary| {
+                            let signature = identity.signing_key.sign(&summary.signing_bytes());
+                            summary.signature = Some(NodeSignature::new(
+                                identity.node_id.clone(),
+                                signature.to_bytes(),
+                                summary.timestamp,
+                            ));
+                            summary
+                        },
+                    );
                     let _ = reply.send(summary);
                 }
                 NodeCommand::CreateObjectRequest {
@@ -975,8 +985,11 @@ async fn run_node_task(
 
                 match message {
                     GossipMessage::Summary(summary) => {
-                        mesh.gossip_mut()
-                            .handle_summary(summary, delivered_at_ms / 1000);
+                        mesh.handle_gossip_message(
+                            GossipMessage::Summary(summary),
+                            delivered_at_ms / 1000,
+                        )
+                        .expect("harness summary should verify");
                     }
                     GossipMessage::Request(request) => {
                         let response = mesh.gossip_mut().handle_request(&request);
@@ -994,7 +1007,13 @@ async fn run_node_task(
                     GossipMessage::Response(_response) => {}
                     GossipMessage::ReconcileRequest(_request) => {}
                     GossipMessage::ReconcileResponse(_response) => {}
-                    GossipMessage::RevocationPush(_push) => {}
+                    GossipMessage::RevocationPush(push) => {
+                        mesh.handle_gossip_message(
+                            GossipMessage::RevocationPush(push),
+                            delivered_at_ms / 1000,
+                        )
+                        .expect("harness revocation push should verify");
+                    }
                 }
 
                 observed_messages.push(observed);

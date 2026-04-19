@@ -55,6 +55,11 @@ jobs:
             asset: fwc-windows-amd64
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout external dependencies
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git "$GITHUB_WORKSPACE/../asupersync"
+          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git "$GITHUB_WORKSPACE/../toon_rust"
       - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
@@ -117,6 +122,11 @@ jobs:
             suffix: windows-amd64
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout external dependencies
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git "$GITHUB_WORKSPACE/../asupersync"
+          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git "$GITHUB_WORKSPACE/../toon_rust"
       - uses: dtolnay/rust-toolchain@nightly
         with:
           targets: ${{ matrix.target }}
@@ -257,6 +267,11 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout external dependencies
+        shell: bash
+        run: |
+          git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git "$GITHUB_WORKSPACE/../asupersync"
+          git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git "$GITHUB_WORKSPACE/../toon_rust"
       - uses: dtolnay/rust-toolchain@nightly
 
       - name: Publish crates (dry-run)

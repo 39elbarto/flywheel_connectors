@@ -1255,7 +1255,11 @@ mod meshnode {
             .await
             .expect("symbol request should succeed");
 
-        let status = DecodeStatus {
+        let peer = NodeId::new("peer-1");
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+
+        let mut status = DecodeStatus {
             header: status_header(&zone_id),
             object_id,
             zone_id: zone_id.clone(),
@@ -1267,8 +1271,10 @@ mod meshnode {
             missing_hint: None,
             signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
         };
+        status.sign(&signing_key);
 
-        node.handle_decode_status(&status, 0);
+        node.handle_decode_status(&peer, &status, 0)
+            .expect("status should verify");
 
         let err = node
             .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
@@ -1336,7 +1342,11 @@ mod meshnode {
             .await
             .expect("symbol request should succeed");
 
-        let ack = SymbolAck::new(
+        let peer = NodeId::new("peer-1");
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+
+        let mut ack = SymbolAck::new(
             test_header(&zone_id),
             object_id,
             zone_id.clone(),
@@ -1345,8 +1355,10 @@ mod meshnode {
             SymbolAckReason::Complete,
             4,
         );
+        ack.sign(&signing_key);
 
-        node.handle_symbol_ack(&ack, 0);
+        node.handle_symbol_ack(&peer, &ack, 0)
+            .expect("ack should verify");
 
         let err = node
             .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
@@ -6314,7 +6326,11 @@ mod real_component_integration {
             ttl_secs: None,
             placement: None,
         };
-        let status = DecodeStatus {
+        let peer = NodeId::new("peer-1");
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+
+        let mut status = DecodeStatus {
             header,
             object_id,
             zone_id: zone_id.clone(),
@@ -6326,7 +6342,9 @@ mod real_component_integration {
             missing_hint: None,
             signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
         };
-        node.handle_decode_status(&status, 1001);
+        status.sign(&signing_key);
+        node.handle_decode_status(&peer, &status, 1001)
+            .expect("status should verify");
 
         // Phase 3: Follow-up request rejected
         let request2 = SymbolRequest::new(
@@ -6673,7 +6691,11 @@ mod real_component_integration {
         assert!(!response.symbol_esis.is_empty());
 
         // Phase 2: SymbolAck Complete — signals object is fully decoded
-        let ack = SymbolAck::new(
+        let peer = NodeId::new("peer-1");
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+
+        let mut ack = SymbolAck::new(
             test_header(&zone_id),
             object_id,
             zone_id.clone(),
@@ -6682,7 +6704,9 @@ mod real_component_integration {
             SymbolAckReason::Complete,
             4,
         );
-        node.handle_symbol_ack(&ack, 1001);
+        ack.sign(&signing_key);
+        node.handle_symbol_ack(&peer, &ack, 1001)
+            .expect("ack should verify");
 
         // Phase 3: Rejected
         let request2 = SymbolRequest::new(

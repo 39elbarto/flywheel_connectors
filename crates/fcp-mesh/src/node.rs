@@ -3839,9 +3839,12 @@ mod tests {
     #[test]
     fn handle_decode_status_with_missing_hint() {
         let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
         let object_id = ObjectId::from_bytes([0x55; 32]);
 
-        let status = DecodeStatus {
+        let mut status = DecodeStatus {
             header: test_object_header(),
             object_id,
             zone_id: ZoneId::work(),
@@ -3853,9 +3856,10 @@ mod tests {
             missing_hint: Some(vec![1, 2, 3]),
             signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
         };
+        status.sign(&signing_key);
 
-        // Should not panic
-        node.handle_decode_status(&status, 2000);
+        node.handle_decode_status(&peer, &status, 2000)
+            .expect("status should verify");
     }
 
     // ---- Announce duplicate ----

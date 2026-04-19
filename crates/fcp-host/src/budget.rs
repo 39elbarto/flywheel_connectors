@@ -7,11 +7,11 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::{Mutex, RwLock};
-use fcp_core::ZoneId;
 use fcp_kernel::{
     BudgetEnforcement, BudgetStatus, FcpError, UsageBudgetPolicy, UsageBudgetSnapshot,
     UsageBudgetUsage, UsageMetric, UsageMetricKind,
 };
+use fcp_policy::ZoneId;
 use serde::{Deserialize, Serialize};
 
 use crate::{PolicyEngine, PreflightRequest, PreflightResponse};
@@ -437,10 +437,10 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::ZoneId;
     use fcp_kernel::{
         BudgetEnforcement, ConnectorId, UsageBudgetLimit, UsageBudgetPolicy, UsageMetricKind,
     };
+    use fcp_policy::ZoneId;
 
     #[test]
     fn budget_tracker_warns_on_exceeded() {

@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use fcp_core::ZoneId;
+use fcp_policy::ZoneId;
 use serde::{Deserialize, Serialize};
 
 use crate::{HostError, HostResult};

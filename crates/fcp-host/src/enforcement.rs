@@ -22,7 +22,9 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use fcp_core::{ConnectorId, IdValidationError, OperationId, ZoneId, ZoneIdError};
+use fcp_core::{IdValidationError, ZoneIdError};
+use fcp_kernel::{ConnectorId, OperationId};
+use fcp_policy::ZoneId;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Enforcement configuration

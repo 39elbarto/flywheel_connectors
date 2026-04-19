@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use fcp_async_core::{AsyncError, ExecutionContext};
-use fcp_core::ZoneId;
 use fcp_kernel::{ConnectorId, SelfCheckReport, SelfCheckStatus};
+use fcp_policy::ZoneId;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 

@@ -55,6 +55,13 @@ pub use fcp_core::{
     VerificationStep,
 };
 
+// ── Content-Addressed Objects ────────────────────────────────────────
+
+pub use fcp_core::{
+    DeviceSelector, ObjectHeader, ObjectId, ObjectIdKey, ObjectIdParseError, ObjectPlacementPolicy,
+    RetentionClass, StorageMeta, StoredObject,
+};
+
 // ── Shared Identity Types ──────────────────────────────────────────
 
 pub use fcp_core::{ConnectorId, OperationId, ZoneId};
@@ -105,5 +112,12 @@ mod tests {
             _sbom: SoftwareBillOfMaterials,
         ) {
         }
+    }
+
+    #[test]
+    fn evidence_exports_object_types() {
+        let id = ObjectId::from_bytes([0_u8; 32]);
+        assert_eq!(id.as_bytes(), &[0_u8; 32]);
+        let _: RetentionClass = RetentionClass::Ephemeral;
     }
 }

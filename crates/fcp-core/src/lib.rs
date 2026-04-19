@@ -12,42 +12,51 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
 
-mod audit;
-mod capability;
-mod checkpoint;
+// ── Acceptable shared primitive residue ──────────────────────────────
+mod error;
+pub mod tool_schema;
+pub mod util;
+
+// ── Assigned to fcp-kernel (execution lifecycle) ────────────────────
 mod connector;
 mod connector_artifacts;
 mod connector_descriptors;
 mod connector_state;
 mod crdt;
 mod credential;
-mod enforcement;
-mod enrollment;
-mod error;
 mod event;
 mod health;
 mod lease;
 mod lifecycle;
-mod object;
 mod operation;
-pub mod pcs;
-mod policy;
-mod posture;
 mod protocol;
-mod provenance;
 mod provisioning;
 mod quorum;
 mod ratelimit;
 mod release;
-mod revocation;
 mod secret;
-mod supply_chain;
-pub mod tool_schema;
-pub mod util;
+
+// ── Assigned to fcp-policy (zone, capability, trust) ────────────────
+mod capability;
+mod enforcement;
+mod enrollment;
+pub mod pcs;
+mod policy;
+mod posture;
+mod provenance;
 mod zone_keys;
 
-// Legacy wildcard barrel during the FCP3 carve-out. New semantic ownership
-// should be assigned to the split owner crates, not added here by default.
+// ── Assigned to fcp-evidence (audit, revocation, objects) ───────────
+mod audit;
+mod checkpoint;
+mod object;
+mod revocation;
+mod supply_chain;
+
+// Legacy wildcard barrel during the FCP3 carve-out. These re-exports keep
+// existing `use fcp_core::*` imports working while semantic ownership
+// migrates to fcp-kernel, fcp-policy, and fcp-evidence. New code should
+// import from the owner crate, not from fcp-core.
 pub use audit::*;
 pub use capability::*;
 pub use checkpoint::*;

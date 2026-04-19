@@ -195,6 +195,30 @@ pub use fcp_core::{
 
 pub use fcp_core::{ShutdownAck, ShutdownRequest};
 
+// ── Connector Artifacts & Release ───────────────────────────────────
+
+pub use fcp_core::{
+    ConnectorBinaryObject, ConnectorBinarySymbolSet, ConnectorBinaryTransmissionInfo,
+    ConnectorManifestObject, ConnectorTarget,
+};
+
+pub use fcp_core::{
+    ReleaseError, ReleaseManifest, ReleaseManifestBuilder, ReleaseSignature, RollbackRules,
+    SuccessThresholds,
+};
+
+// ── Credential & Secret Management ──────────────────────────────────
+
+pub use fcp_core::{
+    CredentialApplication, CredentialBackend, CredentialBackendError, CredentialId,
+    CredentialObject, CredentialValidationError,
+};
+
+pub use fcp_core::{
+    KeyDerivationInfo, SecretAccessToken, SecretFormat, SecretId, SecretMaterial, SecretObject,
+    SecretRotationPolicy, SecretSharingScheme, SecretType, ThresholdSecretObject, WrappedShare,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,5 +444,40 @@ mod tests {
         assert!(output.session_id.is_some());
         assert!(output.recipe.is_some());
         assert!(output.setup.is_some());
+    }
+
+    #[test]
+    fn kernel_exports_credential_types() {
+        let id = CredentialId::new();
+        let _ = id.as_uuid();
+        let _: CredentialApplication = CredentialApplication::HttpAuthorizationBearer;
+    }
+
+    #[test]
+    fn kernel_exports_secret_types() {
+        let id = SecretId::new();
+        let _ = id.as_uuid();
+        let _: SecretType = SecretType::ApiKey;
+        let policy = SecretRotationPolicy::default_policy();
+        assert!(!policy.is_rotation_due(0));
+    }
+
+    #[test]
+    fn kernel_exports_release_types() {
+        // Builder requires a signature, so just verify types are accessible
+        fn _release_exists(
+            _m: ReleaseManifest,
+            _s: ReleaseSignature,
+            _t: SuccessThresholds,
+            _r: RollbackRules,
+        ) {}
+        let _: fn() -> ReleaseManifestBuilder =
+            || ReleaseManifest::builder(ConnectorId::from_static("fcp.test"), "1.0.0");
+    }
+
+    #[test]
+    fn kernel_exports_connector_artifact_types() {
+        let target = ConnectorTarget::from_env();
+        let _ = target.as_string();
     }
 }

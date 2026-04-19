@@ -88,6 +88,30 @@ pub use fcp_core::ResourceObject;
 
 pub use fcp_core::RiskLevel;
 
+// ── Enforcement Ordering ─────────────────────────────────────────────
+
+pub use fcp_core::{
+    CheckOutcome, CheckRecord, EnforcementCheckId, EnforcementCheckOrder, EnforcementDecision,
+};
+
+// ── Posture & Device Admission ──────────────────────────────────────
+
+pub use fcp_core::{
+    PostureAttestation, PostureAttributeKey, PostureAttributeValue, PostureCheckResult,
+    PostureRequirement, PostureRequirements, PostureRequirementsBuilder,
+};
+
+// ── Device Enrollment ───────────────────────────────────────────────
+
+pub use fcp_core::{
+    DeviceEnrollmentApproval, DeviceEnrollmentRequest, DeviceId, DeviceMetadata, EnrollmentStatus,
+    KeyRotationSchedule, KeyType, NodeKeyAttestation,
+};
+
+// ── Post-Compromise Security (PCS) ──────────────────────────────────
+
+pub use fcp_core::pcs;
+
 // ── Shared Identity Types ──────────────────────────────────────────
 
 pub use fcp_core::{ConnectorId, InstanceId, OperationId};
@@ -145,5 +169,33 @@ mod tests {
     #[test]
     fn policy_exports_zone_key_types() {
         let _: ZoneKeyAlgorithm = ZoneKeyAlgorithm::ChaCha20Poly1305;
+    }
+
+    #[test]
+    fn policy_exports_enforcement_types() {
+        let order = EnforcementCheckOrder::canonical_order();
+        assert_eq!(order.len(), EnforcementCheckOrder::COUNT);
+        let _: CheckOutcome = CheckOutcome::Allow;
+    }
+
+    #[test]
+    fn policy_exports_posture_types() {
+        fn _posture_exists(
+            _a: PostureAttestation,
+            _r: PostureRequirements,
+        ) {}
+    }
+
+    #[test]
+    fn policy_exports_enrollment_types() {
+        let _: EnrollmentStatus = EnrollmentStatus::Approved;
+        let _: KeyType = KeyType::Signing;
+        let device = DeviceId::new("test-device");
+        assert_eq!(device.as_str(), "test-device");
+    }
+
+    #[test]
+    fn policy_exports_pcs_module() {
+        let _: pcs::PcsMode = pcs::PcsMode::Disabled;
     }
 }

@@ -85,6 +85,16 @@ impl RaptorQDecoder {
             return Err(DecodeError::Timeout);
         }
 
+        let expected_len = usize::from(self.symbol_size);
+        if data.len() != expected_len {
+            return Err(DecodeError::InvalidSymbol {
+                reason: format!(
+                    "symbol size mismatch: expected {expected_len} bytes, got {} bytes",
+                    data.len()
+                ),
+            });
+        }
+
         // Skip duplicates
         if self.received.contains_key(&esi) {
             return Ok(None);
@@ -1919,6 +1929,19 @@ mod tests {
             }
             other => panic!("expected InvalidSymbol, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn decoder_rejects_malformed_symbol_before_buffering() {
+        let config = test_config();
+        let oti = ObjectTransmissionInformation::new(256, 64, 1, 1, 8);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+
+        let err = decoder
+            .add_symbol(0, vec![0xAA; 63])
+            .expect_err("malformed symbol should be rejected at ingress");
+        assert!(matches!(err, DecodeError::InvalidSymbol { .. }));
+        assert_eq!(decoder.received_count(), 0);
     }
 
     #[test]

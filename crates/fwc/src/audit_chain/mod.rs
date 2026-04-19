@@ -27,6 +27,7 @@ pub mod types;
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use clap::{Args, Subcommand};
+use fcp_cbor::to_canonical_cbor;
 use fcp_kernel::{AuditEvent, AuditHead, ObjectId, ZoneId};
 use hex::encode as hex_encode;
 use serde::{Deserialize, Serialize};
@@ -475,6 +476,17 @@ fn parse_audit_head(input: &str) -> Result<AuditHead> {
 }
 
 #[allow(clippy::too_many_lines)]
+/// Recompute the canonical content-addressed ObjectId of an `AuditEvent`.
+///
+/// Mirrors the derivation every other content-addressed object in fcp-core
+/// uses: canonical CBOR (deterministic per RFC 8949 §4.2 via `fcp_cbor`)
+/// hashed through `ObjectId::from_unscoped_bytes` (BLAKE3 with the
+/// `FCP2-CONTENT-V2` domain separator).
+fn computed_event_object_id(event: &AuditEvent) -> Option<ObjectId> {
+    let bytes = to_canonical_cbor(event).ok()?;
+    Some(ObjectId::from_unscoped_bytes(&bytes))
+}
+
 fn verify_chain(
     records: &[AuditEventRecord],
     head: Option<&AuditHead>,
@@ -497,6 +509,41 @@ fn verify_chain(
                     object_id: Some(record.object_id.to_string()),
                 });
             }
+        }
+
+        // The supplied `object_id` is what every downstream check
+        // (`prev_mismatch`, `fork_detected`, `head_mismatch`) compares
+        // against. If a producer (or an attacker with write access to
+        // the audit JSONL) supplies an `object_id` that does not match
+        // the canonical content-addressed hash of the event payload,
+        // those downstream checks operate on attacker-chosen tokens
+        // rather than on real content hashes — the chain "verifies"
+        // even though the events are forged. Recompute the id from
+        // canonical CBOR and reject the mismatch up front so the rest
+        // of `verify_chain` can keep using `record.object_id` as a
+        // trusted alias for content.
+        match computed_event_object_id(&record.event) {
+            Some(expected) if expected != record.object_id => {
+                issues.push(AuditVerifyIssue {
+                    code: "audit.object_id_mismatch".to_string(),
+                    message: format!(
+                        "supplied object_id {} does not match content-derived id {}",
+                        record.object_id, expected
+                    ),
+                    seq: Some(record.event.seq),
+                    object_id: Some(record.object_id.to_string()),
+                });
+            }
+            None => {
+                issues.push(AuditVerifyIssue {
+                    code: "audit.object_id_unverifiable".to_string(),
+                    message: "could not canonicalize event for content-id verification"
+                        .to_string(),
+                    seq: Some(record.event.seq),
+                    object_id: Some(record.object_id.to_string()),
+                });
+            }
+            _ => {}
         }
 
         if let Some(prev) = seen_seq.insert(record.event.seq, record.object_id) {
@@ -619,6 +666,8 @@ fn verify_chain(
                 | "audit.genesis_invalid"
                 | "audit.head_mismatch"
                 | "audit.head_seq_mismatch"
+                | "audit.object_id_mismatch"
+                | "audit.object_id_unverifiable"
         )
     });
 

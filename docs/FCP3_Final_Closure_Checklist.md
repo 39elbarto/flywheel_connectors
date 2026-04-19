@@ -27,8 +27,7 @@
 
 | Item | Blocking bead | Evidence status | Owner | Rerun command | Decision needed |
 |------|---------------|-----------------|-------|---------------|-----------------|
-| Final proof manifest is not yet published | `flywheel_connectors-8bqme.3` | Requirements documented; manifest artifact itself absent | `jemanuel` | `br show flywheel_connectors-8bqme.3` | Finish the proof-manifest doc and wire it to the section indexes below |
-| Operational/deployment/workflow-preservation section still open | `flywheel_connectors-8bqme.2` | Section index now exists in `docs/FCP3_Operational_Proof_Index.md`, but the bead/manifest wiring is still open | `jemanuel` | `br show flywheel_connectors-8bqme.2` | Cite the operational proof index from the final proof manifest and close the bead |
+| Final proof manifest is not yet published | `flywheel_connectors-8bqme.3` | Semantic, operational, and benchmark sections now exist, but the canonical manifest that cites them is still in progress | `jemanuel` | `br show flywheel_connectors-8bqme.3` | Finish the proof-manifest doc and wire it to the published section indexes |
 
 ---
 
@@ -67,6 +66,26 @@ story:
 export CARGO_TARGET_DIR=/tmp/fcp-mg-cod3
 (cd .rch/probes/fcp-core && rch exec -- cargo check)
 ```
+
+## 2026-04-19 Validation Snapshot
+
+The final-closure checklist has now been re-run against the live bead graph and
+supporting docs:
+
+- `flywheel_connectors-24llg.1.3`: `CLOSED` with a placeholder-eradication pass
+  table covering all 13 audited families
+- `flywheel_connectors-z1nkz`: `CLOSED` with all three deletion-wave children
+  closed and the workflow-preservation bundle published
+- `flywheel_connectors-etp8q.3`: `CLOSED` with the quarantine scoreboard
+  treated as a live control surface
+- `flywheel_connectors-8bqme.2`: `CLOSED` and its operational proof index
+  published
+- `flywheel_connectors-8bqme.1`: `CLOSED` and its semantic/conformance proof
+  index published
+- `flywheel_connectors-ukr33.2`: `CLOSED` with current-tree benchmark rerun
+  evidence attached
+- `flywheel_connectors-8bqme.3`: still `IN_PROGRESS`, which remains the sole
+  checklist blocker
 
 ---
 

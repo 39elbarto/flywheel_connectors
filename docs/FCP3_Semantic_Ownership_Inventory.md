@@ -66,8 +66,10 @@ This is the actual phase-7 residue that still makes `fcp-core` a semantic junk d
 | `ratelimit` | rate limit declarations, enforcement modes, throttle signals | split between `fcp-policy` policy semantics and `fcp-kernel` execution reporting, or a future dedicated `fcp-ratelimit` contract | currently mixes governance semantics with execution-facing status types |
 | `release` | release / rollout metadata beyond pure execution control | supply-chain / registry-facing contract | release semantics are distinct from the kernel lifecycle core |
 | `connector_artifacts` | connector package / artifact metadata | registry / supply-chain contract | artifact identity and packaging are not general core primitives |
-| `telemetry` | telemetry value contracts and reporting semantics | `fcp-telemetry` | domain already exists, but the semantic surface still sits in `fcp-core` |
 | `enforcement` | canonical enforcement result and ordering semantics | `fcp-policy` | implementation lives in `fcp-host`, but canonical ordering/results still need a clean policy-owned surface |
+| `pcs` | post-compromise security (TreeKEM-style group ratcheting, epoch state, forward secrecy) | co-owner with `fcp-policy` for zone-level security, or dedicated `fcp-pcs` | `pub mod pcs` (not wildcard re-exported) — accessible as `fcp_core::pcs::*` but not via `use fcp_core::*` |
+
+**Note**: `telemetry.rs` exists as a 46KB source file but is **not declared as a module** in `lib.rs` and is therefore dead code. It should either be deleted or wired in during the 0aczd.2 migration.
 
 None of these rows qualify as acceptable permanent residue. Each still represents either missing crate carving or an unresolved owner boundary.
 
@@ -102,8 +104,9 @@ This is the final phase-7 classification for `fcp-core`.
 - `ratelimit`
 - `release`
 - `connector_artifacts`
-- `telemetry`
 - canonical enforcement-order/result types currently implied by `enforcement`
+- `pcs` (post-compromise security, `pub mod` but not wildcard re-exported)
+- `telemetry.rs` (dead code: 46KB file not declared as module in `lib.rs`)
 
 ---
 
@@ -113,7 +116,7 @@ Three active mechanisms keep `fcp-core` in that role:
 
 1. `crates/fcp-core/src/lib.rs` still wildcard re-exports nearly every internal module, so importing `fcp_core::*` continues to expose almost the entire platform semantic surface.
 2. The split owner crates (`fcp-kernel`, `fcp-policy`, `fcp-evidence`) currently re-export from `fcp-core`, which means semantic ownership is declared socially but not yet enforced mechanically.
-3. Several non-primitive domains do not yet have a crisp owner crate at all (`connector_state`, `object`, `credential`, `secret`, `telemetry`, parts of rate limiting / release / leases).
+3. Several non-primitive domains do not yet have a crisp owner crate at all (`connector_state`, `object`, `credential`, `secret`, `pcs`, parts of rate limiting / release / leases). Additionally, `telemetry.rs` (46KB) exists as dead code — not wired into `lib.rs`.
 
 Until those three conditions change, `fcp-core` remains more than a primitive substrate.
 
@@ -135,7 +138,7 @@ Until those three conditions change, `fcp-core` remains more than a primitive su
 This inventory implies the next migration slices:
 
 1. Move physically trapped execution/policy/evidence definitions out of `fcp-core` and invert the re-export direction.
-2. Create or name the missing long-term homes for state/object/credential/secret/telemetry semantics.
+2. Create or name the missing long-term homes for state/object/credential/secret/pcs semantics, and either wire in or delete the dead `telemetry.rs` file.
 3. Replace `fcp-core` wildcard exports with a deliberately narrow primitive surface.
 
 This document is the phase-7 reference for `flywheel_connectors-0aczd.2`: everything in Section 4 must move, narrow, or be deleted.

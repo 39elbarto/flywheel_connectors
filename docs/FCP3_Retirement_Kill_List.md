@@ -84,6 +84,18 @@ Every surviving seam row must record:
 
 ### Phase-7 Row Gates And Proof
 
+### Deletion-Wave Preservation Index
+
+Use this index when reviewing the `flywheel_connectors-z1nkz` deletion family.
+It maps the live seam rows in this file back to the corresponding deletion wave
+and the preservation artifacts reviewers should inspect first.
+
+| Deletion wave | What changed | First artifacts to inspect |
+|---------------|--------------|----------------------------|
+| `flywheel_connectors-z1nkz.1` | Repo docs stopped teaching host-first operation as the preferred architecture | README, `docs/OPERATIONAL_MODEL_VERSIONS.md`, `docs/FWC_Host_First_Truthfulness_Playbook.md`, `crates/fwc/docs/truthfulness-model.md` |
+| `flywheel_connectors-z1nkz.2` | Runtime/control-plane seam rows moved from stale transition language to current `deleted` / `mostly-deleted` / `quarantine-blessed` states | The seam rows in this file, `docs/FCP3_Transition_Scorecard.md`, and the cited grep or crate-path evidence on each row |
+| `flywheel_connectors-z1nkz.3` | Final workflow-preservation review bundle and handoff index | `docs/FCP3_Acceptance_Contracts.md`, `docs/FCP3_Pre_Cutover_Baseline.md`, and the scorecard’s deletion-wave status table |
+
 #### Raw `tokio::io` import in `crates/fwc/src/serve_mcp.rs`
 
 - **Status: DELETED.** The raw `tokio::io` import has been removed. `fcp_async_core::io` now provides `AsyncWrite`, `AsyncBufReadExt`, and all needed I/O traits. `serve_mcp.rs` no longer references `tokio` at all.

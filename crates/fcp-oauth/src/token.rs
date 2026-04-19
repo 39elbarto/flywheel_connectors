@@ -198,8 +198,16 @@ impl OAuthTokens {
     pub fn update_from_response(&mut self, response: TokenResponse) {
         let now = Utc::now();
 
-        self.access_token = response.access_token;
-        self.token_type = response.token_type;
+        // Guard against empty access_token/token_type from a compromised or
+        // misbehaving OAuth server.  An empty token_type would produce a
+        // malformed Authorization header (` <token>` instead of
+        // `Bearer <token>`).  Same rationale as the refresh_token guard below.
+        if !response.access_token.is_empty() {
+            self.access_token = response.access_token;
+        }
+        if !response.token_type.is_empty() {
+            self.token_type = response.token_type;
+        }
         self.expires_at = response.expires_in.map(|secs| {
             now + chrono::Duration::seconds(
                 i64::try_from(secs.min(u64::from(u32::MAX))).unwrap_or(i64::MAX),

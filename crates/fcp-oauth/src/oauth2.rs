@@ -256,12 +256,21 @@ impl OAuth2Client {
     }
 
     /// Create with a custom HTTP client.
-    #[must_use]
-    pub fn with_http_client(config: OAuth2Config, http_client: HttpClient) -> Self {
-        Self {
+    ///
+    /// # Errors
+    /// Returns an error when the configured authorization URL, token URL,
+    /// or redirect URI is invalid.
+    pub fn with_http_client(config: OAuth2Config, http_client: HttpClient) -> OAuthResult<Self> {
+        Url::parse(&config.authorization_url)?;
+        Url::parse(&config.token_url)?;
+        if let Some(redirect_uri) = config.redirect_uri.as_deref() {
+            Url::parse(redirect_uri)?;
+        }
+
+        Ok(Self {
             config,
             http_client: Arc::new(http_client),
-        }
+        })
     }
 
     /// Generate authorization URL without PKCE.
@@ -440,6 +449,12 @@ impl OAuth2Client {
     /// # Errors
     /// Returns an error when token refresh fails or the token response is invalid.
     pub async fn refresh_tokens(&self, refresh_token: &str) -> OAuthResult<OAuthTokens> {
+        if refresh_token.is_empty() {
+            return Err(OAuthError::InvalidTokenResponse(
+                "refresh token cannot be empty".into(),
+            ));
+        }
+
         let mut params = HashMap::new();
         params.insert("grant_type", GrantType::RefreshToken.to_string());
         params.insert("refresh_token", refresh_token.to_string());
@@ -624,12 +639,17 @@ impl AuthorizationCallback {
             .as_ref()
             .ok_or_else(|| OAuthError::InvalidTokenResponse("Missing state parameter".into()))?;
 
-        if state
-            .as_bytes()
-            .ct_eq(expected_state.as_bytes())
-            .unwrap_u8()
-            == 0
-        {
+        // Guard against length mismatch: ct_eq panics when slice lengths
+        // differ.  Check lengths first (leaking only the length, which is
+        // already observable from the URL) and fall through to constant-time
+        // comparison only when lengths match.
+        let state_matches = state.len() == expected_state.len()
+            && state
+                .as_bytes()
+                .ct_eq(expected_state.as_bytes())
+                .unwrap_u8()
+                == 1;
+        if !state_matches {
             return Err(OAuthError::StateMismatch {
                 expected: expected_state.to_string(),
                 actual: state.clone(),
@@ -727,6 +747,20 @@ mod tests {
         };
 
         let result = callback.validate("expected_state");
+        assert!(matches!(result, Err(OAuthError::StateMismatch { .. })));
+    }
+
+    #[test]
+    fn test_callback_state_mismatch_different_lengths() {
+        let callback = AuthorizationCallback {
+            code: Some("auth_code_123".to_string()),
+            state: Some("short".to_string()),
+            error: None,
+            error_description: None,
+            error_uri: None,
+        };
+
+        let result = callback.validate("much_longer_expected_state");
         assert!(matches!(result, Err(OAuthError::StateMismatch { .. })));
     }
 
@@ -995,6 +1029,34 @@ mod tests {
                 .await
                 .expect_err("empty token_type must be rejected");
             assert!(matches!(err, OAuthError::InvalidTokenResponse(_)));
+        });
+    }
+
+    #[test]
+    fn test_refresh_tokens_rejects_empty_refresh_token_argument() {
+        run_with_test_runtime(async {
+            let config = OAuth2Config::new(
+                "cid",
+                "csec",
+                "https://example.com/authorize",
+                "https://example.com/token",
+            )
+            .with_redirect_uri("https://localhost:3000/callback");
+            let client = OAuth2Client::new(config).expect("client should construct");
+
+            let err = client
+                .refresh_tokens("")
+                .await
+                .expect_err("empty refresh token input must be rejected");
+            match err {
+                OAuthError::InvalidTokenResponse(msg) => {
+                    assert!(
+                        msg.contains("refresh token cannot be empty"),
+                        "unexpected message: {msg}"
+                    );
+                }
+                other => panic!("expected InvalidTokenResponse, got {other:?}"),
+            }
         });
     }
 
@@ -1985,7 +2047,7 @@ mod tests {
     fn test_client_with_custom_http_client() {
         let config = test_config();
         let http_client = HttpClientBuilder::new().build();
-        let client = OAuth2Client::with_http_client(config, http_client);
+        let client = OAuth2Client::with_http_client(config, http_client).unwrap();
         assert_eq!(client.config().client_id, "test_client_id");
     }
 
@@ -1995,7 +2057,7 @@ mod tests {
             .with_scopes(vec!["admin".into()])
             .with_auth_style(AuthStyle::Basic);
         let http_client = HttpClientBuilder::new().build();
-        let client = OAuth2Client::with_http_client(config, http_client);
+        let client = OAuth2Client::with_http_client(config, http_client).unwrap();
         assert_eq!(client.config().default_scopes, vec!["admin"]);
         assert_eq!(client.config().auth_style, AuthStyle::Basic);
     }

@@ -149,6 +149,14 @@ pub enum SerializationError {
     #[error("payload too large ({len} bytes > {max} bytes)")]
     PayloadTooLarge { len: usize, max: usize },
 
+    /// The CBOR Value tree is nested deeper than `MAX_CANONICALIZATION_DEPTH`.
+    /// Distinct from `PayloadTooLarge` because the failure has nothing to do
+    /// with byte length — it is a recursion-stack guard against adversarial
+    /// deeply-nested input that should never have been encoded in the first
+    /// place.
+    #[error("canonicalization depth {depth} exceeds limit {max}")]
+    DepthExceeded { depth: usize, max: usize },
+
     /// The CBOR payload has trailing bytes after the first decoded value.
     #[error("trailing bytes after CBOR value")]
     TrailingBytes,
@@ -331,8 +339,8 @@ const MAX_CANONICALIZATION_DEPTH: usize = 128;
 
 fn canonicalize_value_in_place(v: &mut Value, depth: usize) -> Result<(), SerializationError> {
     if depth > MAX_CANONICALIZATION_DEPTH {
-        return Err(SerializationError::PayloadTooLarge {
-            len: depth,
+        return Err(SerializationError::DepthExceeded {
+            depth,
             max: MAX_CANONICALIZATION_DEPTH,
         });
     }
@@ -2135,7 +2143,35 @@ mod tests {
             v = Value::Array(vec![v]);
         }
         let err = canonicalize_value_in_place(&mut v, 0).unwrap_err();
-        assert!(matches!(err, SerializationError::PayloadTooLarge { .. }));
+        assert!(
+            matches!(err, SerializationError::DepthExceeded { max, .. } if max == MAX_CANONICALIZATION_DEPTH),
+            "expected DepthExceeded, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn depth_exceeded_carries_actual_depth_and_is_distinct_from_payload_too_large() {
+        // The new DepthExceeded variant must carry the actual depth at which
+        // the recursion guard tripped so operators can distinguish "input was
+        // 130 levels deep" from "input was a few MB over the size cap" — both
+        // of which used to surface as `PayloadTooLarge`.
+        let err = canonicalize_value_in_place(
+            &mut Value::Integer(0.into()),
+            MAX_CANONICALIZATION_DEPTH + 5,
+        )
+        .unwrap_err();
+        let display = err.to_string();
+        assert!(
+            display.contains("canonicalization depth"),
+            "Display should distinguish from PayloadTooLarge: {display}"
+        );
+        match err {
+            SerializationError::DepthExceeded { depth, max } => {
+                assert_eq!(depth, MAX_CANONICALIZATION_DEPTH + 5);
+                assert_eq!(max, MAX_CANONICALIZATION_DEPTH);
+            }
+            other => panic!("expected DepthExceeded, got {other:?}"),
+        }
     }
 
     // ========================================================================
@@ -2564,7 +2600,7 @@ mod tests {
         let result = canonicalize_value_in_place(&mut v, 0);
         assert!(matches!(
             result,
-            Err(SerializationError::PayloadTooLarge { .. })
+            Err(SerializationError::DepthExceeded { max, .. }) if max == MAX_CANONICALIZATION_DEPTH
         ));
     }
 
@@ -5967,7 +6003,10 @@ mod tests {
             v = Value::Tag(0, Box::new(v));
         }
         let err = canonicalize_value_in_place(&mut v, 0).unwrap_err();
-        assert!(matches!(err, SerializationError::PayloadTooLarge { .. }));
+        assert!(
+            matches!(err, SerializationError::DepthExceeded { max, .. } if max == MAX_CANONICALIZATION_DEPTH),
+            "expected DepthExceeded, got {err:?}"
+        );
     }
 
     #[test]

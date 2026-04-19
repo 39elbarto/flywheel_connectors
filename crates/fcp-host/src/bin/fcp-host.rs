@@ -2303,7 +2303,7 @@ async fn signal_handler_loop(
 ) {
     // On non-Unix platforms, wait for Ctrl+C through the native asupersync
     // signal shim instead of a compatibility bridge.
-    if let Err(err) = asupersync::signal::ctrl_c().await {
+    if let Err(err) = fcp_async_core::signal::ctrl_c().await {
         tracing::error!(
             event = "signal_registration_failed",
             signal = "CTRL_C",

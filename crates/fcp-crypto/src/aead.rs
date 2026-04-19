@@ -84,26 +84,6 @@ impl ChaCha20Nonce {
         Self(bytes)
     }
 
-    /// Generate a random nonce.
-    ///
-    /// # Safety Warning
-    ///
-    /// Random generation of 96-bit nonces carries a risk of collision if the same key
-    /// is used for a large number of messages (birthday paradox).
-    ///
-    /// For random nonces, prefer [`XChaCha20Nonce`] (192-bit).
-    /// For 96-bit nonces, prefer [`ChaCha20Nonce::from_counter`].
-    #[must_use]
-    #[deprecated(
-        since = "0.1.0",
-        note = "96-bit random nonces are risky. Use XChaCha20Nonce or deterministic counting."
-    )]
-    pub fn generate() -> Self {
-        let mut bytes = [0u8; CHACHA20_NONCE_SIZE];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
-        Self(bytes)
-    }
-
     /// Create from a counter value.
     ///
     /// Useful for protocols with deterministic nonces.

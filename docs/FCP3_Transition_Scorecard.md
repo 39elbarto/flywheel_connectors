@@ -90,6 +90,20 @@ block the final mesh-first cutover.
 
 ---
 
+## Deletion-Wave Status
+
+This table is the quick audit entrypoint for the `flywheel_connectors-z1nkz`
+family. It tells reviewers which deletion wave already has preservation
+artifacts and which wave still depends on open cutover work.
+
+| Wave | Status | Primary artifacts | Notes |
+|------|--------|-------------------|-------|
+| `flywheel_connectors-z1nkz.1` teaching rewrite | CLOSED | README framing, `docs/OPERATIONAL_MODEL_VERSIONS.md`, `docs/FWC_Host_First_Truthfulness_Playbook.md`, `crates/fwc/docs/truthfulness-model.md` | Surviving docs now teach host-backed operation as a transitional boundary, not the end-state architecture |
+| `flywheel_connectors-z1nkz.2` runtime/control-plane deletion | IN PROGRESS | `docs/FCP3_Retirement_Kill_List.md`, scoreboard row-state updates, replacement-proof citations in those rows | Runtime seam deletion is still active, so the parent phase cannot close yet |
+| `flywheel_connectors-z1nkz.3` workflow-preservation index | OPEN | `docs/FCP3_Acceptance_Contracts.md`, `docs/FCP3_Pre_Cutover_Baseline.md`, this scorecard | Preservation anchors now exist, but the final indexed review bundle still depends on `.2` landing |
+
+---
+
 ## Proof Artifacts
 
 Key evidence backing this scorecard:

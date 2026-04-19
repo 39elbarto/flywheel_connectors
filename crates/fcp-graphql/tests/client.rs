@@ -7,8 +7,10 @@ use std::task::Poll;
 use std::time::Duration;
 use std::time::Instant;
 
-use asupersync::Cx;
-use asupersync::io::{AsyncRead, ReadBuf};
+use fcp_async_core::Cx;
+use fcp_async_core::io::{AsyncRead, ReadBuf};
+// ServerWebSocket and WebSocketAcceptor are test-server types not re-exported by
+// fcp-async-core; direct import from asupersync is acceptable for test infrastructure.
 use asupersync::net::websocket::{CloseReason, Message, ServerWebSocket, WebSocketAcceptor};
 use chrono::Utc;
 use fcp_async_core::net::{TcpListener, TcpStream};

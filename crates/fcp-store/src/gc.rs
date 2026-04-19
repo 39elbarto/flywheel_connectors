@@ -346,10 +346,12 @@ impl GarbageCollector {
                 }
             }
             if let Err(err) = symbol_store.delete_object(&candidate.object_id).await {
-                if let Some(snapshot) = object_snapshot {
-                    restore_object_snapshot(store, snapshot).await?;
-                }
-                if !matches!(err, SymbolStoreError::ObjectNotFound(_)) {
+                if matches!(err, SymbolStoreError::ObjectNotFound(_)) {
+                    // No symbol-side state to prune.
+                } else {
+                    if let Some(snapshot) = object_snapshot {
+                        restore_object_snapshot(store, snapshot).await?;
+                    }
                     return Err(GcError::SymbolStore(err));
                 }
             }
@@ -495,7 +497,10 @@ impl GarbageCollector {
         let mut expired_leases = 0;
 
         for candidate in &plan.candidates {
-            store.delete(&candidate.object_id).await?;
+            match store.delete(&candidate.object_id).await {
+                Ok(()) | Err(ObjectStoreError::NotFound(_)) => {}
+                Err(err) => return Err(GcError::ObjectStore(err)),
+            }
             evicted += 1;
             if candidate.expired_lease {
                 expired_leases += 1;

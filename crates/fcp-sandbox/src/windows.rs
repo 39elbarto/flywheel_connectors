@@ -82,6 +82,14 @@ pub struct WindowsSandbox {
     appcontainer_available: bool,
 }
 
+// SAFETY: Windows HANDLE values are opaque kernel-managed identifiers. This
+// type stores and closes them but never dereferences them as pointers, so
+// moving or sharing the wrapper across threads does not violate memory safety.
+unsafe impl Send for WindowsSandbox {}
+// SAFETY: See the Send justification above; shared references do not enable
+// aliasing unsafety because HANDLEs are passed back to the OS by value.
+unsafe impl Sync for WindowsSandbox {}
+
 impl WindowsSandbox {
     /// Create a new Windows sandbox.
     #[must_use]
@@ -238,8 +246,7 @@ impl WindowsSandbox {
                 token,
                 TOKEN_INTEGRITY_LEVEL,
                 &label as *const _ as *const std::ffi::c_void,
-                std::mem::size_of::<TOKEN_MANDATORY_LABEL>() as DWORD
-                    + unsafe { GetLengthSid(sid) } as DWORD,
+                std::mem::size_of::<TOKEN_MANDATORY_LABEL>() as DWORD + GetLengthSid(sid) as DWORD,
             )
         };
 
@@ -332,7 +339,7 @@ impl Sandbox for WindowsSandbox {
 
     fn apply_to_command(
         &self,
-        cmd: &mut std::process::Command,
+        _cmd: &mut std::process::Command,
         _policy: &CompiledPolicy,
     ) -> Result<(), SandboxError> {
         // On Windows, true AppContainer sandboxing must be applied to the process BEFORE it starts
@@ -487,7 +494,7 @@ const TOKEN_ADJUST_DEFAULT: DWORD = 0x0080;
 // FFI Bindings
 // ============================================================================
 
-extern "system" {
+unsafe extern "system" {
     fn CreateJobObjectW(lpJobAttributes: *mut std::ffi::c_void, lpName: LPCWSTR) -> HANDLE;
 
     fn SetInformationJobObject(

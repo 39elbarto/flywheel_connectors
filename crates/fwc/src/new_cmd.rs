@@ -464,6 +464,17 @@ fn insert_workspace_member(content: &str, member_path: &str) -> Result<String> {
             in_workspace = false;
         }
         if in_workspace && trimmed.starts_with("members") && trimmed.contains('[') {
+            if trimmed.contains(']') {
+                let closing_idx = lines[i]
+                    .rfind(']')
+                    .context("failed to find closing bracket for workspace members list")?;
+                let (prefix, suffix) = lines[i].split_at(closing_idx);
+                let needs_separator = !prefix.trim_end().ends_with('[');
+                let separator = if needs_separator { ", " } else { "" };
+                lines[i] = format!("{prefix}{separator}\"{member_path}\"{suffix}");
+                inserted = true;
+                break;
+            }
             in_members = true;
             continue;
         }
@@ -5436,6 +5447,18 @@ serde = "1"
         let content = "[workspace]\nmembers = [\n]\n";
         let result = insert_workspace_member(content, "connectors/first").unwrap();
         assert!(result.contains("\"connectors/first\""));
+    }
+
+    #[test]
+    fn insert_workspace_member_single_line_list() {
+        let content = r#"[workspace]
+members = ["crates/alpha", "crates/beta"]
+"#;
+        let result = insert_workspace_member(content, "connectors/new").unwrap();
+        assert!(result.contains("\"crates/alpha\""));
+        assert!(result.contains("\"crates/beta\""));
+        assert!(result.contains("\"connectors/new\""));
+        assert!(result.contains("members = ["));
     }
 
     // ---- generate_next_steps expanded ----

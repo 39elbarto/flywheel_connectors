@@ -16,6 +16,8 @@
 4. Check the **Tooling Prerequisites** before running anything remotely.
 5. Walk the **Artifact Manifest** to confirm every referenced file exists.
 6. Consult `docs/FCP3_Final_Closure_Checklist.md` for the gate-by-gate status.
+7. Read `docs/FCP3_Go_No_Go_Review_Record.md` for the final published
+   go/no-go record.
 
 ---
 
@@ -148,6 +150,7 @@ Every document referenced by the proof sections, with its source bead and role.
 | Operational proof index | `docs/FCP3_Operational_Proof_Index.md` | 8bqme.2 | Deployment, operator journeys, replay bundles |
 | Benchmark comparison | `docs/FCP3_Benchmark_Comparison.md` | ukr33.2 | Before/after performance proof with thresholds |
 | Final closure checklist | `docs/FCP3_Final_Closure_Checklist.md` | 84phy.1 | Gate-by-gate review status |
+| Go/no-go review record | `docs/FCP3_Go_No_Go_Review_Record.md` | 84phy.2 | Final cutover decision and non-blocking follow-ups |
 
 ### Supporting evidence documents
 
@@ -215,7 +218,7 @@ All blocking beads for this manifest are closed.
 | pl7pj.2 | Production deployment guide | 2026-04-06 |
 | pl7pj.3 | Scorecard reconciliation | 2026-04-07 |
 | 24llg.1.3 | Placeholder closure audit | 2026-04-19 |
-| etp8q.3 | Quarantine scoreboard | -- |
+| etp8q.3 | Quarantine scoreboard | 2026-04-07 |
 
 ---
 

@@ -36,7 +36,7 @@ after phase-7 deletion work.
 | Memory and binary size | `flywheel_connectors-tr2xx.3`, `flywheel_connectors-34q27.3` | `fcp-host=2.8MB`, `fwc=7.2MB`, representative connectors 3.6-4.0MB, idle RSS `fcp-test-connector=5.7MB`, `fcp-host=8.8MB` | Release-build size check and idle RSS spot-check from the same task family | Binary size `<20MB`; memory `<10MB` per connector | Baseline is already under target with margin; rerun remains required only if cutover changes binary composition materially |
 | Symbol reconstruction | `flywheel_connectors-tr2xx.4`, `flywheel_connectors-34q27.3` | 1MB round-trip proof anchored by `vector_v5_1mb_stress_roundtrip`; README target `<50ms / <250ms` remains the governing limit | `rch exec -- cargo test -p fcp-raptorq` and the symbol-store / RaptorQ benchmark surfaces cited by `flywheel_connectors-tr2xx.4` | Meet README target; `REVIEW` on criterion delta beyond +20% p50 or +50% p99 | Functional proof exists; phase-7 final proof still needs the rerun note that ties the current tree back to the 1MB target |
 | Secret reconstruction | `flywheel_connectors-tr2xx.6`, `flywheel_connectors-34q27.3` | HPKE seal ~80us, HPKE open ~52us, estimated k-of-n reconstruction `<1ms`, far under the `<150ms / <750ms` README target | `rch exec -- cargo bench -p fcp-crypto --bench crypto_benchmarks` | Meet README target; `REVIEW` on criterion delta beyond +20% p50 or +50% p99 | Baseline remains far below threshold; a current rerun should be cited in the final proof manifest |
-| Cross-cutover protocol / crypto / revocation / gossip / serialization / enforcement hot paths | `flywheel_connectors-ukr33.1`, `docs/FCP3_Pre_Cutover_Baseline.md` | Unified criterion harness added in `crates/fcp-conformance/benches/cutover_harness.rs` to freeze the measurement method across deletion waves | `export CARGO_TARGET_DIR=/tmp/fcp-mg-cod3 && rch exec -- cargo bench -p fcp-conformance --bench cutover_harness -- --output-format bencher` | `PASS` if criterion deltas stay within +20% p50 / +50% p99 and no user-visible flow loses its preserved scenario coverage | PASS on 2026-04-19: remote rerun completed successfully and produced a reproducible bencher transcript |
+| Cross-cutover protocol / crypto / revocation / gossip / serialization / enforcement hot paths | `flywheel_connectors-ukr33.1`, `docs/FCP3_Pre_Cutover_Baseline.md` | Unified criterion harness added in `crates/fcp-conformance/benches/cutover_harness.rs` to freeze the measurement method across deletion waves | `export CARGO_TARGET_DIR=/tmp/fcp-mg-cod4 && rch exec -- cargo bench -p fcp-conformance --bench cutover_harness -- --output-format bencher` | `PASS` if criterion deltas stay within +20% p50 / +50% p99 and no user-visible flow loses its preserved scenario coverage | PASS on 2026-04-19: remote rerun completed successfully and produced a reproducible bencher transcript |
 
 ## Environment Capture For Final Review
 
@@ -54,30 +54,30 @@ When the post-cutover rerun is attached, include:
 Command:
 
 ```bash
-export CARGO_TARGET_DIR=/tmp/fcp-mg-cod3
+export CARGO_TARGET_DIR=/tmp/fcp-mg-cod4
 rch exec -- cargo bench -p fcp-conformance --bench cutover_harness -- --output-format bencher
 ```
 
 Execution notes:
 
-- remote worker: `vmi1149989`
+- remote worker: `vmi1152480`
 - remote cargo result: `exit=0`
-- remote command duration: about `698s`
-- artifact retrieval succeeded after the remote run
+- remote command duration: about `943s`
+- artifact retrieval: `5427 files`, `86562 bytes`, `5007ms`
 - result type: direct bencher-format measurement for the unified cutover harness
 
 Selected benchmark outputs from the current tree:
 
 | Group | Result |
 |-------|--------|
-| Revocation lookup | hit/miss across 100/1,000/10,000 entries stayed at `18-22ns/iter` |
-| FCPC roundtrip | seal/open at 256B: `1651ns` / `1622ns`; 1024B: `2302ns` / `2347ns`; 4096B: `5179ns` / `5101ns` |
-| Ed25519 | sign `15095ns`; verify `27506ns` |
-| Blake3 MAC | 32B MAC/verify `115ns` / `137ns`; 1024B `1688ns` / `1716ns` |
-| AEAD | 256B encrypt/decrypt `1569ns` / `1548ns`; 1024B `2295ns` / `2290ns`; 4096B `4925ns` / `4980ns` |
-| Gossip push | serialize/deserialize 1 entry `342ns` / `871ns`; 10 entries `1860ns` / `3439ns`; 100 entries `14400ns` / `25376ns` |
-| Schema serde | simple hash `241ns`; long hash `345ns`; json roundtrip `281ns` |
-| Full enforcement | check/seal/push/serialize `477ns`; clean check/seal/proceed `21ns` |
+| Revocation lookup | hit/miss across 100/1,000/10,000 entries stayed at `14-16ns/iter`; `check_with_seal=25ns`; `validate_seal=1ns`; freshness/SLA checks stayed at `0-12ns` |
+| FCPC roundtrip | seal/open at 256B: `3206ns` / `3356ns`; 1024B: `7065ns` / `2313ns`; 4096B: `10056ns` / `15312ns` |
+| Ed25519 | sign `49472ns`; verify `91391ns` |
+| Blake3 MAC | 32B MAC/verify `343ns` / `275ns`; 1024B `5427ns` / `2298ns` |
+| AEAD | 256B encrypt/decrypt `1738ns` / `4892ns`; 1024B `7077ns` / `4650ns`; 4096B `10376ns` / `15715ns` |
+| Gossip push | serialize/deserialize 1 entry `1276ns` / `885ns`; 10 entries `5300ns` / `6150ns`; 100 entries `39200ns` / `68068ns` |
+| Schema serde | simple hash `479ns`; long hash `358ns`; json roundtrip `810ns` |
+| Full enforcement | check/seal/push/serialize `1319ns`; clean check/seal/proceed `23ns` |
 
 Interpretation:
 
@@ -88,12 +88,13 @@ Interpretation:
   paths remain well below the user-visible README ceilings.
 - This rerun closes the remaining documentation gap for `flywheel_connectors-ukr33.2`:
   the repository now has both explicit thresholds and an attached current-tree
-  comparison transcript.
+  comparison transcript using the requested `CARGO_TARGET_DIR=/tmp/fcp-mg-cod4`
+  remote run.
 
 ## Rerun Commands
 
 ```bash
-export CARGO_TARGET_DIR=/tmp/fcp-mg-cod3
+export CARGO_TARGET_DIR=/tmp/fcp-mg-cod4
 
 rch exec -- cargo bench -p fcp-conformance --bench cutover_harness -- --output-format bencher
 rch exec -- cargo bench -p fcp-crypto --bench crypto_benchmarks

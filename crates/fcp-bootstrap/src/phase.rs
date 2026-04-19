@@ -206,6 +206,13 @@ impl std::fmt::Display for PartialStateSuggestion {
 /// Detects partial state from a crashed initialization.
 #[must_use]
 pub fn detect_partial_state(data_dir: &Path) -> Option<BootstrapPhase> {
+    // A durable genesis artifact means bootstrap completed far enough that any
+    // surviving partial-state markers are stale leftovers, not an active
+    // in-progress bootstrap.
+    if data_dir.join("genesis.cbor").exists() {
+        return None;
+    }
+
     // Check for lock file
     let lock_file = data_dir.join("init.lock");
     if lock_file.exists() {
@@ -531,6 +538,25 @@ mod tests {
     #[test]
     fn test_detect_no_partial_state() {
         let dir = tempdir().unwrap();
+        assert!(detect_partial_state(dir.path()).is_none());
+    }
+
+    #[test]
+    fn test_detect_partial_state_ignores_stale_lock_when_genesis_exists() {
+        let dir = tempdir().unwrap();
+        write_phase_lock(dir.path(), &BootstrapPhase::GenesisCreate).unwrap();
+        std::fs::write(dir.path().join("genesis.cbor"), b"present").unwrap();
+
+        assert!(detect_partial_state(dir.path()).is_none());
+    }
+
+    #[test]
+    fn test_detect_partial_state_ignores_stale_partial_markers_when_genesis_exists() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("genesis.partial")).unwrap();
+        std::fs::create_dir(dir.path().join("keys.partial")).unwrap();
+        std::fs::write(dir.path().join("genesis.cbor"), b"present").unwrap();
+
         assert!(detect_partial_state(dir.path()).is_none());
     }
 

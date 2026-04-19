@@ -963,6 +963,8 @@ impl WasiRuntime {
     ///
     /// Returns an error if the runtime cannot be initialized.
     pub fn new(config: WasiConfig) -> WasiResult<Self> {
+        validate_preopened_paths(&config)?;
+
         // Configure wasmtime engine
         let mut engine_config = Config::new();
         engine_config.wasm_component_model(true);
@@ -1116,19 +1118,16 @@ impl WasiRuntime {
         // Deduplicate directories to preopen to avoid Wasmtime errors
         let mut preopened_dirs = std::collections::HashMap::new();
 
-        // Mount filesystem directories (or parent directories for specific files)
+        // Mount only explicitly allowed directories. Preopening a parent of a
+        // file-scoped allowlist entry widens access to sibling paths.
         for path in &self.config.readonly_paths {
-            let dir = if path.is_dir() {
-                path.as_path()
-            } else if let Some(parent) = path.parent() {
-                parent
-            } else {
+            if !path.is_dir() {
                 continue;
-            };
+            }
 
-            if dir.exists() {
-                let guest_path = dir.display().to_string();
-                preopened_dirs.insert(guest_path, (dir, DirPerms::READ, FilePerms::READ));
+            if path.exists() {
+                let guest_path = path.display().to_string();
+                preopened_dirs.insert(guest_path, (path.as_path(), DirPerms::READ, FilePerms::READ));
             }
         }
 
@@ -1140,18 +1139,17 @@ impl WasiRuntime {
                 let _ = std::fs::create_dir_all(path);
             }
 
-            let dir = if path.is_dir() {
-                path.as_path()
-            } else if let Some(parent) = path.parent() {
-                parent
-            } else {
+            if !path.is_dir() {
                 continue;
-            };
+            }
 
-            if dir.exists() {
-                let guest_path = dir.display().to_string();
+            if path.exists() {
+                let guest_path = path.display().to_string();
                 // Overwrite with writable permissions if there's a conflict
-                preopened_dirs.insert(guest_path, (dir, DirPerms::all(), FilePerms::all()));
+                preopened_dirs.insert(
+                    guest_path,
+                    (path.as_path(), DirPerms::all(), FilePerms::all()),
+                );
             }
         }
 
@@ -1274,6 +1272,26 @@ impl WasiRuntime {
     pub const fn engine(&self) -> &Engine {
         &self.engine
     }
+}
+
+fn validate_preopened_paths(config: &WasiConfig) -> WasiResult<()> {
+    for (mode, path) in config
+        .readonly_paths
+        .iter()
+        .map(|path| ("readonly", path))
+        .chain(config.writable_paths.iter().map(|path| ("writable", path)))
+    {
+        if path.exists() && !path.is_dir() {
+            return Err(WasiError::FsAccessDenied {
+                path: path.display().to_string(),
+                reason: format!(
+                    "{mode} WASI preopens must be directories; file paths would widen access to the parent directory"
+                ),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 // ============================================================================
@@ -2207,6 +2225,40 @@ mod tests {
         };
         let runtime = WasiRuntime::new(config);
         assert!(runtime.is_ok());
+    }
+
+    #[test]
+    fn test_wasi_runtime_rejects_existing_readonly_file_preopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("readonly.txt");
+        std::fs::write(&file, b"data").unwrap();
+
+        let err = WasiRuntime::new(WasiConfig {
+            readonly_paths: vec![file.clone()],
+            ..WasiConfig::default()
+        })
+        .unwrap_err();
+
+        assert!(matches!(err, WasiError::FsAccessDenied { .. }));
+        assert!(err.to_string().contains("must be directories"));
+        assert!(err.to_string().contains(&file.display().to_string()));
+    }
+
+    #[test]
+    fn test_wasi_runtime_rejects_existing_writable_file_preopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("writable.txt");
+        std::fs::write(&file, b"data").unwrap();
+
+        let err = WasiRuntime::new(WasiConfig {
+            writable_paths: vec![file.clone()],
+            ..WasiConfig::default()
+        })
+        .unwrap_err();
+
+        assert!(matches!(err, WasiError::FsAccessDenied { .. }));
+        assert!(err.to_string().contains("must be directories"));
+        assert!(err.to_string().contains(&file.display().to_string()));
     }
 
     #[test]

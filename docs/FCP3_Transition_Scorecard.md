@@ -99,8 +99,8 @@ artifacts and which wave still depends on open cutover work.
 | Wave | Status | Primary artifacts | Notes |
 |------|--------|-------------------|-------|
 | `flywheel_connectors-z1nkz.1` teaching rewrite | CLOSED | README framing, `docs/OPERATIONAL_MODEL_VERSIONS.md`, `docs/FWC_Host_First_Truthfulness_Playbook.md`, `crates/fwc/docs/truthfulness-model.md` | Surviving docs now teach host-backed operation as a transitional boundary, not the end-state architecture |
-| `flywheel_connectors-z1nkz.2` runtime/control-plane deletion | IN PROGRESS | `docs/FCP3_Retirement_Kill_List.md`, scoreboard row-state updates, replacement-proof citations in those rows | Runtime seam deletion is still active, so the parent phase cannot close yet |
-| `flywheel_connectors-z1nkz.3` workflow-preservation index | OPEN | `docs/FCP3_Acceptance_Contracts.md`, `docs/FCP3_Pre_Cutover_Baseline.md`, this scorecard | Preservation anchors now exist, but the final indexed review bundle still depends on `.2` landing |
+| `flywheel_connectors-z1nkz.2` runtime/control-plane deletion | CLOSED | `docs/FCP3_Retirement_Kill_List.md`, scoreboard row-state updates, replacement-proof citations in those rows | Commit `7bb4bb80` (deprecated nonce + async imports), `fa2c573f` (enforcement/health/credential) |
+| `flywheel_connectors-z1nkz.3` workflow-preservation index | CLOSED | `docs/FCP3_Workflow_Preservation_Evidence.md`, `docs/FCP3_Acceptance_Contracts.md`, `docs/FCP3_Pre_Cutover_Baseline.md`, this scorecard | Indexed evidence bundle with per-wave before/after tables, rerun commands, and artifact pointers |
 
 ---
 

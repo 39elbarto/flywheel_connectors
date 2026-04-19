@@ -524,7 +524,24 @@ fn verify_chain(
 
         let mut prev = first;
         for record in iter {
-            let expected_seq = prev.event.seq.saturating_add(1);
+            // Use checked_add so seq == u64::MAX is correctly treated as a
+            // terminal state, consistent with fcp_audit::AuditEntry::follows().
+            // saturating_add would silently accept a stalled chain.
+            let expected_seq = match prev.event.seq.checked_add(1) {
+                Some(next) => next,
+                None => {
+                    issues.push(AuditVerifyIssue {
+                        code: "audit.seq_overflow".to_string(),
+                        message: format!(
+                            "sequence number overflow: previous seq {} cannot be incremented",
+                            prev.event.seq
+                        ),
+                        seq: Some(prev.event.seq),
+                        object_id: Some(prev.object_id.to_string()),
+                    });
+                    break;
+                }
+            };
             if record.event.seq != expected_seq {
                 issues.push(AuditVerifyIssue {
                     code: "audit.seq_gap".to_string(),

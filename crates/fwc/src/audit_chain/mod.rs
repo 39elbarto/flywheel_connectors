@@ -560,6 +560,20 @@ fn verify_chain(
                 });
             }
 
+            // Timestamps should be non-decreasing along the chain.
+            // A backwards timestamp indicates clock skew or tampering.
+            if record.event.occurred_at < prev.event.occurred_at {
+                issues.push(AuditVerifyIssue {
+                    code: "audit.timestamp_regression".to_string(),
+                    message: format!(
+                        "timestamp {} is earlier than previous event timestamp {}",
+                        record.event.occurred_at, prev.event.occurred_at
+                    ),
+                    seq: Some(record.event.seq),
+                    object_id: Some(record.object_id.to_string()),
+                });
+            }
+
             prev = record;
         }
     }

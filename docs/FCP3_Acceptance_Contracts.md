@@ -191,6 +191,7 @@ Each phase produces a **proof bundle** containing:
 - [ ] All `PENDING-CARVE` annotations resolved
 - [ ] fcp-sdk::migration module deleted or deprecated
 - [ ] No re-exports of moved types from old locations
+- [ ] Every deletion wave carries workflow-preservation evidence, not just a diff
 
 ### Unit Test Matrix
 | Test | Crate | Purpose |
@@ -198,6 +199,29 @@ Each phase produces a **proof bundle** containing:
 | `test_no_compat_shim_annotations` | fcp-e2e | Grep for `COMPAT-SHIM` returns zero |
 | `test_no_pending_carve_annotations` | fcp-e2e | Grep for `PENDING-CARVE` returns zero |
 | `test_no_migration_module_usage` | fcp-e2e | No imports from `fcp_sdk::migration` |
+
+### Artifact Bundle
+- `docs/FCP3_Retirement_Kill_List.md` — per-seam deletion gates, proof obligations, and replacement paths
+- `docs/testing/placeholder-inventory.json` — concrete placeholder/deletion scoreboard with workflow artifact fields
+- `docs/FCP3_Transition_Scorecard.md` — live migration scoreboard showing which deletion waves are actually closed
+- `docs/FCP3_Pre_Cutover_Baseline.md` — frozen pre-deletion scenarios and expected outcomes for comparison
+- Workflow-preservation references for each deletion wave:
+  - teaching-surface rewrite wave (`flywheel_connectors-z1nkz.1`) anchored in the surviving docs that preserve the user-facing mental model without normalizing host-first as the end state
+  - runtime/control-plane deletion wave (`flywheel_connectors-z1nkz.2`) anchored in scoreboard rows, kill-list row state, and the replacement proof cited by those rows
+  - final workflow-preservation index (`flywheel_connectors-z1nkz.3`) packaging before/after notes, artifact pointers, and rerun commands for later proof-bundle assembly
+
+### Workflow-Preservation Matrix
+
+| Deletion wave | Before surface | After surface | Minimum preservation proof |
+|---------------|----------------|---------------|----------------------------|
+| Host-first teaching rewrite | README and operator playbooks teaching host-first as the dominant mental model | README, operational-model docs, and truth docs framing host-backed operation as a transitional but still-real boundary | Updated doc anchors plus explicit references to the truth hierarchy and cutover gates |
+| Runtime/control-plane scaffold deletion | Scoreboard rows that still describe deleted seams as open or merely “owner-bead-closed” | Scoreboard rows marked `deleted`, `mostly-deleted`, or `quarantine-blessed` with evidence pointers | Row-level proof artifacts, replacement path, and rerun commands or grep evidence |
+| Final deletion review bundle | Scattered commits and bead comments | Indexed proof section that a reviewer can traverse without git archaeology | One index linking source beads, artifact paths, and workflow notes for each deletion wave |
+
+### Failure Diagnosis
+- If a deletion wave cannot point to a surviving replacement path: the shim was removed before its replacement was proven.
+- If the scoreboard says a seam is deleted but the workflow-preservation matrix has no artifact pointer: the deletion proof is incomplete.
+- If the post-deletion docs still teach the removed boundary as preferred architecture: the teaching cleanup regressed even if the code deletion was correct.
 
 ---
 

@@ -107,4 +107,18 @@ When phase-7 proof beads compare against this baseline:
 
 ---
 
+## Deletion-Wave Preservation Anchors
+
+Phase-7 deletion work should compare post-cutover behavior against this
+baseline through named preservation anchors rather than through commit diffs
+alone.
+
+| Wave | Baseline anchor | Post-deletion anchor | Notes |
+|------|-----------------|----------------------|-------|
+| `flywheel_connectors-z1nkz.1` teaching rewrite | The scenario tables above, plus the pre-cutover statement that host-first is an intentional transitional seam | README, `docs/OPERATIONAL_MODEL_VERSIONS.md`, `docs/FWC_Host_First_Truthfulness_Playbook.md`, and `crates/fwc/docs/truthfulness-model.md` after the rewrite commits | The preserved workflow is truthful operator guidance, not identical wording |
+| `flywheel_connectors-z1nkz.2` runtime/control-plane deletion | The “Known Transition Seams” list and the proof obligations attached to each quarantine row | `docs/FCP3_Retirement_Kill_List.md` and `docs/FCP3_Transition_Scorecard.md` after the seam state updates | The preserved workflow is the ability to audit what was deleted, why it was safe, and what replaced it |
+| `flywheel_connectors-z1nkz.3` final preservation bundle | This baseline document plus the named scenario and seam tables | Final proof-bundle indexes that cite the two earlier waves and their rerun commands or artifact pointers | The preserved workflow is reviewability without reconstructing history by hand |
+
+---
+
 *Frozen at 2026-04-07. Do not modify after phase-7 deletions begin -- this document IS the baseline.*

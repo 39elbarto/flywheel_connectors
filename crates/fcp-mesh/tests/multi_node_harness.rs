@@ -13,7 +13,7 @@ use fcp_core::{EpochId, NodeSignature, ObjectId, TailscaleNodeId, ZoneId};
 use fcp_crypto::{Ed25519SigningKey, Ed25519VerifyingKey, X25519PublicKey, X25519SecretKey};
 use fcp_mesh::{
     AvailabilityProfile, CpuArch, DeviceProfile, GossipMessage, GossipRequest, LatencyClass,
-    MeshNode, MeshNodeConfig, ObjectAdmissionClass, PowerSource,
+    MeshNode, MeshNodeConfig, ObjectAdmissionClass, PowerSource, RevocationPushMessage,
 };
 use fcp_store::{
     MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
@@ -64,6 +64,7 @@ pub struct ObservedMessage {
     pub from: NodeId,
     pub received_at_ms: u64,
     pub message: GossipMessage,
+    pub dispatch_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +217,7 @@ enum NodeCommand {
     CreateSummary {
         zone_id: ZoneId,
         epoch_id: EpochId,
+        sign: bool,
         reply: oneshot::Sender<Option<fcp_mesh::GossipSummary>>,
     },
     CreateObjectRequest {
@@ -501,6 +503,7 @@ impl MultiNodeMeshHarness {
             NodeCommand::CreateSummary {
                 zone_id,
                 epoch_id,
+                sign: true,
                 reply: reply_tx,
             },
             "create_summary",
@@ -513,6 +516,69 @@ impl MultiNodeMeshHarness {
 
         let disposition =
             self.schedule_message(from, to, GossipMessage::Summary(summary), self.now_ms);
+        self.flush().await?;
+        Ok(disposition)
+    }
+
+    pub async fn send_unsigned_summary(
+        &mut self,
+        from: &NodeId,
+        to: &NodeId,
+        zone_id: ZoneId,
+        epoch_id: EpochId,
+    ) -> Result<DeliveryDisposition, HarnessError> {
+        let handle = self.node_handle(from)?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        send_with_timeout(
+            &handle.event_tx,
+            NodeCommand::CreateSummary {
+                zone_id,
+                epoch_id,
+                sign: false,
+                reply: reply_tx,
+            },
+            "create_unsigned_summary",
+        )
+        .await?;
+
+        let Some(summary) = await_reply("create_unsigned_summary", reply_rx).await? else {
+            return Ok(DeliveryDisposition::Queued);
+        };
+
+        let disposition =
+            self.schedule_message(from, to, GossipMessage::Summary(summary), self.now_ms);
+        self.flush().await?;
+        Ok(disposition)
+    }
+
+    pub async fn send_revocation_push(
+        &mut self,
+        from: &NodeId,
+        to: &NodeId,
+        zone_id: ZoneId,
+        revoked_ids: Vec<ObjectId>,
+        new_rev_seq: u64,
+        sign: bool,
+    ) -> Result<DeliveryDisposition, HarnessError> {
+        let handle = self.node_handle(from)?;
+        let mut push = RevocationPushMessage::new(
+            TailscaleNodeId::new(from.as_str()),
+            zone_id,
+            revoked_ids,
+            new_rev_seq,
+            self.now_ms / 1000,
+        );
+        if sign {
+            let signature = handle.identity.signing_key.sign(&push.signing_bytes());
+            push.signature = Some(NodeSignature::new(
+                from.clone(),
+                signature.to_bytes(),
+                push.timestamp,
+            ));
+        }
+
+        let disposition =
+            self.schedule_message(from, to, GossipMessage::RevocationPush(push), self.now_ms);
         self.flush().await?;
         Ok(disposition)
     }
@@ -915,16 +981,22 @@ async fn run_node_task(
                 NodeCommand::CreateSummary {
                     zone_id,
                     epoch_id,
+                    sign,
                     reply,
                 } => {
                     let summary = mesh.gossip_mut().create_summary(&zone_id, epoch_id).map(
                         |mut summary| {
-                            let signature = identity.signing_key.sign(&summary.signing_bytes());
-                            summary.signature = Some(NodeSignature::new(
-                                identity.node_id.clone(),
-                                signature.to_bytes(),
-                                summary.timestamp,
-                            ));
+                            if sign {
+                                let signature =
+                                    identity.signing_key.sign(&summary.signing_bytes());
+                                summary.signature = Some(NodeSignature::new(
+                                    identity.node_id.clone(),
+                                    signature.to_bytes(),
+                                    summary.timestamp,
+                                ));
+                            } else {
+                                summary.signature = None;
+                            }
                             summary
                         },
                     );
@@ -981,15 +1053,18 @@ async fn run_node_task(
                     from: from.clone(),
                     received_at_ms: delivered_at_ms,
                     message: message.clone(),
+                    dispatch_error: None,
                 };
 
+                let mut observed = observed;
                 match message {
                     GossipMessage::Summary(summary) => {
-                        mesh.handle_gossip_message(
+                        if let Err(err) = mesh.handle_gossip_message(
                             GossipMessage::Summary(summary),
                             delivered_at_ms / 1000,
-                        )
-                        .expect("harness summary should verify");
+                        ) {
+                            observed.dispatch_error = Some(err.to_string());
+                        }
                     }
                     GossipMessage::Request(request) => {
                         let response = mesh.gossip_mut().handle_request(&request);
@@ -1008,11 +1083,12 @@ async fn run_node_task(
                     GossipMessage::ReconcileRequest(_request) => {}
                     GossipMessage::ReconcileResponse(_response) => {}
                     GossipMessage::RevocationPush(push) => {
-                        mesh.handle_gossip_message(
+                        if let Err(err) = mesh.handle_gossip_message(
                             GossipMessage::RevocationPush(push),
                             delivered_at_ms / 1000,
-                        )
-                        .expect("harness revocation push should verify");
+                        ) {
+                            observed.dispatch_error = Some(err.to_string());
+                        }
                     }
                 }
 
@@ -1336,6 +1412,115 @@ async fn multi_node_harness_enforces_latency_loss_and_partitions() {
     );
 
     harness.heal_partitions();
+    harness.shutdown().await.unwrap();
+}
+
+#[fcp_async_core::runtime::test]
+async fn multi_node_harness_enforces_summary_signature_boundary() {
+    let zone_id = ZoneId::work();
+    let epoch = EpochId::new("epoch-signature-boundary");
+    let mut harness = MultiNodeMeshHarness::new_three_node(0x51A9_4E11)
+        .await
+        .unwrap();
+    harness.register_all_peers().await.unwrap();
+
+    let node_ids = harness.node_ids();
+    let node_a = node_ids[0].clone();
+    let node_b = node_ids[1].clone();
+    let object_id = test_object_id("signed-summary-object");
+
+    harness
+        .announce_object(
+            &node_a,
+            zone_id.clone(),
+            object_id,
+            ObjectAdmissionClass::Admitted,
+        )
+        .await
+        .unwrap();
+
+    let signed = harness
+        .send_summary(&node_a, &node_b, zone_id.clone(), epoch.clone())
+        .await
+        .unwrap();
+    assert_eq!(signed, DeliveryDisposition::Queued);
+
+    let signed_snapshot = harness
+        .snapshot(&node_b, zone_id.clone(), 10)
+        .await
+        .unwrap();
+    assert_eq!(signed_snapshot.peer_count, 1);
+    assert!(
+        signed_snapshot
+            .observed_messages
+            .iter()
+            .any(|entry| matches!(entry.message, GossipMessage::Summary(_))
+                && entry.dispatch_error.is_none()),
+        "signed summaries should cross the verified dispatch boundary"
+    );
+
+    let unsigned = harness
+        .send_unsigned_summary(&node_a, &node_b, zone_id.clone(), epoch)
+        .await
+        .unwrap();
+    assert_eq!(unsigned, DeliveryDisposition::Queued);
+
+    let rejected_snapshot = harness
+        .snapshot(&node_b, zone_id.clone(), 10)
+        .await
+        .unwrap();
+    assert_eq!(rejected_snapshot.peer_count, 1);
+    assert!(
+        rejected_snapshot
+            .observed_messages
+            .iter()
+            .any(|entry| matches!(entry.message, GossipMessage::Summary(_))
+                && entry
+                    .dispatch_error
+                    .as_deref()
+                    .is_some_and(|err| err.contains("invalid gossip summary signature"))),
+        "unsigned summaries should be rejected at the verified dispatch boundary"
+    );
+
+    let revocation_id = test_object_id("revocation-boundary-object");
+    let signed_push = harness
+        .send_revocation_push(&node_a, &node_b, zone_id.clone(), vec![revocation_id], 1, true)
+        .await
+        .unwrap();
+    assert_eq!(signed_push, DeliveryDisposition::Queued);
+
+    let signed_push_snapshot = harness
+        .snapshot(&node_b, zone_id.clone(), 10)
+        .await
+        .unwrap();
+    assert!(
+        signed_push_snapshot
+            .observed_messages
+            .iter()
+            .any(|entry| matches!(entry.message, GossipMessage::RevocationPush(_))
+                && entry.dispatch_error.is_none()),
+        "signed revocation pushes should cross the verified dispatch boundary"
+    );
+
+    let unsigned_push = harness
+        .send_revocation_push(&node_a, &node_b, zone_id.clone(), vec![revocation_id], 2, false)
+        .await
+        .unwrap();
+    assert_eq!(unsigned_push, DeliveryDisposition::Queued);
+
+    let unsigned_push_snapshot = harness.snapshot(&node_b, zone_id, 10).await.unwrap();
+    assert!(
+        unsigned_push_snapshot
+            .observed_messages
+            .iter()
+            .any(|entry| matches!(entry.message, GossipMessage::RevocationPush(_))
+                && entry
+                    .dispatch_error
+                    .as_deref()
+                    .is_some_and(|err| err.contains("invalid revocation push signature"))),
+        "unsigned revocation pushes should be rejected at the verified dispatch boundary"
+    );
+
     harness.shutdown().await.unwrap();
 }
 

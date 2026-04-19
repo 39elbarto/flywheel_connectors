@@ -5405,8 +5405,9 @@ mod real_component_integration {
     use fcp_core::{
         Decision, DecisionReasonCode, EpochId, NodeSignature, ObjectHeader, Provenance, ZoneKeyId,
     };
+    use fcp_crypto::Ed25519SigningKey;
     use fcp_mesh::admission::{AdmissionError, AdmissionPolicy, ObjectAdmissionClass, PeerBudget};
-    use fcp_mesh::gossip::GossipConfig;
+    use fcp_mesh::gossip::{GossipConfig, GossipSummary};
     use fcp_mesh::{MeshNode, MeshNodeConfig, MeshSession, SymbolRequestError};
     use fcp_protocol::session::{
         MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, TransportLimits,
@@ -5466,6 +5467,20 @@ mod real_component_integration {
             local_node_id,
             AdmissionPolicy::default(),
         )
+    }
+
+    fn sign_summary(
+        signing_key: &Ed25519SigningKey,
+        node_id: &NodeId,
+        mut summary: GossipSummary,
+    ) -> GossipSummary {
+        let signature = signing_key.sign(&summary.signing_bytes());
+        summary.signature = Some(NodeSignature::new(
+            node_id.clone(),
+            signature.to_bytes(),
+            summary.timestamp,
+        ));
+        summary
     }
 
     async fn seed_symbols(store: &Arc<dyn SymbolStore>, meta: &ObjectSymbolMeta, source_node: u64) {
@@ -5866,6 +5881,12 @@ mod real_component_integration {
 
         let mut node_a = build_node("node-gossip-a", 60, 1);
         let mut node_b = build_node("node-gossip-b", 61, 2);
+        let node_a_id = NodeId::new("node-gossip-a");
+        let node_b_id = NodeId::new("node-gossip-b");
+        let signing_key_a = Ed25519SigningKey::generate();
+        let signing_key_b = Ed25519SigningKey::generate();
+        node_a.register_peer_signing_key(node_b_id.clone(), signing_key_b.verifying_key());
+        node_b.register_peer_signing_key(node_a_id.clone(), signing_key_a.verifying_key());
 
         // Node A announces obj_a and obj_b
         assert!(node_a.announce_object(&zone_id, &obj_a, ObjectAdmissionClass::Admitted, 1000));
@@ -5898,9 +5919,12 @@ mod real_component_integration {
             .gossip_mut()
             .create_summary(&zone_id, epoch.clone())
             .expect("node A should produce a summary");
+        let summary_a = sign_summary(&signing_key_a, &node_a_id, summary_a);
 
         // B processes A's summary to learn about A's objects
-        node_b.gossip_mut().handle_summary(summary_a, 2000);
+        node_b
+            .handle_summary(summary_a, 2000)
+            .expect("node B should accept node A's signed summary");
 
         // B requests objects it learned about from A
         let request_from_b = node_b
@@ -5916,9 +5940,12 @@ mod real_component_integration {
             .gossip_mut()
             .create_summary(&zone_id, epoch)
             .expect("node B should produce a summary");
+        let summary_b = sign_summary(&signing_key_b, &node_b_id, summary_b);
 
         // A processes B's summary to learn about B's objects
-        node_a.gossip_mut().handle_summary(summary_b, 2002);
+        node_a
+            .handle_summary(summary_b, 2002)
+            .expect("node A should accept node B's signed summary");
 
         // A requests objects it learned about from B
         let request_from_a = node_a
@@ -6420,6 +6447,12 @@ mod real_component_integration {
             symbol_store_b,
             quarantine_store_b,
         );
+        let node_a_id = NodeId::new("node-ckpt-a");
+        let node_b_id = NodeId::new("node-ckpt-b");
+        let signing_key_a = Ed25519SigningKey::generate();
+        let signing_key_b = Ed25519SigningKey::generate();
+        node_a.register_peer_signing_key(node_b_id.clone(), signing_key_b.verifying_key());
+        node_b.register_peer_signing_key(node_a_id.clone(), signing_key_a.verifying_key());
 
         // Node A: 5 objects
         let mut a_objects = Vec::new();
@@ -6450,9 +6483,12 @@ mod real_component_integration {
             .gossip_mut()
             .create_summary(&zone_id, epoch.clone())
             .expect("A should produce summary");
+        let summary_a = sign_summary(&signing_key_a, &node_a_id, summary_a);
 
         // B processes A's summary, then requests A's objects it doesn't have
-        node_b.gossip_mut().handle_summary(summary_a, 2000);
+        node_b
+            .handle_summary(summary_a, 2000)
+            .expect("B should accept A's signed summary");
         // B wants a_objects[1..5] (it already has a_objects[0])
         let missing_from_a: Vec<_> = a_objects[1..].to_vec();
         let request_from_b = node_b
@@ -6465,7 +6501,10 @@ mod real_component_integration {
             .gossip_mut()
             .create_summary(&zone_id, epoch)
             .expect("B should produce summary");
-        node_a.gossip_mut().handle_summary(summary_b, 2002);
+        let summary_b = sign_summary(&signing_key_b, &node_b_id, summary_b);
+        node_a
+            .handle_summary(summary_b, 2002)
+            .expect("A should accept B's signed summary");
 
         // A wants b_objects[1..3] (it already has a_objects[0] which overlaps)
         let missing_from_b: Vec<_> = b_objects[1..].to_vec();

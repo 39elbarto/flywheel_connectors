@@ -100,6 +100,26 @@ fn validate_base_url_for_auth(base_url: &str, auth: &AsanaAuth) -> FcpResult<Str
         code: 1003,
         message: format!("base_url could not be parsed: {error}"),
     })?;
+    // Strip query/fragment/userinfo before the host/scheme checks because
+    // the validator returns parsed.to_string() — any of those components
+    // would otherwise be preserved and then concatenated into downstream
+    // format!("{base_url}/...") URL construction, leaking attacker-chosen
+    // values into every Asana API request or baking userinfo into the
+    // URL that silently overrides the PAT the connector sets via the
+    // Authorization header. Same hygiene already in whatsapp / stripe /
+    // notion / telegram / discord / gmail after earlier patches.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
     let canonical = parsed.to_string().trim_end_matches('/').to_string();
 
     match auth {
@@ -1635,6 +1655,62 @@ mod tests {
         let v = serde_json::to_value(&recipe).unwrap();
         assert_eq!(v["id"], "asana.personal_access_token");
         assert!(v["steps"].as_array().unwrap().len() == 3);
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_query_string_with_pat() {
+        let auth = AsanaAuth::PersonalAccessToken("pat_test".into());
+        let err = validate_base_url_for_auth("https://app.asana.com/api/1.0?leak=x", &auth)
+            .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("query"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_fragment_with_pat() {
+        let auth = AsanaAuth::PersonalAccessToken("pat_test".into());
+        let err = validate_base_url_for_auth("https://app.asana.com/api/1.0#frag", &auth)
+            .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_userinfo_with_pat() {
+        let auth = AsanaAuth::PersonalAccessToken("pat_test".into());
+        let err = validate_base_url_for_auth(
+            "https://attacker:pw@app.asana.com/api/1.0",
+            &auth,
+        )
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("userinfo"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_query_string_with_credential_id() {
+        let cid = fcp_core::CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let auth = AsanaAuth::CredentialId(cid);
+        let err = validate_base_url_for_auth(
+            "https://any-vault-proxy.example/api/?leak=x",
+            &auth,
+        )
+        .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_accepts_clean_asana_url() {
+        let auth = AsanaAuth::PersonalAccessToken("pat_test".into());
+        let out = validate_base_url_for_auth("https://app.asana.com/api/1.0", &auth).unwrap();
+        assert_eq!(out, "https://app.asana.com/api/1.0");
     }
 
     #[test]

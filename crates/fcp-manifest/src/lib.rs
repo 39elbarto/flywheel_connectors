@@ -1455,6 +1455,26 @@ pub struct EventSection {
     pub schema: Option<serde_json::Value>,
 }
 
+impl EventSection {
+    fn validate(&self) -> Result<(), ManifestError> {
+        if self.description.trim().is_empty() {
+            return Err(ManifestError::Invalid {
+                field: "provides.events.*.description",
+                message: "must not be empty".into(),
+            });
+        }
+        if let Some(topic) = self.topic.as_deref()
+            && topic.trim().is_empty()
+        {
+            return Err(ManifestError::Invalid {
+                field: "provides.events.*.topic",
+                message: "must not be empty when present".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
 impl ProvidesSection {
     fn validate(&self) -> Result<(), ManifestError> {
         if self.operations.is_empty() {
@@ -1466,6 +1486,10 @@ impl ProvidesSection {
         for (op_id, op) in &self.operations {
             validate_canonical_id(op_id)?;
             op.validate()?;
+        }
+        for (event_id, event) in &self.events {
+            validate_canonical_id(event_id)?;
+            event.validate()?;
         }
         Ok(())
     }
@@ -1661,6 +1685,9 @@ pub struct RateLimitsSection {
 
 impl RateLimitsSection {
     fn validate(&self) -> Result<(), ManifestError> {
+        for pool in &self.pools {
+            pool.validate()?;
+        }
         // Convert to fcp_core declarations and validate
         let decls = self.to_declarations();
         decls.validate()?;
@@ -1742,6 +1769,54 @@ pub struct RateLimitPoolSection {
     /// Scope: "instance" (default), "credential", "global".
     #[serde(default)]
     pub scope: Option<String>,
+}
+
+impl RateLimitPoolSection {
+    fn validate(&self) -> Result<(), ManifestError> {
+        if let Some(unit) = self.unit.as_deref() {
+            match unit {
+                "requests" | "tokens" | "bytes" | "custom" => {}
+                _ => {
+                    return Err(ManifestError::Invalid {
+                        field: "rate_limits.pools.*.unit",
+                        message: format!(
+                            "unsupported unit `{unit}` (expected one of: requests, tokens, bytes, custom)"
+                        ),
+                    });
+                }
+            }
+        }
+
+        if let Some(enforcement) = self.enforcement.as_deref() {
+            match enforcement {
+                "hard" | "soft" | "advisory" => {}
+                _ => {
+                    return Err(ManifestError::Invalid {
+                        field: "rate_limits.pools.*.enforcement",
+                        message: format!(
+                            "unsupported enforcement `{enforcement}` (expected one of: hard, soft, advisory)"
+                        ),
+                    });
+                }
+            }
+        }
+
+        if let Some(scope) = self.scope.as_deref() {
+            match scope {
+                "instance" | "credential" | "global" => {}
+                _ => {
+                    return Err(ManifestError::Invalid {
+                        field: "rate_limits.pools.*.scope",
+                        message: format!(
+                            "unsupported scope `{scope}` (expected one of: instance, credential, global)"
+                        ),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Connector-level default time budgets.
@@ -6222,8 +6297,7 @@ deny_ptrace = true
     }
 
     #[test]
-    fn rate_limits_section_unknown_unit_defaults_to_requests() {
-        use fcp_core::RateLimitUnit;
+    fn rate_limits_section_unknown_unit_rejected() {
         let section = RateLimitsSection {
             pools: vec![RateLimitPoolSection {
                 id: "test".into(),
@@ -6237,15 +6311,15 @@ deny_ptrace = true
             }],
             operation_pools: std::collections::HashMap::default(),
         };
-        assert_eq!(
-            section.to_declarations().limits[0].config.unit,
-            RateLimitUnit::Requests
-        );
+        let err = section.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::Invalid { field, .. } if field == "rate_limits.pools.*.unit"
+        ));
     }
 
     #[test]
-    fn rate_limits_section_unknown_enforcement_defaults_to_hard() {
-        use fcp_core::RateLimitEnforcement;
+    fn rate_limits_section_unknown_enforcement_rejected() {
         let section = RateLimitsSection {
             pools: vec![RateLimitPoolSection {
                 id: "test".into(),
@@ -6259,15 +6333,15 @@ deny_ptrace = true
             }],
             operation_pools: std::collections::HashMap::default(),
         };
-        assert_eq!(
-            section.to_declarations().limits[0].enforcement,
-            RateLimitEnforcement::Hard
-        );
+        let err = section.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::Invalid { field, .. } if field == "rate_limits.pools.*.enforcement"
+        ));
     }
 
     #[test]
-    fn rate_limits_section_unknown_scope_defaults_to_instance() {
-        use fcp_core::RateLimitScope;
+    fn rate_limits_section_unknown_scope_rejected() {
         let section = RateLimitsSection {
             pools: vec![RateLimitPoolSection {
                 id: "test".into(),
@@ -6281,10 +6355,33 @@ deny_ptrace = true
             }],
             operation_pools: std::collections::HashMap::default(),
         };
-        assert_eq!(
-            section.to_declarations().limits[0].scope,
-            RateLimitScope::Instance
-        );
+        let err = section.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::Invalid { field, .. } if field == "rate_limits.pools.*.scope"
+        ));
+    }
+
+    #[test]
+    fn rate_limits_section_uppercase_unit_rejected() {
+        let section = RateLimitsSection {
+            pools: vec![RateLimitPoolSection {
+                id: "test".into(),
+                description: None,
+                requests: 10,
+                window_ms: 1000,
+                burst: None,
+                unit: Some("Bytes".into()),
+                enforcement: None,
+                scope: None,
+            }],
+            operation_pools: std::collections::HashMap::default(),
+        };
+        let err = section.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::Invalid { field, .. } if field == "rate_limits.pools.*.unit"
+        ));
     }
 
     #[test]
@@ -7853,6 +7950,30 @@ schema_version = "2.1"
         assert!(matches!(err, ManifestError::Toml(_)));
     }
 
+    #[test]
+    fn parse_str_duplicate_key_rejected() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder)
+            + "\n[connector]\nname = \"Duplicate Connector Section\"\n";
+        let err = ConnectorManifest::parse_str_unchecked(&toml).unwrap_err();
+        assert!(matches!(err, ManifestError::Toml(_)));
+    }
+
+    #[test]
+    fn parse_str_event_blank_topic_rejected() {
+        let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        let toml = test_manifest_toml(&placeholder)
+            + "\n[provides.events.test_event]\ndescription = \"Test event\"\ntopic = \"   \"\n";
+        let err = ConnectorManifest::parse_str(&toml).unwrap_err();
+        assert!(matches!(
+            err,
+            ManifestError::Invalid {
+                field: "provides.events.*.topic",
+                ..
+            }
+        ));
+    }
+
     // ══════════════════════════════════════════════════════════════════
     // EXPANDED TESTS: ManifestSection validation
     // ══════════════════════════════════════════════════════════════════
@@ -9110,12 +9231,24 @@ schema_version = "2.1"
     // ── EventSection edge cases ──────────────────────────────────────
 
     #[test]
-    fn event_section_empty_description() {
+    fn event_section_empty_description_rejected() {
         let section: EventSection = serde_json::from_value(json!({
             "description": ""
         }))
         .unwrap();
-        assert!(section.description.is_empty());
+        let err = section.validate().unwrap_err();
+        assert!(err.to_string().contains("provides.events.*.description"));
+    }
+
+    #[test]
+    fn event_section_blank_topic_rejected() {
+        let section: EventSection = serde_json::from_value(json!({
+            "description": "Event with blank topic",
+            "topic": "   "
+        }))
+        .unwrap();
+        let err = section.validate().unwrap_err();
+        assert!(err.to_string().contains("provides.events.*.topic"));
     }
 
     #[test]

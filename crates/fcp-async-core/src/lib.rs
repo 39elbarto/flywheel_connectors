@@ -4323,8 +4323,9 @@ mod tests {
 
         let dropped = Arc::new(AtomicBool::new(false));
         let dropped_flag = Arc::clone(&dropped);
+        let future_guard = DropFlag(dropped_flag);
         let handle = task::spawn(async move {
-            let _flag = DropFlag(dropped_flag);
+            let _flag = future_guard;
             future::pending::<()>().await;
         });
 

@@ -42,7 +42,10 @@ fn fuzz_hardware_token_pin(a: &[u8], b: &[u8]) {
     let pin_b = HardwareTokenPin::new(b_str.clone());
 
     // Reflexivity: every pin must equal itself.
-    assert!(pin_a == pin_a_again, "HardwareTokenPin equality must be reflexive");
+    assert!(
+        pin_a == pin_a_again,
+        "HardwareTokenPin equality must be reflexive"
+    );
 
     // Agreement with plain byte-equality: the constant-time comparator
     // must return true iff the underlying strings are identical.
@@ -62,9 +65,9 @@ fn fuzz_hardware_token_pin(a: &[u8], b: &[u8]) {
 
     // Debug formatting must never leak PIN material.
     let debug = format!("{pin_a:?}");
-    assert!(
-        !debug.contains(&a_str) || a_str.is_empty(),
-        "Debug for HardwareTokenPin must redact inner value"
+    assert_eq!(
+        debug, "<redacted>",
+        "Debug for HardwareTokenPin must stay redacted"
     );
 }
 
@@ -76,8 +79,8 @@ fn fuzz_recovery_phrase_parser(input: &str) {
             let rendered = phrase.to_phrase();
             // Round-trip: re-parsing the canonical rendering should
             // succeed and yield the same entropy.
-            let reparsed = RecoveryPhrase::from_mnemonic(&rendered)
-                .expect("canonical phrase must re-parse");
+            let reparsed =
+                RecoveryPhrase::from_mnemonic(&rendered).expect("canonical phrase must re-parse");
             assert_eq!(
                 phrase.entropy(),
                 reparsed.entropy(),
@@ -96,8 +99,7 @@ fn fuzz_recovery_phrase_parser(input: &str) {
             // And an attacker-controlled fingerprint string — must be
             // rejected cleanly (Err), not panic.
             let _ = ColdRecovery::from_phrase(&phrase, Some(""));
-            let _ =
-                ColdRecovery::from_phrase(&phrase, Some("BLAKE3:not-a-real-fingerprint"));
+            let _ = ColdRecovery::from_phrase(&phrase, Some("BLAKE3:not-a-real-fingerprint"));
         }
         Err(err) => {
             // Every error from the parser must implement std::error::Error

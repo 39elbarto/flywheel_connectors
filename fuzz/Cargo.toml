@@ -106,13 +106,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_audit_tamper_chain_events"
-path = "fuzz_targets/audit_tamper_chain_events.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "fuzz_canonical_cbor"
 path = "fuzz_targets/canonical_cbor.rs"
 test = false
@@ -178,13 +171,6 @@ bench = false
 [[bin]]
 name = "fuzz_bootstrap_recovery"
 path = "fuzz_targets/bootstrap_recovery.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "fuzz_store_gc_object_headers"
-path = "fuzz_targets/store_gc_object_headers.rs"
 test = false
 doc = false
 bench = false

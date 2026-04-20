@@ -176,6 +176,17 @@ fn audit_input(data: &[u8]) -> AuditSeed {
     serde_json::from_slice::<AuditSeed>(data).unwrap_or_else(|_| audit_from_unstructured(data))
 }
 
+fn truncate_utf8(value: &mut String, max_len: usize) {
+    if value.len() <= max_len {
+        return;
+    }
+    let mut boundary = max_len;
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
+}
+
 fn to_entry(seed: AuditEntrySeed, index: usize) -> AuditEntry {
     let event_type = seed
         .event_type
@@ -242,21 +253,28 @@ fuzz_target!(|data: &[u8]| {
         .collect::<Vec<_>>();
 
     if let Some(first) = entries.first_mut() {
-        first.id.truncate(MAX_TEXT_LEN);
-        first.actor.truncate(MAX_TEXT_LEN);
-        first.zone_id.truncate(MAX_TEXT_LEN);
+        truncate_utf8(&mut first.id, MAX_TEXT_LEN);
+        truncate_utf8(&mut first.actor, MAX_TEXT_LEN);
+        truncate_utf8(&mut first.zone_id, MAX_TEXT_LEN);
     }
 
     let head = seed.head.take().map(to_head);
     let report = verify_chain(&entries, head.as_ref(), seed.zone_filter.as_deref());
+    let expected_head_seq = if entries.is_empty() {
+        None
+    } else {
+        head.as_ref().map(|value| value.head_seq)
+    };
+    let expected_head_entry = if entries.is_empty() {
+        None
+    } else {
+        head.as_ref().map(|value| value.head_entry.as_str())
+    };
 
     assert_eq!(report.chain_len, entries.len());
     assert_eq!(report.zone_id.as_deref(), seed.zone_filter.as_deref());
-    assert_eq!(report.head_seq, head.as_ref().map(|value| value.head_seq));
-    assert_eq!(
-        report.head_entry.as_deref(),
-        head.as_ref().map(|value| value.head_entry.as_str())
-    );
+    assert_eq!(report.head_seq, expected_head_seq);
+    assert_eq!(report.head_entry.as_deref(), expected_head_entry);
     assert_eq!(report.is_clean(), report.issues.is_empty());
     assert_eq!(
         report.critical_count(),

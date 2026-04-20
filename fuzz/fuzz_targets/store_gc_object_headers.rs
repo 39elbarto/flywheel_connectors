@@ -1,10 +1,10 @@
 use super::{HeaderMutationSeed, ObjectSeed, PlacementSeed, StoreSeed, SymbolSeed};
 use fcp_core::{ObjectId, ZoneId};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct CheckpointVector {
     zone_id: String,
     prev_checkpoint_id: String,
@@ -217,7 +217,7 @@ pub(crate) fn hydrate_vector_objects(
             id_hex: Some(vector.active_zone_key_manifest),
             id_byte: None,
             zone_id: Some(primary_zone.to_string()),
-            body_hex: Some(body_hex),
+            body_hex: Some(body_hex.clone()),
             refs: Some(vec![]),
             foreign_refs: Some(vec![]),
             retention: Some("lease".to_string()),

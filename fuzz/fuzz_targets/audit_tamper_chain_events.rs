@@ -115,7 +115,7 @@ pub(crate) fn hydrate_from_vector(seed: &mut AuditSeed) {
 }
 
 pub(crate) fn apply_tampering(seed: &mut AuditSeed) {
-    let (Some(entries), tamper) = (seed.entries.as_mut(), seed.tamper.as_deref()) else {
+    let (Some(entries), Some(tamper)) = (seed.entries.as_mut(), seed.tamper.as_deref()) else {
         return;
     };
 

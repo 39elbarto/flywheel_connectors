@@ -7,7 +7,7 @@ use quote::quote;
 use syn::parse::Parser;
 use syn::{Expr, ItemFn, Lit, Meta};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Flavor {
     CurrentThread,
     MultiThread,
@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn validate_signature_rejects_unsafe() {
         let function: ItemFn = syn::parse2(quote!(
-            unsafe async fn subject() {}
+            async unsafe fn subject() {}
         ))
         .expect("function should parse");
 

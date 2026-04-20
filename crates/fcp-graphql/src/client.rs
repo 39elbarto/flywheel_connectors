@@ -131,7 +131,7 @@ impl Drop for DedupGuard {
         // will never be read again.
         let state = self.state.clone();
         let key = std::mem::take(&mut self.key);
-        task::spawn(async move {
+        task::spawn_detached(async move {
             state.inner.lock().await.remove(&key);
         });
     }

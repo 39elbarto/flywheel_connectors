@@ -1105,8 +1105,10 @@ pub mod channel {
 
     /// Tokio oneshot compatibility surface owned by async-core.
     pub mod oneshot {
+        use std::sync::{Arc, Mutex as StdMutex};
+        use std::task::Waker;
+
         use super::{Context, Future, Pin, Poll};
-        use crate::compatibility_cx;
 
         pub mod error {
             /// Oneshot receive error.
@@ -1134,37 +1136,59 @@ pub mod channel {
 
         impl<T: std::fmt::Debug> std::error::Error for SendError<T> {}
 
+        #[derive(Debug)]
+        struct Shared<T> {
+            state: StdMutex<State<T>>,
+        }
+
+        #[derive(Debug)]
+        struct State<T> {
+            value: Option<T>,
+            sender_consumed: bool,
+            receiver_dropped: bool,
+            waker: Option<Waker>,
+        }
+
+        impl<T> State<T> {
+            const fn new() -> Self {
+                Self {
+                    value: None,
+                    sender_consumed: false,
+                    receiver_dropped: false,
+                    waker: None,
+                }
+            }
+        }
+
         /// Oneshot sender wrapper.
         #[derive(Debug)]
         pub struct Sender<T> {
-            inner: Option<asupersync::channel::oneshot::Sender<T>>,
+            shared: Option<Arc<Shared<T>>>,
         }
 
         /// Oneshot receiver wrapper.
         pub struct Receiver<T> {
-            state: ReceiverState<T>,
-        }
-
-        #[derive(Debug)]
-        enum ReceiverState<T> {
-            Idle(asupersync::channel::oneshot::Receiver<T>),
-            Waiting(crate::task::JoinHandle<Result<T, error::RecvError>>),
-            Done,
+            shared: Arc<Shared<T>>,
+            completed: bool,
         }
 
         impl<T> std::fmt::Debug for Receiver<T> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let state = self.shared.state.lock().expect("oneshot state poisoned");
                 f.debug_struct("Receiver")
-                    .field("state", &self.state)
+                    .field("completed", &self.completed)
+                    .field("has_value", &state.value.is_some())
+                    .field("sender_consumed", &state.sender_consumed)
+                    .field("receiver_dropped", &state.receiver_dropped)
                     .finish()
             }
         }
 
         impl<T> Drop for Receiver<T> {
             fn drop(&mut self) {
-                if let ReceiverState::Waiting(handle) = &self.state {
-                    handle.abort();
-                }
+                let mut state = self.shared.state.lock().expect("oneshot state poisoned");
+                state.receiver_dropped = true;
+                state.waker = None;
             }
         }
 
@@ -1177,16 +1201,46 @@ pub mod channel {
             /// # Panics
             /// Panics if the same sender is reused after a prior `send` call.
             pub fn send(mut self, value: T) -> Result<(), SendError<T>> {
-                let cx = compatibility_cx();
-                self.inner
-                    .take()
-                    .expect("oneshot sender reused")
-                    .send(&cx, value)
-                    .map_err(|err| match err {
-                        asupersync::channel::oneshot::SendError::Disconnected(value) => {
-                            SendError(value)
-                        }
-                    })
+                let shared = self.shared.take().expect("oneshot sender reused");
+
+                let waker = {
+                    let mut state = shared.state.lock().expect("oneshot state poisoned");
+                    state.sender_consumed = true;
+                    if state.receiver_dropped {
+                        return Err(SendError(value));
+                    }
+
+                    state.value = Some(value);
+                    state.waker.take()
+                };
+
+                if let Some(waker) = waker {
+                    waker.wake();
+                }
+
+                Ok(())
+            }
+        }
+
+        impl<T> Drop for Sender<T> {
+            fn drop(&mut self) {
+                let Some(shared) = self.shared.take() else {
+                    return;
+                };
+
+                let waker = {
+                    let mut state = shared.state.lock().expect("oneshot state poisoned");
+                    if state.sender_consumed {
+                        None
+                    } else {
+                        state.sender_consumed = true;
+                        state.waker.take()
+                    }
+                };
+
+                if let Some(waker) = waker {
+                    waker.wake();
+                }
             }
         }
 
@@ -1196,62 +1250,82 @@ pub mod channel {
             /// # Errors
             /// Returns `RecvError` when the value is not yet available or the sender was dropped.
             pub fn try_recv(&mut self) -> Result<T, error::RecvError> {
-                match &mut self.state {
-                    ReceiverState::Idle(inner) => inner.try_recv().map_err(|_| error::RecvError),
-                    ReceiverState::Waiting(_) | ReceiverState::Done => Err(error::RecvError),
+                if self.completed {
+                    return Err(error::RecvError);
                 }
+
+                let mut state = self.shared.state.lock().expect("oneshot state poisoned");
+                if let Some(value) = state.value.take() {
+                    state.waker = None;
+                    self.completed = true;
+                    return Ok(value);
+                }
+
+                if state.sender_consumed {
+                    state.waker = None;
+                    self.completed = true;
+                    return Err(error::RecvError);
+                }
+
+                Err(error::RecvError)
+            }
+
+            pub(crate) fn is_finished(&self) -> bool {
+                if self.completed {
+                    return true;
+                }
+
+                let state = self.shared.state.lock().expect("oneshot state poisoned");
+                state.value.is_some() || state.sender_consumed || state.receiver_dropped
             }
         }
 
-        impl<T: Send + 'static> Future for Receiver<T> {
+        impl<T> Future for Receiver<T> {
             type Output = Result<T, error::RecvError>;
 
             fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                if let ReceiverState::Idle(_) = &self.state {
-                    let ReceiverState::Idle(mut inner) =
-                        std::mem::replace(&mut self.state, ReceiverState::Done)
-                    else {
-                        unreachable!("receiver state changed unexpectedly");
-                    };
-
-                    let handle = crate::task::spawn(async move {
-                        let compat = compatibility_cx();
-                        inner.recv(&compat).await.map_err(|_| error::RecvError)
-                    });
-
-                    self.state = ReceiverState::Waiting(handle);
+                if self.completed {
+                    return Poll::Ready(Err(error::RecvError));
                 }
 
-                match &mut self.state {
-                    ReceiverState::Waiting(handle) => match Pin::new(handle).poll(cx) {
-                        Poll::Ready(Ok(result)) => {
-                            self.state = ReceiverState::Done;
-                            Poll::Ready(result)
-                        }
-                        Poll::Ready(Err(_)) => {
-                            self.state = ReceiverState::Done;
-                            Poll::Ready(Err(error::RecvError))
-                        }
-                        Poll::Pending => Poll::Pending,
-                    },
-                    ReceiverState::Done => Poll::Ready(Err(error::RecvError)),
-                    ReceiverState::Idle(_) => {
-                        unreachable!("receiver should transition before poll")
-                    }
+                let mut state = self.shared.state.lock().expect("oneshot state poisoned");
+                if let Some(value) = state.value.take() {
+                    state.waker = None;
+                    self.completed = true;
+                    return Poll::Ready(Ok(value));
                 }
+
+                if state.sender_consumed {
+                    state.waker = None;
+                    self.completed = true;
+                    return Poll::Ready(Err(error::RecvError));
+                }
+
+                if !state
+                    .waker
+                    .as_ref()
+                    .is_some_and(|waker| waker.will_wake(cx.waker()))
+                {
+                    state.waker = Some(cx.waker().clone());
+                }
+
+                Poll::Pending
             }
         }
 
         /// Create a one-shot channel.
         #[must_use]
         pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
-            let (sender, receiver) = asupersync::channel::oneshot::channel();
+            let shared = Arc::new(Shared {
+                state: StdMutex::new(State::new()),
+            });
             (
                 Sender {
-                    inner: Some(sender),
+                    shared: Some(Arc::clone(&shared)),
                 },
                 Receiver {
-                    state: ReceiverState::Idle(receiver),
+                    shared,
+                    completed: false,
                 },
             )
         }
@@ -1853,8 +1927,9 @@ pub mod task {
 
     /// Join handle returned from [`spawn`].
     pub struct JoinHandle<T> {
-        inner: Pin<Box<asupersync::runtime::JoinHandle<Result<T, JoinError>>>>,
+        receiver: crate::channel::oneshot::Receiver<Result<T, JoinError>>,
         abort_handle: AbortHandle,
+        detached: bool,
     }
 
     impl<T> std::fmt::Debug for JoinHandle<T> {
@@ -1874,7 +1949,12 @@ pub mod task {
         /// Returns true if the task has already completed.
         #[must_use]
         pub fn is_finished(&self) -> bool {
-            self.inner.as_ref().get_ref().is_finished()
+            self.receiver.is_finished()
+        }
+
+        /// Explicitly detach the task so it can continue after the handle drops.
+        pub fn detach(mut self) {
+            self.detached = true;
         }
     }
 
@@ -1882,7 +1962,25 @@ pub mod task {
         type Output = Result<T, JoinError>;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            self.inner.as_mut().poll(cx)
+            match Pin::new(&mut self.receiver).poll(cx) {
+                Poll::Ready(Ok(result)) => {
+                    self.detached = true;
+                    Poll::Ready(result)
+                }
+                Poll::Ready(Err(_)) => {
+                    self.detached = true;
+                    Poll::Ready(Err(JoinError::cancelled()))
+                }
+                Poll::Pending => Poll::Pending,
+            }
+        }
+    }
+
+    impl<T> Drop for JoinHandle<T> {
+        fn drop(&mut self) {
+            if !self.detached && !self.is_finished() {
+                self.abort();
+            }
         }
     }
 
@@ -1925,6 +2023,7 @@ pub mod task {
         // spawned task can enter the Tokio runtime context on whatever
         // worker thread the asupersync scheduler places it on.
         let tokio_handle = crate::runtime::get_or_create_tokio_compat_handle();
+        let (result_tx, result_rx) = crate::channel::oneshot::channel();
 
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         let future = Abortable::new(
@@ -1937,19 +2036,30 @@ pub mod task {
             handle: tokio_handle,
         };
 
-        let inner = runtime.spawn(async move {
+        std::mem::drop(runtime.spawn(async move {
             let _guard = crate::runtime::RuntimeGuard::enter(runtime_context);
-            match wrapped.await {
+            let result = match wrapped.await {
                 Ok(Ok(output)) => Ok(output),
                 Ok(Err(payload)) => Err(JoinError::panicked(payload.as_ref())),
                 Err(_) => Err(JoinError::cancelled()),
-            }
-        });
+            };
+            let _ = result_tx.send(result);
+        }));
 
         JoinHandle {
-            inner: Box::pin(inner),
+            receiver: result_rx,
             abort_handle,
+            detached: false,
         }
+    }
+
+    /// Spawn a task that is allowed to outlive the returned handle.
+    pub fn spawn_detached<F>(future: F)
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        spawn(future).detach();
     }
 
     /// Cooperatively yield execution.
@@ -2373,33 +2483,49 @@ impl TaskGroup {
     ///
     /// Returns first error from task exit/join/timeout.
     pub async fn shutdown(mut self, timeout: Duration) -> Result<(), AsyncError> {
+        use crate::__private::futures_util::stream::{FuturesUnordered, StreamExt};
+
         self.cancellation.cancel();
 
         let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
         let deadline = saturating_instant_add(std::time::Instant::now(), timeout);
         let mut first_error: Option<AsyncError> = None;
 
-        for (task_name, mut handle) in self.tasks.drain(..) {
+        let mut pending = self
+            .tasks
+            .drain(..)
+            .map(|(task_name, handle)| async move { (task_name, handle.await) })
+            .collect::<FuturesUnordered<_>>();
+
+        while !pending.is_empty() {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            match time::timeout(remaining, &mut handle).await {
-                Ok(Ok(Ok(()))) => {}
-                Ok(Err(err)) => {
+            if remaining.is_zero() {
+                return Err(first_error.unwrap_or(AsyncError::Timeout { timeout_ms }));
+            }
+
+            match time::timeout(remaining, pending.next()).await {
+                Ok(Some((_task_name, Ok(Ok(()))))) => {}
+                Ok(Some((task_name, Err(err)))) => {
                     if first_error.is_none() {
                         first_error = Some(AsyncError::Join {
                             message: format!("{task_name}: {err}"),
                         });
                     }
                 }
-                Err(AsyncError::Timeout { .. }) => {
-                    handle.abort();
-                    if first_error.is_none() {
-                        first_error = Some(AsyncError::Timeout { timeout_ms });
-                    }
-                }
-                Ok(Ok(Err(err))) | Err(err) => {
+                Ok(Some((_task_name, Ok(Err(err))))) => {
                     if first_error.is_none() {
                         first_error = Some(err);
                     }
+                }
+                Ok(None) => break,
+                Err(AsyncError::Timeout { .. }) => {
+                    return Err(first_error.unwrap_or(AsyncError::Timeout { timeout_ms }));
+                }
+                Err(err) => {
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                    return Err(first_error.expect("first error just assigned"));
                 }
             }
         }
@@ -2420,7 +2546,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use std::{
         sync::Arc,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     use super::{
@@ -2821,7 +2947,7 @@ mod tests {
         assert!(!listener.is_cancelled());
 
         let token_clone = token.clone();
-        task::spawn(async move {
+        task::spawn_detached(async move {
             time::sleep(Duration::from_millis(20)).await;
             token_clone.cancel();
         });
@@ -2872,6 +2998,33 @@ mod tests {
             .await
             .expect_err("hung task should cause timeout");
         assert!(matches!(err, AsyncError::Timeout { .. }));
+    }
+
+    #[runtime::test]
+    async fn task_group_shutdown_does_not_let_hung_task_mask_ready_error() {
+        let mut group = TaskGroup::new();
+        let mut hung_cancel = group.subscribe_cancellation();
+        let mut error_cancel = group.subscribe_cancellation();
+        let error_started = Arc::new(AtomicBool::new(false));
+        let error_started_clone = Arc::clone(&error_started);
+
+        group.spawn("hung-first", async move {
+            hung_cancel.cancelled().await?;
+            future::pending::<Result<(), AsyncError>>().await
+        });
+
+        group.spawn("error-second", async move {
+            error_cancel.cancelled().await?;
+            error_started_clone.store(true, Ordering::SeqCst);
+            Err(AsyncError::ChannelClosed)
+        });
+
+        let err = group
+            .shutdown(Duration::from_millis(50))
+            .await
+            .expect_err("ready task error should outrank later timeout");
+        assert_eq!(err, AsyncError::ChannelClosed);
+        assert!(error_started.load(Ordering::SeqCst));
     }
 
     #[runtime::test]
@@ -3065,7 +3218,7 @@ mod tests {
     async fn wait_for_shutdown_signals_on_true() {
         let (tx, mut rx) = channel::watch::channel(false);
 
-        task::spawn(async move {
+        task::spawn_detached(async move {
             time::sleep(Duration::from_millis(20)).await;
             tx.send(true).unwrap();
         });
@@ -3087,7 +3240,7 @@ mod tests {
     async fn sleep_or_shutdown_cancelled_by_shutdown() {
         let (tx, mut rx) = channel::watch::channel(false);
 
-        task::spawn(async move {
+        task::spawn_detached(async move {
             time::sleep(Duration::from_millis(10)).await;
             tx.send(true).unwrap();
         });
@@ -4039,6 +4192,53 @@ mod tests {
         handle.abort();
         let err = handle.await.expect_err("should be cancelled");
         assert!(err.is_cancelled());
+    }
+
+    #[runtime::test]
+    async fn dropped_join_handle_aborts_task_and_releases_resources() {
+        struct DropFlag(Arc<AtomicBool>);
+
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped_flag = Arc::clone(&dropped);
+        let handle = task::spawn(async move {
+            let _flag = DropFlag(dropped_flag);
+            future::pending::<()>().await;
+        });
+
+        drop(handle);
+
+        let released = time::timeout(Duration::from_secs(1), async {
+            while !dropped.load(Ordering::SeqCst) {
+                task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            released.is_ok(),
+            "dropped task should release its future promptly"
+        );
+    }
+
+    #[runtime::test]
+    async fn detached_join_handle_allows_background_task_to_finish() {
+        let (tx, rx) = channel::oneshot::channel::<u32>();
+        task::spawn(async move {
+            time::sleep(Duration::from_millis(10)).await;
+            tx.send(7).expect("detached sender should stay alive");
+        })
+        .detach();
+
+        let result = time::timeout(Duration::from_secs(1), rx)
+            .await
+            .expect("detached task should complete")
+            .expect("receiver should get detached result");
+        assert_eq!(result, 7);
     }
 
     #[runtime::test]

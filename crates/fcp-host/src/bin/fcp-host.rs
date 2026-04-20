@@ -756,7 +756,7 @@ async fn handle_accept_error(err: std::io::Error) {
 
 fn hyper_executor() -> HyperExecutor {
     HyperExecutor::with_spawn_fn(|future| {
-        std::mem::drop(task::spawn(future));
+        task::spawn_detached(future);
     })
 }
 
@@ -767,7 +767,7 @@ where
     let tower_service = app.map_request(|request: hyper::Request<Incoming>| request.map(Body::new));
     let hyper_service = TowerToHyperService::new(tower_service);
 
-    std::mem::drop(task::spawn(async move {
+    task::spawn_detached(async move {
         let mut builder = HyperConnectionBuilder::new(hyper_executor());
         builder.http2().enable_connect_protocol();
 
@@ -775,7 +775,7 @@ where
         if let Err(err) = connection.as_mut().await {
             tracing::debug!(error = %err, "failed to serve connection");
         }
-    }));
+    });
 }
 
 async fn serve_tcp(
@@ -2380,7 +2380,7 @@ async fn async_main() -> HostResult<()> {
 
     // Spawn signal handler task.
     let signal_state = Arc::clone(&state);
-    task::spawn(async move {
+    task::spawn_detached(async move {
         signal_handler_loop(signal_state, shutdown_tx).await;
     });
 

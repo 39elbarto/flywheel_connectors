@@ -121,7 +121,7 @@ impl GraphqlSubscriptionClient {
         let ack_timeout = self.config.ack_timeout;
         let reconnect_config = reconnect_config_from_ws(client.config());
 
-        task::spawn(async move {
+        task::spawn_detached(async move {
             let mut conn = connection;
             let mut reconnect_handler = ReconnectHandler::new(reconnect_config);
             loop {

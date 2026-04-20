@@ -1016,8 +1016,10 @@ impl LinearConnector {
             message: "Invalid capability ID format".into(),
         })?;
 
+        let resource_uris = resource_uris_for_operation(operation, &input)?;
+
         if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
+            verifier.verify(token, &cap_id, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -1318,6 +1320,66 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
         })
 }
 
+fn resource_uris_for_operation(
+    operation: &str,
+    input: &serde_json::Value,
+) -> FcpResult<Vec<String>> {
+    let uris = match operation {
+        "linear.create_issue" => {
+            let team_id = require_str(input, "team_id")?;
+            vec![format!("linear://team/{team_id}/issues")]
+        }
+        "linear.get_issue" | "linear.update_issue" => {
+            let issue_id = require_str(input, "issue_id")?;
+            vec![format!("linear://issue/{issue_id}")]
+        }
+        "linear.list_cycles" => {
+            let team_id = require_str(input, "team_id")?;
+            vec![format!("linear://team/{team_id}/cycles")]
+        }
+        "linear.add_comment" => {
+            let issue_id = require_str(input, "issue_id")?;
+            vec![format!("linear://issue/{issue_id}/comments")]
+        }
+        "linear.process_webhook" => {
+            let payload_value = input.get("payload").ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing required field: payload".into(),
+            })?;
+            let payload: crate::types::WebhookPayload =
+                serde_json::from_value(payload_value.clone()).map_err(|e| {
+                    FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("Invalid webhook payload: {e}"),
+                    }
+                })?;
+            vec![resource_uri_for_webhook_payload(&payload)]
+        }
+        _ => Vec::new(),
+    };
+
+    Ok(uris)
+}
+
+fn resource_uri_for_webhook_payload(payload: &crate::types::WebhookPayload) -> String {
+    let resource_id = payload
+        .data
+        .get("id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+
+    match payload.resource_type {
+        crate::types::WebhookResourceType::Issue => format!("linear://issue/{resource_id}"),
+        crate::types::WebhookResourceType::Comment => format!("linear://comment/{resource_id}"),
+        crate::types::WebhookResourceType::Project => format!("linear://project/{resource_id}"),
+        crate::types::WebhookResourceType::Cycle => format!("linear://cycle/{resource_id}"),
+        crate::types::WebhookResourceType::IssueLabel => format!("linear://label/{resource_id}"),
+        crate::types::WebhookResourceType::Reaction => {
+            format!("linear://reaction/{resource_id}")
+        }
+    }
+}
+
 #[allow(clippy::fn_params_excessive_bools)]
 fn op_info(
     id: &'static str,
@@ -1350,20 +1412,21 @@ fn op_info(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+    use fcp_core::CapabilityConstraints;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
     use std::path::PathBuf;
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    fn generate_token_with_constraints(
+        signing_key: &Ed25519SigningKey,
+        op: &str,
+        constraints: CapabilityConstraints,
+    ) -> CapabilityToken {
         let cap = match op {
             "linear.create_issue" | "linear.update_issue" | "linear.add_comment" => "linear.write",
             "linear.process_webhook" => "linear.process_webhook",
             _ => "linear.read",
-        };
-        let constraints = fcp_core::CapabilityConstraints {
-            resource_allow: vec!["*".into()],
-            ..Default::default()
         };
         let mut constraints_cbor = Vec::new();
         ciborium::into_writer(&constraints, &mut constraints_cbor).unwrap();
@@ -1380,6 +1443,17 @@ mod tests {
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
+    }
+
+    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+        generate_token_with_constraints(
+            signing_key,
+            op,
+            CapabilityConstraints {
+                resource_allow: vec!["*".into()],
+                ..Default::default()
+            },
+        )
     }
 
     #[fcp_async_core::runtime::test]
@@ -1477,6 +1551,91 @@ mod tests {
                 assert!(message.contains("team_id"));
             }
             e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resource_uris_for_issue_operations() {
+        let get_issue = resource_uris_for_operation(
+            "linear.get_issue",
+            &json!({ "issue_id": "issue-42" }),
+        )
+        .unwrap();
+        assert_eq!(get_issue, vec!["linear://issue/issue-42"]);
+
+        let create_issue = resource_uris_for_operation(
+            "linear.create_issue",
+            &json!({ "team_id": "team-7" }),
+        )
+        .unwrap();
+        assert_eq!(create_issue, vec!["linear://team/team-7/issues"]);
+
+        let add_comment = resource_uris_for_operation(
+            "linear.add_comment",
+            &json!({ "issue_id": "issue-42" }),
+        )
+        .unwrap();
+        assert_eq!(add_comment, vec!["linear://issue/issue-42/comments"]);
+    }
+
+    #[test]
+    fn test_resource_uris_for_webhook_operation() {
+        let uris = resource_uris_for_operation(
+            "linear.process_webhook",
+            &json!({
+                "payload": {
+                    "action": "create",
+                    "type": "Issue",
+                    "createdAt": "2026-03-07T00:00:00Z",
+                    "webhookTimestamp": 1762459200000_i64,
+                    "data": { "id": "issue-1" }
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(uris, vec!["linear://issue/issue-1"]);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_issue_rejects_disallowed_resource_scope() {
+        let mut connector = LinearConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["linear.get_issue"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_token_with_constraints(
+            &signing_key,
+            "linear.get_issue",
+            CapabilityConstraints {
+                resource_allow: vec!["linear://issue/issue-allowed".into()],
+                ..Default::default()
+            },
+        );
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "linear.get_issue",
+                "input": { "issue_id": "issue-42" },
+                "capability_token": token
+            }))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::ResourceNotAllowed { resource } => {
+                assert_eq!(resource, "linear://issue/issue-42");
+            }
+            other => panic!("Expected ResourceNotAllowed, got: {other:?}"),
         }
     }
 
@@ -1901,6 +2060,59 @@ mod tests {
                 assert!(message.contains("already been processed"));
             }
             other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_process_webhook_rejects_disallowed_resource_scope() {
+        let mut connector = LinearConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["linear.process_webhook"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_token_with_constraints(
+            &signing_key,
+            "linear.process_webhook",
+            CapabilityConstraints {
+                resource_allow: vec!["linear://issue/issue-allowed".into()],
+                ..Default::default()
+            },
+        );
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "linear.process_webhook",
+                "input": {
+                    "delivery_id": Uuid::new_v4().to_string(),
+                    "signature_validated": true,
+                    "payload": {
+                        "action": "create",
+                        "type": "Issue",
+                        "createdAt": "2026-03-07T00:00:00Z",
+                        "webhookTimestamp": Utc::now().timestamp_millis(),
+                        "data": { "id": "issue-1" }
+                    }
+                },
+                "capability_token": token
+            }))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::ResourceNotAllowed { resource } => {
+                assert_eq!(resource, "linear://issue/issue-1");
+            }
+            other => panic!("Expected ResourceNotAllowed, got: {other:?}"),
         }
     }
 

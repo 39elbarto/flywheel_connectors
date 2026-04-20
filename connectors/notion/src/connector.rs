@@ -130,6 +130,22 @@ fn validate_api_url_for_auth(raw_url: &str, auth: &NotionAuth) -> FcpResult<Stri
         code: 1003,
         message: "api_url must include a host".into(),
     })?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "api_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        // Query/fragment components would be preserved by parsed.to_string()
+        // and then corrupt downstream format!("{api_url}/path", ...) URL
+        // construction — e.g. "https://api.notion.com/?leak=x" would turn
+        // into "https://api.notion.com/?leak=x/v1/databases/...".
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "api_url must not include a query string or fragment".into(),
+        });
+    }
     let host_lower = host.to_ascii_lowercase();
     let is_local = matches!(host_lower.as_str(), "localhost" | "127.0.0.1" | "::1");
     let scheme = parsed.scheme();
@@ -2013,6 +2029,55 @@ mod tests {
         assert_eq!(result["status"], "configured");
         let config = connector.config.as_ref().unwrap();
         assert_eq!(config.api_url, "https://proxy.internal.example/v1");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_api_url_with_query_string() {
+        let mut connector = NotionConnector::new();
+        let err = connector
+            .handle_configure(json!({
+                "token": "ntn_test123",
+                "api_url": "https://api.notion.com/?leak=attacker.com"
+            }))
+            .await
+            .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("query"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_api_url_with_fragment() {
+        let mut connector = NotionConnector::new();
+        let err = connector
+            .handle_configure(json!({
+                "token": "ntn_test123",
+                "api_url": "https://api.notion.com/#frag"
+            }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_api_url_with_userinfo() {
+        let mut connector = NotionConnector::new();
+        let err = connector
+            .handle_configure(json!({
+                "token": "ntn_test123",
+                "api_url": "https://attacker:pw@api.notion.com/"
+            }))
+            .await
+            .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("userinfo"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
     }
 
     #[fcp_async_core::runtime::test]

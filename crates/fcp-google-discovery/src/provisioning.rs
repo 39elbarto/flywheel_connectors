@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::auth::{
-    DEFAULT_GOOGLE_OAUTH_TOKEN_URL, GoogleAuthSourceDisposition, google_auth_source_policies,
+    google_auth_source_policies, GoogleAuthSourceDisposition, DEFAULT_GOOGLE_OAUTH_TOKEN_URL,
 };
 use crate::policy::{
     GoogleGcloudAutomationBoundary, GooglePolicyCatalog, GoogleProvisioningScopeEscalation,
@@ -53,6 +53,19 @@ pub enum GoogleProvisioningError {
         surface_id: String,
         /// Rejected trigger.
         trigger: String,
+    },
+
+    /// Requested auth-flow parameters are structurally invalid.
+    #[error(
+        "invalid google provisioning auth flow `{flow}`: `{field}` must be non-zero (got {value})"
+    )]
+    InvalidAuthFlowParameter {
+        /// Auth-flow variant name.
+        flow: &'static str,
+        /// Rejected field name.
+        field: &'static str,
+        /// Rejected value.
+        value: u64,
     },
 }
 
@@ -256,6 +269,8 @@ impl GooglePolicyCatalog {
             }
         })?;
 
+        validate_auth_flow(&auth_flow)?;
+
         let surface_profile = GoogleProvisioningSurfaceProfile::from(surface);
         let automation = build_automation_plan(self, surface, auth_flow);
         let recipe = build_recipe(&surface_profile, &automation);
@@ -284,6 +299,32 @@ pub fn load_default_google_provisioning_bundle(
     surface_id: &str,
 ) -> Result<GoogleProvisioningBundle, GoogleProvisioningError> {
     GooglePolicyCatalog::load_default()?.provisioning_bundle(surface_id)
+}
+
+fn validate_auth_flow(
+    auth_flow: &GoogleProvisioningAuthFlow,
+) -> Result<(), GoogleProvisioningError> {
+    match auth_flow {
+        GoogleProvisioningAuthFlow::AuthorizationCodePkce { callback_port, .. }
+            if *callback_port == 0 =>
+        {
+            Err(GoogleProvisioningError::InvalidAuthFlowParameter {
+                flow: "authorization_code_pkce",
+                field: "callback_port",
+                value: 0,
+            })
+        }
+        GoogleProvisioningAuthFlow::DeviceCode {
+            poll_interval_seconds,
+        } if *poll_interval_seconds == 0 => {
+            Err(GoogleProvisioningError::InvalidAuthFlowParameter {
+                flow: "device_code",
+                field: "poll_interval_seconds",
+                value: 0,
+            })
+        }
+        _ => Ok(()),
+    }
 }
 
 fn build_automation_plan(
@@ -649,12 +690,10 @@ mod tests {
             bundle.surface.default_scopes,
             vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()]
         );
-        assert!(
-            bundle
-                .automation
-                .required_api_enablement
-                .contains(&"Gmail API".to_string())
-        );
+        assert!(bundle
+            .automation
+            .required_api_enablement
+            .contains(&"Gmail API".to_string()));
         assert_eq!(bundle.recipe.id.as_str(), "google/gmail/setup");
         assert_eq!(bundle.recipe.steps.len(), 5);
         assert_eq!(
@@ -737,19 +776,15 @@ mod tests {
             bundle.setup.estimated_duration_ms,
             Some(WORKSPACE_EVENTS_ESTIMATED_DURATION_MS)
         );
-        assert!(
-            bundle
-                .automation
-                .required_api_enablement
-                .contains(&"Google Cloud Pub/Sub API".to_string())
-        );
-        assert!(
-            bundle
-                .automation
-                .gcloud_assisted_steps
-                .iter()
-                .any(|step| step.contains("Pub/Sub topic"))
-        );
+        assert!(bundle
+            .automation
+            .required_api_enablement
+            .contains(&"Google Cloud Pub/Sub API".to_string()));
+        assert!(bundle
+            .automation
+            .gcloud_assisted_steps
+            .iter()
+            .any(|step| step.contains("Pub/Sub topic")));
         let bootstrap_step = bundle
             .recipe
             .steps
@@ -899,6 +934,23 @@ mod tests {
         );
         assert!(msg.contains("bad-trigger"), "got: {msg}");
         assert!(msg.contains("gmail"), "got: {msg}");
+    }
+
+    #[test]
+    fn error_invalid_auth_flow_parameter_display() {
+        let err = GoogleProvisioningError::InvalidAuthFlowParameter {
+            flow: "device_code",
+            field: "poll_interval_seconds",
+            value: 0,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid google provisioning auth flow"),
+            "got: {msg}"
+        );
+        assert!(msg.contains("device_code"), "got: {msg}");
+        assert!(msg.contains("poll_interval_seconds"), "got: {msg}");
+        assert!(msg.contains("0"), "got: {msg}");
     }
 
     #[test]
@@ -1087,6 +1139,49 @@ mod tests {
             matches!(err, GoogleProvisioningError::UnknownSurface { .. }),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn bundle_rejects_zero_callback_port() {
+        let catalog = GooglePolicyCatalog::load_default().expect("embedded catalog should load");
+        let err = catalog
+            .provisioning_bundle_with_auth_flow(
+                "gmail",
+                GoogleProvisioningAuthFlow::AuthorizationCodePkce {
+                    auto_browser: true,
+                    callback_port: 0,
+                },
+            )
+            .expect_err("zero callback_port should fail closed");
+        assert!(matches!(
+            err,
+            GoogleProvisioningError::InvalidAuthFlowParameter {
+                flow: "authorization_code_pkce",
+                field: "callback_port",
+                value: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn bundle_rejects_zero_device_code_poll_interval() {
+        let catalog = GooglePolicyCatalog::load_default().expect("embedded catalog should load");
+        let err = catalog
+            .provisioning_bundle_with_auth_flow(
+                "calendar",
+                GoogleProvisioningAuthFlow::DeviceCode {
+                    poll_interval_seconds: 0,
+                },
+            )
+            .expect_err("zero poll interval should fail closed");
+        assert!(matches!(
+            err,
+            GoogleProvisioningError::InvalidAuthFlowParameter {
+                flow: "device_code",
+                field: "poll_interval_seconds",
+                value: 0,
+            }
+        ));
     }
 
     // ── Recipe structure tests ───────────────────────────────────────
@@ -1484,21 +1579,17 @@ mod tests {
             bundle.surface.default_scopes,
             vec!["https://www.googleapis.com/auth/contacts.readonly".to_string()]
         );
-        assert!(
-            bundle
-                .surface
-                .escalation_paths
-                .iter()
-                .any(|path| path.trigger.contains("directory search"))
-        );
-        assert!(
-            bundle
-                .surface
-                .escalation_paths
-                .iter()
-                .flat_map(|path| path.add_scopes.iter())
-                .any(|scope| scope == "https://www.googleapis.com/auth/directory.readonly")
-        );
+        assert!(bundle
+            .surface
+            .escalation_paths
+            .iter()
+            .any(|path| path.trigger.contains("directory search")));
+        assert!(bundle
+            .surface
+            .escalation_paths
+            .iter()
+            .flat_map(|path| path.add_scopes.iter())
+            .any(|scope| scope == "https://www.googleapis.com/auth/directory.readonly"));
     }
 
     #[test]
@@ -1510,23 +1601,17 @@ mod tests {
             bundle.surface.default_scopes,
             vec!["https://www.googleapis.com/auth/admin.reports.audit.readonly".to_string()]
         );
-        assert!(
-            bundle
-                .surface
-                .escalation_paths
-                .iter()
-                .any(|path| path.trigger.contains("usage-report workflows"))
-        );
-        assert!(
-            bundle
-                .surface
-                .escalation_paths
-                .iter()
-                .flat_map(|path| path.add_scopes.iter())
-                .any(
-                    |scope| scope == "https://www.googleapis.com/auth/admin.reports.usage.readonly"
-                )
-        );
+        assert!(bundle
+            .surface
+            .escalation_paths
+            .iter()
+            .any(|path| path.trigger.contains("usage-report workflows")));
+        assert!(bundle
+            .surface
+            .escalation_paths
+            .iter()
+            .flat_map(|path| path.add_scopes.iter())
+            .any(|scope| scope == "https://www.googleapis.com/auth/admin.reports.usage.readonly"));
     }
 
     // ── Message content tests ───────────────────────────────────────

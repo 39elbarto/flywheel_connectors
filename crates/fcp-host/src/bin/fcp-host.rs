@@ -46,14 +46,14 @@ use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
     BatchOptions, BatchStatus, BudgetAction, BudgetPolicyEngine, BudgetReportRequest,
     BudgetReportResponse, CacheMetadata, CacheValidator, CancellationController,
-    CapabilityTokenVerifyRequest,
-    CancellationRequest, CancellationResponse, ConfigRevisionRecord, ConnectorAdminState,
-    ConnectorAdminStatus, ConnectorArchetype, ConnectorArtifactMetadataResponse,
-    ConnectorArtifactRegistrationRequest, ConnectorArtifactRegistrationResponse,
-    ConnectorConfigApplyRequest, ConnectorConfigApplyResponse, ConnectorConfigDiffRequest,
-    ConnectorConfigDiffResponse, ConnectorConfigRevisionsResponse, ConnectorConfigRollbackRequest,
-    ConnectorConfigSnapshot, ConnectorConfigSnapshotSource, ConnectorConfigValidateRequest,
-    ConnectorConfigValidateResponse, ConnectorInventoryApplyReport, ConnectorInventoryMutationKind,
+    CancellationRequest, CancellationResponse, CapabilityTokenVerifyRequest, ConfigRevisionRecord,
+    ConnectorAdminState, ConnectorAdminStatus, ConnectorArchetype,
+    ConnectorArtifactMetadataResponse, ConnectorArtifactRegistrationRequest,
+    ConnectorArtifactRegistrationResponse, ConnectorConfigApplyRequest,
+    ConnectorConfigApplyResponse, ConnectorConfigDiffRequest, ConnectorConfigDiffResponse,
+    ConnectorConfigRevisionsResponse, ConnectorConfigRollbackRequest, ConnectorConfigSnapshot,
+    ConnectorConfigSnapshotSource, ConnectorConfigValidateRequest, ConnectorConfigValidateResponse,
+    ConnectorInventoryApplyReport, ConnectorInventoryMutationKind,
     ConnectorInventoryMutationRequest, ConnectorInventoryMutationResponse,
     ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint,
     DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest, DoctorService,
@@ -1185,7 +1185,9 @@ fn claims_principal(claims: &fcp_crypto::cose::CwtClaims) -> Option<&str> {
 
 fn capability_token_b64(token: &fcp_core::CapabilityToken) -> HostResult<String> {
     let bytes = token.raw().to_cbor().map_err(|error| {
-        HostError::Internal(format!("failed to serialize capability token for verification: {error}"))
+        HostError::Internal(format!(
+            "failed to serialize capability token for verification: {error}"
+        ))
     })?;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
@@ -1238,9 +1240,7 @@ async fn verify_live_request(
         })
         .await
         .map_err(|error| {
-            HostError::PreflightFailed(format!(
-                "persisted capability verification failed: {error}"
-            ))
+            HostError::PreflightFailed(format!("persisted capability verification failed: {error}"))
         })?;
     if !persisted_verify.valid {
         let reason = persisted_verify
@@ -3776,7 +3776,7 @@ async fn invoke_handler(
                 Some(&zone_id),
                 &connector_id,
                 &operation_name,
-                &response,
+                Some(&response),
             )
             .await;
             record_invoke_receipt_summary(
@@ -3801,6 +3801,14 @@ async fn invoke_handler(
             Ok(Json(response))
         }
         Err(err) => {
+            record_invoke_budget_usage(
+                state.budget.as_ref(),
+                Some(&zone_id),
+                &connector_id,
+                &operation_name,
+                None,
+            )
+            .await;
             tracing::warn!(
                 event = "invoke_error",
                 connector_id = %connector_id,
@@ -3855,19 +3863,18 @@ async fn record_invoke_budget_usage(
     zone_id: Option<&ZoneId>,
     connector_id: &ConnectorId,
     operation: &str,
-    response: &InvokeResponse,
+    response: Option<&InvokeResponse>,
 ) {
     let Some(zone_id) = zone_id else {
         return;
     };
-    let Some(metrics) = response
-        .usage_metrics
-        .as_deref()
-        .filter(|metrics| !metrics.is_empty())
-    else {
-        return;
-    };
-    let Some(evaluation) = budget.record_usage(zone_id, metrics).await else {
+    let mut metrics = response
+        .and_then(|response| response.usage_metrics.clone())
+        .unwrap_or_default();
+    if !metrics.iter().any(|metric| metric.kind == UsageMetricKind::Requests) {
+        metrics.push(UsageMetric::requests(1));
+    }
+    let Some(evaluation) = budget.record_usage(zone_id, metrics.as_slice()).await else {
         return;
     };
     match evaluation.action {
@@ -4043,7 +4050,7 @@ async fn execute_batch_operation(
                 Some(&zone_id),
                 &connector_id,
                 &operation_name,
-                &response,
+                Some(&response),
             )
             .await;
             record_invoke_receipt_summary(
@@ -4066,13 +4073,23 @@ async fn execute_batch_operation(
                 duration_ms,
             }
         }
-        Err(err) => OperationResult {
-            id: operation.id,
-            status: OperationResultStatus::Error,
-            output: None,
-            error: Some(batch_error_from_host_error(err)),
-            duration_ms: elapsed_millis(started_at),
-        },
+        Err(err) => {
+            record_invoke_budget_usage(
+                state.budget.as_ref(),
+                Some(&zone_id),
+                &connector_id,
+                &operation_name,
+                None,
+            )
+            .await;
+            OperationResult {
+                id: operation.id,
+                status: OperationResultStatus::Error,
+                output: None,
+                error: Some(batch_error_from_host_error(err)),
+                duration_ms: elapsed_millis(started_at),
+            }
+        }
     }
 }
 
@@ -5113,6 +5130,198 @@ mod tests {
         assert!(error.to_string().contains("revoked"));
     }
 
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn evaluate_live_preflight_host_state_rejection_does_not_track_cancellation() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!(
+                "compiled fcp-test-connector missing; skipping host-state preflight cleanup test"
+            );
+            return;
+        }
+
+        let connector_id = "fcp.test.revoked-preflight:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let issued = lifecycle
+            .issue_capability_token(
+                &fcp_host::CapabilityIssuanceRequest {
+                    connector_id: connector_id.to_string(),
+                    zone_id: ZoneId::work().to_string(),
+                    principal_id: "user:test".to_string(),
+                    operations: vec!["test.echo".to_string()],
+                    ttl_secs: 3600,
+                    not_before_delay_secs: None,
+                    holder_node: None,
+                    max_delegation_depth: 0,
+                    resource_allow: Vec::new(),
+                    resource_deny: Vec::new(),
+                    max_calls: None,
+                    max_bytes: None,
+                    credential_allow: Vec::new(),
+                    dry_run: false,
+                },
+                &signing_key,
+            )
+            .await
+            .expect("issue token for revocation ledger");
+        lifecycle
+            .revoke_token(&fcp_host::TokenRevocationRequest {
+                token_id: issued.token_id.clone(),
+                reason: Some("test revocation".to_string()),
+            })
+            .await
+            .expect("revoke token");
+
+        let token_id = hex::decode(&issued.token_id).expect("issued token id should be hex");
+        let revoked_live_token = test_capability_token_with_token_id(
+            &signing_key,
+            "cap.test.echo",
+            "test.echo",
+            ZoneId::work().as_str(),
+            connector_id,
+            &token_id,
+        );
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![subprocess_test_connector_config(connector_id)],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            ..(*base_state).clone()
+        });
+
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "revoked token should fail" }),
+            capability_token: revoked_live_token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let preflight = evaluate_live_preflight(state.as_ref(), &request, None).await;
+        assert!(!preflight.allowed);
+        assert!(
+            preflight
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("capability token rejected by host state"))
+        );
+        assert!(
+            preflight
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("revoked"))
+        );
+        assert_eq!(state.cancellation.tracked_count(), 0);
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn invoke_handler_propagates_host_state_preflight_rejection() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!(
+                "compiled fcp-test-connector missing; skipping host-state invoke propagation test"
+            );
+            return;
+        }
+
+        let connector_id = "fcp.test.revoked-invoke:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let issued = lifecycle
+            .issue_capability_token(
+                &fcp_host::CapabilityIssuanceRequest {
+                    connector_id: connector_id.to_string(),
+                    zone_id: ZoneId::work().to_string(),
+                    principal_id: "user:test".to_string(),
+                    operations: vec!["test.echo".to_string()],
+                    ttl_secs: 3600,
+                    not_before_delay_secs: None,
+                    holder_node: None,
+                    max_delegation_depth: 0,
+                    resource_allow: Vec::new(),
+                    resource_deny: Vec::new(),
+                    max_calls: None,
+                    max_bytes: None,
+                    credential_allow: Vec::new(),
+                    dry_run: false,
+                },
+                &signing_key,
+            )
+            .await
+            .expect("issue token for revocation ledger");
+        lifecycle
+            .revoke_token(&fcp_host::TokenRevocationRequest {
+                token_id: issued.token_id.clone(),
+                reason: Some("test revocation".to_string()),
+            })
+            .await
+            .expect("revoke token");
+
+        let token_id = hex::decode(&issued.token_id).expect("issued token id should be hex");
+        let revoked_live_token = test_capability_token_with_token_id(
+            &signing_key,
+            "cap.test.echo",
+            "test.echo",
+            ZoneId::work().as_str(),
+            connector_id,
+            &token_id,
+        );
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![subprocess_test_connector_config(connector_id)],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            ..(*base_state).clone()
+        });
+
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "revoked token should fail" }),
+            capability_token: revoked_live_token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let (status, message) = invoke_handler(State(state), Json(request))
+            .await
+            .expect_err("invoke handler should surface preflight failure");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(message.contains("preflight failed"));
+        assert!(message.contains("capability token rejected by host state"));
+        assert!(message.contains("revoked"));
+    }
+
     fn rollout_handler_test_policy() -> RolloutPolicy {
         RolloutPolicy::builder()
             .canary_percent(5)
@@ -5166,7 +5375,7 @@ mod tests {
             Some(&zone),
             &connector_id,
             "test.echo",
-            &invoke_response_with_metrics(vec![UsageMetric::tokens(60)]),
+            Some(&invoke_response_with_metrics(vec![UsageMetric::tokens(60)])),
         )
         .await;
 
@@ -5202,7 +5411,7 @@ mod tests {
             None,
             &connector_id,
             "test.echo",
-            &invoke_response_with_metrics(vec![UsageMetric::tokens(60)]),
+            Some(&invoke_response_with_metrics(vec![UsageMetric::tokens(60)])),
         )
         .await;
         record_invoke_budget_usage(
@@ -5210,7 +5419,7 @@ mod tests {
             Some(&zone),
             &connector_id,
             "test.echo",
-            &InvokeResponse::ok(RequestId::random(), json!({"ok": true})),
+            Some(&InvokeResponse::ok(RequestId::random(), json!({"ok": true}))),
         )
         .await;
 
@@ -5220,6 +5429,72 @@ mod tests {
             .expect("budget policy should produce a snapshot");
         assert_eq!(snapshot.budgets[0].used, 0);
         assert_eq!(snapshot.budgets[0].remaining, 100);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn record_invoke_budget_usage_counts_request_without_connector_metric() {
+        let budget = BudgetPolicyEngine::new();
+        let zone = ZoneId::work();
+        let connector_id = ConnectorId::from_static("fcp.test.budget-requests:utility:1.0.0");
+        budget
+            .upsert_policy(
+                zone.clone(),
+                UsageBudgetPolicy {
+                    enforcement: BudgetEnforcement::Deny,
+                    budgets: vec![UsageBudgetLimit {
+                        metric: UsageMetricKind::Requests,
+                        limit: 10,
+                        window_seconds: 60,
+                    }],
+                },
+            )
+            .await;
+
+        record_invoke_budget_usage(
+            &budget,
+            Some(&zone),
+            &connector_id,
+            "test.echo",
+            Some(&InvokeResponse::ok(RequestId::random(), json!({"ok": true}))),
+        )
+        .await;
+
+        let snapshot = budget
+            .snapshot(&zone)
+            .await
+            .expect("budget policy should produce a snapshot");
+        assert_eq!(snapshot.budgets[0].used, 1);
+        assert_eq!(snapshot.budgets[0].remaining, 9);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn record_invoke_budget_usage_counts_failed_invoke_attempt() {
+        let budget = BudgetPolicyEngine::new();
+        let zone = ZoneId::work();
+        let connector_id =
+            ConnectorId::from_static("fcp.test.budget-failed-request:utility:1.0.0");
+        budget
+            .upsert_policy(
+                zone.clone(),
+                UsageBudgetPolicy {
+                    enforcement: BudgetEnforcement::Deny,
+                    budgets: vec![UsageBudgetLimit {
+                        metric: UsageMetricKind::Requests,
+                        limit: 10,
+                        window_seconds: 60,
+                    }],
+                },
+            )
+            .await;
+
+        record_invoke_budget_usage(&budget, Some(&zone), &connector_id, "test.echo", None).await;
+
+        let snapshot = budget
+            .snapshot(&zone)
+            .await
+            .expect("budget policy should produce a snapshot");
+        assert_eq!(snapshot.budgets[0].used, 1);
+        assert_eq!(snapshot.budgets[0].remaining, 9);
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

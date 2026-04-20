@@ -10,6 +10,9 @@ use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, Retr
 use crate::error::{CloudflareError, CloudflareResult};
 use crate::types::*;
 
+const MAX_RETRY_AFTER_SECS: u64 = 300;
+const MAX_ERROR_MESSAGE_CHARS: usize = 512;
+
 /// Validate a user-supplied path segment to prevent URL path injection.
 fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> CloudflareResult<&'a str> {
     if value.trim().is_empty() {
@@ -562,12 +565,7 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
     let status = resp.status().as_u16();
 
     if status == 429 {
-        let retry_after = resp
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(Duration::from_secs);
+        let retry_after = parse_retry_after_header(resp.headers());
         return AttemptOutcome::Retryable {
             error: CloudflareError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(Duration::from_secs(30)).as_millis() as u64,
@@ -592,7 +590,7 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
         let text = resp.text().await.unwrap_or_default();
         let err = CloudflareError::Api {
             code: u32::from(status),
-            message: text,
+            message: sanitize_error_message(&text),
         };
         if status >= 500 {
             return AttemptOutcome::Retryable {
@@ -620,7 +618,7 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
             let err = &cf_resp.errors[0];
             let cf_err = CloudflareError::Api {
                 code: err.code,
-                message: err.message.clone(),
+                message: sanitize_error_message(&err.message),
             };
             if cf_err.is_retryable() {
                 return AttemptOutcome::Retryable {
@@ -659,12 +657,7 @@ async fn handle_list_response<T: serde::de::DeserializeOwned>(
     let status = resp.status().as_u16();
 
     if status == 429 {
-        let retry_after = resp
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(Duration::from_secs);
+        let retry_after = parse_retry_after_header(resp.headers());
         return AttemptOutcome::Retryable {
             error: CloudflareError::RateLimited {
                 retry_after_ms: retry_after.unwrap_or(Duration::from_secs(30)).as_millis() as u64,
@@ -683,7 +676,7 @@ async fn handle_list_response<T: serde::de::DeserializeOwned>(
         let text = resp.text().await.unwrap_or_default();
         let err = CloudflareError::Api {
             code: u32::from(status),
-            message: text,
+            message: sanitize_error_message(&text),
         };
         if status >= 500 {
             return AttemptOutcome::Retryable {
@@ -707,7 +700,7 @@ async fn handle_list_response<T: serde::de::DeserializeOwned>(
             let err = &cf_resp.errors[0];
             return AttemptOutcome::Terminal(CloudflareError::Api {
                 code: err.code,
-                message: err.message.clone(),
+                message: sanitize_error_message(&err.message),
             });
         }
     }
@@ -719,6 +712,26 @@ async fn handle_list_response<T: serde::de::DeserializeOwned>(
             AttemptOutcome::Terminal(CloudflareError::Json(e))
         }
     }
+}
+
+fn parse_retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    headers
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(|secs| Duration::from_secs(secs.min(MAX_RETRY_AFTER_SECS)))
+}
+
+fn sanitize_error_message(message: &str) -> String {
+    let collapsed = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim();
+    if trimmed.chars().count() <= MAX_ERROR_MESSAGE_CHARS {
+        return trimmed.to_string();
+    }
+    trimmed
+        .chars()
+        .take(MAX_ERROR_MESSAGE_CHARS)
+        .collect::<String>()
 }
 
 #[cfg(test)]
@@ -861,5 +874,23 @@ mod tests {
         })
         .unwrap();
         assert_eq!(rt.timeout, Duration::from_millis(1_234));
+    }
+
+    #[test]
+    fn retry_after_header_is_clamped() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", "999999".parse().unwrap());
+        assert_eq!(
+            parse_retry_after_header(&headers),
+            Some(Duration::from_secs(MAX_RETRY_AFTER_SECS))
+        );
+    }
+
+    #[test]
+    fn sanitize_error_message_truncates_and_collapses_whitespace() {
+        let msg = format!("{}\n{}", "x".repeat(MAX_ERROR_MESSAGE_CHARS + 10), "tail");
+        let sanitized = sanitize_error_message(&msg);
+        assert!(sanitized.len() <= MAX_ERROR_MESSAGE_CHARS);
+        assert!(!sanitized.contains('\n'));
     }
 }

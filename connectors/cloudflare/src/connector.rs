@@ -1385,7 +1385,14 @@ impl CloudflareConnector {
                     });
                 }
             };
-            verifier.verify(req.capability_token, &cap, &req.operation, &[])?;
+            let configured_account_id = self
+                .config
+                .as_ref()
+                .map(|config| config.account_id.as_str())
+                .unwrap_or_default();
+            let resource_uris =
+                resource_uris_for_operation(operation, &req.input, configured_account_id)?;
+            verifier.verify(req.capability_token, &cap, &req.operation, &resource_uris)?;
         } else {
             return Err(FcpError::Internal {
                 message: "connector ready state missing capability verifier".into(),
@@ -1564,6 +1571,78 @@ impl CloudflareConnector {
         };
         Ok(InvokeResponse::ok(req.id, output))
     }
+}
+
+fn resource_uris_for_operation(
+    operation: &str,
+    input: &serde_json::Value,
+    configured_account_id: &str,
+) -> FcpResult<Vec<String>> {
+    let account_id = (!configured_account_id.trim().is_empty()).then_some(configured_account_id);
+    let account_prefix = |account: &str| format!("cloudflare://accounts/{account}");
+
+    let uris = match operation {
+        OP_ZONES_LIST | OP_HEALTH => Vec::new(),
+        OP_DNS_LIST => {
+            let zone_id = CloudflareConnector::require_str(input, "zone_id")?;
+            vec![format!("cloudflare://zones/{zone_id}/dns_records")]
+        }
+        OP_DNS_CREATE => {
+            let zone_id = CloudflareConnector::require_str(input, "zone_id")?;
+            let name = CloudflareConnector::require_str(input, "name")?;
+            vec![format!("cloudflare://zones/{zone_id}/dns_records/{name}")]
+        }
+        OP_DNS_UPDATE | OP_DNS_DELETE => {
+            let zone_id = CloudflareConnector::require_str(input, "zone_id")?;
+            let record_id = CloudflareConnector::require_str(input, "record_id")?;
+            vec![format!(
+                "cloudflare://zones/{zone_id}/dns_records/{record_id}"
+            )]
+        }
+        OP_WORKERS_LIST => account_id
+            .map(|account| vec![format!("{}/workers/scripts", account_prefix(account))])
+            .unwrap_or_default(),
+        OP_WORKERS_GET | OP_WORKERS_DELETE | OP_WORKERS_DEPLOY => {
+            let script_name = CloudflareConnector::require_str(input, "script_name")?;
+            account_id
+                .map(|account| {
+                    vec![format!(
+                        "{}/workers/scripts/{script_name}",
+                        account_prefix(account)
+                    )]
+                })
+                .unwrap_or_default()
+        }
+        OP_PAGES_LIST => account_id
+            .map(|account| vec![format!("{}/pages/projects", account_prefix(account))])
+            .unwrap_or_default(),
+        OP_PAGES_DEPLOY => {
+            let project_name = CloudflareConnector::require_str(input, "project_name")?;
+            account_id
+                .map(|account| {
+                    vec![format!(
+                        "{}/pages/projects/{project_name}/deployments",
+                        account_prefix(account)
+                    )]
+                })
+                .unwrap_or_default()
+        }
+        OP_KV_GET | OP_KV_PUT | OP_KV_DELETE => {
+            let namespace_id = CloudflareConnector::require_str(input, "namespace_id")?;
+            let key = CloudflareConnector::require_str(input, "key")?;
+            account_id
+                .map(|account| {
+                    vec![format!(
+                        "{}/kv/namespaces/{namespace_id}/values/{key}",
+                        account_prefix(account)
+                    )]
+                })
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+
+    Ok(uris)
 }
 
 #[cfg(test)]
@@ -1946,6 +2025,31 @@ mod tests {
         .expect_err("missing zone_id should be rejected");
         assert!(matches!(error, FcpError::InvalidRequest { .. }));
         assert!(error.to_string().contains("Missing: zone_id"));
+    }
+
+    #[test]
+    fn resource_uris_bind_dns_and_account_scoped_operations() {
+        let dns_uris = resource_uris_for_operation(
+            OP_DNS_UPDATE,
+            &json!({"zone_id":"zone-123","record_id":"rec-456"}),
+            "acc123",
+        )
+        .unwrap();
+        assert_eq!(
+            dns_uris,
+            vec!["cloudflare://zones/zone-123/dns_records/rec-456"]
+        );
+
+        let worker_uris = resource_uris_for_operation(
+            OP_WORKERS_GET,
+            &json!({"script_name":"worker-a"}),
+            "acc123",
+        )
+        .unwrap();
+        assert_eq!(
+            worker_uris,
+            vec!["cloudflare://accounts/acc123/workers/scripts/worker-a"]
+        );
     }
     #[test]
     fn invoke_dns_create_rejects_invalid_optional_numeric_field() {

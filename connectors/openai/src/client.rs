@@ -29,6 +29,8 @@ use crate::{
 
 /// Default API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
+const MAX_RETRY_AFTER_MS: u64 = 300_000;
+const MAX_ERROR_MESSAGE_CHARS: usize = 512;
 
 /// Authentication mode for OpenAI API access.
 #[derive(Clone)]
@@ -1085,11 +1087,14 @@ fn parse_error_response(
         .and_then(|v| v.to_str().ok())
     {
         if let Some(ms) = parse_openai_reset(reset) {
-            retry_after_ms = ms;
+            retry_after_ms = ms.min(MAX_RETRY_AFTER_MS);
         }
     } else if let Some(retry) = headers.get("retry-after").and_then(|v| v.to_str().ok()) {
         if let Ok(secs) = retry.parse::<f64>() {
-            retry_after_ms = (secs * 1000.0) as u64;
+            if secs.is_finite() && secs.is_sign_positive() {
+                let retry_secs = secs.min(MAX_RETRY_AFTER_MS as f64 / 1000.0);
+                retry_after_ms = (retry_secs * 1000.0).round() as u64;
+            }
         }
     }
 
@@ -1133,7 +1138,7 @@ fn parse_error_response(
 
         return OpenAIError::Api {
             error_type: details.error_type,
-            message: details.message,
+            message: sanitize_error_message(&details.message),
             status_code: Some(status.as_u16()),
         };
     }
@@ -1141,9 +1146,21 @@ fn parse_error_response(
     // Fallback for unparseable errors
     OpenAIError::Api {
         error_type: "unknown".into(),
-        message: String::from_utf8_lossy(bytes).into_owned(),
+        message: sanitize_error_message(&String::from_utf8_lossy(bytes)),
         status_code: Some(status.as_u16()),
     }
+}
+
+fn sanitize_error_message(message: &str) -> String {
+    let collapsed = message.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim();
+    if trimmed.chars().count() <= MAX_ERROR_MESSAGE_CHARS {
+        return trimmed.to_string();
+    }
+    trimmed
+        .chars()
+        .take(MAX_ERROR_MESSAGE_CHARS)
+        .collect::<String>()
 }
 
 /// Parse SSE stream into chunks.
@@ -1527,6 +1544,38 @@ mod tests {
             .is_retryable()
         );
         assert!(!OpenAIError::InvalidApiKey.is_retryable());
+    }
+
+    #[test]
+    fn test_parse_error_response_clamps_retry_after_header() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("retry-after", "999999".parse().unwrap());
+        let body = Bytes::from_static(
+            br#"{"error":{"message":"Rate limit exceeded","type":"rate_limit_error","param":null,"code":null}}"#,
+        );
+
+        let err = parse_error_response(StatusCode::TOO_MANY_REQUESTS, &headers, &body);
+        match err {
+            OpenAIError::RateLimited { retry_after_ms } => {
+                assert_eq!(retry_after_ms, MAX_RETRY_AFTER_MS);
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_error_response_truncates_fallback_body() {
+        let headers = reqwest::header::HeaderMap::new();
+        let raw = format!("{}\n{}", "x".repeat(MAX_ERROR_MESSAGE_CHARS + 50), "tail");
+        let err = parse_error_response(StatusCode::BAD_REQUEST, &headers, &Bytes::from(raw));
+
+        match err {
+            OpenAIError::Api { message, .. } => {
+                assert!(message.len() <= MAX_ERROR_MESSAGE_CHARS);
+                assert!(!message.contains('\n'));
+            }
+            other => panic!("expected Api error, got {other:?}"),
+        }
     }
 
     #[test]

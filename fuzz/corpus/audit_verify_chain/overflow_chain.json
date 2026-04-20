@@ -1,0 +1,23 @@
+{
+  "entries": [
+    {
+      "id": "entry-max",
+      "event_type": "capability.invoke",
+      "actor": "agent-overflow",
+      "zone_id": "z:work",
+      "seq": 18446744073709551615,
+      "occurred_at": 999,
+      "correlation_id": "corr-max"
+    },
+    {
+      "id": "entry-next",
+      "event_type": "capability.invoke",
+      "actor": "agent-overflow",
+      "zone_id": "z:work",
+      "seq": 7,
+      "occurred_at": 1000,
+      "prev": "entry-max",
+      "correlation_id": "corr-next"
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "zone_id": "z:work",
+  "current_time": 1000,
+  "checkpoint": 0,
+  "hot_objects": [0],
+  "cycle_id": 7,
+  "mains_power": true,
+  "bandwidth_estimate_kbps": 75000,
+  "objects": [
+    {
+      "id_byte": 1,
+      "body_hex": "00010203",
+      "retention": "ephemeral",
+      "placement": {
+        "min_nodes": 2,
+        "max_node_fraction_bps": 6000,
+        "target_coverage_bps": 9000,
+        "min_source_diversity": 2
+      },
+      "include_policy": true,
+      "source_symbols": 3,
+      "symbol_size": 4,
+      "symbols": [
+        { "esi": 0, "data_hex": "00010203", "source_node": 1, "stored_at": 1000 },
+        { "esi": 1, "data_hex": "04050607", "source_node": 2, "stored_at": 1001 }
+      ]
+    },
+    {
+      "id_byte": 2,
+      "body_hex": "aabbccdd",
+      "refs": [0],
+      "retention": "lease",
+      "lease_expires_at": 5000,
+      "placement": {
+        "min_nodes": 1,
+        "max_node_fraction_bps": 10000,
+        "target_coverage_bps": 5000,
+        "min_source_diversity": 1
+      },
+      "include_policy": true,
+      "source_symbols": 2,
+      "symbol_size": 4,
+      "symbols": [
+        { "esi": 0, "data_hex": "aabbccdd", "source_node": 9, "stored_at": 1002 }
+      ]
+    }
+  ]
+}

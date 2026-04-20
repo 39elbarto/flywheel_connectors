@@ -1,0 +1,42 @@
+{
+  "zone_filter": "z:work",
+  "head": {
+    "zone_id": "z:work",
+    "head_entry": "entry-2",
+    "head_seq": 2,
+    "coverage": 1.0,
+    "epoch_id": "epoch-1",
+    "signature_count": 3
+  },
+  "entries": [
+    {
+      "id": "entry-0",
+      "event_type": "secret.access",
+      "actor": "agent-1",
+      "zone_id": "z:work",
+      "seq": 0,
+      "occurred_at": 100,
+      "correlation_id": "corr-0"
+    },
+    {
+      "id": "entry-1",
+      "event_type": "capability.invoke",
+      "actor": "agent-1",
+      "zone_id": "z:work",
+      "seq": 1,
+      "occurred_at": 101,
+      "prev": "entry-0",
+      "correlation_id": "corr-1"
+    },
+    {
+      "id": "entry-2",
+      "event_type": "security.violation",
+      "actor": "agent-2",
+      "zone_id": "z:work",
+      "seq": 2,
+      "occurred_at": 102,
+      "prev": "entry-1",
+      "correlation_id": "corr-2"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "zone_id": "z:work",
+  "current_time": 250,
+  "cycle_id": 3,
+  "objects": [
+    {
+      "id_byte": 9,
+      "body_hex": "01020304",
+      "retention": "pinned",
+      "placement": {
+        "min_nodes": 2,
+        "max_node_fraction_bps": 5000,
+        "target_coverage_bps": 9500,
+        "min_source_diversity": 2
+      },
+      "include_policy": true,
+      "source_symbols": 4,
+      "symbol_size": 4,
+      "symbols": []
+    }
+  ]
+}

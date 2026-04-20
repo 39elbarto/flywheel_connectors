@@ -1,0 +1,19 @@
+{
+  "integer_minimal_encoding": [
+    {
+      "value": 24,
+      "canonical_hex": "1818",
+      "description": "First integer that requires one extra byte"
+    }
+  ],
+  "map_key_ordering": {
+    "test_cases": [
+      {
+        "name": "length_first_then_lexicographic",
+        "keys": ["bb", "a", "aaa", "z"],
+        "sorted_keys": ["a", "z", "bb", "aaa"],
+        "description": "Matches the existing canonical ordering vectors"
+      }
+    ]
+  }
+}

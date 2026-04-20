@@ -2,13 +2,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
-use crate::{DEFAULT_REFRESH_THRESHOLD, OAuthError, OAuthResult};
+use crate::{DEFAULT_REFRESH_THRESHOLD, OAuth2Client, OAuthError, OAuthResult};
 
 /// OAuth token response from provider.
 #[derive(Clone, Serialize, Deserialize)]
@@ -270,6 +271,7 @@ impl OAuthTokens {
 #[derive(Debug, Clone)]
 pub struct TokenStore {
     tokens: Arc<RwLock<HashMap<String, StoredToken>>>,
+    refresh_gates: Arc<Mutex<HashMap<String, Arc<RefreshGate>>>>,
     /// Time of last cleanup.
     last_cleanup: Arc<RwLock<Instant>>,
     /// Cleanup interval.
@@ -281,6 +283,11 @@ struct StoredToken {
     tokens: OAuthTokens,
     /// Optional metadata for the stored token.
     metadata: HashMap<String, String>,
+}
+
+#[derive(Debug, Default)]
+struct RefreshGate {
+    refreshing: AtomicBool,
 }
 
 impl Default for TokenStore {
@@ -295,6 +302,7 @@ impl TokenStore {
     pub fn new() -> Self {
         Self {
             tokens: Arc::new(RwLock::new(HashMap::new())),
+            refresh_gates: Arc::new(Mutex::new(HashMap::new())),
             last_cleanup: Arc::new(RwLock::new(Instant::now())),
             cleanup_interval: Duration::from_secs(60), // Cleanup every minute
         }
@@ -349,16 +357,25 @@ impl TokenStore {
     }
 
     /// Check if tokens exist and are valid.
+    ///
+    /// "Valid" here means usable for a request without entering the proactive
+    /// refresh window. A token that is within [`DEFAULT_REFRESH_THRESHOLD`] of
+    /// expiry is treated as not valid so callers do not race the provider with
+    /// an access token that may expire in-flight.
     #[must_use]
     pub fn has_valid_token(&self, key: &str) -> bool {
-        self.get(key).is_some_and(|t| !t.is_expired())
+        self.get(key).is_some_and(|t| !t.needs_refresh())
     }
 
     /// Remove tokens by key.
     #[must_use]
     pub fn remove(&self, key: &str) -> Option<OAuthTokens> {
         let mut store = self.tokens.write();
-        store.remove(key).map(|s| s.tokens)
+        let removed = store.remove(key).map(|s| s.tokens);
+        if removed.is_some() {
+            self.refresh_gates.lock().remove(key);
+        }
+        removed
     }
 
     /// Update tokens (used after refresh).
@@ -375,6 +392,105 @@ impl TokenStore {
         }
     }
 
+    /// Update stored tokens only if the refresh token still matches the
+    /// snapshot that triggered the refresh request.
+    ///
+    /// Returns `Ok(true)` when the update was applied. Returns `Ok(false)` when
+    /// another refresh already rotated the stored refresh token, which means
+    /// this response is stale and must not overwrite the newer credential set.
+    ///
+    /// # Errors
+    /// Returns [`OAuthError::TokenNotFound`] when no tokens are stored for `key`.
+    pub fn update_after_refresh(
+        &self,
+        key: &str,
+        expected_refresh_token: Option<&str>,
+        tokens: OAuthTokens,
+    ) -> OAuthResult<bool> {
+        let mut store = self.tokens.write();
+        if let Some(stored) = store.get_mut(key) {
+            if stored.tokens.refresh_token() != expected_refresh_token {
+                return Ok(false);
+            }
+            stored.tokens = tokens;
+            Ok(true)
+        } else {
+            Err(OAuthError::TokenNotFound(key.to_string()))
+        }
+    }
+
+    /// Return tokens that are safe to use for a request, refreshing them first
+    /// when they are inside the proactive refresh window.
+    ///
+    /// Refreshes are single-flight per key: concurrent callers wait for the
+    /// in-progress refresh instead of issuing parallel refresh requests with the
+    /// same refresh token.
+    ///
+    /// # Errors
+    /// Returns [`OAuthError::TokenNotFound`] when `key` is unknown,
+    /// [`OAuthError::NoRefreshToken`] when refresh is required but unavailable,
+    /// or [`OAuthError::RefreshFailed`] when the provider refresh request fails.
+    pub async fn get_or_refresh(
+        &self,
+        key: &str,
+        client: &OAuth2Client,
+    ) -> OAuthResult<OAuthTokens> {
+        loop {
+            let snapshot = self
+                .get(key)
+                .ok_or_else(|| OAuthError::TokenNotFound(key.to_string()))?;
+            if !snapshot.needs_refresh() {
+                return Ok(snapshot);
+            }
+
+            let refresh_token = snapshot
+                .refresh_token()
+                .ok_or(OAuthError::NoRefreshToken)?
+                .to_string();
+            let expected_refresh_token = snapshot.refresh_token().map(str::to_string);
+            let gate = self.refresh_gate(key);
+
+            if gate
+                .refreshing
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                while gate.refreshing.load(Ordering::Acquire) {
+                    fcp_async_core::task::yield_now().await;
+                }
+                continue;
+            }
+
+            let refresh_outcome = match client.refresh_tokens(&refresh_token).await {
+                Ok(tokens) => match self.update_after_refresh(
+                    key,
+                    expected_refresh_token.as_deref(),
+                    tokens.clone(),
+                ) {
+                    Ok(true) => Ok(Some(tokens)),
+                    Ok(false) => Ok(None),
+                    Err(error) => Err(error),
+                },
+                Err(error) => {
+                    if self.get(key).is_some_and(|current| {
+                        !current.needs_refresh()
+                            || current.refresh_token() != expected_refresh_token.as_deref()
+                    }) {
+                        Ok(None)
+                    } else {
+                        Err(OAuthError::RefreshFailed(error.to_string()))
+                    }
+                }
+            };
+            gate.refreshing.store(false, Ordering::Release);
+
+            match refresh_outcome? {
+                Some(tokens) => return Ok(tokens),
+                None => continue,
+            }
+        }
+    }
+
     /// Get all stored keys.
     #[must_use]
     pub fn keys(&self) -> Vec<String> {
@@ -384,6 +500,7 @@ impl TokenStore {
     /// Clear all tokens.
     pub fn clear(&self) {
         self.tokens.write().clear();
+        self.refresh_gates.lock().clear();
     }
 
     /// Cleanup expired tokens.
@@ -398,10 +515,32 @@ impl TokenStore {
             // concurrent callers that both passed the read-lock check above.
             let mut last = self.last_cleanup.write();
             if last.elapsed() >= self.cleanup_interval {
-                self.tokens.write().retain(|_, v| !v.tokens.is_expired());
+                let mut expired_keys = Vec::new();
+                self.tokens.write().retain(|key, value| {
+                    let keep = !value.tokens.is_expired();
+                    if !keep {
+                        expired_keys.push(key.clone());
+                    }
+                    keep
+                });
+                if !expired_keys.is_empty() {
+                    let mut gates = self.refresh_gates.lock();
+                    for key in expired_keys {
+                        gates.remove(&key);
+                    }
+                }
                 *last = Instant::now();
             }
         }
+    }
+
+    fn refresh_gate(&self, key: &str) -> Arc<RefreshGate> {
+        let mut gates = self.refresh_gates.lock();
+        Arc::clone(
+            gates
+                .entry(key.to_string())
+                .or_insert_with(|| Arc::new(RefreshGate::default())),
+        )
     }
 }
 
@@ -540,8 +679,15 @@ mod tests {
             matches!(result, Err(OAuthError::InvalidTokenResponse(_))),
             "empty access_token must be rejected with InvalidTokenResponse, got {result:?}"
         );
-        assert_eq!(tokens.access_token(), original_access, "access_token untouched");
-        assert_eq!(tokens.expires_at, original_expires_at, "expires_at untouched");
+        assert_eq!(
+            tokens.access_token(),
+            original_access,
+            "access_token untouched"
+        );
+        assert_eq!(
+            tokens.expires_at, original_expires_at,
+            "expires_at untouched"
+        );
         assert_eq!(tokens.issued_at, original_issued_at, "issued_at untouched");
         assert_eq!(
             tokens.refresh_token().map(str::to_string),
@@ -1058,6 +1204,19 @@ mod tests {
             OAuthTokens::from_response(mock_token_response(Some(0))),
         );
         assert!(!store.has_valid_token("expired"));
+    }
+
+    #[test]
+    fn test_token_store_has_valid_token_false_inside_refresh_window() {
+        let store = TokenStore::new();
+        store.store(
+            "needs_refresh",
+            OAuthTokens::from_response(mock_token_response(Some(120))),
+        );
+        assert!(
+            !store.has_valid_token("needs_refresh"),
+            "tokens inside the proactive refresh window must not be treated as request-safe"
+        );
     }
 
     #[test]
@@ -1823,6 +1982,55 @@ mod tests {
         assert_eq!(tokens.access_token(), "updated_at");
         // Metadata should still be preserved after update
         assert_eq!(meta.get("env"), Some(&"production".to_string()));
+    }
+
+    #[test]
+    fn test_token_store_update_after_refresh_rejects_stale_overwrite() {
+        let store = TokenStore::new();
+        store.store(
+            "k",
+            OAuthTokens::from_response(TokenResponse {
+                access_token: "old_at".into(),
+                token_type: "Bearer".into(),
+                expires_in: Some(0),
+                refresh_token: Some("old_rt".into()),
+                scope: None,
+                id_token: None,
+            }),
+        );
+
+        let leader_tokens = OAuthTokens::from_response(TokenResponse {
+            access_token: "leader_at".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: Some("new_rt".into()),
+            scope: None,
+            id_token: None,
+        });
+        assert!(
+            store
+                .update_after_refresh("k", Some("old_rt"), leader_tokens)
+                .unwrap()
+        );
+
+        let stale_tokens = OAuthTokens::from_response(TokenResponse {
+            access_token: "stale_at".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: Some("stale_rt".into()),
+            scope: None,
+            id_token: None,
+        });
+        assert!(
+            !store
+                .update_after_refresh("k", Some("old_rt"), stale_tokens)
+                .unwrap(),
+            "stale refresh response must not overwrite rotated credentials"
+        );
+
+        let stored = store.get("k").unwrap();
+        assert_eq!(stored.access_token(), "leader_at");
+        assert_eq!(stored.refresh_token(), Some("new_rt"));
     }
 
     #[test]

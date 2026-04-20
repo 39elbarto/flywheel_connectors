@@ -21,6 +21,14 @@ pub enum OAuthError {
         actual: String,
     },
 
+    /// Invalid OAuth state value.
+    #[error("Invalid OAuth state: {0}")]
+    InvalidState(String),
+
+    /// OAuth state or PKCE session was already consumed.
+    #[error("OAuth authorization session has already been consumed")]
+    AuthorizationSessionConsumed,
+
     /// Authorization error from provider.
     #[error("Authorization error: {error} - {description}")]
     AuthorizationError {
@@ -128,6 +136,24 @@ mod tests {
     }
 
     #[test]
+    fn invalid_state_display() {
+        let e = OAuthError::InvalidState("state must not be empty".into());
+        assert_eq!(
+            e.to_string(),
+            "Invalid OAuth state: state must not be empty"
+        );
+    }
+
+    #[test]
+    fn authorization_session_consumed_display() {
+        let e = OAuthError::AuthorizationSessionConsumed;
+        assert_eq!(
+            e.to_string(),
+            "OAuth authorization session has already been consumed"
+        );
+    }
+
+    #[test]
     fn authorization_error_display() {
         let e = OAuthError::AuthorizationError {
             error: "access_denied".into(),
@@ -218,6 +244,8 @@ mod tests {
             expected: "a".into(),
             actual: "b".into(),
         });
+        assert_error(&OAuthError::InvalidState("x".into()));
+        assert_error(&OAuthError::AuthorizationSessionConsumed);
         assert_error(&OAuthError::AuthorizationError {
             error: "e".into(),
             description: "d".into(),

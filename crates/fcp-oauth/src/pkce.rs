@@ -28,7 +28,7 @@ impl std::fmt::Display for PkceMethod {
 }
 
 /// PKCE verifier and challenge pair.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pkce {
     /// The code verifier (secret, sent during token exchange).
     verifier: String,

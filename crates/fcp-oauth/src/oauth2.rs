@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -224,6 +225,90 @@ pub struct OAuth2Client {
     http_client: Arc<HttpClient>,
 }
 
+/// One-time authorization session tying together state and optional PKCE.
+#[derive(Debug, Clone)]
+pub struct AuthorizationSession {
+    authorization_url: String,
+    state: String,
+    pkce: Option<Pkce>,
+    consumed: Arc<AtomicBool>,
+}
+
+/// Validated authorization grant extracted from a callback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizationGrant {
+    code: String,
+    pkce: Option<Pkce>,
+}
+
+impl AuthorizationSession {
+    /// Get the authorization URL.
+    #[must_use]
+    pub fn authorization_url(&self) -> &str {
+        &self.authorization_url
+    }
+
+    /// Get the CSRF state value.
+    #[must_use]
+    pub fn state(&self) -> &str {
+        &self.state
+    }
+
+    /// Get the PKCE parameters for this session, if any.
+    #[must_use]
+    pub fn pkce(&self) -> Option<&Pkce> {
+        self.pkce.as_ref()
+    }
+
+    /// Validate a provider callback exactly once.
+    ///
+    /// On failure the session remains reusable only for validation failures
+    /// before the callback is accepted. Once a callback validates successfully,
+    /// the session is consumed and later reuse attempts are rejected.
+    ///
+    /// # Errors
+    /// Returns [`OAuthError::AuthorizationSessionConsumed`] when called after a
+    /// successful validation, or any callback validation error from
+    /// [`AuthorizationCallback::validate`].
+    pub fn validate_callback(
+        &self,
+        callback: &AuthorizationCallback,
+    ) -> OAuthResult<AuthorizationGrant> {
+        if self
+            .consumed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(OAuthError::AuthorizationSessionConsumed);
+        }
+
+        match callback.validate(&self.state) {
+            Ok(code) => Ok(AuthorizationGrant {
+                code,
+                pkce: self.pkce.clone(),
+            }),
+            Err(error) => {
+                self.consumed.store(false, Ordering::Release);
+                Err(error)
+            }
+        }
+    }
+}
+
+impl AuthorizationGrant {
+    /// Get the authorization code.
+    #[must_use]
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    /// Get the PKCE verifier/challenge associated with this grant.
+    #[must_use]
+    pub fn pkce(&self) -> Option<&Pkce> {
+        self.pkce.as_ref()
+    }
+}
+
 impl std::fmt::Debug for OAuth2Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OAuth2Client")
@@ -280,9 +365,11 @@ impl OAuth2Client {
     /// # Errors
     /// Returns an error when the configured authorization endpoint is invalid.
     pub fn authorization_url(&self, scopes: &[&str]) -> OAuthResult<(String, String)> {
-        let state = generate_state();
-        let url = self.build_auth_url(scopes, &state, None)?;
-        Ok((url, state))
+        let session = self.authorization_session(scopes)?;
+        Ok((
+            session.authorization_url().to_string(),
+            session.state().to_string(),
+        ))
     }
 
     /// Generate authorization URL with PKCE.
@@ -295,10 +382,49 @@ impl OAuth2Client {
         &self,
         scopes: &[&str],
     ) -> OAuthResult<(String, String, Pkce)> {
+        let session = self.authorization_session_with_pkce(scopes)?;
+        Ok((
+            session.authorization_url().to_string(),
+            session.state().to_string(),
+            session
+                .pkce()
+                .cloned()
+                .expect("PKCE session must carry PKCE material"),
+        ))
+    }
+
+    /// Build a one-time authorization session without PKCE.
+    ///
+    /// # Errors
+    /// Returns an error when the configured authorization endpoint is invalid.
+    pub fn authorization_session(&self, scopes: &[&str]) -> OAuthResult<AuthorizationSession> {
+        let state = generate_state();
+        let authorization_url = self.build_auth_url(scopes, &state, None)?;
+        Ok(AuthorizationSession {
+            authorization_url,
+            state,
+            pkce: None,
+            consumed: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    /// Build a one-time authorization session with PKCE.
+    ///
+    /// # Errors
+    /// Returns an error when the configured authorization endpoint is invalid.
+    pub fn authorization_session_with_pkce(
+        &self,
+        scopes: &[&str],
+    ) -> OAuthResult<AuthorizationSession> {
         let state = generate_state();
         let pkce = Pkce::with_method(self.config.pkce_method);
-        let url = self.build_auth_url(scopes, &state, Some(&pkce))?;
-        Ok((url, state, pkce))
+        let authorization_url = self.build_auth_url(scopes, &state, Some(&pkce))?;
+        Ok(AuthorizationSession {
+            authorization_url,
+            state,
+            pkce: Some(pkce),
+            consumed: Arc::new(AtomicBool::new(false)),
+        })
     }
 
     /// Build the authorization URL.
@@ -633,11 +759,22 @@ impl AuthorizationCallback {
             });
         }
 
+        if expected_state.is_empty() {
+            return Err(OAuthError::InvalidState(
+                "expected state must not be empty".into(),
+            ));
+        }
+
         // Validate state
         let state = self
             .state
             .as_ref()
             .ok_or_else(|| OAuthError::InvalidTokenResponse("Missing state parameter".into()))?;
+        if state.is_empty() {
+            return Err(OAuthError::InvalidState(
+                "callback state must not be empty".into(),
+            ));
+        }
 
         // Guard against length mismatch: ct_eq panics when slice lengths
         // differ.  Check lengths first (leaking only the length, which is
@@ -676,6 +813,7 @@ fn generate_state() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TokenStore;
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1057,6 +1195,123 @@ mod tests {
                 }
                 other => panic!("expected InvalidTokenResponse, got {other:?}"),
             }
+        });
+    }
+
+    #[test]
+    fn test_token_store_get_or_refresh_refreshes_threshold_token() {
+        run_with_test_runtime(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_string_contains("grant_type=refresh_token"))
+                .and(body_string_contains("refresh_token=refresh-old"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "access-new",
+                    "token_type": "Bearer",
+                    "refresh_token": "refresh-new",
+                    "expires_in": 3600
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "cid",
+                "csec",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_redirect_uri("https://localhost:3000/callback");
+            let client = OAuth2Client::new(config).unwrap();
+            let store = TokenStore::new();
+            store.store(
+                "user",
+                OAuthTokens::from_response(TokenResponse {
+                    access_token: "access-old".into(),
+                    token_type: "Bearer".into(),
+                    expires_in: Some(120),
+                    refresh_token: Some("refresh-old".into()),
+                    scope: None,
+                    id_token: None,
+                }),
+            );
+
+            let refreshed = store.get_or_refresh("user", &client).await.unwrap();
+            assert_eq!(refreshed.access_token(), "access-new");
+            assert_eq!(refreshed.refresh_token(), Some("refresh-new"));
+
+            let stored = store.get("user").unwrap();
+            assert_eq!(stored.access_token(), "access-new");
+            assert_eq!(stored.refresh_token(), Some("refresh-new"));
+            assert!(store.has_valid_token("user"));
+            server.verify().await;
+        });
+    }
+
+    #[test]
+    fn test_token_store_get_or_refresh_is_single_flight_per_key() {
+        run_with_test_runtime(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_string_contains("grant_type=refresh_token"))
+                .and(body_string_contains("refresh_token=shared-refresh"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_delay(Duration::from_millis(25))
+                        .set_body_json(serde_json::json!({
+                            "access_token": "shared-access-new",
+                            "token_type": "Bearer",
+                            "refresh_token": "shared-refresh-new",
+                            "expires_in": 3600
+                        })),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "cid",
+                "csec",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_redirect_uri("https://localhost:3000/callback");
+            let client = OAuth2Client::new(config).unwrap();
+            let store = TokenStore::new();
+            store.store(
+                "user",
+                OAuthTokens::from_response(TokenResponse {
+                    access_token: "shared-access-old".into(),
+                    token_type: "Bearer".into(),
+                    expires_in: Some(1),
+                    refresh_token: Some("shared-refresh".into()),
+                    scope: None,
+                    id_token: None,
+                }),
+            );
+
+            let store_a = store.clone();
+            let client_a = client.clone();
+            let task_a = fcp_async_core::task::spawn(async move {
+                store_a.get_or_refresh("user", &client_a).await
+            });
+            let store_b = store.clone();
+            let client_b = client.clone();
+            let task_b = fcp_async_core::task::spawn(async move {
+                store_b.get_or_refresh("user", &client_b).await
+            });
+
+            let a = task_a.await.expect("task a should join").unwrap();
+            let b = task_b.await.expect("task b should join").unwrap();
+            assert_eq!(a.access_token(), "shared-access-new");
+            assert_eq!(b.access_token(), "shared-access-new");
+
+            let stored = store.get("user").unwrap();
+            assert_eq!(stored.access_token(), "shared-access-new");
+            assert_eq!(stored.refresh_token(), Some("shared-refresh-new"));
+            server.verify().await;
         });
     }
 
@@ -2171,9 +2426,10 @@ mod tests {
             error_description: None,
             error_uri: None,
         };
-        // Empty state should match empty expected state
-        let code = callback.validate("").unwrap();
-        assert_eq!(code, "code");
+        let err = callback
+            .validate("")
+            .expect_err("empty states must be rejected");
+        assert!(matches!(err, OAuthError::InvalidState(_)));
     }
 
     #[test]
@@ -2187,6 +2443,48 @@ mod tests {
         };
         let result = callback.validate("state");
         assert!(matches!(result, Err(OAuthError::StateMismatch { .. })));
+    }
+
+    #[test]
+    fn test_authorization_session_is_single_use() {
+        let client = OAuth2Client::new(test_config()).unwrap();
+        let session = client.authorization_session(&["openid"]).unwrap();
+        let callback = AuthorizationCallback {
+            code: Some("auth-code".into()),
+            state: Some(session.state().to_string()),
+            error: None,
+            error_description: None,
+            error_uri: None,
+        };
+
+        let grant = session
+            .validate_callback(&callback)
+            .expect("first validation should succeed");
+        assert_eq!(grant.code(), "auth-code");
+
+        let err = session
+            .validate_callback(&callback)
+            .expect_err("validated session must not be reusable");
+        assert!(matches!(err, OAuthError::AuthorizationSessionConsumed));
+    }
+
+    #[test]
+    fn test_authorization_session_with_pkce_preserves_pkce() {
+        let client = OAuth2Client::new(test_config()).unwrap();
+        let session = client.authorization_session_with_pkce(&["read"]).unwrap();
+        let callback = AuthorizationCallback {
+            code: Some("auth-code".into()),
+            state: Some(session.state().to_string()),
+            error: None,
+            error_description: None,
+            error_uri: None,
+        };
+
+        let grant = session
+            .validate_callback(&callback)
+            .expect("callback should validate");
+        assert_eq!(grant.code(), "auth-code");
+        assert_eq!(grant.pkce(), session.pkce());
     }
 
     #[test]

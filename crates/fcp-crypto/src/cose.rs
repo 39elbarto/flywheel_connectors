@@ -406,7 +406,11 @@ impl CwtClaims {
                     ));
                 }
             };
-            claims.insert(key, v);
+            if claims.insert(key, v).is_some() {
+                return Err(CryptoError::SerializationError(format!(
+                    "duplicate claim key: {key}"
+                )));
+            }
         }
 
         Ok(Self { claims })
@@ -897,6 +901,44 @@ mod tests {
         let verified = parsed.verify(&pk).unwrap();
 
         assert_eq!(verified.get_issuer(), Some("test"));
+    }
+
+    // Metamorphic tamper-detection: for a valid signed token, flipping any
+    // single byte of the encoded form MUST break verification. Either parse
+    // fails outright or verify rejects — we never accept a silently-modified
+    // token. Scoped to a reproducible byte stride to stay fast; still broad
+    // enough to exercise protected-header, payload, and signature regions.
+    #[test]
+    fn cose_token_single_byte_flip_fails_verification() {
+        let sk = Ed25519SigningKey::from_bytes(&[0x7c; 32]).unwrap();
+        let pk = sk.verifying_key();
+        let claims = CwtClaims::new()
+            .issuer("node:tamper-test")
+            .capability_id("cap:tamper")
+            .subject("sub:tamper");
+        let token = CoseToken::sign(&sk, &claims).unwrap();
+        let cbor = token.to_cbor().unwrap();
+        assert!(cbor.len() > 16, "encoded token should be non-trivial");
+
+        let stride = (cbor.len() / 16).max(1);
+        let mut checked = 0usize;
+        for idx in (0..cbor.len()).step_by(stride) {
+            let mut mutated = cbor.clone();
+            mutated[idx] ^= 0x01;
+            match CoseToken::from_cbor(&mutated) {
+                Ok(reparsed) => {
+                    assert!(
+                        reparsed.verify(&pk).is_err(),
+                        "byte flip at offset {idx} must break signature verification"
+                    );
+                }
+                Err(_) => {
+                    // Structural damage is also an acceptable rejection outcome.
+                }
+            }
+            checked += 1;
+        }
+        assert!(checked >= 8, "must have probed at least 8 distinct offsets");
     }
 
     #[test]
@@ -1826,5 +1868,20 @@ mod tests {
 
         let verified = parsed2.verify(&pk).unwrap();
         assert_eq!(verified.get_issuer(), Some("double"));
+    }
+
+    #[test]
+    fn cwt_claims_rejects_duplicate_keys() {
+        use ciborium::value::Value;
+        // Construct CBOR map with duplicate keys: {1: "a", 1: "b"}
+        let map = Value::Map(vec![
+            (Value::Integer(1.into()), Value::Text("a".into())),
+            (Value::Integer(1.into()), Value::Text("b".into())),
+        ]);
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&map, &mut bytes).unwrap();
+
+        let err = CwtClaims::from_cbor(&bytes).unwrap_err();
+        assert!(err.to_string().contains("duplicate claim key: 1"));
     }
 }

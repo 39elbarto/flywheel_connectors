@@ -690,4 +690,84 @@ mod tests {
         let long: [u8; 32] = hkdf.expand_to_array(b"info").unwrap();
         assert_eq!(&long[..16], &short);
     }
+
+    // Metamorphic: no collision across the full (direction × session_id) product
+    // under a fixed shared secret. This is strictly stronger than pairwise
+    // direction separation — it catches any regression that makes e.g. the
+    // session_id length-prefix ineffective.
+    #[test]
+    fn fcp2_session_key_mutual_distinctness() {
+        let shared = [7u8; 32];
+        let directions = [SessionDirection::Send, SessionDirection::Recv];
+        let session_ids: [&[u8]; 5] = [b"", b"a", b"bc", b"abc", b"\x00\x00\x00\x01"];
+
+        let mut derived = Vec::new();
+        for dir in directions {
+            for sid in session_ids {
+                let key =
+                    Fcp2KeyDerivation::derive_session_key(&shared, sid, dir).unwrap();
+                derived.push(*key.as_bytes());
+            }
+        }
+
+        for i in 0..derived.len() {
+            for j in (i + 1)..derived.len() {
+                assert_ne!(
+                    derived[i], derived[j],
+                    "session keys must be mutually distinct across (direction, session_id) pairs \
+                     (index {i} vs {j})"
+                );
+            }
+        }
+    }
+
+    // Metamorphic: no collision across all MacKeyPurpose variants under a fixed
+    // session key. Guards against label-table drift that would silently merge
+    // two MAC scopes.
+    #[test]
+    fn fcp2_mac_key_mutual_distinctness() {
+        let session_key = [9u8; 32];
+        let purposes = [
+            MacKeyPurpose::Frame,
+            MacKeyPurpose::Header,
+            MacKeyPurpose::Auth,
+        ];
+
+        let keys: Vec<[u8; 32]> = purposes
+            .iter()
+            .map(|p| *Fcp2KeyDerivation::derive_mac_key(&session_key, *p).unwrap().as_bytes())
+            .collect();
+
+        for i in 0..keys.len() {
+            for j in (i + 1)..keys.len() {
+                assert_ne!(
+                    keys[i], keys[j],
+                    "mac keys must be mutually distinct across MacKeyPurpose variants \
+                     ({:?} vs {:?})",
+                    purposes[i], purposes[j]
+                );
+            }
+        }
+    }
+
+    // Metamorphic: swapping SessionDirection labels in the framed info must
+    // yield a different key — confirms the direction component contributes
+    // to the derivation and is not short-circuited by length-prefix framing.
+    #[test]
+    fn fcp2_session_direction_is_not_swap_symmetric() {
+        let shared = [5u8; 32];
+        let sid = b"sess-42";
+        let send =
+            Fcp2KeyDerivation::derive_session_key(&shared, sid, SessionDirection::Send).unwrap();
+        let recv =
+            Fcp2KeyDerivation::derive_session_key(&shared, sid, SessionDirection::Recv).unwrap();
+        assert_ne!(send.as_bytes(), recv.as_bytes());
+
+        // Direction label bytes must actually differ — a regression that stubbed
+        // both arms to the same slice would silently break domain separation.
+        assert_ne!(
+            SessionDirection::Send.label(),
+            SessionDirection::Recv.label()
+        );
+    }
 }

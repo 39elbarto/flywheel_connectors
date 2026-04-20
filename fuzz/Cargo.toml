@@ -50,6 +50,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_cose_parse_adversarial"
+path = "fuzz_targets/cose_parse_adversarial.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_session"
 path = "fuzz_targets/session.rs"
 test = false

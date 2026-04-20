@@ -40,7 +40,9 @@ use crate::degraded::{
     DegradedTransportError, RetentionClass,
 };
 use crate::device::DeviceProfile;
-use crate::gossip::{GossipConfig, GossipMessage, GossipSummary, MeshGossip, RevocationPushMessage};
+use crate::gossip::{
+    GossipConfig, GossipMessage, GossipSummary, MeshGossip, RevocationPushMessage,
+};
 use crate::planner::{
     CandidateNode, ExecutionPlanner, HeldLease, LeasePurpose, NodeInfo, PlannerContext,
     PlannerInput,
@@ -1225,13 +1227,14 @@ impl MeshNode {
     }
 
     fn verify_summary_signature(&self, summary: &GossipSummary) -> Result<NodeId, MeshNodeError> {
-        let signature = summary
-            .signature
-            .as_ref()
-            .ok_or_else(|| MeshNodeError::PeerSignatureInvalid {
-                peer: summary.from.as_str().to_string(),
-                message_kind: "gossip summary",
-            })?;
+        let signature =
+            summary
+                .signature
+                .as_ref()
+                .ok_or_else(|| MeshNodeError::PeerSignatureInvalid {
+                    peer: summary.from.as_str().to_string(),
+                    message_kind: "gossip summary",
+                })?;
         if signature.node_id.as_str() != summary.from.as_str() {
             return Err(MeshNodeError::SignatureNodeMismatch {
                 message_kind: "gossip summary",
@@ -1259,13 +1262,13 @@ impl MeshNode {
         &self,
         push: &RevocationPushMessage,
     ) -> Result<NodeId, MeshNodeError> {
-        let signature = push
-            .signature
-            .as_ref()
-            .ok_or_else(|| MeshNodeError::PeerSignatureInvalid {
-                peer: push.from.as_str().to_string(),
-                message_kind: "revocation push",
-            })?;
+        let signature =
+            push.signature
+                .as_ref()
+                .ok_or_else(|| MeshNodeError::PeerSignatureInvalid {
+                    peer: push.from.as_str().to_string(),
+                    message_kind: "revocation push",
+                })?;
         if signature.node_id.as_str() != push.from.as_str() {
             return Err(MeshNodeError::SignatureNodeMismatch {
                 message_kind: "revocation push",
@@ -2416,7 +2419,8 @@ mod tests {
         };
         status.sign(&signing_key);
 
-        node.handle_decode_status(&peer, &status, 1000).expect("status should verify");
+        node.handle_decode_status(&peer, &status, 1000)
+            .expect("status should verify");
     }
 
     #[test]
@@ -2462,27 +2466,28 @@ mod tests {
             timestamp: 1_000,
             signature: Some(fcp_core::NodeSignature::new(
                 peer.clone(),
-                signing_key.sign(
-                    &GossipSummary {
-                        from: TailscaleNodeId::new("peer-1"),
-                        zone_id: ZoneId::work(),
-                        epoch_id: EpochId::new("epoch-1"),
-                        object_filter_digest: [0x11; 32],
-                        symbol_filter_digest: [0x22; 32],
-                        object_count: 3,
-                        symbol_count: 7,
-                        iblt: b"[]".to_vec(),
-                        timestamp: 1_000,
-                        signature: None,
-                    }
-                    .signing_bytes(),
-                )
-                .to_bytes(),
+                signing_key
+                    .sign(
+                        &GossipSummary {
+                            from: TailscaleNodeId::new("peer-1"),
+                            zone_id: ZoneId::work(),
+                            epoch_id: EpochId::new("epoch-1"),
+                            object_filter_digest: [0x11; 32],
+                            symbol_filter_digest: [0x22; 32],
+                            object_count: 3,
+                            symbol_count: 7,
+                            iblt: b"[]".to_vec(),
+                            timestamp: 1_000,
+                            signature: None,
+                        }
+                        .signing_bytes(),
+                    )
+                    .to_bytes(),
                 1_000,
             )),
         };
 
-        node.handle_summary(summary, 1_000)
+        node.handle_gossip_message(GossipMessage::Summary(summary), 1_000)
             .expect("summary should verify");
         assert_eq!(node.metrics().gossip_updates, 1);
     }
@@ -2508,7 +2513,7 @@ mod tests {
         };
 
         let err = node
-            .handle_summary(summary, 1_000)
+            .handle_gossip_message(GossipMessage::Summary(summary), 1_000)
             .expect_err("unsigned summary must be rejected");
         assert!(matches!(
             err,

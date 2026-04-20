@@ -31,7 +31,9 @@ use fcp_mesh::device::{
     AvailabilityProfile, CpuArch, DeviceProfile, GpuProfile, GpuVendor, InstalledConnector,
     LatencyClass, PowerSource,
 };
-use fcp_mesh::gossip::{GossipConfig, GossipRequest, GossipState, GossipSummary, MeshGossip};
+use fcp_mesh::gossip::{
+    GossipConfig, GossipMessage, GossipRequest, GossipState, GossipSummary, MeshGossip,
+};
 use fcp_mesh::planner::{
     ExecutionPlanner, HeldLease, LeasePurpose, NodeInfo, PlannerContext, PlannerInput,
 };
@@ -5923,7 +5925,7 @@ mod real_component_integration {
 
         // B processes A's summary to learn about A's objects
         node_b
-            .handle_summary(summary_a, 2000)
+            .handle_gossip_message(GossipMessage::Summary(summary_a), 2000)
             .expect("node B should accept node A's signed summary");
 
         // B requests objects it learned about from A
@@ -5944,7 +5946,7 @@ mod real_component_integration {
 
         // A processes B's summary to learn about B's objects
         node_a
-            .handle_summary(summary_b, 2002)
+            .handle_gossip_message(GossipMessage::Summary(summary_b), 2002)
             .expect("node A should accept node B's signed summary");
 
         // A requests objects it learned about from B
@@ -6487,7 +6489,7 @@ mod real_component_integration {
 
         // B processes A's summary, then requests A's objects it doesn't have
         node_b
-            .handle_summary(summary_a, 2000)
+            .handle_gossip_message(GossipMessage::Summary(summary_a), 2000)
             .expect("B should accept A's signed summary");
         // B wants a_objects[1..5] (it already has a_objects[0])
         let missing_from_a: Vec<_> = a_objects[1..].to_vec();
@@ -6503,7 +6505,7 @@ mod real_component_integration {
             .expect("B should produce summary");
         let summary_b = sign_summary(&signing_key_b, &node_b_id, summary_b);
         node_a
-            .handle_summary(summary_b, 2002)
+            .handle_gossip_message(GossipMessage::Summary(summary_b), 2002)
             .expect("A should accept B's signed summary");
 
         // A wants b_objects[1..3] (it already has a_objects[0] which overlaps)

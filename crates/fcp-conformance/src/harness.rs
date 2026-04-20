@@ -12,10 +12,11 @@ use std::time::Duration;
 
 use crate::schemas::{SchemaValidationError, validate_e2e_log_jsonl};
 use chrono::{DateTime, TimeZone, Utc};
-use fcp_core::{EpochId, ZoneId};
+use fcp_core::{EpochId, NodeSignature, ZoneId};
+use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_mesh::{
     AvailabilityProfile, CpuArch, DeviceProfile, LatencyClass, MeshNode, MeshNodeConfig,
-    PowerSource,
+    PowerSource, gossip::GossipMessage,
 };
 use fcp_store::{
     MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
@@ -464,6 +465,7 @@ pub struct TestMeshNode {
     object_store: Arc<dyn ObjectStore>,
     symbol_store: Arc<dyn SymbolStore>,
     quarantine_store: Arc<QuarantineStore>,
+    signing_key: Ed25519SigningKey,
     mesh: Option<MeshNode>,
     running: bool,
 }
@@ -488,6 +490,7 @@ impl TestMeshNode {
         let sender_instance_id = seed ^ u64::from(node_index);
         let config =
             MeshNodeConfig::new(node_id.as_str()).with_sender_instance_id(sender_instance_id);
+        let signing_key = Ed25519SigningKey::generate();
         let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
         let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
         let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
@@ -507,6 +510,7 @@ impl TestMeshNode {
             object_store,
             symbol_store,
             quarantine_store,
+            signing_key,
             mesh,
             running: false,
         }
@@ -562,6 +566,24 @@ impl TestMeshNode {
             serde_json::json!({ "node_id": self.node_id.as_str() }),
         ));
         Ok(())
+    }
+
+    fn verifying_key(&self) -> fcp_crypto::ed25519::Ed25519VerifyingKey {
+        self.signing_key.verifying_key()
+    }
+
+    fn register_peer_signing_keys(
+        &mut self,
+        peers: &[(NodeId, fcp_crypto::ed25519::Ed25519VerifyingKey)],
+    ) {
+        let Some(mesh) = self.mesh.as_mut() else {
+            return;
+        };
+        for (peer_id, key) in peers {
+            if *peer_id != self.node_id {
+                mesh.register_peer_signing_key(peer_id.clone(), key.clone());
+            }
+        }
     }
 
     /// Simulate a crash (drops mesh state).
@@ -648,12 +670,14 @@ impl TestHarness {
             .map(|index| TestMeshNode::new(seed, index as u32, clock.clone(), logs.clone()))
             .collect::<Vec<_>>();
 
-        Self {
+        let mut harness = Self {
             nodes,
             network: SimulatedNetwork::new(seed),
             clock,
             logs,
-        }
+        };
+        harness.register_all_peer_signing_keys();
+        harness
     }
 
     /// Start all nodes.
@@ -665,6 +689,7 @@ impl TestHarness {
         for node in &mut self.nodes {
             node.start()?;
         }
+        self.register_all_peer_signing_keys();
         Ok(())
     }
 
@@ -706,6 +731,17 @@ impl TestHarness {
     /// Heal all partitions.
     pub fn heal_partition(&mut self) {
         self.network.heal_partitions();
+    }
+
+    fn register_all_peer_signing_keys(&mut self) {
+        let peers = self
+            .nodes
+            .iter()
+            .map(|node| (node.node_id.clone(), node.verifying_key()))
+            .collect::<Vec<_>>();
+        for node in &mut self.nodes {
+            node.register_peer_signing_keys(&peers);
+        }
     }
 
     /// Inject packet loss between two nodes.
@@ -816,8 +852,18 @@ impl TestHarness {
                 if self.network.is_partitioned(&source_id, target_id) {
                     continue;
                 }
+                let mut signed_summary = summary.clone();
+                let signature = self.nodes[*source_idx]
+                    .signing_key
+                    .sign(&signed_summary.signing_bytes());
+                signed_summary.signature = Some(NodeSignature::new(
+                    fcp_core::NodeId::new(source_id.as_str()),
+                    signature.to_bytes(),
+                    signed_summary.timestamp,
+                ));
                 if let Some(mesh) = self.nodes[target_idx].mesh_mut() {
-                    mesh.gossip_mut().handle_summary(summary.clone(), now_secs);
+                    let _ = mesh
+                        .handle_gossip_message(GossipMessage::Summary(signed_summary), now_secs);
                 }
             }
         }

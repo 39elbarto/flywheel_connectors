@@ -8,6 +8,7 @@ use fcp_core::{
     IdempotencyClass, Introspection, OperationId, OperationInfo, ProvisioningRecipe,
     ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, StepId,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -71,8 +72,51 @@ impl ElasticsearchConfig {
             .and_then(|v| v.as_str())
             .unwrap_or(DEFAULT_BASE_URL)
             .to_string();
+        let (base_url_ok, base_url_message) = base_url_policy(&base_url);
+        if !base_url_ok {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: base_url_message,
+            });
+        }
 
         Ok(Self { auth, base_url })
+    }
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(url) => url,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let is_loopback = matches!(host, "localhost" | "127.0.0.1" | "::1");
+    if is_loopback {
+        let scheme = parsed.scheme();
+        return (
+            matches!(scheme, "http" | "https"),
+            format!("Loopback endpoint accepted for tests: {base_url}"),
+        );
+    }
+
+    let host = host.to_ascii_lowercase();
+    let trusted_host = host.ends_with(".elastic-cloud.com") || host.ends_with(".found.io");
+    let https = parsed.scheme() == "https";
+    if https && trusted_host {
+        (true, format!("Endpoint accepted by policy checks: {base_url}"))
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https and target a trusted Elasticsearch cloud host (*.elastic-cloud.com or *.found.io); loopback hosts are allowed for tests: {base_url}"
+            ),
+        )
     }
 }
 
@@ -279,13 +323,14 @@ impl ElasticsearchConnector {
             .as_ref()
             .map_or_else(|| DEFAULT_BASE_URL.to_string(), |c| c.base_url.clone());
 
-        let network_ok = base_url.contains(".elastic-cloud.com") || base_url.contains(".found.io");
+        let (network_ok, network_message) = base_url_policy(&base_url);
 
         json!({
             "auth_mode": auth_mode,
             "api_key_configured": api_key_configured,
             "credential_id_configured": credential_id_configured,
             "network_ok": network_ok,
+            "network_message": network_message,
             "base_url": base_url,
         })
     }
@@ -870,6 +915,21 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(config.base_url, DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn config_rejects_untrusted_base_url() {
+        let err = ElasticsearchConfig::from_params(&json!({
+            "api_key": "key",
+            "base_url": "https://elastic-cloud.com.evil.example/api",
+        }))
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("trusted Elasticsearch cloud host"));
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1507,6 +1567,7 @@ mod tests {
         assert_eq!(readiness["api_key_configured"], false);
         assert_eq!(readiness["credential_id_configured"], false);
         assert_eq!(readiness["base_url"], DEFAULT_BASE_URL);
+        assert_eq!(readiness["network_ok"], true);
     }
 
     #[test]
@@ -1559,12 +1620,12 @@ mod tests {
         });
         assert_eq!(connector.provisioning_readiness()["network_ok"], true);
 
-        // Invalid: localhost
+        // Valid: localhost loopback test endpoint
         connector.config = Some(ElasticsearchConfig {
             auth: ElasticsearchAuth::ApiKey("k".into()),
             base_url: "https://localhost:9200".into(),
         });
-        assert_eq!(connector.provisioning_readiness()["network_ok"], false);
+        assert_eq!(connector.provisioning_readiness()["network_ok"], true);
 
         // Invalid: arbitrary domain
         connector.config = Some(ElasticsearchConfig {
@@ -1573,9 +1634,16 @@ mod tests {
         });
         assert_eq!(connector.provisioning_readiness()["network_ok"], false);
 
-        // Unconfigured: defaults to localhost
-        connector.config = None;
+        // Invalid: trusted-domain substring in attacker host
+        connector.config = Some(ElasticsearchConfig {
+            auth: ElasticsearchAuth::ApiKey("k".into()),
+            base_url: "https://deploy.elastic-cloud.com.evil.example:443".into(),
+        });
         assert_eq!(connector.provisioning_readiness()["network_ok"], false);
+
+        // Unconfigured: defaults to loopback test endpoint
+        connector.config = None;
+        assert_eq!(connector.provisioning_readiness()["network_ok"], true);
     }
 
     // ── self_check includes provisioning ────────────────────────────

@@ -3188,6 +3188,30 @@ mod tests {
     }
 
     #[test]
+    fn test_normalize_base_url_rejects_non_telegram_remote_host() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "base_url": "https://evil.example.com"
+        }))
+        .unwrap();
+        let err = config.normalize_base_url().unwrap_err();
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("api.telegram.org"));
+        }
+    }
+
+    #[test]
+    fn test_normalize_base_url_rejects_remote_http_host() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "base_url": "http://api.telegram.org"
+        }))
+        .unwrap();
+        let err = config.normalize_base_url().unwrap_err();
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("must use https"));
+        }
+    }
+
+    #[test]
     fn test_normalize_base_url_invalid_scheme_fails() {
         let config: TelegramConfig = serde_json::from_value(json!({
             "base_url": "ftp://example.com"

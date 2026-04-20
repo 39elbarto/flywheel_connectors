@@ -4,7 +4,7 @@ use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
 };
 use fcp_sdk::retry::RetryDecision;
-use reqwest::{Client, RequestBuilder};
+use reqwest::{Client, RequestBuilder, Url};
 use serde_json::json;
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -73,7 +73,7 @@ impl WhatsAppClient {
 
         Ok(Self {
             client,
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: normalize_base_url(base_url)?,
             phone_number_id: phone_number_id.to_string(),
             access_token: access_token.to_string(),
             retry_config,
@@ -358,6 +358,40 @@ impl WhatsAppClient {
     }
 }
 
+fn normalize_base_url(base_url: &str) -> WhatsAppResult<String> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Err(WhatsAppError::Config("base_url must not be empty".into()));
+    }
+
+    let parsed = Url::parse(trimmed)
+        .map_err(|error| WhatsAppError::Config(format!("invalid base_url: {error}")))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| WhatsAppError::Config("base_url must include a host".into()))?;
+    let is_local_test_host = host.eq_ignore_ascii_case("localhost")
+        || host.ends_with(".localhost")
+        || host == "127.0.0.1"
+        || host == "::1";
+    if parsed.scheme() == "http" && !is_local_test_host {
+        return Err(WhatsAppError::Config(
+            "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests".into(),
+        ));
+    }
+    if !host.eq_ignore_ascii_case("graph.facebook.com") && !is_local_test_host {
+        return Err(WhatsAppError::Config(
+            "base_url host must be graph.facebook.com or a local test host".into(),
+        ));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(WhatsAppError::Config(
+            "base_url must not include a query string or fragment".into(),
+        ));
+    }
+
+    Ok(trimmed.trim_end_matches('/').to_string())
+}
+
 fn authenticate(request: RequestBuilder, access_token: &str) -> RequestBuilder {
     if access_token.is_empty() {
         request
@@ -393,6 +427,30 @@ mod tests {
         )
         .unwrap();
         assert!(!client.base_url().ends_with('/'));
+    }
+
+    #[test]
+    fn client_creation_rejects_non_meta_remote_host() {
+        let err = WhatsAppClient::new(
+            "https://evil.example.com/v21.0",
+            "123456",
+            "test_token",
+            HttpRetryConfig::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("graph.facebook.com"));
+    }
+
+    #[test]
+    fn client_creation_rejects_remote_http_host() {
+        let err = WhatsAppClient::new(
+            "http://graph.facebook.com/v21.0",
+            "123456",
+            "test_token",
+            HttpRetryConfig::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("must use https"));
     }
 
     #[test]

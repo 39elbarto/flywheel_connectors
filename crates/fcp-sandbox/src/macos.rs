@@ -151,13 +151,15 @@ impl MacOsSandbox {
         if policy.block_direct_network {
             profile.push_str(";; Direct network access blocked (use Network Guard)\n");
             profile.push_str("(deny network*)\n");
-            // Allow Unix domain sockets for IPC with Network Guard
+            // Allow only client-style connect access to the fixed Network Guard
+            // socket path. Granting generic unix-socket bind/inbound rights
+            // would let a sandboxed connector create or accept arbitrary local
+            // IPC endpoints, widening the blocked-network profile beyond the
+            // intended mediated egress exception.
             profile.push_str("(allow network-outbound\n");
             profile.push_str("  (path \"/var/run/fcp-network-guard.sock\")\n");
             profile.push_str(")\n");
-            profile.push_str("(allow network-bind network-inbound\n");
-            profile.push_str("  (local unix-socket)\n");
-            profile.push_str(")\n\n");
+            profile.push('\n');
         } else {
             profile.push_str(";; Network access allowed\n");
             profile.push_str("(allow network*)\n\n");
@@ -993,6 +995,8 @@ mod tests {
         let profile = MacOsSandbox::generate_profile(&policy);
         assert!(profile.contains("(deny network*)"));
         assert!(profile.contains("fcp-network-guard.sock"));
+        assert!(!profile.contains("(allow network-bind"));
+        assert!(!profile.contains("network-inbound"));
     }
 
     #[test]

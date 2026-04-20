@@ -1,10 +1,11 @@
-//! Differential policy matrix: 3 zones × 3 capabilities.
+//! Differential policy matrix: 5 zones × 3 capabilities.
 //!
-//! Exercises the `PolicyEngine` across a 3×3 grid of {zone, capability}
-//! pairs and asserts the matrix of expected outcomes. Each zone has a
-//! distinct `ZonePolicyObject` shape (ceiling vs blocklist vs
-//! wide-open), and each capability represents a different safety class.
-//! The test proves:
+//! Exercises the `PolicyEngine` across a 5×3 grid of {zone, capability}
+//! pairs — one per canonical FCP zone (`owner`, `private`, `work`,
+//! `community`, `public`) — and asserts the matrix of expected
+//! outcomes. Each zone has a distinct `ZonePolicyObject` shape
+//! (wide-open vs ceiling vs blocklist vs strict allowlist), and each
+//! capability represents a different safety class. The test proves:
 //!
 //!   1. `capability_ceiling` gates capabilities not in the ceiling set.
 //!   2. `capability_deny` blocklists a capability regardless of ceiling.
@@ -58,6 +59,19 @@ fn make_policy(
     capability_ceiling: Vec<&'static str>,
     capability_deny: Vec<&'static str>,
 ) -> ZonePolicyObject {
+    make_policy_full(zone, vec![], capability_ceiling, capability_deny)
+}
+
+/// Full variant: exercises `capability_allow` in addition to the
+/// ceiling/deny axes. Non-empty `capability_allow` triggers a distinct
+/// deny reason (`ZonePolicyCapabilityNotAllowed`) from the ceiling
+/// path (`CapabilityInsufficient`) — the matrix needs both reached.
+fn make_policy_full(
+    zone: ZoneId,
+    capability_allow: Vec<&'static str>,
+    capability_ceiling: Vec<&'static str>,
+    capability_deny: Vec<&'static str>,
+) -> ZonePolicyObject {
     ZonePolicyObject {
         header: test_header(&zone),
         zone_id: zone,
@@ -69,7 +83,10 @@ fn make_policy(
             pattern: "connector:*".into(),
         }],
         connector_deny: vec![],
-        capability_allow: vec![],
+        capability_allow: capability_allow
+            .into_iter()
+            .map(|p| PolicyPattern { pattern: p.into() })
+            .collect(),
         capability_deny: capability_deny
             .into_iter()
             .map(|p| PolicyPattern { pattern: p.into() })
@@ -115,8 +132,14 @@ fn make_input(zone: ZoneId, capability: &str) -> PolicyDecisionInput<'static> {
     }
 }
 
-/// Three-policy corpus for the matrix.
-fn zone_policies() -> [(ZoneId, PolicyEngine); 3] {
+/// Five-policy corpus for the matrix, one per canonical FCP zone.
+/// Each zone encodes a distinct enforcement shape so the matrix
+/// exercises every major deny path at least once.
+fn zone_policies() -> [(ZoneId, PolicyEngine); 5] {
+    // owner: highest trust — wide open (no ceiling, no deny, no
+    //        allowlist). Canonical "admin" zone; everything allowed.
+    let owner_policy = make_policy(ZoneId::owner(), vec![], vec![]);
+
     // private: strict ceiling — only read_file + send_message allowed;
     //          spawn_process is outside the ceiling → CapabilityInsufficient
     let private_policy = make_policy(
@@ -135,7 +158,25 @@ fn zone_policies() -> [(ZoneId, PolicyEngine); 3] {
     // community: explicit blocklist on spawn_process — no ceiling.
     let community_policy = make_policy(ZoneId::community(), vec![], vec![CAP_SPAWN_PROCESS]);
 
+    // public: untrusted-edge zone — strict capability_allow list of
+    //         exactly one capability. Caps outside the allow list
+    //         yield ZonePolicyCapabilityNotAllowed — a DIFFERENT reason
+    //         code from CapabilityInsufficient (ceiling path). Both
+    //         reason codes must be distinguishable in conformance.
+    let public_policy = make_policy_full(
+        ZoneId::public(),
+        vec![CAP_SEND_MESSAGE], // only send_message permitted
+        vec![],
+        vec![],
+    );
+
     [
+        (
+            ZoneId::owner(),
+            PolicyEngine {
+                zone_policy: owner_policy,
+            },
+        ),
         (
             ZoneId::private(),
             PolicyEngine {
@@ -154,19 +195,27 @@ fn zone_policies() -> [(ZoneId, PolicyEngine); 3] {
                 zone_policy: community_policy,
             },
         ),
+        (
+            ZoneId::public(),
+            PolicyEngine {
+                zone_policy: public_policy,
+            },
+        ),
     ]
 }
 
 /// Lookup expected decision for a (zone, capability) pair.
 fn expected(zone: &ZoneId, capability: &str) -> (Decision, Option<DecisionReasonCode>) {
     match (zone.as_str(), capability) {
+        // owner: wide open (no ceiling, no deny, no allowlist)
+        ("z:owner", _) => (Decision::Allow, None),
         // private: only read_file + send_message are in the ceiling
         ("z:private", CAP_READ_FILE | CAP_SEND_MESSAGE) => (Decision::Allow, None),
         ("z:private", CAP_SPAWN_PROCESS) => (
             Decision::Deny,
             Some(DecisionReasonCode::CapabilityInsufficient),
         ),
-        // work: wide-open ceiling
+        // work: wide-open ceiling (explicitly all three capabilities)
         ("z:work", _) => (Decision::Allow, None),
         // community: spawn_process is blocklisted
         ("z:community", CAP_SPAWN_PROCESS) => (
@@ -174,6 +223,15 @@ fn expected(zone: &ZoneId, capability: &str) -> (Decision, Option<DecisionReason
             Some(DecisionReasonCode::ZonePolicyCapabilityDenied),
         ),
         ("z:community", _) => (Decision::Allow, None),
+        // public: capability_allow restricts to send_message only; the
+        //         other two caps yield ZonePolicyCapabilityNotAllowed,
+        //         a distinct reason from the ceiling path's
+        //         CapabilityInsufficient.
+        ("z:public", CAP_SEND_MESSAGE) => (Decision::Allow, None),
+        ("z:public", CAP_READ_FILE | CAP_SPAWN_PROCESS) => (
+            Decision::Deny,
+            Some(DecisionReasonCode::ZonePolicyCapabilityNotAllowed),
+        ),
         _ => panic!("unknown (zone, capability): ({zone:?}, {capability})"),
     }
 }
@@ -308,4 +366,90 @@ fn policy_matrix_deny_decisions_have_stable_reason_codes() {
             }
         }
     }
+}
+
+/// Precedence contract: when `capability_deny` AND `capability_ceiling`
+/// would BOTH reject the same capability, the denial must surface
+/// `ZonePolicyCapabilityDenied` (explicit blocklist) — NOT
+/// `CapabilityInsufficient` (ceiling). The ordering is observable to
+/// operators reading decision receipts and must not silently flip.
+///
+/// Pins the order of checks inside `evaluate_invoke`: pattern lists
+/// (which include `capability_deny`) run before the ceiling gate.
+#[test]
+fn capability_deny_precedes_capability_ceiling_when_both_reject() {
+    let zone = ZoneId::work();
+    // Cap is both outside the ceiling AND explicitly in the deny list.
+    let policy = make_policy_full(
+        zone.clone(),
+        vec![],
+        vec![CAP_READ_FILE], // ceiling: only file.read allowed
+        vec![CAP_SPAWN_PROCESS], // deny: proc.spawn explicitly rejected
+    );
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
+
+    let decision = engine.evaluate_invoke(&make_input(zone, CAP_SPAWN_PROCESS));
+    assert_eq!(decision.decision, Decision::Deny);
+    assert_eq!(
+        decision.reason_code,
+        DecisionReasonCode::ZonePolicyCapabilityDenied,
+        "capability_deny MUST precede capability_ceiling when both would reject; \
+         ceiling's CapabilityInsufficient would mask the operator's explicit blocklist intent",
+    );
+}
+
+/// Distinctness: the three capability-rejection reason codes are not
+/// aliases. A regression that collapses `ZonePolicyCapabilityNotAllowed`
+/// into `CapabilityInsufficient` (or vice versa) would eliminate the
+/// operator's ability to distinguish "not in the allowlist this zone
+/// defines" from "outside the ceiling this zone declares" in decision
+/// receipts. The public zone (allowlist-driven) and private zone
+/// (ceiling-driven) pin those two reasons apart; community pins the
+/// explicit-deny reason apart from both.
+#[test]
+fn distinct_capability_rejection_reasons_across_zones() {
+    let reasons: Vec<(String, DecisionReasonCode)> = zone_policies()
+        .iter()
+        .filter_map(|(zone, engine)| {
+            // Pick a capability that we know is denied in this zone via
+            // expected(), if any.
+            [CAP_READ_FILE, CAP_SEND_MESSAGE, CAP_SPAWN_PROCESS]
+                .iter()
+                .find_map(|cap| {
+                    let (expected_decision, _) = expected(zone, cap);
+                    if matches!(expected_decision, Decision::Deny) {
+                        let d = engine.evaluate_invoke(&make_input(zone.clone(), cap));
+                        Some((zone.as_str().to_owned(), d.reason_code))
+                    } else {
+                        None
+                    }
+                })
+        })
+        .collect();
+
+    // Must observe at least the three distinct deny reasons across
+    // private, community, and public. A zone that suddenly started
+    // returning the same reason for an allowlist miss and a ceiling
+    // miss would collapse this set below 3.
+    let distinct: std::collections::HashSet<_> =
+        reasons.iter().map(|(_, r)| r).collect();
+    assert!(
+        distinct.len() >= 3,
+        "expected at least 3 distinct capability-rejection reasons across \
+         {{private, community, public}}; got {reasons:?}",
+    );
+    assert!(
+        distinct.contains(&DecisionReasonCode::CapabilityInsufficient),
+        "private zone should surface CapabilityInsufficient (ceiling path)"
+    );
+    assert!(
+        distinct.contains(&DecisionReasonCode::ZonePolicyCapabilityDenied),
+        "community zone should surface ZonePolicyCapabilityDenied (blocklist path)"
+    );
+    assert!(
+        distinct.contains(&DecisionReasonCode::ZonePolicyCapabilityNotAllowed),
+        "public zone should surface ZonePolicyCapabilityNotAllowed (allowlist-miss path)"
+    );
 }

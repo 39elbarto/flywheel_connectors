@@ -2578,6 +2578,7 @@ dependencies = [
  "fcp-cbor",
  "fcp-core",
  "fcp-crypto",
+ "fcp-host",
  "fcp-manifest",
  "fcp-mesh",
  "fcp-protocol",
@@ -4397,6 +4398,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "hmac",
+ "insta",
  "parking_lot",
  "rand 0.8.5",
  "serde",
@@ -7878,6 +7880,7 @@ checksum = "7b4a6248eb93a4401ed2f37dfe8ea592d3cf05b7cf4f8efa867b6895af7e094e"
 dependencies = [
  "console",
  "once_cell",
+ "regex",
  "serde",
  "similar",
  "tempfile",

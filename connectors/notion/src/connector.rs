@@ -20,6 +20,8 @@ use crate::{
     limits,
 };
 
+const MAX_NOTION_CURSOR_BYTES: usize = 512;
+
 /// Validated configuration for the Notion connector.
 struct NotionConfig {
     auth: NotionAuth,
@@ -32,10 +34,7 @@ impl NotionConfig {
     ///
     /// Strict auth: exactly one of `token` or `credential_id` must be supplied.
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
-        let token = params
-            .get("token")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let token = optional_nonempty_string(params, "token")?;
         let credential_id = match params.get("credential_id") {
             Some(value) => {
                 let raw = value.as_str().ok_or(FcpError::InvalidRequest {
@@ -74,6 +73,7 @@ impl NotionConfig {
             .and_then(|v| v.as_str())
             .unwrap_or(DEFAULT_API_URL)
             .to_string();
+        let api_url = validate_api_url_for_auth(&api_url, &auth)?;
 
         let notion_version = match params.get("notion_version") {
             Some(value) => {
@@ -97,6 +97,81 @@ impl NotionConfig {
             notion_version,
         })
     }
+}
+
+fn optional_nonempty_string(
+    params: &serde_json::Value,
+    field: &str,
+) -> FcpResult<Option<String>> {
+    let Some(value) = params.get(field) else {
+        return Ok(None);
+    };
+
+    let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a string"),
+    })?;
+    if raw.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must be a non-empty string"),
+        });
+    }
+
+    Ok(Some(raw.to_string()))
+}
+
+fn validate_api_url_for_auth(raw_url: &str, auth: &NotionAuth) -> FcpResult<String> {
+    let parsed = reqwest::Url::parse(raw_url).map_err(|_| FcpError::InvalidRequest {
+        code: 1003,
+        message: "api_url must be an absolute URL".into(),
+    })?;
+    let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "api_url must include a host".into(),
+    })?;
+    let host_lower = host.to_ascii_lowercase();
+    let is_local = matches!(host_lower.as_str(), "localhost" | "127.0.0.1" | "::1");
+    let scheme = parsed.scheme();
+    let token_origin_allowed = match auth {
+        NotionAuth::Token(_) => {
+            (scheme == "https" && host_lower == "api.notion.com")
+                || (is_local && matches!(scheme, "http" | "https"))
+        }
+        NotionAuth::CredentialId(_) => true,
+    };
+
+    if !token_origin_allowed {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "api_url must target https://api.notion.com for direct token mode".into(),
+        });
+    }
+
+    Ok(parsed.to_string().trim_end_matches('/').to_string())
+}
+
+fn optional_safe_cursor(input: &serde_json::Value, field: &str) -> FcpResult<Option<String>> {
+    let Some(raw) = optional_nonempty_string(input, field)? else {
+        return Ok(None);
+    };
+
+    if raw.len() > MAX_NOTION_CURSOR_BYTES {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "{field} exceeds maximum length of {MAX_NOTION_CURSOR_BYTES} bytes"
+            ),
+        });
+    }
+    if raw.chars().any(char::is_control) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must not contain control characters"),
+        });
+    }
+
+    Ok(Some(raw))
 }
 
 /// Structured readiness diagnostic for the doctor command.
@@ -1128,10 +1203,10 @@ impl NotionConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let database_id = require_str(&input, "database_id")?;
         let filter = input.get("filter").cloned();
-        let start_cursor = input.get("start_cursor").and_then(|v| v.as_str());
+        let start_cursor = optional_safe_cursor(&input, "start_cursor")?;
 
         let result = client
-            .query_database(database_id, filter, start_cursor)
+            .query_database(database_id, filter, start_cursor.as_deref())
             .await
             .map_err(|e: NotionError| e.to_fcp_error())?;
 
@@ -1914,11 +1989,43 @@ mod tests {
                 "token": "ntn_test123",
                 "api_url": "https://custom-notion.example.com/v1"
             }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("api.notion.com"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_credential_id_allows_custom_api_url() {
+        let mut connector = NotionConnector::new();
+        let cid = uuid::Uuid::new_v4().to_string();
+        let result = connector
+            .handle_configure(json!({
+                "credential_id": cid,
+                "api_url": "https://proxy.internal.example/v1"
+            }))
             .await
             .unwrap();
         assert_eq!(result["status"], "configured");
         let config = connector.config.as_ref().unwrap();
-        assert_eq!(config.api_url, "https://custom-notion.example.com/v1");
+        assert_eq!(config.api_url, "https://proxy.internal.example/v1");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_empty_token() {
+        let mut connector = NotionConnector::new();
+        let result = connector.handle_configure(json!({ "token": "" })).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("non-empty"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
     }
 
     #[fcp_async_core::runtime::test]

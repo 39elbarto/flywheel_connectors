@@ -931,23 +931,49 @@ fn validate_token_url(token_url: &str) -> Result<(), GoogleAuthError> {
     let parsed = Url::parse(token_url).map_err(|error| GoogleAuthError::InvalidConfig {
         message: format!("`oauth_refresh.token_url` is invalid: {error}"),
     })?;
-    if parsed.scheme() == "https" {
-        return Ok(());
-    }
-
     let host = parsed
         .host_str()
         .ok_or_else(|| GoogleAuthError::InvalidConfig {
             message: "`oauth_refresh.token_url` must include a host".to_string(),
         })?;
     if is_local_test_host(host) {
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(GoogleAuthError::InvalidConfig {
+                message:
+                    "`oauth_refresh.token_url` must not include query or fragment components"
+                        .to_string(),
+            });
+        }
         return Ok(());
     }
 
-    Err(GoogleAuthError::InvalidConfig {
-        message: "`oauth_refresh.token_url` must use https unless targeting localhost for tests"
-            .to_string(),
-    })
+    if parsed.scheme() != "https" {
+        return Err(GoogleAuthError::InvalidConfig {
+            message: "`oauth_refresh.token_url` must use https unless targeting localhost for tests"
+                .to_string(),
+        });
+    }
+    if !host.eq_ignore_ascii_case("oauth2.googleapis.com") {
+        return Err(GoogleAuthError::InvalidConfig {
+            message: "`oauth_refresh.token_url` must target https://oauth2.googleapis.com/token"
+                .to_string(),
+        });
+    }
+    if parsed.path() != "/token" || parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(GoogleAuthError::InvalidConfig {
+            message:
+                "`oauth_refresh.token_url` must match the canonical Google token endpoint path"
+                    .to_string(),
+        });
+    }
+
+    if parsed.username() != "" || parsed.password().is_some() {
+        return Err(GoogleAuthError::InvalidConfig {
+            message: "`oauth_refresh.token_url` must not embed userinfo".to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 fn is_local_test_host(host: &str) -> bool {
@@ -1888,6 +1914,33 @@ mod tests {
             .expect_err("http non-local should be rejected");
         let msg = err.to_string();
         assert!(msg.contains("https"), "error should mention https: {msg}");
+    }
+
+    #[test]
+    fn validate_token_url_https_non_google_host_is_rejected() {
+        let err = validate_token_url("https://evil.example.com/token")
+            .expect_err("non-google https host should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("oauth2.googleapis.com/token"),
+            "error should mention canonical endpoint: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_token_url_google_host_wrong_path_is_rejected() {
+        let err = validate_token_url("https://oauth2.googleapis.com/not-token")
+            .expect_err("wrong path should be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("canonical"), "error should mention canonical path: {msg}");
+    }
+
+    #[test]
+    fn validate_token_url_google_host_with_query_is_rejected() {
+        let err = validate_token_url("https://oauth2.googleapis.com/token?alt=json")
+            .expect_err("query should be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("canonical"), "error should mention canonical path: {msg}");
     }
 
     #[test]

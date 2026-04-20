@@ -13,6 +13,7 @@ use fcp_core::{
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
 use hmac::{Hmac, Mac};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::Sha256;
@@ -27,6 +28,7 @@ use crate::{
 };
 
 const DEFAULT_WEBHOOK_TOLERANCE_SECONDS: i64 = 300;
+const STRIPE_API_HOST: &str = "api.stripe.com";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -86,6 +88,7 @@ impl StripeConfig {
             .and_then(|v| v.as_str())
             .unwrap_or(DEFAULT_API_URL)
             .to_string();
+        let api_url = validate_api_url_for_auth(&api_url, &auth)?;
 
         let webhook_signing_secret = params
             .get("webhook_signing_secret")
@@ -118,6 +121,111 @@ impl StripeConfig {
             webhook_tolerance_seconds,
         })
     }
+}
+
+fn validate_api_url_for_auth(api_url: &str, auth: &StripeAuth) -> FcpResult<String> {
+    let parsed = Url::parse(api_url).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("api_url could not be parsed: {error}"),
+    })?;
+    let canonical = parsed.to_string().trim_end_matches('/').to_string();
+
+    if parsed.host_str().is_none() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "api_url must include a host".into(),
+        });
+    }
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "api_url must not include userinfo".into(),
+        });
+    }
+
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "api_url must not include query or fragment components".into(),
+        });
+    }
+
+    match auth {
+        StripeAuth::SecretKey(_) => {
+            let (allowed, message) = api_url_policy(&canonical);
+            if !allowed {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message,
+                });
+            }
+        }
+        StripeAuth::CredentialId(_) => {
+            let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "api_url must include a host".into(),
+            })?;
+            let local = is_local_test_host(host);
+            let secure_or_local = parsed.scheme() == "https" || local;
+            if !secure_or_local {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message:
+                        "api_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
+                            .into(),
+                });
+            }
+        }
+    }
+
+    Ok(canonical)
+}
+
+fn api_url_policy(api_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(api_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("api_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "api_url must include a host".into());
+    };
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return (false, "api_url must not include userinfo".into());
+    }
+
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return (
+            false,
+            "api_url must not include query or fragment components".into(),
+        );
+    }
+
+    let local = is_local_test_host(host);
+    let allowed_host = host.eq_ignore_ascii_case(STRIPE_API_HOST) || local;
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if allowed_host && secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {api_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "api_url must use https and {STRIPE_API_HOST} (localhost/127.0.0.1/::1 allowed for tests): {api_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// Doctor check result.
@@ -273,20 +381,21 @@ impl StripeConnector {
         });
 
         // Check 5: Network constraints - host must be api.stripe.com (or test override)
-        let allowed_hosts = ["api.stripe.com"];
-        let host_ok = config.api_url.starts_with("http://localhost")
-            || config.api_url.starts_with("http://127.0.0.1")
-            || allowed_hosts.iter().any(|h| config.api_url.contains(h));
+        let (host_ok, network_message) = match &config.auth {
+            StripeAuth::SecretKey(_) => api_url_policy(&config.api_url),
+            StripeAuth::CredentialId(_) => (
+                true,
+                "credential_id mode delegates destination enforcement to the egress proxy"
+                    .to_string(),
+            ),
+        };
         checks.push(DoctorCheck {
             name: "network_constraints".into(),
             passed: host_ok,
             message: Some(if host_ok {
-                "API URL matches allowed host (api.stripe.com)".into()
+                network_message
             } else {
-                format!(
-                    "API URL {} does not match allowed hosts: {:?}",
-                    config.api_url, allowed_hosts
-                )
+                network_message
             }),
             critical: true,
         });
@@ -2254,18 +2363,18 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_doctor_bad_network_host() {
+    async fn test_doctor_configured_credential_id_custom_https_host() {
         let mut connector = StripeConnector::new();
         connector
             .handle_configure(json!({
-                "secret_key": "sk_test",
-                "api_url": "https://evil.example.com/v1"
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+                "api_url": "https://proxy.internal.example/v1"
             }))
             .await
             .unwrap();
 
         let result = connector.handle_doctor().await.unwrap();
-        assert_eq!(result["status"], "unhealthy");
+        assert_eq!(result["status"], "healthy");
     }
 
     // ── Self-check tests ────────────────────────────────────────
@@ -2355,6 +2464,24 @@ mod tests {
         match result.unwrap_err() {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("exactly one"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_secret_key_rejects_untrusted_api_origin() {
+        let mut connector = StripeConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "secret_key": "sk_test",
+                "api_url": "https://evil.example.com/v1"
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains(STRIPE_API_HOST));
             }
             e => panic!("Expected InvalidRequest, got: {e:?}"),
         }
@@ -2947,10 +3074,52 @@ mod tests {
     fn config_custom_api_url() {
         let params = json!({
             "secret_key": "sk_test",
-            "api_url": "https://custom.stripe.com/v1"
+            "api_url": "https://api.stripe.com/v1/"
         });
         let config = StripeConfig::from_params(&params).unwrap();
-        assert_eq!(config.api_url, "https://custom.stripe.com/v1");
+        assert_eq!(config.api_url, "https://api.stripe.com/v1");
+    }
+
+    #[test]
+    fn config_rejects_secret_key_custom_api_origin() {
+        let params = json!({
+            "secret_key": "sk_test",
+            "api_url": "https://evil.example.com/v1"
+        });
+        let result = StripeConfig::from_params(&params);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains(STRIPE_API_HOST));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn config_allows_credential_id_custom_https_api_origin() {
+        let params = json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+            "api_url": "https://proxy.internal.example/v1/"
+        });
+        let config = StripeConfig::from_params(&params).unwrap();
+        assert_eq!(config.api_url, "https://proxy.internal.example/v1");
+    }
+
+    #[test]
+    fn config_rejects_api_url_with_query_components() {
+        let params = json!({
+            "secret_key": "sk_test",
+            "api_url": "https://api.stripe.com/v1?alt=evil"
+        });
+        let result = StripeConfig::from_params(&params);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("query or fragment"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
     }
 
     // --- DoctorResult from_checks all healthy ---

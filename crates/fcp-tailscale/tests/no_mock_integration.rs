@@ -613,9 +613,9 @@ fn peer_info_tailscale_tags() {
 
 #[test]
 fn peer_info_node_id_conversion() {
-    let peer = MockTailscaleClient::mock_peer("nodeXYZ", "host", test_ip(), &[]);
-    let node_id = peer.node_id();
-    assert_eq!(node_id.as_str(), "nodeXYZ");
+    let peer = MockTailscaleClient::mock_peer("node-xyz", "host", test_ip(), &[]);
+    let node_id = peer.node_id().expect("validated node id");
+    assert_eq!(node_id.as_str(), "node-xyz");
 }
 
 // ── TailscaleStatus::peers() ──
@@ -633,7 +633,7 @@ async fn status_peers_keyed_by_node_id() {
         .await;
 
     let status = client.status().await.expect("status");
-    let peers = status.peers();
+    let peers = status.peers().expect("validated peer map");
     assert!(peers.contains_key(&NodeId::new("node-abc")));
 }
 

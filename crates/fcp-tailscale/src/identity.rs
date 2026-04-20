@@ -7,6 +7,7 @@
 //! - [`NodeKeyAttestation`] - Owner-signed binding of `node_id` ↔ keys ↔ tags
 
 use chrono::{DateTime, Utc};
+use fcp_core::TailscaleNodeId;
 use fcp_crypto::canonicalize::to_deterministic_cbor;
 use fcp_crypto::{
     Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, KeyId, X25519PublicKey,
@@ -14,31 +15,78 @@ use fcp_crypto::{
 };
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
+use std::str::FromStr;
 
 use crate::error::{TailscaleError, TailscaleResult};
 use crate::tag::TailscaleTag;
 
 /// Tailscale node ID (opaque string identifier).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct NodeId(String);
+#[serde(try_from = "String", into = "String")]
+pub struct NodeId(TailscaleNodeId);
 
 impl NodeId {
     /// Create a new `NodeId` from a string.
     #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        Self(TailscaleNodeId::new(id))
+    }
+
+    /// Create a validated `NodeId` from untrusted input.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node ID is not a canonical `TailscaleNodeId`.
+    pub fn try_new(id: impl Into<String>) -> TailscaleResult<Self> {
+        TailscaleNodeId::try_new(id)
+            .map(Self)
+            .map_err(|err| TailscaleError::InvalidNodeId(err.to_string()))
     }
 
     /// Get the node ID as a string slice.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
 impl std::fmt::Display for NodeId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl TryFrom<String> for NodeId {
+    type Error = TailscaleError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_new(value)
+    }
+}
+
+impl From<NodeId> for String {
+    fn from(value: NodeId) -> Self {
+        value.as_str().to_string()
+    }
+}
+
+impl From<NodeId> for TailscaleNodeId {
+    fn from(value: NodeId) -> Self {
+        value.0
+    }
+}
+
+impl From<TailscaleNodeId> for NodeId {
+    fn from(value: TailscaleNodeId) -> Self {
+        Self(value)
+    }
+}
+
+impl FromStr for NodeId {
+    type Err = TailscaleError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_new(s.to_owned())
     }
 }
 
@@ -200,6 +248,13 @@ impl AttestationPayload<'_> {
     const SCHEMA: &'static str = "fcp.attestation.v1";
 }
 
+fn canonical_tag_strings(tags: &[TailscaleTag]) -> Vec<&str> {
+    let mut tags = tags.iter().map(TailscaleTag::as_str).collect::<Vec<_>>();
+    tags.sort_unstable();
+    tags.dedup();
+    tags
+}
+
 /// Owner-signed attestation binding node_id ↔ keys ↔ tags.
 ///
 /// This proves that the owner of the mesh has authorized this node with the
@@ -246,7 +301,7 @@ impl NodeKeyAttestation {
             signing_kid: node_keys.signing_kid().to_hex(),
             encryption_kid: node_keys.encryption_kid().to_hex(),
             issuance_kid: node_keys.issuance_kid().to_hex(),
-            tags: tags.iter().map(TailscaleTag::as_str).collect(),
+            tags: canonical_tag_strings(tags),
             issued_at: now.timestamp(),
             expires_at: expires_at.timestamp(),
         };
@@ -299,7 +354,7 @@ impl NodeKeyAttestation {
             signing_kid: node_keys.signing_kid().to_hex(),
             encryption_kid: node_keys.encryption_kid().to_hex(),
             issuance_kid: node_keys.issuance_kid().to_hex(),
-            tags: tags.iter().map(TailscaleTag::as_str).collect(),
+            tags: canonical_tag_strings(tags),
             issued_at: self.issued_at.timestamp(),
             expires_at: self.expires_at.timestamp(),
         };
@@ -960,11 +1015,23 @@ mod tests {
     }
 
     #[test]
-    fn test_node_id_serde_roundtrip_empty() {
-        let id = NodeId::new("");
-        let json = serde_json::to_string(&id).unwrap();
-        let decoded: NodeId = serde_json::from_str(&json).unwrap();
-        assert_eq!(id, decoded);
+    fn test_node_id_serde_rejects_empty() {
+        let err = serde_json::from_str::<NodeId>(r#""""#).unwrap_err();
+        assert!(err.to_string().contains("invalid node ID"));
+    }
+
+    #[test]
+    fn test_node_id_try_new_accepts_canonical_id() {
+        let id = NodeId::try_new("node-validated").unwrap();
+        assert_eq!(id.as_str(), "node-validated");
+    }
+
+    #[test]
+    fn test_node_id_try_new_rejects_unicode() {
+        assert!(matches!(
+            NodeId::try_new("nöde-日本語"),
+            Err(TailscaleError::InvalidNodeId(_))
+        ));
     }
 
     // --- NodeKeys serde roundtrip ---
@@ -1530,10 +1597,10 @@ mod tests {
         assert!(identity.ips[1].is_ipv6());
     }
 
-    // --- Attestation: verify with reordered tags fails ---
+    // --- Attestation: verify with reordered tags succeeds for same logical set ---
 
     #[test]
-    fn test_attestation_reordered_tags_fails() {
+    fn test_attestation_reordered_tags_succeeds() {
         let (owner_key, node_keys) = create_test_keys();
         let node_id = NodeId::new("reorder");
         let tags = vec![
@@ -1554,7 +1621,36 @@ mod tests {
             &node_keys,
             &reversed_tags,
         );
-        assert!(result.is_err());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_attestation_duplicate_tags_verify_as_set() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("dedup");
+        let duplicated_tags = vec![
+            TailscaleTag::fcp_tag("work"),
+            TailscaleTag::fcp_tag("private"),
+            TailscaleTag::fcp_tag("work"),
+        ];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &duplicated_tags, 24)
+                .unwrap();
+
+        let deduped_tags = vec![
+            TailscaleTag::fcp_tag("private"),
+            TailscaleTag::fcp_tag("work"),
+        ];
+        assert!(
+            attestation
+                .verify(
+                    &owner_key.verifying_key(),
+                    &node_id,
+                    &node_keys,
+                    &deduped_tags,
+                )
+                .is_ok()
+        );
     }
 
     // --- Attestation: single tag works ---

@@ -12,6 +12,10 @@ pub type TailscaleResult<T> = Result<T, TailscaleError>;
 /// Errors that can occur during Tailscale operations.
 #[derive(Debug, Error)]
 pub enum TailscaleError {
+    /// Invalid node ID format.
+    #[error("invalid node ID: {0}")]
+    InvalidNodeId(String),
+
     /// Invalid tag format (must be `tag:fcp-<suffix>`).
     #[error("invalid FCP tag format: {0}")]
     InvalidTag(String),
@@ -102,6 +106,12 @@ mod tests {
     }
 
     #[test]
+    fn error_display_invalid_node_id() {
+        let err = TailscaleError::InvalidNodeId("bad id".to_string());
+        assert_eq!(err.to_string(), "invalid node ID: bad id");
+    }
+
+    #[test]
     fn error_display_invalid_zone_id() {
         let err = TailscaleError::InvalidZoneId("not-a-zone".to_string());
         assert_eq!(err.to_string(), "invalid zone ID format: not-a-zone");
@@ -185,6 +195,14 @@ mod tests {
         let err = TailscaleError::InvalidTag("bad".to_string());
         let dbg = format!("{err:?}");
         assert!(dbg.contains("InvalidTag"));
+        assert!(dbg.contains("bad"));
+    }
+
+    #[test]
+    fn debug_invalid_node_id() {
+        let err = TailscaleError::InvalidNodeId("bad".to_string());
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("InvalidNodeId"));
         assert!(dbg.contains("bad"));
     }
 

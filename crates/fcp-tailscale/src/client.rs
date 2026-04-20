@@ -75,12 +75,30 @@ pub struct TailscaleStatus {
 
 impl TailscaleStatus {
     /// Get peers as a more convenient map.
-    #[must_use]
-    pub fn peers(&self) -> HashMap<NodeId, PeerInfo> {
-        self.peer
-            .iter()
-            .map(|(k, v)| (NodeId::new(k.clone()), v.clone()))
-            .collect()
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a peer-map key or embedded peer ID is not a valid
+    /// `NodeId`, or if the outer map key does not match the embedded `ID`.
+    pub fn peers(&self) -> TailscaleResult<HashMap<NodeId, PeerInfo>> {
+        let mut peers = HashMap::with_capacity(self.peer.len());
+        for (raw_key, peer) in &self.peer {
+            let key_id = NodeId::try_new(raw_key.clone())?;
+            let peer_id = peer.node_id()?;
+            if key_id != peer_id {
+                return Err(TailscaleError::ParseError(format!(
+                    "peer map key '{raw_key}' does not match embedded ID '{}'",
+                    peer.id
+                )));
+            }
+            if peers.insert(key_id, peer.clone()).is_some() {
+                return Err(TailscaleError::ParseError(format!(
+                    "duplicate peer entry for '{}'",
+                    peer.id
+                )));
+            }
+        }
+        Ok(peers)
     }
 }
 
@@ -153,9 +171,12 @@ pub struct PeerInfo {
 
 impl PeerInfo {
     /// Get this peer's node ID.
-    #[must_use]
-    pub fn node_id(&self) -> NodeId {
-        NodeId::new(&self.id)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the peer ID is not a canonical `NodeId`.
+    pub fn node_id(&self) -> TailscaleResult<NodeId> {
+        NodeId::try_new(self.id.clone())
     }
 
     /// Get this peer's tags as `TailscaleTag` objects.
@@ -662,7 +683,7 @@ mod tests {
     fn test_peer_info_node_id() {
         let peer =
             MockTailscaleClient::mock_peer("node-42", "host", "100.64.0.2".parse().unwrap(), &[]);
-        assert_eq!(peer.node_id().as_str(), "node-42");
+        assert_eq!(peer.node_id().unwrap().as_str(), "node-42");
     }
 
     #[test]
@@ -695,7 +716,7 @@ mod tests {
         client.add_peer(peer).await;
 
         let status = client.status().await.unwrap();
-        let peers = status.peers();
+        let peers = status.peers().unwrap();
         assert_eq!(peers.len(), 1);
         assert!(peers.contains_key(&NodeId::new("node-1")));
     }
@@ -901,7 +922,7 @@ mod tests {
         client.add_peer(p2).await;
 
         let status = client.status().await.unwrap();
-        let peers = status.peers();
+        let peers = status.peers().unwrap();
         assert_eq!(peers.len(), 2);
         assert!(peers.contains_key(&NodeId::new("node-aaa")));
         assert!(peers.contains_key(&NodeId::new("node-bbb")));
@@ -911,7 +932,7 @@ mod tests {
     async fn status_peers_empty_when_no_peers() {
         let client = MockTailscaleClient::new();
         let status = client.status().await.unwrap();
-        let peers = status.peers();
+        let peers = status.peers().unwrap();
         assert!(peers.is_empty());
     }
 
@@ -1120,7 +1141,7 @@ mod tests {
             os: None,
             last_seen: None,
         };
-        assert_eq!(peer.node_id().as_str(), "node-with-dashes-and-123");
+        assert_eq!(peer.node_id().unwrap().as_str(), "node-with-dashes-and-123");
     }
 
     #[test]
@@ -1525,7 +1546,7 @@ mod tests {
             user: None,
             tailnet: None,
         };
-        let peers = status.peers();
+        let peers = status.peers().unwrap();
         assert_eq!(peers.len(), 5);
         for i in 0..5 {
             assert!(peers.contains_key(&NodeId::new(format!("node-{i}"))));
@@ -1647,7 +1668,7 @@ mod tests {
             user: None,
             tailnet: None,
         };
-        assert!(status.peers().is_empty());
+        assert!(status.peers().unwrap().is_empty());
     }
 
     // --- PeerInfo Clone and Debug ---
@@ -1810,7 +1831,7 @@ mod tests {
     // --- PeerInfo: node_id from empty id ---
 
     #[test]
-    fn peer_info_node_id_empty() {
+    fn peer_info_node_id_empty_rejected() {
         let peer = PeerInfo {
             id: String::new(),
             public_key: "pk".into(),
@@ -1822,7 +1843,10 @@ mod tests {
             os: None,
             last_seen: None,
         };
-        assert_eq!(peer.node_id().as_str(), "");
+        assert!(matches!(
+            peer.node_id(),
+            Err(TailscaleError::InvalidNodeId(_))
+        ));
     }
 
     // --- LocalApiClient: URL with port 0 ---
@@ -1904,7 +1928,7 @@ mod tests {
             user: None,
             tailnet: None,
         };
-        let node_peers = status.peers();
+        let node_peers = status.peers().unwrap();
         let p = &node_peers[&NodeId::new("n1")];
         assert_eq!(p.host_name, "host1");
         assert_eq!(p.tags.len(), 1);
@@ -2342,8 +2366,68 @@ mod tests {
     fn peer_info_node_id_consistent() {
         let peer =
             MockTailscaleClient::mock_peer("stable-id", "h", "100.64.0.1".parse().unwrap(), &[]);
-        let id1 = peer.node_id();
-        let id2 = peer.node_id();
+        let id1 = peer.node_id().unwrap();
+        let id2 = peer.node_id().unwrap();
         assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn peer_info_node_id_rejects_uppercase() {
+        let peer =
+            MockTailscaleClient::mock_peer("nodeXYZ", "h", "100.64.0.1".parse().unwrap(), &[]);
+        assert!(matches!(
+            peer.node_id(),
+            Err(TailscaleError::InvalidNodeId(_))
+        ));
+    }
+
+    #[test]
+    fn status_peers_rejects_invalid_or_mismatched_peer_ids() {
+        let status = TailscaleStatus {
+            backend_state: "Running".to_string(),
+            self_node: MockTailscaleClient::mock_self_node(
+                "self-node",
+                "self",
+                "100.64.0.1".parse().unwrap(),
+                &[],
+            ),
+            peer: HashMap::from([(
+                "node-a".to_string(),
+                MockTailscaleClient::mock_peer(
+                    "node-b",
+                    "host",
+                    "100.64.0.2".parse().unwrap(),
+                    &[],
+                ),
+            )]),
+            user: None,
+            tailnet: None,
+        };
+        assert!(matches!(status.peers(), Err(TailscaleError::ParseError(_))));
+
+        let invalid = TailscaleStatus {
+            backend_state: "Running".to_string(),
+            self_node: MockTailscaleClient::mock_self_node(
+                "self-node",
+                "self",
+                "100.64.0.1".parse().unwrap(),
+                &[],
+            ),
+            peer: HashMap::from([(
+                "Bad ID".to_string(),
+                MockTailscaleClient::mock_peer(
+                    "Bad ID",
+                    "host",
+                    "100.64.0.2".parse().unwrap(),
+                    &[],
+                ),
+            )]),
+            user: None,
+            tailnet: None,
+        };
+        assert!(matches!(
+            invalid.peers(),
+            Err(TailscaleError::InvalidNodeId(_))
+        ));
     }
 }

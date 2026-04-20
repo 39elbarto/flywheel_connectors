@@ -14,6 +14,7 @@
 //! | `z:public`   | `tag:fcp-public`  |
 
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 use crate::FCP_TAG_PREFIX;
 use crate::error::{TailscaleError, TailscaleResult};
@@ -23,6 +24,7 @@ use crate::error::{TailscaleError, TailscaleResult};
 /// Tags are used for ACL-based access control in Tailscale. FCP uses tags
 /// with the `tag:fcp-` prefix to represent zone membership.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct TailscaleTag(String);
 
 impl TailscaleTag {
@@ -92,6 +94,28 @@ impl TailscaleTag {
 impl std::fmt::Display for TailscaleTag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl TryFrom<String> for TailscaleTag {
+    type Error = TailscaleError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<TailscaleTag> for String {
+    fn from(value: TailscaleTag) -> Self {
+        value.0
+    }
+}
+
+impl FromStr for TailscaleTag {
+    type Err = TailscaleError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::new(s.to_owned())
     }
 }
 
@@ -791,6 +815,12 @@ mod tests {
         let json = serde_json::to_string(&tag).unwrap();
         let decoded: TailscaleTag = serde_json::from_str(&json).unwrap();
         assert_eq!(tag, decoded);
+    }
+
+    #[test]
+    fn test_tag_serde_rejects_missing_prefix() {
+        let err = serde_json::from_str::<TailscaleTag>(r#""server""#).unwrap_err();
+        assert!(err.to_string().contains("tag must start"));
     }
 
     // --- TailscaleTag equality and inequality ---

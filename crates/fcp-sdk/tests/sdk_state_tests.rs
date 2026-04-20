@@ -12,14 +12,14 @@ use fcp_cbor::SchemaId;
 use fcp_core::{ObjectHeader, Signature};
 
 #[cfg(feature = "cursor-store-object-store")]
-use fcp_core::ObjectIdKey;
+use fcp_core::{ConnectorStateObject, ObjectIdKey, RetentionClass, StorageMeta, StoredObject};
 use fcp_sdk::prelude::*;
 use semver::Version;
 
 #[cfg(feature = "cursor-store-object-store")]
 use fcp_sdk::runtime::ObjectStoreCursorBackend;
 #[cfg(feature = "cursor-store-object-store")]
-use fcp_store::{MemoryObjectStore, MemoryObjectStoreConfig};
+use fcp_store::{MemoryObjectStore, MemoryObjectStoreConfig, ObjectStore};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ConnectorStateModel Tests
@@ -213,7 +213,8 @@ fn cursor_store_commit_and_load() {
 #[cfg(feature = "cursor-store-object-store")]
 #[test]
 fn cursor_store_object_store_roundtrip() {
-    let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+    let object_store: Arc<dyn ObjectStore> =
+        Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
     let object_id_key = ObjectIdKey::from_bytes([0xA5; 32]);
     let connector_id = ConnectorId::from_static("test:operational:1.0");
     let zone_id = ZoneId::work();
@@ -253,6 +254,89 @@ fn cursor_store_object_store_roundtrip() {
         .expect("load should succeed")
         .expect("cursor should exist");
     assert_eq!(loaded, cursor);
+}
+
+#[cfg(feature = "cursor-store-object-store")]
+#[test]
+fn cursor_store_object_store_rejects_tampered_recovery_state() {
+    let object_store: Arc<dyn ObjectStore> =
+        Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
+    let object_id_key = ObjectIdKey::from_bytes([0xA6; 32]);
+    let connector_id = ConnectorId::from_static("test:operational:1.0");
+    let zone_id = ZoneId::work();
+    let lease_object_id = ObjectId::from_bytes([0x51; 32]);
+
+    let backend = ObjectStoreCursorBackend::new(
+        Arc::clone(&object_store),
+        object_id_key,
+        connector_id.clone(),
+        zone_id.clone(),
+    );
+    let mut store = CursorStore::new(backend, connector_id.clone(), zone_id.clone());
+
+    let mut header = object_store_header(1_700_200_000, zone_id.clone());
+    header.refs.push(lease_object_id);
+
+    let clean_state = ConnectorStateObject {
+        header: header.clone(),
+        connector_id: connector_id.clone(),
+        instance_id: None,
+        zone_id: zone_id.clone(),
+        prev: None,
+        seq: 1,
+        state_cbor: CursorState {
+            offset: Some(10),
+            last_seen_id: Some("clean".to_string()),
+            watermark: Some(100),
+        }
+        .to_cbor()
+        .expect("clean cursor should encode"),
+        updated_at: header.created_at,
+        lease_seq: 1,
+        lease_object_id,
+        signature: Signature::zero(),
+    };
+    let clean_body = fcp_cbor::CanonicalSerializer::serialize(&clean_state, &clean_state.header.schema)
+        .expect("clean state should serialize");
+    let clean_object_id =
+        StoredObject::derive_id(&clean_state.header, &clean_body, &object_id_key).expect("clean object id");
+
+    let tampered_state = ConnectorStateObject {
+        seq: 99,
+        state_cbor: CursorState {
+            offset: Some(999),
+            last_seen_id: Some("tampered".to_string()),
+            watermark: Some(999),
+        }
+        .to_cbor()
+        .expect("tampered cursor should encode"),
+        ..clean_state
+    };
+    let tampered_body = fcp_cbor::CanonicalSerializer::serialize(
+        &tampered_state,
+        &tampered_state.header.schema,
+    )
+    .expect("tampered state should serialize");
+
+    fcp_async_core::runtime::block_on_sync(async {
+        object_store
+            .put(StoredObject {
+                object_id: clean_object_id,
+                header,
+                body: tampered_body,
+                storage: StorageMeta {
+                    retention: RetentionClass::Pinned,
+                },
+            })
+            .await
+    })
+    .expect("runtime should be available")
+    .expect("tampered object should be inserted");
+
+    assert!(
+        store.load_cursor().expect("load should succeed").is_none(),
+        "tampered recovery state should be ignored"
+    );
 }
 
 #[test]

@@ -917,6 +917,47 @@ impl ObjectStoreCursorBackend {
         CanonicalSerializer::deserialize(&stored.body, &stored.header.schema)
             .map_err(|err| CursorStoreError::CursorDecoding(err.to_string()))
     }
+
+    fn validate_loaded_state_object(
+        &self,
+        object_id: ObjectId,
+        stored: &StoredObject,
+        state: &ConnectorStateObject,
+    ) -> Result<(), CursorStoreError> {
+        let state_header = serde_json::to_vec(&state.header)
+            .map_err(|err| CursorStoreError::CursorEncoding(err.to_string()))?;
+        let stored_header = serde_json::to_vec(&stored.header)
+            .map_err(|err| CursorStoreError::CursorEncoding(err.to_string()))?;
+        if state_header != stored_header {
+            return Err(CursorStoreError::Storage(
+                "stored connector state header/body mismatch".into(),
+            ));
+        }
+
+        if !state.header.refs.contains(&state.lease_object_id) {
+            return Err(CursorStoreError::Storage(
+                "stored connector state missing lease reference".into(),
+            ));
+        }
+
+        let canonical_body = CanonicalSerializer::serialize(state, &state.header.schema)
+            .map_err(|err| CursorStoreError::CursorEncoding(err.to_string()))?;
+        if canonical_body != stored.body {
+            return Err(CursorStoreError::Storage(
+                "stored connector state is not in canonical form".into(),
+            ));
+        }
+
+        let derived_object_id = StoredObject::derive_id(&stored.header, &canonical_body, &self.object_id_key)
+            .map_err(|err| CursorStoreError::CursorEncoding(err.to_string()))?;
+        if derived_object_id != object_id {
+            return Err(CursorStoreError::Storage(
+                "stored connector state object id does not match canonical content".into(),
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(feature = "cursor-store-object-store")]
@@ -947,6 +988,11 @@ impl CursorStoreBackend for ObjectStoreCursorBackend {
                     continue;
                 }
             };
+
+            if let Err(err) = self.validate_loaded_state_object(object_id, &stored, &state) {
+                tracing::warn!(error = %err, object_id = %object_id, "Rejecting tampered connector state object");
+                continue;
+            }
 
             if state.connector_id != self.connector_id || state.zone_id != self.zone_id {
                 continue;

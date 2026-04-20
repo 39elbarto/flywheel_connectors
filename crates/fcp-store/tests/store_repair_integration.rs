@@ -16,10 +16,11 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use chrono::Utc;
+use fcp_async_core::ExecutionContext;
 use fcp_core::{
     ObjectId, ObjectPlacementPolicy, Provenance, RetentionClass, StorageMeta, StoredObject, ZoneId,
 };
-use fcp_raptorq::{RaptorQConfig, RaptorQDecoder, RaptorQEncoder};
+use fcp_raptorq::{DecodeAdmissionController, RaptorQConfig, RaptorQDecoder, RaptorQEncoder};
 use fcp_store::{
     CoverageEvaluation, CoverageHealth, MemoryObjectStore, MemoryObjectStoreConfig,
     MemorySymbolStore, MemorySymbolStoreConfig, ObjectStore, ObjectSymbolMeta,
@@ -1421,6 +1422,97 @@ fn adversarial_reordered_duplicate_symbols_reconstruct() {
                     "received_unique": decoder.received_count(),
                     "reordered": true,
                     "duplicates_injected": 3,
+                })),
+                ..StoreLogData::default()
+            }
+        },
+    );
+}
+
+/// Adversarial delivery: a store-backed decoder must reject the
+/// `(max_symbols + 1)`th distinct symbol for a block that never completes,
+/// without buffering the rejected symbol or growing past the configured cap.
+#[test]
+fn adversarial_symbol_flood_is_capped_without_stale_decoder_state() {
+    run_store_test(
+        "adversarial_symbol_flood_is_capped_without_stale_decoder_state",
+        "integration",
+        "adversarial",
+        5,
+        || async {
+            let config = RaptorQConfig {
+                symbol_size: 1,
+                repair_ratio_bps: 0,
+                max_object_size: 2001,
+                decode_timeout: Duration::from_secs(120),
+                max_chunk_threshold: 4096,
+                chunk_size: 1024,
+            };
+            let object_id = test_object_id();
+            let oti = fcp_raptorq::ObjectTransmissionInformation::new(1001, 1, 1, 1, 8)
+                .with_payload_hash([0xCD; 32]);
+            let source_k = 1001_u32;
+            let max_symbols = config.total_symbols(1001).saturating_add(1000);
+            let attack_stream: Vec<_> = (0..=max_symbols)
+                .map(|offset| (10_000 + offset, vec![0xAA]))
+                .collect();
+
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig {
+                // One-byte symbols are already the minimum payload. Give the
+                // test enough quota for symbol metadata so it exercises the
+                // decoder cap instead of failing earlier in the store layer.
+                max_bytes: 128 * 1024,
+                local_node_id: 9,
+            });
+            store_symbols(&store, object_id, oti, source_k, &attack_stream, 9).await;
+
+            let stored = store.get_all_symbols(&object_id).await;
+            assert_eq!(
+                stored.len(),
+                usize::try_from(max_symbols + 1).expect("symbol count fits in usize"),
+                "symbol store should retain the full attacker stream"
+            );
+
+            let controller = DecodeAdmissionController::with_limits(
+                1,
+                usize::try_from(max_symbols).expect("buffer budget fits in usize"),
+                Duration::from_secs(5),
+                max_symbols,
+            );
+            let context = ExecutionContext::request_scoped(Duration::from_secs(5));
+            let mut decoder = RaptorQDecoder::new(oti, &config);
+            let symbols = stored
+                .iter()
+                .map(|sym| (sym.meta.esi, sym.data.to_vec()))
+                .collect::<Vec<_>>();
+            let err = controller
+                .decode_with_context(&context, &mut decoder, symbols)
+                .await
+                .expect_err("decoder should reject the capped symbol");
+            assert!(
+                matches!(err, fcp_raptorq::DecodeError::SymbolBufferExceeded { .. }),
+                "expected SymbolBufferExceeded, got {err:?}"
+            );
+            assert_eq!(
+                decoder.received_count(),
+                0,
+                "rejected symbol must not remain buffered"
+            );
+            assert!(
+                !decoder.is_timed_out(),
+                "cap rejection must happen before timeout"
+            );
+
+            StoreLogData {
+                object_id: Some(object_id),
+                object_size: Some(oti.transfer_length()),
+                symbol_count: Some(decoder.received_count()),
+                details: Some(json!({
+                    "stored_attack_symbols": stored.len(),
+                    "decoder_buffered_symbols": decoder.received_count(),
+                    "max_symbols": max_symbols,
+                    "stale_state_after_rejection": decoder.received_count() != 0,
+                    "last_error": format!("{err}"),
                 })),
                 ..StoreLogData::default()
             }

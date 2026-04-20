@@ -1328,6 +1328,7 @@ impl fmt::Display for AuditStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::collections::BTreeMap;
 
     // ── Helpers ──────────────────────────────────────────────────────────
@@ -1410,6 +1411,47 @@ mod tests {
             epoch_id: "epoch-1".to_string(),
             signature_count: 3,
         }
+    }
+
+    fn canonical_chain_in_zone(len: usize, zone_id: &str) -> Vec<AuditEntry> {
+        assert!(len > 0, "test chains must contain at least one entry");
+
+        let mut entries = Vec::with_capacity(len);
+        let mut prev_id = None;
+
+        for seq in 0..len {
+            let mut entry = if seq == 0 {
+                raw_genesis_entry()
+            } else {
+                raw_chain_entry(seq as u64, prev_id.as_deref().unwrap_or("missing-prev"))
+            };
+            entry.zone_id = zone_id.to_string();
+            entry.prev = prev_id.clone();
+            entry.id = entry.computed_id().unwrap();
+
+            prev_id = Some(entry.id.clone());
+            entries.push(entry);
+        }
+
+        entries
+    }
+
+    fn chain_head_for(entries: &[AuditEntry], zone_id: &str) -> ChainHead {
+        let last = entries.last().expect("test chains must not be empty");
+        ChainHead {
+            zone_id: zone_id.to_string(),
+            head_entry: last.id.clone(),
+            head_seq: last.seq,
+            coverage: 0.85,
+            epoch_id: "epoch-1".to_string(),
+            signature_count: 3,
+        }
+    }
+
+    fn normalized_verify_report(mut report: VerifyReport) -> VerifyReport {
+        report.zone_id = None;
+        report.head_entry = None;
+        report
     }
 
     fn sample_receipt() -> DecisionReceipt {
@@ -2747,6 +2789,83 @@ mod tests {
         let report = verify_chain(&entries, None, None);
         assert!(report.status.is_ok());
         assert_eq!(report.chain_len, 3);
+    }
+
+    proptest! {
+        #[test]
+        fn verify_chain_mr_idempotent_on_repeated_verification(
+            len in 1usize..=6,
+            include_head in any::<bool>(),
+            scoped_verification in any::<bool>(),
+            mismatch_filter in any::<bool>(),
+            mismatch_head_zone in any::<bool>(),
+            forge_last_id in any::<bool>(),
+        ) {
+            let mut entries = canonical_chain_in_zone(len, "z:work");
+            if forge_last_id {
+                let last = entries
+                    .last_mut()
+                    .expect("generated chains must contain a tail entry");
+                last.id = format!("forged-{}", last.id);
+            }
+
+            let head = include_head.then(|| {
+                chain_head_for(
+                    &entries,
+                    if mismatch_head_zone {
+                        "z:shadow"
+                    } else {
+                        "z:work"
+                    },
+                )
+            });
+            let zone_filter = scoped_verification.then_some(if mismatch_filter {
+                "z:other"
+            } else {
+                "z:work"
+            });
+
+            let report_once = verify_chain(&entries, head.as_ref(), zone_filter);
+            let report_twice = verify_chain(&entries, head.as_ref(), zone_filter);
+
+            prop_assert_eq!(report_once, report_twice);
+        }
+
+        #[test]
+        fn verify_chain_mr_head_zone_invariance(
+            len in 1usize..=6,
+            scoped_verification in any::<bool>(),
+            zones in prop::sample::select(vec![
+                ("z:work", "z:staging"),
+                ("z:prod", "z:prod-canary"),
+                ("z:community", "z:community-shadow"),
+            ]),
+        ) {
+            let (base_zone, transformed_zone) = zones;
+
+            let base_entries = canonical_chain_in_zone(len, base_zone);
+            let base_head = chain_head_for(&base_entries, base_zone);
+            let base_filter = scoped_verification.then_some(base_zone);
+            let base_report = verify_chain(&base_entries, Some(&base_head), base_filter);
+
+            let transformed_entries = canonical_chain_in_zone(len, transformed_zone);
+            let transformed_head = chain_head_for(&transformed_entries, transformed_zone);
+            let transformed_filter = scoped_verification.then_some(transformed_zone);
+            let transformed_report = verify_chain(
+                &transformed_entries,
+                Some(&transformed_head),
+                transformed_filter,
+            );
+
+            prop_assert!(base_report.is_clean());
+            prop_assert!(transformed_report.is_clean());
+            prop_assert_eq!(
+                normalized_verify_report(base_report.clone()),
+                normalized_verify_report(transformed_report.clone()),
+            );
+            prop_assert_eq!(base_report.zone_id.as_deref(), base_filter);
+            prop_assert_eq!(transformed_report.zone_id.as_deref(), transformed_filter);
+        }
     }
 
     #[test]

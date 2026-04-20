@@ -105,6 +105,20 @@ pub enum CryptoError {
     /// does not understand (RFC 8152 §3.1 — message MUST be rejected).
     #[error("unsupported critical header: {0}")]
     UnsupportedCriticalHeader(String),
+
+    /// COSE protected-header key ID did not match the verifying key used to
+    /// authenticate the token.
+    #[error("key ID mismatch: expected {expected}, got {got}")]
+    KeyIdMismatch {
+        /// Expected key ID derived from the verifying key.
+        expected: String,
+        /// Actual key ID carried in the protected header.
+        got: String,
+    },
+
+    /// COSE header placement or cross-field policy violation.
+    #[error("header policy violation: {0}")]
+    HeaderPolicyViolation(String),
 }
 
 /// Result type alias for cryptographic operations.
@@ -240,6 +254,27 @@ mod tests {
         assert_eq!(err.to_string(), "missing required field: issuer");
     }
 
+    #[test]
+    fn error_display_key_id_mismatch() {
+        let err = CryptoError::KeyIdMismatch {
+            expected: "0011223344556677".to_string(),
+            got: "8899aabbccddeeff".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "key ID mismatch: expected 0011223344556677, got 8899aabbccddeeff"
+        );
+    }
+
+    #[test]
+    fn error_display_header_policy_violation() {
+        let err = CryptoError::HeaderPolicyViolation("crit must be protected".to_string());
+        assert_eq!(
+            err.to_string(),
+            "header policy violation: crit must be protected"
+        );
+    }
+
     // ---- Debug format ----
 
     #[test]
@@ -259,6 +294,26 @@ mod tests {
         let err = CryptoError::SignatureVerificationFailed;
         let debug = format!("{err:?}");
         assert!(debug.contains("SignatureVerificationFailed"));
+    }
+
+    #[test]
+    fn error_debug_key_id_mismatch() {
+        let err = CryptoError::KeyIdMismatch {
+            expected: "0011223344556677".to_string(),
+            got: "8899aabbccddeeff".to_string(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("KeyIdMismatch"));
+        assert!(debug.contains("0011223344556677"));
+        assert!(debug.contains("8899aabbccddeeff"));
+    }
+
+    #[test]
+    fn error_debug_header_policy_violation() {
+        let err = CryptoError::HeaderPolicyViolation("kid must be protected".to_string());
+        let debug = format!("{err:?}");
+        assert!(debug.contains("HeaderPolicyViolation"));
+        assert!(debug.contains("kid must be protected"));
     }
 
     #[test]

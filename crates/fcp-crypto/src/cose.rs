@@ -420,6 +420,52 @@ pub struct CoseToken {
 }
 
 impl CoseToken {
+    fn reject_unprotected_security_headers(&self) -> CryptoResult<()> {
+        if self.inner.unprotected.alg.is_some() {
+            return Err(CryptoError::HeaderPolicyViolation(
+                "alg must not appear in unprotected headers".into(),
+            ));
+        }
+
+        if !self.inner.unprotected.key_id.is_empty() {
+            return Err(CryptoError::HeaderPolicyViolation(
+                "kid must not appear in unprotected headers".into(),
+            ));
+        }
+
+        if !self.inner.unprotected.crit.is_empty() {
+            return Err(CryptoError::HeaderPolicyViolation(
+                "crit must not appear in unprotected headers".into(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn require_critical_headers_present_in_protected_bucket(&self) -> CryptoResult<()> {
+        for label in &self.inner.protected.header.crit {
+            match label {
+                RegisteredLabelWithPrivate::Assigned(iana::HeaderParameter::Alg)
+                    if self.inner.protected.header.alg.is_none() =>
+                {
+                    return Err(CryptoError::HeaderPolicyViolation(
+                        "crit references alg, but alg is missing from protected headers".into(),
+                    ));
+                }
+                RegisteredLabelWithPrivate::Assigned(iana::HeaderParameter::Kid)
+                    if self.inner.protected.header.key_id.is_empty() =>
+                {
+                    return Err(CryptoError::HeaderPolicyViolation(
+                        "crit references kid, but kid is missing from protected headers".into(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
     /// Create and sign a new `COSE_Sign1` token.
     ///
     /// # Errors
@@ -468,6 +514,12 @@ impl CoseToken {
     ///
     /// Returns an error if verification fails.
     pub fn verify(&self, verifying_key: &Ed25519VerifyingKey) -> CryptoResult<CwtClaims> {
+        // FCP capability tokens require the security-sensitive headers we
+        // consume (`alg`, `kid`, `crit`) to be unambiguous and integrity
+        // protected, even though bare COSE allows some of them to be
+        // unprotected hints.
+        self.reject_unprotected_security_headers()?;
+
         // RFC 8152 §4.4: bind the verifier to a specific algorithm.
         // Without this, alg is only implicitly bound through the TBS bytes,
         // which works for our single-algorithm registry but is brittle once
@@ -485,6 +537,18 @@ impl CoseToken {
             }
         }
 
+        // FCP routes issuance keys by protected `kid`, so direct verification
+        // must reject tokens whose signed key hint does not match the
+        // verifying key selected by the caller.
+        let kid_bytes = self.get_key_id()?;
+        let expected_kid = verifying_key.key_id();
+        if kid_bytes != expected_kid.as_bytes() {
+            return Err(CryptoError::KeyIdMismatch {
+                expected: expected_kid.to_hex(),
+                got: hex::encode(kid_bytes),
+            });
+        }
+
         // RFC 8152 §3.1: every label in `crit` MUST be one the recipient
         // understands; otherwise the message MUST be rejected. We process
         // only `Alg` and `Kid` from the protected header, so any other
@@ -499,6 +563,10 @@ impl CoseToken {
                 }
             }
         }
+
+        // RFC 9052 §3.1: `crit` can only list labels that are actually
+        // carried in the protected header bucket.
+        self.require_critical_headers_present_in_protected_bucket()?;
 
         // Extract signature
         let signature = Ed25519Signature::try_from_slice(&self.inner.signature)?;
@@ -921,10 +989,33 @@ mod tests {
     /// with `signing_key` over the resulting TBS bytes. Used by the
     /// algorithm-confusion / crit-handling tests below.
     fn build_signed_token(signing_key: &Ed25519SigningKey, header: coset::Header) -> CoseToken {
-        let claims = CwtClaims::new().issuer("test").capability_id("cap:test.read");
+        let claims = CwtClaims::new()
+            .issuer("test")
+            .capability_id("cap:test.read");
         let payload = claims.to_cbor().unwrap();
         let mut inner = CoseSign1Builder::new()
             .protected(header)
+            .payload(payload)
+            .build();
+        let tbs = inner.tbs_data(&[]);
+        let signature = signing_key.sign(&tbs);
+        inner.signature = signature.to_bytes().to_vec();
+        CoseToken { inner }
+    }
+
+    /// Build a CoseSign1 with caller-chosen protected and unprotected headers.
+    fn build_signed_token_with_unprotected(
+        signing_key: &Ed25519SigningKey,
+        protected: coset::Header,
+        unprotected: coset::Header,
+    ) -> CoseToken {
+        let claims = CwtClaims::new()
+            .issuer("test")
+            .capability_id("cap:test.read");
+        let payload = claims.to_cbor().unwrap();
+        let mut inner = CoseSign1Builder::new()
+            .protected(protected)
+            .unprotected(unprotected)
             .payload(payload)
             .build();
         let tbs = inner.tbs_data(&[]);
@@ -969,9 +1060,34 @@ mod tests {
         assert!(
             matches!(
                 err,
-                CryptoError::AlgorithmMismatch { expected: "EdDSA", .. }
+                CryptoError::AlgorithmMismatch {
+                    expected: "EdDSA",
+                    ..
+                }
             ),
             "expected AlgorithmMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_token_with_mismatched_protected_kid() {
+        // A token can be syntactically well-formed and signed by the correct
+        // key while still carrying a forged protected `kid`. Direct verify()
+        // must bind the header hint back to the verifying key so callers do
+        // not accept a signature under one key while attributing it to
+        // another.
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let wrong_kid = Ed25519SigningKey::generate().key_id();
+        let header = HeaderBuilder::new()
+            .algorithm(iana::Algorithm::EdDSA)
+            .key_id(wrong_kid.as_bytes().to_vec())
+            .build();
+        let token = build_signed_token(&sk, header);
+        let err = token.verify(&pk).unwrap_err();
+        assert!(
+            matches!(err, CryptoError::KeyIdMismatch { .. }),
+            "expected KeyIdMismatch, got {err:?}"
         );
     }
 
@@ -1008,6 +1124,87 @@ mod tests {
             .build();
         let token = build_signed_token(&sk, header);
         token.verify(&pk).expect("verify should succeed");
+    }
+
+    #[test]
+    fn verify_rejects_token_with_unprotected_alg() {
+        // RFC 9052 requires alg to be authenticated where possible. COSE_Sign1
+        // has protected headers, so a second unprotected alg is an ambiguity we
+        // reject rather than silently preferring one bucket.
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let protected = HeaderBuilder::new()
+            .algorithm(iana::Algorithm::EdDSA)
+            .key_id(sk.key_id().as_bytes().to_vec())
+            .build();
+        let unprotected = HeaderBuilder::new()
+            .algorithm(iana::Algorithm::ES256)
+            .build();
+        let token = build_signed_token_with_unprotected(&sk, protected, unprotected);
+        let err = token.verify(&pk).unwrap_err();
+        assert!(
+            matches!(err, CryptoError::HeaderPolicyViolation(ref s) if s.contains("alg")),
+            "expected HeaderPolicyViolation(alg…), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_token_with_unprotected_kid() {
+        // Bare COSE treats kid as a hint, but FCP routes by protected kid.
+        // Reject a second unprotected kid to avoid key-selection ambiguity.
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let protected = HeaderBuilder::new()
+            .algorithm(iana::Algorithm::EdDSA)
+            .key_id(sk.key_id().as_bytes().to_vec())
+            .build();
+        let unprotected = HeaderBuilder::new()
+            .key_id(Ed25519SigningKey::generate().key_id().as_bytes().to_vec())
+            .build();
+        let token = build_signed_token_with_unprotected(&sk, protected, unprotected);
+        let err = token.verify(&pk).unwrap_err();
+        assert!(
+            matches!(err, CryptoError::HeaderPolicyViolation(ref s) if s.contains("kid")),
+            "expected HeaderPolicyViolation(kid…), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_token_with_unprotected_crit() {
+        // RFC 9052 §3.1: crit itself must be integrity protected.
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let protected = HeaderBuilder::new()
+            .algorithm(iana::Algorithm::EdDSA)
+            .key_id(sk.key_id().as_bytes().to_vec())
+            .build();
+        let unprotected = HeaderBuilder::new()
+            .add_critical(iana::HeaderParameter::Kid)
+            .build();
+        let token = build_signed_token_with_unprotected(&sk, protected, unprotected);
+        let err = token.verify(&pk).unwrap_err();
+        assert!(
+            matches!(err, CryptoError::HeaderPolicyViolation(ref s) if s.contains("crit")),
+            "expected HeaderPolicyViolation(crit…), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_crit_label_missing_from_protected_bucket() {
+        // RFC 9052 §3.1: if crit lists a label that is not actually present in
+        // the protected header bucket, processing must fail.
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+        let header = HeaderBuilder::new()
+            .algorithm(iana::Algorithm::EdDSA)
+            .add_critical(iana::HeaderParameter::Kid)
+            .build();
+        let token = build_signed_token(&sk, header);
+        let err = token.verify(&pk).unwrap_err();
+        assert!(
+            matches!(err, CryptoError::HeaderPolicyViolation(ref s) if s.contains("crit")),
+            "expected HeaderPolicyViolation(crit…), got {err:?}"
+        );
     }
 
     // ---- CwtClaims builder coverage ----

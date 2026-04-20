@@ -26,9 +26,19 @@ use std::collections::HashMap;
 
 use fcp_webhook::{GitHubWebhook, HmacSha256Verifier, SignatureVerifier, StripeWebhook};
 use libfuzzer_sys::fuzz_target;
+use serde::Deserialize;
 
 const MAX_INPUT_BYTES: usize = 8 * 1024;
 const MAX_HEADER_BYTES: usize = 2 * 1024;
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct WebhookSignatureSeed {
+    header: String,
+    event_type: String,
+    body: String,
+    secret: String,
+}
 
 fn split_first<'a>(bytes: &'a [u8], sep: u8) -> Option<(&'a [u8], &'a [u8])> {
     let pos = bytes.iter().position(|b| *b == sep)?;
@@ -101,11 +111,27 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
+    if let Ok(seed) = serde_json::from_slice::<WebhookSignatureSeed>(data) {
+        let event_type = if seed.event_type.is_empty() {
+            "push"
+        } else {
+            seed.event_type.as_str()
+        };
+        let secret = if seed.secret.is_empty() {
+            b"fuzz-shared-secret".as_slice()
+        } else {
+            seed.secret.as_bytes()
+        };
+        fuzz_stripe(&seed.header, seed.body.as_bytes());
+        fuzz_github(&seed.header, event_type, seed.body.as_bytes());
+        positive_hmac_round_trip(secret, seed.body.as_bytes());
+        return;
+    }
+
     // Layout: [header_bytes] 0x1F [body_bytes]. 0x1F (unit separator) is
     // vanishingly rare in webhook headers and bodies, so the split is
     // usually clean; if it is missing we treat the whole input as header.
-    let (header_raw, body) =
-        split_first(data, 0x1F).unwrap_or((data, &[][..]));
+    let (header_raw, body) = split_first(data, 0x1F).unwrap_or((data, &[][..]));
 
     if header_raw.len() > MAX_HEADER_BYTES {
         return;

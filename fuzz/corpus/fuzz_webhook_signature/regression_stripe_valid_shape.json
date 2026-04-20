@@ -1,0 +1,6 @@
+{
+  "header": "t=1234567890,v1=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+  "event_type": "push",
+  "body": "{\"id\":\"evt_1\",\"type\":\"ping\"}",
+  "secret": "fuzz-stripe-secret"
+}

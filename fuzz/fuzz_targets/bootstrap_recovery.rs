@@ -25,8 +25,17 @@
 
 use fcp_bootstrap::{ColdRecovery, HardwareTokenPin, RecoveryPhrase};
 use libfuzzer_sys::fuzz_target;
+use serde::Deserialize;
 
 const MAX_INPUT_BYTES: usize = 4 * 1024;
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct BootstrapRecoverySeed {
+    pin_a: String,
+    pin_b: String,
+    mnemonic: String,
+}
 
 fn fuzz_hardware_token_pin(a: &[u8], b: &[u8]) {
     // Non-UTF-8 input is coerced via `String::from_utf8_lossy` because
@@ -125,6 +134,14 @@ fn fuzz_recovery_phrase_words(words: &[&str]) {
 
 fuzz_target!(|data: &[u8]| {
     if data.len() > MAX_INPUT_BYTES {
+        return;
+    }
+
+    if let Ok(seed) = serde_json::from_slice::<BootstrapRecoverySeed>(data) {
+        fuzz_hardware_token_pin(seed.pin_a.as_bytes(), seed.pin_b.as_bytes());
+        fuzz_recovery_phrase_parser(&seed.mnemonic);
+        let words: Vec<&str> = seed.mnemonic.split_whitespace().collect();
+        fuzz_recovery_phrase_words(&words);
         return;
     }
 

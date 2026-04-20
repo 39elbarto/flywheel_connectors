@@ -1,0 +1,14 @@
+{
+  "checkpoint_vector": "checkpoint/valid_checkpoint_proposal.json",
+  "body_vector": "provenance/provenance_merge.cbor",
+  "current_time": 1000,
+  "mains_power": true,
+  "bandwidth_estimate_kbps": 90000,
+  "cycle_id": 17,
+  "header_mutations": [
+    { "index": 0, "action": "set_ttl", "ttl_secs": 300 },
+    { "index": 2, "action": "expire_lease" },
+    { "index": 4, "action": "foreign_zone", "zone_id": "z:public" },
+    { "index": 5, "action": "append_foreign_ref", "target": 1 }
+  ]
+}

@@ -1197,6 +1197,21 @@ fn parse_base_url(params: &serde_json::Value) -> FcpResult<String> {
         code: 1003,
         message: "base_url must include a host".into(),
     })?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        // Query/fragment components survive into `format!("{base_url}/...",
+        // ...)` URL construction downstream, letting an attacker-controlled
+        // base_url leak arbitrary query values into every Gmail API request.
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
     let local = is_local_test_host(host);
     if parsed.scheme() == "http" && !local {
         return Err(FcpError::InvalidRequest {
@@ -1882,6 +1897,42 @@ mod tests {
             parse_base_url(&json!({"base_url": "https://content-gmail.googleapis.com/gmail/v1"}))
                 .unwrap();
         assert_eq!(result, "https://content-gmail.googleapis.com/gmail/v1");
+    }
+
+    #[test]
+    fn parse_base_url_rejects_query_string() {
+        let err = parse_base_url(
+            &json!({"base_url": "https://gmail.googleapis.com/?leak=attacker.com"}),
+        )
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("query"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_base_url_rejects_fragment() {
+        let err =
+            parse_base_url(&json!({"base_url": "https://gmail.googleapis.com/gmail/v1#frag"}))
+                .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn parse_base_url_rejects_userinfo() {
+        let err = parse_base_url(
+            &json!({"base_url": "https://attacker:pw@gmail.googleapis.com/gmail/v1"}),
+        )
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("userinfo"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
     }
 
     #[test]

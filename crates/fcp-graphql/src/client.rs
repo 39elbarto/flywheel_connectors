@@ -234,7 +234,7 @@ impl Default for GraphqlClientConfig {
 }
 
 /// GraphQL client builder.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GraphqlClientBuilder {
     endpoint: String,
     config: GraphqlClientConfig,
@@ -244,6 +244,16 @@ pub struct GraphqlClientBuilder {
     /// pool — the right choice when an application creates many
     /// `GraphqlClient`s pointing at the same service.
     http: Option<Arc<HttpClient>>,
+}
+
+impl fmt::Debug for GraphqlClientBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GraphqlClientBuilder")
+            .field("endpoint", &self.endpoint)
+            .field("config", &self.config)
+            .field("shared_http_client", &self.http.is_some())
+            .finish()
+    }
 }
 
 impl GraphqlClientBuilder {

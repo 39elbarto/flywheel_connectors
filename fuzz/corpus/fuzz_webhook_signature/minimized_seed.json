@@ -1,0 +1,6 @@
+{
+  "header": "sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "event_type": "push",
+  "body": "{\"event\":\"push\"}",
+  "secret": "fuzz-github-secret"
+}

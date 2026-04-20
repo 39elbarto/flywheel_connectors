@@ -1,0 +1,156 @@
+---
+source: crates/fcp-testkit/src/session_script.rs
+expression: "serde_json::json!({\n    \"websocket_hello_pong\": scenarios::websocket_hello_pong(\"/ws\"),\n    \"websocket_reconnect\": scenarios::websocket_reconnect(\"/ws\"),\n    \"webhook_deliver_and_ack\": scenarios::webhook_deliver_and_ack(\"push\"),\n    \"nack_redelivery\":\n    scenarios::nack_redelivery(Transport::WebSocket, \"/ws\"),\n})"
+---
+{
+  "nack_redelivery": {
+    "default_transport": "web_socket",
+    "description": "Verify message redelivery when ack is suppressed",
+    "scenario_id": "delivery.nack_redelivery",
+    "steps": [
+      {
+        "action": "connect",
+        "path": "/ws",
+        "transport": "web_socket"
+      },
+      {
+        "ack": "suppress",
+        "action": "expect_message",
+        "matcher": {
+          "mode": "any"
+        },
+        "timeout": "5000ms"
+      },
+      {
+        "action": "annotate",
+        "message": "ack suppressed, expecting redelivery"
+      },
+      {
+        "ack": "auto",
+        "action": "expect_message",
+        "matcher": {
+          "mode": "any"
+        },
+        "timeout": "10000ms"
+      },
+      {
+        "action": "assert_messages_received",
+        "min": 2
+      },
+      {
+        "action": "disconnect"
+      }
+    ]
+  },
+  "webhook_deliver_and_ack": {
+    "default_transport": "webhook_ingress",
+    "description": "Deliver webhook event and verify acknowledgement",
+    "scenario_id": "webhook.deliver_and_ack",
+    "steps": [
+      {
+        "action": "webhook_deliver",
+        "body": {
+          "action": "created",
+          "id": "test-event-1"
+        },
+        "event_type": "push"
+      },
+      {
+        "action": "webhook_expect_ack",
+        "timeout": "5000ms"
+      },
+      {
+        "action": "assert_messages_received",
+        "min": 1
+      }
+    ]
+  },
+  "websocket_hello_pong": {
+    "default_transport": "web_socket",
+    "description": "Basic WebSocket hello/pong exchange",
+    "scenario_id": "websocket.hello_pong",
+    "steps": [
+      {
+        "action": "connect",
+        "path": "/ws",
+        "transport": "web_socket"
+      },
+      {
+        "ack": "auto",
+        "action": "expect_message",
+        "matcher": {
+          "fragment": {
+            "type": "hello"
+          },
+          "mode": "contains"
+        },
+        "timeout": "5000ms"
+      },
+      {
+        "action": "assert_health",
+        "expected": "connected"
+      },
+      {
+        "action": "send_message",
+        "body": {
+          "type": "ping"
+        }
+      },
+      {
+        "ack": "auto",
+        "action": "expect_message",
+        "matcher": {
+          "fragment": {
+            "type": "pong"
+          },
+          "mode": "contains"
+        },
+        "timeout": "5000ms"
+      },
+      {
+        "action": "disconnect"
+      }
+    ]
+  },
+  "websocket_reconnect": {
+    "default_transport": "web_socket",
+    "description": "Verify reconnection after connection drop",
+    "scenario_id": "websocket.reconnect_after_drop",
+    "steps": [
+      {
+        "action": "connect",
+        "path": "/ws",
+        "transport": "web_socket"
+      },
+      {
+        "action": "assert_health",
+        "expected": "connected"
+      },
+      {
+        "action": "inject_fault",
+        "fault": {
+          "kind": "connection_drop"
+        }
+      },
+      {
+        "action": "assert_health",
+        "expected": "reconnecting"
+      },
+      {
+        "action": "wait",
+        "duration": "2000ms"
+      },
+      {
+        "action": "assert_health",
+        "expected": "connected"
+      },
+      {
+        "action": "assert_reconnect_count",
+        "expected": 1
+      },
+      {
+        "action": "disconnect"
+      }
+    ]
+  }
+}

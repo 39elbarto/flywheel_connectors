@@ -1,0 +1,4 @@
+{
+  "checkpoint_vector": "checkpoint/valid_checkpoint_proposal.json",
+  "body_vector": "provenance/provenance_merge.cbor"
+}

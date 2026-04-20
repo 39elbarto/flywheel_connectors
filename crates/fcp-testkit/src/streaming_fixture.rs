@@ -301,10 +301,13 @@ impl StreamingFixtureServer {
         let _ = stream.read(&mut buf);
 
         // Send SSE response headers
+        // This fixture delimits scripted SSE bodies by closing the socket.
+        // Advertising keep-alive with no content-length or chunked framing is
+        // invalid HTTP/1.1 and newer reqwest/hyper rejects it during send().
         let headers = "HTTP/1.1 200 OK\r\n\
                        Content-Type: text/event-stream\r\n\
                        Cache-Control: no-cache\r\n\
-                       Connection: keep-alive\r\n\
+                       Connection: close\r\n\
                        \r\n";
         if stream.write_all(headers.as_bytes()).is_err() {
             return;

@@ -1,7 +1,6 @@
 //! JSON Schema validation helpers.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use jsonschema::Validator;
@@ -11,23 +10,21 @@ use crate::error::GraphqlClientError;
 
 #[derive(Debug, Default)]
 pub struct SchemaCache {
-    inner: Mutex<std::collections::HashMap<u64, Arc<Validator>>>,
+    // Cache by exact schema text so distinct schemas can never alias onto the
+    // same validator entry through a truncated hash key.
+    inner: Mutex<HashMap<String, Arc<Validator>>>,
 }
 
 impl SchemaCache {
     /// Fetch or compile a schema validator.
     pub fn get_or_compile(&self, schema: &str) -> Result<Arc<Validator>, GraphqlClientError> {
-        let mut hasher = DefaultHasher::new();
-        schema.hash(&mut hasher);
-        let key = hasher.finish();
-
         let guard = self
             .inner
             .lock()
             .map_err(|_| GraphqlClientError::Protocol {
                 message: "schema cache lock poisoned".to_string(),
             })?;
-        if let Some(existing) = guard.get(&key) {
+        if let Some(existing) = guard.get(schema) {
             return Ok(Arc::clone(existing));
         }
         drop(guard);
@@ -45,7 +42,7 @@ impl SchemaCache {
             .map_err(|_| GraphqlClientError::Protocol {
                 message: "schema cache lock poisoned".to_string(),
             })?
-            .insert(key, Arc::clone(&validator));
+            .insert(schema.to_string(), Arc::clone(&validator));
 
         Ok(validator)
     }
@@ -431,6 +428,21 @@ mod tests {
         let v1 = cache.get_or_compile(r#"{"type": "string"}"#).unwrap();
         let v2 = cache.get_or_compile(r#"{"type": "integer"}"#).unwrap();
         assert!(!Arc::ptr_eq(&v1, &v2));
+    }
+
+    #[test]
+    fn cache_keys_by_exact_schema_text() {
+        let cache = SchemaCache::default();
+        let schema_a = r#"{"type":"string"}"#;
+        let schema_b = r#"{"type":"integer"}"#;
+
+        cache.get_or_compile(schema_a).unwrap();
+        cache.get_or_compile(schema_b).unwrap();
+
+        let guard = cache.inner.lock().unwrap();
+        assert!(guard.contains_key(schema_a));
+        assert!(guard.contains_key(schema_b));
+        assert_eq!(guard.len(), 2);
     }
 
     // ---- deeply nested validation ----

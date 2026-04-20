@@ -619,6 +619,9 @@ pub mod scenarios {
             .with_transport(Transport::WebSocket)
             .with_description("Basic WebSocket hello/pong exchange")
             .step(ScriptStep::connect(Transport::WebSocket, path))
+            .step(ScriptStep::expect_message_containing(
+                serde_json::json!({"type": "hello"}),
+            ))
             .step(ScriptStep::assert_health(ScriptHealthState::Connected))
             .step(ScriptStep::send_message(
                 serde_json::json!({"type": "ping"}),
@@ -939,7 +942,18 @@ mod tests {
         let script = scenarios::websocket_hello_pong("/ws");
         assert_eq!(script.scenario_id, "websocket.hello_pong");
         assert!(!script.is_empty());
-        assert!(script.len() >= 4);
+        assert!(script.len() >= 5);
+        match &script.steps[1] {
+            ScriptStep::ExpectMessage { matcher, .. } => {
+                assert_eq!(
+                    matcher,
+                    &MessageMatcher::Contains {
+                        fragment: json!({"type": "hello"}),
+                    }
+                );
+            }
+            other => panic!("expected hello ExpectMessage step, got {other:?}"),
+        }
     }
 
     #[test]
@@ -977,6 +991,19 @@ mod tests {
     fn canonical_scenario_nack_redelivery() {
         let script = scenarios::nack_redelivery(Transport::WebSocket, "/ws");
         assert_eq!(script.scenario_id, "delivery.nack_redelivery");
+    }
+
+    #[test]
+    fn common_handshake_scripts_snapshot() {
+        insta::assert_json_snapshot!(
+            "common_handshake_scripts_snapshot",
+            serde_json::json!({
+                "websocket_hello_pong": scenarios::websocket_hello_pong("/ws"),
+                "websocket_reconnect": scenarios::websocket_reconnect("/ws"),
+                "webhook_deliver_and_ack": scenarios::webhook_deliver_and_ack("push"),
+                "nack_redelivery": scenarios::nack_redelivery(Transport::WebSocket, "/ws"),
+            })
+        );
     }
 
     #[test]

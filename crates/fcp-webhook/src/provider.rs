@@ -670,10 +670,11 @@ mod tests {
     fn stripe_accepts_boundary_sized_timestamp_and_signature() {
         // Positive-side boundary: the exactly-at-limit values must
         // still parse (with a valid numeric timestamp).
-        let ts = "1".repeat(MAX_STRIPE_TIMESTAMP_LEN);
+        let ts = format!("0{}", i64::MAX);
         let sig = "a".repeat(MAX_STRIPE_SIGNATURE_LEN);
         let header = format!("t={ts},v1={sig}");
-        // At-limit timestamp parses as a bare integer; result Ok.
+        // At-limit length still parses when the numeric value remains
+        // in-range for i64.
         let (raw, _parsed, sigs) =
             StripeWebhook::parse_stripe_signature(&header).expect("at-limit must parse");
         assert_eq!(raw.len(), MAX_STRIPE_TIMESTAMP_LEN);

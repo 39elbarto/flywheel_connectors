@@ -38,6 +38,8 @@ struct WebhookSignatureSeed {
     event_type: String,
     body: String,
     secret: String,
+    stripe_timestamp: Option<String>,
+    stripe_signatures: Vec<String>,
 }
 
 fn split_first<'a>(bytes: &'a [u8], sep: u8) -> Option<(&'a [u8], &'a [u8])> {
@@ -70,6 +72,21 @@ fn fuzz_github(signature_header: &str, event_type: &str, body: &[u8]) {
 
     let github = GitHubWebhook::new(b"fuzz-github-secret");
     let _ = github.verify_and_parse(&headers, body);
+}
+
+fn structured_stripe_header(seed: &WebhookSignatureSeed) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(ts) = seed.stripe_timestamp.as_deref().filter(|ts| !ts.is_empty()) {
+        parts.push(format!("t={ts}"));
+    }
+    for signature in seed.stripe_signatures.iter().filter(|sig| !sig.is_empty()) {
+        parts.push(format!("v1={signature}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(","))
+    }
 }
 
 fn positive_hmac_round_trip(secret: &[u8], body: &[u8]) {
@@ -123,6 +140,9 @@ fuzz_target!(|data: &[u8]| {
             seed.secret.as_bytes()
         };
         fuzz_stripe(&seed.header, seed.body.as_bytes());
+        if let Some(header) = structured_stripe_header(&seed) {
+            fuzz_stripe(&header, seed.body.as_bytes());
+        }
         fuzz_github(&seed.header, event_type, seed.body.as_bytes());
         positive_hmac_round_trip(secret, seed.body.as_bytes());
         return;

@@ -23,8 +23,8 @@ expression: canonicalize_json(snapshot)
     "source_ip": "[source-ip]",
     "status": "failed",
     "taint_flags": [
-      "PublicInput",
-      "WebhookInjected"
+      "PUBLIC_INPUT",
+      "WEBHOOK_INJECTED"
     ]
   },
   "payload": {

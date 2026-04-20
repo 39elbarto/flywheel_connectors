@@ -11,6 +11,7 @@ cargo-fuzz = true
 arbitrary = { version = "1.4.2", features = ["derive"] }
 base64 = "0.22.1"
 bytes = "1.10.1"
+chrono = "0.4.43"
 hex = "0.4.3"
 libfuzzer-sys = "0.4"
 ciborium = "0.2.2"
@@ -37,6 +38,13 @@ fcp-webhook = { path = "../crates/fcp-webhook" }
 [[bin]]
 name = "fuzz_capability"
 path = "fuzz_targets/capability.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_cose_roundtrip"
+path = "fuzz_targets/cose_roundtrip.rs"
 test = false
 doc = false
 bench = false

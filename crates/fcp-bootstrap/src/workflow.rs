@@ -1891,6 +1891,34 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn map_error_certificate_selection_failed_preserves_all_refusal_variants() {
+        use crate::hardware_token::{CertificateSelectionRefusal, TokenKeyType};
+
+        let refusals = [
+            CertificateSelectionRefusal::NoCertificates,
+            CertificateSelectionRefusal::NoKeys,
+            CertificateSelectionRefusal::NoMatchingKeyPair,
+            CertificateSelectionRefusal::NoCompatibleKeyType {
+                found: vec![TokenKeyType::Rsa],
+            },
+            CertificateSelectionRefusal::AmbiguousSelection { count: 2 },
+        ];
+
+        for refusal in refusals {
+            let err = map_hardware_token_error(
+                &empty_report(),
+                TokenError::CertificateSelectionFailed(refusal.clone()),
+            );
+            assert!(matches!(
+                err,
+                BootstrapError::HardwareTokenCertificateSelectionFailed {
+                    refusal: mapped,
+                } if mapped == refusal
+            ));
+        }
+    }
+
     // ---- Session cleanup determinism ----
 
     #[test]

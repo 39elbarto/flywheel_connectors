@@ -11,6 +11,7 @@ use std::{
 
 use base64::Engine;
 use chrono::{DateTime, FixedOffset};
+use reqwest::Url;
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
@@ -31,6 +32,69 @@ use crate::types::{
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
+fn is_local_test_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+}
+
+/// Validate a Jira URL override (`base_url` / `agile_url` / `automation_url`).
+///
+/// Cloud deployments pin the host to `{domain}.atlassian.net` (localhost
+/// permitted for tests). Server/DC deployments accept any https host so
+/// self-hosted installations can be configured, but still require https
+/// unless targeting a local test listener. Parses the URL so substring
+/// smuggles like `https://evil.com/example.atlassian.net` are rejected.
+fn validate_jira_endpoint_url(
+    raw: &str,
+    field: &str,
+    deployment: JiraDeployment,
+    domain: &str,
+) -> FcpResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must not be empty"),
+        });
+    }
+    let parsed = Url::parse(trimmed).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} could not be parsed: {error}"),
+    })?;
+    if !matches!(parsed.scheme(), "https" | "http") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must use http or https"),
+        });
+    }
+    let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must include a host"),
+    })?;
+    let local = is_local_test_host(host);
+    if parsed.scheme() == "http" && !local {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "{field} must use https unless targeting localhost/127.0.0.1/::1 for tests"
+            ),
+        });
+    }
+    if let JiraDeployment::Cloud = deployment {
+        if !local {
+            let expected = format!("{}.atlassian.net", domain.trim().to_ascii_lowercase());
+            if !host.eq_ignore_ascii_case(&expected) {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!(
+                        "{field} must target {expected} for cloud deployment (localhost allowed for tests): {trimmed}"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(trimmed.trim_end_matches('/').to_string())
+}
 
 /// Parsed configuration for the Jira connector.
 struct JiraConfig {
@@ -55,9 +119,21 @@ impl JiraConfig {
         let email = params.get("email").and_then(|v| v.as_str());
         let api_token = params.get("api_token").and_then(|v| v.as_str());
         let credential_id = params.get("credential_id").and_then(|v| v.as_str());
-        let base_url = params.get("base_url").and_then(|v| v.as_str());
-        let agile_url = params.get("agile_url").and_then(|v| v.as_str());
-        let automation_url = params.get("automation_url").and_then(|v| v.as_str());
+        let base_url = params
+            .get("base_url")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let agile_url = params
+            .get("agile_url")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let automation_url = params
+            .get("automation_url")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
         let deployment_str = params
             .get("deployment")
             .and_then(|v| v.as_str())
@@ -69,6 +145,16 @@ impl JiraConfig {
                     code: 1003,
                     message: e,
                 })?;
+
+        let base_url = base_url
+            .map(|raw| validate_jira_endpoint_url(raw, "base_url", deployment, domain))
+            .transpose()?;
+        let agile_url = agile_url
+            .map(|raw| validate_jira_endpoint_url(raw, "agile_url", deployment, domain))
+            .transpose()?;
+        let automation_url = automation_url
+            .map(|raw| validate_jira_endpoint_url(raw, "automation_url", deployment, domain))
+            .transpose()?;
 
         let auth = match (email, api_token, credential_id) {
             (Some(_), Some(_), Some(_)) => {
@@ -121,9 +207,9 @@ impl JiraConfig {
         Ok(Self {
             auth,
             deployment,
-            base_url: base_url.map(String::from),
-            agile_url: agile_url.map(String::from),
-            automation_url: automation_url.map(String::from),
+            base_url,
+            agile_url,
+            automation_url,
         })
     }
 }
@@ -3516,6 +3602,110 @@ mod tests {
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
     use std::path::PathBuf;
+
+    #[test]
+    fn validate_jira_endpoint_cloud_requires_atlassian_net() {
+        let ok = validate_jira_endpoint_url(
+            "https://acme.atlassian.net",
+            "base_url",
+            JiraDeployment::Cloud,
+            "acme",
+        )
+        .unwrap();
+        assert_eq!(ok, "https://acme.atlassian.net");
+
+        let err = validate_jira_endpoint_url(
+            "https://evil.example.com",
+            "base_url",
+            JiraDeployment::Cloud,
+            "acme",
+        )
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("acme.atlassian.net"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_jira_endpoint_cloud_rejects_substring_smuggle() {
+        let err = validate_jira_endpoint_url(
+            "https://evil.com/acme.atlassian.net",
+            "base_url",
+            JiraDeployment::Cloud,
+            "acme",
+        )
+        .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_jira_endpoint_cloud_rejects_cross_domain_even_if_atlassian_net() {
+        // acme2.atlassian.net is a different tenant — must be rejected.
+        let err = validate_jira_endpoint_url(
+            "https://acme2.atlassian.net",
+            "base_url",
+            JiraDeployment::Cloud,
+            "acme",
+        )
+        .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_jira_endpoint_cloud_allows_localhost() {
+        validate_jira_endpoint_url(
+            "http://localhost:9999",
+            "base_url",
+            JiraDeployment::Cloud,
+            "acme",
+        )
+        .unwrap();
+        validate_jira_endpoint_url(
+            "http://127.0.0.1:9999",
+            "base_url",
+            JiraDeployment::Cloud,
+            "acme",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_jira_endpoint_server_accepts_any_https_host() {
+        // Self-hosted Jira Server/DC can be anywhere — we only require https.
+        validate_jira_endpoint_url(
+            "https://jira.internal.corp",
+            "base_url",
+            JiraDeployment::ServerDc,
+            "ignored",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_jira_endpoint_server_rejects_plain_http_on_public_host() {
+        let err = validate_jira_endpoint_url(
+            "http://jira.internal.corp",
+            "base_url",
+            JiraDeployment::ServerDc,
+            "ignored",
+        )
+        .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_jira_endpoint_rejects_empty_and_malformed() {
+        let err = validate_jira_endpoint_url("   ", "agile_url", JiraDeployment::Cloud, "acme")
+            .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+        let err =
+            validate_jira_endpoint_url("not a url", "agile_url", JiraDeployment::Cloud, "acme")
+                .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
         let cap = match op {

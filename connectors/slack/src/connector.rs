@@ -20,6 +20,7 @@ use fcp_streaming::{WsClient, WsConnection, WsMessage};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{info, instrument, warn};
+use url::Url;
 
 use crate::{
     client::SlackClient,
@@ -27,7 +28,48 @@ use crate::{
     types::{DoctorCheck, DoctorReport, OperationReceipt},
 };
 
+const SLACK_API_HOST: &str = "slack.com";
 const SOCKET_EVENT_BUFFER_CAPACITY: usize = 200;
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+/// Validate a Slack `base_url` override.
+///
+/// Direct-token mode pins the host to `slack.com` (localhost permitted
+/// for tests). Empty/whitespace overrides fall through to the client
+/// default upstream. Custom vault-proxy hosts are not supported here —
+/// Slack's connector does not yet have a credential_id auth mode.
+fn validate_slack_base_url(raw: &str) -> FcpResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not be empty".into(),
+        });
+    }
+    let parsed = Url::parse(trimmed).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("base_url could not be parsed: {error}"),
+    })?;
+    let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "base_url must include a host".into(),
+    })?;
+    let local = is_local_test_host(host);
+    let host_ok = host.eq_ignore_ascii_case(SLACK_API_HOST) || local;
+    let scheme_ok = parsed.scheme() == "https" || local;
+    if !host_ok || !scheme_ok {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "base_url must use https and {SLACK_API_HOST} (localhost/127.0.0.1/::1 allowed for tests): {trimmed}"
+            ),
+        });
+    }
+    Ok(trimmed.trim_end_matches('/').to_string())
+}
 const SOCKET_RECONNECT_MIN_MS: u64 = 1_000;
 const SOCKET_RECONNECT_MAX_MS: u64 = 30_000;
 const SOCKET_DEFAULT_TOPICS: &[&str] = &[
@@ -96,17 +138,25 @@ impl SlackConnector {
     ) -> FcpResult<serde_json::Value> {
         self.stop_socket_mode().await;
 
-        let token =
-            params
-                .get("token")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing token in configuration".into(),
-                })?;
+        let token = params
+            .get("token")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing token in configuration".into(),
+            })?;
 
-        let base_url = params.get("base_url").and_then(|v| v.as_str());
-        let app_token = params.get("app_token").and_then(|v| v.as_str());
+        let base_url = match params.get("base_url").and_then(|v| v.as_str()) {
+            Some(raw) => Some(validate_slack_base_url(raw)?),
+            None => None,
+        };
+        let app_token = params
+            .get("app_token")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
         let socket_mode_token = app_token.unwrap_or(token).to_string();
 
         let mut client = SlackClient::new(token).map_err(|e| FcpError::Internal {
@@ -1511,6 +1561,49 @@ mod tests {
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn validate_slack_base_url_accepts_slack_com() {
+        let normalized =
+            validate_slack_base_url("https://slack.com/api/").expect("slack.com/api is allowed");
+        assert_eq!(normalized, "https://slack.com/api");
+    }
+
+    #[test]
+    fn validate_slack_base_url_allows_localhost_http() {
+        validate_slack_base_url("http://localhost:8080").expect("localhost permitted for tests");
+        validate_slack_base_url("http://127.0.0.1/api").expect("127.0.0.1 permitted for tests");
+    }
+
+    #[test]
+    fn validate_slack_base_url_rejects_other_hosts() {
+        let err = validate_slack_base_url("https://evil.example.com/api").unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("slack.com"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_slack_base_url_rejects_plain_http_on_public_host() {
+        let err = validate_slack_base_url("http://slack.com/api").unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_slack_base_url_rejects_substring_smuggle() {
+        // "api.slack.com" subdomain-like smuggling via evil host containing the string
+        let err = validate_slack_base_url("https://evil.com/slack.com").unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_slack_base_url_rejects_empty() {
+        let err = validate_slack_base_url("   ").unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
 
     fn run_with_test_runtime<F, T>(future: F) -> T
     where

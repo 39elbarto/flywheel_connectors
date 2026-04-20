@@ -52,7 +52,9 @@ pub struct TokenCost {
 impl TokenCost {
     #[must_use]
     pub const fn total(self) -> u32 {
-        self.base_tokens + self.bytes_tokens + self.compute_tokens
+        self.base_tokens
+            .saturating_add(self.bytes_tokens)
+            .saturating_add(self.compute_tokens)
     }
 }
 
@@ -753,6 +755,16 @@ mod tests {
         // Should work without panic
         let cost = compute_token_cost(0, u64::MAX, u64::MAX, 0).unwrap();
         assert_eq!(cost.bytes_tokens, 1);
+    }
+
+    #[test]
+    fn token_cost_total_saturates_on_manual_overflow() {
+        let cost = TokenCost {
+            base_tokens: u32::MAX,
+            bytes_tokens: 1,
+            compute_tokens: 1,
+        };
+        assert_eq!(cost.total(), u32::MAX);
     }
 
     // ── BackpressureThresholds tests ────────────────────────────────────

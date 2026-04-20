@@ -652,6 +652,7 @@ pub struct ReconnectingWsStream {
     client: WsClient,
     handler: ReconnectHandler,
     state: ReconnectState,
+    reset_backoff_after_first_message: bool,
 }
 
 enum ReconnectState {
@@ -681,7 +682,26 @@ impl ReconnectingWsStream {
             client,
             handler: ReconnectHandler::new(config),
             state: ReconnectState::Idle,
+            reset_backoff_after_first_message: false,
         }
+    }
+
+    fn note_connection_established(&mut self) {
+        // A TCP/WebSocket handshake alone is not proof of a healthy session. If the
+        // peer immediately closes before delivering any frame, keep the accumulated
+        // retry budget so reconnect storms back off instead of restarting from zero.
+        self.reset_backoff_after_first_message = true;
+    }
+
+    fn note_message_received(&mut self) {
+        if self.reset_backoff_after_first_message {
+            self.handler.reset();
+            self.reset_backoff_after_first_message = false;
+        }
+    }
+
+    fn note_connection_lost(&mut self) {
+        self.reset_backoff_after_first_message = false;
     }
 }
 
@@ -702,7 +722,7 @@ impl Stream for ReconnectingWsStream {
                 },
                 ReconnectState::Connecting(future) => match future.as_mut().poll(cx) {
                     Poll::Ready(Ok(connection)) => {
-                        self.handler.reset();
+                        self.note_connection_established();
                         self.state = ReconnectState::Connected(Box::new(connection));
                     }
                     Poll::Ready(Err(err)) => {
@@ -730,11 +750,13 @@ impl Stream for ReconnectingWsStream {
                 }
                 ReconnectState::Receiving(future) => match future.as_mut().poll(cx) {
                     Poll::Ready((connection, Ok(Some(message)))) => {
+                        self.note_message_received();
                         self.state = ReconnectState::Connected(connection);
                         return Poll::Ready(Some(Ok(message)));
                     }
                     Poll::Ready((connection, Ok(None))) => {
                         drop(connection);
+                        self.note_connection_lost();
                         if !self.handler.can_reconnect() {
                             return Poll::Ready(None);
                         }
@@ -745,6 +767,7 @@ impl Stream for ReconnectingWsStream {
                     }
                     Poll::Ready((connection, Err(err))) => {
                         drop(connection);
+                        self.note_connection_lost();
                         if !self.handler.can_reconnect() {
                             return Poll::Ready(Some(Err(err)));
                         }
@@ -778,6 +801,29 @@ mod tests {
         assert!(!message.is_binary());
         assert_eq!(message.as_text(), Some("hello"));
         assert_eq!(message.as_binary(), None);
+    }
+
+    #[test]
+    fn reconnect_stream_only_resets_backoff_after_first_message() {
+        let client = WsClient::new("ws://localhost:8080");
+        let mut stream = ReconnectingWsStream::new(client);
+
+        stream.handler.record_failure();
+        stream.handler.record_failure();
+        assert_eq!(stream.handler.attempts(), 2);
+
+        stream.note_connection_established();
+        assert_eq!(stream.handler.attempts(), 2);
+        assert!(stream.reset_backoff_after_first_message);
+
+        stream.note_connection_lost();
+        assert_eq!(stream.handler.attempts(), 2);
+        assert!(!stream.reset_backoff_after_first_message);
+
+        stream.note_connection_established();
+        stream.note_message_received();
+        assert_eq!(stream.handler.attempts(), 0);
+        assert!(!stream.reset_backoff_after_first_message);
     }
 
     #[test]

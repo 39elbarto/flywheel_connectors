@@ -1,15 +1,13 @@
 //! GraphQL HTTP client implementation.
 
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
 use std::fmt;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use fcp_async_core::http::{HttpClient, HttpClientBuilder, Method};
-use fcp_async_core::{AsyncError, sync::Mutex, time};
+use fcp_async_core::{AsyncError, sync::Mutex, task, time};
 use futures_util::future::{BoxFuture, FutureExt, Shared};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -79,9 +77,22 @@ pub struct GraphqlClientMetricsSnapshot {
     pub requests_retried: u64,
 }
 
+/// In-flight dedup keyed on the request body bytes.
+///
+/// Previously keyed on a `u64` `DefaultHasher` (SipHash) output —
+/// collision-prone in principle (two distinct bodies hashing to the
+/// same `u64` would be merged into one in-flight entry, serving the
+/// second caller the response intended for the first). Adversarial
+/// collisions only need knowledge of the hasher seed and `DefaultHasher`
+/// is not HashDoS-resistant (br-flywheel_connectors-upp69).
+///
+/// Using the raw body bytes as the key makes the dedup map
+/// collision-free: key equality is byte-for-byte request equality.
+/// The memory cost is one additional `Vec<u8>` per in-flight entry,
+/// bounded by concurrency and released by [`DedupGuard::drop`].
 #[derive(Debug, Clone)]
 struct DedupState {
-    inner: Arc<Mutex<HashMap<u64, SharedRequestFuture>>>,
+    inner: Arc<Mutex<HashMap<Vec<u8>, SharedRequestFuture>>>,
 }
 
 impl DedupState {
@@ -89,6 +100,40 @@ impl DedupState {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+}
+
+/// RAII guard that removes a dedup entry from the map when the owning
+/// caller exits — whether via normal return, cancellation (the outer
+/// future being dropped mid-`await`), or panic. Without this, a cancelled
+/// owner leaves the map entry resident forever, so every subsequent
+/// same-body caller hits the cached (stale) result and the map grows
+/// monotonically with unique cancelled-request bodies.
+struct DedupGuard {
+    state: DedupState,
+    key: Vec<u8>,
+}
+
+impl Drop for DedupGuard {
+    fn drop(&mut self) {
+        // Common case: the lock is uncontended because the owner has
+        // already finished its `shared.await` and no other caller is
+        // mutating the map at this instant — remove synchronously.
+        if let Ok(mut inner) = self.state.inner.try_lock() {
+            inner.remove(&self.key);
+            return;
+        }
+
+        // Contended case: defer to a short spawned task so Drop stays
+        // synchronous. The task captures `state` + `key` by move; it
+        // cannot outlive the Arc because DedupState holds an Arc to the
+        // map. `mem::take` is fine here: we're in Drop and the key slot
+        // will never be read again.
+        let state = self.state.clone();
+        let key = std::mem::take(&mut self.key);
+        task::spawn(async move {
+            state.inner.lock().await.remove(&key);
+        });
     }
 }
 
@@ -517,9 +562,10 @@ impl GraphqlClient {
         self.metrics.requests_total.fetch_add(1, Ordering::Relaxed);
 
         if let Some(state) = &self.dedup_state {
-            let key = hash_bytes(&body_bytes);
+            // Key on the raw body bytes — collision-free. See DedupState
+            // docs for the rationale vs. the prior u64 SipHash key.
             let mut guard = state.inner.lock().await;
-            if let Some(shared) = guard.get(&key).cloned() {
+            if let Some(shared) = guard.get(&body_bytes).cloned() {
                 drop(guard);
                 return shared.await;
             }
@@ -529,12 +575,20 @@ impl GraphqlClient {
             let future = async move { client.send_with_retry(payload, idempotent).await }
                 .boxed()
                 .shared();
-            guard.insert(key, future.clone());
+            guard.insert(body_bytes.clone(), future.clone());
             drop(guard);
 
-            let result = future.await;
-            state.inner.lock().await.remove(&key);
-            return result;
+            // The cleanup guard removes our entry from the dedup map no
+            // matter how we exit this scope: return, cancellation, or
+            // panic. Previously the explicit `remove` after `future.await`
+            // only fired on normal completion, so a cancelled owner
+            // leaked the entry and future duplicates saw a stale cached
+            // Shared<> indefinitely.
+            let _cleanup = DedupGuard {
+                state: state.clone(),
+                key: body_bytes,
+            };
+            return future.await;
         }
 
         self.send_with_retry(body_bytes, idempotent).await
@@ -651,12 +705,6 @@ fn truncate_body(bytes: &[u8]) -> String {
         body.push('…');
     }
     body
-}
-
-fn hash_bytes(bytes: &[u8]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    hasher.finish()
 }
 
 impl GraphqlClient {
@@ -1068,24 +1116,6 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    // ---- hash_bytes ----
-
-    #[test]
-    fn hash_bytes_deterministic() {
-        let data = b"test payload";
-        assert_eq!(hash_bytes(data), hash_bytes(data));
-    }
-
-    #[test]
-    fn hash_bytes_different_input_different_hash() {
-        assert_ne!(hash_bytes(b"hello"), hash_bytes(b"world"));
-    }
-
-    #[test]
-    fn hash_bytes_empty() {
-        let _ = hash_bytes(b""); // should not panic
-    }
-
     // ---- additional edge case tests ----
 
     #[test]
@@ -1163,14 +1193,6 @@ mod tests {
         };
         let cloned = snap;
         assert_eq!(snap, cloned);
-    }
-
-    #[test]
-    fn hash_bytes_large_payload() {
-        let data = vec![0xABu8; 100_000];
-        let h1 = hash_bytes(&data);
-        let h2 = hash_bytes(&data);
-        assert_eq!(h1, h2);
     }
 
     #[test]
@@ -1382,22 +1404,6 @@ mod tests {
         let body = b"Hello World 2026";
         let result = truncate_body(body);
         assert_eq!(result, "Hello World 2026");
-    }
-
-    // ---- hash_bytes additional tests ----
-
-    #[test]
-    fn hash_bytes_single_byte() {
-        let a = hash_bytes(b"a");
-        let b = hash_bytes(b"b");
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn hash_bytes_same_content_same_hash() {
-        let data1 = b"identical payload".to_vec();
-        let data2 = b"identical payload".to_vec();
-        assert_eq!(hash_bytes(&data1), hash_bytes(&data2));
     }
 
     // ---- upsert_header additional tests ----
@@ -1793,21 +1799,106 @@ mod tests {
         assert_eq!(snap.requests_retried, 0);
     }
 
-    // ---- hash_bytes with various data patterns ----
+    // ---- DedupGuard ----
 
-    #[test]
-    fn hash_bytes_all_zeros() {
-        let data = vec![0u8; 100];
-        let h = hash_bytes(&data);
-        assert_ne!(h, 0); // hash of zeros should not be zero
+    #[fcp_async_core::runtime::test]
+    async fn dedup_guard_removes_entry_on_drop() {
+        let state = DedupState::new();
+
+        // Pre-seed the map with a Shared future that's already resolved —
+        // the guard's job is only to remove the key, not to drive the
+        // future.
+        let fut = async { Ok(Vec::<u8>::new()) }.boxed().shared();
+        let key = b"{\"query\":\"{ seeded }\"}".to_vec();
+        state.inner.lock().await.insert(key.clone(), fut);
+        assert_eq!(state.inner.lock().await.len(), 1);
+
+        {
+            let _guard = DedupGuard {
+                state: state.clone(),
+                key: key.clone(),
+            };
+            // Drop happens at end of scope.
+        }
+
+        // Give the spawn fallback a chance to run if try_lock contended.
+        // In this test there's no concurrent lock holder, so try_lock
+        // succeeds and removal is synchronous.
+        assert!(
+            state.inner.lock().await.is_empty(),
+            "DedupGuard::drop must remove the map entry"
+        );
     }
 
-    #[test]
-    fn hash_bytes_single_difference() {
-        let mut a = vec![0u8; 100];
-        let mut b = vec![0u8; 100];
-        a[50] = 1;
-        b[50] = 2;
-        assert_ne!(hash_bytes(&a), hash_bytes(&b));
+    #[fcp_async_core::runtime::test]
+    async fn dedup_guard_tolerates_missing_key() {
+        // Guard for a key that was already removed should be a no-op,
+        // not a panic.
+        let state = DedupState::new();
+        {
+            let _guard = DedupGuard {
+                state: state.clone(),
+                key: b"never-inserted".to_vec(),
+            };
+        }
+        assert!(state.inner.lock().await.is_empty());
+    }
+
+    // ---- br-flywheel_connectors-upp69: collision-free dedup keys ----
+
+    #[fcp_async_core::runtime::test]
+    async fn dedup_map_distinguishes_bodies_that_would_share_siphash_output() {
+        // Regression: prior behavior keyed on `u64` DefaultHasher output,
+        // which merges distinct bodies on the (hypothetical, but
+        // adversarially-attainable) collision. With byte-keyed dedup,
+        // any two distinct byte sequences map to distinct entries
+        // *unconditionally*. Prove it with the strongest possible
+        // pair: two bodies that differ in exactly one byte.
+        let state = DedupState::new();
+
+        let body_a = b"{\"query\":\"{ a }\"}".to_vec();
+        let mut body_b = body_a.clone();
+        // Flip the only letter of content.
+        let idx = body_b
+            .iter()
+            .position(|&c| c == b'a')
+            .expect("body_a has 'a'");
+        body_b[idx] = b'b';
+
+        let fut_a = async { Ok(b"RESPONSE-A".to_vec()) }.boxed().shared();
+        let fut_b = async { Ok(b"RESPONSE-B".to_vec()) }.boxed().shared();
+
+        {
+            let mut inner = state.inner.lock().await;
+            inner.insert(body_a.clone(), fut_a);
+            inner.insert(body_b.clone(), fut_b);
+            assert_eq!(
+                inner.len(),
+                2,
+                "distinct bodies must occupy distinct map entries"
+            );
+        }
+
+        let got_a = state
+            .inner
+            .lock()
+            .await
+            .get(&body_a)
+            .cloned()
+            .expect("a present")
+            .await
+            .expect("a resolved");
+        let got_b = state
+            .inner
+            .lock()
+            .await
+            .get(&body_b)
+            .cloned()
+            .expect("b present")
+            .await
+            .expect("b resolved");
+
+        assert_eq!(got_a, b"RESPONSE-A");
+        assert_eq!(got_b, b"RESPONSE-B");
     }
 }

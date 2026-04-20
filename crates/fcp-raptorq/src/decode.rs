@@ -4,6 +4,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -85,21 +86,16 @@ impl RaptorQDecoder {
             return Err(DecodeError::Timeout);
         }
 
-        let expected_len = usize::from(self.symbol_size);
-        if data.len() != expected_len {
-            return Err(DecodeError::InvalidSymbol {
-                reason: format!(
-                    "symbol size mismatch: expected {expected_len} bytes, got {} bytes",
-                    data.len()
-                ),
-            });
-        }
+        self.validate_decode_bounds()?;
+        self.validate_symbol_ingress(data.len())?;
 
-        // Skip duplicates
-        if self.received.contains_key(&esi) {
+        // Ignore exact duplicates, but reject conflicting payloads for the same ESI.
+        if let Some(existing) = self.received.get(&esi) {
+            self.validate_duplicate_symbol(esi, existing, &data)?;
             return Ok(None);
         }
 
+        self.validate_direct_buffer_capacity()?;
         self.received.insert(esi, data);
 
         // Attempt reconstruction when we have at least K symbols.
@@ -502,6 +498,127 @@ impl RaptorQDecoder {
     pub const fn expected_k(&self) -> u32 {
         self.k
     }
+
+    fn validate_decode_bounds(&self) -> Result<(), DecodeError> {
+        let max_object_size = self.config.max_object_size as usize;
+        let transfer_len = usize::try_from(self.transfer_length).map_err(|_| {
+            DecodeError::MemoryLimitExceeded {
+                used: usize::MAX,
+                limit: max_object_size,
+            }
+        })?;
+        if transfer_len > max_object_size {
+            return Err(DecodeError::MemoryLimitExceeded {
+                used: transfer_len,
+                limit: max_object_size,
+            });
+        }
+
+        let max_supported_k = self.config.source_symbols(max_object_size);
+        if self.k > max_supported_k {
+            return Err(DecodeError::UnsupportedSourceBlockSize {
+                requested: usize::try_from(self.k).unwrap_or(usize::MAX),
+                max_supported: usize::try_from(max_supported_k).unwrap_or(usize::MAX),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn validate_symbol_ingress(&self, actual_len: usize) -> Result<(), DecodeError> {
+        if self.transfer_length == 0 || self.k == 0 {
+            return Err(DecodeError::InvalidSymbol {
+                reason: "zero-length source block must not receive symbols".into(),
+            });
+        }
+        let expected_len = usize::from(self.symbol_size);
+        if actual_len != expected_len {
+            return Err(DecodeError::InvalidSymbol {
+                reason: format!(
+                    "symbol size mismatch: expected {expected_len} bytes, got {actual_len} bytes"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_duplicate_symbol(
+        &self,
+        esi: u32,
+        existing: &[u8],
+        incoming: &[u8],
+    ) -> Result<(), DecodeError> {
+        if existing != incoming {
+            return Err(DecodeError::InvalidSymbol {
+                reason: format!(
+                    "conflicting duplicate symbol for ESI {esi}: payload differs from previously buffered symbol"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_direct_buffer_capacity(&self) -> Result<(), DecodeError> {
+        let transfer_len = usize::try_from(self.transfer_length).map_err(|_| {
+            DecodeError::MemoryLimitExceeded {
+                used: usize::MAX,
+                limit: self.config.max_object_size as usize,
+            }
+        })?;
+        let max_symbols = self
+            .config
+            .total_symbols(transfer_len)
+            .saturating_add(1000);
+        let max_symbols_usize = usize::try_from(max_symbols)
+        .map_err(|_| DecodeError::MemoryLimitExceeded {
+            used: usize::MAX,
+            limit: self.config.max_object_size as usize,
+        })?;
+        if self.received_count() >= max_symbols {
+            return Err(DecodeError::SymbolBufferExceeded {
+                buffered: self.received_count(),
+                limit: max_symbols,
+            });
+        }
+
+        let symbol_size = usize::from(self.symbol_size);
+        let projected_symbols =
+            self.received
+                .len()
+                .checked_add(1)
+                .ok_or(DecodeError::MemoryLimitExceeded {
+                    used: usize::MAX,
+                    limit: self.config.max_object_size as usize,
+                })?;
+        // Byte-budget derived from max_symbols so the memory cap matches the
+        // symbol-count cap above. Using max_object_size directly here falsely
+        // rejected legitimate repair symbols whenever transfer_length was
+        // close to max_object_size (every `projected_symbols * symbol_size`
+        // past transfer_length tripped the cap, even though
+        // total_symbols(transfer_len) explicitly budgets repair overhead).
+        let max_buffer_bytes =
+            max_symbols_usize
+                .checked_mul(symbol_size)
+                .ok_or(DecodeError::MemoryLimitExceeded {
+                    used: usize::MAX,
+                    limit: self.config.max_object_size as usize,
+                })?;
+        let projected_memory =
+            projected_symbols
+                .checked_mul(symbol_size)
+                .ok_or(DecodeError::MemoryLimitExceeded {
+                    used: usize::MAX,
+                    limit: max_buffer_bytes,
+                })?;
+        if projected_memory > max_buffer_bytes {
+            return Err(DecodeError::MemoryLimitExceeded {
+                used: projected_memory,
+                limit: max_buffer_bytes,
+            });
+        }
+
+        Ok(())
+    }
 }
 
 /// Decode admission controller (NORMATIVE).
@@ -633,16 +750,42 @@ impl DecodeAdmissionController {
             return Err(DecodeError::Timeout);
         }
 
+        decoder.validate_decode_bounds()?;
         let mut permit = self.acquire()?;
-        let mut ordered_symbols: Vec<(u32, Vec<u8>)> = symbols.into_iter().collect();
-        ordered_symbols.sort_unstable_by_key(|(esi, _)| *esi);
+        let mut ordered_symbols: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+        for (index, (esi, data)) in symbols.into_iter().enumerate() {
+            if let Some(existing) = decoder.received.get(&esi) {
+                decoder.validate_duplicate_symbol(esi, existing, &data)?;
+                continue;
+            }
+            decoder.validate_symbol_ingress(data.len())?;
+
+            match ordered_symbols.entry(esi) {
+                Entry::Occupied(existing) => {
+                    decoder.validate_duplicate_symbol(esi, existing.get(), &data)?;
+                    continue;
+                }
+                Entry::Vacant(slot) => {
+                    permit.try_buffer_symbol(data.len())?;
+                    slot.insert(data);
+                }
+            }
+
+            if index % COOPERATIVE_YIELD_INTERVAL == COOPERATIVE_YIELD_INTERVAL - 1 {
+                fcp_async_core::task::yield_now().await;
+                if context.is_cancelled() {
+                    return Err(DecodeError::Cancelled);
+                }
+                if context.deadline().is_some_and(Deadline::is_expired) {
+                    return Err(DecodeError::Timeout);
+                }
+            }
+        }
         let loop_context = context.clone();
 
         match context
             .run(async move {
                 for (index, (esi, data)) in ordered_symbols.into_iter().enumerate() {
-                    permit.try_buffer_symbol(data.len())?;
-
                     if let Some(payload) = decoder.add_symbol(esi, data)? {
                         return Ok(payload);
                     }
@@ -1314,6 +1457,94 @@ mod tests {
         .expect("runtime available for async decode test");
     }
 
+    #[test]
+    fn decode_with_context_duplicate_symbols_do_not_consume_permit_budget() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let config = test_config();
+            let controller =
+                DecodeAdmissionController::with_limits(1, 128, Duration::from_secs(5), 2);
+            let context = ExecutionContext::request_scoped(Duration::from_secs(5));
+            let mut decoder = RaptorQDecoder::with_expected_symbols(4, 256, 64, &config);
+
+            let symbols = vec![
+                (7, vec![0xAA; 64]),
+                (7, vec![0xBB; 64]),
+                (8, vec![0xCC; 64]),
+            ];
+
+            let err = controller
+                .decode_with_context(&context, &mut decoder, symbols)
+                .await
+                .expect_err("two unique symbols remain insufficient");
+            assert!(matches!(err, DecodeError::InsufficientSymbols { .. }));
+            assert_eq!(decoder.received_count(), 2);
+        })
+        .expect("runtime available for async decode test");
+    }
+
+    #[test]
+    fn decode_with_context_rejects_oversized_symbol_before_buffering() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let config = test_config();
+            let controller =
+                DecodeAdmissionController::with_limits(1, 64, Duration::from_secs(5), 1);
+            let context = ExecutionContext::request_scoped(Duration::from_secs(5));
+            let mut decoder = RaptorQDecoder::with_expected_symbols(4, 256, 64, &config);
+
+            let err = controller
+                .decode_with_context(&context, &mut decoder, vec![(0, vec![0xAA; 65])])
+                .await
+                .expect_err("oversized symbol must be rejected");
+            assert!(matches!(err, DecodeError::InvalidSymbol { .. }));
+            assert_eq!(decoder.received_count(), 0);
+        })
+        .expect("runtime available for async decode test");
+    }
+
+    #[test]
+    fn decode_with_context_rejects_zero_length_source_block_before_buffering() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let config = test_config();
+            let controller =
+                DecodeAdmissionController::with_limits(1, 64, Duration::from_secs(5), 1);
+            let context = ExecutionContext::request_scoped(Duration::from_secs(5));
+            let mut decoder =
+                RaptorQDecoder::new(ObjectTransmissionInformation::new(0, 64, 1, 1, 8), &config);
+
+            let err = controller
+                .decode_with_context(&context, &mut decoder, vec![(0, vec![0xAA; 64])])
+                .await
+                .expect_err("zero-length source block must reject symbols");
+            assert!(matches!(err, DecodeError::InvalidSymbol { .. }));
+            assert_eq!(decoder.received_count(), 0);
+        })
+        .expect("runtime available for async decode test");
+    }
+
+    #[test]
+    fn decode_with_context_rejects_conflicting_duplicate_esi_payload() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let config = test_config();
+            let controller =
+                DecodeAdmissionController::with_limits(1, 256, Duration::from_secs(5), 4);
+            let context = ExecutionContext::request_scoped(Duration::from_secs(5));
+            let mut decoder = RaptorQDecoder::with_expected_symbols(4, 256, 64, &config);
+
+            let err = controller
+                .decode_with_context(
+                    &context,
+                    &mut decoder,
+                    vec![(0, vec![0xAA; 64]), (0, vec![0xBB; 64])],
+                )
+                .await
+                .expect_err("conflicting duplicate ESI must be rejected");
+
+            assert!(matches!(err, DecodeError::InvalidSymbol { .. }));
+            assert_eq!(decoder.received_count(), 0);
+        })
+        .expect("runtime available for async decode test");
+    }
+
     // ── Decoder timing methods ───────────────────────────────────────────
 
     #[test]
@@ -1574,6 +1805,153 @@ mod tests {
         decoder.add_symbol(1, vec![3u8; 64]).unwrap();
 
         assert_eq!(decoder.received_count(), 2);
+    }
+
+    #[test]
+    fn decoder_rejects_conflicting_duplicate_esi_payload() {
+        let config = test_config();
+        let oti = ObjectTransmissionInformation::new(640, 64, 1, 1, 8);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+
+        decoder.add_symbol(0, vec![1u8; 64]).unwrap();
+        let err = decoder
+            .add_symbol(0, vec![2u8; 64])
+            .expect_err("conflicting duplicate ESI must be rejected");
+
+        assert!(matches!(err, DecodeError::InvalidSymbol { .. }));
+        match err {
+            DecodeError::InvalidSymbol { reason } => {
+                assert!(reason.contains("conflicting duplicate symbol"));
+                assert!(reason.contains("ESI 0"));
+            }
+            other => panic!("expected InvalidSymbol, got {other:?}"),
+        }
+        assert_eq!(decoder.received_count(), 1);
+    }
+
+    #[test]
+    fn decoder_rejects_symbols_for_zero_length_source_block() {
+        let config = test_config();
+        let oti = ObjectTransmissionInformation::new(0, 64, 1, 1, 8);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+
+        let err = decoder
+            .add_symbol(0, vec![0u8; 64])
+            .expect_err("zero-length object must reject symbols");
+        assert!(matches!(err, DecodeError::InvalidSymbol { .. }));
+        assert_eq!(decoder.received_count(), 0);
+    }
+
+    #[test]
+    fn decoder_rejects_oversized_transfer_length_before_buffering() {
+        let config = RaptorQConfig {
+            max_object_size: 256,
+            ..test_config()
+        };
+        let oti = ObjectTransmissionInformation::new(512, 64, 1, 1, 8);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+
+        let err = decoder
+            .add_symbol(0, vec![0u8; 64])
+            .expect_err("oversized transfer length must be rejected before buffering");
+        assert!(matches!(err, DecodeError::MemoryLimitExceeded { .. }));
+        assert_eq!(decoder.received_count(), 0);
+    }
+
+    #[test]
+    fn decoder_direct_add_symbol_enforces_per_block_memory_cap() {
+        // The per-block memory cap is now derived from max_symbols (same
+        // `total_symbols(transfer_len) + 1000` expression as the symbol-count
+        // cap), so it converges with SymbolBufferExceeded for realistic
+        // symbol_size. We still assert a cap fires and that it is one of the
+        // DoS-related variants rather than an arbitrary decode failure.
+        let config = RaptorQConfig {
+            symbol_size: 64,
+            max_object_size: 128,
+            repair_ratio_bps: 0,
+            ..test_config()
+        };
+        let oti = ObjectTransmissionInformation::new(128, 64, 1, 1, 8);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+
+        // max_symbols = total_symbols(128) + 1000 = 2 + 1000 = 1002.
+        // Feed distinct ESIs past the cap; most add_symbol calls may return
+        // unrelated errors (try_reconstruct on padding-range ESIs), but the
+        // symbol-count / memory cap is the only one that must eventually fire
+        // and short-circuit further buffering.
+        let mut capped = None;
+        for esi in 0..1200_u32 {
+            match decoder.add_symbol(esi, vec![0xAA; 64]) {
+                Err(
+                    e @ (DecodeError::MemoryLimitExceeded { .. }
+                    | DecodeError::SymbolBufferExceeded { .. }),
+                ) => {
+                    capped = Some(e);
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        assert!(
+            capped.is_some(),
+            "per-block cap (memory or symbol-count) must fire within 1200 symbols"
+        );
+    }
+
+    #[test]
+    fn decoder_accepts_repair_symbols_at_max_object_size_boundary() {
+        // Regression: pre-fix, the memory cap at validate_direct_buffer_capacity
+        // compared `projected_memory` against `max_object_size` directly, which
+        // falsely rejected repair symbols whenever transfer_length was close to
+        // max_object_size. After the fix, the cap is derived from max_symbols
+        // (which includes repair-overhead headroom), so buffering the K+1-th
+        // symbol at the object-size boundary must NOT yield MemoryLimitExceeded.
+        let config = RaptorQConfig {
+            symbol_size: 64,
+            max_object_size: 640, // exactly K × symbol_size for K = 10
+            repair_ratio_bps: 500,
+            ..test_config()
+        };
+        // transfer_length just under the ceiling so K × symbol_size == max_object_size.
+        let oti = ObjectTransmissionInformation::new(639, 64, 1, 1, 8);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+
+        // Buffer K = 10 source symbols. The 10th triggers try_reconstruct.
+        for esi in 0..10_u32 {
+            let _ = decoder.add_symbol(esi, vec![0u8; 64]);
+        }
+
+        // Now attempt a legitimate K+1-th symbol. Pre-fix this was
+        // MemoryLimitExceeded { used: 704, limit: 640 }. Post-fix the cap is
+        // max_symbols × symbol_size, which comfortably admits this symbol.
+        let res = decoder.add_symbol(10, vec![0u8; 64]);
+        assert!(
+            !matches!(res, Err(DecodeError::MemoryLimitExceeded { .. })),
+            "K+1-th symbol at transfer_length ≈ max_object_size must not be \
+             rejected by the per-block memory cap; got {res:?}"
+        );
+    }
+
+    #[test]
+    fn decoder_direct_add_symbol_enforces_symbol_slot_cap() {
+        let config = RaptorQConfig {
+            symbol_size: 1,
+            max_object_size: 2000,
+            repair_ratio_bps: 0,
+            ..test_config()
+        };
+        let oti = ObjectTransmissionInformation::new(1, 1, 1, 1, 8);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+
+        for esi in 0..1001 {
+            decoder.add_symbol(esi, vec![0xAA]).unwrap();
+        }
+        let err = decoder
+            .add_symbol(1001, vec![0xBB])
+            .expect_err("direct add_symbol must cap total buffered symbol slots");
+
+        assert!(matches!(err, DecodeError::SymbolBufferExceeded { .. }));
+        assert_eq!(decoder.received_count(), 1001);
     }
 
     #[test]

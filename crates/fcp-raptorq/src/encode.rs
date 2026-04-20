@@ -86,8 +86,11 @@ impl RaptorQEncoder {
             })
             .collect();
 
-        let inner = SystematicEncoder::new(&source_symbols, symbol_size, 0)
-            .expect("SystematicEncoder::new failed for valid payload");
+        let inner = SystematicEncoder::new(&source_symbols, symbol_size, 0).ok_or_else(|| {
+            EncodeError::InvalidConfiguration {
+                reason: "systematic encoder rejected validated payload".into(),
+            }
+        })?;
 
         Ok(Self {
             inner,

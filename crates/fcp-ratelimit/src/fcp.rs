@@ -313,7 +313,7 @@ fn backpressure_from_state(
 
     let retry_after_ms = match level {
         fcp_core::BackpressureLevel::SoftLimit | fcp_core::BackpressureLevel::HardLimit => {
-            Some(u64::try_from(state.reset_after.as_millis()).unwrap_or(u64::MAX))
+            Some(duration_to_retry_after_ms(state.reset_after))
         }
         fcp_core::BackpressureLevel::Normal | fcp_core::BackpressureLevel::Warning => None,
     };
@@ -323,6 +323,19 @@ fn backpressure_from_state(
         utilization_bps,
         retry_after_ms,
     }
+}
+
+fn duration_to_retry_after_ms(duration: Duration) -> u64 {
+    if duration.is_zero() {
+        return 0;
+    }
+
+    let millis = duration.as_millis();
+    if millis > 0 {
+        return u64::try_from(millis).unwrap_or(u64::MAX);
+    }
+
+    1
 }
 
 fn utilization_bps(limit: u32, remaining: u32) -> u16 {
@@ -581,6 +594,20 @@ mod tests {
         let signal = backpressure_from_state(&state_hard, thresholds);
         assert_eq!(signal.level, fcp_core::BackpressureLevel::HardLimit);
         assert!(signal.retry_after_ms.is_some());
+    }
+
+    #[test]
+    fn backpressure_rounds_submillisecond_retry_after_up() {
+        let state = RateLimitState {
+            limit: 100,
+            remaining: 0,
+            reset_after: Duration::from_nanos(1),
+            is_limited: true,
+        };
+
+        let signal = backpressure_from_state(&state, BackpressureThresholds::standard());
+        assert_eq!(signal.level, fcp_core::BackpressureLevel::HardLimit);
+        assert_eq!(signal.retry_after_ms, Some(1));
     }
 
     #[fcp_async_core::runtime::test]

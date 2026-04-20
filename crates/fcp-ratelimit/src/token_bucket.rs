@@ -121,16 +121,18 @@ impl TokenBucket {
 
     /// Refill tokens based on elapsed time.
     ///
-    /// Fast path: if tokens are already at capacity, skip the Mutex lock entirely.
-    /// The lock is only needed to update `last_refill` when actually adding tokens.
+    /// When the bucket is already full, refresh the refill anchor so idle time does not
+    /// accrue extra burst credit past capacity.
     fn refill(&self) {
-        // Fast path: if already at capacity, no refill needed.
-        if self.tokens.load(Ordering::Acquire) >= self.capacity {
+        let current = self.tokens.load(Ordering::Acquire);
+        let mut last_refill = self.last_refill.lock();
+        let now = Instant::now();
+
+        if current >= self.capacity {
+            *last_refill = now;
             return;
         }
 
-        let mut last_refill = self.last_refill.lock();
-        let now = Instant::now();
         let elapsed = now.saturating_duration_since(*last_refill);
 
         if elapsed >= self.refill_interval {
@@ -249,6 +251,7 @@ impl RateLimiter for TokenBucket {
     }
 
     fn remaining(&self) -> u32 {
+        self.refill();
         self.tokens.load(Ordering::Acquire)
     }
 
@@ -649,6 +652,34 @@ mod tests {
 
         // Should have at least 1 token back
         assert!(limiter.try_acquire().await);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn full_bucket_does_not_bank_extra_burst_after_idle() {
+        let limiter = TokenBucket::new(1, Duration::from_millis(50));
+
+        // Let the bucket sit full longer than its refill interval.
+        sleep(Duration::from_millis(120)).await;
+
+        assert!(limiter.try_acquire().await);
+        assert!(
+            !limiter.try_acquire().await,
+            "idle time while full must not mint an extra token"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn remaining_refreshes_after_elapsed_refill() {
+        let config = RateLimitConfig::new(2, Duration::from_millis(100));
+        let limiter = TokenBucket::from_config(&config);
+
+        assert!(limiter.try_acquire().await);
+        assert!(limiter.try_acquire().await);
+        assert_eq!(limiter.remaining(), 0);
+
+        sleep(Duration::from_millis(60)).await;
+
+        assert_eq!(limiter.remaining(), 1);
     }
 
     // ── try_acquire_n additional ───────────────────────────────────────

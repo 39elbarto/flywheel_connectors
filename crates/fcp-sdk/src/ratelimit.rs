@@ -19,13 +19,22 @@
 //! ```
 
 use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::{
     FcpError, RateLimitConfig, RateLimitDeclarations, RateLimitEnforcement, RateLimitPool,
     RateLimitScope, RateLimitStatus, RateLimitUnit,
 };
+use serde::{Deserialize, Serialize};
+
+const RATE_LIMIT_CHECKPOINT_FILE: &str = "ratelimit-checkpoints.json";
+const RATE_LIMIT_CHECKPOINT_VERSION: u32 = 1;
+const FCP_CONNECTOR_STATE_DIR_ENV: &str = "FCP_CONNECTOR_STATE_DIR";
+const CONNECTOR_STATE_DIR_ENV: &str = "CONNECTOR_STATE";
 
 /// Error returned when a rate limit is exceeded.
 #[derive(Debug, Clone)]
@@ -88,6 +97,119 @@ impl std::fmt::Display for RateLimitError {
 
 impl std::error::Error for RateLimitError {}
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RateLimitCheckpointFile {
+    version: u32,
+    pools: HashMap<String, PoolCheckpoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PoolCheckpoint {
+    prev_count: u32,
+    curr_count: u32,
+    window_start_unix_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct RateLimitCheckpointStore {
+    path: PathBuf,
+}
+
+impl RateLimitCheckpointStore {
+    fn from_state_dir(state_dir: impl AsRef<Path>) -> Self {
+        Self {
+            path: state_dir.as_ref().join(RATE_LIMIT_CHECKPOINT_FILE),
+        }
+    }
+
+    fn from_env() -> Option<Self> {
+        resolve_rate_limit_state_dir_from_env().map(Self::from_state_dir)
+    }
+
+    fn load_all(&self) -> HashMap<String, PoolCheckpoint> {
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return HashMap::new(),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %self.path.display(),
+                    "Failed to read persisted rate limit checkpoints"
+                );
+                return HashMap::new();
+            }
+        };
+
+        let checkpoint_file: RateLimitCheckpointFile = match serde_json::from_slice(&bytes) {
+            Ok(file) => file,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    path = %self.path.display(),
+                    "Ignoring malformed rate limit checkpoint file"
+                );
+                return HashMap::new();
+            }
+        };
+
+        if checkpoint_file.version != RATE_LIMIT_CHECKPOINT_VERSION {
+            tracing::warn!(
+                version = checkpoint_file.version,
+                path = %self.path.display(),
+                "Ignoring unsupported rate limit checkpoint version"
+            );
+            return HashMap::new();
+        }
+
+        checkpoint_file.pools
+    }
+
+    fn load_for_pool(&self, pool: &RateLimitPool) -> Option<PoolCheckpoint> {
+        let mut checkpoints = self.load_all();
+        checkpoints.remove(&rate_limit_checkpoint_key(pool))
+    }
+
+    fn persist(&self, pools: &HashMap<String, PoolState>) -> std::io::Result<()> {
+        let Some(parent) = self.path.parent() else {
+            return Ok(());
+        };
+        fs::create_dir_all(parent)?;
+
+        let checkpoint_file = RateLimitCheckpointFile {
+            version: RATE_LIMIT_CHECKPOINT_VERSION,
+            pools: pools
+                .values()
+                .map(|state| (rate_limit_checkpoint_key(&state.config), state.checkpoint()))
+                .collect(),
+        };
+
+        let bytes = serde_json::to_vec_pretty(&checkpoint_file)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+        let mut file = File::create(&self.path)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        Ok(())
+    }
+}
+
+fn resolve_rate_limit_state_dir_from_env() -> Option<PathBuf> {
+    std::env::var_os(FCP_CONNECTOR_STATE_DIR_ENV)
+        .or_else(|| std::env::var_os(CONNECTOR_STATE_DIR_ENV))
+        .map(PathBuf::from)
+}
+
+const fn rate_limit_scope_key(scope: RateLimitScope) -> &'static str {
+    match scope {
+        RateLimitScope::Instance => "instance",
+        RateLimitScope::Credential => "credential",
+        RateLimitScope::Global => "global",
+    }
+}
+
+fn rate_limit_checkpoint_key(pool: &RateLimitPool) -> String {
+    format!("{}::{}", rate_limit_scope_key(pool.scope), pool.id)
+}
+
 /// Runtime state for a single rate limit pool.
 ///
 /// Implements a two-counter sliding-window approximation rather than a hard
@@ -121,6 +243,16 @@ impl PoolState {
         }
     }
 
+    fn from_checkpoint(config: RateLimitPool, checkpoint: &PoolCheckpoint) -> Self {
+        let mut state = Self::new(config);
+        state.prev_count = checkpoint.prev_count;
+        state.curr_count = checkpoint.curr_count;
+        state.window_start =
+            instant_from_unix_ms(checkpoint.window_start_unix_ms).unwrap_or_else(Instant::now);
+        state.maybe_advance_window();
+        state
+    }
+
     /// Advance window state if the current window has fully elapsed.
     ///
     /// On a single-window roll-over, `prev_count := curr_count` and
@@ -152,7 +284,10 @@ impl PoolState {
         }
         let advance_nanos = windows_elapsed.saturating_mul(window_nanos);
         let advance = Duration::from_nanos(u64::try_from(advance_nanos).unwrap_or(u64::MAX));
-        self.window_start = self.window_start.checked_add(advance).unwrap_or(Instant::now());
+        self.window_start = self
+            .window_start
+            .checked_add(advance)
+            .unwrap_or(Instant::now());
     }
 
     /// Sliding-window effective count: `prev * (1 - fraction) + curr`.
@@ -254,6 +389,15 @@ impl PoolState {
             window_seconds: u32::try_from(self.config.config.window.as_secs()).unwrap_or(u32::MAX),
         }
     }
+
+    fn checkpoint(&self) -> PoolCheckpoint {
+        let elapsed_ms = u64::try_from(self.window_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        PoolCheckpoint {
+            prev_count: self.prev_count,
+            curr_count: self.curr_count,
+            window_start_unix_ms: unix_ms_now().saturating_sub(elapsed_ms),
+        }
+    }
 }
 
 /// Thread-safe rate limit tracker for connector pools.
@@ -264,6 +408,7 @@ impl PoolState {
 pub struct RateLimitTracker {
     pools: Arc<RwLock<HashMap<String, PoolState>>>,
     operation_map: Arc<HashMap<String, Vec<String>>>,
+    checkpoint_store: Option<RateLimitCheckpointStore>,
 }
 
 impl Default for RateLimitTracker {
@@ -279,21 +424,57 @@ impl RateLimitTracker {
         Self {
             pools: Arc::new(RwLock::new(HashMap::new())),
             operation_map: Arc::new(HashMap::new()),
+            checkpoint_store: None,
         }
     }
 
     /// Create a tracker from rate limit declarations.
     #[must_use]
     pub fn from_declarations(decls: &RateLimitDeclarations) -> Self {
+        Self::from_declarations_with_store(decls, RateLimitCheckpointStore::from_env())
+    }
+
+    /// Create a tracker from rate limit declarations with an explicit state directory.
+    ///
+    /// Persisted checkpoints are keyed by `scope + pool_id`, so `global` pools
+    /// no longer silently reuse the same in-memory counter namespace as
+    /// `instance` or `credential` pools after restart.
+    #[must_use]
+    pub fn from_declarations_with_state_dir(
+        decls: &RateLimitDeclarations,
+        state_dir: impl AsRef<Path>,
+    ) -> Self {
+        Self::from_declarations_with_store(
+            decls,
+            Some(RateLimitCheckpointStore::from_state_dir(state_dir)),
+        )
+    }
+
+    fn from_declarations_with_store(
+        decls: &RateLimitDeclarations,
+        checkpoint_store: Option<RateLimitCheckpointStore>,
+    ) -> Self {
+        let checkpoints = checkpoint_store
+            .as_ref()
+            .map_or_else(HashMap::new, RateLimitCheckpointStore::load_all);
         let pools: HashMap<String, PoolState> = decls
             .limits
             .iter()
-            .map(|pool| (pool.id.clone(), PoolState::new(pool.clone())))
+            .map(|pool| {
+                let pool_state = checkpoints
+                    .get(&rate_limit_checkpoint_key(pool))
+                    .map_or_else(
+                        || PoolState::new(pool.clone()),
+                        |checkpoint| PoolState::from_checkpoint(pool.clone(), checkpoint),
+                    );
+                (pool.id.clone(), pool_state)
+            })
             .collect();
 
         Self {
             pools: Arc::new(RwLock::new(pools)),
             operation_map: Arc::new(decls.tool_pool_map.clone()),
+            checkpoint_store,
         }
     }
 
@@ -303,7 +484,16 @@ impl RateLimitTracker {
     /// Panics if the internal lock is poisoned (indicates a prior panic during pool access).
     pub fn add_pool(&self, pool: RateLimitPool) {
         let mut pools = self.pools.write().expect("lock poisoned");
-        pools.insert(pool.id.clone(), PoolState::new(pool));
+        let pool_state = self
+            .checkpoint_store
+            .as_ref()
+            .and_then(|store| store.load_for_pool(&pool))
+            .map_or_else(
+                || PoolState::new(pool.clone()),
+                |checkpoint| PoolState::from_checkpoint(pool.clone(), &checkpoint),
+            );
+        pools.insert(pool.id.clone(), pool_state);
+        self.persist_locked(&pools);
     }
 
     /// Try to consume requests for an operation.
@@ -374,6 +564,8 @@ impl RateLimitTracker {
                 }
             }
         }
+
+        self.persist_locked(&pools);
 
         None
     }
@@ -452,7 +644,37 @@ impl RateLimitTracker {
             state.curr_count = 0;
             state.window_start = Instant::now();
         }
+        self.persist_locked(&pools);
     }
+
+    fn persist_locked(&self, pools: &HashMap<String, PoolState>) {
+        let Some(store) = &self.checkpoint_store else {
+            return;
+        };
+        if let Err(err) = store.persist(pools) {
+            tracing::warn!(
+                error = %err,
+                path = %store.path.display(),
+                "Failed to persist rate limit checkpoints"
+            );
+        }
+    }
+}
+
+fn unix_ms_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+fn instant_from_unix_ms(unix_ms: u64) -> Option<Instant> {
+    let checkpoint_time = UNIX_EPOCH.checked_add(Duration::from_millis(unix_ms))?;
+    let elapsed = SystemTime::now()
+        .duration_since(checkpoint_time)
+        .unwrap_or(Duration::ZERO);
+    Instant::now().checked_sub(elapsed)
 }
 
 /// Builder for creating rate limit pools with fluent API.
@@ -567,6 +789,15 @@ mod tests {
             .requests(requests)
             .window_secs(window_secs)
             .build()
+    }
+
+    fn unique_state_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "fcp-sdk-ratelimit-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("state dir should be creatable");
+        dir
     }
 
     #[test]
@@ -2292,6 +2523,61 @@ mod tests {
         assert_eq!(state.curr_count, 0);
     }
 
+    #[test]
+    fn tracker_restores_persisted_pool_usage_after_restart() {
+        let state_dir = unique_state_dir("restart");
+        let decls = RateLimitDeclarations {
+            limits: vec![test_pool("api", 3, 60)],
+            tool_pool_map: HashMap::from([("send".to_string(), vec!["api".to_string()])]),
+        };
+
+        let tracker = RateLimitTracker::from_declarations_with_state_dir(&decls, &state_dir);
+        assert!(tracker.try_consume("send", 1).is_none());
+        assert!(tracker.try_consume("send", 1).is_none());
+
+        let restarted = RateLimitTracker::from_declarations_with_state_dir(&decls, &state_dir);
+        assert!(restarted.try_consume("send", 1).is_none());
+        let err = restarted
+            .try_consume("send", 1)
+            .expect("restart should not reset the persisted bucket");
+        assert_eq!(err.pool_id, "api");
+    }
+
+    #[test]
+    fn persisted_checkpoints_are_namespaced_by_scope_and_pool_id() {
+        let state_dir = unique_state_dir("scope-key");
+        let global_decls = RateLimitDeclarations {
+            limits: vec![
+                RateLimitPoolBuilder::new("shared")
+                    .requests(2)
+                    .window_secs(60)
+                    .scope(RateLimitScope::Global)
+                    .build(),
+            ],
+            tool_pool_map: HashMap::from([("op".to_string(), vec!["shared".to_string()])]),
+        };
+        let global_tracker =
+            RateLimitTracker::from_declarations_with_state_dir(&global_decls, &state_dir);
+        assert!(global_tracker.try_consume("op", 1).is_none());
+
+        let instance_decls = RateLimitDeclarations {
+            limits: vec![
+                RateLimitPoolBuilder::new("shared")
+                    .requests(2)
+                    .window_secs(60)
+                    .scope(RateLimitScope::Instance)
+                    .build(),
+            ],
+            tool_pool_map: HashMap::from([("op".to_string(), vec!["shared".to_string()])]),
+        };
+        let instance_tracker =
+            RateLimitTracker::from_declarations_with_state_dir(&instance_decls, &state_dir);
+        let status = instance_tracker
+            .pool_status("shared")
+            .expect("instance pool should be registered");
+        assert_eq!(status.remaining, 2);
+    }
+
     // ── br-flywheel_connectors-83xt1: fail-closed on unregistered pool ──
 
     #[test]
@@ -2307,6 +2593,7 @@ mod tests {
         let tracker = RateLimitTracker {
             pools: Arc::new(RwLock::new(HashMap::new())),
             operation_map: Arc::new(operation_map),
+            checkpoint_store: None,
         };
 
         let err = tracker
@@ -2345,14 +2632,12 @@ mod tests {
         pools.insert("real_pool".into(), PoolState::new(pool));
 
         let mut operation_map: HashMap<String, Vec<String>> = HashMap::new();
-        operation_map.insert(
-            "op".into(),
-            vec!["real_pool".into(), "ghost_pool".into()],
-        );
+        operation_map.insert("op".into(), vec!["real_pool".into(), "ghost_pool".into()]);
 
         let tracker = RateLimitTracker {
             pools: Arc::new(RwLock::new(pools)),
             operation_map: Arc::new(operation_map),
+            checkpoint_store: None,
         };
 
         let err = tracker.try_consume("op", 1).expect("must fail closed");
@@ -2363,6 +2648,9 @@ mod tests {
         let status = tracker
             .pool_status("real_pool")
             .expect("real_pool is registered");
-        assert_eq!(status.remaining, 100, "real_pool must not have been consumed");
+        assert_eq!(
+            status.remaining, 100,
+            "real_pool must not have been consumed"
+        );
     }
 }

@@ -725,6 +725,45 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_repeated_identical_refresh_is_observationally_idempotent() {
+        let mut tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        let refresh_response = TokenResponse {
+            access_token: "steady_access".into(),
+            token_type: "Bearer".into(),
+            expires_in: None,
+            refresh_token: Some("steady_refresh".into()),
+            scope: Some("read write".into()),
+            id_token: Some("steady_id".into()),
+        };
+
+        tokens
+            .update_from_response(refresh_response.clone())
+            .expect("first refresh must succeed");
+        let after_first = (
+            tokens.access_token().to_string(),
+            tokens.token_type().to_string(),
+            tokens.refresh_token().map(str::to_string),
+            tokens.scopes().to_vec(),
+            tokens.id_token().map(str::to_string),
+            tokens.expires_at,
+        );
+
+        tokens
+            .update_from_response(refresh_response)
+            .expect("second identical refresh must succeed");
+        let after_second = (
+            tokens.access_token().to_string(),
+            tokens.token_type().to_string(),
+            tokens.refresh_token().map(str::to_string),
+            tokens.scopes().to_vec(),
+            tokens.id_token().map(str::to_string),
+            tokens.expires_at,
+        );
+
+        assert_eq!(after_second, after_first);
+    }
+
+    #[test]
     fn test_expired_token_cannot_be_revived_by_empty_replacement() {
         // The canonical failure mode the fix closes: a token that has
         // already expired must stay expired when the refresh response is

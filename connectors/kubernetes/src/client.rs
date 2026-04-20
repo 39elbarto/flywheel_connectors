@@ -156,11 +156,7 @@ impl KubernetesClient {
         if status.is_success() {
             Ok(resp.text().await?)
         } else {
-            let retry_after = resp
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok());
+            let retry_after_ms = retry_after_ms_from_headers(resp.headers());
             let body = resp.text().await.unwrap_or_default();
             let detail = serde_json::from_str::<ApiErrorResponse>(&body)
                 .ok()
@@ -177,7 +173,7 @@ impl KubernetesClient {
                 403 => Err(KubernetesError::Forbidden),
                 404 => Err(KubernetesError::NotFound { resource: detail }),
                 429 => Err(KubernetesError::RateLimited {
-                    retry_after_ms: retry_after.unwrap_or(60) * 1000,
+                    retry_after_ms: retry_after_ms.unwrap_or(60_000),
                 }),
                 code => Err(KubernetesError::Api {
                     status_code: code,
@@ -192,11 +188,7 @@ impl KubernetesClient {
         status: StatusCode,
         resp: Response,
     ) -> KubernetesResult<serde_json::Value> {
-        let retry_after = resp
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok());
+        let retry_after_ms = retry_after_ms_from_headers(resp.headers());
 
         let body = resp.text().await.unwrap_or_default();
 
@@ -216,7 +208,7 @@ impl KubernetesClient {
             403 => Err(KubernetesError::Forbidden),
             404 => Err(KubernetesError::NotFound { resource: detail }),
             429 => Err(KubernetesError::RateLimited {
-                retry_after_ms: retry_after.unwrap_or(60) * 1000,
+                retry_after_ms: retry_after_ms.unwrap_or(60_000),
             }),
             code => Err(KubernetesError::Api {
                 status_code: code,
@@ -802,9 +794,18 @@ fn epoch_timestamp() -> String {
     format!("{}", duration.as_secs())
 }
 
+fn retry_after_ms_from_headers(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|seconds| seconds.saturating_mul(1000))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::header::{HeaderMap, HeaderValue};
 
     #[test]
     fn auth_debug_redacts_token() {
@@ -1080,5 +1081,18 @@ mod tests {
     fn encode_query_param_preserves_alphanumeric() {
         let encoded = encode_query_param("nginx123");
         assert_eq!(encoded, "nginx123");
+    }
+
+    #[test]
+    fn retry_after_ms_from_headers_defaults_to_none_when_missing() {
+        let headers = HeaderMap::new();
+        assert_eq!(retry_after_ms_from_headers(&headers), None);
+    }
+
+    #[test]
+    fn retry_after_ms_from_headers_saturates_large_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("18446744073709551615"));
+        assert_eq!(retry_after_ms_from_headers(&headers), Some(u64::MAX));
     }
 }

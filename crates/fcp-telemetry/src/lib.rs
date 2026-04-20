@@ -221,7 +221,7 @@ fn init_telemetry_with<L, P, O>(
 where
     L: Fn(&TelemetryConfig) -> Result<(), TelemetryError>,
     P: Fn(u16) -> Result<(), TelemetryError>,
-    O: Fn(&str, &str) -> Result<(), TelemetryError>,
+    O: Fn(&str, &str, f64) -> Result<(), TelemetryError>,
 {
     if state.get().is_some() {
         return Ok(());
@@ -243,7 +243,16 @@ where
 
     if otlp_enabled && config.otlp_enabled {
         if let Some(ref endpoint) = config.otlp_endpoint {
-            init_otlp_fn(&config.service_name, endpoint)?;
+            // Thread the operator-configured sample rate through to the
+            // SDK so `with_sample_rate(0.01)` actually results in a 1%
+            // sampling rate rather than silently exporting 100% of
+            // spans. Prior behavior silently dropped the rate on the
+            // floor and used Sampler::AlwaysOn unconditionally.
+            init_otlp_fn(
+                &config.service_name,
+                endpoint,
+                config.trace_sample_rate,
+            )?;
         }
     }
 
@@ -266,7 +275,7 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<(), TelemetryError> {
         true,
         init_logging,
         init_prometheus_exporter,
-        init_otlp_tracer,
+        init_otlp_tracer_with_sample_rate,
     )
 }
 
@@ -282,7 +291,7 @@ pub fn init_telemetry_sync(config: TelemetryConfig) -> Result<(), TelemetryError
         false,
         init_logging,
         init_prometheus_exporter,
-        init_otlp_tracer,
+        init_otlp_tracer_with_sample_rate,
     )
 }
 
@@ -667,7 +676,7 @@ mod tests {
                 prometheus_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
-            |_, _| {
+            |_, _, _| {
                 otlp_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
@@ -686,7 +695,7 @@ mod tests {
                 prometheus_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
-            |_, _| {
+            |_, _, _| {
                 otlp_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
@@ -716,7 +725,7 @@ mod tests {
                 Err(TelemetryError::LoggingInit("boom".to_string()))
             },
             |_| Ok(()),
-            |_, _| Ok(()),
+            |_, _, _| Ok(()),
         );
 
         assert!(matches!(first, Err(TelemetryError::LoggingInit(_))));
@@ -731,7 +740,7 @@ mod tests {
                 Ok(())
             },
             |_| Ok(()),
-            |_, _| Ok(()),
+            |_, _, _| Ok(()),
         )
         .unwrap();
 
@@ -739,6 +748,39 @@ mod tests {
         assert_eq!(
             state.get().unwrap().config.service_name,
             "second-attempt".to_string()
+        );
+    }
+
+    /// Regression for the silently-ignored sample rate: whatever the
+    /// operator configures via `with_sample_rate` MUST reach the OTLP
+    /// init function, not get dropped by `init_telemetry_with`. Prior
+    /// behavior threaded only (service_name, endpoint) through, so the
+    /// SDK sampler was `AlwaysOn` regardless of config.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn test_init_telemetry_threads_sample_rate_to_otlp() {
+        let state = OnceLock::new();
+        let captured_rate: std::sync::Mutex<Option<f64>> = std::sync::Mutex::new(None);
+
+        init_telemetry_with(
+            &state,
+            TelemetryConfig::new("sample-rate-test")
+                .with_otlp("http://collector:4317")
+                .with_sample_rate(0.05),
+            true,
+            |_| Ok(()),
+            |_| Ok(()),
+            |_, _, rate| {
+                *captured_rate.lock().expect("lock") = Some(rate);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            *captured_rate.lock().expect("lock"),
+            Some(0.05),
+            "configured sample rate must reach the OTLP initializer",
         );
     }
 
@@ -753,7 +795,7 @@ mod tests {
             false,
             |_| Ok(()),
             |_| Ok(()),
-            |_, _| {
+            |_, _, _| {
                 otlp_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },

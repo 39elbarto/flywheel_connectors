@@ -34,13 +34,44 @@ pub fn init_prometheus_exporter(port: u16) -> Result<(), TelemetryError> {
     Ok(())
 }
 
-/// Initialize the OTLP trace exporter.
+/// Initialize the OTLP trace exporter with a fixed `AlwaysOn` sampler.
 ///
-/// This sets up OpenTelemetry trace export to an OTLP-compatible collector.
+/// Kept for backward compatibility. New callers should use
+/// [`init_otlp_tracer_with_sample_rate`] so the
+/// [`TelemetryConfig::trace_sample_rate`](crate::TelemetryConfig::trace_sample_rate)
+/// actually reaches the SDK. Historically this function ignored the
+/// configured sample rate entirely, so a service configured with
+/// `with_sample_rate(0.01)` still exported 100% of spans — the opposite
+/// of what the operator asked for, and a material cost/PII-volume
+/// regression on hot paths.
 ///
 /// # Errors
 /// Returns `TelemetryError::TracingInit` if the exporter cannot be initialized.
 pub fn init_otlp_tracer(service_name: &str, endpoint: &str) -> Result<(), TelemetryError> {
+    init_otlp_tracer_with_sample_rate(service_name, endpoint, 1.0)
+}
+
+/// Initialize the OTLP trace exporter with a configurable head-sampling rate.
+///
+/// `sample_rate` is clamped to `[0.0, 1.0]`. The sampler honors upstream
+/// sampling decisions carried in `traceparent` (parent-based wrapper),
+/// so a service behaving as a downstream node follows whatever the
+/// edge decided rather than re-rolling the dice per hop.
+///
+/// Special-cases:
+/// * rate >= 1.0 → `Sampler::AlwaysOn` (no per-span RNG, matches the
+///   historical default).
+/// * rate <= 0.0 → `Sampler::AlwaysOff` (exports nothing; local spans
+///   still run but no OTLP traffic is generated).
+/// * otherwise → `ParentBased(TraceIdRatioBased(rate))`.
+///
+/// # Errors
+/// Returns `TelemetryError::TracingInit` if the exporter cannot be initialized.
+pub fn init_otlp_tracer_with_sample_rate(
+    service_name: &str,
+    endpoint: &str,
+    sample_rate: f64,
+) -> Result<(), TelemetryError> {
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .with_endpoint(endpoint)
@@ -51,16 +82,36 @@ pub fn init_otlp_tracer(service_name: &str, endpoint: &str) -> Result<(), Teleme
         .with_attributes([KeyValue::new("service.name", service_name.to_string())])
         .build();
 
+    // NaN maps to AlwaysOff (clamp + compare: NaN != NaN so both
+    // `>= 1.0` and `<= 0.0` are false, but we want fail-safe behavior
+    // — an insane input must not silently default to AlwaysOn).
+    let clamped = if sample_rate.is_nan() {
+        0.0
+    } else {
+        sample_rate.clamp(0.0, 1.0)
+    };
+    let sampler = if clamped >= 1.0 {
+        Sampler::AlwaysOn
+    } else if clamped <= 0.0 {
+        Sampler::AlwaysOff
+    } else {
+        Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(clamped)))
+    };
+
     let provider = SdkTracerProvider::builder()
         .with_batch_exporter(exporter)
-        .with_sampler(Sampler::AlwaysOn)
+        .with_sampler(sampler)
         .with_id_generator(RandomIdGenerator::default())
         .with_resource(resource)
         .build();
 
     opentelemetry::global::set_tracer_provider(provider);
 
-    tracing::info!(endpoint = endpoint, "OTLP trace exporter initialized");
+    tracing::info!(
+        endpoint = endpoint,
+        sample_rate = clamped,
+        "OTLP trace exporter initialized"
+    );
 
     Ok(())
 }

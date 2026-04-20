@@ -149,12 +149,24 @@ pub fn log_request_response(
     duration_ms: u64,
     success: bool,
 ) {
+    // Substring-matched against JSON field names. Keep this list
+    // aligned with the sensitive-header allowlist in
+    // `fcp_webhook::provider::is_sensitive_header_name` and the PII
+    // conventions codified by connectors. Adding a field here is
+    // backward-compatible: worst case it hides a value that was
+    // previously being logged.
     let redact_fields = vec![
         "password".to_string(),
         "api_key".to_string(),
+        "apikey".to_string(),
         "secret".to_string(),
         "token".to_string(),
         "authorization".to_string(),
+        "bearer".to_string(),
+        "cookie".to_string(),
+        "credential".to_string(),
+        "private_key".to_string(),
+        "session".to_string(),
     ];
 
     let redacted_request = redact_sensitive(request, &redact_fields);
@@ -913,5 +925,54 @@ mod tests {
     fn sanitize_log_value_preserves_plain_text() {
         let sanitized = sanitize_log_value(&"connector:stripe");
         assert_eq!(sanitized, "connector:stripe");
+    }
+
+    /// Regression: the default redact list used by `log_request_response`
+    /// previously only covered password/api_key/secret/token/authorization.
+    /// Extending the list adds defense-in-depth against common PII/credential
+    /// field names that leaked through under the old set. This test exercises
+    /// the expanded list via log_request_response's internal vec by calling
+    /// redact_sensitive with the same list.
+    #[test]
+    fn test_redact_covers_expanded_credential_fields() {
+        let expanded = vec![
+            "password".to_string(),
+            "api_key".to_string(),
+            "apikey".to_string(),
+            "secret".to_string(),
+            "token".to_string(),
+            "authorization".to_string(),
+            "bearer".to_string(),
+            "cookie".to_string(),
+            "credential".to_string(),
+            "private_key".to_string(),
+            "session".to_string(),
+        ];
+
+        let value = json!({
+            "bearer_token": "bearer_xyz",
+            "cookie": "sid=123",
+            "credentials": {"username": "u", "password": "p"},
+            "private_key_pem": "-----BEGIN...",
+            "session_id": "sess_abc",
+            "api_key_raw": "key_xxx",
+            "apiKey": "k2",
+            // A field that must NOT be redacted — proves we didn't go too wide.
+            "user_name": "alice",
+        });
+
+        let redacted = redact_sensitive(&value, &expanded);
+
+        // All sensitive fields are redacted (substring match is permissive).
+        assert_eq!(redacted["bearer_token"], "[REDACTED]", "bearer_token");
+        assert_eq!(redacted["cookie"], "[REDACTED]", "cookie");
+        assert_eq!(redacted["credentials"], "[REDACTED]", "credentials (whole subtree)");
+        assert_eq!(redacted["private_key_pem"], "[REDACTED]", "private_key_pem");
+        assert_eq!(redacted["session_id"], "[REDACTED]", "session_id");
+        assert_eq!(redacted["api_key_raw"], "[REDACTED]", "api_key_raw");
+        assert_eq!(redacted["apiKey"], "[REDACTED]", "apiKey (case-insensitive)");
+
+        // Non-sensitive field passes through.
+        assert_eq!(redacted["user_name"], "alice", "plain user_name untouched");
     }
 }

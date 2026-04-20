@@ -1,0 +1,6 @@
+{
+  "zone_id": "z:project-alpha",
+  "tag": "tag:fcp-project-alpha",
+  "symbol_port": 4200,
+  "control_port": 4201
+}

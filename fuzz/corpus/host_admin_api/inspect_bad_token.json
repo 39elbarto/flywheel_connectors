@@ -1,0 +1,5 @@
+{
+  "token_cbor_b64": "not-valid-base64!!!",
+  "operation_id": "connector.invoke",
+  "connector_id": "github"
+}

@@ -1,0 +1,5 @@
+{
+  "hello_vector": "hello.cbor",
+  "initiator_suite_ids": [1, 2, 3],
+  "responder_suite_ids": []
+}

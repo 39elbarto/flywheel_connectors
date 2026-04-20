@@ -1,0 +1,11 @@
+[connector]
+id = "example"
+name = "Example"
+version = "0.1.0"
+binary = "target/debug/example"
+
+[capabilities]
+"net.http" = {}
+
+[extra]
+unexpected = true

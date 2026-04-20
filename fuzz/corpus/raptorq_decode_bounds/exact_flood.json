@@ -1,0 +1,8 @@
+{
+  "transfer_length": 512,
+  "symbol_size": 32,
+  "max_object_size": 1024,
+  "exact_attempts": 2048,
+  "malformed_every": 0,
+  "fill_byte": 170
+}

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use fcp_core::{EpochId, NodeId as SignatureNodeId, NodeSignature, TailscaleNodeId, ZoneId};
 use fcp_crypto::Ed25519SigningKey;
 use fcp_mesh::{GossipMessage, GossipSummary, MeshNode, MeshNodeConfig, MeshNodeError};
@@ -12,10 +12,11 @@ use fcp_store::{
 };
 use fcp_tailscale::NodeId as PeerNodeId;
 use libfuzzer_sys::fuzz_target;
+use serde::Deserialize;
 
 const MAX_IBLT_BYTES: usize = 4096;
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Deserialize)]
 struct SummaryInput {
     object_filter_digest: [u8; 32],
     symbol_filter_digest: [u8; 32],
@@ -83,7 +84,17 @@ fn build_signature(
     }
 }
 
-fuzz_target!(|input: SummaryInput| {
+fuzz_target!(|data: &[u8]| {
+    let input = if let Ok(seed) = serde_json::from_slice::<SummaryInput>(data) {
+        seed
+    } else {
+        let mut unstructured = Unstructured::new(data);
+        let Ok(seed) = SummaryInput::arbitrary(&mut unstructured) else {
+            return;
+        };
+        seed
+    };
+
     let mut node = test_node("node-1");
     let registered_key = match Ed25519SigningKey::from_bytes(&input.signing_seed) {
         Ok(key) => key,

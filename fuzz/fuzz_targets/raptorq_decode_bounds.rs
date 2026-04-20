@@ -1,13 +1,14 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use fcp_raptorq::{DecodeError, RaptorQConfig, RaptorQDecoder};
 use libfuzzer_sys::fuzz_target;
+use serde::Deserialize;
 
 const MAX_SYMBOL_BYTES: usize = 1024;
 const MAX_EXTRA_ATTEMPTS: u32 = 64;
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Deserialize)]
 struct DecodeFloodInput {
     transfer_length: u16,
     symbol_size: u16,
@@ -17,7 +18,17 @@ struct DecodeFloodInput {
     fill_byte: u8,
 }
 
-fuzz_target!(|input: DecodeFloodInput| {
+fuzz_target!(|data: &[u8]| {
+    let input = if let Ok(seed) = serde_json::from_slice::<DecodeFloodInput>(data) {
+        seed
+    } else {
+        let mut unstructured = Unstructured::new(data);
+        let Ok(seed) = DecodeFloodInput::arbitrary(&mut unstructured) else {
+            return;
+        };
+        seed
+    };
+
     let symbol_size = input.symbol_size.clamp(1, 256);
     let max_object_size = input.max_object_size.max(symbol_size).clamp(1, 4096);
     let transfer_length = input.transfer_length.max(1).min(max_object_size);

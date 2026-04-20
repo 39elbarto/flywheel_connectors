@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 arbitrary = { version = "1.4.2", features = ["derive"] }
+base64 = "0.22.1"
 bytes = "1.10.1"
 hex = "0.4.3"
 libfuzzer-sys = "0.4"
@@ -25,6 +26,8 @@ fcp-core = { path = "../crates/fcp-core" }
 fcp-crypto = { path = "../crates/fcp-crypto" }
 fcp-mesh = { path = "../crates/fcp-mesh" }
 fcp-manifest = { path = "../crates/fcp-manifest" }
+fcp-host = { path = "../crates/fcp-host" }
+fcp-oauth = { path = "../crates/fcp-oauth" }
 fcp-protocol = { path = "../crates/fcp-protocol" }
 fcp-raptorq = { path = "../crates/fcp-raptorq" }
 fcp-store = { path = "../crates/fcp-store" }
@@ -139,6 +142,27 @@ bench = false
 [[bin]]
 name = "fuzz_bootstrap_recovery"
 path = "fuzz_targets/bootstrap_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_oauth_redirect_allowlist"
+path = "fuzz_targets/oauth_redirect_allowlist.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_host_admin_api"
+path = "fuzz_targets/host_admin_api.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_tailscale_acl"
+path = "fuzz_targets/tailscale_acl.rs"
 test = false
 doc = false
 bench = false

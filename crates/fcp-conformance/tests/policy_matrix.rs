@@ -313,7 +313,11 @@ fn policy_matrix_depends_on_both_axes() {
     for cap in capabilities {
         let decisions: Vec<_> = policies
             .iter()
-            .map(|(zone, engine)| engine.evaluate_invoke(&make_input(zone.clone(), cap)).decision)
+            .map(|(zone, engine)| {
+                engine
+                    .evaluate_invoke(&make_input(zone.clone(), cap))
+                    .decision
+            })
             .collect();
         if decisions.windows(2).any(|w| w[0] != w[1]) {
             zone_axis_varies = true;
@@ -330,7 +334,11 @@ fn policy_matrix_depends_on_both_axes() {
     for (zone, engine) in &policies {
         let decisions: Vec<_> = capabilities
             .iter()
-            .map(|cap| engine.evaluate_invoke(&make_input(zone.clone(), cap)).decision)
+            .map(|cap| {
+                engine
+                    .evaluate_invoke(&make_input(zone.clone(), cap))
+                    .decision
+            })
             .collect();
         if decisions.windows(2).any(|w| w[0] != w[1]) {
             cap_axis_varies = true;
@@ -383,7 +391,7 @@ fn capability_deny_precedes_capability_ceiling_when_both_reject() {
     let policy = make_policy_full(
         zone.clone(),
         vec![],
-        vec![CAP_READ_FILE], // ceiling: only file.read allowed
+        vec![CAP_READ_FILE],     // ceiling: only file.read allowed
         vec![CAP_SPAWN_PROCESS], // deny: proc.spawn explicitly rejected
     );
     let engine = PolicyEngine {
@@ -433,8 +441,7 @@ fn distinct_capability_rejection_reasons_across_zones() {
     // private, community, and public. A zone that suddenly started
     // returning the same reason for an allowlist miss and a ceiling
     // miss would collapse this set below 3.
-    let distinct: std::collections::HashSet<_> =
-        reasons.iter().map(|(_, r)| r).collect();
+    let distinct: std::collections::HashSet<_> = reasons.iter().map(|(_, r)| r).collect();
     assert!(
         distinct.len() >= 3,
         "expected at least 3 distinct capability-rejection reasons across \

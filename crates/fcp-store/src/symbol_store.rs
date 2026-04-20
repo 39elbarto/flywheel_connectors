@@ -297,10 +297,27 @@ impl SymbolStore for MemorySymbolStore {
             });
         }
 
-        // Check for duplicate ESI
-        if obj.symbols.contains_key(&symbol.meta.esi) {
-            // Already have this symbol, skip
-            return Ok(());
+        // Check for duplicate ESI. Idempotent when the incoming bytes match
+        // the stored symbol; a bytewise mismatch indicates either a crafted
+        // "symbol-id forgery" attempt or on-the-wire corruption and MUST be
+        // surfaced instead of silently discarded. Silent discard would let
+        // an adversary who wins the race (or populates ESIs 0..K with
+        // correctly-sized garbage ahead of a legitimate source) permanently
+        // deny repair: symbol_count reaches K, can_reconstruct returns true,
+        // and all honest put_symbol calls thereafter return Ok(()) without
+        // storing anything. Returning InvalidSymbol lets upstream callers
+        // quarantine the peer and/or evict the poisoned entry via
+        // delete_symbol before retrying.
+        if let Some(existing) = obj.symbols.get(&symbol.meta.esi) {
+            if existing.data == symbol.data {
+                return Ok(());
+            }
+            return Err(SymbolStoreError::InvalidSymbol {
+                reason: format!(
+                    "conflicting symbol for object {} esi {}: stored bytes differ from incoming",
+                    symbol.meta.object_id, symbol.meta.esi
+                ),
+            });
         }
 
         let size = Self::symbol_size(&symbol);
@@ -492,7 +509,8 @@ impl SymbolStore for MemorySymbolStore {
             return false;
         };
         let removed_bytes = Self::scrub_corrupt_symbols_locked(obj);
-        let reconstructable = Self::has_required_symbols(obj.symbols.len(), obj.meta.source_symbols);
+        let reconstructable =
+            Self::has_required_symbols(obj.symbols.len(), obj.meta.source_symbols);
         drop(objects);
 
         if removed_bytes > 0 {
@@ -702,6 +720,48 @@ mod tests {
                 object_id: Some(test_object_id()),
                 symbol_count: Some(count),
                 details: Some(json!({"note": "duplicate_ignored"})),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn conflicting_symbol_rejected() {
+        // Regression: first-write-wins on ESI used to silently drop
+        // subsequent put_symbol calls, letting a crafted "symbol" block
+        // every honest later write and permanently deny repair. A byte
+        // mismatch on an existing ESI must surface as InvalidSymbol.
+        run_store_test("conflicting_symbol_rejected", "verify", "write", 3, || async {
+            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+
+            store.put_object_meta(test_object_meta()).await.unwrap();
+            let honest = test_symbol(0);
+            store.put_symbol(honest.clone()).await.unwrap();
+
+            // Same bytes → idempotent.
+            let ok_again = store.put_symbol(honest.clone()).await;
+            assert!(ok_again.is_ok(), "identical resubmission must remain idempotent");
+
+            // Different bytes for same ESI → explicit rejection, not silent skip.
+            let forged = StoredSymbol {
+                meta: honest.meta.clone(),
+                data: Bytes::from(vec![0xAA_u8; 64]),
+            };
+            let result = store.put_symbol(forged).await;
+            assert!(
+                matches!(&result, Err(SymbolStoreError::InvalidSymbol { reason }) if reason.contains("conflicting")),
+                "expected InvalidSymbol with conflicting reason, got {result:?}"
+            );
+
+            // Honest symbol still retrievable (poisoning attempt did not
+            // overwrite or corrupt the good entry).
+            let fetched = store.get_symbol(&test_object_id(), 0).await.unwrap();
+            assert_eq!(fetched.data, honest.data);
+
+            StoreLogData {
+                object_id: Some(test_object_id()),
+                symbol_count: Some(1),
+                details: Some(json!({"note": "conflict_rejected"})),
                 ..StoreLogData::default()
             }
         });

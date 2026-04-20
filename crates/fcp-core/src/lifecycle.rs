@@ -554,25 +554,39 @@ mod lifecycle_sealed {
 }
 
 impl lifecycle_sealed::LifecycleMarker for StatePending {
-    fn runtime_state() -> LifecycleState { LifecycleState::Pending }
+    fn runtime_state() -> LifecycleState {
+        LifecycleState::Pending
+    }
 }
 impl lifecycle_sealed::LifecycleMarker for StateInstalling {
-    fn runtime_state() -> LifecycleState { LifecycleState::Installing }
+    fn runtime_state() -> LifecycleState {
+        LifecycleState::Installing
+    }
 }
 impl lifecycle_sealed::LifecycleMarker for StateCanary {
-    fn runtime_state() -> LifecycleState { LifecycleState::Canary }
+    fn runtime_state() -> LifecycleState {
+        LifecycleState::Canary
+    }
 }
 impl lifecycle_sealed::LifecycleMarker for StateProduction {
-    fn runtime_state() -> LifecycleState { LifecycleState::Production }
+    fn runtime_state() -> LifecycleState {
+        LifecycleState::Production
+    }
 }
 impl lifecycle_sealed::LifecycleMarker for StateRolledBack {
-    fn runtime_state() -> LifecycleState { LifecycleState::RolledBack }
+    fn runtime_state() -> LifecycleState {
+        LifecycleState::RolledBack
+    }
 }
 impl lifecycle_sealed::LifecycleMarker for StateDisabled {
-    fn runtime_state() -> LifecycleState { LifecycleState::Disabled }
+    fn runtime_state() -> LifecycleState {
+        LifecycleState::Disabled
+    }
 }
 impl lifecycle_sealed::LifecycleMarker for StateUninstalled {
-    fn runtime_state() -> LifecycleState { LifecycleState::Uninstalled }
+    fn runtime_state() -> LifecycleState {
+        LifecycleState::Uninstalled
+    }
 }
 
 /// A type-state lifecycle record where the state `S` is encoded at the

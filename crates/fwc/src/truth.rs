@@ -1535,8 +1535,7 @@ impl LiveTruthResolver {
                         detail: None,
                     });
 
-                    let freshness =
-                        TruthFreshness::now(self.max_age_for(*source), start.elapsed());
+                    let freshness = TruthFreshness::now(self.max_age_for(*source), start.elapsed());
 
                     let trace = DecisionTrace {
                         attempts,
@@ -3463,14 +3462,10 @@ mod tests {
             KnowledgeState::Offline,
         );
 
-        let resolver_a = LiveTruthResolver::with_precedence_policy(
-            ResolverConfig::default(),
-            policy.clone(),
-        );
-        let resolver_b = LiveTruthResolver::with_precedence_policy(
-            ResolverConfig::default(),
-            policy.clone(),
-        );
+        let resolver_a =
+            LiveTruthResolver::with_precedence_policy(ResolverConfig::default(), policy.clone());
+        let resolver_b =
+            LiveTruthResolver::with_precedence_policy(ResolverConfig::default(), policy.clone());
 
         // Both see host-backed data available
         let result_a = resolver_a
@@ -3515,7 +3510,10 @@ mod tests {
             _ => None,
         });
 
-        assert!(result.is_err(), "strict mesh-only policy should reject host-only answers");
+        assert!(
+            result.is_err(),
+            "strict mesh-only policy should reject host-only answers"
+        );
 
         // Mesh available → should succeed
         let result = resolver
@@ -3546,7 +3544,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.knowledge_state, KnowledgeState::MeshBacked);
-        assert!(result.trace.used_fallback, "should record that fallback was used");
+        assert!(
+            result.trace.used_fallback,
+            "should record that fallback was used"
+        );
         assert_eq!(result.value, "mesh-fallback");
     }
 
@@ -3598,10 +3599,7 @@ mod tests {
     fn c2_3_is_acceptable_rejects_below_minimum() {
         let policy = TruthPrecedencePolicy::for_zone(
             "z:work",
-            vec![
-                KnowledgeState::HostBacked,
-                KnowledgeState::NodeLocal,
-            ],
+            vec![KnowledgeState::HostBacked, KnowledgeState::NodeLocal],
             KnowledgeState::NodeLocal,
         );
 
@@ -3644,6 +3642,9 @@ mod tests {
             KnowledgeState::NodeLocal => Some("node-local"),
             _ => None,
         });
-        assert!(result.is_err(), "no-fallback policy should not try lower sources");
+        assert!(
+            result.is_err(),
+            "no-fallback policy should not try lower sources"
+        );
     }
 }

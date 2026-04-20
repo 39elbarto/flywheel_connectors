@@ -22,25 +22,22 @@ use fcp_bootstrap::{
     CeremonyCheckpoint,
     CeremonyId,
     CeremonyPhase,
+    // Hardware token
+    CertificateKeyPair,
+    CertificateSelectionRefusal,
     // Cold recovery
     ColdRecovery,
     ColdRecoveryError,
     ColdRecoveryWarning,
-    // Hardware token
-    CertificateKeyPair,
-    CertificateSelectionRefusal,
     DetectedToken,
     DetectionStage,
-    ProvisioningMaterial,
-    TokenCertificate,
-    TokenKeyInfo,
-    TokenKeyType,
     // Genesis
     GenesisState,
     GenesisValidationError,
     InitSuggestion,
     PartialStateSuggestion,
     ParticipantId,
+    ProvisioningMaterial,
     // Recovery
     RecoveryPhrase,
     RecoveryPhraseError,
@@ -49,7 +46,10 @@ use fcp_bootstrap::{
     // Time
     TimeValidation,
     TimeValidationResult,
+    TokenCertificate,
     TokenDetector,
+    TokenKeyInfo,
+    TokenKeyType,
 };
 use fcp_crypto::{Ed25519Signature, Ed25519SigningKey};
 use rand_chacha::ChaCha20Rng;
@@ -1146,10 +1146,8 @@ fn match_certificate_key_pairs_across_module_boundary() {
         can_sign: true,
         can_derive: false,
     };
-    let pairs = fcp_bootstrap::hardware_token::match_certificate_key_pairs(
-        &[cert.clone()],
-        &[key.clone()],
-    );
+    let pairs =
+        fcp_bootstrap::hardware_token::match_certificate_key_pairs(&[cert.clone()], &[key.clone()]);
     assert_eq!(pairs.len(), 1);
     assert_eq!(pairs[0].certificate.label, "agent-cert");
     assert_eq!(pairs[0].key.key_type, TokenKeyType::Ed25519);

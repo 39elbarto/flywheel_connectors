@@ -342,6 +342,32 @@ impl std::fmt::Display for Ed25519Signature {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    const ED25519_GROUP_ORDER_LE: [u8; 32] = [
+        0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde,
+        0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+    ];
+
+    fn signature_with_s_plus_group_order(signature: Ed25519Signature) -> Ed25519Signature {
+        let mut signature_bytes = signature.to_bytes();
+        let mut carry = 0u16;
+
+        for (scalar_byte, order_byte) in
+            signature_bytes[32..].iter_mut().zip(ED25519_GROUP_ORDER_LE)
+        {
+            let sum = u16::from(*scalar_byte) + u16::from(order_byte) + carry;
+            *scalar_byte = sum as u8;
+            carry = sum >> 8;
+        }
+
+        assert_eq!(
+            carry, 0,
+            "adding the Ed25519 group order to a canonical S must stay in-range",
+        );
+
+        Ed25519Signature::from_bytes(&signature_bytes)
+    }
 
     #[test]
     fn generate_and_sign() {
@@ -552,27 +578,35 @@ mod tests {
 
     #[test]
     fn signature_malleability_rejection() {
-        // Ed25519 signatures must have S < L (where L is the order of the base point)
-        // This tests that we correctly verify signatures and don't accept malleable ones
         let sk = Ed25519SigningKey::generate();
         let pk = sk.verifying_key();
         let message = b"test message";
 
         let sig = sk.sign(message);
-
-        // Valid signature should verify
         assert!(pk.verify(message, &sig).is_ok());
 
-        // Create an invalid signature (all 0xff bytes for S component)
-        // This should fail verification
-        let mut bad_sig_bytes = sig.to_bytes();
-        // Set the S component (last 32 bytes) to values that would make S >= L
-        bad_sig_bytes[63] = 0xff;
-        bad_sig_bytes[62] = 0xff;
-        let bad_sig = Ed25519Signature::from_bytes(&bad_sig_bytes);
+        let malleated = signature_with_s_plus_group_order(sig);
+        assert_ne!(sig, malleated);
+        assert!(pk.verify(message, &malleated).is_err());
+    }
 
-        // This should fail because the signature is invalid
-        assert!(pk.verify(message, &bad_sig).is_err());
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        #[test]
+        fn signature_malleability_relation_rejects_s_plus_group_order(
+            message in prop::collection::vec(any::<u8>(), 0..512),
+        ) {
+            let sk = Ed25519SigningKey::from_bytes(&[7u8; 32]).expect("fixed test key must parse");
+            let pk = sk.verifying_key();
+
+            let signature = sk.sign(&message);
+            let malleated = signature_with_s_plus_group_order(signature);
+
+            prop_assert!(pk.verify(&message, &signature).is_ok());
+            prop_assert_ne!(signature, malleated);
+            prop_assert!(pk.verify(&message, &malleated).is_err());
+        }
     }
 
     #[test]

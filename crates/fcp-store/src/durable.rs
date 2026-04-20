@@ -1344,6 +1344,46 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn durable_symbol_store_rejects_conflicting_esi() {
+        // Regression: silent first-write-wins on ESI let a crafted symbol
+        // block all later honest writes and permanently deny repair for
+        // the target object. Durable validate_mutation + apply_put_symbol
+        // must reject bytewise conflicts before touching the WAL.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config = DurableSymbolStoreConfig::new(temp_dir.path().join("symbols"));
+        let store = DurableSymbolStore::open(config).expect("open symbol store");
+        store
+            .put_object_meta(test_symbol_meta(9))
+            .await
+            .expect("put meta");
+        let honest = test_symbol(9, 0, 2);
+        store.put_symbol(honest.clone()).await.expect("put honest");
+
+        // Idempotent resubmission.
+        store
+            .put_symbol(honest.clone())
+            .await
+            .expect("identical resubmission must remain idempotent");
+
+        // Conflict → InvalidSymbol, not silent drop.
+        let forged = StoredSymbol {
+            meta: honest.meta.clone(),
+            data: Bytes::from(vec![0xAA_u8; 128]),
+        };
+        let result = store.put_symbol(forged).await;
+        assert!(
+            matches!(&result, Err(SymbolStoreError::InvalidSymbol { reason }) if reason.contains("conflicting")),
+            "expected InvalidSymbol with conflicting reason, got {result:?}"
+        );
+
+        let fetched = store
+            .get_symbol(&test_object_id(9), 0)
+            .await
+            .expect("fetch honest");
+        assert_eq!(fetched.data, honest.data);
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn durable_symbol_store_recovers_after_restart() {
         let temp_dir = TempDir::new().expect("temp dir");
         let mut config = DurableSymbolStoreConfig::new(temp_dir.path().join("symbols"));

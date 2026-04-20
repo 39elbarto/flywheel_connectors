@@ -508,9 +508,7 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
 
         let session = open_enumeration_session(token, pin)?;
         let template = [Attribute::Class(ObjectClass::CERTIFICATE)];
-        let handles = session
-            .find_objects(&template)
-            .map_err(map_pkcs11_error)?;
+        let handles = session.find_objects(&template).map_err(map_pkcs11_error)?;
 
         let mut certs = Vec::new();
         for handle in handles {
@@ -541,9 +539,7 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
 
         let session = open_enumeration_session(token, pin)?;
         let template = [Attribute::Class(ObjectClass::PRIVATE_KEY)];
-        let handles = session
-            .find_objects(&template)
-            .map_err(map_pkcs11_error)?;
+        let handles = session.find_objects(&template).map_err(map_pkcs11_error)?;
 
         let mut keys = Vec::new();
         for handle in handles {
@@ -585,8 +581,8 @@ fn open_enumeration_session(
         Err(err) => return Err(map_pkcs11_error(err)),
     }
 
-    let slot = Slot::try_from(u64::from(token.slot))
-        .map_err(|err| TokenError::Pkcs11(err.to_string()))?;
+    let slot =
+        Slot::try_from(u64::from(token.slot)).map_err(|err| TokenError::Pkcs11(err.to_string()))?;
     let session = pkcs11.open_rw_session(slot).map_err(map_pkcs11_error)?;
 
     let auth_pin = pin.to_auth_pin();
@@ -652,10 +648,7 @@ fn read_certificate_object(
 }
 
 /// Read a private key object's attributes from its handle.
-fn read_key_object(
-    session: &Session,
-    handle: ObjectHandle,
-) -> Result<TokenKeyInfo, TokenError> {
+fn read_key_object(session: &Session, handle: ObjectHandle) -> Result<TokenKeyInfo, TokenError> {
     let attrs = session
         .get_attributes(
             handle,
@@ -924,11 +917,7 @@ pub struct CertificateKeyPair {
 
 impl fmt::Display for CertificateKeyPair {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "cert={} key={}",
-            self.certificate.label, self.key
-        )
+        write!(f, "cert={} key={}", self.certificate.label, self.key)
     }
 }
 
@@ -997,7 +986,10 @@ impl fmt::Display for CertificateSelectionRefusal {
                 )
             }
             Self::AmbiguousSelection { count } => {
-                write!(f, "{count} equally-ranked certificate candidates; cannot select deterministically")
+                write!(
+                    f,
+                    "{count} equally-ranked certificate candidates; cannot select deterministically"
+                )
             }
         }
     }
@@ -2363,10 +2355,22 @@ mod tests {
 
     #[test]
     fn authenticated_session_state_display_all_variants() {
-        assert_eq!(AuthenticatedSessionState::ReadOnlyPublic.to_string(), "ro-public");
-        assert_eq!(AuthenticatedSessionState::ReadOnlyUser.to_string(), "ro-user");
-        assert_eq!(AuthenticatedSessionState::ReadWritePublic.to_string(), "rw-public");
-        assert_eq!(AuthenticatedSessionState::ReadWriteUser.to_string(), "rw-user");
+        assert_eq!(
+            AuthenticatedSessionState::ReadOnlyPublic.to_string(),
+            "ro-public"
+        );
+        assert_eq!(
+            AuthenticatedSessionState::ReadOnlyUser.to_string(),
+            "ro-user"
+        );
+        assert_eq!(
+            AuthenticatedSessionState::ReadWritePublic.to_string(),
+            "rw-public"
+        );
+        assert_eq!(
+            AuthenticatedSessionState::ReadWriteUser.to_string(),
+            "rw-user"
+        );
         assert_eq!(
             AuthenticatedSessionState::ReadWriteSecurityOfficer.to_string(),
             "rw-so"
@@ -2689,8 +2693,7 @@ mod tests {
             }],
         };
 
-        let outcome =
-            select_and_authenticate(&strong, &pin, &report, &driver, None).unwrap();
+        let outcome = select_and_authenticate(&strong, &pin, &report, &driver, None).unwrap();
         assert_eq!(outcome.selected_token, strong);
     }
 
@@ -2706,10 +2709,7 @@ mod tests {
             self.close_count.load(Ordering::SeqCst)
         }
 
-        fn with_certs_and_keys(
-            certs: Vec<TokenCertificate>,
-            keys: Vec<TokenKeyInfo>,
-        ) -> Self {
+        fn with_certs_and_keys(certs: Vec<TokenCertificate>, keys: Vec<TokenKeyInfo>) -> Self {
             Self {
                 close_count: Arc::new(AtomicUsize::new(0)),
                 certs: Arc::new(Mutex::new(certs)),
@@ -2932,10 +2932,7 @@ mod tests {
 
     #[test]
     fn select_cert_no_keys_returns_refusal() {
-        let driver = MockSessionDriver::with_certs_and_keys(
-            vec![test_cert("c1", &[1])],
-            vec![],
-        );
+        let driver = MockSessionDriver::with_certs_and_keys(vec![test_cert("c1", &[1])], vec![]);
         let token = test_token();
         let pin = HardwareTokenPin::new("123456");
 
@@ -3074,15 +3071,21 @@ mod tests {
 
     #[test]
     fn certificate_selection_refusal_display_all_variants() {
-        assert!(CertificateSelectionRefusal::NoCertificates
-            .to_string()
-            .contains("no certificates"));
-        assert!(CertificateSelectionRefusal::NoKeys
-            .to_string()
-            .contains("no private keys"));
-        assert!(CertificateSelectionRefusal::NoMatchingKeyPair
-            .to_string()
-            .contains("matching private key"));
+        assert!(
+            CertificateSelectionRefusal::NoCertificates
+                .to_string()
+                .contains("no certificates")
+        );
+        assert!(
+            CertificateSelectionRefusal::NoKeys
+                .to_string()
+                .contains("no private keys")
+        );
+        assert!(
+            CertificateSelectionRefusal::NoMatchingKeyPair
+                .to_string()
+                .contains("matching private key")
+        );
         let no_compat = CertificateSelectionRefusal::NoCompatibleKeyType {
             found: vec![TokenKeyType::Rsa],
         };
@@ -3095,9 +3098,8 @@ mod tests {
 
     #[test]
     fn certificate_selection_failed_error_display() {
-        let err = TokenError::CertificateSelectionFailed(
-            CertificateSelectionRefusal::NoCertificates,
-        );
+        let err =
+            TokenError::CertificateSelectionFailed(CertificateSelectionRefusal::NoCertificates);
         let display = err.to_string();
         assert!(display.contains("certificate selection failed"));
         assert!(display.contains("no certificates"));

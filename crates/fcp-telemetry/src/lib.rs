@@ -248,11 +248,7 @@ where
             // sampling rate rather than silently exporting 100% of
             // spans. Prior behavior silently dropped the rate on the
             // floor and used Sampler::AlwaysOn unconditionally.
-            init_otlp_fn(
-                &config.service_name,
-                endpoint,
-                config.trace_sample_rate,
-            )?;
+            init_otlp_fn(&config.service_name, endpoint, config.trace_sample_rate)?;
         }
     }
 

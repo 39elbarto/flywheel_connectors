@@ -246,8 +246,7 @@ impl AwsClient {
                         error: AwsError::RateLimited {
                             retry_after_ms: retry_after
                                 .unwrap_or(Duration::from_secs(30))
-                                .as_millis()
-                                as u64,
+                                .as_millis() as u64,
                         },
                         retry_after,
                     };

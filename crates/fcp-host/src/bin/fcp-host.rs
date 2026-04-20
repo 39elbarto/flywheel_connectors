@@ -1,6 +1,7 @@
 //! Minimal fcp-host HTTP server with discovery and doctor endpoints.
 
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::{OsStr, OsString};
 use std::net::SocketAddr;
 #[cfg(unix)]
 use std::path::Path as FsPath;
@@ -90,6 +91,13 @@ use tower::ServiceExt;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 type ConnectorConfig = ManagedConnectorConfig;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CliAction {
+    Run,
+    PrintHelp,
+    PrintVersion,
+}
 
 struct SubprocessConnector {
     summary: ConnectorSummary,
@@ -902,21 +910,102 @@ struct VerifiedLiveRequest {
     safety_tier: SafetyTier,
 }
 
-fn resolve_admin_bearer_token() -> HostResult<Option<Arc<str>>> {
-    match std::env::var("FCP_HOST_ADMIN_BEARER_TOKEN") {
-        Ok(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(Arc::<str>::from(trimmed.to_owned())))
-            }
+fn parse_cli_action() -> HostResult<CliAction> {
+    parse_cli_action_from_args(std::env::args_os())
+}
+
+fn parse_cli_action_from_args<I, S>(args: I) -> HostResult<CliAction>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<OsString>,
+{
+    let mut args = args.into_iter();
+    let _program = args.next();
+    let remaining = args.map(Into::into).collect::<Vec<_>>();
+
+    match remaining.as_slice() {
+        [] => Ok(CliAction::Run),
+        [arg] if arg == OsStr::new("-h") || arg == OsStr::new("--help") => {
+            Ok(CliAction::PrintHelp)
         }
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(HostError::InvalidFilter(
-            "FCP_HOST_ADMIN_BEARER_TOKEN contains non-unicode data".to_string(),
-        )),
+        [arg] if arg == OsStr::new("-V") || arg == OsStr::new("--version") => {
+            Ok(CliAction::PrintVersion)
+        }
+        _ => {
+            let rendered = remaining
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(" ");
+            Err(HostError::InvalidFilter(format!(
+                "unexpected CLI arguments: {rendered}. fcp-host is configured via environment variables; use --help for supported startup controls"
+            )))
+        }
     }
+}
+
+fn print_cli_help() {
+    println!(
+        "\
+fcp-host {}
+
+Usage:
+  fcp-host
+  fcp-host --help
+  fcp-host --version
+
+Startup configuration is supplied via environment variables:
+  FCP_HOST_BIND
+  FCP_HOST_CONNECTORS or FCP_HOST_CONNECTORS_FILE
+  FCP_HOST_LIFECYCLE_STATE_FILE
+  FCP_HOST_ADMIN_BEARER_TOKEN
+  FCP_HOST_CAPABILITY_PUBLIC_KEY or FCP_HOST_CAPABILITY_PUBLIC_KEY_FILE
+  FCP_HOST_APPROVAL_PUBLIC_KEY or FCP_HOST_APPROVAL_PUBLIC_KEY_FILE
+  FCP_HOST_SELF_CHECK_TIMEOUT_MS
+  FCP_HOST_SUPPLY_CHAIN_*
+",
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
+fn read_optional_env_string(name: &str) -> HostResult<Option<String>> {
+    read_optional_env_string_from_result(name, std::env::var(name))
+}
+
+fn read_optional_env_string_from_result(
+    name: &str,
+    value: Result<String, std::env::VarError>,
+) -> HostResult<Option<String>> {
+    match value {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(HostError::InvalidFilter(format!(
+            "{name} contains non-unicode data"
+        ))),
+    }
+}
+
+fn read_optional_trimmed_env_string(name: &str) -> HostResult<Option<String>> {
+    read_optional_trimmed_env_string_from_result(name, std::env::var(name))
+}
+
+fn read_optional_trimmed_env_string_from_result(
+    name: &str,
+    value: Result<String, std::env::VarError>,
+) -> HostResult<Option<String>> {
+    Ok(read_optional_env_string_from_result(name, value)?.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    }))
+}
+
+fn resolve_admin_bearer_token() -> HostResult<Option<Arc<str>>> {
+    Ok(read_optional_trimmed_env_string("FCP_HOST_ADMIN_BEARER_TOKEN")?
+        .map(Arc::<str>::from))
 }
 
 /// HTTP header name for binding the caller's asserted principal to the
@@ -1019,14 +1108,19 @@ fn resolve_verifying_key(
     inline_env: &str,
     file_env: &str,
 ) -> HostResult<Option<Ed25519VerifyingKey>> {
-    let inline = std::env::var(inline_env).ok();
-    let file = std::env::var(file_env).ok();
+    let inline = read_optional_trimmed_env_string(inline_env)?;
+    let file = read_optional_trimmed_env_string(file_env)?;
 
-    if inline
-        .as_ref()
-        .is_some_and(|value| !value.trim().is_empty())
-        && file.as_ref().is_some_and(|value| !value.trim().is_empty())
-    {
+    resolve_verifying_key_from_sources(inline_env, inline, file_env, file)
+}
+
+fn resolve_verifying_key_from_sources(
+    inline_env: &str,
+    inline: Option<String>,
+    file_env: &str,
+    file: Option<String>,
+) -> HostResult<Option<Ed25519VerifyingKey>> {
+    if inline.is_some() && file.is_some() {
         return Err(HostError::InvalidFilter(format!(
             "set either {inline_env} or {file_env}, not both"
         )));
@@ -1838,14 +1932,7 @@ struct LoadedConnectorConfigs {
 }
 
 fn resolve_connectors_file_path() -> HostResult<Option<PathBuf>> {
-    match std::env::var("FCP_HOST_CONNECTORS_FILE") {
-        Ok(raw) if raw.trim().is_empty() => Ok(None),
-        Ok(raw) => Ok(Some(PathBuf::from(raw))),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(HostError::Internal(
-            "FCP_HOST_CONNECTORS_FILE contains non-unicode data".to_string(),
-        )),
-    }
+    Ok(read_optional_trimmed_env_string("FCP_HOST_CONNECTORS_FILE")?.map(PathBuf::from))
 }
 
 fn read_connector_configs_file(path: &std::path::Path) -> HostResult<Vec<ConnectorConfig>> {
@@ -1961,7 +2048,7 @@ fn load_connector_configs() -> HostResult<LoadedConnectorConfigs> {
             ))
         })?)
     } else {
-        std::env::var("FCP_HOST_CONNECTORS").ok()
+        read_optional_env_string("FCP_HOST_CONNECTORS")?
     };
 
     let Some(raw) = payload else {
@@ -1986,13 +2073,9 @@ fn load_connector_configs() -> HostResult<LoadedConnectorConfigs> {
 }
 
 fn resolve_self_check_timeout() -> HostResult<Option<Duration>> {
-    let raw = match std::env::var("FCP_HOST_SELF_CHECK_TIMEOUT_MS") {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
-    };
-    if raw.trim().is_empty() {
+    let Some(raw) = read_optional_trimmed_env_string("FCP_HOST_SELF_CHECK_TIMEOUT_MS")? else {
         return Ok(None);
-    }
+    };
     let millis: u64 = raw.parse().map_err(|err| {
         HostError::InvalidFilter(format!("invalid FCP_HOST_SELF_CHECK_TIMEOUT_MS: {err}"))
     })?;
@@ -2042,15 +2125,10 @@ fn resolve_supply_chain_gate_config() -> HostResult<SupplyChainGateConfig> {
 }
 
 fn read_env_bool(name: &str) -> HostResult<Option<bool>> {
-    let raw = match std::env::var(name) {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    let Some(raw) = read_optional_trimmed_env_string(name)? else {
         return Ok(None);
-    }
-    parse_env_bool(name, trimmed).map(Some)
+    };
+    parse_env_bool(name, &raw).map(Some)
 }
 
 fn parse_env_bool(name: &str, raw: &str) -> HostResult<bool> {
@@ -2074,37 +2152,28 @@ fn parse_env_bool(name: &str, raw: &str) -> HostResult<bool> {
 }
 
 fn read_env_u8(name: &str) -> HostResult<Option<u8>> {
-    let raw = match std::env::var(name) {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    let Some(raw) = read_optional_trimmed_env_string(name)? else {
         return Ok(None);
-    }
-    let parsed = trimmed
+    };
+    let parsed = raw
         .parse()
         .map_err(|err| HostError::InvalidFilter(format!("invalid {name}: {err}")))?;
     Ok(Some(parsed))
 }
 
 fn read_env_usize(name: &str) -> HostResult<Option<usize>> {
-    let raw = match std::env::var(name) {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    let Some(raw) = read_optional_trimmed_env_string(name)? else {
         return Ok(None);
-    }
-    let parsed = trimmed
+    };
+    let parsed = raw
         .parse()
         .map_err(|err| HostError::InvalidFilter(format!("invalid {name}: {err}")))?;
     Ok(Some(parsed))
 }
 
 fn resolve_bind_target() -> HostResult<BindTarget> {
-    let raw = std::env::var("FCP_HOST_BIND").unwrap_or_else(|_| "127.0.0.1:9090".to_string());
+    let raw = read_optional_env_string("FCP_HOST_BIND")?
+        .unwrap_or_else(|| "127.0.0.1:9090".to_string());
     parse_bind_target(&raw)
 }
 
@@ -2179,6 +2248,17 @@ fn prepare_unix_socket_path(path: &FsPath) -> HostResult<()> {
 }
 
 fn main() -> HostResult<()> {
+    match parse_cli_action()? {
+        CliAction::Run => {}
+        CliAction::PrintHelp => {
+            print_cli_help();
+            return Ok(());
+        }
+        CliAction::PrintVersion => {
+            println!("{}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+    }
     init_tracing();
     match fcp_async_core::runtime::block_on_sync(async_main()) {
         Ok(result) => result,

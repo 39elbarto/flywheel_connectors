@@ -246,9 +246,8 @@ impl SupplyChainSignature {
                 reason: "signature cannot be empty".to_string(),
             });
         }
-        let signature_len = decode_signature_bytes(&self.signature).map_err(|reason| {
-            SupplyChainError::InvalidSignature { reason }
-        })?;
+        let signature_len = decode_signature_bytes(&self.signature)
+            .map_err(|reason| SupplyChainError::InvalidSignature { reason })?;
         if signature_len != 64 {
             return Err(SupplyChainError::InvalidSignature {
                 reason: format!(
@@ -781,11 +780,7 @@ fn is_lower_hex_64(value: &str) -> bool {
 
 fn decode_signature_bytes(signature: &str) -> Result<usize, String> {
     let trimmed = signature.trim();
-    if trimmed.len() % 2 == 0
-        && trimmed
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
+    if trimmed.len() % 2 == 0 && trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return hex::decode(trimmed)
             .map(|bytes| bytes.len())
             .map_err(|error| format!("signature hex decoding failed: {error}"));

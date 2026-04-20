@@ -470,7 +470,8 @@ mod tests {
             _s: ReleaseSignature,
             _t: SuccessThresholds,
             _r: RollbackRules,
-        ) {}
+        ) {
+        }
         let _: fn() -> ReleaseManifestBuilder =
             || ReleaseManifest::builder(ConnectorId::from_static("fcp.test"), "1.0.0");
     }

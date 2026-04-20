@@ -855,11 +855,7 @@ impl RevocationSlaChecker {
     /// - `Risky` operations SHOULD warn but may proceed.
     /// - `Safe` operations may always proceed.
     #[must_use]
-    pub const fn may_proceed(
-        &self,
-        now: u64,
-        freshness_class: RevocationFreshnessClass,
-    ) -> bool {
+    pub const fn may_proceed(&self, now: u64, freshness_class: RevocationFreshnessClass) -> bool {
         match freshness_class {
             RevocationFreshnessClass::Critical => self.check_sla(now).is_fresh(),
             RevocationFreshnessClass::Risky | RevocationFreshnessClass::Safe => true,
@@ -2317,10 +2313,7 @@ mod tests {
         assert_eq!(RevocationFreshnessClass::Critical.as_str(), "critical");
         assert_eq!(RevocationFreshnessClass::Risky.as_str(), "risky");
         assert_eq!(RevocationFreshnessClass::Safe.as_str(), "safe");
-        assert_eq!(
-            RevocationFreshnessClass::Critical.to_string(),
-            "critical"
-        );
+        assert_eq!(RevocationFreshnessClass::Critical.to_string(), "critical");
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -2504,7 +2497,10 @@ mod tests {
                 false_positives += 1;
             }
         }
-        assert_eq!(false_positives, 0, "exact membership must have zero false positives");
+        assert_eq!(
+            false_positives, 0,
+            "exact membership must have zero false positives"
+        );
     }
 
     #[test]
@@ -2599,10 +2595,7 @@ mod tests {
     fn c1_4_sla_breached_past_window() {
         let checker = RevocationSlaChecker::new(100, 1_700_000_000, 300);
         let status = checker.check_sla(1_700_000_500); // 500s > 300s SLA
-        assert_eq!(
-            status,
-            RevocationSlaStatus::Breached { overdue_secs: 200 }
-        );
+        assert_eq!(status, RevocationSlaStatus::Breached { overdue_secs: 200 });
         assert!(!status.is_fresh());
     }
 
@@ -2632,10 +2625,7 @@ mod tests {
 
         // One second past — Breached
         let status = checker.check_sla(1_700_000_301);
-        assert_eq!(
-            status,
-            RevocationSlaStatus::Breached { overdue_secs: 1 }
-        );
+        assert_eq!(status, RevocationSlaStatus::Breached { overdue_secs: 1 });
     }
 
     #[test]

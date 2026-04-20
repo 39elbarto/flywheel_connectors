@@ -296,10 +296,11 @@ fn cursor_store_object_store_rejects_tampered_recovery_state() {
         lease_object_id,
         signature: Signature::zero(),
     };
-    let clean_body = fcp_cbor::CanonicalSerializer::serialize(&clean_state, &clean_state.header.schema)
-        .expect("clean state should serialize");
-    let clean_object_id =
-        StoredObject::derive_id(&clean_state.header, &clean_body, &object_id_key).expect("clean object id");
+    let clean_body =
+        fcp_cbor::CanonicalSerializer::serialize(&clean_state, &clean_state.header.schema)
+            .expect("clean state should serialize");
+    let clean_object_id = StoredObject::derive_id(&clean_state.header, &clean_body, &object_id_key)
+        .expect("clean object id");
 
     let tampered_state = ConnectorStateObject {
         seq: 99,
@@ -312,11 +313,9 @@ fn cursor_store_object_store_rejects_tampered_recovery_state() {
         .expect("tampered cursor should encode"),
         ..clean_state
     };
-    let tampered_body = fcp_cbor::CanonicalSerializer::serialize(
-        &tampered_state,
-        &tampered_state.header.schema,
-    )
-    .expect("tampered state should serialize");
+    let tampered_body =
+        fcp_cbor::CanonicalSerializer::serialize(&tampered_state, &tampered_state.header.schema)
+            .expect("tampered state should serialize");
 
     fcp_async_core::runtime::block_on_sync(async {
         object_store

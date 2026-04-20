@@ -682,7 +682,7 @@ mod tests {
         }
     }
 
-fcp_core::impl_fcp_sealed!(MockConnector);
+    fcp_core::impl_fcp_sealed!(MockConnector);
 
     #[async_trait::async_trait]
     impl FcpConnector for MockConnector {

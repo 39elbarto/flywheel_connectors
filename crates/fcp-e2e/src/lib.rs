@@ -1535,7 +1535,7 @@ mod tests {
         }
     }
 
-fcp_core::impl_fcp_sealed!(RevocationFlowConnector);
+    fcp_core::impl_fcp_sealed!(RevocationFlowConnector);
 
     #[fcp_core::async_trait]
     impl FcpConnector for RevocationFlowConnector {
@@ -1653,8 +1653,7 @@ fcp_core::impl_fcp_sealed!(RevocationFlowConnector);
             Ok(())
         }
     }
-fcp_core::impl_fcp_sealed!(DummyConnector);
-
+    fcp_core::impl_fcp_sealed!(DummyConnector);
 
     #[fcp_core::async_trait]
     impl FcpConnector for DummyConnector {

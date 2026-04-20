@@ -442,7 +442,6 @@ pub trait Sandbox: Send + Sync {
         FilterStrength::ProcessLimit
     }
 
-
     /// Apply the sandbox to the current process.
     ///
     /// This should be called early in the connector's startup, before any

@@ -430,15 +430,11 @@ impl PayPalClient {
                 let idempotency_key = idempotency_key.clone();
                 async move {
                     debug!(attempt, url = %url, "POST invoice send");
-                    let mut req = client
-                        .post(&url)
-                        .bearer_auth(&token)
-                        .json(&json!({}));
+                    let mut req = client.post(&url).bearer_auth(&token).json(&json!({}));
                     if let Some(key) = &idempotency_key {
                         req = req.header("PayPal-Request-Id", key.as_str());
                     }
-                    let resp = match req.send().await
-                    {
+                    let resp = match req.send().await {
                         Ok(r) => r,
                         Err(e) => {
                             return AttemptOutcome::Retryable {

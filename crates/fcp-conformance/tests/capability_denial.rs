@@ -59,7 +59,8 @@ fn assert_cap_denied(decision: &EnforcementDecision, expected_reason: &str, zone
             ..
         } => {
             assert_eq!(
-                check_name, "capability_verify",
+                check_name,
+                "capability_verify",
                 "zone {}: expected denial at capability_verify, got {}",
                 zone.as_str(),
                 check_name
@@ -170,7 +171,11 @@ fn capability_denial_short_circuits_before_later_checks() {
         3,
         "capability denial must short-circuit before holder_proof and later",
     );
-    let names: Vec<&str> = decision.checks_run.iter().map(|r| r.name.as_str()).collect();
+    let names: Vec<&str> = decision
+        .checks_run
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
     assert_eq!(
         names,
         vec!["canonical_decode", "zone_membership", "capability_verify"]

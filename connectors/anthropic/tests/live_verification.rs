@@ -256,11 +256,9 @@ async fn live_introspect() {
     );
 
     // Verify anthropic.message is listed
-    let has_message = ops.iter().any(|op| {
-        op.get("id")
-            .and_then(|id| id.as_str())
-            == Some("anthropic.message")
-    });
+    let has_message = ops
+        .iter()
+        .any(|op| op.get("id").and_then(|id| id.as_str()) == Some("anthropic.message"));
     assert!(
         has_message,
         "operations should include anthropic.message: {introspection}"

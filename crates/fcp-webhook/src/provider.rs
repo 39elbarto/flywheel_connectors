@@ -617,10 +617,7 @@ mod tests {
         let body = vec![b'y'; 128];
 
         let mut headers = HashMap::new();
-        headers.insert(
-            "stripe-signature".into(),
-            "t=1700000000,v1=deadbeef".into(),
-        );
+        headers.insert("stripe-signature".into(), "t=1700000000,v1=deadbeef".into());
 
         match handler.verify_and_parse(&headers, &body) {
             Err(WebhookError::PayloadTooLarge { size, limit }) => {
@@ -642,7 +639,10 @@ mod tests {
         let err = StripeWebhook::parse_stripe_signature(&header).unwrap_err();
         match err {
             WebhookError::InvalidPayload(msg) => {
-                assert!(msg.contains("timestamp"), "message should name the field: {msg}");
+                assert!(
+                    msg.contains("timestamp"),
+                    "message should name the field: {msg}"
+                );
             }
             other => panic!("expected InvalidPayload, got {other:?}"),
         }

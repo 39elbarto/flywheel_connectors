@@ -2320,12 +2320,10 @@ mod tests {
         let op = OperationId::new("op.test").unwrap();
         let cap = CapabilityId::new("cap.test").unwrap();
 
-        verifier
-            .verify(token, &cap, &op, &[])
-            .expect(
-                "without_instance_binding must accept a token that declares instance_id — \
+        verifier.verify(token, &cap, &op, &[]).expect(
+            "without_instance_binding must accept a token that declares instance_id — \
                  the verifier explicitly declined to check the binding",
-            );
+        );
     }
 
     #[test]

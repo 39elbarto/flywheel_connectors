@@ -120,7 +120,10 @@ async fn invoke_search_text_uses_default_operation_field_mask() {
     Mock::given(method("POST"))
         .and(path("/v1/places:searchText"))
         .and(header("x-goog-api-key", "test-key"))
-        .and(header_regex("x-goog-fieldmask", &fieldmask_regex(DEFAULT_SEARCH_TEXT_FIELD_MASK)))
+        .and(header_regex(
+            "x-goog-fieldmask",
+            &fieldmask_regex(DEFAULT_SEARCH_TEXT_FIELD_MASK),
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "places": [
                 {
@@ -175,7 +178,10 @@ async fn invoke_autocomplete_uses_autocomplete_specific_field_mask() {
     Mock::given(method("POST"))
         .and(path("/v1/places:autocomplete"))
         .and(header("x-goog-api-key", "test-key"))
-        .and(header_regex("x-goog-fieldmask", &fieldmask_regex(DEFAULT_AUTOCOMPLETE_FIELD_MASK)))
+        .and(header_regex(
+            "x-goog-fieldmask",
+            &fieldmask_regex(DEFAULT_AUTOCOMPLETE_FIELD_MASK),
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "suggestions": [
                 {
@@ -239,7 +245,10 @@ async fn invoke_get_place_uses_place_details_field_mask_and_language_code() {
         .and(path("/v1/places/ghi789"))
         .and(query_param("languageCode", "en"))
         .and(header("x-goog-api-key", "test-key"))
-        .and(header_regex("x-goog-fieldmask", &fieldmask_regex(DEFAULT_PLACE_DETAILS_FIELD_MASK)))
+        .and(header_regex(
+            "x-goog-fieldmask",
+            &fieldmask_regex(DEFAULT_PLACE_DETAILS_FIELD_MASK),
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": "ghi789",
             "name": "places/ghi789",
@@ -325,8 +334,16 @@ async fn wiremock_header_exact_fails_on_comma_separated_fieldmask() {
         .expect("send");
 
     // Document the bug: exact returns 404, regex returns 200
-    assert_eq!(exact.status().as_u16(), 404, "wiremock header() bug: exact match should 404");
-    assert_eq!(regex.status().as_u16(), 200, "header_regex workaround must succeed");
+    assert_eq!(
+        exact.status().as_u16(),
+        404,
+        "wiremock header() bug: exact match should 404"
+    );
+    assert_eq!(
+        regex.status().as_u16(),
+        200,
+        "header_regex workaround must succeed"
+    );
 }
 
 #[fcp_async_core::runtime::test]

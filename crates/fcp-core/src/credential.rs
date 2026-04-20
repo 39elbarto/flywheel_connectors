@@ -416,16 +416,11 @@ pub trait CredentialBackend: Send + Sync {
     ) -> Result<CredentialObject, CredentialBackendError>;
 
     /// List all credentials within a zone.
-    async fn list(
-        &self,
-        zone_id: &ZoneId,
-    ) -> Result<Vec<CredentialObject>, CredentialBackendError>;
+    async fn list(&self, zone_id: &ZoneId)
+    -> Result<Vec<CredentialObject>, CredentialBackendError>;
 
     /// Store or update a credential.
-    async fn put(
-        &self,
-        credential: &CredentialObject,
-    ) -> Result<(), CredentialBackendError>;
+    async fn put(&self, credential: &CredentialObject) -> Result<(), CredentialBackendError>;
 
     /// Delete a credential by ID within a zone.
     async fn delete(

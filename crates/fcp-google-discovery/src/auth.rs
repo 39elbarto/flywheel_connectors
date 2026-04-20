@@ -357,12 +357,11 @@ impl std::fmt::Debug for GoogleAuthSource {
                 .debug_struct("CredentialId")
                 .field("credential_id", credential_id)
                 .finish(),
-            Self::OAuthRefresh(source) => {
-                f.debug_tuple("OAuthRefresh").field(source).finish()
-            }
-            Self::CredentialsFile { path } => {
-                f.debug_struct("CredentialsFile").field("path", path).finish()
-            }
+            Self::OAuthRefresh(source) => f.debug_tuple("OAuthRefresh").field(source).finish(),
+            Self::CredentialsFile { path } => f
+                .debug_struct("CredentialsFile")
+                .field("path", path)
+                .finish(),
             Self::EncryptedLocalCredentials { profile } => f
                 .debug_struct("EncryptedLocalCredentials")
                 .field("profile", profile)

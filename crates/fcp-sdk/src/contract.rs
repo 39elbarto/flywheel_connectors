@@ -654,7 +654,7 @@ mod tests {
         }
     }
 
-fcp_core::impl_fcp_sealed!(ContractTestConnector);
+    fcp_core::impl_fcp_sealed!(ContractTestConnector);
 
     #[async_trait::async_trait]
     impl FcpConnector for ContractTestConnector {

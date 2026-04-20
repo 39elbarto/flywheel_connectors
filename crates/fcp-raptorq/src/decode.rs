@@ -565,15 +565,12 @@ impl RaptorQDecoder {
                 limit: self.config.max_object_size as usize,
             }
         })?;
-        let max_symbols = self
-            .config
-            .total_symbols(transfer_len)
-            .saturating_add(1000);
-        let max_symbols_usize = usize::try_from(max_symbols)
-        .map_err(|_| DecodeError::MemoryLimitExceeded {
-            used: usize::MAX,
-            limit: self.config.max_object_size as usize,
-        })?;
+        let max_symbols = self.config.total_symbols(transfer_len).saturating_add(1000);
+        let max_symbols_usize =
+            usize::try_from(max_symbols).map_err(|_| DecodeError::MemoryLimitExceeded {
+                used: usize::MAX,
+                limit: self.config.max_object_size as usize,
+            })?;
         if self.received_count() >= max_symbols {
             return Err(DecodeError::SymbolBufferExceeded {
                 buffered: self.received_count(),

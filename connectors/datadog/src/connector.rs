@@ -486,9 +486,9 @@ impl DatadogConnector {
         client: &DatadogClient,
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, DatadogError> {
-        let series = input.get("series").ok_or_else(|| {
-            DatadogError::InvalidInput("Missing required field: series".into())
-        })?;
+        let series = input
+            .get("series")
+            .ok_or_else(|| DatadogError::InvalidInput("Missing required field: series".into()))?;
         let body = json!({ "series": series });
         let data = client.submit_metrics(&body).await?;
         Ok(json!({ "status": data.get("status").cloned().unwrap_or(json!("ok")) }))

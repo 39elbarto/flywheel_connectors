@@ -678,7 +678,9 @@ fn require_str<'a>(
     input
         .get(field)
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| SemanticScholarError::InvalidInput(format!("Missing required field: {field}")))
+        .ok_or_else(|| {
+            SemanticScholarError::InvalidInput(format!("Missing required field: {field}"))
+        })
 }
 
 fn optional_string_field<'a>(

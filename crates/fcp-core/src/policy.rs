@@ -2279,13 +2279,11 @@ pub fn simulate_policy_decision(
     // SAFETY: Unverified claim access is acceptable here because this is
     // a policy *simulation* — no authorization is granted.  The claims
     // are used solely to populate the DecisionReceipt for dry-run UX.
-    let claims = invoke
-        .capability_token
-        .raw()
-        .claims_unverified()
-        .map_err(|err: fcp_crypto::CryptoError| PolicySimulationError::TokenClaims {
+    let claims = invoke.capability_token.raw().claims_unverified().map_err(
+        |err: fcp_crypto::CryptoError| PolicySimulationError::TokenClaims {
             message: err.to_string(),
-        })?;
+        },
+    )?;
 
     let principal_str = input
         .principal
@@ -4931,9 +4929,8 @@ mod tests {
         // ApprovalElevationScopeMismatch, not Allow.
         let request_b = ObjectId::from_unscoped_bytes(b"req-B");
         static APPROVALS: std::sync::OnceLock<Vec<ApprovalToken>> = std::sync::OnceLock::new();
-        let approvals = APPROVALS.get_or_init(|| {
-            vec![elevation_token(ObjectId::from_unscoped_bytes(b"req-A"))]
-        });
+        let approvals = APPROVALS
+            .get_or_init(|| vec![elevation_token(ObjectId::from_unscoped_bytes(b"req-A"))]);
         let input = elevation_flow_input(request_b, approvals.as_slice());
         let engine = PolicyEngine {
             zone_policy: minimal_zone_policy(),
@@ -4951,9 +4948,8 @@ mod tests {
     fn engine_elevation_accepts_token_bound_to_this_request() {
         let request = ObjectId::from_unscoped_bytes(b"req-match");
         static APPROVALS: std::sync::OnceLock<Vec<ApprovalToken>> = std::sync::OnceLock::new();
-        let approvals = APPROVALS.get_or_init(|| {
-            vec![elevation_token(ObjectId::from_unscoped_bytes(b"req-match"))]
-        });
+        let approvals = APPROVALS
+            .get_or_init(|| vec![elevation_token(ObjectId::from_unscoped_bytes(b"req-match"))]);
         let input = elevation_flow_input(request, approvals.as_slice());
         let engine = PolicyEngine {
             zone_policy: minimal_zone_policy(),

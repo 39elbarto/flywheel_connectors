@@ -216,11 +216,7 @@ impl ElasticsearchClient {
                 "DELETE" => self.client.delete(url),
                 _ => unreachable!(),
             };
-            let req = if let Some(b) = body {
-                req.json(b)
-            } else {
-                req
-            };
+            let req = if let Some(b) = body { req.json(b) } else { req };
             let req = self.add_auth(req);
 
             match req.send().await {
@@ -272,7 +268,12 @@ impl ElasticsearchClient {
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
-            debug!(attempt, method = "POST", url, "elasticsearch ndjson request");
+            debug!(
+                attempt,
+                method = "POST",
+                url,
+                "elasticsearch ndjson request"
+            );
 
             let req = self
                 .client

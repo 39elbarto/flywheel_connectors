@@ -65,11 +65,15 @@ pub enum BootstrapError {
     NoHardwareTokens,
 
     /// Hardware token PIN is required for authentication.
-    #[error("hardware token PIN is required: provide via --hardware-token-pin or interactive prompt")]
+    #[error(
+        "hardware token PIN is required: provide via --hardware-token-pin or interactive prompt"
+    )]
     HardwareTokenPinRequired,
 
     /// Hardware token PIN was rejected by the token.
-    #[error("hardware token PIN was rejected: verify and retry; repeated failures will lock the token")]
+    #[error(
+        "hardware token PIN was rejected: verify and retry; repeated failures will lock the token"
+    )]
     HardwareTokenInvalidPin,
 
     /// Hardware token PIN is locked after too many failed attempts.
@@ -77,7 +81,9 @@ pub enum BootstrapError {
     HardwareTokenPinLocked,
 
     /// Requested hardware token was not found during discovery.
-    #[error("hardware token not found: {locator} — verify token is connected and provider library is installed")]
+    #[error(
+        "hardware token not found: {locator} — verify token is connected and provider library is installed"
+    )]
     HardwareTokenNotFound {
         /// Locator string identifying the requested token.
         locator: String,
@@ -95,7 +101,9 @@ pub enum BootstrapError {
     HardwareTokenDisconnected,
 
     /// Hardware token session expired before the operation completed.
-    #[error("hardware token session expired after {elapsed:?} (timeout: {timeout:?}): retry or increase --session-timeout")]
+    #[error(
+        "hardware token session expired after {elapsed:?} (timeout: {timeout:?}): retry or increase --session-timeout"
+    )]
     HardwareTokenSessionExpired {
         /// Elapsed time since session was opened.
         elapsed: Duration,
@@ -811,9 +819,7 @@ mod tests {
                 timeout: Duration::from_secs(1),
             },
             BootstrapError::HardwareTokenCancelled,
-            BootstrapError::HardwareTokenProviderFault {
-                detail: "x".into(),
-            },
+            BootstrapError::HardwareTokenProviderFault { detail: "x".into() },
         ];
         for err in &variants {
             assert!(err.source().is_none(), "expected no source for {err:?}");

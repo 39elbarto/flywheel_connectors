@@ -1092,7 +1092,10 @@ mod tests {
     #[test]
     fn retry_after_ms_from_headers_saturates_large_values() {
         let mut headers = HeaderMap::new();
-        headers.insert("retry-after", HeaderValue::from_static("18446744073709551615"));
+        headers.insert(
+            "retry-after",
+            HeaderValue::from_static("18446744073709551615"),
+        );
         assert_eq!(retry_after_ms_from_headers(&headers), Some(u64::MAX));
     }
 }

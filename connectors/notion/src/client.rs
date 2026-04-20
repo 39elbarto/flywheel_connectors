@@ -25,6 +25,7 @@ pub const DEFAULT_API_URL: &str = "https://api.notion.com/v1";
 /// Verified against Notion's changes-by-version reference (latest version
 /// `2026-03-11` as of March 25, 2026).
 pub const DEFAULT_NOTION_VERSION: &str = "2026-03-11";
+const MAX_PAGINATION_CURSOR_BYTES: usize = 512;
 
 /// Truncate a response body string to `max` characters at a safe UTF-8 boundary.
 fn truncate_body(body: String, max: usize) -> String {
@@ -105,6 +106,27 @@ fn validate_notion_id(id: &str, label: &str) -> NotionResult<()> {
     if id.chars().any(|c| FORBIDDEN_ID_CHARS.contains(&c)) {
         return Err(NotionError::Validation {
             message: format!("{label} contains URL-unsafe characters: {id:?}"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_pagination_cursor(cursor: &str, label: &str) -> NotionResult<()> {
+    if cursor.is_empty() {
+        return Err(NotionError::Validation {
+            message: format!("{label} must not be empty"),
+        });
+    }
+    if cursor.len() > MAX_PAGINATION_CURSOR_BYTES {
+        return Err(NotionError::Validation {
+            message: format!(
+                "{label} exceeds maximum length of {MAX_PAGINATION_CURSOR_BYTES} bytes"
+            ),
+        });
+    }
+    if cursor.chars().any(char::is_control) {
+        return Err(NotionError::Validation {
+            message: format!("{label} contains control characters"),
         });
     }
     Ok(())
@@ -320,6 +342,7 @@ impl NotionClient {
             body["filter"] = f;
         }
         if let Some(cursor) = start_cursor {
+            validate_pagination_cursor(cursor, "start_cursor")?;
             body["start_cursor"] = serde_json::Value::String(cursor.into());
         }
         let data = self.post(&url, Some(body)).await?;
@@ -1199,6 +1222,35 @@ mod tests {
             .with_api_url("http://localhost:1234/v1");
 
         let result = client.query_database("", None, None).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            NotionError::Validation { .. }
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_query_database_rejects_control_chars_in_cursor() {
+        let client = NotionClient::new("test-token")
+            .unwrap()
+            .with_api_url("http://localhost:1234/v1");
+
+        let result = client.query_database("db-1", None, Some("cursor\nnext")).await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            NotionError::Validation { .. }
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_query_database_rejects_oversized_cursor() {
+        let client = NotionClient::new("test-token")
+            .unwrap()
+            .with_api_url("http://localhost:1234/v1");
+        let cursor = "a".repeat(MAX_PAGINATION_CURSOR_BYTES + 1);
+
+        let result = client.query_database("db-1", None, Some(cursor.as_str())).await;
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),

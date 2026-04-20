@@ -601,20 +601,27 @@ mod tests {
     fn urlencoded_handles_special_characters() {
         assert_eq!(urlencoded("hello world"), "hello+world");
         assert_eq!(urlencoded("a=b&c=d"), "a%3Db%26c%3Dd");
-        assert_eq!(urlencoded("safe-chars_here.tilde~"), "safe-chars_here.tilde~");
+        assert_eq!(
+            urlencoded("safe-chars_here.tilde~"),
+            "safe-chars_here.tilde~"
+        );
     }
 
     #[test]
     fn jwt_rejects_pkcs1_format_pem() {
         // PKCS#1 format starts with "-----BEGIN RSA PRIVATE KEY-----"
         // Our implementation requires PKCS#8 format
-        let pkcs1_pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIBogIBAAJBALRiMLAH\n-----END RSA PRIVATE KEY-----";
+        let pkcs1_pem =
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIBogIBAAJBALRiMLAH\n-----END RSA PRIVATE KEY-----";
         let result = build_jwt_assertion(
             "svc@p.iam.gserviceaccount.com",
             pkcs1_pem,
             crate::types::DEFAULT_GCP_SCOPES,
             None,
         );
-        assert!(result.is_err(), "PKCS#1 format should be rejected (we require PKCS#8)");
+        assert!(
+            result.is_err(),
+            "PKCS#1 format should be rejected (we require PKCS#8)"
+        );
     }
 }

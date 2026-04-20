@@ -104,7 +104,10 @@ fn sigv4_sign_has_correct_structure() {
     let res = signer.sign(&request);
 
     // Authorization header: AWS4-HMAC-SHA256 Credential=.../..., SignedHeaders=..., Signature=...
-    assert!(res.authorization.starts_with("AWS4-HMAC-SHA256 Credential="));
+    assert!(
+        res.authorization
+            .starts_with("AWS4-HMAC-SHA256 Credential=")
+    );
     assert!(res.authorization.contains("SignedHeaders="));
     assert!(res.authorization.contains("Signature="));
     // Date must be ISO 8601 compact
@@ -144,8 +147,7 @@ fn sigv4_sign_with_body_payload() {
 
 #[test]
 fn sigv4_sign_with_session_token() {
-    let signer =
-        SigV4Signer::new(aws_creds_with_token(), s3_scope()).with_fixed_time(fixed_time());
+    let signer = SigV4Signer::new(aws_creds_with_token(), s3_scope()).with_fixed_time(fixed_time());
     let request = make_get_request("s3.amazonaws.com", "/bucket/key");
 
     let res = signer.sign(&request);
@@ -176,8 +178,9 @@ fn sigv4_sign_without_session_token() {
 fn sigv4_different_regions_produce_different_signatures() {
     let request = make_get_request("s3.amazonaws.com", "/bucket/key");
 
-    let us_east =
-        SigV4Signer::new(aws_creds(), s3_scope()).with_fixed_time(fixed_time()).sign(&request);
+    let us_east = SigV4Signer::new(aws_creds(), s3_scope())
+        .with_fixed_time(fixed_time())
+        .sign(&request);
     let eu_west = SigV4Signer::new(aws_creds(), eu_west_s3_scope())
         .with_fixed_time(fixed_time())
         .sign(&request);
@@ -194,10 +197,12 @@ fn sigv4_different_regions_produce_different_signatures() {
 fn sigv4_different_services_produce_different_signatures() {
     let request = make_get_request("service.amazonaws.com", "/");
 
-    let s3_res =
-        SigV4Signer::new(aws_creds(), s3_scope()).with_fixed_time(fixed_time()).sign(&request);
-    let ec2_res =
-        SigV4Signer::new(aws_creds(), ec2_scope()).with_fixed_time(fixed_time()).sign(&request);
+    let s3_res = SigV4Signer::new(aws_creds(), s3_scope())
+        .with_fixed_time(fixed_time())
+        .sign(&request);
+    let ec2_res = SigV4Signer::new(aws_creds(), ec2_scope())
+        .with_fixed_time(fixed_time())
+        .sign(&request);
 
     assert_ne!(s3_res.authorization, ec2_res.authorization);
 }
@@ -208,10 +213,12 @@ fn sigv4_different_dates_produce_different_signatures() {
     let time_a: chrono::DateTime<chrono::Utc> = "2024-06-15T12:00:00Z".parse().unwrap();
     let time_b: chrono::DateTime<chrono::Utc> = "2024-06-16T12:00:00Z".parse().unwrap();
 
-    let auth_a =
-        SigV4Signer::new(aws_creds(), s3_scope()).with_fixed_time(time_a).sign(&request);
-    let auth_b =
-        SigV4Signer::new(aws_creds(), s3_scope()).with_fixed_time(time_b).sign(&request);
+    let auth_a = SigV4Signer::new(aws_creds(), s3_scope())
+        .with_fixed_time(time_a)
+        .sign(&request);
+    let auth_b = SigV4Signer::new(aws_creds(), s3_scope())
+        .with_fixed_time(time_b)
+        .sign(&request);
 
     assert_ne!(auth_a.authorization, auth_b.authorization);
     assert_ne!(auth_a.x_amz_date, auth_b.x_amz_date);
@@ -232,10 +239,12 @@ fn sigv4_different_credentials_produce_different_signatures() {
         session_token: None,
     };
 
-    let auth_a =
-        SigV4Signer::new(creds_a, s3_scope()).with_fixed_time(fixed_time()).sign(&request);
-    let auth_b =
-        SigV4Signer::new(creds_b, s3_scope()).with_fixed_time(fixed_time()).sign(&request);
+    let auth_a = SigV4Signer::new(creds_a, s3_scope())
+        .with_fixed_time(fixed_time())
+        .sign(&request);
+    let auth_b = SigV4Signer::new(creds_b, s3_scope())
+        .with_fixed_time(fixed_time())
+        .sign(&request);
 
     assert_ne!(auth_a.authorization, auth_b.authorization);
 }
@@ -255,7 +264,10 @@ fn sigv4_empty_credentials_still_produce_valid_structure() {
     let res = signer.sign(&request);
 
     // Structure must be valid even with empty keys
-    assert!(res.authorization.starts_with("AWS4-HMAC-SHA256 Credential="));
+    assert!(
+        res.authorization
+            .starts_with("AWS4-HMAC-SHA256 Credential=")
+    );
     assert!(res.authorization.contains("Signature="));
 }
 
@@ -351,7 +363,10 @@ fn sigv4_signs_post_request() {
         query_params: BTreeMap::new(),
         headers: BTreeMap::from([
             ("host".into(), "ec2.amazonaws.com".into()),
-            ("content-type".into(), "application/x-www-form-urlencoded".into()),
+            (
+                "content-type".into(),
+                "application/x-www-form-urlencoded".into(),
+            ),
         ]),
         payload_hash: SignableRequest::hash_payload(body),
     };
@@ -388,7 +403,11 @@ fn presign_url_has_all_required_params() {
     let presigned = signer.presign(&request, 3600);
 
     assert!(presigned.url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"));
-    assert!(presigned.url.contains("X-Amz-Credential=AKIAIOSFODNN7EXAMPLE"));
+    assert!(
+        presigned
+            .url
+            .contains("X-Amz-Credential=AKIAIOSFODNN7EXAMPLE")
+    );
     assert!(presigned.url.contains("X-Amz-Date="));
     assert!(presigned.url.contains("X-Amz-Expires=3600"));
     assert!(presigned.url.contains("X-Amz-Signature="));
@@ -407,8 +426,7 @@ fn presign_url_secret_not_in_url() {
 
 #[test]
 fn presign_url_session_token_included_when_present() {
-    let signer =
-        SigV4Signer::new(aws_creds_with_token(), s3_scope()).with_fixed_time(fixed_time());
+    let signer = SigV4Signer::new(aws_creds_with_token(), s3_scope()).with_fixed_time(fixed_time());
     let request = make_presign_request("s3.amazonaws.com", "/bucket/key");
     let presigned = signer.presign(&request, 3600);
 
@@ -695,17 +713,22 @@ fn sigv4_authorization_contains_correct_scope() {
     let res = signer.sign(&request);
 
     // Credential scope: date/region/service/aws4_request
-    assert!(res.authorization.contains("20240615/us-east-1/s3/aws4_request"));
+    assert!(
+        res.authorization
+            .contains("20240615/us-east-1/s3/aws4_request")
+    );
 }
 
 #[test]
 fn sigv4_authorization_eu_scope() {
-    let signer =
-        SigV4Signer::new(aws_creds(), eu_west_s3_scope()).with_fixed_time(fixed_time());
+    let signer = SigV4Signer::new(aws_creds(), eu_west_s3_scope()).with_fixed_time(fixed_time());
     let request = make_get_request("s3.amazonaws.com", "/");
     let res = signer.sign(&request);
 
-    assert!(res.authorization.contains("20240615/eu-west-1/s3/aws4_request"));
+    assert!(
+        res.authorization
+            .contains("20240615/eu-west-1/s3/aws4_request")
+    );
 }
 
 #[test]
@@ -714,7 +737,10 @@ fn sigv4_authorization_ec2_scope() {
     let request = make_get_request("ec2.amazonaws.com", "/");
     let res = signer.sign(&request);
 
-    assert!(res.authorization.contains("20240615/us-east-1/ec2/aws4_request"));
+    assert!(
+        res.authorization
+            .contains("20240615/us-east-1/ec2/aws4_request")
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

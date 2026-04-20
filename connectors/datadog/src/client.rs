@@ -235,11 +235,7 @@ impl DatadogClient {
                 "DELETE" => self.client.delete(url),
                 _ => unreachable!(),
             };
-            let req = if let Some(b) = body {
-                req.json(b)
-            } else {
-                req
-            };
+            let req = if let Some(b) = body { req.json(b) } else { req };
             let req = self.add_auth(req);
 
             match req.send().await {

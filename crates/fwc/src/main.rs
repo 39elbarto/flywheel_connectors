@@ -330,8 +330,7 @@ use fcp_registry::{
 };
 use fcp_telemetry::{
     CapabilityRecommendation, CapabilitySuggestionKind, CapabilityUsageAggregate,
-    CapabilityUsageKey,
-    RecommendationConfig, recommend_capabilities,
+    CapabilityUsageKey, RecommendationConfig, recommend_capabilities,
 };
 
 use crate::credential::{AuthStatus, AuthTestResult, ExpiryInfo};

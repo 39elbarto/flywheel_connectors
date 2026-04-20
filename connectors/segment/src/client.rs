@@ -231,8 +231,7 @@ impl SegmentClient {
     /// List all destinations for a source.
     pub async fn list_destinations(&self, source_id: &str) -> SegmentResult<serde_json::Value> {
         let safe_id = sanitize_path_segment(source_id, "source_id")?;
-        self.get(&format!("/sources/{safe_id}/destinations"))
-            .await
+        self.get(&format!("/sources/{safe_id}/destinations")).await
     }
 
     // -- Track --

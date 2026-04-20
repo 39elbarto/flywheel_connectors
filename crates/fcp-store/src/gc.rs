@@ -765,7 +765,10 @@ mod tests {
             self.inner.delete_symbol(object_id, esi).await
         }
 
-        async fn get_distribution(&self, object_id: &ObjectId) -> Option<crate::SymbolDistribution> {
+        async fn get_distribution(
+            &self,
+            object_id: &ObjectId,
+        ) -> Option<crate::SymbolDistribution> {
             self.inner.get_distribution(object_id).await
         }
 
@@ -2203,7 +2206,10 @@ mod tests {
                     meta
                 );
                 let preserved_symbol = symbol_store.get_symbol(&object_id, 0).await.unwrap();
-                assert_eq!(preserved_symbol.meta.object_id, stored_symbol.meta.object_id);
+                assert_eq!(
+                    preserved_symbol.meta.object_id,
+                    stored_symbol.meta.object_id
+                );
                 assert_eq!(preserved_symbol.meta.esi, stored_symbol.meta.esi);
                 assert_eq!(preserved_symbol.meta.zone_id, stored_symbol.meta.zone_id);
                 assert_eq!(

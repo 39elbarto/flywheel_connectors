@@ -5339,16 +5339,12 @@ mod tests {
         assert_eq!(back.timestamp_ms, 5_000);
         assert_eq!(back.cleared_flags.len(), 2);
         assert_eq!(back.covered_inputs.len(), 2);
-        assert_eq!(
-            back.sanitizer_receipt_id,
-            test_object_id("receipt-c32-5")
-        );
+        assert_eq!(back.sanitizer_receipt_id, test_object_id("receipt-c32-5"));
 
         // Serialize to CBOR (binary audit trail)
         let mut cbor = Vec::new();
         ciborium::into_writer(&reduction, &mut cbor).unwrap();
-        let cbor_back: TaintReduction =
-            ciborium::from_reader(&cbor[..]).unwrap();
+        let cbor_back: TaintReduction = ciborium::from_reader(&cbor[..]).unwrap();
         assert_eq!(cbor_back.cleared_flags, reduction.cleared_flags);
     }
 

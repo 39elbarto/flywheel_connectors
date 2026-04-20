@@ -273,6 +273,7 @@ pub fn open_zone_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn hpke_roundtrip() {
@@ -630,6 +631,62 @@ mod tests {
 
         assert_eq!(sealed1.enc, sealed2.enc);
         assert_eq!(sealed1.ciphertext, sealed2.ciphertext);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        #[test]
+        fn hpke_encrypt_then_decrypt_identity_relation(
+            plaintext in prop::collection::vec(any::<u8>(), 0..256),
+            suffix in prop::collection::vec(any::<u8>(), 1..33),
+            node_suffix in prop::collection::vec(any::<u8>(), 0..16),
+            issued_at in any::<u64>(),
+        ) {
+            use rand::SeedableRng;
+            use rand_chacha::ChaCha20Rng;
+
+            let recipient_secret_key = X25519SecretKey::from_bytes([42u8; 32]);
+            let recipient_public_key = recipient_secret_key.public_key();
+            let mut recipient_node_id = b"node-meta-".to_vec();
+            recipient_node_id.extend_from_slice(&node_suffix);
+            let aad = Fcp2Aad::for_zone_key(b"z:meta", &recipient_node_id, issued_at);
+
+            let mut rng = ChaCha20Rng::from_seed([0x11; 32]);
+            let sealed = hpke_seal_with_rng(&recipient_public_key, &plaintext, &aad, &mut rng)
+                .expect("base seal should succeed");
+            let opened = hpke_open(&recipient_secret_key, &sealed, &aad)
+                .expect("base open should succeed");
+            prop_assert_eq!(opened, plaintext);
+
+            let mut transformed_plaintext = plaintext.clone();
+            transformed_plaintext.extend_from_slice(&suffix);
+
+            let mut transformed_rng = ChaCha20Rng::from_seed([0x11; 32]);
+            let transformed_sealed = hpke_seal_with_rng(
+                &recipient_public_key,
+                &transformed_plaintext,
+                &aad,
+                &mut transformed_rng,
+            )
+            .expect("transformed seal should succeed");
+            let transformed_opened = hpke_open(
+                &recipient_secret_key,
+                &transformed_sealed,
+                &aad,
+            )
+            .expect("transformed open should succeed");
+
+            let mut expected_transformed = opened.clone();
+            expected_transformed.extend_from_slice(&suffix);
+
+            // Holding the RNG seed constant keeps the encapsulated key stable,
+            // so the only semantic change across the relation is the plaintext
+            // transformation itself.
+            prop_assert_eq!(sealed.enc, transformed_sealed.enc);
+            prop_assert_ne!(sealed.ciphertext, transformed_sealed.ciphertext);
+            prop_assert_eq!(transformed_opened, expected_transformed);
+        }
     }
 
     // ---- HPKE constants ----

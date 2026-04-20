@@ -510,9 +510,7 @@ mod tests {
         })
         .to_fcp_error()
         {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => assert_eq!(retry_after_ms, 1000),
+            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 1000),
             other => panic!("expected RateLimited, got {other:?}"),
         }
     }

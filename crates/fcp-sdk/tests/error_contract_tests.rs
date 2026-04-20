@@ -31,7 +31,10 @@ fn async_timeout_maps_to_retryable_gateway_timeout() {
         } => {
             assert_eq!(service, "runtime");
             assert_eq!(*status_code, Some(504));
-            assert!(*retryable, "deadline timeout should preserve FCP timeout retry semantics");
+            assert!(
+                *retryable,
+                "deadline timeout should preserve FCP timeout retry semantics"
+            );
         }
         other => panic!("Expected External, got {other:?}"),
     }
@@ -673,7 +676,10 @@ fn timeout_full_chain_async_to_wire() {
     // Wire response contract
     assert!(resp.code.starts_with("FCP-"));
     assert_eq!(resp.code, "FCP-7002");
-    assert!(resp.retryable, "timeout response should preserve timeout retryability");
+    assert!(
+        resp.retryable,
+        "timeout response should preserve timeout retryability"
+    );
     assert!(
         resp.message.contains("30000"),
         "response should include timeout value"

@@ -527,7 +527,10 @@ mod tests {
         let schema = schema_v1();
         let value = sample();
         let payload = CanonicalSerializer::serialize(&value, &schema).unwrap();
-        assert!(payload.len() >= 32, "payload must contain schema hash prefix");
+        assert!(
+            payload.len() >= 32,
+            "payload must contain schema hash prefix"
+        );
         // CBOR bytes come after the 32-byte hash
         let cbor = &payload[32..];
         assert!(!cbor.is_empty(), "payload must contain CBOR body");
@@ -641,7 +644,8 @@ mod tests {
         let s = id.to_string();
         assert_eq!(s.len(), 64, "ObjectId hex must be 64 chars (32 bytes)");
         assert!(
-            s.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            s.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
             "ObjectId hex must be lowercase ascii hex"
         );
     }
@@ -693,7 +697,11 @@ mod tests {
             );
             let back = ZoneId::from_tailscale_tag(&tag)
                 .unwrap_or_else(|e| panic!("roundtrip failed for {zone:?}: {e:?}"));
-            assert_eq!(zone.as_str(), back.as_str(), "roundtrip lost canonical name");
+            assert_eq!(
+                zone.as_str(),
+                back.as_str(),
+                "roundtrip lost canonical name"
+            );
         }
     }
 

@@ -2277,8 +2277,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time after epoch")
             .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("fcp-wasi-readonly-file-{}-{unique}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "fcp-wasi-readonly-file-{}-{unique}",
+            std::process::id()
+        ));
         let file = dir.join("readonly.txt");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2306,8 +2308,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time after epoch")
             .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("fcp-wasi-writable-file-{}-{unique}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "fcp-wasi-writable-file-{}-{unique}",
+            std::process::id()
+        ));
         let file = dir.join("writable.txt");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2337,8 +2341,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time after epoch")
             .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("fcp-wasi-readonly-symlink-{}-{unique}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "fcp-wasi-readonly-symlink-{}-{unique}",
+            std::process::id()
+        ));
         let escaped = dir.join("escaped");
         let link = dir.join("link");
         let _ = std::fs::remove_dir_all(&dir);
@@ -2372,8 +2378,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time after epoch")
             .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("fcp-wasi-writable-symlink-{}-{unique}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "fcp-wasi-writable-symlink-{}-{unique}",
+            std::process::id()
+        ));
         let state = dir.join("state");
         let escaped = dir.join("escaped");
         let link = state.join("link");

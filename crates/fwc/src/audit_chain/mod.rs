@@ -537,8 +537,7 @@ fn verify_chain(
             None => {
                 issues.push(AuditVerifyIssue {
                     code: "audit.object_id_unverifiable".to_string(),
-                    message: "could not canonicalize event for content-id verification"
-                        .to_string(),
+                    message: "could not canonicalize event for content-id verification".to_string(),
                     seq: Some(record.event.seq),
                     object_id: Some(record.object_id.to_string()),
                 });

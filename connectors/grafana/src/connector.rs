@@ -422,9 +422,9 @@ impl GrafanaConnector {
         client: &GrafanaClient,
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, GrafanaError> {
-        let dashboard = input
-            .get("dashboard")
-            .ok_or_else(|| GrafanaError::InvalidInput("Missing required field: dashboard".into()))?;
+        let dashboard = input.get("dashboard").ok_or_else(|| {
+            GrafanaError::InvalidInput("Missing required field: dashboard".into())
+        })?;
         let overwrite = input
             .get("overwrite")
             .and_then(|v| v.as_bool())

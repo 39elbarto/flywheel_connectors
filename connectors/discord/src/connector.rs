@@ -1165,7 +1165,10 @@ impl DiscordConnector {
                             let mut size = 0;
 
                             // Title
-                            size += e.get("title").and_then(|v| v.as_str()).map_or(0, |s| s.chars().count());
+                            size += e
+                                .get("title")
+                                .and_then(|v| v.as_str())
+                                .map_or(0, |s| s.chars().count());
 
                             // Description
                             size += e

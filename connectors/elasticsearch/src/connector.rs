@@ -109,7 +109,10 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
     let trusted_host = host.ends_with(".elastic-cloud.com") || host.ends_with(".found.io");
     let https = parsed.scheme() == "https";
     if https && trusted_host {
-        (true, format!("Endpoint accepted by policy checks: {base_url}"))
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
     } else {
         (
             false,
@@ -712,9 +715,11 @@ impl ElasticsearchConnector {
     ) -> Result<serde_json::Value, ElasticsearchError> {
         let index = require_str(input, "index")?;
         let document_id = input.get("id").and_then(|v| v.as_str());
-        let document = input.get("document").ok_or(ElasticsearchError::InvalidInput(
-            "Missing required field: document".into(),
-        ))?;
+        let document = input
+            .get("document")
+            .ok_or(ElasticsearchError::InvalidInput(
+                "Missing required field: document".into(),
+            ))?;
         client.index_document(index, document_id, document).await
     }
 
@@ -723,13 +728,9 @@ impl ElasticsearchConnector {
         client: &ElasticsearchClient,
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, ElasticsearchError> {
-        let operations =
-            input
-                .get("operations")
-                .and_then(|v| v.as_array())
-                .ok_or(ElasticsearchError::InvalidInput(
-                    "Missing required field: operations".into(),
-                ))?;
+        let operations = input.get("operations").and_then(|v| v.as_array()).ok_or(
+            ElasticsearchError::InvalidInput("Missing required field: operations".into()),
+        )?;
         client.bulk(operations).await
     }
 

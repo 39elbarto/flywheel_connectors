@@ -288,11 +288,8 @@ impl BitbucketClient {
     ) -> BitbucketResult<serde_json::Value> {
         let ws = encode_path_segment(workspace);
         let repo = encode_path_segment(repo_slug);
-        self.post(
-            &format!("/repositories/{ws}/{repo}/pullrequests"),
-            body,
-        )
-        .await
+        self.post(&format!("/repositories/{ws}/{repo}/pullrequests"), body)
+            .await
     }
 
     // -- Branches --

@@ -980,8 +980,9 @@ impl ObjectStoreCursorBackend {
             ));
         }
 
-        let derived_object_id = StoredObject::derive_id(&stored.header, &canonical_body, &self.object_id_key)
-            .map_err(|err| CursorStoreError::CursorEncoding(err.to_string()))?;
+        let derived_object_id =
+            StoredObject::derive_id(&stored.header, &canonical_body, &self.object_id_key)
+                .map_err(|err| CursorStoreError::CursorEncoding(err.to_string()))?;
         if derived_object_id != object_id {
             return Err(CursorStoreError::Storage(
                 "stored connector state object id does not match canonical content".into(),
@@ -1593,9 +1594,11 @@ impl<S: StreamingSession> StreamingSupervisor<S> {
             );
         }
 
-        // Transition to healthy on start
-        self.health.record_success();
-        self.health.evaluate(&self.config);
+        // Remain in `Starting` until the first successful connection proves the
+        // supervisor can actually do its job. Previously we recorded a synthetic
+        // success here, which made `health().is_healthy()` return true before
+        // any connection was established — a misleading readiness signal for
+        // external health checks.
 
         loop {
             if *shutdown.borrow() {
@@ -2063,9 +2066,10 @@ impl<C: PollingCursor> PollingSupervisor<C> {
             tracing::warn!(error = %e, "Failed to restore cursor state, starting fresh");
         }
 
-        // Transition to healthy on start
-        self.health.record_success();
-        self.health.evaluate(&self.config);
+        // Remain in `Starting` until the first successful poll proves the
+        // supervisor can actually reach its upstream. Previously we recorded a
+        // synthetic success here, which made `health().is_healthy()` return
+        // true before any poll had run — a misleading readiness signal.
 
         loop {
             // Check for shutdown signal
@@ -3805,7 +3809,9 @@ mod tests {
         backend.store_state_object(mismatched_state).unwrap();
 
         let err = store.load_cursor().unwrap_err();
-        assert!(matches!(err, CursorStoreError::Storage(message) if message.contains("instance_id mismatch")));
+        assert!(
+            matches!(err, CursorStoreError::Storage(message) if message.contains("instance_id mismatch"))
+        );
     }
 
     #[test]
@@ -4836,7 +4842,9 @@ mod tests {
         let sig = Signature::from_bytes([0u8; 64]);
         let err = store.commit_cursor(cursor, header, lease, sig).unwrap_err();
 
-        assert!(matches!(err, CursorStoreError::Storage(message) if message.contains("header zone_id mismatch")));
+        assert!(
+            matches!(err, CursorStoreError::Storage(message) if message.contains("header zone_id mismatch"))
+        );
     }
 
     #[test]
@@ -5040,6 +5048,71 @@ mod tests {
         let mut supervisor = StreamingSupervisor::new(config, session);
         supervisor.session_mut().set_resume_token("abc".to_string());
         assert_eq!(supervisor.session().resume_token(), Some("abc".to_string()));
+    }
+
+    // Regression: supervisor must stay in `Starting` until the first real
+    // successful connection — readiness must not be reported synthetically
+    // from the top of `run()`.
+    #[test]
+    fn streaming_supervisor_does_not_report_ready_before_first_connect() {
+        let _ = fcp_async_core::runtime::block_on_sync(async {
+            let config = SupervisorConfig::default()
+                .with_base_backoff_ms(1)
+                .with_max_consecutive_failures(1);
+            let session = InMemoryStreamingSession::new();
+            let mut supervisor = StreamingSupervisor::new(config, session);
+
+            let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
+
+            let outcome = supervisor
+                .run::<(), _, _, _, _>(
+                    shutdown_rx,
+                    |_session| async { Err(boxed_err("connect failed")) },
+                    |_event, _session| async { Ok(()) },
+                )
+                .await;
+
+            assert!(matches!(
+                outcome,
+                SupervisorOutcome::MaxFailuresReached { failures: 1 }
+            ));
+            // Health must never have transitioned to Ready — the only
+            // connection attempt failed, so the supervisor never proved
+            // it could serve. Starting → Error is the only valid path.
+            assert!(!supervisor.health().is_healthy());
+            assert!(supervisor.health().is_unhealthy());
+        });
+    }
+
+    #[test]
+    fn polling_supervisor_does_not_report_ready_before_first_poll() {
+        let _ = fcp_async_core::runtime::block_on_sync(async {
+            let config = SupervisorConfig::default()
+                .with_base_backoff_ms(1)
+                .with_max_consecutive_failures(1);
+            let cursor = InMemoryPollingCursor::new();
+            let mut supervisor = PollingSupervisor::new(config, cursor);
+
+            let (_shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
+
+            let outcome = supervisor
+                .run(
+                    shutdown_rx,
+                    10,
+                    |_offset| async {
+                        PollResult::<i32>::recoverable("poll failed")
+                    },
+                    |_items, _cursor| Ok(()),
+                )
+                .await;
+
+            assert!(matches!(
+                outcome,
+                SupervisorOutcome::MaxFailuresReached { failures: 1 }
+            ));
+            assert!(!supervisor.health().is_healthy());
+            assert!(supervisor.health().is_unhealthy());
+        });
     }
 
     // ── NEW: PollingSupervisor accessor coverage ───────────────────────

@@ -100,16 +100,12 @@ fn bench_revocation_lookup(c: &mut Criterion) {
         let existing = make_id_from_u32(size / 2);
         let missing = make_id_from_u32(size + 1);
 
-        group.bench_with_input(
-            BenchmarkId::new("hit", size),
-            &size,
-            |b, _| b.iter(|| black_box(registry.is_revoked(&existing))),
-        );
-        group.bench_with_input(
-            BenchmarkId::new("miss", size),
-            &size,
-            |b, _| b.iter(|| black_box(registry.is_revoked(&missing))),
-        );
+        group.bench_with_input(BenchmarkId::new("hit", size), &size, |b, _| {
+            b.iter(|| black_box(registry.is_revoked(&existing)))
+        });
+        group.bench_with_input(BenchmarkId::new("miss", size), &size, |b, _| {
+            b.iter(|| black_box(registry.is_revoked(&missing)))
+        });
     }
     group.finish();
 }
@@ -184,9 +180,15 @@ fn bench_fcpc_seal_open(c: &mut Criterion) {
             },
         );
 
-        let sealed =
-            FcpcFrame::seal(session_id, 42, dir, FcpcFrameFlags::default(), &plaintext, &k_ctx)
-                .expect("seal");
+        let sealed = FcpcFrame::seal(
+            session_id,
+            42,
+            dir,
+            FcpcFrameFlags::default(),
+            &plaintext,
+            &k_ctx,
+        )
+        .expect("seal");
         group.bench_with_input(
             BenchmarkId::new("open", payload_size),
             &payload_size,
@@ -282,17 +284,13 @@ fn bench_gossip_push_serde(c: &mut Criterion) {
 
         let json = serde_json::to_vec(&msg).expect("serialize");
 
-        group.bench_with_input(
-            BenchmarkId::new("serialize", n_ids),
-            &n_ids,
-            |b, _| b.iter(|| black_box(serde_json::to_vec(&msg))),
-        );
+        group.bench_with_input(BenchmarkId::new("serialize", n_ids), &n_ids, |b, _| {
+            b.iter(|| black_box(serde_json::to_vec(&msg)))
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("deserialize", n_ids),
-            &n_ids,
-            |b, _| b.iter(|| black_box(serde_json::from_slice::<GossipMessage>(&json))),
-        );
+        group.bench_with_input(BenchmarkId::new("deserialize", n_ids), &n_ids, |b, _| {
+            b.iter(|| black_box(serde_json::from_slice::<GossipMessage>(&json)))
+        });
     }
     group.finish();
 }
@@ -409,10 +407,7 @@ criterion_group!(
     bench_revocation_sla,
 );
 
-criterion_group!(
-    protocol,
-    bench_fcpc_seal_open,
-);
+criterion_group!(protocol, bench_fcpc_seal_open,);
 
 criterion_group!(
     crypto,
@@ -421,20 +416,17 @@ criterion_group!(
     bench_crypto_aead,
 );
 
-criterion_group!(
+criterion_group!(gossip, bench_gossip_push_serde, bench_gossip_config,);
+
+criterion_group!(serialization, bench_schema_serde,);
+
+criterion_group!(enforcement, bench_full_enforcement_path,);
+
+criterion_main!(
+    revocation,
+    protocol,
+    crypto,
     gossip,
-    bench_gossip_push_serde,
-    bench_gossip_config,
-);
-
-criterion_group!(
     serialization,
-    bench_schema_serde,
+    enforcement
 );
-
-criterion_group!(
-    enforcement,
-    bench_full_enforcement_path,
-);
-
-criterion_main!(revocation, protocol, crypto, gossip, serialization, enforcement);

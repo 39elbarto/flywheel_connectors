@@ -174,8 +174,7 @@ async fn execute_rejects_user_supplied_savepoint() {
         .await
         .unwrap_err();
     assert!(
-        error.to_string().contains("safety policy")
-            || error.to_string().contains("denied"),
+        error.to_string().contains("safety policy") || error.to_string().contains("denied"),
         "expected savepoint rejection, got: {error}",
     );
 }

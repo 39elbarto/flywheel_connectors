@@ -966,11 +966,17 @@ mod tests {
         // All sensitive fields are redacted (substring match is permissive).
         assert_eq!(redacted["bearer_token"], "[REDACTED]", "bearer_token");
         assert_eq!(redacted["cookie"], "[REDACTED]", "cookie");
-        assert_eq!(redacted["credentials"], "[REDACTED]", "credentials (whole subtree)");
+        assert_eq!(
+            redacted["credentials"], "[REDACTED]",
+            "credentials (whole subtree)"
+        );
         assert_eq!(redacted["private_key_pem"], "[REDACTED]", "private_key_pem");
         assert_eq!(redacted["session_id"], "[REDACTED]", "session_id");
         assert_eq!(redacted["api_key_raw"], "[REDACTED]", "api_key_raw");
-        assert_eq!(redacted["apiKey"], "[REDACTED]", "apiKey (case-insensitive)");
+        assert_eq!(
+            redacted["apiKey"], "[REDACTED]",
+            "apiKey (case-insensitive)"
+        );
 
         // Non-sensitive field passes through.
         assert_eq!(redacted["user_name"], "alice", "plain user_name untouched");

@@ -67,9 +67,9 @@ pub use fcp_core::{
 // ── Policy Engine & Evaluation ─────────────────────────────────────
 
 pub use fcp_core::{
-    DecisionReceiptPolicy, PolicyBundle, PolicyBundleBuilder, PolicyBundleError,
-    PolicyBundleObject, PolicyBundlePolicyRef, PolicyBundleResolved, PolicyBundleSignature,
-    DecisionReasonCode, PolicyDecision, PolicyEngine, PolicyPattern,
+    DecisionReasonCode, DecisionReceiptPolicy, PolicyBundle, PolicyBundleBuilder,
+    PolicyBundleError, PolicyBundleObject, PolicyBundlePolicyRef, PolicyBundleResolved,
+    PolicyBundleSignature, PolicyDecision, PolicyEngine, PolicyPattern,
 };
 
 // ── Policy Diffs ───────────────────────────────────────────────────
@@ -170,11 +170,11 @@ mod tests {
     fn policy_exports_policy_engine_types() {
         fn _engine_exists(_engine: PolicyEngine) {}
         let _ = _engine_exists;
-        let decision = PolicyDecision::deny(
-            DecisionReasonCode::CapabilityInsufficient,
-            Vec::new(),
+        let decision = PolicyDecision::deny(DecisionReasonCode::CapabilityInsufficient, Vec::new());
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::CapabilityInsufficient
         );
-        assert_eq!(decision.reason_code, DecisionReasonCode::CapabilityInsufficient);
     }
 
     #[test]
@@ -191,10 +191,7 @@ mod tests {
 
     #[test]
     fn policy_exports_posture_types() {
-        fn _posture_exists(
-            _a: PostureAttestation,
-            _r: PostureRequirements,
-        ) {}
+        fn _posture_exists(_a: PostureAttestation, _r: PostureRequirements) {}
     }
 
     #[test]

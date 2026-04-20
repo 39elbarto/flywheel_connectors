@@ -1228,7 +1228,12 @@ mod tests {
             r#"{"error":{"type":"rate_limit_error","message":"Rate limit exceeded"}}"#,
         );
         let err = parse_error_response(StatusCode::TOO_MANY_REQUESTS, &bytes, None);
-        assert!(matches!(err, AnthropicError::RateLimited { retry_after_ms: 30_000 }));
+        assert!(matches!(
+            err,
+            AnthropicError::RateLimited {
+                retry_after_ms: 30_000
+            }
+        ));
     }
 
     #[test]
@@ -1237,7 +1242,12 @@ mod tests {
             r#"{"error":{"type":"rate_limit_error","message":"Rate limit exceeded"}}"#,
         );
         let err = parse_error_response(StatusCode::TOO_MANY_REQUESTS, &bytes, Some(5_000));
-        assert!(matches!(err, AnthropicError::RateLimited { retry_after_ms: 5_000 }));
+        assert!(matches!(
+            err,
+            AnthropicError::RateLimited {
+                retry_after_ms: 5_000
+            }
+        ));
     }
 
     #[test]

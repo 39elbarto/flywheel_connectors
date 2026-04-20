@@ -244,24 +244,15 @@ fn snapshot_redirect_allowlist_enforcement() {
     ));
     report.push_str(&run(
         "registered_fragment_rejected",
-        ensure_allowlisted_redirect_uri(
-            "https://example.com/oauth/callback#frag",
-            &allowlist,
-        ),
+        ensure_allowlisted_redirect_uri("https://example.com/oauth/callback#frag", &allowlist),
     ));
     report.push_str(&run(
         "registered_query_rejected",
-        ensure_allowlisted_redirect_uri(
-            "https://example.com/oauth/callback?x=1",
-            &allowlist,
-        ),
+        ensure_allowlisted_redirect_uri("https://example.com/oauth/callback?x=1", &allowlist),
     ));
     report.push_str(&run(
         "registered_embedded_credentials_rejected",
-        ensure_allowlisted_redirect_uri(
-            "https://user:pw@example.com/oauth/callback",
-            &allowlist,
-        ),
+        ensure_allowlisted_redirect_uri("https://user:pw@example.com/oauth/callback", &allowlist),
     ));
     report.push_str(&run(
         "registered_relative_rejected",

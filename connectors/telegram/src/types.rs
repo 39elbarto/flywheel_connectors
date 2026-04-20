@@ -322,8 +322,9 @@ impl TelegramConfig {
         if parsed.scheme() == "http" && !is_local_test_host {
             return Err(FcpError::InvalidRequest {
                 code: 1003,
-                message: "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
-                    .into(),
+                message:
+                    "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
+                        .into(),
             });
         }
         if !host.eq_ignore_ascii_case("api.telegram.org") && !is_local_test_host {

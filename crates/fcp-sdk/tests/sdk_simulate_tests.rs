@@ -314,7 +314,6 @@ impl CapabilityCheckingConnector {
 }
 fcp_core::impl_fcp_sealed!(CapabilityCheckingConnector);
 
-
 #[async_trait]
 impl FcpConnector for CapabilityCheckingConnector {
     fn id(&self) -> &ConnectorId {

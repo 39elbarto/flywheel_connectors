@@ -1404,7 +1404,10 @@ mod tests {
         let url1 = client.generate_presigned_url("bucket", "key1.txt", 3600);
         let url2 = client.generate_presigned_url("bucket", "key2.txt", 3600);
 
-        assert_ne!(url1.url, url2.url, "different keys must produce different presigned URLs");
+        assert_ne!(
+            url1.url, url2.url,
+            "different keys must produce different presigned URLs"
+        );
     }
 
     #[test]

@@ -172,7 +172,6 @@ impl FcpConnector for HealthyConnector {
 struct DenyingConnector;
 fcp_core::impl_fcp_sealed!(DenyingConnector);
 
-
 #[async_trait::async_trait]
 impl FcpConnector for DenyingConnector {
     fn id(&self) -> &ConnectorId {

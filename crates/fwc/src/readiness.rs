@@ -7965,9 +7965,7 @@ deny_ptrace = true
         .expect_err("discovery should fail without [provides.operations]");
 
         assert!(
-            error
-                .to_string()
-                .contains("missing [provides.operations]"),
+            error.to_string().contains("missing [provides.operations]"),
             "unexpected error: {error:?}"
         );
     }

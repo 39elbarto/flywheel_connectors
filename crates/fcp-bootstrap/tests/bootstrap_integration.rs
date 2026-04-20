@@ -633,10 +633,7 @@ fn test_bootstrap_workflow_hardware_token_returns_error() {
     let workflow = BootstrapWorkflow::new(config).expect("create workflow");
     let result = workflow.run();
 
-    let has_truthful_pin_refusal = matches!(
-        &result,
-        Err(BootstrapError::HardwareTokenPinRequired)
-    );
+    let has_truthful_pin_refusal = matches!(&result, Err(BootstrapError::HardwareTokenPinRequired));
     if let Err(err) = &result {
         log = log.with_error(err);
     }

@@ -984,7 +984,8 @@ mod adversarial_attacks {
         assert!(result.is_ok(), "clean safe path should work");
 
         // Nested path should work
-        let result = verifier.verify_claims(&token, &cap, &op, &["/safe/deeply/nested/file.txt".into()]);
+        let result =
+            verifier.verify_claims(&token, &cap, &op, &["/safe/deeply/nested/file.txt".into()]);
         assert!(result.is_ok(), "nested safe path should work");
     }
 }

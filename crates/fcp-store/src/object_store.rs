@@ -236,8 +236,7 @@ pub async fn snapshot_zone_lifecycle(
                     // the symbol store via can_reconstruct_with_policy — the second
                     // get_distribution call would acquire the write lock again and
                     // could see a different snapshot (TOCTOU).
-                    reconstructable =
-                        Some(evaluation.meets_diversity_for_reconstruction(policy));
+                    reconstructable = Some(evaluation.meets_diversity_for_reconstruction(policy));
                 } else {
                     reconstructable = Some(evaluation.is_available);
                 }

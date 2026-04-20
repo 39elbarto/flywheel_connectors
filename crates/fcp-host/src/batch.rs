@@ -286,9 +286,10 @@ impl BatchZoneValidator {
     pub fn group_by_zone(&self, operations: &[BatchOperation]) -> BTreeMap<String, Vec<String>> {
         let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for op in operations {
-            let zone_str = self
-                .effective_zone(op)
-                .map_or_else(|| "<unresolved>".to_string(), |zone| zone.as_str().to_string());
+            let zone_str = self.effective_zone(op).map_or_else(
+                || "<unresolved>".to_string(),
+                |zone| zone.as_str().to_string(),
+            );
             groups.entry(zone_str).or_default().push(op.id.clone());
         }
         groups

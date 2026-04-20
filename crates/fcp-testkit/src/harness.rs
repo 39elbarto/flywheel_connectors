@@ -460,7 +460,7 @@ mod tests {
         }
     }
 
-fcp_core::impl_fcp_sealed!(StubConnector);
+    fcp_core::impl_fcp_sealed!(StubConnector);
 
     #[async_trait::async_trait]
     impl FcpConnector for StubConnector {

@@ -305,7 +305,10 @@ mod tests {
 
     #[test]
     fn check_id_display() {
-        assert_eq!(EnforcementCheckId::CanonicalDecode.to_string(), "canonical_decode");
+        assert_eq!(
+            EnforcementCheckId::CanonicalDecode.to_string(),
+            "canonical_decode"
+        );
         assert_eq!(EnforcementCheckId::RateLimit.to_string(), "rate_limit");
     }
 

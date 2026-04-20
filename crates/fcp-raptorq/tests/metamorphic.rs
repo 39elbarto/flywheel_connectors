@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use fcp_raptorq::{RaptorQConfig, RaptorQDecoder, RaptorQEncoder};
-use rand::seq::SliceRandom;
 use rand::SeedableRng;
+use rand::seq::SliceRandom;
 use rand_chacha::ChaCha20Rng;
 
 const fn metamorphic_config() -> RaptorQConfig {
@@ -115,7 +115,8 @@ fn mr3_loss_recovery_up_to_k_symbols() {
         let decoded = decode_payload(&config, &encoder, surviving);
 
         assert_eq!(
-            decoded, payload,
+            decoded,
+            payload,
             "MR3 failed after dropping {loss_count} symbols out of {} (K={k})",
             all_symbols.len()
         );

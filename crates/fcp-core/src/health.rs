@@ -524,14 +524,8 @@ impl CompositeHealthSnapshot {
         components: Vec<ComponentHealthEntry>,
         config: &HealthAggregationConfig,
     ) -> Self {
-        let degraded_count = components
-            .iter()
-            .filter(|c| c.state.is_degraded())
-            .count();
-        let unhealthy_count = components
-            .iter()
-            .filter(|c| c.state.is_unhealthy())
-            .count();
+        let degraded_count = components.iter().filter(|c| c.state.is_degraded()).count();
+        let unhealthy_count = components.iter().filter(|c| c.state.is_unhealthy()).count();
 
         let status = if unhealthy_count >= config.unhealthy_threshold {
             let reasons: Vec<String> = components
@@ -2258,15 +2252,13 @@ mod tests {
 
     #[test]
     fn composite_snapshot_one_unhealthy() {
-        let components = vec![
-            ComponentHealthEntry {
-                name: "db".into(),
-                state: AggregateHealthState::Unhealthy {
-                    reasons: vec!["connection refused".into()],
-                },
-                consecutive_failures: 5,
+        let components = vec![ComponentHealthEntry {
+            name: "db".into(),
+            state: AggregateHealthState::Unhealthy {
+                reasons: vec!["connection refused".into()],
             },
-        ];
+            consecutive_failures: 5,
+        }];
         let config = HealthAggregationConfig::default();
         let snapshot =
             CompositeHealthSnapshot::from_components("2.0.0".into(), 0, components, &config);
@@ -2312,8 +2304,7 @@ mod tests {
     #[test]
     fn composite_snapshot_empty_components_healthy() {
         let config = HealthAggregationConfig::default();
-        let snapshot =
-            CompositeHealthSnapshot::from_components("1.0.0".into(), 0, vec![], &config);
+        let snapshot = CompositeHealthSnapshot::from_components("1.0.0".into(), 0, vec![], &config);
         assert!(snapshot.status.is_healthy());
         assert!(snapshot.components.is_empty());
     }

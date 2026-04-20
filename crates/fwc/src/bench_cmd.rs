@@ -1347,8 +1347,7 @@ fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
         resource_allow: vec!["*".into()],
         ..Default::default()
     };
-    let constraints_cbor = to_canonical_cbor(&constraints)
-        .expect("constraints should serialize");
+    let constraints_cbor = to_canonical_cbor(&constraints).expect("constraints should serialize");
 
     let cose_capability = CapabilityBuilder::new()
         .capability_id("cap.test")

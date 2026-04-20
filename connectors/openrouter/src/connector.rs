@@ -621,9 +621,8 @@ async fn send_json(request: RequestBuilder, service: &'static str) -> FcpResult<
             .await
             .unwrap_or_else(|_| "<unreadable response body>".into());
         if status == StatusCode::TOO_MANY_REQUESTS {
-            let retry_after_ms = retry_after.map_or(30_000, |d| {
-                u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
-            });
+            let retry_after_ms =
+                retry_after.map_or(30_000, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
             return Err(FcpError::RateLimited {
                 retry_after_ms,
                 violation: None,

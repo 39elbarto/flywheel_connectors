@@ -5103,7 +5103,9 @@ members = [
         let output = generate_e2e_tests_rs("fcp.test", "test", "fcp_test");
         assert!(output.contains("use anyhow::Result;"));
         assert!(output.contains("use fcp_sdk::prelude::*;"));
-        assert!(output.contains("fn send(&mut self, request: &serde_json::Value) -> Result<serde_json::Value>"));
+        assert!(output.contains(
+            "fn send(&mut self, request: &serde_json::Value) -> Result<serde_json::Value>"
+        ));
         assert!(output.contains("serde_json::to_value(base_handshake(&signing_key))"));
         assert!(output.contains("serde_json::to_value(base_invoke(&signing_key))"));
         assert!(output.contains("serde_json::to_value(base_simulate(&signing_key))"));
@@ -6055,10 +6057,7 @@ members = ["crates/alpha", "connectors/new"]
     fn emit_truthful_streaming_fixture_bundle() {
         let bundle = canonical_truthful_streaming_bundle();
         if std::env::var_os("FCP_UPDATE_GOLDENS").is_some() {
-            write_generator_fixture_json(
-                "generator/truthful_streaming_bundle.json",
-                &bundle,
-            );
+            write_generator_fixture_json("generator/truthful_streaming_bundle.json", &bundle);
         }
         println!(
             "{}",
@@ -6069,8 +6068,7 @@ members = ["crates/alpha", "connectors/new"]
     #[test]
     fn truthful_streaming_scaffold_matches_golden_bundle() {
         let actual = canonical_truthful_streaming_bundle();
-        let expected =
-            load_generator_fixture_json("generator/truthful_streaming_bundle.json");
+        let expected = load_generator_fixture_json("generator/truthful_streaming_bundle.json");
         assert_eq!(actual, expected);
     }
 
@@ -6089,12 +6087,8 @@ members = ["crates/alpha", "connectors/new"]
         )
         .expect("fixture files");
         let prechecks = run_prechecks(&files, connector_id, "z:project:truthful-hook");
-        let next_steps = generate_next_steps(
-            connector_id,
-            crate_path,
-            ConnectorArchetype::Webhook,
-            false,
-        );
+        let next_steps =
+            generate_next_steps(connector_id, crate_path, ConnectorArchetype::Webhook, false);
 
         serde_json::json!({
             "connector_id": connector_id,
@@ -6116,10 +6110,7 @@ members = ["crates/alpha", "connectors/new"]
     fn emit_truthful_webhook_fixture_bundle() {
         let bundle = canonical_truthful_webhook_bundle();
         if std::env::var_os("FCP_UPDATE_GOLDENS").is_some() {
-            write_generator_fixture_json(
-                "generator/truthful_webhook_bundle.json",
-                &bundle,
-            );
+            write_generator_fixture_json("generator/truthful_webhook_bundle.json", &bundle);
         }
         println!(
             "{}",
@@ -6130,8 +6121,7 @@ members = ["crates/alpha", "connectors/new"]
     #[test]
     fn truthful_webhook_scaffold_matches_golden_bundle() {
         let actual = canonical_truthful_webhook_bundle();
-        let expected =
-            load_generator_fixture_json("generator/truthful_webhook_bundle.json");
+        let expected = load_generator_fixture_json("generator/truthful_webhook_bundle.json");
         assert_eq!(actual, expected);
     }
 
@@ -6150,12 +6140,8 @@ members = ["crates/alpha", "connectors/new"]
         )
         .expect("fixture files");
         let prechecks = run_prechecks(&files, connector_id, "z:project:truthful-poll");
-        let next_steps = generate_next_steps(
-            connector_id,
-            crate_path,
-            ConnectorArchetype::Polling,
-            false,
-        );
+        let next_steps =
+            generate_next_steps(connector_id, crate_path, ConnectorArchetype::Polling, false);
 
         serde_json::json!({
             "connector_id": connector_id,
@@ -6177,10 +6163,7 @@ members = ["crates/alpha", "connectors/new"]
     fn emit_truthful_polling_fixture_bundle() {
         let bundle = canonical_truthful_polling_bundle();
         if std::env::var_os("FCP_UPDATE_GOLDENS").is_some() {
-            write_generator_fixture_json(
-                "generator/truthful_polling_bundle.json",
-                &bundle,
-            );
+            write_generator_fixture_json("generator/truthful_polling_bundle.json", &bundle);
         }
         println!(
             "{}",
@@ -6191,8 +6174,7 @@ members = ["crates/alpha", "connectors/new"]
     #[test]
     fn truthful_polling_scaffold_matches_golden_bundle() {
         let actual = canonical_truthful_polling_bundle();
-        let expected =
-            load_generator_fixture_json("generator/truthful_polling_bundle.json");
+        let expected = load_generator_fixture_json("generator/truthful_polling_bundle.json");
         assert_eq!(actual, expected);
     }
 
@@ -6238,10 +6220,7 @@ members = ["crates/alpha", "connectors/new"]
     fn emit_truthful_database_fixture_bundle() {
         let bundle = canonical_truthful_database_bundle();
         if std::env::var_os("FCP_UPDATE_GOLDENS").is_some() {
-            write_generator_fixture_json(
-                "generator/truthful_database_bundle.json",
-                &bundle,
-            );
+            write_generator_fixture_json("generator/truthful_database_bundle.json", &bundle);
         }
         println!(
             "{}",
@@ -6252,8 +6231,7 @@ members = ["crates/alpha", "connectors/new"]
     #[test]
     fn truthful_database_scaffold_matches_golden_bundle() {
         let actual = canonical_truthful_database_bundle();
-        let expected =
-            load_generator_fixture_json("generator/truthful_database_bundle.json");
+        let expected = load_generator_fixture_json("generator/truthful_database_bundle.json");
         assert_eq!(actual, expected);
     }
 
@@ -6299,10 +6277,7 @@ members = ["crates/alpha", "connectors/new"]
     fn emit_truthful_bidirectional_fixture_bundle() {
         let bundle = canonical_truthful_bidirectional_bundle();
         if std::env::var_os("FCP_UPDATE_GOLDENS").is_some() {
-            write_generator_fixture_json(
-                "generator/truthful_bidirectional_bundle.json",
-                &bundle,
-            );
+            write_generator_fixture_json("generator/truthful_bidirectional_bundle.json", &bundle);
         }
         println!(
             "{}",
@@ -6313,8 +6288,7 @@ members = ["crates/alpha", "connectors/new"]
     #[test]
     fn truthful_bidirectional_scaffold_matches_golden_bundle() {
         let actual = canonical_truthful_bidirectional_bundle();
-        let expected =
-            load_generator_fixture_json("generator/truthful_bidirectional_bundle.json");
+        let expected = load_generator_fixture_json("generator/truthful_bidirectional_bundle.json");
         assert_eq!(actual, expected);
     }
 
@@ -6463,10 +6437,7 @@ members = ["crates/alpha", "connectors/new"]
         );
 
         // Also check generic placeholder patterns the scanner scans repo-wide for
-        let generic_markers = [
-            "planned_only",
-            "placeholder_operation",
-        ];
+        let generic_markers = ["planned_only", "placeholder_operation"];
 
         for (index, archetype) in all_archetypes().into_iter().enumerate() {
             let connector_id = format!("fcp.scantest{index}");
@@ -6639,7 +6610,8 @@ members = ["crates/alpha", "connectors/new"]
             "prechecks must include manifest validation; got: {ids:?}"
         );
         assert!(
-            ids.iter().any(|id| id.contains("unsafe") || id.contains("forbid")),
+            ids.iter()
+                .any(|id| id.contains("unsafe") || id.contains("forbid")),
             "prechecks must include unsafe-code validation; got: {ids:?}"
         );
     }

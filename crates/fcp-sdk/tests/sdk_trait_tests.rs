@@ -237,7 +237,6 @@ impl StreamingConnector {
 }
 fcp_core::impl_fcp_sealed!(StreamingConnector);
 
-
 #[async_trait]
 impl FcpConnector for StreamingConnector {
     fn id(&self) -> &ConnectorId {

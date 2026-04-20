@@ -727,16 +727,21 @@ mod tests {
         let request = SignableRequest {
             method: "GET".into(),
             uri: "/bucket/key".into(),
-            query_params: BTreeMap::from([
-                ("response-content-type".into(), "application/json".into()),
-            ]),
+            query_params: BTreeMap::from([(
+                "response-content-type".into(),
+                "application/json".into(),
+            )]),
             headers: BTreeMap::from([("host".into(), "s3.amazonaws.com".into())]),
             payload_hash: UNSIGNED_PAYLOAD.into(),
         };
         let presigned = signer.presign(&request, 3600);
         assert!(
-            presigned.url.contains("response-content-type=application%2Fjson")
-                || presigned.url.contains("response-content-type=application/json"),
+            presigned
+                .url
+                .contains("response-content-type=application%2Fjson")
+                || presigned
+                    .url
+                    .contains("response-content-type=application/json"),
             "existing query params must be preserved: {}",
             presigned.url
         );
@@ -755,7 +760,9 @@ mod tests {
         let sign_result = signer.sign(&request);
         // Credential should contain: access_key/date/region/service/aws4_request
         assert!(
-            sign_result.authorization.contains("20130524/us-east-1/s3/aws4_request"),
+            sign_result
+                .authorization
+                .contains("20130524/us-east-1/s3/aws4_request"),
             "credential scope must include date/region/service: {}",
             sign_result.authorization
         );
@@ -776,7 +783,11 @@ mod tests {
         let signer = test_signer();
         for date in ["20130524", "20261231", "20000101"] {
             let key = signer.derive_signing_key(date);
-            assert_eq!(key.len(), 32, "HMAC-SHA256 output must be 32 bytes for date {date}");
+            assert_eq!(
+                key.len(),
+                32,
+                "HMAC-SHA256 output must be 32 bytes for date {date}"
+            );
         }
     }
 }

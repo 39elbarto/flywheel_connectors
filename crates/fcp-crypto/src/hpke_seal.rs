@@ -70,9 +70,11 @@ impl HpkeSealedBox {
         if bytes.len() < HPKE_ENC_SIZE + HPKE_TAG_SIZE {
             return Err(CryptoError::HpkeFailed("sealed box too short".into()));
         }
+        // enc must be exactly HPKE_ENC_SIZE, remainder is ciphertext
+        let (enc_bytes, ciphertext_bytes) = bytes.split_at(HPKE_ENC_SIZE);
         Ok(Self {
-            enc: bytes[..HPKE_ENC_SIZE].to_vec(),
-            ciphertext: bytes[HPKE_ENC_SIZE..].to_vec(),
+            enc: enc_bytes.to_vec(),
+            ciphertext: ciphertext_bytes.to_vec(),
         })
     }
 }
@@ -361,6 +363,26 @@ mod tests {
 
         assert_eq!(sealed.enc, parsed.enc);
         assert_eq!(sealed.ciphertext, parsed.ciphertext);
+        }
+
+        #[test]
+        fn hpke_sealed_box_trailing_junk_included_in_ciphertext() {
+        // from_bytes currently treats everything after HPKE_ENC_SIZE as ciphertext.
+        // If there's junk, it's included, and opening will fail due to AEAD tag mismatch.
+        let recipient_sk = X25519SecretKey::generate();
+        let recip_pub = recipient_sk.public_key();
+        let aad = Fcp2Aad::for_zone_key(b"z:work", b"node-1", 100);
+        let sealed = hpke_seal(&recip_pub, b"secret", &aad).unwrap();
+
+        let mut bytes = sealed.to_bytes();
+        bytes.push(0xff); // Trailing junk
+
+        let parsed = HpkeSealedBox::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.ciphertext.len(), sealed.ciphertext.len() + 1);
+
+        // Opening must fail
+        let result = hpke_open(&recipient_sk, &parsed, &aad);
+        assert!(result.is_err());
     }
 
     #[test]

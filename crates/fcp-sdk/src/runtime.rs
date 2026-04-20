@@ -478,6 +478,12 @@ pub trait PollingCursor: Send + Sync {
     /// Typically set to `last_update_id + 1` to acknowledge processed updates.
     fn set_offset(&mut self, offset: i64);
 
+    /// Clear the cursor offset after a failed processing attempt.
+    ///
+    /// This must restore the pre-poll "no cursor yet" state so failed first
+    /// polls do not accidentally advance the in-memory cursor.
+    fn clear_offset(&mut self);
+
     /// Get the last processing timestamp.
     fn last_poll_at(&self) -> Option<Instant>;
 
@@ -549,6 +555,10 @@ impl PollingCursor for InMemoryPollingCursor {
 
     fn set_offset(&mut self, offset: i64) {
         self.offset = Some(offset);
+    }
+
+    fn clear_offset(&mut self) {
+        self.offset = None;
     }
 
     fn last_poll_at(&self) -> Option<Instant> {
@@ -2101,8 +2111,9 @@ impl<C: PollingCursor> PollingSupervisor<C> {
                     let mut processing_failed = false;
                     if !items.is_empty() {
                         if let Err(e) = process_fn(items, &mut self.cursor) {
-                            if let Some(offset) = previous_offset {
-                                self.cursor.set_offset(offset);
+                            match previous_offset {
+                                Some(offset) => self.cursor.set_offset(offset),
+                                None => self.cursor.clear_offset(),
                             }
                             tracing::error!(error = %e, "Failed to process poll results");
                             processing_failed = true;
@@ -5099,9 +5110,7 @@ mod tests {
                 .run(
                     shutdown_rx,
                     10,
-                    |_offset| async {
-                        PollResult::<i32>::recoverable("poll failed")
-                    },
+                    |_offset| async { PollResult::<i32>::recoverable("poll failed") },
                     |_items, _cursor| Ok(()),
                 )
                 .await;
@@ -5367,6 +5376,10 @@ mod tests {
             self.offset = Some(offset);
         }
 
+        fn clear_offset(&mut self) {
+            self.offset = None;
+        }
+
         fn last_poll_at(&self) -> Option<Instant> {
             self.last_poll_at
         }
@@ -5425,6 +5438,10 @@ mod tests {
                 self.offset = Some(offset);
             }
 
+            fn clear_offset(&mut self) {
+                self.offset = None;
+            }
+
             fn last_poll_at(&self) -> Option<Instant> {
                 self.last_poll_at
             }
@@ -5440,8 +5457,7 @@ mod tests {
 
             fn persist(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 if self.last_poll_count > 0 {
-                    self.persist_with_items_calls
-                        .fetch_add(1, Ordering::SeqCst);
+                    self.persist_with_items_calls.fetch_add(1, Ordering::SeqCst);
                 } else {
                     self.persist_without_items_calls
                         .fetch_add(1, Ordering::SeqCst);

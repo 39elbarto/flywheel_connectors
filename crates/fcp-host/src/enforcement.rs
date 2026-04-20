@@ -95,6 +95,8 @@ pub struct EnforcementConfig {
     pub zone_allowed_connectors: HashMap<ZoneId, HashSet<AllowedConnector>>,
     /// Per-zone allowed operation IDs.
     pub zone_allowed_operations: HashMap<ZoneId, HashSet<AllowedOperation>>,
+    /// Current revocation registry (optional).
+    pub revocation_registry: Option<Arc<RevocationRegistry>>,
 }
 
 impl Default for EnforcementConfig {
@@ -111,6 +113,7 @@ impl Default for EnforcementConfig {
             zone_memberships: HashMap::new(),
             zone_allowed_connectors: HashMap::new(),
             zone_allowed_operations: HashMap::new(),
+            revocation_registry: None,
         }
     }
 }
@@ -140,6 +143,13 @@ impl EnforcementConfig {
     #[must_use]
     pub fn with_critical_taint_flags(mut self, flags: Vec<String>) -> Self {
         self.critical_taint_flags = flags;
+        self
+    }
+
+    /// Set the revocation registry.
+    #[must_use]
+    pub fn with_revocation_registry(mut self, registry: Arc<RevocationRegistry>) -> Self {
+        self.revocation_registry = Some(registry);
         self
     }
 
@@ -234,6 +244,14 @@ pub struct EnforcementContext {
     pub approval_scopes: Vec<String>,
     /// Request timestamp in milliseconds since epoch.
     pub timestamp_ms: u64,
+    /// ID of the presented capability token (if any).
+    pub token_id: Option<ObjectId>,
+    /// ID of the node attestation for the presenting node.
+    pub node_attestation_id: Option<ObjectId>,
+    /// ID of the issuer key that signed the token.
+    pub issuer_key_id: Option<ObjectId>,
+    /// ID of the connector binary artifact being invoked.
+    pub binary_artifact_id: Option<ObjectId>,
     /// Whether the presented capability token requires holder-proof binding.
     pub holder_proof_required: bool,
     /// Whether the capability holder proof has been verified.
@@ -267,6 +285,10 @@ pub struct EnforcementContextBuilder {
     taint_flags: Vec<String>,
     approval_scopes: Vec<String>,
     timestamp_ms: u64,
+    token_id: Option<ObjectId>,
+    node_attestation_id: Option<ObjectId>,
+    issuer_key_id: Option<ObjectId>,
+    binary_artifact_id: Option<ObjectId>,
     holder_proof_required: bool,
     holder_verified: bool,
     checkpoint_age_ms: Option<u64>,
@@ -435,6 +457,10 @@ impl EnforcementContextBuilder {
             taint_flags: self.taint_flags,
             approval_scopes: self.approval_scopes,
             timestamp_ms: self.timestamp_ms,
+            token_id: self.token_id,
+            node_attestation_id: self.node_attestation_id,
+            issuer_key_id: self.issuer_key_id,
+            binary_artifact_id: self.binary_artifact_id,
             holder_proof_required: self.holder_proof_required,
             holder_verified: self.holder_verified,
             checkpoint_age_ms: self.checkpoint_age_ms,
@@ -817,31 +843,6 @@ impl EnforcementCheck for CheckpointFreshnessCheck {
     }
 }
 
-/// Validates that the revocation list is fresh enough.
-pub struct RevocationFreshnessCheck;
-
-impl EnforcementCheck for RevocationFreshnessCheck {
-    fn name(&self) -> &'static str {
-        "revocation_freshness"
-    }
-
-    fn check(&self, ctx: &EnforcementContext, config: &EnforcementConfig) -> CheckOutcome {
-        match ctx.revocation_list_age_ms {
-            None => CheckOutcome::Skip {
-                reason: "revocation list age not available".into(),
-            },
-            Some(age) if age <= config.revocation_max_age_ms => CheckOutcome::Allow,
-            Some(age) => CheckOutcome::Deny {
-                reason_code: "REVOCATION_LIST_STALE".into(),
-                explanation: format!(
-                    "revocation list age {age}ms exceeds maximum {}ms",
-                    config.revocation_max_age_ms
-                ),
-            },
-        }
-    }
-}
-
 /// Validates that critical taint flags have matching approval tokens.
 pub struct TaintApprovalCheck;
 
@@ -1002,6 +1003,82 @@ impl EnforcementCheck for BudgetCheck {
     }
 }
 
+/// Validates that none of the request's security artifacts have been revoked.
+/// Also validates that the revocation list is fresh enough.
+pub struct RevocationCheck;
+
+impl EnforcementCheck for RevocationCheck {
+    fn name(&self) -> &'static str {
+        "revocation"
+    }
+
+    fn check(&self, ctx: &EnforcementContext, config: &EnforcementConfig) -> CheckOutcome {
+        // 1. Validate freshness of the revocation list.
+        match ctx.revocation_list_age_ms {
+            None => return CheckOutcome::Skip {
+                reason: "revocation list age not available".into(),
+            },
+            Some(age) if age > config.revocation_max_age_ms => {
+                return CheckOutcome::Deny {
+                    reason_code: "REVOCATION_LIST_STALE".into(),
+                    explanation: format!(
+                        "revocation list age {age}ms exceeds maximum {}ms",
+                        config.revocation_max_age_ms
+                    ),
+                };
+            }
+            _ => {}
+        }
+
+        // 2. Perform concrete revocation lookups if a registry is available.
+        let Some(registry) = &config.revocation_registry else {
+            return CheckOutcome::Allow; // Fresh but no registry to check IDs against
+        };
+
+        // Check capability token revocation
+        if let Some(token_id) = &ctx.token_id {
+            if registry.is_revoked(token_id) {
+                return CheckOutcome::Deny {
+                    reason_code: "CAPABILITY_REVOKED".into(),
+                    explanation: format!("capability token '{token_id}' has been revoked"),
+                };
+            }
+        }
+
+        // Check node attestation revocation
+        if let Some(att_id) = &ctx.node_attestation_id {
+            if registry.is_revoked(att_id) {
+                return CheckOutcome::Deny {
+                    reason_code: "NODE_ATTESTATION_REVOKED".into(),
+                    explanation: format!("node attestation '{att_id}' has been revoked"),
+                };
+            }
+        }
+
+        // Check issuer key revocation
+        if let Some(key_id) = &ctx.issuer_key_id {
+            if registry.is_revoked(key_id) {
+                return CheckOutcome::Deny {
+                    reason_code: "ISSUER_KEY_REVOKED".into(),
+                    explanation: format!("issuer key '{key_id}' has been revoked"),
+                };
+            }
+        }
+
+        // Check binary artifact revocation
+        if let Some(bin_id) = &ctx.binary_artifact_id {
+            if registry.is_revoked(bin_id) {
+                return CheckOutcome::Deny {
+                    reason_code: "BINARY_ARTIFACT_REVOKED".into(),
+                    explanation: format!("connector binary artifact '{bin_id}' has been revoked"),
+                };
+            }
+        }
+
+        CheckOutcome::Allow
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Enforcement pipeline
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1126,7 +1203,7 @@ impl EnforcementPipeline {
             Box::new(CapabilityVerifyCheck),
             Box::new(HolderProofCheck),
             Box::new(CheckpointFreshnessCheck),
-            Box::new(RevocationFreshnessCheck),
+            Box::new(RevocationCheck),
             Box::new(TaintApprovalCheck),
             Box::new(PolicyCeilingCheck),
             Box::new(ConnectorManifestCheck),
@@ -1170,6 +1247,10 @@ fn test_context() -> EnforcementContext {
         taint_flags: Vec::new(),
         approval_scopes: Vec::new(),
         timestamp_ms: 1_700_000_000_000,
+        token_id: None,
+        node_attestation_id: None,
+        issuer_key_id: None,
+        binary_artifact_id: None,
         holder_proof_required: true,
         holder_verified: true,
         checkpoint_age_ms: Some(10_000),
@@ -3533,6 +3614,73 @@ mod tests {
         assert!(ctx.is_some());
         let ctx = ctx.unwrap();
         assert!(ctx.request_id.is_empty());
+    }
+
+    #[test]
+    fn revocation_check_denies_revoked_token() {
+        let mut registry = RevocationRegistry::new();
+        let token_id = ObjectId::from_bytes([0xAA; 32]);
+        let revocation = fcp_core::RevocationObject {
+            header: fcp_core::ObjectHeader {
+                zone_id: ZoneId::work(),
+                schema: fcp_core::RevocationObject::schema(),
+                refs: Vec::new(),
+                foreign_refs: Vec::new(),
+                metadata: std::collections::BTreeMap::new(),
+            },
+            scope: fcp_core::RevocationScope::Capability,
+            revoked: vec![token_id],
+            effective_at: 1000,
+            expires_at: None,
+            reason: "test".into(),
+            signature: [0u8; 64],
+        };
+        registry.add_revocation(&revocation);
+
+        let config = EnforcementConfig::default()
+            .with_revocation_registry(Arc::new(registry));
+
+        let ctx = EnforcementContextBuilder::new()
+            .request_id("r1")
+            .connector_id("c1")
+            .operation("op1")
+            .zone_id("z1")
+            .principal("p1")
+            .token_id(token_id)
+            .revocation_list_age_ms(100)
+            .build()
+            .unwrap();
+
+        let check = RevocationCheck;
+        let outcome = check.check(&ctx, &config);
+
+        if let CheckOutcome::Deny { reason_code, .. } = outcome {
+            assert_eq!(reason_code, "CAPABILITY_REVOKED");
+        } else {
+            panic!("Expected denial for revoked token, got {outcome:?}");
+        }
+    }
+
+    #[test]
+    fn revocation_check_allows_fresh_unrevoked() {
+        let registry = RevocationRegistry::new();
+        let config = EnforcementConfig::default()
+            .with_revocation_registry(Arc::new(registry));
+
+        let ctx = EnforcementContextBuilder::new()
+            .request_id("r1")
+            .connector_id("c1")
+            .operation("op1")
+            .zone_id("z1")
+            .principal("p1")
+            .token_id(ObjectId::from_bytes([0xBB; 32]))
+            .revocation_list_age_ms(100)
+            .build()
+            .unwrap();
+
+        let check = RevocationCheck;
+        let outcome = check.check(&ctx, &config);
+        assert!(outcome.is_allow());
     }
 
     #[test]

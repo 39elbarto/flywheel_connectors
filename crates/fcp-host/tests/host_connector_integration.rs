@@ -53,7 +53,9 @@ use fcp_kernel::{
     LifecycleState, LifecycleStatus, OperationId, RequestId, SelfCheckReport, SelfCheckStatus,
 };
 use fcp_testkit::LogCapture;
-use reqwest::header::{CACHE_CONTROL, ETAG, HeaderMap, HeaderValue, IF_NONE_MATCH, LAST_MODIFIED};
+use reqwest::header::{
+    AUTHORIZATION, CACHE_CONTROL, ETAG, HeaderMap, HeaderValue, IF_NONE_MATCH, LAST_MODIFIED,
+};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -110,6 +112,7 @@ fn test_time() -> chrono::DateTime<Utc> {
 const TEST_PRINCIPAL: &str = "agent:test";
 const TEST_OPERATION: &str = "test.echo";
 const TEST_CAPABILITY_ID: &str = "cap.test.echo";
+const TEST_ADMIN_BEARER_TOKEN: &str = "host-test-admin-bearer";
 const TRUSTED_CAPABILITY_SIGNING_KEY_HEX: &str =
     "1111111111111111111111111111111111111111111111111111111111111111";
 
@@ -809,6 +812,42 @@ where
     Ok(http_get_json_response(client, url, None).await?.body)
 }
 
+fn protected_route_path(path: &str) -> bool {
+    path.starts_with("/rpc/admin/")
+        || path.starts_with("/rpc/rollout/")
+        || path.starts_with("/rpc/lifecycle/")
+        || path.starts_with("/rpc/connectors/apply")
+        || path.starts_with("/rpc/connectors/")
+            && (path.contains("/config") || path.ends_with("/artifact"))
+        || path.starts_with("/rpc/supply-chain/verify")
+}
+
+fn admin_auth_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {TEST_ADMIN_BEARER_TOKEN}"))
+            .expect("test admin bearer token should be a valid header"),
+    );
+    headers
+}
+
+fn with_admin_auth_if_needed(url: &str, headers: Option<HeaderMap>) -> Option<HeaderMap> {
+    let path = reqwest::Url::parse(url)
+        .ok()
+        .map(|parsed| parsed.path().to_string())?;
+    if !protected_route_path(&path) {
+        return headers;
+    }
+
+    let mut headers = headers.unwrap_or_default();
+    headers.entry(AUTHORIZATION).or_insert_with(|| {
+        HeaderValue::from_str(&format!("Bearer {TEST_ADMIN_BEARER_TOKEN}"))
+            .expect("test admin bearer token should be a valid header")
+    });
+    Some(headers)
+}
+
 async fn http_post_json<B, T>(
     client: reqwest::Client,
     url: String,
@@ -830,8 +869,10 @@ where
     B: serde::Serialize + Send + 'static,
     T: DeserializeOwned + Send + 'static,
 {
+    let headers = with_admin_auth_if_needed(&url, None).unwrap_or_default();
     let response = client
         .put(url)
+        .headers(headers)
         .json(&body)
         .send()
         .await?
@@ -847,7 +888,13 @@ async fn http_delete_json<T>(
 where
     T: DeserializeOwned + Send + 'static,
 {
-    let response = client.delete(url).send().await?.error_for_status()?;
+    let headers = with_admin_auth_if_needed(&url, None).unwrap_or_default();
+    let response = client
+        .delete(url)
+        .headers(headers)
+        .send()
+        .await?
+        .error_for_status()?;
     let body = response.json::<T>().await?;
     Ok(body)
 }
@@ -866,8 +913,9 @@ async fn http_get_json_response<T>(
 where
     T: DeserializeOwned + Send + 'static,
 {
+    let auth_headers = with_admin_auth_if_needed(&url, headers);
     let mut request = client.get(url);
-    if let Some(hdrs) = headers {
+    if let Some(hdrs) = auth_headers {
         request = request.headers(hdrs);
     }
     let response = request.send().await?.error_for_status()?;
@@ -891,8 +939,9 @@ where
     B: serde::Serialize + Send + 'static,
     T: DeserializeOwned + Send + 'static,
 {
+    let auth_headers = with_admin_auth_if_needed(&url, headers);
     let mut request = client.post(url).json(&body);
-    if let Some(hdrs) = headers {
+    if let Some(hdrs) = auth_headers {
         request = request.headers(hdrs);
     }
     let response = request.send().await?.error_for_status()?;
@@ -1062,6 +1111,7 @@ impl HttpHostProcess {
                 "FCP_HOST_CONNECTORS",
                 serde_json::to_string(&connector_configs)?,
             )
+            .env("FCP_HOST_ADMIN_BEARER_TOKEN", TEST_ADMIN_BEARER_TOKEN)
             .env("FCP_HOST_LIFECYCLE_STATE_FILE", &lifecycle_state_path)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -1105,6 +1155,7 @@ impl HttpHostProcess {
         command
             .env("FCP_HOST_BIND", bind_addr.to_string())
             .env("FCP_HOST_CONNECTORS_FILE", &connectors_file_path)
+            .env("FCP_HOST_ADMIN_BEARER_TOKEN", TEST_ADMIN_BEARER_TOKEN)
             .env("FCP_HOST_LIFECYCLE_STATE_FILE", &lifecycle_state_path)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -1174,6 +1225,7 @@ impl UnixHostProcess {
                 "FCP_HOST_CONNECTORS",
                 serde_json::to_string(&connector_configs)?,
             )
+            .env("FCP_HOST_ADMIN_BEARER_TOKEN", TEST_ADMIN_BEARER_TOKEN)
             .env("FCP_HOST_LIFECYCLE_STATE_FILE", &lifecycle_state_path)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
@@ -4353,6 +4405,92 @@ async fn fcp_host_binary_invoke_route_rejects_invalid_capability_signature()
 
     assert_eq!(status, reqwest::StatusCode::FORBIDDEN);
     assert!(body.contains("capability token rejected"));
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_protected_routes_require_admin_bearer()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.admin-auth:utility:1.0.0");
+    let host = HttpHostProcess::spawn_with_env(
+        vec![test_connector_config(
+            &connector_id,
+            "Admin Auth",
+            &["test", "admin-auth"],
+        )],
+        &[],
+    )
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let public_health = host.client.get(url("/rpc/health")).send().await?;
+    assert!(public_health.status().is_success());
+
+    let rollout_without_auth = host
+        .client
+        .get(url(&format!("/rpc/rollout/pin/{}", connector_id.as_str())))
+        .send()
+        .await?;
+    assert_eq!(
+        rollout_without_auth.status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+    assert!(
+        rollout_without_auth
+            .text()
+            .await?
+            .contains("Authorization header")
+    );
+
+    let admin_receipts_without_auth = host
+        .client
+        .post(url("/rpc/admin/receipts"))
+        .json(&ReceiptQueryRequest {
+            connector_id: connector_id.to_string(),
+            operation: Some(TEST_OPERATION.to_string()),
+            after: None,
+            limit: 10,
+        })
+        .send()
+        .await?;
+    assert_eq!(
+        admin_receipts_without_auth.status(),
+        reqwest::StatusCode::FORBIDDEN
+    );
+    assert!(
+        admin_receipts_without_auth
+            .text()
+            .await?
+            .contains("Authorization header")
+    );
+
+    let rollout_with_auth: PinStateResponse = http_get_json_response(
+        host.client.clone(),
+        url(&format!("/rpc/rollout/pin/{}", connector_id.as_str())),
+        Some(admin_auth_headers()),
+    )
+    .await?
+    .body;
+    assert_eq!(rollout_with_auth.connector_id, connector_id.as_str());
+    assert!(!rollout_with_auth.pinned);
+    assert!(rollout_with_auth.version.is_none());
+
+    let receipts_with_auth: ReceiptQueryResponse = http_post_json_response(
+        host.client.clone(),
+        url("/rpc/admin/receipts"),
+        ReceiptQueryRequest {
+            connector_id: connector_id.to_string(),
+            operation: Some(TEST_OPERATION.to_string()),
+            after: None,
+            limit: 10,
+        },
+        Some(admin_auth_headers()),
+    )
+    .await?
+    .body;
+    assert_eq!(receipts_with_auth.total_receipts, 0);
+    assert!(receipts_with_auth.receipts.is_empty());
 
     Ok(())
 }

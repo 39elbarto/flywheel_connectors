@@ -876,10 +876,9 @@ impl ExecutionPlanner {
                     return false;
                 };
                 if let Some(ver) = min_version {
-                    // Simple string comparison for version compatibility.
-                    // The existing check_connector_version method handles
-                    // proper semver; this is a fallback for policy evaluation.
-                    installed.version.as_str() >= ver.as_str()
+                    // Use semver-aware comparison instead of simple string comparison
+                    // to handle numeric component ordering correctly (e.g. "10" > "2").
+                    version_gte(installed.version.as_str(), ver.as_str())
                 } else {
                     true
                 }

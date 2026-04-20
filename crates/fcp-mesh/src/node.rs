@@ -1050,6 +1050,16 @@ impl MeshNode {
     ) -> Result<(ValidatedRequest, fcp_store::ObjectSymbolMeta), SymbolRequestError> {
         let mut authenticated = is_authenticated || self.is_peer_authenticated(peer);
 
+        // Check if peer is authorized for the requested zone
+        if let Some(state) = self.peers.get(peer) {
+            if !state.zones.contains(&request.zone_id) {
+                return Err(SymbolRequestError::UnauthorizedZone {
+                    peer: peer.as_str().to_string(),
+                    zone_id: request.zone_id.to_string(),
+                });
+            }
+        }
+
         self.check_symbol_request_gate(request, peer, authenticated, now_ms)?;
 
         // Fetch metadata first to get accurate symbol size for admission control
@@ -1510,13 +1520,24 @@ impl MeshNode {
     /// Returns `MeshNodeError::DegradedTransport` if decoding fails.
     pub fn decode_control_plane(
         &mut self,
+        peer: &NodeId,
         frame: &fcp_protocol::FcpsFrame,
         expected_zone_id: &ZoneId,
         retention: RetentionClass,
+        now_ms: u64,
     ) -> Result<Option<ControlPlaneEnvelope>, MeshNodeError> {
-        Ok(self
+        // Enforce per-peer concurrent decode limits (Admission Control)
+        self.admission.try_acquire_decode(peer, now_ms)?;
+
+        let result = self
             .degraded_decoder
-            .process_frame(frame, expected_zone_id, retention)?)
+            .process_frame(frame, expected_zone_id, retention);
+
+        // Release the decode slot immediately after processing the frame.
+        // This bounds the active CPU time spent decoding for this peer.
+        self.admission.release_decode(peer, now_ms);
+
+        Ok(result?)
     }
 
     /// Decode a control-plane frame and enforce retention via handler.
@@ -1527,12 +1548,14 @@ impl MeshNode {
     /// envelope.
     pub fn process_control_plane_frame(
         &mut self,
+        peer: &NodeId,
         frame: &fcp_protocol::FcpsFrame,
         expected_zone_id: &ZoneId,
         retention: RetentionClass,
+        now_ms: u64,
         handler: &dyn ControlPlaneHandler,
     ) -> Result<Option<ControlPlaneEnvelope>, MeshNodeError> {
-        let envelope = self.decode_control_plane(frame, expected_zone_id, retention)?;
+        let envelope = self.decode_control_plane(peer, frame, expected_zone_id, retention, now_ms)?;
         if let Some(ref env) = envelope {
             handler.handle(env.clone())?;
         }

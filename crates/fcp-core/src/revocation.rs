@@ -2066,6 +2066,68 @@ mod tests {
         assert_eq!(stored.effective_at, 1_700_000_000);
     }
 
+    // The tie case (identical effective_at): the replace condition is
+    // `existing.effective_at > revocation.effective_at`, so on equality the
+    // first-writer wins. This test codifies that semantics so any future
+    // change — e.g., moving to `>=` for content-addressed tie-break — is
+    // flagged rather than silently changing observable behavior. Both
+    // revocations agree on `is_revoked_at` because the effective_at matches.
+    #[test]
+    fn registry_equal_effective_at_is_first_writer_wins() {
+        let mut registry = RevocationRegistry::new();
+        let id = ObjectId::from_bytes([44u8; 32]);
+        let effective_at = 1_800_000_000;
+
+        let mut first = test_revocation();
+        first.revoked = vec![id];
+        first.effective_at = effective_at;
+        first.reason = "first-writer".into();
+
+        let mut second = test_revocation();
+        second.revoked = vec![id];
+        second.effective_at = effective_at;
+        second.reason = "second-writer".into();
+
+        registry.add_revocation(&first);
+        registry.add_revocation(&second);
+
+        let stored = registry.get_revocation(&id).expect("entry exists");
+        assert_eq!(stored.effective_at, effective_at);
+        assert_eq!(
+            stored.reason, "first-writer",
+            "on effective_at tie, the first-written revocation must be retained"
+        );
+        // Semantic invariant: regardless of which revocation won the
+        // metadata slot, is_revoked_at stays stable because effective_at
+        // is identical — divergence on ties is cosmetic, not functional.
+        assert!(registry.is_revoked_at(&id, effective_at));
+        assert!(registry.is_revoked_at(&id, effective_at + 1));
+        assert!(!registry.is_revoked_at(&id, effective_at - 1));
+    }
+
+    // Re-adding the same revocation must be idempotent: repeated deliveries
+    // from gossip or retried apply paths cannot re-order outcomes or leak
+    // metadata drift. Length stays at 1 entry per revoked id.
+    #[test]
+    fn registry_add_revocation_is_idempotent() {
+        let mut registry = RevocationRegistry::new();
+        let id = ObjectId::from_bytes([45u8; 32]);
+
+        let mut rev = test_revocation();
+        rev.revoked = vec![id];
+        rev.effective_at = 1_900_000_000;
+        rev.reason = "duplicate-delivery".into();
+
+        for _ in 0..5 {
+            registry.add_revocation(&rev);
+        }
+
+        assert_eq!(registry.len(), 1);
+        let stored = registry.get_revocation(&id).expect("entry exists");
+        assert_eq!(stored.effective_at, 1_900_000_000);
+        assert_eq!(stored.reason, "duplicate-delivery");
+    }
+
     #[test]
     fn registry_len_tracking() {
         let mut registry = RevocationRegistry::new();

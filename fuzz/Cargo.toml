@@ -162,6 +162,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_gossip_summary_sig"
+path = "fuzz_targets/fuzz_gossip_summary_sig.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_raptorq_decode_bounds"
 path = "fuzz_targets/raptorq_decode_bounds.rs"
 test = false

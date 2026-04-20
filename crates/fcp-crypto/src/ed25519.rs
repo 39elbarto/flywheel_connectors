@@ -160,7 +160,25 @@ impl Ed25519VerifyingKey {
     ///
     /// Returns an error if the bytes are not a valid Ed25519 public key.
     pub fn from_bytes(bytes: &[u8; PUBLIC_KEY_SIZE]) -> CryptoResult<Self> {
+        // Reject all-zero public keys (weak/invalid for FCP)
+        if bytes.iter().all(|&b| b == 0) {
+            return Err(CryptoError::InvalidPublicKey);
+        }
+
         let inner = VerifyingKey::from_bytes(bytes).map_err(|_| CryptoError::InvalidPublicKey)?;
+
+        // Reject small-subgroup points to prevent subgroup confinement attacks.
+        // ed25519-dalek's VerifyingKey::from_bytes is lenient by default for
+        // RFC 8032 compliance, but FCP requires strict keys.
+        let point = curve25519_dalek::edwards::CompressedEdwardsY::from_slice(bytes)
+            .map_err(|_| CryptoError::InvalidPublicKey)?
+            .decompress()
+            .ok_or(CryptoError::InvalidPublicKey)?;
+
+        if point.is_small_order() {
+            return Err(CryptoError::InvalidPublicKey);
+        }
+
         let kid = KeyId::derive_from_public_key(bytes);
         Ok(Self { inner, kid })
     }

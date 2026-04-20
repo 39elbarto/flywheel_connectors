@@ -75,6 +75,10 @@ pub enum SymbolRequestError {
     #[error("object not found: {object_id}")]
     ObjectNotFound { object_id: String },
 
+    /// Peer is not authorized for the requested zone.
+    #[error("peer {peer} is not authorized for zone {zone_id}")]
+    UnauthorizedZone { peer: String, zone_id: String },
+
     /// Signature verification failed.
     #[error("signature verification failed")]
     SignatureInvalid,

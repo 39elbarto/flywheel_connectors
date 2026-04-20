@@ -89,6 +89,10 @@ impl PollingCursor for TelegramPollingCursor {
         self.offset = Some(offset);
     }
 
+    fn clear_offset(&mut self) {
+        self.offset = None;
+    }
+
     fn last_poll_at(&self) -> Option<Instant> {
         self.last_poll_at
     }

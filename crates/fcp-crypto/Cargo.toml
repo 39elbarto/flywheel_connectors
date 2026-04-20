@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 # Signatures
 ed25519-dalek.workspace = true
+curve25519-dalek = { version = "4.1", features = ["group"] }
 frost-ed25519 = "2.2"
 
 # Key exchange

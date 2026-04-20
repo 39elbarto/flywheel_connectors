@@ -823,6 +823,120 @@ mod tests {
         assert!(err.to_string().contains("tag must start"));
     }
 
+    // Regression-pinning batch for the is_fcp_tag / fcp_suffix / tag_to_zone
+    // invariants. `TailscaleTag::new` only gates the `tag:` prefix; everything
+    // downstream assumes a stricter contract on the FCP-specific slice:
+    //
+    //   INV1: tag_to_zone returns Some iff is_fcp_tag && canonical suffix.
+    //   INV2: is_fcp_tag is a prefix check only — accepting a tag with
+    //         `tag:fcp-` plus a *malformed* suffix does NOT imply the tag
+    //         round-trips to a zone.
+    //   INV3: Every TailscaleTag::fcp_tag(standard_suffix) round-trips back
+    //         through tag_to_zone ∘ fcp_suffix to the same zone id.
+    //
+    // A regression in ZoneTagMapping::is_valid_zone_id (or the prefix check
+    // inside fcp_suffix) could accept malformed tags as zones. That would
+    // leak attacker-controlled bytes into ACL generation downstream. These
+    // tests pin the accept/reject boundary explicitly.
+
+    #[test]
+    fn fcp_tag_with_empty_suffix_is_not_a_zone() {
+        // INV2: tag:fcp- is a prefix match for is_fcp_tag, but the empty
+        // suffix does NOT form a valid zone id and must not be mapped.
+        let tag = TailscaleTag::fcp_tag("");
+        assert!(tag.is_fcp_tag(), "tag:fcp- trivially matches the prefix");
+        assert_eq!(tag.fcp_suffix(), Some(""));
+        assert!(
+            ZoneTagMapping::tag_to_zone(&tag).is_none(),
+            "empty FCP suffix must not round-trip to a zone id",
+        );
+    }
+
+    #[test]
+    fn fcp_tag_with_leading_hyphen_suffix_is_not_a_zone() {
+        // INV1 + INV2: a suffix starting with '-' would produce
+        // `z:-foo` which is_valid_zone_id must reject.
+        let tag = TailscaleTag::fcp_tag("-leading");
+        assert!(tag.is_fcp_tag());
+        assert!(
+            ZoneTagMapping::tag_to_zone(&tag).is_none(),
+            "leading-hyphen FCP suffix must not map to a zone id",
+        );
+    }
+
+    #[test]
+    fn fcp_tag_with_trailing_hyphen_suffix_is_not_a_zone() {
+        let tag = TailscaleTag::fcp_tag("trailing-");
+        assert!(tag.is_fcp_tag());
+        assert!(
+            ZoneTagMapping::tag_to_zone(&tag).is_none(),
+            "trailing-hyphen FCP suffix must not map to a zone id",
+        );
+    }
+
+    #[test]
+    fn fcp_tag_with_uppercase_suffix_is_not_a_zone() {
+        let tag = TailscaleTag::fcp_tag("MixedCase");
+        assert!(tag.is_fcp_tag());
+        assert!(
+            ZoneTagMapping::tag_to_zone(&tag).is_none(),
+            "non-ascii-lowercase FCP suffix must not map to a zone id",
+        );
+    }
+
+    #[test]
+    fn fcp_tag_with_underscore_suffix_is_not_a_zone() {
+        // Underscores are explicitly not in the valid-suffix set
+        // ([a-z0-9-]), so they must reject even though `_` is common in
+        // many identifier systems.
+        let tag = TailscaleTag::fcp_tag("foo_bar");
+        assert!(tag.is_fcp_tag());
+        assert!(
+            ZoneTagMapping::tag_to_zone(&tag).is_none(),
+            "underscore in FCP suffix must not map to a zone id",
+        );
+    }
+
+    #[test]
+    fn all_standard_zones_round_trip_through_tag_and_back() {
+        // INV3: every declared standard zone must survive the
+        // zone_to_tag → tag_to_zone cycle with no drift.
+        for &zone in ZoneTagMapping::standard_zones() {
+            let tag = ZoneTagMapping::zone_to_tag(zone)
+                .unwrap_or_else(|e| panic!("zone_to_tag({zone}) failed: {e:?}"));
+            let recovered = ZoneTagMapping::tag_to_zone(&tag).unwrap_or_else(|| {
+                panic!(
+                    "tag_to_zone({}) returned None for standard zone {zone}",
+                    tag.as_str()
+                )
+            });
+            assert_eq!(
+                recovered, zone,
+                "round-trip drift: {zone} -> {} -> {recovered}",
+                tag.as_str(),
+            );
+            assert!(
+                tag.is_fcp_tag(),
+                "zone_to_tag output for {zone} must pass is_fcp_tag",
+            );
+        }
+    }
+
+    #[test]
+    fn non_fcp_tag_cannot_be_mapped_to_zone_even_with_valid_looking_suffix() {
+        // A tag without the fcp- prefix should never satisfy tag_to_zone
+        // regardless of whether the bytes AFTER `tag:` look like a valid
+        // zone suffix. Pins that the prefix gate is enforced by
+        // fcp_suffix() returning None, not by accident of the downstream
+        // is_valid_zone_id check.
+        let tag = TailscaleTag::new("tag:work").expect("valid tag prefix");
+        assert!(!tag.is_fcp_tag());
+        assert!(
+            ZoneTagMapping::tag_to_zone(&tag).is_none(),
+            "non-fcp tag must never map to a zone id",
+        );
+    }
+
     // --- TailscaleTag equality and inequality ---
 
     #[test]

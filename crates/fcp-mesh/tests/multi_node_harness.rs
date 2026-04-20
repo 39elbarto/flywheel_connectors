@@ -984,22 +984,23 @@ async fn run_node_task(
                     sign,
                     reply,
                 } => {
-                    let summary = mesh.gossip_mut().create_summary(&zone_id, epoch_id).map(
-                        |mut summary| {
-                            if sign {
-                                let signature =
-                                    identity.signing_key.sign(&summary.signing_bytes());
-                                summary.signature = Some(NodeSignature::new(
-                                    identity.node_id.clone(),
-                                    signature.to_bytes(),
-                                    summary.timestamp,
-                                ));
-                            } else {
-                                summary.signature = None;
-                            }
-                            summary
-                        },
-                    );
+                    let summary =
+                        mesh.gossip_mut()
+                            .create_summary(&zone_id, epoch_id)
+                            .map(|mut summary| {
+                                if sign {
+                                    let signature =
+                                        identity.signing_key.sign(&summary.signing_bytes());
+                                    summary.signature = Some(NodeSignature::new(
+                                        identity.node_id.clone(),
+                                        signature.to_bytes(),
+                                        summary.timestamp,
+                                    ));
+                                } else {
+                                    summary.signature = None;
+                                }
+                                summary
+                            });
                     let _ = reply.send(summary);
                 }
                 NodeCommand::CreateObjectRequest {
@@ -1484,7 +1485,14 @@ async fn multi_node_harness_enforces_summary_signature_boundary() {
 
     let revocation_id = test_object_id("revocation-boundary-object");
     let signed_push = harness
-        .send_revocation_push(&node_a, &node_b, zone_id.clone(), vec![revocation_id], 1, true)
+        .send_revocation_push(
+            &node_a,
+            &node_b,
+            zone_id.clone(),
+            vec![revocation_id],
+            1,
+            true,
+        )
         .await
         .unwrap();
     assert_eq!(signed_push, DeliveryDisposition::Queued);
@@ -1497,13 +1505,22 @@ async fn multi_node_harness_enforces_summary_signature_boundary() {
         signed_push_snapshot
             .observed_messages
             .iter()
-            .any(|entry| matches!(entry.message, GossipMessage::RevocationPush(_))
-                && entry.dispatch_error.is_none()),
+            .any(
+                |entry| matches!(entry.message, GossipMessage::RevocationPush(_))
+                    && entry.dispatch_error.is_none()
+            ),
         "signed revocation pushes should cross the verified dispatch boundary"
     );
 
     let unsigned_push = harness
-        .send_revocation_push(&node_a, &node_b, zone_id.clone(), vec![revocation_id], 2, false)
+        .send_revocation_push(
+            &node_a,
+            &node_b,
+            zone_id.clone(),
+            vec![revocation_id],
+            2,
+            false,
+        )
         .await
         .unwrap();
     assert_eq!(unsigned_push, DeliveryDisposition::Queued);
@@ -1513,11 +1530,13 @@ async fn multi_node_harness_enforces_summary_signature_boundary() {
         unsigned_push_snapshot
             .observed_messages
             .iter()
-            .any(|entry| matches!(entry.message, GossipMessage::RevocationPush(_))
-                && entry
-                    .dispatch_error
-                    .as_deref()
-                    .is_some_and(|err| err.contains("invalid revocation push signature"))),
+            .any(
+                |entry| matches!(entry.message, GossipMessage::RevocationPush(_))
+                    && entry
+                        .dispatch_error
+                        .as_deref()
+                        .is_some_and(|err| err.contains("invalid revocation push signature"))
+            ),
         "unsigned revocation pushes should be rejected at the verified dispatch boundary"
     );
 

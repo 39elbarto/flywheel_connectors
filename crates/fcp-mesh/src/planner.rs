@@ -909,8 +909,14 @@ impl ExecutionPlanner {
                 node_id,
                 weight_bps,
             } => {
+                // weight_bps is basis points (0–10000). Divide by 10000 to
+                // place the bonus on the same scale as the other preference
+                // variants (e.g. `HighResources`) — the previous `/100.0`
+                // produced a bonus 100× larger than any other signal,
+                // letting a `SpecificDevice` preference deterministically
+                // swamp resource-, locality-, and latency-based scoring.
                 if candidate.node_id == *node_id {
-                    f64::from(*weight_bps) / 100.0
+                    f64::from(*weight_bps) / 10000.0
                 } else {
                     0.0
                 }
@@ -3228,6 +3234,47 @@ mod tests {
 
         let plan = planner.plan_with_policy(&input, &context, &policy);
         assert!(plan.selected.is_none());
+    }
+
+    /// Regression (MEDIUM): `SpecificDevice` preference must be scaled by
+    /// basis-points (/ 10000), not / 100. A previous off-by-100 error let a
+    /// single `SpecificDevice` preference swamp all other scoring signals,
+    /// making it a cheap lever for placement manipulation whenever policy
+    /// contents could be influenced.
+    #[test]
+    fn specific_device_bonus_uses_basis_points_scale() {
+        let strong = CandidateNode::new(NodeId::new("strong"), 100.0);
+        let weak = CandidateNode::new(NodeId::new("weak"), 50.0);
+
+        let pref = DevicePreference::SpecificDevice {
+            node_id: NodeId::new("weak"),
+            weight_bps: 10000, // maximum weight
+        };
+        let input = PlannerInput::new(vec![], 0);
+        let bonus = ExecutionPlanner::preference_bonus(&weak, &pref, &input);
+        assert!(
+            (bonus - 1.0).abs() < f64::EPSILON,
+            "SpecificDevice bonus at weight_bps=10000 must be 1.0, got {bonus}"
+        );
+        // And at a more typical 50% weight it must be 0.5, not 50.0.
+        let pref_half = DevicePreference::SpecificDevice {
+            node_id: NodeId::new("weak"),
+            weight_bps: 5000,
+        };
+        let bonus_half = ExecutionPlanner::preference_bonus(&weak, &pref_half, &input);
+        assert!(
+            (bonus_half - 0.5).abs() < f64::EPSILON,
+            "SpecificDevice at weight_bps=5000 must be 0.5, got {bonus_half}"
+        );
+
+        // A 50-point fitness gap must not be overturned by a single
+        // max-weight `SpecificDevice` bonus (which tops out at 1.0).
+        let non_match = ExecutionPlanner::preference_bonus(&strong, &pref, &input);
+        assert!((non_match - 0.0).abs() < f64::EPSILON);
+        assert!(
+            strong.score + non_match > weak.score + bonus,
+            "strong candidate (100) must still beat weak (50+bonus={bonus}) after preference"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════

@@ -327,6 +327,7 @@ impl LeaseCoordinator {
                 subject_id,
                 purpose,
                 current.lease.fencing_token,
+                existing_leases,
                 now_secs,
                 Some(ttl),
             );
@@ -386,18 +387,91 @@ impl LeaseCoordinator {
     }
 
     /// Renew an existing lease.
+    ///
+    /// Authoritative validation is performed against `existing_leases`:
+    ///
+    /// 1. `requester` must currently hold an active lease with
+    ///    `held_fencing_token` for the given subject/purpose.
+    /// 2. No observed active lease for the same subject/purpose may hold a
+    ///    higher fencing token (the requester must not have been superseded).
+    /// 3. Renewal is monotonic: the new expiry never regresses below the
+    ///    previously observed expiry, even if `now_secs` regresses (clock
+    ///    skew, NTP step-back, or a malicious caller reporting a stale time).
     pub fn renew(
         &self,
         requester: &TailscaleNodeId,
         subject_id: &ObjectId,
         purpose: &LeasePurpose,
         held_fencing_token: u64,
+        existing_leases: &[ObservedLeaseAuthority],
         now_secs: u64,
         requested_ttl: Option<u32>,
     ) -> (RenewOutcome, Vec<AuthorityTimelineEvent>) {
         let mut timeline = Vec::new();
         let ttl = self.clamp_ttl(requested_ttl.unwrap_or(self.config.default_ttl_secs));
-        let new_expires = now_secs + u64::from(ttl);
+
+        // (1) Requester must still hold the claimed token as an active lease.
+        let held = existing_leases.iter().find(|obs| {
+            obs.holder == *requester
+                && obs.lease.subject_id == *subject_id
+                && obs.lease.purpose == *purpose
+                && obs.lease.fencing_token == held_fencing_token
+                && obs.lease.is_active(now_secs)
+        });
+        let Some(held) = held else {
+            let reason = format!(
+                "Renew denied: no active lease matches holder={} token={held_fencing_token}",
+                requester.as_str()
+            );
+            timeline.push(AuthorityTimelineEvent {
+                observed_at_ms: now_secs * 1000,
+                operation: "lease.renew_denied".into(),
+                subject_id: *subject_id,
+                purpose: purpose.clone(),
+                holder: Some(requester.clone()),
+                coordinator: None,
+                reason_code: AuthorityReasonCode::LeaseNotHeld,
+                fencing_token: Some(held_fencing_token),
+                expires_at: None,
+                explanation: reason.clone(),
+            });
+            return (RenewOutcome::Denied { reason }, timeline);
+        };
+
+        // (2) Held lease must not have been superseded by a higher token.
+        let max_active_token = existing_leases
+            .iter()
+            .filter(|obs| {
+                obs.lease.subject_id == *subject_id
+                    && obs.lease.purpose == *purpose
+                    && obs.lease.is_active(now_secs)
+            })
+            .map(|obs| obs.lease.fencing_token)
+            .max()
+            .unwrap_or(held_fencing_token);
+        if max_active_token > held_fencing_token {
+            let reason = format!(
+                "Renew denied: lease superseded (held_token={held_fencing_token}, max_active={max_active_token})"
+            );
+            timeline.push(AuthorityTimelineEvent {
+                observed_at_ms: now_secs * 1000,
+                operation: "lease.renew_denied".into(),
+                subject_id: *subject_id,
+                purpose: purpose.clone(),
+                holder: Some(requester.clone()),
+                coordinator: None,
+                reason_code: AuthorityReasonCode::SupersededByPreferredLease,
+                fencing_token: Some(held_fencing_token),
+                expires_at: Some(held.lease.expires_at),
+                explanation: reason.clone(),
+            });
+            return (RenewOutcome::Denied { reason }, timeline);
+        }
+
+        // (3) Monotonic expiry — guard against clock regression or a stale
+        //     `now_secs` that would otherwise shorten an active lease.
+        let computed = now_secs.saturating_add(u64::from(ttl));
+        let new_expires = computed.max(held.lease.expires_at);
 
         timeline.push(AuthorityTimelineEvent {
             observed_at_ms: now_secs * 1000,
@@ -962,16 +1036,130 @@ mod tests {
     #[test]
     fn renew_extends_expiry() {
         let coord = LeaseCoordinator::with_defaults();
-        let (outcome, timeline) =
-            coord.renew(&node("a"), &subject(), &purpose(), 42, 1000, Some(300));
+        let existing = vec![held_lease("a", 42, 1100)];
+        let (outcome, timeline) = coord.renew(
+            &node("a"),
+            &subject(),
+            &purpose(),
+            42,
+            &existing,
+            1000,
+            Some(300),
+        );
 
         if let RenewOutcome::Renewed { expires_at } = outcome {
             assert_eq!(expires_at, 1300);
         } else {
-            panic!("expected Renewed");
+            panic!("expected Renewed, got {outcome:?}");
         }
         assert_eq!(timeline.len(), 1);
         assert_eq!(timeline[0].operation, "lease.renewed");
+    }
+
+    // ── Renewal validation (regression, HIGH) ────────────────────
+
+    #[test]
+    fn renew_rejects_when_no_matching_lease() {
+        // Non-holder should not be able to renew a lease they don't hold.
+        let coord = LeaseCoordinator::with_defaults();
+        let existing = vec![held_lease("a", 42, 2000)];
+
+        let (outcome, timeline) = coord.renew(
+            &node("b"),
+            &subject(),
+            &purpose(),
+            42,
+            &existing,
+            1000,
+            Some(300),
+        );
+
+        assert!(matches!(outcome, RenewOutcome::Denied { .. }));
+        assert!(
+            timeline
+                .iter()
+                .any(|e| e.reason_code == AuthorityReasonCode::LeaseNotHeld)
+        );
+    }
+
+    #[test]
+    fn renew_rejects_when_lease_superseded() {
+        // A stale holder with a lower fencing token must not be able to
+        // renew past a higher-token authority transfer.
+        let coord = LeaseCoordinator::with_defaults();
+        let existing = vec![
+            held_lease("a", 5, 2000), // old holder
+            held_lease("b", 9, 2000), // new authority
+        ];
+
+        let (outcome, timeline) = coord.renew(
+            &node("a"),
+            &subject(),
+            &purpose(),
+            5,
+            &existing,
+            1000,
+            Some(300),
+        );
+
+        assert!(
+            matches!(outcome, RenewOutcome::Denied { .. }),
+            "superseded renew must be denied, got {outcome:?}"
+        );
+        assert!(
+            timeline
+                .iter()
+                .any(|e| e.reason_code == AuthorityReasonCode::SupersededByPreferredLease)
+        );
+    }
+
+    #[test]
+    fn renew_rejects_when_held_lease_expired() {
+        let coord = LeaseCoordinator::with_defaults();
+        // lease expired at 900, now=1000
+        let existing = vec![held_lease("a", 42, 900)];
+
+        let (outcome, _) = coord.renew(
+            &node("a"),
+            &subject(),
+            &purpose(),
+            42,
+            &existing,
+            1000,
+            Some(300),
+        );
+
+        assert!(matches!(outcome, RenewOutcome::Denied { .. }));
+    }
+
+    #[test]
+    fn renew_is_monotonic_under_clock_regression() {
+        // If now_secs regresses (clock skew / stale caller), the new
+        // expiry must not fall below the currently observed expiry.
+        let coord = LeaseCoordinator::with_defaults();
+        let existing = vec![held_lease("a", 42, 5000)];
+
+        // Caller reports now=100 with ttl=300 → naive computed expiry=400,
+        // but held expiry is 5000. We must keep 5000.
+        let (outcome, _) = coord.renew(
+            &node("a"),
+            &subject(),
+            &purpose(),
+            42,
+            &existing,
+            100,
+            Some(300),
+        );
+
+        match outcome {
+            RenewOutcome::Renewed { expires_at } => {
+                assert!(
+                    expires_at >= 5000,
+                    "renew must not shorten expiry on clock regression; got {expires_at}"
+                );
+            }
+            RenewOutcome::Denied { reason } => panic!("expected Renewed, got Denied: {reason}"),
+        }
     }
 
     // ── Release ─────────────────────────────────────────────────

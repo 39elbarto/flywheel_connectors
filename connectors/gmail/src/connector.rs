@@ -1193,21 +1193,41 @@ fn parse_base_url(params: &serde_json::Value) -> FcpResult<String> {
             message: "base_url must use http or https".into(),
         });
     }
-    if parsed.host_str().is_none() {
-        return Err(FcpError::InvalidRequest {
-            code: 1003,
-            message: "base_url must include a host".into(),
-        });
-    }
-    if parsed.scheme() == "http" && !parsed.host_str().is_some_and(is_local_test_host) {
+    let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "base_url must include a host".into(),
+    })?;
+    let local = is_local_test_host(host);
+    if parsed.scheme() == "http" && !local {
         return Err(FcpError::InvalidRequest {
             code: 1003,
             message: "base_url must use https unless targeting localhost/127.0.0.1 for tests"
                 .into(),
         });
     }
+    // Pin direct-token base_url to the Google API domain. Substring
+    // smuggles like https://evil.com/gmail.googleapis.com are rejected
+    // because we parse the URL and check the host component directly.
+    // Vault-proxy / credential_id mode resolves the destination through
+    // fcp-google-discovery's allowlist at fetch time; we still require
+    // the configured base_url to be a googleapis.com host here so the
+    // connector cannot be redirected at config time even before the
+    // discovery fetcher runs.
+    if !local && !host_is_googleapis(host) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "base_url must target googleapis.com (localhost/127.0.0.1/::1 allowed for tests): {raw}"
+            ),
+        });
+    }
 
     Ok(raw.trim_end_matches('/').to_string())
+}
+
+fn host_is_googleapis(host: &str) -> bool {
+    let lower = host.to_ascii_lowercase();
+    lower == "googleapis.com" || lower.ends_with(".googleapis.com")
 }
 
 fn parse_required_scopes(params: &serde_json::Value) -> FcpResult<Vec<String>> {
@@ -1819,16 +1839,59 @@ mod tests {
     }
 
     #[test]
-    fn parse_base_url_accepts_https() {
+    fn parse_base_url_accepts_https_googleapis() {
         let result =
-            parse_base_url(&json!({"base_url": "https://custom.example.com/api"})).unwrap();
-        assert_eq!(result, "https://custom.example.com/api");
+            parse_base_url(&json!({"base_url": "https://gmail.googleapis.com/gmail/v1"}))
+                .unwrap();
+        assert_eq!(result, "https://gmail.googleapis.com/gmail/v1");
     }
 
     #[test]
     fn parse_base_url_strips_trailing_slash() {
-        let result = parse_base_url(&json!({"base_url": "https://example.com/api/"})).unwrap();
-        assert_eq!(result, "https://example.com/api");
+        let result =
+            parse_base_url(&json!({"base_url": "https://gmail.googleapis.com/gmail/v1/"}))
+                .unwrap();
+        assert_eq!(result, "https://gmail.googleapis.com/gmail/v1");
+    }
+
+    #[test]
+    fn parse_base_url_rejects_non_googleapis_host() {
+        let err = parse_base_url(&json!({"base_url": "https://custom.example.com/api"}))
+            .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("googleapis.com"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_base_url_rejects_substring_smuggle() {
+        // Path-based smuggle: host component is evil.com, not googleapis.com,
+        // even though the full string contains "googleapis.com".
+        let err =
+            parse_base_url(&json!({"base_url": "https://evil.com/gmail.googleapis.com/v1"}))
+                .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn parse_base_url_accepts_googleapis_subdomain() {
+        let result =
+            parse_base_url(&json!({"base_url": "https://content-gmail.googleapis.com/gmail/v1"}))
+                .unwrap();
+        assert_eq!(result, "https://content-gmail.googleapis.com/gmail/v1");
+    }
+
+    #[test]
+    fn host_is_googleapis_recognizes_apex_and_subdomains() {
+        assert!(host_is_googleapis("googleapis.com"));
+        assert!(host_is_googleapis("gmail.googleapis.com"));
+        assert!(host_is_googleapis("content-sheets.googleapis.com"));
+        assert!(!host_is_googleapis("googleapis.com.evil.com"));
+        assert!(!host_is_googleapis("evil-googleapis.com"));
+        assert!(!host_is_googleapis("googleapis.example"));
     }
 
     #[test]

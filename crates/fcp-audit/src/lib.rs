@@ -1123,7 +1123,7 @@ pub fn verify_chain(
             }
         }
 
-        if let Some(zone) = zone_id {
+        if let Some(zone) = zone_id.or_else(|| entries.first().map(|entry| entry.zone_id.as_str())) {
             if head.zone_id != zone {
                 issues.push(VerifyIssue::new(
                     "audit.head_zone_mismatch",
@@ -2900,6 +2900,15 @@ mod tests {
                 .iter()
                 .any(|i| i.code == "audit.head_zone_mismatch")
         );
+    }
+
+    #[test]
+    fn verify_chain_head_zone_mismatch_without_filter() {
+        let e0 = genesis_entry();
+        let mut head = sample_head("entry-0", 0);
+        head.zone_id = "z:other".to_string();
+        let report = verify_chain(&[e0], Some(&head), None);
+        assert!(report.issues.iter().any(|i| i.code == "audit.head_zone_mismatch"));
     }
 
     #[test]

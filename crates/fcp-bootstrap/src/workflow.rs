@@ -719,11 +719,9 @@ fn map_hardware_token_error(
         }
         TokenError::Cancelled => BootstrapError::HardwareTokenCancelled,
         TokenError::Pkcs11(detail) => BootstrapError::HardwareTokenProviderFault { detail },
-        TokenError::KeyNotFound(key) => {
-            BootstrapError::HardwareToken(format!("key not found on hardware token: {key}"))
-        }
+        TokenError::KeyNotFound(key) => BootstrapError::HardwareTokenKeyNotFound { key },
         TokenError::CertificateSelectionFailed(refusal) => {
-            BootstrapError::HardwareToken(format!("certificate selection failed: {refusal}"))
+            BootstrapError::HardwareTokenCertificateSelectionFailed { refusal }
         }
     }
 }
@@ -1521,8 +1519,9 @@ mod tests {
         // a typed mapping. Session is still cleaned up via Drop.
         assert!(matches!(
             result,
-            Err(BootstrapError::HardwareToken(message))
-                if message.contains("certificate selection failed")
+            Err(BootstrapError::HardwareTokenCertificateSelectionFailed {
+                refusal: crate::hardware_token::CertificateSelectionRefusal::NoCertificates,
+            })
         ));
         // Session cleanup happens via Drop when certificate selection fails.
         assert_eq!(driver.close_count(), 1);
@@ -1867,12 +1866,28 @@ mod tests {
     }
 
     #[test]
-    fn map_error_key_not_found_yields_hardware_token_string() {
+    fn map_error_key_not_found_yields_typed_variant() {
         let err =
             map_hardware_token_error(&empty_report(), TokenError::KeyNotFound("owner-key".into()));
         assert!(matches!(
             err,
-            BootstrapError::HardwareToken(msg) if msg.contains("key not found") && msg.contains("owner-key")
+            BootstrapError::HardwareTokenKeyNotFound { key } if key == "owner-key"
+        ));
+    }
+
+    #[test]
+    fn map_error_certificate_selection_failed_yields_typed_variant() {
+        let err = map_hardware_token_error(
+            &empty_report(),
+            TokenError::CertificateSelectionFailed(
+                crate::hardware_token::CertificateSelectionRefusal::NoCertificates,
+            ),
+        );
+        assert!(matches!(
+            err,
+            BootstrapError::HardwareTokenCertificateSelectionFailed {
+                refusal: crate::hardware_token::CertificateSelectionRefusal::NoCertificates,
+            }
         ));
     }
 

@@ -1,5 +1,6 @@
 //! Bootstrap error types.
 
+use crate::hardware_token::CertificateSelectionRefusal;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -59,6 +60,22 @@ pub enum BootstrapError {
     /// Hardware token error.
     #[error("hardware token error: {0}")]
     HardwareToken(String),
+
+    /// Requested key label was not found on the authenticated token.
+    #[error(
+        "hardware token key not found: {key} — ensure the token is provisioned with the expected key label"
+    )]
+    HardwareTokenKeyNotFound {
+        /// The missing key label or identifier.
+        key: String,
+    },
+
+    /// Token authentication succeeded, but no usable identity could be chosen.
+    #[error("hardware token certificate selection failed: {refusal}")]
+    HardwareTokenCertificateSelectionFailed {
+        /// Typed refusal describing why selection could not proceed.
+        refusal: CertificateSelectionRefusal,
+    },
 
     /// No hardware tokens found.
     #[error("no hardware tokens detected")]
@@ -225,6 +242,26 @@ mod tests {
     fn display_hardware_token() {
         let err = BootstrapError::HardwareToken("PKCS#11 init failed".into());
         assert!(err.to_string().contains("PKCS#11"));
+    }
+
+    #[test]
+    fn display_hardware_token_key_not_found() {
+        let err = BootstrapError::HardwareTokenKeyNotFound {
+            key: "owner-key".into(),
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains("owner-key"));
+        assert!(rendered.contains("not found"));
+    }
+
+    #[test]
+    fn display_hardware_token_certificate_selection_failed() {
+        let err = BootstrapError::HardwareTokenCertificateSelectionFailed {
+            refusal: CertificateSelectionRefusal::NoCertificates,
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains("certificate selection failed"));
+        assert!(rendered.contains("no certificates"));
     }
 
     #[test]
@@ -585,6 +622,26 @@ mod tests {
         assert!(debug.contains("InvalidRecoveryPhrase"));
     }
 
+    #[test]
+    fn debug_hardware_token_key_not_found() {
+        let err = BootstrapError::HardwareTokenKeyNotFound {
+            key: "owner-key".into(),
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("HardwareTokenKeyNotFound"));
+        assert!(debug.contains("owner-key"));
+    }
+
+    #[test]
+    fn debug_hardware_token_certificate_selection_failed() {
+        let err = BootstrapError::HardwareTokenCertificateSelectionFailed {
+            refusal: CertificateSelectionRefusal::NoCertificates,
+        };
+        let debug = format!("{err:?}");
+        assert!(debug.contains("HardwareTokenCertificateSelectionFailed"));
+        assert!(debug.contains("NoCertificates"));
+    }
+
     // ---- Display consistency checks ----
 
     #[test]
@@ -809,6 +866,10 @@ mod tests {
             BootstrapError::HardwareTokenPinLocked,
             BootstrapError::HardwareTokenNotFound {
                 locator: "x".into(),
+            },
+            BootstrapError::HardwareTokenKeyNotFound { key: "x".into() },
+            BootstrapError::HardwareTokenCertificateSelectionFailed {
+                refusal: CertificateSelectionRefusal::NoCertificates,
             },
             BootstrapError::HardwareTokenUnsupported {
                 mechanism: "x".into(),

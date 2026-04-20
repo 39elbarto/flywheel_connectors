@@ -23,7 +23,10 @@
 //!   strings through the comparator and confirms the result agrees with
 //!   a byte-exact equality check.
 
-use fcp_bootstrap::{ColdRecovery, HardwareTokenPin, RecoveryPhrase};
+use fcp_bootstrap::hardware_token::{TokenError, TokenKeyType};
+use fcp_bootstrap::{
+    BootstrapError, CertificateSelectionRefusal, ColdRecovery, HardwareTokenPin, RecoveryPhrase,
+};
 use libfuzzer_sys::fuzz_target;
 use serde::Deserialize;
 
@@ -35,6 +38,8 @@ struct BootstrapRecoverySeed {
     pin_a: String,
     pin_b: String,
     mnemonic: String,
+    key_name: String,
+    incompatible_key_types: Vec<u32>,
 }
 
 fn fuzz_hardware_token_pin(a: &[u8], b: &[u8]) {
@@ -132,6 +137,64 @@ fn fuzz_recovery_phrase_words(words: &[&str]) {
     let _ = RecoveryPhrase::from_words(words);
 }
 
+fn token_key_type_from_seed(raw: u32) -> TokenKeyType {
+    match raw % 6 {
+        0 => TokenKeyType::Ed25519,
+        1 => TokenKeyType::X25519,
+        2 => TokenKeyType::EcdsaP256,
+        3 => TokenKeyType::EcdsaP384,
+        4 => TokenKeyType::Rsa,
+        _ => TokenKeyType::Other(raw),
+    }
+}
+
+fn fuzz_typed_hardware_token_errors(key_name: &str, incompatible_key_types: &[u32]) {
+    let key_name = if key_name.is_empty() {
+        "owner-key".to_string()
+    } else {
+        key_name.to_string()
+    };
+    let found: Vec<TokenKeyType> = incompatible_key_types
+        .iter()
+        .copied()
+        .map(token_key_type_from_seed)
+        .collect();
+    let refusal = if found.is_empty() {
+        CertificateSelectionRefusal::NoCertificates
+    } else {
+        CertificateSelectionRefusal::NoCompatibleKeyType { found }
+    };
+
+    let token_errors = [
+        TokenError::KeyNotFound(key_name.clone()),
+        TokenError::CertificateSelectionFailed(refusal.clone()),
+    ];
+    for err in token_errors {
+        let rendered = err.to_string();
+        assert!(!rendered.is_empty(), "TokenError Display must never be empty");
+    }
+
+    let bootstrap_errors = [
+        BootstrapError::HardwareTokenKeyNotFound {
+            key: key_name.clone(),
+        },
+        BootstrapError::HardwareTokenCertificateSelectionFailed {
+            refusal: refusal.clone(),
+        },
+    ];
+    for err in bootstrap_errors {
+        let rendered = err.to_string();
+        assert!(
+            !rendered.is_empty(),
+            "BootstrapError Display must never be empty"
+        );
+        assert!(
+            std::error::Error::source(&err).is_none(),
+            "typed bootstrap refusals must not carry a source chain"
+        );
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     if data.len() > MAX_INPUT_BYTES {
         return;
@@ -142,6 +205,7 @@ fuzz_target!(|data: &[u8]| {
         fuzz_recovery_phrase_parser(&seed.mnemonic);
         let words: Vec<&str> = seed.mnemonic.split_whitespace().collect();
         fuzz_recovery_phrase_words(&words);
+        fuzz_typed_hardware_token_errors(&seed.key_name, &seed.incompatible_key_types);
         return;
     }
 
@@ -159,6 +223,7 @@ fuzz_target!(|data: &[u8]| {
     };
 
     fuzz_hardware_token_pin(pin_a, pin_b);
+    fuzz_typed_hardware_token_errors("", &[]);
 
     if let Ok(mnemonic) = std::str::from_utf8(mnemonic_raw) {
         fuzz_recovery_phrase_parser(mnemonic);

@@ -521,7 +521,11 @@ impl RevocationRegistry {
     }
 
     /// Update the head pointer and sequence.
-    pub const fn update_head(&mut self, head: ObjectId, seq: u64, updated_at: u64) {
+    pub fn update_head(&mut self, head: ObjectId, seq: u64, updated_at: u64) {
+        // Enforce sequence monotonicity (C1.3)
+        if seq <= self.head_seq && self.head.is_some() {
+            return;
+        }
         self.head = Some(head);
         self.head_seq = seq;
         self.last_updated = updated_at;

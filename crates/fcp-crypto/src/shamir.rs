@@ -464,6 +464,16 @@ pub fn reconstruct_secret(shares: &[ShamirShare]) -> ShamirResult<ZeroizingSecre
         return Err(ShamirError::EmptySecret);
     }
 
+    // Reject inputs that cannot possibly succeed — `share.index` is u8 and
+    // index 0 is reserved, so at most 255 distinct shares can ever be passed.
+    // Without this guard a caller could hand in an arbitrarily long slice
+    // of (mostly-duplicate) shares and force N iterations of the duplicate
+    // and mismatched-length scans before the duplicate check fires. Cap
+    // at 255 so pathological inputs are rejected before any O(N) work.
+    if shares.len() > 255 {
+        return Err(ShamirError::TooManyShares);
+    }
+
     // Check for duplicate indices
     let mut seen = [false; 256];
     for share in shares {
@@ -930,6 +940,19 @@ mod tests {
     fn reconstruct_error_empty_shares() {
         let result = reconstruct_secret(&[]);
         assert!(matches!(result, Err(ShamirError::EmptySecret)));
+    }
+
+    #[test]
+    fn reconstruct_error_too_many_shares() {
+        // Pigeonhole: with index: u8 and index 0 reserved, at most 255
+        // distinct shares are possible. Any caller passing >255 shares is
+        // either malicious or broken; reject immediately rather than
+        // iterating the full slice to discover the duplicate.
+        let shares: Vec<ShamirShare> = (0..256)
+            .map(|i| ShamirShare::new(((i % 255) + 1) as u8, vec![0u8; 4]))
+            .collect();
+        let result = reconstruct_secret(&shares);
+        assert!(matches!(result, Err(ShamirError::TooManyShares)));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

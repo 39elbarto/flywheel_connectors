@@ -145,10 +145,13 @@ pub struct DynamicCompliance {
 
 impl DynamicCompliance {
     /// Create a skipped dynamic report.
+    ///
+    /// A skipped dynamic suite is non-conformant: missing runtime coverage must
+    /// not be reported as a passing compliance result.
     #[must_use]
     pub fn skipped(reason: impl Into<String>) -> Self {
         Self {
-            passed: true,
+            passed: false,
             findings: vec![ComplianceFinding::skipped("dynamic.skip", reason)],
         }
     }
@@ -565,9 +568,9 @@ mod tests {
     // ── DynamicCompliance tests ──
 
     #[test]
-    fn dynamic_skipped_is_passing() {
+    fn dynamic_skipped_is_failing() {
         let dc = DynamicCompliance::skipped("no connector available");
-        assert!(dc.passed);
+        assert!(!dc.passed);
         assert_eq!(dc.findings.len(), 1);
         assert_eq!(dc.findings[0].status, CheckStatus::Skipped);
         assert_eq!(dc.findings[0].check, "dynamic.skip");
@@ -1027,7 +1030,7 @@ mod tests {
             dynamic_checks: DynamicCompliance::skipped("z"),
         };
         let moved = report;
-        assert!(moved.passed());
+        assert!(!moved.passed());
         assert_eq!(moved.static_checks.findings.len(), 1);
     }
 
@@ -1428,8 +1431,8 @@ mod tests {
             dynamic_checks: DynamicCompliance::skipped("reason"),
         };
         let cloned = report.clone();
-        assert!(report.passed());
-        assert!(cloned.passed());
+        assert!(!report.passed());
+        assert!(!cloned.passed());
         assert_eq!(cloned.static_checks.findings.len(), 1);
         assert_eq!(cloned.dynamic_checks.findings.len(), 1);
     }
@@ -1742,7 +1745,7 @@ mod tests {
     #[test]
     fn dynamic_skipped_empty_reason() {
         let dc = DynamicCompliance::skipped("");
-        assert!(dc.passed);
+        assert!(!dc.passed);
         assert!(dc.findings[0].message.is_empty());
     }
 

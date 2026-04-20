@@ -194,7 +194,7 @@ fn compliance_report_serde_roundtrip() {
 #[test]
 fn dynamic_compliance_skipped() {
     let dynamic = DynamicCompliance::skipped("no config available");
-    assert!(dynamic.passed);
+    assert!(!dynamic.passed);
     assert_eq!(dynamic.findings.len(), 1);
     assert_eq!(dynamic.findings[0].status, CheckStatus::Skipped);
     assert_eq!(dynamic.findings[0].check, "dynamic.skip");

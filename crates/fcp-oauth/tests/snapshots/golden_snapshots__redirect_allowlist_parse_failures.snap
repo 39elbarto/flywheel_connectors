@@ -1,0 +1,9 @@
+---
+source: crates/fcp-oauth/tests/golden_snapshots.rs
+expression: report
+---
+empty_allowlist: ERR Invalid OAuth configuration: allowed_redirect_uris must not be empty
+non_url_entry: ERR Invalid OAuth configuration: allowed_redirect_uris must be a valid absolute URL: relative URL without a base
+ftp_scheme_entry: ERR Invalid OAuth configuration: allowed_redirect_uris must use https or loopback http
+plain_http_non_loopback: ERR Invalid OAuth configuration: allowed_redirect_uris must use https or loopback http
+mixed_valid_and_invalid: ERR Invalid OAuth configuration: allowed_redirect_uris must be a valid absolute URL: relative URL without a base

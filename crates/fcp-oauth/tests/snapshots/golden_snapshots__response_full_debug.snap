@@ -1,0 +1,20 @@
+---
+source: crates/fcp-oauth/tests/golden_snapshots.rs
+expression: debug_repr
+---
+TokenResponse {
+    access_token: "[REDACTED]",
+    token_type: "Bearer",
+    expires_in: Some(
+        3600,
+    ),
+    refresh_token: Some(
+        "[REDACTED]",
+    ),
+    scope: Some(
+        "read write admin",
+    ),
+    id_token: Some(
+        "[REDACTED]",
+    ),
+}

@@ -1,0 +1,5 @@
+---
+source: crates/fcp-oauth/tests/golden_snapshots.rs
+expression: body
+---
+audience=https%3A%2F%2Fapi.example.com&grant_type=refresh_token&refresh_token=rt_with_extras&resource=https%3A%2F%2Fgraph.microsoft.com

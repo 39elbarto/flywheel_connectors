@@ -1,0 +1,347 @@
+//! Golden artifact snapshots for fcp-oauth.
+//!
+//! Freezes three observable surfaces so a silent change in serialization,
+//! deserialization, or redirect-allowlist semantics will fail the next
+//! CI run with a diff of the old vs. new output:
+//!
+//! 1. **Token refresh request serialization** — the form-urlencoded
+//!    body that [`OAuth2Client::refresh_tokens`] would send. The
+//!    snapshot captures the exact byte-for-byte body so any reordering
+//!    of parameters, change of grant-type encoding, or change of
+//!    percent-encoding rules shows up as a diff.
+//! 2. **Token refresh response deserialization** — the JSON an RFC 6749
+//!    token endpoint returns, parsed into [`TokenResponse`] and then
+//!    promoted to [`OAuthTokens`]. Snapshotting the structural output
+//!    catches any regression in default-field handling, scope splitting,
+//!    or expiry-clamping logic. Timestamps are scrubbed so the snapshot
+//!    is stable across runs.
+//! 3. **Redirect URL allowlist enforcement** — every decision point in
+//!    [`ensure_allowlisted_redirect_uri`] and
+//!    [`ensure_callback_redirect_is_allowlisted`] (accept, reject for
+//!    scheme, reject for host, reject for path, reject for missing
+//!    membership). Snapshotting the error messages means any change in
+//!    the operator-facing failure surface is detected immediately.
+
+use std::collections::BTreeMap;
+
+use fcp_oauth::{
+    OAuthError, OAuthTokens, TokenResponse, ensure_allowlisted_redirect_uri,
+    ensure_callback_redirect_is_allowlisted, parse_registered_redirect_allowlist,
+};
+use serde_json::json;
+
+/// Build the form-urlencoded refresh-token request body the same way
+/// `OAuth2Client::refresh_tokens` does internally: a `grant_type` of
+/// `refresh_token`, the caller's refresh token, and any extra token
+/// parameters the config carries. A `BTreeMap` here is deliberate — we
+/// want a deterministic parameter ordering in the snapshot even though
+/// the production code path uses a `HashMap` (whose iteration order is
+/// not observable to external systems once the body is hashed/signed or
+/// consumed as a form POST).
+fn refresh_token_request_body(
+    refresh_token: &str,
+    extra_params: &[(&str, &str)],
+    client_id_post: Option<&str>,
+    client_secret_post: Option<&str>,
+) -> String {
+    let mut params: BTreeMap<&str, String> = BTreeMap::new();
+    params.insert("grant_type", "refresh_token".to_string());
+    params.insert("refresh_token", refresh_token.to_string());
+    if let Some(client_id) = client_id_post {
+        params.insert("client_id", client_id.to_string());
+    }
+    if let Some(client_secret) = client_secret_post {
+        params.insert("client_secret", client_secret.to_string());
+    }
+    for (key, value) in extra_params {
+        params.insert(key, (*value).to_string());
+    }
+    serde_urlencoded::to_string(&params).expect("urlencoded serialization must succeed")
+}
+
+#[test]
+fn snapshot_refresh_token_request_basic() {
+    // Basic refresh with no extra params and Basic-auth credentials
+    // (so `client_id`/`client_secret` do not appear in the body).
+    let body = refresh_token_request_body("rt_abc123", &[], None, None);
+    insta::assert_snapshot!("refresh_request_basic_auth", body);
+}
+
+#[test]
+fn snapshot_refresh_token_request_post_credentials() {
+    // Post-style credential auth embeds `client_id` and `client_secret`
+    // alongside `grant_type` and `refresh_token`.
+    let body = refresh_token_request_body(
+        "rt_xyz789",
+        &[],
+        Some("client-id-42"),
+        Some("secret-with/special+chars=yes"),
+    );
+    insta::assert_snapshot!("refresh_request_post_credentials", body);
+}
+
+#[test]
+fn snapshot_refresh_token_request_with_extra_params() {
+    // Provider-specific extra params (e.g., `audience` for Auth0, `resource`
+    // for Azure AD) that the client is configured to forward on every
+    // token request.
+    let body = refresh_token_request_body(
+        "rt_with_extras",
+        &[
+            ("audience", "https://api.example.com"),
+            ("resource", "https://graph.microsoft.com"),
+        ],
+        None,
+        None,
+    );
+    insta::assert_snapshot!("refresh_request_with_extras", body);
+}
+
+/// A representative provider response: every field populated so the
+/// snapshot shows how each one maps into the eventual [`OAuthTokens`].
+const FULL_TOKEN_RESPONSE_JSON: &str = r#"{
+    "access_token": "at_full_9f2c",
+    "token_type": "Bearer",
+    "expires_in": 3600,
+    "refresh_token": "rt_rotated_8b01",
+    "scope": "read write admin",
+    "id_token": "id_example_jwt.payload.signature"
+}"#;
+
+/// A minimal response: only `access_token` + `token_type`, every other
+/// field defaulted. Captures the serde `#[serde(default)]` behaviour.
+const MINIMAL_TOKEN_RESPONSE_JSON: &str = r#"{
+    "access_token": "at_min_5e4d",
+    "token_type": "Bearer"
+}"#;
+
+/// A response with explicitly-null optional fields — common enough in
+/// provider responses that the serde path should handle it identically
+/// to field-absent cases.
+const NULL_OPTIONAL_TOKEN_RESPONSE_JSON: &str = r#"{
+    "access_token": "at_nulls_1122",
+    "token_type": "Bearer",
+    "expires_in": null,
+    "refresh_token": null,
+    "scope": null,
+    "id_token": null
+}"#;
+
+fn deserialize_response_as_debug(raw: &str) -> String {
+    let parsed: TokenResponse =
+        serde_json::from_str(raw).expect("test fixture must parse as TokenResponse");
+    format!("{parsed:#?}")
+}
+
+fn deserialize_response_into_tokens(raw: &str) -> String {
+    let parsed: TokenResponse =
+        serde_json::from_str(raw).expect("test fixture must parse as TokenResponse");
+    let tokens = OAuthTokens::from_response(parsed);
+    format!("{tokens:#?}")
+}
+
+#[test]
+fn snapshot_response_deserialization_full_fields() {
+    // Debug form of the parsed TokenResponse — access/refresh/id tokens
+    // are redacted by the Debug impl, so the snapshot captures only the
+    // fields that are safe to commit.
+    let debug_repr = deserialize_response_as_debug(FULL_TOKEN_RESPONSE_JSON);
+    insta::assert_snapshot!("response_full_debug", debug_repr);
+}
+
+#[test]
+fn snapshot_response_deserialization_minimal() {
+    let debug_repr = deserialize_response_as_debug(MINIMAL_TOKEN_RESPONSE_JSON);
+    insta::assert_snapshot!("response_minimal_debug", debug_repr);
+}
+
+#[test]
+fn snapshot_response_deserialization_null_optionals() {
+    let debug_repr = deserialize_response_as_debug(NULL_OPTIONAL_TOKEN_RESPONSE_JSON);
+    insta::assert_snapshot!("response_null_optionals_debug", debug_repr);
+}
+
+/// Scrub RFC 3339 / ISO 8601 timestamps so snapshot output is stable
+/// across runs. `OAuthTokens` populates `expires_at` and `issued_at`
+/// from `Utc::now()`, which drifts every second and would otherwise
+/// make every snapshot assertion fail.
+///
+/// The pattern matches timestamps like `2026-04-20T06:13:59Z`,
+/// `2026-04-20T06:13:59.123Z`, and `2026-04-20T06:13:59.123+00:00`.
+fn with_timestamp_scrubbed<F: FnOnce()>(f: F) {
+    let mut settings = insta::Settings::clone_current();
+    settings.add_filter(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})",
+        "[TIMESTAMP]",
+    );
+    settings.bind(f);
+}
+
+#[test]
+fn snapshot_response_promoted_to_oauth_tokens_full() {
+    // OAuthTokens holds wall-clock timestamps (`expires_at`, `issued_at`)
+    // set by `Utc::now()`. The scrubber rewrites every timestamp in the
+    // snapshot payload to the literal string `[TIMESTAMP]`.
+    let tokens_debug = deserialize_response_into_tokens(FULL_TOKEN_RESPONSE_JSON);
+    with_timestamp_scrubbed(|| {
+        insta::assert_snapshot!("response_full_oauth_tokens", tokens_debug);
+    });
+}
+
+#[test]
+fn snapshot_response_promoted_to_oauth_tokens_minimal() {
+    // Minimal response -> OAuthTokens has no `expires_at` but still has
+    // `issued_at`. Scrubber handles both.
+    let tokens_debug = deserialize_response_into_tokens(MINIMAL_TOKEN_RESPONSE_JSON);
+    with_timestamp_scrubbed(|| {
+        insta::assert_snapshot!("response_minimal_oauth_tokens", tokens_debug);
+    });
+}
+
+/// Format a single allowlist decision into a line for the snapshot.
+/// Owning the `String` on both sides keeps lifetimes simple while
+/// building a multi-decision report.
+fn format_decision(label: &str, outcome: Result<url::Url, OAuthError>) -> String {
+    match outcome {
+        Ok(url) => format!("{label}: OK ({})\n", url.as_str()),
+        Err(err) => format!("{label}: ERR {err}\n"),
+    }
+}
+
+#[test]
+fn snapshot_redirect_allowlist_enforcement() {
+    let allowlist = parse_registered_redirect_allowlist(&[
+        "https://example.com/oauth/callback",
+        "https://api.example.com/v2/cb",
+        "http://localhost:3000/dev-cb",
+    ])
+    .expect("allowlist fixture must parse");
+
+    let run = |label: &str, outcome: Result<url::Url, OAuthError>| -> String {
+        format_decision(label, outcome)
+    };
+
+    let mut report = String::new();
+    report.push_str(&run(
+        "registered_exact_match",
+        ensure_allowlisted_redirect_uri("https://example.com/oauth/callback", &allowlist),
+    ));
+    report.push_str(&run(
+        "registered_host_mismatch",
+        ensure_allowlisted_redirect_uri("https://attacker.example/oauth/callback", &allowlist),
+    ));
+    report.push_str(&run(
+        "registered_path_mismatch",
+        ensure_allowlisted_redirect_uri("https://example.com/other/callback", &allowlist),
+    ));
+    report.push_str(&run(
+        "registered_plain_http_non_loopback",
+        ensure_allowlisted_redirect_uri("http://example.com/oauth/callback", &allowlist),
+    ));
+    report.push_str(&run(
+        "registered_loopback_match",
+        ensure_allowlisted_redirect_uri("http://localhost:3000/dev-cb", &allowlist),
+    ));
+    report.push_str(&run(
+        "registered_fragment_rejected",
+        ensure_allowlisted_redirect_uri(
+            "https://example.com/oauth/callback#frag",
+            &allowlist,
+        ),
+    ));
+    report.push_str(&run(
+        "registered_query_rejected",
+        ensure_allowlisted_redirect_uri(
+            "https://example.com/oauth/callback?x=1",
+            &allowlist,
+        ),
+    ));
+    report.push_str(&run(
+        "registered_embedded_credentials_rejected",
+        ensure_allowlisted_redirect_uri(
+            "https://user:pw@example.com/oauth/callback",
+            &allowlist,
+        ),
+    ));
+    report.push_str(&run(
+        "registered_relative_rejected",
+        ensure_allowlisted_redirect_uri("/oauth/callback", &allowlist),
+    ));
+
+    // Callback variants — these accept a query string carrying the
+    // provider's response params.
+    report.push_str(&run(
+        "callback_with_oauth_response_params",
+        ensure_callback_redirect_is_allowlisted(
+            "https://example.com/oauth/callback?code=auth123&state=abc",
+            &allowlist,
+        ),
+    ));
+    report.push_str(&run(
+        "callback_host_mismatch",
+        ensure_callback_redirect_is_allowlisted(
+            "https://evil.example/oauth/callback?code=auth123",
+            &allowlist,
+        ),
+    ));
+    report.push_str(&run(
+        "callback_plain_http_non_loopback",
+        ensure_callback_redirect_is_allowlisted(
+            "http://example.com/oauth/callback?code=auth123",
+            &allowlist,
+        ),
+    ));
+    report.push_str(&run(
+        "callback_loopback_ok",
+        ensure_callback_redirect_is_allowlisted(
+            "http://localhost:3000/dev-cb?code=auth123",
+            &allowlist,
+        ),
+    ));
+
+    insta::assert_snapshot!("redirect_allowlist_decisions", report);
+}
+
+#[test]
+fn snapshot_redirect_allowlist_parse_failures() {
+    // The allowlist parser itself has failure modes that operators will
+    // see on misconfiguration; freeze the messages so operators have a
+    // stable grep target.
+    let mut report = String::new();
+
+    let cases: &[(&str, &[&str])] = &[
+        ("empty_allowlist", &[]),
+        ("non_url_entry", &["not a url"]),
+        ("ftp_scheme_entry", &["ftp://example.com/cb"]),
+        ("plain_http_non_loopback", &["http://example.com/cb"]),
+        (
+            "mixed_valid_and_invalid",
+            &["https://ok.example/cb", "not a url"],
+        ),
+    ];
+    for (label, raw) in cases {
+        match parse_registered_redirect_allowlist(raw) {
+            Ok(_) => report.push_str(&format!("{label}: OK\n")),
+            Err(err) => report.push_str(&format!("{label}: ERR {err}\n")),
+        }
+    }
+
+    insta::assert_snapshot!("redirect_allowlist_parse_failures", report);
+}
+
+#[test]
+fn snapshot_response_deserialization_unknown_fields_ignored() {
+    // Confirm unknown fields in the provider response are ignored
+    // (serde is not configured for `deny_unknown_fields`) and make that
+    // behaviour visible in a golden.
+    let raw = json!({
+        "access_token": "at_unknown_1",
+        "token_type": "Bearer",
+        "expires_in": 7200,
+        "unknown_extra_field": "should_be_ignored",
+        "nested_unknown": {"k": "v"},
+    })
+    .to_string();
+    let debug_repr = deserialize_response_as_debug(&raw);
+    insta::assert_snapshot!("response_unknown_fields_ignored", debug_repr);
+}

@@ -1,0 +1,23 @@
+---
+source: crates/fcp-oauth/tests/golden_snapshots.rs
+expression: tokens_debug
+---
+OAuthTokens {
+    access_token: "[REDACTED]",
+    token_type: "Bearer",
+    expires_at: Some(
+        [TIMESTAMP],
+    ),
+    refresh_token: Some(
+        "[REDACTED]",
+    ),
+    scopes: [
+        "read",
+        "write",
+        "admin",
+    ],
+    id_token: Some(
+        "[REDACTED]",
+    ),
+    issued_at: [TIMESTAMP],
+}

@@ -1397,6 +1397,14 @@ fn map_oauth_error_to_fcp(error: OAuthError) -> FcpError {
                 format!("GitHub OAuth authorization failed: {error}: {description}")
             },
         },
+        // The shared `fcp_oauth::redirect_allowlist` helpers surface
+        // both shape errors (bad URL, embedded credentials, fragment,
+        // disallowed scheme) and allowlist-membership failures through
+        // the existing `OAuthError::InvalidConfig(String)` variant —
+        // the descriptive message already names the offending field
+        // (`redirect_uri`, `callback_url`, `allowed_redirect_uris`),
+        // so no separate match arm is needed for the
+        // "outside allowlist" case.
         OAuthError::InvalidConfig(message)
         | OAuthError::InvalidTokenResponse(message)
         | OAuthError::TokenExchangeFailed(message)
@@ -1405,15 +1413,9 @@ fn map_oauth_error_to_fcp(error: OAuthError) -> FcpError {
         | OAuthError::SignatureError(message)
         | OAuthError::UnsupportedProvider(message)
         | OAuthError::TokenNotFound(message)
-        | OAuthError::PkceError(message)
-        | OAuthError::InvalidRedirectUri(message) => FcpError::InvalidRequest {
+        | OAuthError::PkceError(message) => FcpError::InvalidRequest {
             code: 1003,
             message: format!("GitHub OAuth request invalid: {message}"),
-        },
-        OAuthError::RedirectUriNotAllowlisted => FcpError::InvalidRequest {
-            code: 1003,
-            message: "GitHub OAuth request invalid: redirect URI outside allowed_redirect_uris"
-                .into(),
         },
         OAuthError::TokenExpired(duration) => FcpError::InvalidRequest {
             code: 1003,

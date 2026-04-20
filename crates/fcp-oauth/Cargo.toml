@@ -45,4 +45,5 @@ serde_urlencoded = "0.7"
 parking_lot = "0.12"
 
 [dev-dependencies]
+insta = { workspace = true, features = ["filters"] }
 wiremock.workspace = true

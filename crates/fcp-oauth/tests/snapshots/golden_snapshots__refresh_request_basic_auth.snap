@@ -1,0 +1,5 @@
+---
+source: crates/fcp-oauth/tests/golden_snapshots.rs
+expression: body
+---
+grant_type=refresh_token&refresh_token=rt_abc123

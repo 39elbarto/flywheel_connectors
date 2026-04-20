@@ -8,12 +8,25 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
+arbitrary = { version = "1.4.2", features = ["derive"] }
+bytes = "1.10.1"
+hex = "0.4.3"
 libfuzzer-sys = "0.4"
 ciborium = "0.2.2"
+semver = "1.0.27"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
 
+fcp-async-core = { path = "../crates/fcp-async-core" }
+fcp-audit = { path = "../crates/fcp-audit" }
+fcp-cbor = { path = "../crates/fcp-cbor" }
 fcp-core = { path = "../crates/fcp-core" }
 fcp-crypto = { path = "../crates/fcp-crypto" }
+fcp-mesh = { path = "../crates/fcp-mesh" }
 fcp-protocol = { path = "../crates/fcp-protocol" }
+fcp-raptorq = { path = "../crates/fcp-raptorq" }
+fcp-store = { path = "../crates/fcp-store" }
+fcp-tailscale = { path = "../crates/fcp-tailscale" }
 
 [[bin]]
 name = "fuzz_capability"
@@ -60,6 +73,41 @@ bench = false
 [[bin]]
 name = "fuzz_zone_key_manifest"
 path = "fuzz_targets/zone_key_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_store_repair_planner"
+path = "fuzz_targets/store_repair_planner.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_audit_verify_chain"
+path = "fuzz_targets/audit_verify_chain.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_canonical_cbor"
+path = "fuzz_targets/canonical_cbor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_mesh_gossip_summary"
+path = "fuzz_targets/mesh_gossip_summary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_raptorq_decode_bounds"
+path = "fuzz_targets/raptorq_decode_bounds.rs"
 test = false
 doc = false
 bench = false

@@ -1,0 +1,67 @@
+#![no_main]
+
+use arbitrary::Arbitrary;
+use fcp_raptorq::{DecodeError, RaptorQConfig, RaptorQDecoder};
+use libfuzzer_sys::fuzz_target;
+
+const MAX_SYMBOL_BYTES: usize = 1024;
+const MAX_EXTRA_ATTEMPTS: u32 = 64;
+
+#[derive(Arbitrary, Debug)]
+struct DecodeFloodInput {
+    transfer_length: u16,
+    symbol_size: u16,
+    max_object_size: u16,
+    exact_attempts: u16,
+    malformed_every: u8,
+    fill_byte: u8,
+}
+
+fuzz_target!(|input: DecodeFloodInput| {
+    let symbol_size = input.symbol_size.clamp(1, 256);
+    let max_object_size = input.max_object_size.max(symbol_size).clamp(1, 4096);
+    let transfer_length = input.transfer_length.max(1).min(max_object_size);
+    let config = RaptorQConfig {
+        symbol_size,
+        max_object_size: u32::from(max_object_size),
+        ..RaptorQConfig::default()
+    };
+
+    let limit = config
+        .total_symbols(usize::from(transfer_length))
+        .saturating_add(1000);
+    let attempts = u32::from(input.exact_attempts).min(limit.saturating_add(MAX_EXTRA_ATTEMPTS));
+    let k = limit.saturating_add(1);
+    let mut decoder =
+        RaptorQDecoder::with_expected_symbols(k, u64::from(transfer_length), symbol_size, &config);
+    let malformed_every = usize::from(input.malformed_every);
+    let mut saw_symbol_cap = false;
+
+    for esi in 0..attempts {
+        let exact_size = malformed_every == 0 || ((esi as usize + 1) % malformed_every != 0);
+        let data_len = if exact_size {
+            usize::from(symbol_size)
+        } else {
+            usize::from(symbol_size).saturating_add(1).min(MAX_SYMBOL_BYTES)
+        };
+        let data = vec![input.fill_byte.wrapping_add(esi as u8); data_len];
+        match decoder.add_symbol(esi, data) {
+            Ok(_) => {}
+            Err(DecodeError::SymbolBufferExceeded { .. }) => {
+                saw_symbol_cap = true;
+                break;
+            }
+            Err(
+                DecodeError::InvalidSymbol { .. }
+                | DecodeError::MemoryLimitExceeded { .. }
+                | DecodeError::Timeout
+                | DecodeError::InsufficientSymbols { .. }
+                | DecodeError::RaptorQ { .. },
+            ) => {}
+        }
+    }
+
+    if malformed_every == 0 && attempts > limit {
+        assert!(saw_symbol_cap, "adversarial exact-size symbol flood must hit the cap");
+    }
+});

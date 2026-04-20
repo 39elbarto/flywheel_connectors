@@ -195,19 +195,41 @@ impl OAuthTokens {
     }
 
     /// Update tokens from a refresh response.
-    pub fn update_from_response(&mut self, response: TokenResponse) {
+    ///
+    /// Validation is response-level and atomic: if the response has an
+    /// empty `access_token` or `token_type`, the function returns
+    /// `Err` without mutating any field on `self`.  This prevents a
+    /// malformed refresh response from extending `expires_at` and
+    /// `issued_at` while leaving the stale `access_token` in place,
+    /// which would otherwise produce a Frankenstein state where
+    /// `is_expired()` returns `false` for a token that no longer
+    /// authenticates against the provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OAuthError::InvalidTokenResponse`] when the refresh
+    /// response carries an empty `access_token` or an empty `token_type`.
+    pub fn update_from_response(&mut self, response: TokenResponse) -> OAuthResult<()> {
+        // Validate response-level invariants before any mutation so the
+        // update is atomic.  An empty access_token with a fresh expires_in
+        // would otherwise bump self.expires_at forward while leaving
+        // self.access_token stale — see the Frankenstein hazard in the
+        // doc comment above.
+        if response.access_token.is_empty() {
+            return Err(OAuthError::InvalidTokenResponse(
+                "refresh response contained empty access_token".into(),
+            ));
+        }
+        if response.token_type.is_empty() {
+            return Err(OAuthError::InvalidTokenResponse(
+                "refresh response contained empty token_type".into(),
+            ));
+        }
+
         let now = Utc::now();
 
-        // Guard against empty access_token/token_type from a compromised or
-        // misbehaving OAuth server.  An empty token_type would produce a
-        // malformed Authorization header (` <token>` instead of
-        // `Bearer <token>`).  Same rationale as the refresh_token guard below.
-        if !response.access_token.is_empty() {
-            self.access_token = response.access_token;
-        }
-        if !response.token_type.is_empty() {
-            self.token_type = response.token_type;
-        }
+        self.access_token = response.access_token;
+        self.token_type = response.token_type;
         // Only update expires_at if the response provides expires_in.
         // Some providers omit expires_in on refresh responses; unconditionally
         // setting expires_at = None would silently clear the previous expiry,
@@ -239,6 +261,8 @@ impl OAuthTokens {
         if let Some(id) = response.id_token.filter(|id| !id.is_empty()) {
             self.id_token = Some(id);
         }
+
+        Ok(())
     }
 }
 
@@ -445,7 +469,9 @@ mod tests {
             scope: None,
             id_token: Some(String::new()),
         };
-        tokens.update_from_response(refresh_response);
+        tokens
+            .update_from_response(refresh_response)
+            .expect("non-empty access_token and token_type must succeed");
 
         assert_eq!(tokens.access_token(), "new_at");
         assert_eq!(
@@ -473,13 +499,125 @@ mod tests {
             scope: None,
             id_token: None,
         };
-        tokens.update_from_response(refresh_response);
+        tokens
+            .update_from_response(refresh_response)
+            .expect("non-empty access_token and token_type must succeed");
 
         assert_eq!(tokens.access_token(), "refreshed_at");
         assert!(
             tokens.expires_at.is_some(),
             "expires_at must be preserved when refresh response omits expires_in"
         );
+    }
+
+    #[test]
+    fn test_update_from_response_rejects_empty_access_token_without_mutating() {
+        // An OAuth server returning access_token: "" with a valid expires_in
+        // must NOT produce a Frankenstein token where the stale access_token
+        // inherits a freshly-bumped expires_at.  Before the fix, the empty
+        // access_token was silently skipped while expires_at and issued_at
+        // were advanced, hiding token staleness from is_expired() and
+        // needs_refresh() for up to the full expiry window.
+        let initial = mock_token_response(Some(3600));
+        let mut tokens = OAuthTokens::from_response(initial);
+        let original_access = tokens.access_token().to_string();
+        let original_expires_at = tokens.expires_at;
+        let original_issued_at = tokens.issued_at;
+        let original_refresh = tokens.refresh_token().map(str::to_string);
+
+        let malformed = TokenResponse {
+            access_token: String::new(), // empty — must reject response-level
+            token_type: "Bearer".into(),
+            expires_in: Some(7200), // would otherwise bump expiry 2h forward
+            refresh_token: Some("shouldnt_overwrite".into()),
+            scope: Some("newscope".into()),
+            id_token: None,
+        };
+
+        let result = tokens.update_from_response(malformed);
+
+        assert!(
+            matches!(result, Err(OAuthError::InvalidTokenResponse(_))),
+            "empty access_token must be rejected with InvalidTokenResponse, got {result:?}"
+        );
+        assert_eq!(tokens.access_token(), original_access, "access_token untouched");
+        assert_eq!(tokens.expires_at, original_expires_at, "expires_at untouched");
+        assert_eq!(tokens.issued_at, original_issued_at, "issued_at untouched");
+        assert_eq!(
+            tokens.refresh_token().map(str::to_string),
+            original_refresh,
+            "refresh_token untouched"
+        );
+    }
+
+    #[test]
+    fn test_update_from_response_rejects_empty_token_type_without_mutating() {
+        // Symmetric guard: an empty token_type would produce a malformed
+        // Authorization header.  The whole response must be rejected
+        // atomically — no field on self changes.
+        let mut tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        let original_token_type = tokens.token_type().to_string();
+        let original_expires_at = tokens.expires_at;
+
+        let malformed = TokenResponse {
+            access_token: "nonempty_at".into(),
+            token_type: String::new(), // empty — reject
+            expires_in: Some(7200),
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        };
+
+        let result = tokens.update_from_response(malformed);
+
+        assert!(
+            matches!(result, Err(OAuthError::InvalidTokenResponse(_))),
+            "empty token_type must be rejected, got {result:?}"
+        );
+        assert_eq!(tokens.token_type(), original_token_type);
+        assert_eq!(tokens.expires_at, original_expires_at);
+    }
+
+    #[test]
+    fn test_expired_token_cannot_be_revived_by_empty_replacement() {
+        // The canonical failure mode the fix closes: a token that has
+        // already expired must stay expired when the refresh response is
+        // malformed (empty access_token).  Before the fix, the stale
+        // (expired) access_token would inherit a fresh expires_at from
+        // the malformed response, and is_expired() would flip to false —
+        // silently masking an expired credential as valid.
+        let expired_resp = TokenResponse {
+            access_token: "stale_at".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(0), // expire immediately
+            refresh_token: Some("rt".into()),
+            scope: None,
+            id_token: None,
+        };
+        let mut tokens = OAuthTokens::from_response(expired_resp);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(tokens.is_expired(), "precondition: token must be expired");
+
+        let malformed_refresh = TokenResponse {
+            access_token: String::new(), // attempt to revive with bad response
+            token_type: "Bearer".into(),
+            expires_in: Some(3600), // would hide staleness for 1h
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        };
+
+        let result = tokens.update_from_response(malformed_refresh);
+
+        assert!(
+            matches!(result, Err(OAuthError::InvalidTokenResponse(_))),
+            "expired token must not be revived by empty replacement, got {result:?}"
+        );
+        assert!(
+            tokens.is_expired(),
+            "is_expired() must still report expired after rejected refresh"
+        );
+        assert_eq!(tokens.access_token(), "stale_at");
     }
 
     #[test]
@@ -599,7 +737,9 @@ mod tests {
             id_token: Some("new_id".into()),
         };
 
-        tokens.update_from_response(new_resp);
+        tokens
+            .update_from_response(new_resp)
+            .expect("non-empty access_token and token_type must succeed");
         assert_eq!(tokens.access_token(), "new_access");
         assert_eq!(tokens.refresh_token(), Some("new_refresh"));
         assert_eq!(tokens.scopes(), &["read", "write", "admin"]);
@@ -620,7 +760,9 @@ mod tests {
             id_token: None,
         };
 
-        tokens.update_from_response(new_resp);
+        tokens
+            .update_from_response(new_resp)
+            .expect("non-empty access_token and token_type must succeed");
         assert_eq!(tokens.access_token(), "new_access");
         // Original refresh token should be preserved
         assert_eq!(tokens.refresh_token(), Some("test_refresh_token"));
@@ -1044,14 +1186,16 @@ mod tests {
         });
         assert_eq!(tokens.scopes(), &["original"]);
 
-        tokens.update_from_response(TokenResponse {
-            access_token: "new_t".into(),
-            token_type: "Bearer".into(),
-            expires_in: Some(3600),
-            refresh_token: None,
-            scope: None, // not provided
-            id_token: None,
-        });
+        tokens
+            .update_from_response(TokenResponse {
+                access_token: "new_t".into(),
+                token_type: "Bearer".into(),
+                expires_in: Some(3600),
+                refresh_token: None,
+                scope: None, // not provided
+                id_token: None,
+            })
+            .expect("non-empty access_token and token_type must succeed");
         // original scopes should be preserved
         assert_eq!(tokens.scopes(), &["original"]);
     }
@@ -1066,14 +1210,16 @@ mod tests {
             scope: Some("original".into()),
             id_token: None,
         });
-        tokens.update_from_response(TokenResponse {
-            access_token: "new_t".into(),
-            token_type: "Bearer".into(),
-            expires_in: Some(3600),
-            refresh_token: None,
-            scope: Some("updated".into()),
-            id_token: None,
-        });
+        tokens
+            .update_from_response(TokenResponse {
+                access_token: "new_t".into(),
+                token_type: "Bearer".into(),
+                expires_in: Some(3600),
+                refresh_token: None,
+                scope: Some("updated".into()),
+                id_token: None,
+            })
+            .expect("non-empty access_token and token_type must succeed");
         assert_eq!(tokens.scopes(), &["updated"]);
     }
 
@@ -1087,14 +1233,16 @@ mod tests {
             scope: None,
             id_token: Some("original_id".into()),
         });
-        tokens.update_from_response(TokenResponse {
-            access_token: "new_t".into(),
-            token_type: "Bearer".into(),
-            expires_in: Some(3600),
-            refresh_token: None,
-            scope: None,
-            id_token: None,
-        });
+        tokens
+            .update_from_response(TokenResponse {
+                access_token: "new_t".into(),
+                token_type: "Bearer".into(),
+                expires_in: Some(3600),
+                refresh_token: None,
+                scope: None,
+                id_token: None,
+            })
+            .expect("non-empty access_token and token_type must succeed");
         assert_eq!(tokens.id_token(), Some("original_id"));
     }
 
@@ -1268,14 +1416,16 @@ mod tests {
         let mut tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
         assert_eq!(tokens.token_type(), "Bearer");
 
-        tokens.update_from_response(TokenResponse {
-            access_token: "new".into(),
-            token_type: "MAC".into(),
-            expires_in: Some(1800),
-            refresh_token: None,
-            scope: None,
-            id_token: None,
-        });
+        tokens
+            .update_from_response(TokenResponse {
+                access_token: "new".into(),
+                token_type: "MAC".into(),
+                expires_in: Some(1800),
+                refresh_token: None,
+                scope: None,
+                id_token: None,
+            })
+            .expect("non-empty access_token and token_type must succeed");
         assert_eq!(tokens.token_type(), "MAC");
         assert_eq!(tokens.access_token(), "new");
     }
@@ -1285,14 +1435,16 @@ mod tests {
         let mut tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
         assert!(!tokens.is_expired());
 
-        tokens.update_from_response(TokenResponse {
-            access_token: "new".into(),
-            token_type: "Bearer".into(),
-            expires_in: Some(0),
-            refresh_token: None,
-            scope: None,
-            id_token: None,
-        });
+        tokens
+            .update_from_response(TokenResponse {
+                access_token: "new".into(),
+                token_type: "Bearer".into(),
+                expires_in: Some(0),
+                refresh_token: None,
+                scope: None,
+                id_token: None,
+            })
+            .expect("non-empty access_token and token_type must succeed");
         assert!(tokens.is_expired());
     }
 
@@ -1554,14 +1706,16 @@ mod tests {
             scope: None,
             id_token: Some("old_id".into()),
         });
-        tokens.update_from_response(TokenResponse {
-            access_token: "new_t".into(),
-            token_type: "Bearer".into(),
-            expires_in: Some(3600),
-            refresh_token: None,
-            scope: None,
-            id_token: Some("new_id".into()),
-        });
+        tokens
+            .update_from_response(TokenResponse {
+                access_token: "new_t".into(),
+                token_type: "Bearer".into(),
+                expires_in: Some(3600),
+                refresh_token: None,
+                scope: None,
+                id_token: Some("new_id".into()),
+            })
+            .expect("non-empty access_token and token_type must succeed");
         assert_eq!(tokens.id_token(), Some("new_id"));
     }
 
@@ -1575,14 +1729,16 @@ mod tests {
             scope: None,
             id_token: None,
         });
-        tokens.update_from_response(TokenResponse {
-            access_token: "new_t".into(),
-            token_type: "Bearer".into(),
-            expires_in: Some(3600),
-            refresh_token: Some("new_rt".into()),
-            scope: None,
-            id_token: None,
-        });
+        tokens
+            .update_from_response(TokenResponse {
+                access_token: "new_t".into(),
+                token_type: "Bearer".into(),
+                expires_in: Some(3600),
+                refresh_token: Some("new_rt".into()),
+                scope: None,
+                id_token: None,
+            })
+            .expect("non-empty access_token and token_type must succeed");
         assert_eq!(tokens.refresh_token(), Some("new_rt"));
     }
 

@@ -534,7 +534,9 @@ fn oauth_tokens_update_preserves_refresh_token() {
         scope: None,
         id_token: None,
     };
-    tokens.update_from_response(refresh);
+    tokens
+        .update_from_response(refresh)
+        .expect("non-empty access_token and token_type must succeed");
 
     assert_eq!(tokens.access_token(), "new-at");
     assert_eq!(tokens.refresh_token(), Some("original-rt")); // preserved
@@ -560,7 +562,9 @@ fn oauth_tokens_update_replaces_refresh_token_when_provided() {
         scope: None,
         id_token: None,
     };
-    tokens.update_from_response(refresh);
+    tokens
+        .update_from_response(refresh)
+        .expect("non-empty access_token and token_type must succeed");
 
     assert_eq!(tokens.refresh_token(), Some("new-rt"));
 }

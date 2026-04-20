@@ -223,6 +223,10 @@ pub enum RegistryError {
         attestation: String,
         expired_at: u64,
     },
+    #[error(
+        "attestation `{attestation}` has no expires_at but policy.require_attestation_expiry is set"
+    )]
+    AttestationExpiryMissing { attestation: String },
     #[error("attestation does not meet minimum SLSA level {required}")]
     SlsaLevelInsufficient { required: u8 },
     #[error("attestation builder `{builder}` not in trusted builders list")]
@@ -1498,6 +1502,25 @@ fn enforce_supply_chain_policy(
     let attestation_evidence = if attestation_policy_active {
         let evidence = evidence.ok_or(RegistryError::AttestationEvidenceMissing)?;
         let now = u64::try_from(Utc::now().timestamp()).expect("system clock before year 2262");
+
+        // Fail-closed expiry-required gate runs BEFORE the expires_at <= now
+        // check so a manifest with `require_attestation_expiry = true` rejects
+        // an attestation that has no expires_at field set at all. Without
+        // this, an evidence record with `expires_at = None` is treated as
+        // eternally fresh — a verifier-adapter regression would silently
+        // disable freshness enforcement on every connector under that policy.
+        if policy.require_attestation_expiry {
+            if let Some(att) = evidence
+                .attestations
+                .iter()
+                .find(|att| att.expires_at.is_none())
+            {
+                return Err(RegistryError::AttestationExpiryMissing {
+                    attestation: attestation_label(att.attestation_type).to_string(),
+                });
+            }
+        }
+
         if let Some((attestation_type, expired_at)) = evidence
             .attestations
             .iter()
@@ -2407,6 +2430,7 @@ sig = "{sig}"
                     require_attestation_types: vec![AttestationType::InToto],
                     min_slsa_level: None,
                     trusted_builders: Vec::new(),
+                    require_attestation_expiry: false,
                 });
 
                 let err =
@@ -2416,6 +2440,98 @@ sig = "{sig}"
                 RegistryLogData {
                     connector_id: Some(manifest.connector.id.to_string()),
                     reason_code: Some("attestation_evidence_missing".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn supply_chain_policy_rejects_unset_expiry_when_required() {
+        // Without `require_attestation_expiry`, an attestation with
+        // expires_at=None passes policy indefinitely (the freshness check
+        // skips entries whose expires_at is None). When the operator sets
+        // require_attestation_expiry=true, those entries must be rejected
+        // up-front so a verifier-adapter regression cannot silently disable
+        // freshness enforcement on every connector under that policy.
+        run_registry_test(
+            "supply_chain_policy_rejects_unset_expiry_when_required",
+            "verify",
+            "attestation",
+            1,
+            || async {
+                let mut manifest = minimal_manifest();
+                manifest.policy = Some(PolicySection {
+                    require_transparency_log: false,
+                    require_attestation_types: vec![AttestationType::InToto],
+                    min_slsa_level: None,
+                    trusted_builders: Vec::new(),
+                    require_attestation_expiry: true,
+                });
+
+                let evidence = SupplyChainEvidence {
+                    transparency_log_present: false,
+                    attestations: vec![AttestationEvidence {
+                        attestation_type: AttestationType::InToto,
+                        slsa_level: None,
+                        builder_id: None,
+                        expires_at: None, // The leak point.
+                    }],
+                };
+
+                let err = enforce_supply_chain_policy(&manifest, Some(&evidence))
+                    .expect_err("attestation without expires_at must be rejected");
+                assert!(
+                    matches!(err, RegistryError::AttestationExpiryMissing { .. }),
+                    "expected AttestationExpiryMissing, got {err:?}"
+                );
+
+                RegistryLogData {
+                    connector_id: Some(manifest.connector.id.to_string()),
+                    reason_code: Some("attestation_expiry_missing".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn supply_chain_policy_unset_expiry_passes_when_not_required() {
+        // Backward-compat: when require_attestation_expiry is false (the
+        // default), an attestation with expires_at=None continues to pass
+        // policy. Existing operators who haven't opted in keep their
+        // current behavior.
+        run_registry_test(
+            "supply_chain_policy_unset_expiry_passes_when_not_required",
+            "verify",
+            "attestation",
+            1,
+            || async {
+                let mut manifest = minimal_manifest();
+                manifest.policy = Some(PolicySection {
+                    require_transparency_log: false,
+                    require_attestation_types: vec![AttestationType::InToto],
+                    min_slsa_level: None,
+                    trusted_builders: Vec::new(),
+                    require_attestation_expiry: false,
+                });
+
+                let evidence = SupplyChainEvidence {
+                    transparency_log_present: false,
+                    attestations: vec![AttestationEvidence {
+                        attestation_type: AttestationType::InToto,
+                        slsa_level: None,
+                        builder_id: None,
+                        expires_at: None,
+                    }],
+                };
+
+                enforce_supply_chain_policy(&manifest, Some(&evidence))
+                    .expect("require_attestation_expiry=false admits unset expiry");
+
+                RegistryLogData {
+                    connector_id: Some(manifest.connector.id.to_string()),
+                    reason_code: Some("policy_passed".to_string()),
                     ..RegistryLogData::default()
                 }
             },
@@ -5176,6 +5292,7 @@ sig = "base64:{sig_b64}"
                     require_attestation_types: vec![],
                     min_slsa_level: None,
                     trusted_builders: Vec::new(),
+                    require_attestation_expiry: false,
                 });
                 manifest.signatures = Some(SignaturesSection {
                     publisher_signatures: vec![],
@@ -5215,6 +5332,7 @@ sig = "base64:{sig_b64}"
                     require_attestation_types: vec![],
                     min_slsa_level: Some(2),
                     trusted_builders: Vec::new(),
+                    require_attestation_expiry: false,
                 });
 
                 let evidence = SupplyChainEvidence {
@@ -5256,6 +5374,7 @@ sig = "base64:{sig_b64}"
                     require_attestation_types: vec![],
                     min_slsa_level: None,
                     trusted_builders: vec!["trusted-ci".to_string()],
+                    require_attestation_expiry: false,
                 });
 
                 let evidence = SupplyChainEvidence {
@@ -6549,6 +6668,7 @@ sig = "{reg_sig}"
                     ],
                     min_slsa_level: Some(3),
                     trusted_builders: vec!["trusted-ci".into()],
+                    require_attestation_expiry: false,
                 });
 
                 let evidence = SupplyChainEvidence {
@@ -6597,6 +6717,7 @@ sig = "{reg_sig}"
                     ],
                     min_slsa_level: Some(2),
                     trusted_builders: vec![],
+                    require_attestation_expiry: false,
                 });
 
                 let evidence = SupplyChainEvidence {
@@ -9722,6 +9843,7 @@ trusted_builders = ["trusted-ci"]
             require_attestation_types: vec![],
             min_slsa_level: None,
             trusted_builders: vec![],
+            require_attestation_expiry: false,
         });
         enforce_supply_chain_policy(&manifest, None).expect("empty attestation types passes");
     }
@@ -9972,6 +10094,7 @@ trusted_builders = ["trusted-ci"]
             require_attestation_types: vec![],
             min_slsa_level: Some(3),
             trusted_builders: Vec::new(),
+            require_attestation_expiry: false,
         });
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,
@@ -9994,6 +10117,7 @@ trusted_builders = ["trusted-ci"]
             require_attestation_types: vec![AttestationType::InToto],
             min_slsa_level: None,
             trusted_builders: Vec::new(),
+            require_attestation_expiry: false,
         });
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,
@@ -10023,6 +10147,7 @@ trusted_builders = ["trusted-ci"]
             require_attestation_types: vec![],
             min_slsa_level: Some(3),
             trusted_builders: Vec::new(),
+            require_attestation_expiry: false,
         });
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,
@@ -10049,6 +10174,7 @@ trusted_builders = ["trusted-ci"]
             require_attestation_types: vec![],
             min_slsa_level: Some(1),
             trusted_builders: Vec::new(),
+            require_attestation_expiry: false,
         });
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,
@@ -10070,6 +10196,7 @@ trusted_builders = ["trusted-ci"]
             require_attestation_types: vec![],
             min_slsa_level: Some(0),
             trusted_builders: Vec::new(),
+            require_attestation_expiry: false,
         });
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,
@@ -10093,6 +10220,7 @@ trusted_builders = ["trusted-ci"]
             require_attestation_types: vec![],
             min_slsa_level: None,
             trusted_builders: vec!["my-ci".to_string()],
+            require_attestation_expiry: false,
         });
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,
@@ -10115,6 +10243,7 @@ trusted_builders = ["trusted-ci"]
             require_attestation_types: vec![],
             min_slsa_level: None,
             trusted_builders: vec!["My-CI".to_string()],
+            require_attestation_expiry: false,
         });
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,
@@ -10138,6 +10267,7 @@ trusted_builders = ["trusted-ci"]
             require_attestation_types: vec![],
             min_slsa_level: None,
             trusted_builders: vec!["ci-alpha".to_string(), "ci-beta".to_string()],
+            require_attestation_expiry: false,
         });
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,
@@ -10160,6 +10290,7 @@ trusted_builders = ["trusted-ci"]
             require_attestation_types: vec![],
             min_slsa_level: None,
             trusted_builders: vec!["trusted-ci".to_string()],
+            require_attestation_expiry: false,
         });
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,

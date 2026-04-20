@@ -2428,6 +2428,16 @@ pub struct PolicySection {
     pub min_slsa_level: Option<u8>,
     #[serde(default)]
     pub trusted_builders: Vec<String>,
+    /// When true, every attestation evidence entry MUST carry a non-None
+    /// `expires_at` timestamp. Without this gate, an attestation with
+    /// `expires_at = None` is treated as eternally fresh by
+    /// `enforce_supply_chain_policy`, which lets a stale or revoked-but-
+    /// still-cacheable attestation pass policy indefinitely. Operators
+    /// who depend on Sigstore/TUF verifiers (which always populate
+    /// expires_at) should set this to `true` to fail-closed against
+    /// unset-expiry adapters.
+    #[serde(default)]
+    pub require_attestation_expiry: bool,
 }
 
 impl PolicySection {
@@ -3022,7 +3032,10 @@ deny_ptrace = true
             err,
             ManifestError::Invalid { field, .. } if field == "provides.operations.*.capability"
         ));
-        assert!(err.to_string().contains("must appear in capabilities.required"));
+        assert!(
+            err.to_string()
+                .contains("must appear in capabilities.required")
+        );
     }
 
     #[test]
@@ -4513,6 +4526,7 @@ deny_ptrace = true
             require_attestation_types: vec![],
             min_slsa_level: Some(4),
             trusted_builders: vec![],
+            require_attestation_expiry: false,
         };
         assert!(policy.validate().is_ok());
     }
@@ -4524,6 +4538,7 @@ deny_ptrace = true
             require_attestation_types: vec![],
             min_slsa_level: Some(5),
             trusted_builders: vec![],
+            require_attestation_expiry: false,
         };
         let err = policy.validate().unwrap_err();
         assert!(err.to_string().contains("0..=4"));
@@ -4536,6 +4551,7 @@ deny_ptrace = true
             require_attestation_types: vec![AttestationType::InToto],
             min_slsa_level: Some(3),
             trusted_builders: vec!["builder1".into()],
+            require_attestation_expiry: false,
         };
         let json = serde_json::to_string(&policy).unwrap();
         let deserialized: PolicySection = serde_json::from_str(&json).unwrap();
@@ -5415,6 +5431,7 @@ deny_ptrace = true
             require_attestation_types: vec![],
             min_slsa_level: Some(0),
             trusted_builders: vec![],
+            require_attestation_expiry: false,
         };
         assert!(p.validate().is_ok());
     }
@@ -5426,6 +5443,7 @@ deny_ptrace = true
             require_attestation_types: vec![],
             min_slsa_level: Some(4),
             trusted_builders: vec![],
+            require_attestation_expiry: false,
         };
         assert!(p.validate().is_ok());
     }
@@ -5437,6 +5455,7 @@ deny_ptrace = true
             require_attestation_types: vec![],
             min_slsa_level: Some(5),
             trusted_builders: vec![],
+            require_attestation_expiry: false,
         };
         let err = p.validate().unwrap_err();
         assert!(err.to_string().contains("0..=4"));
@@ -5449,6 +5468,7 @@ deny_ptrace = true
             require_attestation_types: vec![AttestationType::InToto],
             min_slsa_level: None,
             trusted_builders: vec!["trusted-builder-1".into()],
+            require_attestation_expiry: false,
         };
         assert!(p.validate().is_ok());
     }
@@ -7348,6 +7368,7 @@ deny_ptrace = true
             require_attestation_types: vec![AttestationType::CodeReview],
             min_slsa_level: Some(2),
             trusted_builders: vec!["builder".into()],
+            require_attestation_expiry: false,
         };
         let cloned = policy.clone();
         assert_eq!(policy.min_slsa_level, cloned.min_slsa_level);
@@ -8207,6 +8228,7 @@ schema_version = "2.1"
             require_attestation_types: vec![],
             min_slsa_level: Some(1),
             trusted_builders: vec![],
+            require_attestation_expiry: false,
         };
         assert!(p.validate().is_ok());
     }
@@ -8218,6 +8240,7 @@ schema_version = "2.1"
             require_attestation_types: vec![],
             min_slsa_level: Some(2),
             trusted_builders: vec![],
+            require_attestation_expiry: false,
         };
         assert!(p.validate().is_ok());
     }
@@ -8229,6 +8252,7 @@ schema_version = "2.1"
             require_attestation_types: vec![],
             min_slsa_level: Some(3),
             trusted_builders: vec![],
+            require_attestation_expiry: false,
         };
         assert!(p.validate().is_ok());
     }
@@ -8240,6 +8264,7 @@ schema_version = "2.1"
             require_attestation_types: vec![],
             min_slsa_level: Some(255),
             trusted_builders: vec![],
+            require_attestation_expiry: false,
         };
         let err = p.validate().unwrap_err();
         assert!(err.to_string().contains("0..=4"));
@@ -8256,6 +8281,7 @@ schema_version = "2.1"
             ],
             min_slsa_level: Some(4),
             trusted_builders: vec!["b1".into(), "b2".into()],
+            require_attestation_expiry: false,
         };
         assert!(p.validate().is_ok());
     }
@@ -8923,6 +8949,7 @@ schema_version = "2.1"
                 require_attestation_types: vec![],
                 min_slsa_level: Some(level),
                 trusted_builders: vec![],
+                require_attestation_expiry: false,
             };
             assert!(p.validate().is_ok(), "SLSA level {level} should be valid");
         }
@@ -8935,6 +8962,7 @@ schema_version = "2.1"
             require_attestation_types: vec![],
             min_slsa_level: Some(255),
             trusted_builders: vec![],
+            require_attestation_expiry: false,
         };
         assert!(p.validate().is_err());
     }
@@ -8946,6 +8974,7 @@ schema_version = "2.1"
             require_attestation_types: vec![],
             min_slsa_level: None,
             trusted_builders: vec![],
+            require_attestation_expiry: false,
         };
         assert!(p.validate().is_ok());
         assert!(!p.require_transparency_log);
@@ -8963,6 +8992,7 @@ schema_version = "2.1"
             ],
             min_slsa_level: Some(4),
             trusted_builders: vec!["builder-a".into(), "builder-b".into()],
+            require_attestation_expiry: false,
         };
         assert!(p.validate().is_ok());
         assert_eq!(p.require_attestation_types.len(), 3);

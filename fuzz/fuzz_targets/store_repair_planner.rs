@@ -1,5 +1,7 @@
 #![no_main]
 
+mod store_gc_object_headers;
+
 use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use fcp_core::{
@@ -7,10 +9,11 @@ use fcp_core::{
     StoredObject, ZoneId,
 };
 use fcp_store::{
-    GcRoots, MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore,
-    MemorySymbolStoreConfig, ObjectStore, ObjectSymbolMeta, ObjectTransmissionInfo,
-    RepairController, RepairControllerConfig, RepairCycleBudget, RepairPlanningOptions,
-    RepairResult, StoredSymbol, SymbolMeta, SymbolStore, snapshot_zone_lifecycle,
+    GarbageCollector, GcConfig, GcRoots, MemoryObjectStore, MemoryObjectStoreConfig,
+    MemorySymbolStore, MemorySymbolStoreConfig, ObjectStore, ObjectSymbolMeta,
+    ObjectTransmissionInfo, RepairController, RepairControllerConfig, RepairCycleBudget,
+    RepairPlanningOptions, RepairResult, StoredSymbol, SymbolMeta, SymbolStore,
+    snapshot_zone_lifecycle,
 };
 use libfuzzer_sys::fuzz_target;
 use semver::Version;
@@ -27,6 +30,9 @@ struct StoreSeed {
     zone_id: Option<String>,
     current_time: Option<u64>,
     checkpoint: Option<usize>,
+    checkpoint_vector: Option<String>,
+    body_vector: Option<String>,
+    header_mutations: Option<Vec<HeaderMutationSeed>>,
     pinned: Option<Vec<usize>>,
     hot_objects: Option<Vec<usize>>,
     cycle_id: Option<u64>,
@@ -40,6 +46,7 @@ struct StoreSeed {
 
 #[derive(Debug, Clone, Deserialize)]
 struct ObjectSeed {
+    id_hex: Option<String>,
     id_byte: Option<u8>,
     zone_id: Option<String>,
     body_hex: Option<String>,
@@ -47,6 +54,7 @@ struct ObjectSeed {
     foreign_refs: Option<Vec<usize>>,
     retention: Option<String>,
     lease_expires_at: Option<u64>,
+    ttl_secs: Option<u64>,
     placement: Option<PlacementSeed>,
     include_policy: Option<bool>,
     source_symbols: Option<u32>,
@@ -69,6 +77,15 @@ struct SymbolSeed {
     source_node: Option<u64>,
     zone_id: Option<String>,
     stored_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HeaderMutationSeed {
+    index: Option<usize>,
+    action: Option<String>,
+    target: Option<usize>,
+    zone_id: Option<String>,
+    ttl_secs: Option<u64>,
 }
 
 fn bounded_len(u: &mut Unstructured<'_>, max_len: usize) -> usize {
@@ -129,6 +146,7 @@ fn store_seed_from_unstructured(data: &[u8]) -> StoreSeed {
         }
 
         objects.push(ObjectSeed {
+            id_hex: None,
             id_byte: Some(u8::arbitrary(&mut u).unwrap_or(index as u8)),
             zone_id: maybe_text(&mut u, 16),
             body_hex: Some(hex::encode(bounded_bytes(&mut u, MAX_BODY_BYTES))),
@@ -148,6 +166,7 @@ fn store_seed_from_unstructured(data: &[u8]) -> StoreSeed {
                 _ => "lease".to_string(),
             }),
             lease_expires_at: Some(u64::from(u16::arbitrary(&mut u).unwrap_or(0))),
+            ttl_secs: Some(u64::from(u16::arbitrary(&mut u).unwrap_or(0))),
             placement: Some(PlacementSeed {
                 min_nodes: Some(u.int_in_range(1..=4).unwrap_or(1)),
                 max_node_fraction_bps: Some(u.int_in_range(1_000..=10_000).unwrap_or(10_000)),
@@ -165,6 +184,9 @@ fn store_seed_from_unstructured(data: &[u8]) -> StoreSeed {
         zone_id: maybe_text(&mut u, 16),
         current_time: Some(u64::from(u16::arbitrary(&mut u).unwrap_or(0))),
         checkpoint: Some(bounded_len(&mut u, MAX_OBJECTS.saturating_sub(1))),
+        checkpoint_vector: None,
+        body_vector: None,
+        header_mutations: None,
         pinned: Some(
             (0..bounded_len(&mut u, 3))
                 .map(|_| bounded_len(&mut u, MAX_OBJECTS.saturating_sub(1)))
@@ -206,6 +228,11 @@ fn schema() -> fcp_cbor::SchemaId {
 }
 
 fn object_id_for(seed: &ObjectSeed, index: usize) -> ObjectId {
+    if let Some(id_hex) = seed.id_hex.as_deref()
+        && let Some(object_id) = store_gc_object_headers::parse_object_id_hex(id_hex)
+    {
+        return object_id;
+    }
     let mut raw = [seed.id_byte.unwrap_or(index as u8); 32];
     raw[31] = index as u8;
     ObjectId::from_bytes(raw)
@@ -279,23 +306,28 @@ fn controller_config(max_repairs: usize) -> RepairControllerConfig {
 
 fuzz_target!(|data: &[u8]| {
     let seed = store_input(data);
-    let primary_zone = seed
-        .zone_id
-        .as_deref()
-        .and_then(|zone| zone.parse::<ZoneId>().ok())
-        .unwrap_or_else(ZoneId::work);
+    let (primary_zone, mut objects, default_checkpoint) =
+        store_gc_object_headers::hydrate_vector_objects(&seed).unwrap_or_else(|| {
+            let primary_zone = seed
+                .zone_id
+                .as_deref()
+                .and_then(|zone| zone.parse::<ZoneId>().ok())
+                .unwrap_or_else(ZoneId::work);
+            let objects = seed
+                .objects
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .take(MAX_OBJECTS)
+                .collect::<Vec<_>>();
+            (primary_zone, objects, None)
+        });
+    store_gc_object_headers::apply_header_mutations(&mut objects, seed.header_mutations.as_deref());
     let object_store = MemoryObjectStore::new(MemoryObjectStoreConfig { max_bytes: 1 << 20 });
     let symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig {
         max_bytes: 1 << 20,
         local_node_id: 0,
     });
-    let objects = seed
-        .objects
-        .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .take(MAX_OBJECTS)
-        .collect::<Vec<_>>();
     let ids = objects
         .iter()
         .enumerate()
@@ -319,7 +351,7 @@ fuzz_target!(|data: &[u8]| {
                     provenance: Provenance::new(zone.clone()),
                     refs: selected_ids(object_seed.refs.as_deref(), &ids),
                     foreign_refs: selected_ids(object_seed.foreign_refs.as_deref(), &ids),
-                    ttl_secs: None,
+                    ttl_secs: object_seed.ttl_secs,
                     placement: placement.clone(),
                 },
                 body: decode_hex_or_empty(object_seed.body_hex.as_deref()),
@@ -382,7 +414,12 @@ fuzz_target!(|data: &[u8]| {
         }
 
         let mut roots = GcRoots::new();
-        if let Some(checkpoint) = seed.checkpoint.and_then(|index| ids.get(index)).copied() {
+        if let Some(checkpoint) = seed
+            .checkpoint
+            .or(default_checkpoint)
+            .and_then(|index| ids.get(index))
+            .copied()
+        {
             roots.set_checkpoint(checkpoint);
         }
         for pinned in selected_ids(seed.pinned.as_deref(), &ids) {
@@ -443,5 +480,26 @@ fuzz_target!(|data: &[u8]| {
         let stats = controller.stats();
         assert!(stats.repairs_attempted as usize >= drained);
         assert!(stats.queue_depth <= report.queue_depth_after);
+
+        let gc = GarbageCollector::new(GcConfig {
+            max_evictions_per_run: ids.len().max(1),
+            enforce_lease_expiry: true,
+        });
+        if let Ok(gc_report) = gc
+            .collect_and_prune_symbols_with_transcript(
+                &primary_zone,
+                &roots,
+                &object_store,
+                &symbol_store,
+                current_time,
+            )
+            .await
+        {
+            assert_eq!(gc_report.transcript.zone_id, primary_zone);
+            assert_eq!(gc_report.transcript.root_count, roots.root_count());
+            assert!(gc_report.transcript.decisions.len() <= ids.len());
+            assert!(gc_report.result.live <= ids.len());
+            assert!(gc_report.result.evicted <= ids.len());
+        }
     });
 });

@@ -1,5 +1,7 @@
 #![no_main]
 
+mod audit_tamper_chain_events;
+
 use arbitrary::{Arbitrary, Unstructured};
 use fcp_audit::{
     AuditEntry, ChainHead, Severity, TraceContext, VerifyIssue, VerifyStatus, verify_chain,
@@ -13,8 +15,10 @@ const MAX_TEXT_LEN: usize = 32;
 
 #[derive(Debug, Clone, Deserialize)]
 struct AuditSeed {
+    vector_path: Option<String>,
     zone_filter: Option<String>,
     head: Option<AuditHeadSeed>,
+    tamper: Option<Vec<AuditTamperSeed>>,
     entries: Option<Vec<AuditEntrySeed>>,
 }
 
@@ -43,6 +47,16 @@ struct AuditEntrySeed {
     trace_id: Option<String>,
     span_id: Option<String>,
     flags: Option<u8>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AuditTamperSeed {
+    action: Option<String>,
+    index: Option<usize>,
+    target: Option<usize>,
+    value: Option<String>,
+    seq: Option<u64>,
+    occurred_at: Option<u64>,
 }
 
 fn bounded_len(u: &mut Unstructured<'_>, max_len: usize) -> usize {
@@ -150,8 +164,10 @@ fn audit_from_unstructured(data: &[u8]) -> AuditSeed {
     };
 
     AuditSeed {
+        vector_path: None,
         zone_filter: optional_string(&mut u, MAX_TEXT_LEN),
         head,
+        tamper: None,
         entries: Some(entries),
     }
 }
@@ -212,9 +228,12 @@ fn expected_status(issues: &[VerifyIssue]) -> VerifyStatus {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let seed = audit_input(data);
+    let mut seed = audit_input(data);
+    audit_tamper_chain_events::hydrate_from_vector(&mut seed);
+    audit_tamper_chain_events::apply_tampering(&mut seed);
     let mut entries = seed
         .entries
+        .take()
         .unwrap_or_default()
         .into_iter()
         .take(MAX_ENTRIES)
@@ -228,7 +247,7 @@ fuzz_target!(|data: &[u8]| {
         first.zone_id.truncate(MAX_TEXT_LEN);
     }
 
-    let head = seed.head.map(to_head);
+    let head = seed.head.take().map(to_head);
     let report = verify_chain(&entries, head.as_ref(), seed.zone_filter.as_deref());
 
     assert_eq!(report.chain_len, entries.len());

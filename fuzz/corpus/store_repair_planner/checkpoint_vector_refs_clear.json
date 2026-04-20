@@ -1,0 +1,12 @@
+{
+  "checkpoint_vector": "checkpoint/fork_evidence.json",
+  "body_vector": "provenance/sanitizer_receipt.cbor",
+  "current_time": 50,
+  "power_saver": true,
+  "cycle_id": 4,
+  "header_mutations": [
+    { "index": 0, "action": "clear_refs" },
+    { "index": 1, "action": "append_ref", "target": 5 },
+    { "index": 3, "action": "drop_policy" }
+  ]
+}

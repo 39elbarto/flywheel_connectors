@@ -2016,6 +2016,19 @@ fn network_readiness(config: &DiscordConfig) -> NetworkReadiness {
 }
 
 fn validate_network_constraints_hosts(config: &DiscordConfig) -> FcpResult<()> {
+    // Scheme + component validation must run before the host-only network
+    // readiness check, because DiscordApiClient builds every request URL
+    // via `format!("{api_url}{endpoint}", ...)` (see api.rs). A valid-
+    // discord-host api_url that carries query, fragment, or userinfo
+    // would otherwise concatenate into every downstream request URL and
+    // leak attacker-chosen values (or put the endpoint after a `?`/`#`
+    // boundary). Same class of bug already guarded in telegram / gmail /
+    // notion / whatsapp.
+    validate_discord_endpoint_url(&config.api_url, "api_url")?;
+    if let Some(gateway_url) = &config.gateway_url {
+        validate_discord_endpoint_url(gateway_url, "gateway_url")?;
+    }
+
     let readiness = network_readiness(config);
     if readiness.network_ok {
         return Ok(());
@@ -2028,6 +2041,64 @@ fn validate_network_constraints_hosts(config: &DiscordConfig) -> FcpResult<()> {
             readiness.api_host, readiness.gateway_host
         ),
     })
+}
+
+/// Reject URL overrides with bad scheme or sneaky components.
+///
+/// The host allowlist is enforced separately via
+/// `host_allowed_by_network_constraints`; this function only owns the
+/// scheme / userinfo / query / fragment discipline so that a
+/// well-hosted URL cannot smuggle junk into downstream `format!` URL
+/// construction. Accepts `wss://` on gateway_url because Discord's
+/// gateway uses WebSocket; the scheme check permits both `https` and
+/// `wss` for either field since validate_network_constraints_hosts is
+/// called with a single helper, and misapplied schemes are caught at
+/// connect time by WsClient / reqwest.
+fn validate_discord_endpoint_url(raw: &str, field: &str) -> FcpResult<()> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must not be empty"),
+        });
+    }
+    let parsed = Url::parse(trimmed).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} could not be parsed: {error}"),
+    })?;
+    let scheme_ok = matches!(parsed.scheme(), "https" | "http" | "wss" | "ws");
+    if !scheme_ok {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must use https/http or wss/ws"),
+        });
+    }
+    let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must include a host"),
+    })?;
+    let is_local = host == "localhost" || host == "127.0.0.1" || host == "::1";
+    if matches!(parsed.scheme(), "http" | "ws") && !is_local {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "{field} must use https/wss unless targeting localhost/127.0.0.1/::1 for tests"
+            ),
+        });
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must not include userinfo"),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must not include a query string or fragment"),
+        });
+    }
+    Ok(())
 }
 
 fn extract_host(url: &str) -> Option<String> {
@@ -2239,6 +2310,76 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path},
     };
+
+    #[test]
+    fn validate_discord_endpoint_url_accepts_discord_https() {
+        validate_discord_endpoint_url("https://discord.com/api/v10", "api_url").unwrap();
+        validate_discord_endpoint_url("wss://gateway.discord.gg/", "gateway_url").unwrap();
+    }
+
+    #[test]
+    fn validate_discord_endpoint_url_rejects_query_string() {
+        let err = validate_discord_endpoint_url(
+            "https://discord.com/api/v10?leak=attacker.com",
+            "api_url",
+        )
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("query"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_discord_endpoint_url_rejects_fragment() {
+        let err =
+            validate_discord_endpoint_url("https://discord.com/api/v10#frag", "api_url")
+                .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_discord_endpoint_url_rejects_userinfo() {
+        let err = validate_discord_endpoint_url(
+            "https://attacker:pw@discord.com/api/v10",
+            "api_url",
+        )
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("userinfo"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_discord_endpoint_url_rejects_bad_scheme() {
+        let err = validate_discord_endpoint_url("ftp://discord.com/api", "api_url")
+            .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_discord_endpoint_url_rejects_empty() {
+        let err = validate_discord_endpoint_url("   ", "api_url").unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_discord_endpoint_url_allows_local_http_for_tests() {
+        validate_discord_endpoint_url("http://localhost:9999/api", "api_url").unwrap();
+        validate_discord_endpoint_url("ws://127.0.0.1:9999/gateway", "gateway_url").unwrap();
+    }
+
+    #[test]
+    fn validate_discord_endpoint_url_rejects_plain_http_on_public_host() {
+        let err = validate_discord_endpoint_url("http://discord.com/api/v10", "api_url")
+            .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
 
     fn generate_capability(
         signing_key: &Ed25519SigningKey,

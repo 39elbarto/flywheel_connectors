@@ -92,6 +92,12 @@ impl From<HttpClientError> for DiscordHttpErrorInfo {
                 is_timeout: false,
                 is_connect: false,
             },
+            HttpClientError::PoolExhausted { host, port } => Self {
+                message: format!("connection pool exhausted for {host}:{port}"),
+                status_code: None,
+                is_timeout: false,
+                is_connect: true,
+            },
         }
     }
 }

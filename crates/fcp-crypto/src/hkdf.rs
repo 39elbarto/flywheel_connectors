@@ -139,10 +139,23 @@ impl<const N: usize> std::fmt::Debug for DerivedKey<N> {
 
 /// FCP2-specific key derivation with standard domain separation.
 ///
-/// Uses the pattern: `HKDF(salt, ikm, "FCP2-" || purpose || context)`.
+/// Uses explicit length-prefixed framing inside the HKDF `info` string so
+/// variable-length components cannot collide through simple concatenation.
 pub struct Fcp2KeyDerivation;
 
 impl Fcp2KeyDerivation {
+    fn framed_info(label: &[u8], parts: &[&[u8]]) -> Vec<u8> {
+        let mut info = Vec::with_capacity(
+            label.len() + parts.iter().map(|part| 4 + part.len()).sum::<usize>(),
+        );
+        info.extend_from_slice(label);
+        for part in parts {
+            info.extend_from_slice(&(part.len() as u32).to_be_bytes());
+            info.extend_from_slice(part);
+        }
+        info
+    }
+
     /// Derive a zone encryption key.
     ///
     /// # Errors
@@ -152,9 +165,7 @@ impl Fcp2KeyDerivation {
         zone_key_material: &[u8],
         zone_id: &[u8],
     ) -> CryptoResult<DerivedKey<32>> {
-        let mut info = Vec::with_capacity(13 + zone_id.len());
-        info.extend_from_slice(b"FCP2-ZONE-KEY");
-        info.extend_from_slice(zone_id);
+        let info = Self::framed_info(b"FCP2-ZONE-KEY", &[zone_id]);
         DerivedKey::derive(None, zone_key_material, &info)
     }
 
@@ -167,9 +178,7 @@ impl Fcp2KeyDerivation {
         zone_key_material: &[u8],
         zone_id: &[u8],
     ) -> CryptoResult<DerivedKey<32>> {
-        let mut info = Vec::with_capacity(17 + zone_id.len());
-        info.extend_from_slice(b"FCP2-OBJECTID-KEY");
-        info.extend_from_slice(zone_id);
+        let info = Self::framed_info(b"FCP2-OBJECTID-KEY", &[zone_id]);
         DerivedKey::derive(None, zone_key_material, &info)
     }
 
@@ -183,10 +192,7 @@ impl Fcp2KeyDerivation {
         session_id: &[u8],
         direction: &str,
     ) -> CryptoResult<DerivedKey<32>> {
-        let mut info = Vec::with_capacity(13 + session_id.len() + direction.len());
-        info.extend_from_slice(b"FCP2-SESSION-");
-        info.extend_from_slice(direction.as_bytes());
-        info.extend_from_slice(session_id);
+        let info = Self::framed_info(b"FCP2-SESSION", &[direction.as_bytes(), session_id]);
         DerivedKey::derive(None, shared_secret, &info)
     }
 
@@ -196,9 +202,7 @@ impl Fcp2KeyDerivation {
     ///
     /// Returns an error if key derivation fails.
     pub fn derive_mac_key(session_key: &[u8], purpose: &str) -> CryptoResult<DerivedKey<32>> {
-        let mut info = Vec::with_capacity(9 + purpose.len());
-        info.extend_from_slice(b"FCP2-MAC-");
-        info.extend_from_slice(purpose.as_bytes());
+        let info = Self::framed_info(b"FCP2-MAC", &[purpose.as_bytes()]);
         DerivedKey::derive(None, session_key, &info)
     }
 }
@@ -514,6 +518,23 @@ mod tests {
         let k1 = Fcp2KeyDerivation::derive_mac_key(&session_key, "auth").unwrap();
         let k2 = Fcp2KeyDerivation::derive_mac_key(&session_key, "auth").unwrap();
         assert_eq!(k1.as_bytes(), k2.as_bytes());
+    }
+
+    #[test]
+    fn fcp2_session_key_framing_prevents_concat_collisions() {
+        let shared = [7u8; 32];
+        let k1 = Fcp2KeyDerivation::derive_session_key(&shared, b"bc", "a").unwrap();
+        let k2 = Fcp2KeyDerivation::derive_session_key(&shared, b"c", "ab").unwrap();
+        assert_ne!(k1.as_bytes(), k2.as_bytes());
+    }
+
+    #[test]
+    fn fcp2_mac_key_framing_matches_explicit_helper() {
+        let session_key = [11u8; 32];
+        let direct = Fcp2KeyDerivation::derive_mac_key(&session_key, "frame").unwrap();
+        let info = Fcp2KeyDerivation::framed_info(b"FCP2-MAC", &[b"frame"]);
+        let expected = DerivedKey::<32>::derive(None, &session_key, &info).unwrap();
+        assert_eq!(direct.as_bytes(), expected.as_bytes());
     }
 
     // ---- HKDF_MAX_OUTPUT_LENGTH constant ----

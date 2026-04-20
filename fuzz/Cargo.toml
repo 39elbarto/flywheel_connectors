@@ -126,6 +126,27 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_mesh_post_verify_summary"
+path = "fuzz_targets/mesh_post_verify_summary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_mesh_post_verify_decode_status"
+path = "fuzz_targets/mesh_post_verify_decode_status.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_mesh_post_verify_symbol_ack"
+path = "fuzz_targets/mesh_post_verify_symbol_ack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_raptorq_decode_bounds"
 path = "fuzz_targets/raptorq_decode_bounds.rs"
 test = false

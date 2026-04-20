@@ -114,6 +114,29 @@ fn validate_base_url_for_auth(raw_url: &str, auth: &AirtableAuth) -> FcpResult<S
         code: 1003,
         message: "base_url must be an absolute URL".into(),
     })?;
+    // Strip query/fragment/userinfo before scheme/host enforcement. The
+    // validator returns parsed.to_string() which preserves all of those
+    // components; the AirtableClient / list_records paginator then
+    // concatenates the result into format!("{base_url}/{path}", ...)
+    // URLs. A base_url like `https://api.airtable.com/v0?leak=x` would
+    // otherwise leak attacker-chosen query values on every request and
+    // put the endpoint path after the `?` boundary where it parses as
+    // part of the query. Userinfo would bake into every request URL
+    // and silently override the bearer token. Matches the hygiene
+    // already in whatsapp / notion / asana / stripe / discord / gmail
+    // after earlier patches.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
     let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
         code: 1003,
         message: "base_url must include a host".into(),
@@ -3308,6 +3331,71 @@ mod tests {
     use chrono::{Duration, Utc};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+
+    #[test]
+    fn validate_base_url_for_auth_accepts_api_airtable_com_with_token() {
+        let auth = AirtableAuth::Token("patTEST".into());
+        let out = validate_base_url_for_auth("https://api.airtable.com/v0", &auth).unwrap();
+        assert_eq!(out, "https://api.airtable.com/v0");
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_query_string_with_token() {
+        let auth = AirtableAuth::Token("patTEST".into());
+        let err =
+            validate_base_url_for_auth("https://api.airtable.com/v0?leak=x", &auth).unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("query"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_fragment_with_token() {
+        let auth = AirtableAuth::Token("patTEST".into());
+        let err =
+            validate_base_url_for_auth("https://api.airtable.com/v0#frag", &auth).unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_userinfo_with_token() {
+        let auth = AirtableAuth::Token("patTEST".into());
+        let err =
+            validate_base_url_for_auth("https://attacker:pw@api.airtable.com/v0", &auth)
+                .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("userinfo"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_query_string_with_credential_id() {
+        let cid = fcp_core::CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let auth = AirtableAuth::CredentialId(cid);
+        let err =
+            validate_base_url_for_auth("https://vault-proxy.example/v0?leak=x", &auth)
+                .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_substring_smuggle_with_token() {
+        // Path-based smuggle: host is evil.com, not api.airtable.com,
+        // even though the full string contains "api.airtable.com".
+        let auth = AirtableAuth::Token("patTEST".into());
+        let err = validate_base_url_for_auth(
+            "https://evil.com/api.airtable.com/v0",
+            &auth,
+        )
+        .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
 
     fn generate_valid_token(
         signing_key: &Ed25519SigningKey,

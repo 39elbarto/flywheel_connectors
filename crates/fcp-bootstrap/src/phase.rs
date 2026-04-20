@@ -5,6 +5,9 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fs::OpenOptions;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 /// The current phase of the bootstrap process.
@@ -250,7 +253,18 @@ pub fn write_phase_lock(data_dir: &Path, phase: &BootstrapPhase) -> std::io::Res
     let lock_file = data_dir.join("init.lock");
     let contents = serde_json::to_string(phase)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-    std::fs::write(lock_file, contents)
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+
+    let mut file = options.open(&lock_file)?;
+    use std::io::Write as _;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&lock_file, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
 }
 
 /// Remove the phase lock file (call on successful completion).
@@ -278,6 +292,22 @@ mod tests {
             commitments_needed: 3,
         };
         assert_eq!(format!("{phase}"), "CeremonyRound1(2/3)");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_phase_lock_uses_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        write_phase_lock(dir.path(), &BootstrapPhase::TimeValidation).unwrap();
+
+        let lock_mode = std::fs::metadata(dir.path().join("init.lock"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(lock_mode, 0o600);
     }
 
     #[test]

@@ -17,7 +17,10 @@ use crate::phase::{BootstrapPhase, detect_partial_state, remove_phase_lock, writ
 use crate::recovery_phrase::RecoveryPhrase;
 use crate::time_validation::{TimeValidation, TimeValidationResult};
 
+use std::fs::{File, OpenOptions};
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// Mode of bootstrap operation.
@@ -187,8 +190,7 @@ impl BootstrapWorkflow {
     ///
     /// Returns an error if initialization state is invalid or filesystem setup fails.
     pub fn new(config: BootstrapConfig) -> BootstrapResult<Self> {
-        // Ensure data directory exists
-        std::fs::create_dir_all(&config.data_dir)?;
+        ensure_secure_data_dir(&config.data_dir)?;
 
         // Check for existing genesis or partial state
         let init_result = check_initialization_state(&config.data_dir, config.force_overwrite)?;
@@ -455,9 +457,8 @@ impl BootstrapWorkflow {
             .as_ref()
             .ok_or(BootstrapError::HardwareTokenPinRequired)?;
 
-        let outcome =
-            select_and_authenticate(token, pin, detection_report, driver, None)
-                .map_err(|err| map_hardware_token_error(detection_report, err))?;
+        let outcome = select_and_authenticate(token, pin, detection_report, driver, None)
+            .map_err(|err| map_hardware_token_error(detection_report, err))?;
 
         let token_display = outcome.session.token().to_string();
         let session_state = outcome.session.session_state();
@@ -471,15 +472,15 @@ impl BootstrapWorkflow {
         );
 
         // Enumerate certificates and keys, then select the best pair.
-        let provisioning_material = select_certificate_for_provisioning(
-            outcome.session.token(),
-            pin,
-            driver,
-        )
-        .map_err(|err| map_hardware_token_error(detection_report, err))?;
+        let provisioning_material =
+            select_certificate_for_provisioning(outcome.session.token(), pin, driver)
+                .map_err(|err| map_hardware_token_error(detection_report, err))?;
 
         tracing::info!(
-            material = %provisioning_material,
+            token = %token_display,
+            selected_key_type = %provisioning_material.pair.key.key_type,
+            candidates_considered = provisioning_material.candidates_considered,
+            selection_reason = %provisioning_material.selection_reason,
             "Certificate selected; closing session before provisioning handoff"
         );
 
@@ -493,8 +494,7 @@ impl BootstrapWorkflow {
         // Provisioning handoff: the next bead (24llg.4.2.3) will consume the
         // provisioning material to complete key provisioning and enrollment.
         Err(BootstrapError::HardwareToken(format!(
-            "certificate selected for {token_display} ({provisioning_material}), \
-             but provisioning enrollment is not implemented yet"
+            "certificate selected for {token_display}, but provisioning enrollment is not implemented yet"
         )))
     }
 
@@ -526,10 +526,11 @@ impl BootstrapWorkflow {
         let temp_path = genesis_temporary_path(&genesis_path);
         let cbor = genesis.to_cbor()?;
         let write_result = (|| -> BootstrapResult<()> {
-            let mut file = std::fs::File::create(&temp_path)?;
+            let mut file = secure_create_file(&temp_path)?;
             file.write_all(&cbor)?;
             file.sync_all()?;
             std::fs::rename(&temp_path, &genesis_path)?;
+            set_owner_only_file_permissions(&genesis_path)?;
             sync_directory(&self.config.data_dir)?;
             Ok(())
         })();
@@ -556,6 +557,44 @@ impl BootstrapWorkflow {
     #[must_use]
     pub const fn phase(&self) -> &BootstrapPhase {
         &self.phase
+    }
+}
+
+fn secure_create_file(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options.open(path)?;
+    set_owner_only_file_permissions(path)?;
+    Ok(file)
+}
+
+fn set_owner_only_file_permissions(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let permissions = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
+fn ensure_secure_data_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(path)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
     }
 }
 
@@ -670,9 +709,7 @@ fn map_hardware_token_error(
         TokenError::PinRequired => BootstrapError::HardwareTokenPinRequired,
         TokenError::InvalidPin => BootstrapError::HardwareTokenInvalidPin,
         TokenError::PinLocked => BootstrapError::HardwareTokenPinLocked,
-        TokenError::TokenNotFound(locator) => {
-            BootstrapError::HardwareTokenNotFound { locator }
-        }
+        TokenError::TokenNotFound(locator) => BootstrapError::HardwareTokenNotFound { locator },
         TokenError::UnsupportedMechanism(mechanism) => {
             BootstrapError::HardwareTokenUnsupported { mechanism }
         }
@@ -681,16 +718,12 @@ fn map_hardware_token_error(
             BootstrapError::HardwareTokenSessionExpired { elapsed, timeout }
         }
         TokenError::Cancelled => BootstrapError::HardwareTokenCancelled,
-        TokenError::Pkcs11(detail) => {
-            BootstrapError::HardwareTokenProviderFault { detail }
+        TokenError::Pkcs11(detail) => BootstrapError::HardwareTokenProviderFault { detail },
+        TokenError::KeyNotFound(key) => {
+            BootstrapError::HardwareToken(format!("key not found on hardware token: {key}"))
         }
-        TokenError::KeyNotFound(key) => BootstrapError::HardwareToken(format!(
-            "key not found on hardware token: {key}"
-        )),
         TokenError::CertificateSelectionFailed(refusal) => {
-            BootstrapError::HardwareToken(format!(
-                "certificate selection failed: {refusal}"
-            ))
+            BootstrapError::HardwareToken(format!("certificate selection failed: {refusal}"))
         }
     }
 }
@@ -1396,6 +1429,32 @@ mod tests {
         assert_eq!(genesis.owner_public_key, loaded.owner_public_key);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_bootstrap_state_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .skip_time_validation(true)
+            .build()
+            .unwrap();
+
+        BootstrapWorkflow::new(config).unwrap().run().unwrap();
+
+        let dir_mode = std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700);
+
+        let genesis_mode = std::fs::metadata(dir.path().join("genesis.cbor"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(genesis_mode, 0o600);
+    }
+
     // ---- Hardware token not implemented ----
 
     #[test]
@@ -1418,7 +1477,10 @@ mod tests {
 
         let workflow = BootstrapWorkflow::new(config).unwrap();
         let result = workflow.run();
-        assert!(matches!(result, Err(BootstrapError::HardwareTokenPinRequired)));
+        assert!(matches!(
+            result,
+            Err(BootstrapError::HardwareTokenPinRequired)
+        ));
     }
 
     #[test]
@@ -1806,10 +1868,8 @@ mod tests {
 
     #[test]
     fn map_error_key_not_found_yields_hardware_token_string() {
-        let err = map_hardware_token_error(
-            &empty_report(),
-            TokenError::KeyNotFound("owner-key".into()),
-        );
+        let err =
+            map_hardware_token_error(&empty_report(), TokenError::KeyNotFound("owner-key".into()));
         assert!(matches!(
             err,
             BootstrapError::HardwareToken(msg) if msg.contains("key not found") && msg.contains("owner-key")

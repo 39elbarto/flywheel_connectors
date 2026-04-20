@@ -35,8 +35,8 @@ use crate::hardware_token::{
 use ed25519_dalek::SigningKey;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The default master seed for deterministic soft-token generation.
 ///
@@ -140,10 +140,7 @@ impl Default for SoftTokenConfig {
             manufacturer: "FCP-Test".into(),
             serial: "SOFT0001".into(),
             slot: 0,
-            identities: vec![SoftTokenIdentitySpec::ed25519(
-                "fcp-owner",
-                "FCP Owner Key",
-            )],
+            identities: vec![SoftTokenIdentitySpec::ed25519("fcp-owner", "FCP Owner Key")],
             mechanisms: vec![
                 "CKM_ED25519".into(),
                 "CKM_EDDSA".into(),
@@ -259,8 +256,7 @@ impl HardwareTokenSessionDriver for SoftTokenDriver {
         }
 
         // Verify token identity
-        if token.provider != self.detected_token.provider
-            || token.slot != self.detected_token.slot
+        if token.provider != self.detected_token.provider || token.slot != self.detected_token.slot
         {
             return Err(TokenError::TokenNotFound(format!(
                 "{} slot {}",
@@ -457,8 +453,7 @@ mod tests {
 
         assert_eq!(driver.identities.len(), 2);
         assert_ne!(
-            driver.identities[0].signing_key_bytes,
-            driver.identities[1].signing_key_bytes,
+            driver.identities[0].signing_key_bytes, driver.identities[1].signing_key_bytes,
             "different identities must have different keys"
         );
         assert_ne!(
@@ -489,9 +484,7 @@ mod tests {
         let token = driver.detected_token().clone();
         let pin = SoftTokenDriver::wrong_pin();
 
-        let err = driver
-            .open_authenticated_session(&token, &pin)
-            .unwrap_err();
+        let err = driver.open_authenticated_session(&token, &pin).unwrap_err();
         assert!(
             matches!(err, TokenError::InvalidPin),
             "expected InvalidPin, got: {err}"
@@ -504,9 +497,7 @@ mod tests {
         let token = driver.detected_token().clone();
         let pin = HardwareTokenPin::new("");
 
-        let err = driver
-            .open_authenticated_session(&token, &pin)
-            .unwrap_err();
+        let err = driver.open_authenticated_session(&token, &pin).unwrap_err();
         assert!(
             matches!(err, TokenError::PinRequired),
             "expected PinRequired, got: {err}"
@@ -715,8 +706,7 @@ mod tests {
         let report = driver.detection_report();
 
         // Step 1: select and authenticate
-        let outcome =
-            select_and_authenticate(&token, &pin, &report, &driver, None).unwrap();
+        let outcome = select_and_authenticate(&token, &pin, &report, &driver, None).unwrap();
         assert_eq!(
             outcome.session.session_state(),
             AuthenticatedSessionState::ReadWriteUser
@@ -772,9 +762,7 @@ mod tests {
         use crate::hardware_token::select_certificate_for_provisioning;
 
         let config = SoftTokenConfig {
-            identities: vec![
-                SoftTokenIdentitySpec::ed25519("ca-key", "Root CA").into_ca(),
-            ],
+            identities: vec![SoftTokenIdentitySpec::ed25519("ca-key", "Root CA").into_ca()],
             ..SoftTokenConfig::default()
         };
         let driver = SoftTokenDriver::deterministic(config);
@@ -837,8 +825,7 @@ mod tests {
         let token = soft.detected_token().clone();
         let report = soft.detection_report();
 
-        let result =
-            workflow.run_hardware_token_bootstrap_with_driver(&token, &report, &soft);
+        let result = workflow.run_hardware_token_bootstrap_with_driver(&token, &report, &soft);
 
         // The soft token has a valid Ed25519 cert+key pair, so the workflow
         // proceeds through discovery -> auth -> certificate selection successfully.
@@ -849,6 +836,9 @@ mod tests {
             matches!(&err, BootstrapError::HardwareToken(msg) if msg.contains("provisioning enrollment is not implemented")),
             "expected provisioning-not-implemented boundary, got: {err}"
         );
+        let err_text = err.to_string();
+        assert!(!err_text.contains("ProvisioningMaterial("));
+        assert!(!err_text.contains("id="));
 
         // Session was cleaned up via Drop during error unwind
         assert_eq!(soft.close_count(), 1);
@@ -856,8 +846,8 @@ mod tests {
 
     #[test]
     fn workflow_bootstrap_with_wrong_pin_returns_typed_error() {
-        use crate::workflow::{BootstrapConfig, BootstrapMode, BootstrapWorkflow};
         use crate::error::BootstrapError;
+        use crate::workflow::{BootstrapConfig, BootstrapMode, BootstrapWorkflow};
 
         let dir = tempfile::tempdir().unwrap();
         let config = BootstrapConfig::builder()
@@ -884,8 +874,8 @@ mod tests {
 
     #[test]
     fn workflow_bootstrap_without_pin_returns_pin_required() {
-        use crate::workflow::{BootstrapConfig, BootstrapMode, BootstrapWorkflow};
         use crate::error::BootstrapError;
+        use crate::workflow::{BootstrapConfig, BootstrapMode, BootstrapWorkflow};
 
         let dir = tempfile::tempdir().unwrap();
         let config = BootstrapConfig::builder()
@@ -1023,8 +1013,8 @@ mod verification_pack {
     use super::*;
     use crate::error::BootstrapError;
     use crate::hardware_token::{
-        select_and_authenticate, select_certificate_for_provisioning, AuthenticatedTokenSession,
-        CertificateSelectionRefusal,
+        AuthenticatedTokenSession, CertificateSelectionRefusal, select_and_authenticate,
+        select_certificate_for_provisioning,
     };
     use crate::workflow::{BootstrapConfig, BootstrapMode, BootstrapWorkflow};
     use serde::Serialize;
@@ -1093,7 +1083,8 @@ mod verification_pack {
 
         fn assert_pass(&self) {
             assert_eq!(
-                self.outcome, "pass",
+                self.outcome,
+                "pass",
                 "scenario {} failed: {:?}",
                 self.scenario_id,
                 self.steps.iter().filter(|s| !s.passed).collect::<Vec<_>>()
@@ -1156,12 +1147,16 @@ mod verification_pack {
         let pin = driver.pin();
         let report = driver.detection_report();
         {
-            let step = record.add_step("setup", "Provision deterministic soft-token with Ed25519 identity");
+            let step = record.add_step(
+                "setup",
+                "Provision deterministic soft-token with Ed25519 identity",
+            );
             step.passed = true;
             step.duration_ms = millis_u64(t.elapsed());
             step.evidence.push(format!("token_label={}", token.label));
             step.evidence.push(format!("token_serial={}", token.serial));
-            step.evidence.push(format!("mechanisms={}", token.mechanisms.join(",")));
+            step.evidence
+                .push(format!("mechanisms={}", token.mechanisms.join(",")));
         }
 
         // Action: select and authenticate
@@ -1171,22 +1166,34 @@ mod verification_pack {
             let step = record.add_step("action", "Select and authenticate hardware-token session");
             step.passed = true;
             step.duration_ms = millis_u64(t.elapsed());
-            step.evidence.push(format!("session_state={}", outcome.session.session_state()));
-            step.evidence.push(format!("read_write={}", outcome.session.read_write()));
-            step.evidence.push(format!("selected_token={}", outcome.selected_token));
+            step.evidence
+                .push(format!("session_state={}", outcome.session.session_state()));
+            step.evidence
+                .push(format!("read_write={}", outcome.session.read_write()));
+            step.evidence
+                .push(format!("selected_token={}", outcome.selected_token));
         }
 
         // Action: certificate selection for provisioning
         let t = Instant::now();
         let material = select_certificate_for_provisioning(&token, &pin, &driver).unwrap();
         {
-            let step = record.add_step("action", "Select certificate-key pair for FCP provisioning");
+            let step =
+                record.add_step("action", "Select certificate-key pair for FCP provisioning");
             step.passed = true;
             step.duration_ms = millis_u64(t.elapsed());
-            step.evidence.push(format!("selected_key_type={}", material.pair.key.key_type));
-            step.evidence.push(format!("selected_cert_label={}", material.pair.certificate.label));
-            step.evidence.push(format!("candidates_considered={}", material.candidates_considered));
-            step.evidence.push(format!("selection_reason={}", material.selection_reason));
+            step.evidence
+                .push(format!("selected_key_type={}", material.pair.key.key_type));
+            step.evidence.push(format!(
+                "selected_cert_label={}",
+                material.pair.certificate.label
+            ));
+            step.evidence.push(format!(
+                "candidates_considered={}",
+                material.candidates_considered
+            ));
+            step.evidence
+                .push(format!("selection_reason={}", material.selection_reason));
         }
 
         // Assert: verify provisioning material
@@ -1196,19 +1203,26 @@ mod verification_pack {
                 && material.pair.key.can_sign
                 && !material.pair.certificate.is_ca
                 && !material.pair.certificate.der_bytes.is_empty();
-            step.evidence.push(format!("key_can_sign={}", material.pair.key.can_sign));
-            step.evidence.push(format!("cert_is_ca={}", material.pair.certificate.is_ca));
-            step.evidence.push(format!("cert_der_len={}", material.pair.certificate.der_bytes.len()));
+            step.evidence
+                .push(format!("key_can_sign={}", material.pair.key.can_sign));
+            step.evidence
+                .push(format!("cert_is_ca={}", material.pair.certificate.is_ca));
+            step.evidence.push(format!(
+                "cert_der_len={}",
+                material.pair.certificate.der_bytes.len()
+            ));
         }
 
         // Teardown: close session
         let t = Instant::now();
         outcome.session.close().unwrap();
         {
-            let step = record.add_step("teardown", "Close authenticated session and verify cleanup");
+            let step =
+                record.add_step("teardown", "Close authenticated session and verify cleanup");
             step.passed = driver.close_count() == 1;
             step.duration_ms = millis_u64(t.elapsed());
-            step.evidence.push(format!("close_count={}", driver.close_count()));
+            step.evidence
+                .push(format!("close_count={}", driver.close_count()));
         }
 
         record.finalize();
@@ -1262,7 +1276,8 @@ mod verification_pack {
         {
             let step = record.add_step("teardown", "Verify no session leaked");
             step.passed = driver.close_count() == 0;
-            step.evidence.push(format!("close_count={}", driver.close_count()));
+            step.evidence
+                .push(format!("close_count={}", driver.close_count()));
         }
 
         record.finalize();
@@ -1371,14 +1386,20 @@ mod verification_pack {
         let t = Instant::now();
         let err = select_certificate_for_provisioning(&token, &pin, &driver).unwrap_err();
         {
-            let step = record.add_step("negative", "Attempt certificate selection with RSA-only key");
+            let step = record.add_step(
+                "negative",
+                "Attempt certificate selection with RSA-only key",
+            );
             step.passed = matches!(
                 err,
-                TokenError::CertificateSelectionFailed(CertificateSelectionRefusal::NoCompatibleKeyType { .. })
+                TokenError::CertificateSelectionFailed(
+                    CertificateSelectionRefusal::NoCompatibleKeyType { .. }
+                )
             );
             step.duration_ms = millis_u64(t.elapsed());
             step.evidence.push(format!("error={err}"));
-            step.evidence.push("refusal_type=NoCompatibleKeyType".to_string());
+            step.evidence
+                .push("refusal_type=NoCompatibleKeyType".to_string());
         }
 
         {
@@ -1417,11 +1438,14 @@ mod verification_pack {
             let step = record.add_step("negative", "Attempt provisioning with CA-only certificate");
             step.passed = matches!(
                 err,
-                TokenError::CertificateSelectionFailed(CertificateSelectionRefusal::NoMatchingKeyPair)
+                TokenError::CertificateSelectionFailed(
+                    CertificateSelectionRefusal::NoMatchingKeyPair
+                )
             );
             step.duration_ms = millis_u64(t.elapsed());
             step.evidence.push(format!("error={err}"));
-            step.evidence.push("refusal_type=NoMatchingKeyPair".to_string());
+            step.evidence
+                .push("refusal_type=NoMatchingKeyPair".to_string());
         }
 
         record.finalize();
@@ -1476,7 +1500,10 @@ mod verification_pack {
         let pin = wrapped.inner.pin();
 
         {
-            let step = record.add_step("setup", "Provision soft-token certificates but suppress key enumeration");
+            let step = record.add_step(
+                "setup",
+                "Provision soft-token certificates but suppress key enumeration",
+            );
             step.passed = true;
             step.evidence.push("certificates_present=true".to_string());
             step.evidence.push("enumerate_keys=empty".to_string());
@@ -1485,7 +1512,10 @@ mod verification_pack {
         let t = Instant::now();
         let err = select_certificate_for_provisioning(&token, &pin, &wrapped).unwrap_err();
         {
-            let step = record.add_step("negative", "Attempt provisioning when token exposes no private keys");
+            let step = record.add_step(
+                "negative",
+                "Attempt provisioning when token exposes no private keys",
+            );
             step.passed = matches!(
                 err,
                 TokenError::CertificateSelectionFailed(CertificateSelectionRefusal::NoKeys)
@@ -1512,7 +1542,8 @@ mod verification_pack {
         {
             let step = record.add_step("setup", "Provision soft-token with close-action tracking");
             step.passed = true;
-            step.evidence.push(format!("initial_close_count={}", driver.close_count()));
+            step.evidence
+                .push(format!("initial_close_count={}", driver.close_count()));
         }
 
         // Path A: explicit close
@@ -1523,7 +1554,10 @@ mod verification_pack {
             let step = record.add_step("action", "Open and explicitly close session");
             step.passed = driver.close_count() == 1;
             step.duration_ms = millis_u64(t.elapsed());
-            step.evidence.push(format!("close_count_after_explicit={}", driver.close_count()));
+            step.evidence.push(format!(
+                "close_count_after_explicit={}",
+                driver.close_count()
+            ));
         }
 
         // Path B: Drop-based cleanup (separate driver to isolate count)
@@ -1537,7 +1571,8 @@ mod verification_pack {
             let step = record.add_step("action", "Open session and let Drop invoke cleanup");
             step.passed = driver2.close_count() == 1;
             step.duration_ms = millis_u64(t.elapsed());
-            step.evidence.push(format!("close_count_after_drop={}", driver2.close_count()));
+            step.evidence
+                .push(format!("close_count_after_drop={}", driver2.close_count()));
         }
 
         // Path C: close-then-drop must not double-close
@@ -1548,7 +1583,10 @@ mod verification_pack {
         {
             let step = record.add_step("assert", "Close-then-Drop invokes cleanup exactly once");
             step.passed = driver3.close_count() == 1;
-            step.evidence.push(format!("close_count_after_close_then_drop={}", driver3.close_count()));
+            step.evidence.push(format!(
+                "close_count_after_close_then_drop={}",
+                driver3.close_count()
+            ));
         }
 
         // Path D: error path (wrong PIN) must not leak sessions
@@ -1558,7 +1596,8 @@ mod verification_pack {
         {
             let step = record.add_step("assert", "Failed authentication does not leak session");
             step.passed = driver4.close_count() == 0;
-            step.evidence.push(format!("close_count_after_error={}", driver4.close_count()));
+            step.evidence
+                .push(format!("close_count_after_error={}", driver4.close_count()));
         }
 
         record.finalize();
@@ -1585,7 +1624,10 @@ mod verification_pack {
         let report = soft.detection_report();
 
         {
-            let step = record.add_step("setup", "Configure workflow with soft-token and correct PIN");
+            let step = record.add_step(
+                "setup",
+                "Configure workflow with soft-token and correct PIN",
+            );
             step.passed = true;
         }
 
@@ -1609,7 +1651,8 @@ mod verification_pack {
         {
             let step = record.add_step("assert", "Session cleanup occurred during workflow");
             step.passed = soft.close_count() == 1;
-            step.evidence.push(format!("close_count={}", soft.close_count()));
+            step.evidence
+                .push(format!("close_count={}", soft.close_count()));
         }
 
         record.finalize();
@@ -1635,7 +1678,10 @@ mod verification_pack {
         let pin = driver.pin();
 
         {
-            let step = record.add_step("setup", "Provision soft-token with RSA + X25519 + Ed25519 identities");
+            let step = record.add_step(
+                "setup",
+                "Provision soft-token with RSA + X25519 + Ed25519 identities",
+            );
             step.passed = true;
             step.evidence.push("identity_count=3".to_string());
         }
@@ -1643,19 +1689,32 @@ mod verification_pack {
         let t = Instant::now();
         let material = select_certificate_for_provisioning(&token, &pin, &driver).unwrap();
         {
-            let step = record.add_step("action", "Select certificate for provisioning from mixed keys");
+            let step = record.add_step(
+                "action",
+                "Select certificate for provisioning from mixed keys",
+            );
             step.passed = true;
             step.duration_ms = millis_u64(t.elapsed());
-            step.evidence.push(format!("selected_key_type={}", material.pair.key.key_type));
-            step.evidence.push(format!("selected_label={}", material.pair.certificate.label));
-            step.evidence.push(format!("candidates_considered={}", material.candidates_considered));
+            step.evidence
+                .push(format!("selected_key_type={}", material.pair.key.key_type));
+            step.evidence.push(format!(
+                "selected_label={}",
+                material.pair.certificate.label
+            ));
+            step.evidence.push(format!(
+                "candidates_considered={}",
+                material.candidates_considered
+            ));
         }
 
         {
             let step = record.add_step("assert", "Ed25519 selected over X25519 and RSA");
             step.passed = material.pair.key.key_type == TokenKeyType::Ed25519
                 && material.pair.certificate.label == "ed25519-sign";
-            step.evidence.push(format!("expected_type=Ed25519, actual={}", material.pair.key.key_type));
+            step.evidence.push(format!(
+                "expected_type=Ed25519, actual={}",
+                material.pair.key.key_type
+            ));
             step.evidence.push(format!(
                 "expected_label=ed25519-sign, actual={}",
                 material.pair.certificate.label
@@ -1666,7 +1725,10 @@ mod verification_pack {
         {
             let step = record.add_step("assert", "RSA excluded from compatible candidates");
             step.passed = material.candidates_considered == 2; // Ed25519 + X25519
-            step.evidence.push(format!("compatible_count={}", material.candidates_considered));
+            step.evidence.push(format!(
+                "compatible_count={}",
+                material.candidates_considered
+            ));
         }
 
         record.finalize();
@@ -1680,7 +1742,8 @@ mod verification_pack {
         let mut record = VerificationRecord::new("hwtoken-deterministic-rerun");
 
         {
-            let step = record.add_step("setup", "Prepare two independent soft-token instantiations");
+            let step =
+                record.add_step("setup", "Prepare two independent soft-token instantiations");
             step.passed = true;
         }
 
@@ -1706,22 +1769,36 @@ mod verification_pack {
         {
             let step = record.add_step("assert", "Certificate IDs match across runs");
             step.passed = m1.pair.certificate.id == m2.pair.certificate.id;
-            step.evidence.push(format!("run1_cert_id={}", hex::encode(&m1.pair.certificate.id)));
-            step.evidence.push(format!("run2_cert_id={}", hex::encode(&m2.pair.certificate.id)));
+            step.evidence.push(format!(
+                "run1_cert_id={}",
+                hex::encode(&m1.pair.certificate.id)
+            ));
+            step.evidence.push(format!(
+                "run2_cert_id={}",
+                hex::encode(&m2.pair.certificate.id)
+            ));
         }
 
         {
             let step = record.add_step("assert", "DER bytes match across runs");
             step.passed = m1.pair.certificate.der_bytes == m2.pair.certificate.der_bytes;
-            step.evidence.push(format!("run1_der_len={}", m1.pair.certificate.der_bytes.len()));
-            step.evidence.push(format!("run2_der_len={}", m2.pair.certificate.der_bytes.len()));
+            step.evidence.push(format!(
+                "run1_der_len={}",
+                m1.pair.certificate.der_bytes.len()
+            ));
+            step.evidence.push(format!(
+                "run2_der_len={}",
+                m2.pair.certificate.der_bytes.len()
+            ));
         }
 
         {
             let step = record.add_step("assert", "Selection reason matches across runs");
             step.passed = m1.selection_reason == m2.selection_reason;
-            step.evidence.push(format!("run1_reason={}", m1.selection_reason));
-            step.evidence.push(format!("run2_reason={}", m2.selection_reason));
+            step.evidence
+                .push(format!("run1_reason={}", m1.selection_reason));
+            step.evidence
+                .push(format!("run2_reason={}", m2.selection_reason));
         }
 
         record.finalize();

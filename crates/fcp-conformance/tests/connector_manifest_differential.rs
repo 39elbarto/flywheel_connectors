@@ -282,3 +282,156 @@ fn connector_id_segment_is_well_formed() {
         "malformed connector.id segments: {offenders:?}"
     );
 }
+
+// ── Fixture baseline ────────────────────────────────────────
+//
+// The live `connectors/*/manifest.toml` corpus currently has broad drift
+// and parses at 0, which would make every invariant test above pass
+// vacuously (empty iteration). The tests below pin the invariants to a
+// guaranteed-baseline corpus — the canonical `_good` test vectors under
+// `tests/vectors/manifest/` — so regressions in the invariant logic fire
+// even when the live corpus cannot be repaired.
+//
+// Fixtures ship with a placeholder interface hash (all zeros), so they
+// require `parse_str_unchecked` rather than `parse_str`. The structural
+// invariants being tested here (id namespace, zones, operations) are all
+// populated at the unchecked parse layer.
+
+/// Absolute path to the workspace `tests/vectors/manifest/` directory.
+fn fixtures_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .join("tests/vectors/manifest")
+}
+
+/// Collect every `*_good.toml` fixture, returning `(stem, path)`.
+fn discover_good_fixtures() -> Vec<(String, PathBuf)> {
+    let dir = fixtures_dir();
+    let mut out = Vec::new();
+    let entries = match fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(err) => panic!("cannot read {}: {err}", dir.display()),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !name.ends_with("_good.toml") {
+            continue;
+        }
+        out.push((name.trim_end_matches(".toml").to_owned(), path));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Parse every `_good.toml` fixture with `parse_str_unchecked`.
+/// Panics if any fixture fails to parse — these are the canonical baseline.
+fn parse_all_fixtures() -> BTreeMap<String, ConnectorManifest> {
+    let mut out = BTreeMap::new();
+    for (stem, path) in discover_good_fixtures() {
+        let body = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("read fixture {}: {err}", path.display()));
+        let manifest = ConnectorManifest::parse_str_unchecked(&body).unwrap_or_else(|err| {
+            panic!(
+                "fixture {} must parse_str_unchecked (baseline regression): {err}",
+                path.display()
+            )
+        });
+        out.insert(stem, manifest);
+    }
+    out
+}
+
+/// Baseline regression gate: every canonical `_good.toml` fixture MUST
+/// parse via `parse_str_unchecked`. If a fixture stops parsing, either
+/// the fixture is broken or the parser regressed — either way, the gate
+/// should fire before the drift-tolerant live-corpus tests above run.
+#[test]
+fn fixture_corpus_all_parses_unchecked() {
+    const MIN_FIXTURES: usize = 60;
+    let fixtures = parse_all_fixtures();
+    emit_json_line(
+        "fixture_parse_report",
+        &serde_json::json!({
+            "fixture_count": fixtures.len(),
+            "floor": MIN_FIXTURES,
+        }),
+    );
+    assert!(
+        fixtures.len() >= MIN_FIXTURES,
+        "expected at least {MIN_FIXTURES} `_good.toml` fixtures, got {}",
+        fixtures.len()
+    );
+}
+
+/// Exercises every differential invariant against the guaranteed-passing
+/// fixture corpus. This is the non-vacuous version of the invariant tests
+/// above: if any invariant regresses (e.g. `connector.id` uniqueness check
+/// inverted, namespace check silenced), the assertions fire on real data
+/// independent of the live-corpus drift status.
+#[test]
+fn fixture_corpus_satisfies_all_invariants() {
+    let fixtures = parse_all_fixtures();
+    assert!(
+        !fixtures.is_empty(),
+        "fixture corpus empty — invariants cannot be exercised"
+    );
+
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut violations: Vec<String> = Vec::new();
+
+    for (stem, manifest) in &fixtures {
+        let id = manifest.connector.id.as_str();
+
+        // Invariant 1: non-empty id.
+        if id.is_empty() {
+            violations.push(format!("{stem}: empty connector.id"));
+        }
+        // Invariant 2: fcp. namespace.
+        if !id.starts_with("fcp.") {
+            violations.push(format!("{stem}: id {id:?} not in fcp. namespace"));
+        }
+        // Invariant 3: unique ids across the set.
+        if !seen_ids.insert(id.to_owned()) {
+            violations.push(format!("{stem}: duplicate connector.id {id:?}"));
+        }
+        // Invariant 4: non-empty version.
+        if manifest.connector.version.to_string().is_empty() {
+            violations.push(format!("{stem}: empty version"));
+        }
+        // Invariant 5: home zone non-empty and not forbidden.
+        let home = manifest.zones.home.as_str();
+        if home.is_empty() {
+            violations.push(format!("{stem}: empty home zone"));
+        }
+        if manifest.zones.forbidden.iter().any(|z| z.as_str() == home) {
+            violations.push(format!("{stem}: home zone {home:?} appears in forbidden"));
+        }
+        // Invariant 6: at least one operation.
+        if manifest.provides.operations.is_empty() {
+            violations.push(format!("{stem}: zero operations declared"));
+        }
+        // Invariant 7: id segment well-formed.
+        if let Some(segment) = id.strip_prefix("fcp.") {
+            let ok = !segment.is_empty()
+                && segment.chars().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-' | '_')
+                });
+            if !ok {
+                violations.push(format!("{stem}: malformed id segment {segment:?}"));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "fixture invariant violations ({} fixtures, {} violations):\n  {}",
+        fixtures.len(),
+        violations.len(),
+        violations.join("\n  ")
+    );
+}

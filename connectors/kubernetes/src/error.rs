@@ -42,6 +42,10 @@ pub enum KubernetesError {
     /// Invalid input (path traversal, empty segment, etc.)
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+
+    /// Connector policy denied the requested action.
+    #[error("Policy denied: {0}")]
+    PolicyDenied(String),
 }
 
 impl KubernetesError {
@@ -50,7 +54,7 @@ impl KubernetesError {
         match self {
             Self::Http(_) | Self::RateLimited { .. } => true,
             Self::Api { status_code, .. } => matches!(status_code, 500..=599 | 429),
-            Self::InvalidInput(_) => false,
+            Self::InvalidInput(_) | Self::PolicyDenied(_) => false,
             _ => false,
         }
     }
@@ -114,6 +118,10 @@ impl KubernetesError {
             Self::InvalidInput(msg) => FcpError::InvalidRequest {
                 code: 1005,
                 message: format!("Invalid input: {msg}"),
+            },
+            Self::PolicyDenied(reason) => FcpError::CapabilityDenied {
+                capability: "kubernetes.policy".into(),
+                reason: reason.clone(),
             },
         }
     }
@@ -629,9 +637,7 @@ mod tests {
         })
         .to_fcp_error()
         {
-            FcpError::RateLimited {
-                retry_after_ms, ..
-            } => {
+            FcpError::RateLimited { retry_after_ms, .. } => {
                 assert_eq!(retry_after_ms, 5000);
             }
             other => panic!("expected RateLimited, got {other:?}"),

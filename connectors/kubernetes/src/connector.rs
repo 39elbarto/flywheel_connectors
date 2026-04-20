@@ -1,11 +1,13 @@
 //! FCP Kubernetes Connector implementation.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
+    AgentHint, ApprovalMode, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError,
+    FcpResult, IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SelfCheckReport,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -14,6 +16,7 @@ use tracing::{info, instrument};
 use crate::{
     client::{DEFAULT_BASE_URL, KubernetesAuth, KubernetesClient},
     error::KubernetesError,
+    zone::OperationCategory,
 };
 
 /// Parsed and validated Kubernetes connector configuration.
@@ -21,6 +24,83 @@ use crate::{
 struct KubernetesConfig {
     auth: KubernetesAuth,
     base_url: String,
+    policy: KubernetesAccessPolicy,
+}
+
+#[derive(Debug, Clone)]
+struct KubernetesAccessPolicy {
+    allowed_namespaces: Option<BTreeSet<String>>,
+    allow_write_operations: bool,
+    allow_pod_exec: bool,
+    allow_exec_into_system_namespaces: bool,
+    allow_untrusted_exec_targets: bool,
+    allow_shell_exec: bool,
+    exec_required_pod_labels: BTreeMap<String, String>,
+}
+
+impl KubernetesAccessPolicy {
+    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let allow_write_operations = params
+            .get("allow_write_operations")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let allow_pod_exec = params
+            .get("allow_pod_exec")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let allow_exec_into_system_namespaces = params
+            .get("allow_exec_into_system_namespaces")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let allow_untrusted_exec_targets = params
+            .get("allow_untrusted_exec_targets")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let allow_shell_exec = params
+            .get("allow_shell_exec")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        let allowed_namespaces = parse_string_set(params, "allowed_namespaces")?;
+        let exec_required_pod_labels = parse_string_map(params, "exec_required_pod_labels")?
+            .unwrap_or_else(default_exec_required_labels);
+
+        if (allow_write_operations || allow_pod_exec) && allowed_namespaces.is_none() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message:
+                    "allowed_namespaces must be configured before enabling write or exec operations"
+                        .into(),
+            });
+        }
+
+        Ok(Self {
+            allowed_namespaces,
+            allow_write_operations,
+            allow_pod_exec,
+            allow_exec_into_system_namespaces,
+            allow_untrusted_exec_targets,
+            allow_shell_exec,
+            exec_required_pod_labels,
+        })
+    }
+
+    fn enforce_namespace_scope(
+        &self,
+        namespace: &str,
+        operation: &str,
+    ) -> Result<(), KubernetesError> {
+        let Some(allowed) = &self.allowed_namespaces else {
+            return Ok(());
+        };
+        if allowed.contains(namespace) {
+            return Ok(());
+        }
+        Err(KubernetesError::PolicyDenied(format!(
+            "{operation} is not permitted in namespace '{namespace}'; allowed_namespaces={}",
+            join_namespaces(allowed)
+        )))
+    }
 }
 
 impl KubernetesConfig {
@@ -71,7 +151,13 @@ impl KubernetesConfig {
             .unwrap_or(DEFAULT_BASE_URL)
             .to_string();
 
-        Ok(Self { auth, base_url })
+        let policy = KubernetesAccessPolicy::from_params(params)?;
+
+        Ok(Self {
+            auth,
+            base_url,
+            policy,
+        })
     }
 
     const fn auth_mode(&self) -> &'static str {
@@ -102,6 +188,13 @@ impl KubernetesConfig {
             network_message,
             rate_limit_profile: self.rate_limit_profile(),
             base_url: self.base_url.clone(),
+            write_operations_enabled: self.policy.allow_write_operations,
+            pod_exec_enabled: self.policy.allow_pod_exec,
+            namespace_scope: self
+                .policy
+                .allowed_namespaces
+                .as_ref()
+                .map(|values| values.iter().cloned().collect()),
         }
     }
 }
@@ -117,6 +210,9 @@ struct ProvisioningReadiness {
     network_message: String,
     rate_limit_profile: &'static str,
     base_url: String,
+    write_operations_enabled: bool,
+    pod_exec_enabled: bool,
+    namespace_scope: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,12 +328,7 @@ impl KubernetesConnector {
             "protocol_version": "2.0",
             "connector_id": "fcp.kubernetes",
             "connector_version": "0.1.0",
-            "capabilities": [
-                "kubernetes.read",
-                "kubernetes.write",
-                "kubernetes.admin",
-                "kubernetes.secrets"
-            ]
+            "capabilities": self.handshake_capabilities(),
         }))
     }
 
@@ -386,6 +477,8 @@ impl KubernetesConnector {
             })?;
 
         let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
+        self.authorize_operation(operation, &input)
+            .map_err(|e| e.to_fcp_error())?;
 
         self.request_count.fetch_add(1, Ordering::Relaxed);
 
@@ -444,12 +537,24 @@ impl KubernetesConnector {
             .get("operation_id")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
+        let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
 
         let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
+        let denial = if allowed {
+            self.authorize_operation(operation, &input).err()
+        } else {
+            None
+        };
 
         Ok(json!({
-            "allowed": allowed,
-            "reason": if allowed { "Operation supported" } else { "Unknown operation" },
+            "allowed": allowed && denial.is_none(),
+            "reason": if !allowed {
+                "Unknown operation".to_string()
+            } else if let Some(err) = denial {
+                err.to_string()
+            } else {
+                "Operation supported".to_string()
+            },
         }))
     }
 
@@ -518,14 +623,12 @@ impl KubernetesConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, KubernetesError> {
         let namespace = require_str(input, "namespace")?;
+        let name = require_str(input, "name")?;
         let spec = input.get("spec").ok_or_else(|| KubernetesError::Api {
             status_code: 400,
             message: "Missing required field: spec".into(),
         })?;
-        let name = input
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("unnamed");
+        validate_pod_spec(spec, "pod spec")?;
         let labels = input
             .get("labels")
             .cloned()
@@ -616,6 +719,7 @@ impl KubernetesConnector {
             status_code: 400,
             message: "Missing required field: spec".into(),
         })?;
+        validate_deployment_spec(spec)?;
         let labels = input
             .get("labels")
             .cloned()
@@ -827,6 +931,8 @@ impl KubernetesConnector {
                 message: "command array must contain at least one string element".into(),
             });
         }
+        self.validate_exec_request(client, namespace, name, container, &command_strs)
+            .await?;
         let resp = client
             .exec_in_pod(namespace, name, container, &command_strs)
             .await?;
@@ -1130,8 +1236,97 @@ impl KubernetesConnector {
             status_code: 400,
             message: "Missing required field: template".into(),
         })?;
+        validate_template_spec(template, "rollout template")?;
         let result = client.rollout_rollback(namespace, name, template).await?;
         Ok(json!({ "deployment": result }))
+    }
+
+    fn handshake_capabilities(&self) -> Vec<&'static str> {
+        let Some(config) = &self.config else {
+            return vec!["kubernetes.read", "kubernetes.secrets"];
+        };
+
+        let mut capabilities = vec!["kubernetes.read", "kubernetes.secrets"];
+        if config.policy.allow_write_operations {
+            capabilities.push("kubernetes.write");
+        }
+        if config.policy.allow_write_operations || config.policy.allow_pod_exec {
+            capabilities.push("kubernetes.admin");
+        }
+        capabilities
+    }
+
+    fn authorize_operation(
+        &self,
+        operation: &str,
+        input: &serde_json::Value,
+    ) -> Result<(), KubernetesError> {
+        let Some(config) = &self.config else {
+            return Ok(());
+        };
+
+        if let Some(namespace) = input.get("namespace").and_then(serde_json::Value::as_str) {
+            config
+                .policy
+                .enforce_namespace_scope(namespace, operation)?;
+        }
+
+        match OperationCategory::classify(operation) {
+            Some(OperationCategory::Exec) if !config.policy.allow_pod_exec => {
+                Err(KubernetesError::PolicyDenied(
+                    "kubernetes.exec is disabled until configure sets allow_pod_exec=true".into(),
+                ))
+            }
+            Some(
+                OperationCategory::Write | OperationCategory::Deploy | OperationCategory::Delete,
+            ) if !config.policy.allow_write_operations => Err(KubernetesError::PolicyDenied(
+                format!("{operation} is disabled until configure sets allow_write_operations=true"),
+            )),
+            Some(OperationCategory::Secret)
+                if is_secret_mutation(operation) && !config.policy.allow_write_operations =>
+            {
+                Err(KubernetesError::PolicyDenied(format!(
+                    "{operation} is disabled until configure sets allow_write_operations=true"
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    async fn validate_exec_request(
+        &self,
+        client: &KubernetesClient,
+        namespace: &str,
+        name: &str,
+        container: Option<&str>,
+        command: &[String],
+    ) -> Result<(), KubernetesError> {
+        let Some(config) = &self.config else {
+            return Ok(());
+        };
+        let policy = &config.policy;
+
+        if is_system_namespace(namespace) && !policy.allow_exec_into_system_namespaces {
+            return Err(KubernetesError::PolicyDenied(format!(
+                "kubernetes.exec is blocked in system namespace '{namespace}'"
+            )));
+        }
+
+        if command_uses_shell(command) && !policy.allow_shell_exec {
+            return Err(KubernetesError::PolicyDenied(
+                "kubernetes.exec refuses shell trampolines until configure sets allow_shell_exec=true"
+                    .into(),
+            ));
+        }
+
+        let pod = client.get_pod(namespace, name).await?;
+        validate_exec_target_pod(&pod, container)?;
+
+        if !policy.allow_untrusted_exec_targets {
+            enforce_exec_target_labels(&pod, &policy.exec_required_pod_labels)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -1140,6 +1335,458 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         .get(field)
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| KubernetesError::InvalidInput(format!("Missing required field: {field}")))
+}
+
+fn parse_string_set(
+    params: &serde_json::Value,
+    field: &str,
+) -> FcpResult<Option<BTreeSet<String>>> {
+    let Some(raw) = params.get(field) else {
+        return Ok(None);
+    };
+    let values = raw.as_array().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be an array of namespace strings"),
+    })?;
+
+    let mut parsed = BTreeSet::new();
+    for (idx, value) in values.iter().enumerate() {
+        let namespace = value.as_str().ok_or_else(|| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field}[{idx}] must be a string"),
+        })?;
+        let namespace = namespace.trim();
+        if namespace.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("{field}[{idx}] must not be empty"),
+            });
+        }
+        parsed.insert(namespace.to_string());
+    }
+
+    if parsed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must contain at least one namespace"),
+        });
+    }
+
+    Ok(Some(parsed))
+}
+
+fn parse_string_map(
+    params: &serde_json::Value,
+    field: &str,
+) -> FcpResult<Option<BTreeMap<String, String>>> {
+    let Some(raw) = params.get(field) else {
+        return Ok(None);
+    };
+    let values = raw.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be an object of string:string label pairs"),
+    })?;
+
+    let mut parsed = BTreeMap::new();
+    for (key, value) in values {
+        let trimmed_key = key.trim();
+        let parsed_value = value.as_str().ok_or_else(|| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field}.{key} must be a string"),
+        })?;
+        let trimmed_value = parsed_value.trim();
+        if trimmed_key.is_empty() || trimmed_value.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("{field} keys and values must not be empty"),
+            });
+        }
+        parsed.insert(trimmed_key.to_string(), trimmed_value.to_string());
+    }
+
+    Ok(Some(parsed))
+}
+
+fn default_exec_required_labels() -> BTreeMap<String, String> {
+    BTreeMap::from([(
+        "fcp.flywheel.ai/exec-approved".to_string(),
+        "true".to_string(),
+    )])
+}
+
+fn join_namespaces(namespaces: &BTreeSet<String>) -> String {
+    namespaces.iter().cloned().collect::<Vec<_>>().join(",")
+}
+
+const fn is_secret_mutation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "kubernetes.secret.create" | "kubernetes.secret.delete"
+    )
+}
+
+const fn is_system_namespace(namespace: &str) -> bool {
+    matches!(namespace, "kube-system" | "kube-public" | "kube-node-lease")
+}
+
+fn command_uses_shell(command: &[String]) -> bool {
+    if command.is_empty() {
+        return false;
+    }
+
+    let first = command_binary_name(&command[0]);
+    if is_shell_binary(first) {
+        return true;
+    }
+
+    first == "env" && command.len() > 1 && is_shell_binary(command_binary_name(&command[1]))
+}
+
+fn command_binary_name(binary: &str) -> &str {
+    binary.rsplit('/').next().unwrap_or(binary)
+}
+
+const fn is_shell_binary(binary: &str) -> bool {
+    matches!(
+        binary,
+        "sh" | "bash"
+            | "dash"
+            | "ash"
+            | "zsh"
+            | "ksh"
+            | "fish"
+            | "python"
+            | "python3"
+            | "perl"
+            | "ruby"
+            | "node"
+            | "cmd"
+            | "powershell"
+            | "pwsh"
+    )
+}
+
+fn validate_deployment_spec(spec: &serde_json::Value) -> Result<(), KubernetesError> {
+    let template_spec = spec.pointer("/template/spec").ok_or_else(|| {
+        KubernetesError::InvalidInput("deployment spec.template.spec is required".into())
+    })?;
+    validate_pod_spec(template_spec, "deployment spec.template.spec")
+}
+
+fn validate_template_spec(
+    template: &serde_json::Value,
+    context: &str,
+) -> Result<(), KubernetesError> {
+    let pod_spec = template
+        .get("spec")
+        .ok_or_else(|| KubernetesError::InvalidInput(format!("{context}.spec is required")))?;
+    validate_pod_spec(pod_spec, &format!("{context}.spec"))
+}
+
+fn validate_pod_spec(spec: &serde_json::Value, context: &str) -> Result<(), KubernetesError> {
+    let spec_obj = spec
+        .as_object()
+        .ok_or_else(|| KubernetesError::InvalidInput(format!("{context} must be an object")))?;
+
+    for field in ["hostNetwork", "hostPID", "hostIPC", "shareProcessNamespace"] {
+        if spec_obj
+            .get(field)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(KubernetesError::InvalidInput(format!(
+                "{context}.{field} must not be enabled"
+            )));
+        }
+    }
+
+    for field in ["serviceAccountName", "serviceAccount", "nodeName"] {
+        if spec_obj
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return Err(KubernetesError::InvalidInput(format!(
+                "{context}.{field} must not be set"
+            )));
+        }
+    }
+
+    if spec_obj
+        .get("automountServiceAccountToken")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(KubernetesError::InvalidInput(format!(
+            "{context}.automountServiceAccountToken must not be true"
+        )));
+    }
+
+    if let Some(volumes) = spec_obj
+        .get("volumes")
+        .and_then(serde_json::Value::as_array)
+    {
+        for (idx, volume) in volumes.iter().enumerate() {
+            if volume.get("hostPath").is_some() {
+                return Err(KubernetesError::InvalidInput(format!(
+                    "{context}.volumes[{idx}].hostPath is forbidden"
+                )));
+            }
+            if volume
+                .pointer("/projected/sources")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|sources| {
+                    sources
+                        .iter()
+                        .any(|source| source.get("serviceAccountToken").is_some())
+                })
+            {
+                return Err(KubernetesError::InvalidInput(format!(
+                    "{context}.volumes[{idx}] must not project serviceAccountToken"
+                )));
+            }
+        }
+    }
+
+    validate_container_group(spec_obj.get("containers"), context, "containers")?;
+    validate_container_group(spec_obj.get("initContainers"), context, "initContainers")?;
+
+    Ok(())
+}
+
+fn validate_container_group(
+    group: Option<&serde_json::Value>,
+    context: &str,
+    field: &str,
+) -> Result<(), KubernetesError> {
+    let Some(group) = group else {
+        if field == "containers" {
+            return Err(KubernetesError::InvalidInput(format!(
+                "{context}.containers must contain at least one container"
+            )));
+        }
+        return Ok(());
+    };
+
+    let containers = group.as_array().ok_or_else(|| {
+        KubernetesError::InvalidInput(format!("{context}.{field} must be an array"))
+    })?;
+    if field == "containers" && containers.is_empty() {
+        return Err(KubernetesError::InvalidInput(format!(
+            "{context}.containers must contain at least one container"
+        )));
+    }
+
+    for (idx, container) in containers.iter().enumerate() {
+        validate_container_spec(container, context, field, idx)?;
+    }
+    Ok(())
+}
+
+fn validate_container_spec(
+    container: &serde_json::Value,
+    context: &str,
+    field: &str,
+    idx: usize,
+) -> Result<(), KubernetesError> {
+    let container_obj = container.as_object().ok_or_else(|| {
+        KubernetesError::InvalidInput(format!("{context}.{field}[{idx}] must be an object"))
+    })?;
+    validate_named_image_field(container_obj, context, field, idx, "name")?;
+    validate_named_image_field(container_obj, context, field, idx, "image")?;
+
+    if let Some(ports) = container_obj
+        .get("ports")
+        .and_then(serde_json::Value::as_array)
+    {
+        for (port_idx, port) in ports.iter().enumerate() {
+            if port
+                .get("hostPort")
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+            {
+                return Err(KubernetesError::InvalidInput(format!(
+                    "{context}.{field}[{idx}].ports[{port_idx}].hostPort is forbidden"
+                )));
+            }
+        }
+    }
+
+    if let Some(security_context) = container_obj.get("securityContext") {
+        if security_context
+            .get("privileged")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(KubernetesError::InvalidInput(format!(
+                "{context}.{field}[{idx}].securityContext.privileged must not be true"
+            )));
+        }
+        if security_context
+            .get("allowPrivilegeEscalation")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(KubernetesError::InvalidInput(format!(
+                "{context}.{field}[{idx}].securityContext.allowPrivilegeEscalation must not be true"
+            )));
+        }
+        if security_context
+            .pointer("/capabilities/add")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|caps| !caps.is_empty())
+        {
+            return Err(KubernetesError::InvalidInput(format!(
+                "{context}.{field}[{idx}].securityContext.capabilities.add must be empty"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_named_image_field(
+    container: &serde_json::Map<String, serde_json::Value>,
+    context: &str,
+    field: &str,
+    idx: usize,
+    target_field: &str,
+) -> Result<(), KubernetesError> {
+    if container
+        .get(target_field)
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Ok(());
+    }
+
+    Err(KubernetesError::InvalidInput(format!(
+        "{context}.{field}[{idx}].{target_field} must be a non-empty string"
+    )))
+}
+
+fn validate_exec_target_pod(
+    pod: &serde_json::Value,
+    container: Option<&str>,
+) -> Result<(), KubernetesError> {
+    let Some(spec_obj) = pod.get("spec").and_then(serde_json::Value::as_object) else {
+        return Err(KubernetesError::PolicyDenied(
+            "kubernetes.exec target pod did not include a pod spec".into(),
+        ));
+    };
+
+    for field in ["hostNetwork", "hostPID", "hostIPC"] {
+        if spec_obj
+            .get(field)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return Err(KubernetesError::PolicyDenied(format!(
+                "kubernetes.exec refuses target pods with {field}=true"
+            )));
+        }
+    }
+
+    if let Some(volumes) = spec_obj
+        .get("volumes")
+        .and_then(serde_json::Value::as_array)
+    {
+        for volume in volumes {
+            if volume.get("hostPath").is_some() {
+                return Err(KubernetesError::PolicyDenied(
+                    "kubernetes.exec refuses target pods mounting hostPath".into(),
+                ));
+            }
+        }
+    }
+
+    let containers = spec_obj
+        .get("containers")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            KubernetesError::PolicyDenied(
+                "kubernetes.exec target pod must include at least one container".into(),
+            )
+        })?;
+    if containers.is_empty() {
+        return Err(KubernetesError::PolicyDenied(
+            "kubernetes.exec target pod must include at least one container".into(),
+        ));
+    }
+
+    for (idx, pod_container) in containers.iter().enumerate() {
+        if let Some(security_context) = pod_container.get("securityContext") {
+            if security_context
+                .get("privileged")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Err(KubernetesError::PolicyDenied(format!(
+                    "kubernetes.exec refuses target container[{idx}] because it is privileged"
+                )));
+            }
+            if security_context
+                .get("allowPrivilegeEscalation")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Err(KubernetesError::PolicyDenied(format!(
+                    "kubernetes.exec refuses target container[{idx}] because allowPrivilegeEscalation=true"
+                )));
+            }
+        }
+    }
+
+    if let Some(container_name) = container {
+        if !containers.iter().any(|candidate| {
+            candidate
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| value == container_name)
+        }) {
+            return Err(KubernetesError::PolicyDenied(format!(
+                "kubernetes.exec target pod does not have container '{container_name}'"
+            )));
+        }
+    } else if containers.len() > 1 {
+        return Err(KubernetesError::PolicyDenied(
+            "kubernetes.exec requires an explicit container for multi-container pods".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn enforce_exec_target_labels(
+    pod: &serde_json::Value,
+    required_labels: &BTreeMap<String, String>,
+) -> Result<(), KubernetesError> {
+    let labels = pod
+        .pointer("/metadata/labels")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            KubernetesError::PolicyDenied(
+                "kubernetes.exec target pod is missing metadata.labels".into(),
+            )
+        })?;
+
+    for (key, expected) in required_labels {
+        let actual = labels
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                KubernetesError::PolicyDenied(format!(
+                    "kubernetes.exec target pod is missing required label '{key}={expected}'"
+                ))
+            })?;
+        if actual != expected {
+            return Err(KubernetesError::PolicyDenied(format!(
+                "kubernetes.exec target pod label '{key}' must equal '{expected}', got '{actual}'"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 /// Human-readable type name for a JSON value (used in error messages).
@@ -2296,10 +2943,47 @@ fn op_info(
         risk_level,
         description: None,
         rate_limit: None,
-        requires_approval: None,
+        requires_approval: approval_for_operation(id),
         safety_tier,
         idempotency,
         ai_hints,
+    }
+}
+
+const fn approval_for_operation(operation_id: &str) -> Option<ApprovalMode> {
+    match operation_id {
+        "kubernetes.delete_pod"
+        | "kubernetes.create_pod"
+        | "kubernetes.apply_deployment"
+        | "kubernetes.delete_deployment"
+        | "kubernetes.get_secret"
+        | "kubernetes.rollout_restart"
+        | "kubernetes.scale_deployment"
+        | "kubernetes.exec"
+        | "kubernetes.configmap.create"
+        | "kubernetes.configmap.update"
+        | "kubernetes.configmap.delete"
+        | "kubernetes.secret.get"
+        | "kubernetes.secret.create"
+        | "kubernetes.secret.delete"
+        | "kubernetes.rollout.rollback" => Some(ApprovalMode::Interactive),
+        "kubernetes.update_configmap" => Some(ApprovalMode::Policy),
+        "kubernetes.list_services"
+        | "kubernetes.get_configmap"
+        | "kubernetes.get_deployment"
+        | "kubernetes.get_pod"
+        | "kubernetes.get_pod_logs"
+        | "kubernetes.get_service"
+        | "kubernetes.list_deployments"
+        | "kubernetes.list_pods"
+        | "kubernetes.stream_pod_logs"
+        | "kubernetes.watch_events"
+        | "kubernetes.configmap.list"
+        | "kubernetes.configmap.get"
+        | "kubernetes.secret.list"
+        | "kubernetes.rollout.status"
+        | "kubernetes.rollout.history" => Some(ApprovalMode::None),
+        _ => None,
     }
 }
 
@@ -2369,6 +3053,52 @@ mod tests {
     }
 
     #[test]
+    fn config_rejects_write_enable_without_namespace_scope() {
+        assert!(
+            KubernetesConfig::from_params(&json!({
+                "bearer_token": "tok",
+                "allow_write_operations": true
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn config_rejects_exec_enable_without_namespace_scope() {
+        assert!(
+            KubernetesConfig::from_params(&json!({
+                "bearer_token": "tok",
+                "allow_pod_exec": true
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn config_accepts_namespace_scope_for_write_and_exec() {
+        let config = KubernetesConfig::from_params(&json!({
+            "bearer_token": "tok",
+            "allow_write_operations": true,
+            "allow_pod_exec": true,
+            "allowed_namespaces": ["default", "production"]
+        }))
+        .unwrap();
+        assert!(config.policy.allow_write_operations);
+        assert!(config.policy.allow_pod_exec);
+        assert_eq!(
+            config
+                .policy
+                .allowed_namespaces
+                .as_ref()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["default".to_string(), "production".to_string()]
+        );
+    }
+
+    #[test]
     fn config_trims_bearer_token() {
         let config =
             KubernetesConfig::from_params(&json!({"bearer_token": "  my-token  "})).unwrap();
@@ -2409,6 +3139,38 @@ mod tests {
     #[test]
     fn operations_info_has_31_operations() {
         assert_eq!(operations_info().len(), 31);
+    }
+
+    #[test]
+    fn dangerous_operations_expose_approval_modes() {
+        let ops = operations_info();
+        let create_pod = ops
+            .iter()
+            .find(|op| op.id.as_ref() == "kubernetes.create_pod")
+            .unwrap();
+        let exec = ops
+            .iter()
+            .find(|op| op.id.as_ref() == "kubernetes.exec")
+            .unwrap();
+        let update_configmap = ops
+            .iter()
+            .find(|op| op.id.as_ref() == "kubernetes.update_configmap")
+            .unwrap();
+        let list_pods = ops
+            .iter()
+            .find(|op| op.id.as_ref() == "kubernetes.list_pods")
+            .unwrap();
+
+        assert_eq!(
+            create_pod.requires_approval,
+            Some(ApprovalMode::Interactive)
+        );
+        assert_eq!(exec.requires_approval, Some(ApprovalMode::Interactive));
+        assert_eq!(
+            update_configmap.requires_approval,
+            Some(ApprovalMode::Policy)
+        );
+        assert_eq!(list_pods.requires_approval, Some(ApprovalMode::None));
     }
 
     #[test]

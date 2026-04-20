@@ -829,6 +829,14 @@ impl Sandbox for LinuxSandbox {
         "linux"
     }
 
+    fn filter_strength(&self) -> crate::sandbox::FilterStrength {
+        // Linux installs a seccomp-bpf filter with SECCOMP_RET_KILL_PROCESS as
+        // the terminator and an arch-validated allowlist; every syscall that
+        // isn't explicitly allowed terminates the process at the kernel trap
+        // boundary. That matches SyscallLevel semantics in FilterStrength.
+        crate::sandbox::FilterStrength::SyscallLevel
+    }
+
     fn verify_file_access(
         &self,
         policy: &CompiledPolicy,

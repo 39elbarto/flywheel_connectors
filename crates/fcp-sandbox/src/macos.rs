@@ -18,6 +18,21 @@
 //! - Once applied, restrictions cannot be relaxed
 //! - Some system resources require specific entitlements
 //! - Network filtering is coarse-grained (allow/deny per protocol)
+//!
+//! # Parity with Linux seccomp
+//!
+//! `sandbox_init` enforces SBPL rules at the Mach/BSD API layer, not at
+//! each individual syscall. This implementation reports
+//! [`FilterStrength::ProfileLevel`](crate::FilterStrength::ProfileLevel)
+//! — strictly coarser than Linux's `SyscallLevel` seccomp-bpf filter. A
+//! native code path the profile doesn't explicitly name can still reach
+//! the kernel. `RLIMIT_NPROC` is also deliberately not set even when
+//! `deny_exec` is true: on macOS, NPTL threads count as processes, so
+//! clamping `NPROC` to 0 would starve the async runtime. `deny_exec` is
+//! therefore enforced entirely through the SBPL `(deny process-exec)`
+//! rule — if that rule is ever elided during profile generation, no
+//! second line of defense catches it. Cross-platform parity is tracked
+//! in bead `flywheel_connectors-459lp`.
 
 #![cfg(target_os = "macos")]
 
@@ -408,6 +423,17 @@ impl Sandbox for MacOsSandbox {
 
     fn platform_name(&self) -> &'static str {
         "macos"
+    }
+
+    fn filter_strength(&self) -> crate::sandbox::FilterStrength {
+        // sandbox_init enforces SBPL `(deny process-exec)` /
+        // `(deny file-read*)` / `(deny network*)` at the Mach/BSD API layer
+        // rather than at individual syscalls. A native code path that the
+        // profile does not explicitly name may still reach the kernel, and
+        // RLIMIT_NPROC is deliberately not used here (it counts threads as
+        // processes and would crash the async runtime). That's strictly
+        // coarser than Linux seccomp-bpf — ProfileLevel in FilterStrength.
+        crate::sandbox::FilterStrength::ProfileLevel
     }
 
     fn verify_file_access(

@@ -302,6 +302,126 @@ fn is_manifest_absolute_path(path: &str) -> bool {
 }
 
 // ============================================================================
+// Filter Strength (cross-platform parity metric)
+// ============================================================================
+
+/// Precision of the sandbox's enforcement boundary (NORMATIVE — cross-platform parity).
+///
+/// This is a coarse-grained classifier of "how narrow an attack surface does
+/// this platform's sandbox actually filter?". Higher discriminant values
+/// indicate stronger filtering. Use via `>=` comparison.
+///
+/// The three levels correspond to concrete mechanisms in the tree:
+///
+/// | Level            | Platform | Mechanism                                        |
+/// |------------------|----------|--------------------------------------------------|
+/// | `SyscallLevel`   | Linux    | seccomp-bpf with `SECCOMP_RET_KILL_PROCESS`      |
+/// | `ProfileLevel`   | macOS    | `sandbox_init` / SBPL `(deny ...)` rules          |
+/// | `ProcessLimit`   | Windows  | Job Object `ActiveProcessLimit` + memory limits  |
+///
+/// # Why this distinction matters
+///
+/// - **`SyscallLevel`** filters every syscall individually at the kernel
+///   trap boundary. A hostile connector that discovers an unknown native
+///   code path is still stopped at `int 0x80` / `syscall` because the
+///   seccomp allowlist enumerates the kernel ABI, not a set of named
+///   operations. `SECCOMP_RET_KILL_PROCESS` terminates the process
+///   synchronously on any disallowed syscall.
+///
+/// - **`ProfileLevel`** filters *named* operations at the Mach/BSD API
+///   layer (`process-exec`, `file-read*`, `network*`, etc.). Apple's
+///   sandbox is enforced in-kernel, but the granularity is the operation
+///   name the profile declares — not the underlying syscall. A previously
+///   unknown native-API path or a syscall the profile does not explicitly
+///   name may still reach the kernel. macOS is therefore strictly coarser
+///   than Linux seccomp even though both are kernel-enforced.
+///
+/// - **`ProcessLimit`** does no per-operation filtering at all. Windows
+///   job objects constrain *resource consumption* (process count, memory,
+///   CPU time) but never inspect syscalls or API names. A connector that
+///   stays inside its budget can invoke any Win32/NT API the process
+///   integrity level allows. Any API-level denial that Linux seccomp or
+///   macOS SBPL catches today is, on Windows, relying entirely on the
+///   connector honoring the `deny_exec`/`deny_ptrace` contract in its
+///   own code plus `ActiveProcessLimit = 1` catching `CreateProcess`.
+///
+/// # Parity gap (bead 459lp)
+///
+/// FCP's strict profile specifies kernel-enforced syscall-level filtering.
+/// Today only Linux reaches `SyscallLevel`; macOS lands at `ProfileLevel`
+/// and Windows at `ProcessLimit`. Strict-profile connectors that require
+/// the full guarantee MUST run under [`WasiRuntime`](crate::WasiRuntime),
+/// which never leaves the host process and so is unaffected by this gap.
+///
+/// [`WasiRuntime`]: crate::WasiRuntime
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum FilterStrength {
+    /// Coarsest: only process and resource limits are enforced.
+    ///
+    /// Windows job objects live here. The sandbox can stop `deny_exec`
+    /// via `ActiveProcessLimit = 1` and enforce memory/CPU ceilings, but
+    /// it does not filter syscalls or named operations. Any native API
+    /// the process integrity level permits is reachable.
+    ProcessLimit = 0,
+
+    /// Intermediate: named operations are denied at the OS API layer,
+    /// but individual syscalls are not filtered.
+    ///
+    /// macOS `sandbox_init` with SBPL `(deny process-exec)` /
+    /// `(deny file-read*)` / `(deny network*)` lives here. Enforcement is
+    /// kernel-backed but operates on a named-operation vocabulary, so a
+    /// syscall path not covered by a `(deny ...)` rule can still reach
+    /// the kernel. Thread-as-process accounting also forces us to skip
+    /// `RLIMIT_NPROC = 0` here (it would starve any async runtime),
+    /// leaving the SBPL profile as the sole `deny_exec` enforcement.
+    ProfileLevel = 1,
+
+    /// Strongest: every syscall is individually filtered at the kernel
+    /// trap boundary; denied syscalls terminate the process.
+    ///
+    /// Linux seccomp-bpf with `SECCOMP_RET_KILL_PROCESS` and an
+    /// architecture-validated allowlist lives here. This is the only
+    /// level that meets the strict-profile "no unknown syscall reaches
+    /// the kernel" guarantee.
+    SyscallLevel = 2,
+}
+
+impl FilterStrength {
+    /// Stable string identifier (for audit logs and decision receipts).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ProcessLimit => "process_limit",
+            Self::ProfileLevel => "profile_level",
+            Self::SyscallLevel => "syscall_level",
+        }
+    }
+
+    /// The expected filter strength for a given target OS identifier
+    /// (matches `std::env::consts::OS` values).
+    ///
+    /// Tests use this to assert that the current platform's `Sandbox`
+    /// impl returns exactly the parity level documented here — guarding
+    /// against silent regressions (e.g., Windows gaining a weaker
+    /// mechanism that still claims a higher level, or macOS's profile
+    /// being downgraded during a refactor).
+    #[must_use]
+    pub fn expected_for_target_os(os: &str) -> Option<Self> {
+        // Intentionally exhaustive match on the documented targets. New
+        // host targets added without a parity review will return None,
+        // forcing the test to fail loudly rather than default-allow.
+        match os {
+            "linux" => Some(Self::SyscallLevel),
+            "macos" => Some(Self::ProfileLevel),
+            "windows" => Some(Self::ProcessLimit),
+            _ => None,
+        }
+    }
+}
+
+// ============================================================================
 // Sandbox Trait
 // ============================================================================
 
@@ -310,6 +430,19 @@ fn is_manifest_absolute_path(path: &str) -> bool {
 /// Each platform provides its own implementation that translates the
 /// `CompiledPolicy` into native enforcement mechanisms.
 pub trait Sandbox: Send + Sync {
+    /// Report the precision of this sandbox's enforcement mechanism.
+    ///
+    /// See [`FilterStrength`] for the levels and their meaning. The default
+    /// implementation returns the weakest level ([`FilterStrength::ProcessLimit`])
+    /// so that any new [`Sandbox`] impl that forgets to override this method
+    /// is classified as coarse-grained by default — a conservative choice
+    /// that prevents the parity assertion from silently treating a weaker
+    /// sandbox as stronger than it is.
+    fn filter_strength(&self) -> FilterStrength {
+        FilterStrength::ProcessLimit
+    }
+
+
     /// Apply the sandbox to the current process.
     ///
     /// This should be called early in the connector's startup, before any
@@ -1503,5 +1636,160 @@ mod tests {
         assert!(sandbox.verify_exec_allowed(&policy).is_err());
         assert!(sandbox.verify_network_blocked(&policy).is_ok());
         assert!(sandbox.apply(&policy).is_ok());
+    }
+
+    // ── FilterStrength parity matrix (bead 459lp) ─────────────────────────
+    //
+    // These tests lock in the cross-platform filter-coarseness contract
+    // documented on [`FilterStrength`]. The matrix is intentionally
+    // explicit: if a platform's backing mechanism changes (AppContainer
+    // lands on Windows, macOS tightens its SBPL, Linux drops seccomp,
+    // etc.) we want the failure to show up as a test regression rather
+    // than a silent guarantee change. Update the matrix *and* the
+    // [`FilterStrength::expected_for_target_os`] table together.
+
+    #[test]
+    fn filter_strength_ordering_strongest_last() {
+        // SyscallLevel > ProfileLevel > ProcessLimit. Comparisons use
+        // PartialOrd, so trait consumers can assert
+        // `sandbox.filter_strength() >= required_level`.
+        assert!(FilterStrength::SyscallLevel > FilterStrength::ProfileLevel);
+        assert!(FilterStrength::ProfileLevel > FilterStrength::ProcessLimit);
+        assert!(FilterStrength::SyscallLevel > FilterStrength::ProcessLimit);
+    }
+
+    #[test]
+    fn filter_strength_expected_matrix() {
+        // Documented parity table. These asserts are the source of truth
+        // paired with the table in the FilterStrength rustdoc.
+        assert_eq!(
+            FilterStrength::expected_for_target_os("linux"),
+            Some(FilterStrength::SyscallLevel),
+        );
+        assert_eq!(
+            FilterStrength::expected_for_target_os("macos"),
+            Some(FilterStrength::ProfileLevel),
+        );
+        assert_eq!(
+            FilterStrength::expected_for_target_os("windows"),
+            Some(FilterStrength::ProcessLimit),
+        );
+        // Unknown targets MUST NOT default-allow to any strength;
+        // returning None forces a deliberate parity review.
+        assert_eq!(
+            FilterStrength::expected_for_target_os("freebsd"),
+            None,
+            "new host targets must be reviewed before claiming a strength tier",
+        );
+    }
+
+    #[test]
+    fn filter_strength_default_is_conservative() {
+        // Any Sandbox impl that forgets to override filter_strength gets
+        // ProcessLimit (the weakest level). The NoOpSandbox doesn't
+        // override it, so this test also doubles as a guard on the
+        // trait default.
+        struct MinimalSandbox;
+        impl Sandbox for MinimalSandbox {
+            fn apply(&self, _p: &CompiledPolicy) -> Result<(), SandboxError> {
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn platform_name(&self) -> &'static str {
+                "minimal"
+            }
+            fn verify_file_access(
+                &self,
+                _p: &CompiledPolicy,
+                _path: &std::path::Path,
+                _w: bool,
+            ) -> Result<(), SandboxError> {
+                Ok(())
+            }
+            fn verify_exec_allowed(&self, _p: &CompiledPolicy) -> Result<(), SandboxError> {
+                Ok(())
+            }
+            fn verify_network_blocked(&self, _p: &CompiledPolicy) -> Result<(), SandboxError> {
+                Ok(())
+            }
+        }
+        assert_eq!(
+            MinimalSandbox.filter_strength(),
+            FilterStrength::ProcessLimit,
+        );
+        assert_eq!(NoOpSandbox.filter_strength(), FilterStrength::ProcessLimit);
+    }
+
+    #[test]
+    fn filter_strength_as_str_stable_snake_case() {
+        // These identifiers are emitted into audit trails — freezing
+        // them here stops drive-by rename refactors from breaking
+        // downstream log consumers.
+        assert_eq!(FilterStrength::ProcessLimit.as_str(), "process_limit");
+        assert_eq!(FilterStrength::ProfileLevel.as_str(), "profile_level");
+        assert_eq!(FilterStrength::SyscallLevel.as_str(), "syscall_level");
+    }
+
+    /// Assert that the active host sandbox reports exactly the
+    /// documented filter strength for this target OS.
+    ///
+    /// Compiled once per host target, so the workspace test matrix
+    /// naturally ends up with one assertion per (OS, arch) pair — the
+    /// "platform-matrix" coverage the parity bead asks for.
+    #[test]
+    fn host_sandbox_matches_documented_filter_strength() {
+        let Some(expected) = FilterStrength::expected_for_target_os(std::env::consts::OS) else {
+            // Running on a host we haven't reviewed for sandbox parity
+            // (e.g., freebsd, solaris). create_sandbox() will fail; we
+            // just record that no strength contract applies.
+            return;
+        };
+
+        let sandbox = match create_sandbox() {
+            Ok(s) => s,
+            Err(SandboxError::UnsupportedPlatform(_)) => {
+                // Same guard as above, but via the runtime path.
+                return;
+            }
+            Err(other) => panic!("create_sandbox() failed unexpectedly: {other}"),
+        };
+
+        assert_eq!(
+            sandbox.filter_strength(),
+            expected,
+            "host sandbox on {} must report FilterStrength::{:?} per the parity matrix; \
+             got {:?}. If you intentionally changed the backing mechanism, update \
+             both FilterStrength::expected_for_target_os and the rustdoc table.",
+            std::env::consts::OS,
+            expected,
+            sandbox.filter_strength(),
+        );
+    }
+
+    // Per-platform compile-gated assertions. These give each CI leg
+    // (linux, macos, windows) a concrete failure site when only that
+    // platform's parity contract regresses.
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn platform_matrix_linux_is_syscall_level() {
+        let sandbox = crate::linux::LinuxSandbox::new();
+        assert_eq!(sandbox.filter_strength(), FilterStrength::SyscallLevel);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn platform_matrix_macos_is_profile_level() {
+        let sandbox = crate::macos::MacOsSandbox::new();
+        assert_eq!(sandbox.filter_strength(), FilterStrength::ProfileLevel);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn platform_matrix_windows_is_process_limit() {
+        let sandbox = crate::windows::WindowsSandbox::new();
+        assert_eq!(sandbox.filter_strength(), FilterStrength::ProcessLimit);
     }
 }

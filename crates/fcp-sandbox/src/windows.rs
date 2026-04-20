@@ -2,10 +2,29 @@
 //!
 //! # Enforcement Layers
 //!
-//! 1. **AppContainer**: Low-integrity process isolation with capability-based access
-//! 2. **Job Objects**: Resource limits (memory, CPU, process count)
-//! 3. **Integrity Levels**: Restrict write access to higher-integrity objects
-//! 4. **Firewall Rules**: Network isolation (loopback only for Network Guard IPC)
+//! 1. **AppContainer** (roadmap, not yet wired): Low-integrity process
+//!    isolation with capability-based access
+//! 2. **Job Objects**: Resource limits (memory, CPU, process count) — the
+//!    only mechanism active today
+//! 3. **Integrity Levels** (roadmap): Restrict write access to
+//!    higher-integrity objects
+//! 4. **Firewall Rules** (roadmap): Network isolation (loopback only for
+//!    Network Guard IPC)
+//!
+//! # Parity with Linux and macOS
+//!
+//! The Windows implementation reports
+//! [`FilterStrength::ProcessLimit`](crate::FilterStrength::ProcessLimit),
+//! which is the coarsest tier. No syscall filter (Linux seccomp-bpf) and
+//! no named-operation profile (macOS SBPL) is in place. Enforcement is
+//! limited to the job object's `ActiveProcessLimit`, `JobMemoryLimit`,
+//! and `PerProcessUserTimeLimit`. A connector that stays inside those
+//! budgets can invoke any Win32/NT API the process integrity level
+//! allows. Connectors requiring the full strict-profile guarantee MUST
+//! run under [`WasiRuntime`](crate::WasiRuntime) (no host syscalls
+//! reach the kernel from WASI guests). Tightening this to
+//! `ProfileLevel` via AppContainer / integrity-level enforcement is
+//! tracked in bead `flywheel_connectors-459lp`.
 //!
 //! # AppContainer
 //!
@@ -358,6 +377,18 @@ impl Sandbox for WindowsSandbox {
 
     fn platform_name(&self) -> &'static str {
         "windows"
+    }
+
+    fn filter_strength(&self) -> crate::sandbox::FilterStrength {
+        // The current Windows sandbox backs enforcement entirely on job
+        // objects: ActiveProcessLimit/JobMemoryLimit/PerProcessUserTimeLimit
+        // plus KILL_ON_JOB_CLOSE. There is no syscall filter and no named-
+        // operation profile — a connector inside its CPU/memory budget can
+        // reach any Win32/NT API its integrity level permits. That puts
+        // Windows at the coarsest tier, ProcessLimit. (AppContainer or a
+        // WinSandbox integration would raise this to ProfileLevel; see
+        // bead 459lp for the parity roadmap.)
+        crate::sandbox::FilterStrength::ProcessLimit
     }
 
     fn verify_file_access(

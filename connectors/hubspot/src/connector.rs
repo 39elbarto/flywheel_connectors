@@ -101,6 +101,28 @@ fn validate_base_url_for_auth(base_url: &str, auth: &HubSpotAuth) -> FcpResult<S
         code: 1003,
         message: format!("base_url could not be parsed: {error}"),
     })?;
+    // Strip query/fragment/userinfo before scheme/host enforcement. The
+    // validator returns parsed.to_string() which preserves all of those
+    // components; HubSpotClient then concatenates via format!("{}{path}",
+    // self.base_url) in every request method. A base_url like
+    // `https://api.hubapi.com/?leak=x` would otherwise leak attacker-chosen
+    // query values on every request and place the endpoint path after the
+    // `?` boundary where it parses as part of the query. Userinfo
+    // (`https://attacker:pw@api.hubapi.com/`) would bake into every
+    // request URL and silently override the bearer token. Matches the
+    // hygiene already in airtable / notion / asana / gmail / whatsapp.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
     let canonical = parsed.to_string().trim_end_matches('/').to_string();
 
     match auth {
@@ -2240,6 +2262,68 @@ mod tests {
     fn config_rejects_whitespace_token() {
         let result = HubSpotConfig::from_params(&json!({ "access_token": "   " }));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_accepts_api_hubapi_com_with_token() {
+        let auth = HubSpotAuth::BearerToken("pat-na1-test".into());
+        let out = validate_base_url_for_auth("https://api.hubapi.com", &auth).unwrap();
+        assert_eq!(out, "https://api.hubapi.com");
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_query_string_with_token() {
+        let auth = HubSpotAuth::BearerToken("pat-na1-test".into());
+        let err =
+            validate_base_url_for_auth("https://api.hubapi.com/?leak=x", &auth).unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("query"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_fragment_with_token() {
+        let auth = HubSpotAuth::BearerToken("pat-na1-test".into());
+        let err =
+            validate_base_url_for_auth("https://api.hubapi.com/#frag", &auth).unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_userinfo_with_token() {
+        let auth = HubSpotAuth::BearerToken("pat-na1-test".into());
+        let err =
+            validate_base_url_for_auth("https://attacker:pw@api.hubapi.com/", &auth)
+                .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("userinfo"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_query_string_with_credential_id() {
+        let cid = CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let auth = HubSpotAuth::CredentialId(cid);
+        let err =
+            validate_base_url_for_auth("https://vault-proxy.example/?leak=x", &auth)
+                .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_substring_smuggle_with_token() {
+        // Path-based smuggle: host is evil.com, not api.hubapi.com, even
+        // though the full string contains "api.hubapi.com".
+        let auth = HubSpotAuth::BearerToken("pat-na1-test".into());
+        let err =
+            validate_base_url_for_auth("https://evil.com/api.hubapi.com/", &auth).unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
     #[test]

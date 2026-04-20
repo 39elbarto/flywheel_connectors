@@ -1369,18 +1369,60 @@ pub struct CapabilityVerifier {
     /// Zone this connector is bound to
     pub zone_id: ZoneId,
 
-    /// Instance ID for this connector
-    pub instance_id: InstanceId,
+    /// Instance ID for this connector.
+    ///
+    /// `Some(id)` means "enforce the instance-binding check: a token
+    /// that carries an `INSTANCE_ID` claim must match `id`, or be
+    /// rejected." `None` means "this verifier cannot enforce instance
+    /// binding — skip the check and defer enforcement to the connector
+    /// process itself" (br-flywheel_connectors-5qp7o).
+    ///
+    /// The `None` mode exists because an intermediate gateway (the
+    /// `fcp-host` bin) has no link from a capability token back to the
+    /// specific `SubprocessConnector` instance that will ultimately
+    /// execute the operation. Previously the gateway papered over
+    /// that gap by instantiating the verifier with a fresh random
+    /// `InstanceId` per request; the result was worst-of-both-worlds:
+    /// any token that DID declare `instance_id` was rejected (the
+    /// random UUID never matched), and any token that did NOT declare
+    /// `instance_id` passed without any instance enforcement. The
+    /// gateway now opts out of the check explicitly via
+    /// [`Self::without_instance_binding`], and instance-bound tokens
+    /// reach the connector where the check is meaningful.
+    pub instance_id: Option<InstanceId>,
 }
 
 impl CapabilityVerifier {
-    /// Create a new capability verifier.
+    /// Create a new capability verifier that enforces the instance-binding
+    /// check against the given `instance_id`.
     #[must_use]
     pub const fn new(host_public_key: [u8; 32], zone_id: ZoneId, instance_id: InstanceId) -> Self {
         Self {
             host_public_key,
             zone_id,
-            instance_id,
+            instance_id: Some(instance_id),
+        }
+    }
+
+    /// Create a verifier that does NOT enforce the instance-binding check.
+    ///
+    /// Use this when the verifier's vantage point cannot know the
+    /// connector's real `InstanceId` — typically the `fcp-host` gateway,
+    /// which sits between the client and the subprocess connector and
+    /// doesn't capture the connector-chosen instance id at handshake
+    /// time. A downstream enforcement point (the connector itself) is
+    /// responsible for re-verifying the token with the correct
+    /// `InstanceId`.
+    ///
+    /// Construction sites that DO know the instance id (connector
+    /// runtime, in-process integration tests) must keep using
+    /// [`Self::new`] so the check stays active (br-5qp7o).
+    #[must_use]
+    pub const fn without_instance_binding(host_public_key: [u8; 32], zone_id: ZoneId) -> Self {
+        Self {
+            host_public_key,
+            zone_id,
+            instance_id: None,
         }
     }
 
@@ -1502,21 +1544,33 @@ impl CapabilityVerifier {
         // sibling zone check (lines above) already gets this right via
         // `claims.get_zone_id()`, which filters to Text and returns None
         // otherwise — keep instance binding consistent.
+        //
+        // When the verifier itself has no instance id
+        // (`without_instance_binding`), the binding check is skipped —
+        // the verifier is declaring "I can't check this, defer to
+        // downstream." Malformed (non-Text) claims are STILL rejected
+        // even in that mode, because a malformed claim is a parser-level
+        // violation independent of whether we're enforcing the match
+        // (br-flywheel_connectors-5qp7o).
         if let Some(inst_val) = claims.get(fcp2_claims::INSTANCE_ID) {
             let inst_str = inst_val.as_text().ok_or_else(|| FcpError::MissingField {
                 field: "instance_id (must be CBOR text)".into(),
             })?;
-            if inst_str != self.instance_id.as_str() {
-                return Err(FcpError::ZoneViolation {
-                    source_zone: self.zone_id.0.to_string(),
-                    target_zone: self.zone_id.0.to_string(),
-                    message: format!(
-                        "Token instance mismatch: expected {}, got {}",
-                        self.instance_id.as_str(),
-                        inst_str
-                    ),
-                });
+            if let Some(expected) = self.instance_id.as_ref() {
+                if inst_str != expected.as_str() {
+                    return Err(FcpError::ZoneViolation {
+                        source_zone: self.zone_id.0.to_string(),
+                        target_zone: self.zone_id.0.to_string(),
+                        message: format!(
+                            "Token instance mismatch: expected {}, got {}",
+                            expected.as_str(),
+                            inst_str
+                        ),
+                    });
+                }
             }
+            // verifier.instance_id == None: skip match, but the parser-
+            // level non-Text rejection above still fired.
         }
 
         // 4. Check operation grant
@@ -2180,8 +2234,7 @@ mod tests {
                 fcp_crypto::cose::fcp2_claims::INSTANCE_ID,
                 ciborium::Value::Integer(0_i64.into()),
             );
-        let cose_token =
-            fcp_crypto::cose::CoseToken::sign(&signing_key, &claims).expect("sign");
+        let cose_token = fcp_crypto::cose::CoseToken::sign(&signing_key, &claims).expect("sign");
         let token = CapabilityToken::from_raw(cose_token);
 
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
@@ -2233,6 +2286,115 @@ mod tests {
         verifier
             .verify(token, &cap, &op, &[])
             .expect("matching Text INSTANCE_ID must verify");
+    }
+
+    // ── br-flywheel_connectors-5qp7o: without_instance_binding mode ──
+
+    #[test]
+    fn without_instance_binding_accepts_token_that_declares_instance_id() {
+        // Regression: prior host-gateway behavior constructed the verifier
+        // with a fresh random InstanceId per request, so any token that
+        // declared an instance_id claim was ALWAYS rejected (the random
+        // UUID never matched). `without_instance_binding` opts out of
+        // the check entirely — the gateway can't enforce it, but it
+        // must not spuriously reject legitimate instance-bound tokens.
+        let signing_key = Ed25519SigningKey::generate();
+        let pub_bytes = signing_key.verifying_key().to_bytes();
+
+        let token_instance = InstanceId::new();
+        let now = Utc::now();
+        let cose_token = CapabilityTokenBuilder::new()
+            .capability_id("cap.test")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.test"])
+            .issuer("node:primary")
+            .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
+            .target_instance(token_instance.as_str())
+            .sign(&signing_key)
+            .unwrap();
+        let token = CapabilityToken::from_raw(cose_token);
+
+        let verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
+        let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
+
+        verifier
+            .verify(token, &cap, &op, &[])
+            .expect(
+                "without_instance_binding must accept a token that declares instance_id — \
+                 the verifier explicitly declined to check the binding",
+            );
+    }
+
+    #[test]
+    fn without_instance_binding_still_rejects_non_text_instance_id() {
+        // Parser-level defense: a non-Text INSTANCE_ID claim is
+        // rejected even when the verifier is in without_instance_binding
+        // mode. The match check is what's skipped, not type validation —
+        // a malformed claim is still a malformed claim.
+        let signing_key = Ed25519SigningKey::generate();
+        let pub_bytes = signing_key.verifying_key().to_bytes();
+
+        let now = Utc::now();
+        let claims = fcp_crypto::cose::CwtClaims::new()
+            .capability_id("cap.test")
+            .zone_id("z:work")
+            .principal_id("user:test")
+            .issuer("node:primary")
+            .not_before(now)
+            .expiration(now + Duration::hours(1))
+            .operations(&["op.test"])
+            .constraints_cbor(&test_constraints_cbor())
+            .custom(
+                fcp_crypto::cose::fcp2_claims::INSTANCE_ID,
+                ciborium::Value::Integer(0_i64.into()),
+            );
+        let cose_token = fcp_crypto::cose::CoseToken::sign(&signing_key, &claims).expect("sign");
+        let token = CapabilityToken::from_raw(cose_token);
+
+        let verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
+        let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
+
+        let err = verifier
+            .verify(token, &cap, &op, &[])
+            .expect_err("non-Text INSTANCE_ID must be rejected even in unbound mode");
+        assert!(
+            matches!(err, FcpError::MissingField { ref field } if field.contains("instance_id")),
+            "expected MissingField naming instance_id, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn without_instance_binding_ignores_tokens_without_instance_claim() {
+        // A token that doesn't declare instance_id passes cleanly in
+        // unbound mode — matches the behavior of bound-mode for the
+        // same input, so nothing is lost by opting out of the check.
+        let signing_key = Ed25519SigningKey::generate();
+        let pub_bytes = signing_key.verifying_key().to_bytes();
+
+        let now = Utc::now();
+        let cose_token = CapabilityTokenBuilder::new()
+            .capability_id("cap.test")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.test"])
+            .issuer("node:primary")
+            .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
+            .sign(&signing_key)
+            .unwrap();
+        let token = CapabilityToken::from_raw(cose_token);
+
+        let verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
+        let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
+
+        verifier
+            .verify(token, &cap, &op, &[])
+            .expect("unbound mode + no instance claim = no check");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -3685,14 +3847,28 @@ mod tests {
         // bidi-override, namespace-collision lookalike, uppercase).
         let cases: &[(&str, fn(&IdValidationError) -> bool)] = &[
             ("", |e| matches!(e, IdValidationError::Empty)),
-            ("   ", |e| matches!(e, IdValidationError::InvalidStartChar { .. })),
-            ("node-bad ", |e| matches!(e, IdValidationError::InvalidChar { .. })),
-            ("node\nbad", |e| matches!(e, IdValidationError::InvalidChar { .. })),
-            ("node\0bad", |e| matches!(e, IdValidationError::InvalidChar { .. })),
-            ("\u{202E}revil-node", |e| matches!(e, IdValidationError::NonAscii)),
+            ("   ", |e| {
+                matches!(e, IdValidationError::InvalidStartChar { .. })
+            }),
+            ("node-bad ", |e| {
+                matches!(e, IdValidationError::InvalidChar { .. })
+            }),
+            ("node\nbad", |e| {
+                matches!(e, IdValidationError::InvalidChar { .. })
+            }),
+            ("node\0bad", |e| {
+                matches!(e, IdValidationError::InvalidChar { .. })
+            }),
+            ("\u{202E}revil-node", |e| {
+                matches!(e, IdValidationError::NonAscii)
+            }),
             ("node-Café", |e| matches!(e, IdValidationError::NonAscii)),
-            ("Node-UPPER", |e| matches!(e, IdValidationError::UppercaseNotAllowed)),
-            ("/etc/passwd", |e| matches!(e, IdValidationError::InvalidStartChar { .. })),
+            ("Node-UPPER", |e| {
+                matches!(e, IdValidationError::UppercaseNotAllowed)
+            }),
+            ("/etc/passwd", |e| {
+                matches!(e, IdValidationError::InvalidStartChar { .. })
+            }),
         ];
         for (input, predicate) in cases {
             let err = TailscaleNodeId::try_from((*input).to_owned())
@@ -4114,7 +4290,14 @@ mod tests {
 
         assert_eq!(verifier.host_public_key, [0u8; 32]);
         assert_eq!(verifier.zone_id.as_str(), zone.as_str());
-        assert_eq!(verifier.instance_id.as_str(), instance.as_str());
+        assert_eq!(
+            verifier
+                .instance_id
+                .as_ref()
+                .expect("new() sets Some(instance_id)")
+                .as_str(),
+            instance.as_str()
+        );
     }
 
     #[test]
@@ -4463,10 +4646,7 @@ mod tests {
 
         // `token` cannot be used after this point (compiler enforces)
         // Verified token works:
-        assert_eq!(
-            result.claims().get_capability_id(),
-            Some("cap.consume")
-        );
+        assert_eq!(result.claims().get_capability_id(), Some("cap.consume"));
     }
 
     #[test]
@@ -4538,10 +4718,7 @@ mod tests {
 
         // Must verify again to access claims
         let re_verified = verifier.verify(deserialized, &cap, &op, &[]).unwrap();
-        assert_eq!(
-            re_verified.claims().get_capability_id(),
-            Some("cap.serde")
-        );
+        assert_eq!(re_verified.claims().get_capability_id(), Some("cap.serde"));
     }
 
     #[test]
@@ -4634,10 +4811,7 @@ mod tests {
     #[test]
     fn phantom_type_verified_has_zero_runtime_overhead() {
         // PhantomData<S> is zero-sized — verify this at compile time.
-        assert_eq!(
-            std::mem::size_of::<std::marker::PhantomData<Verified>>(),
-            0
-        );
+        assert_eq!(std::mem::size_of::<std::marker::PhantomData<Verified>>(), 0);
         assert_eq!(
             std::mem::size_of::<std::marker::PhantomData<Unverified>>(),
             0

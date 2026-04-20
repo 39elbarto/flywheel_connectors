@@ -75,7 +75,7 @@ use fcp_host::{
 use fcp_host::{HostError, HostResult};
 use fcp_kernel::{
     ApprovalMode, ConnectorHealth, ConnectorId, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
+    HealthSnapshot, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
     LifecycleError, LifecycleManager, LifecycleState, LifecycleStatus, RateLimitDeclarations,
     RequestId, SelfCheckReport, SimulateRequest, SimulateResponse,
 };
@@ -1269,10 +1269,21 @@ async fn verify_live_request(
                 .to_string(),
         )
     })?;
-    let verifier = CapabilityVerifier::new(
+    // The gateway has no link from a capability token back to the
+    // specific SubprocessConnector instance that will ultimately
+    // execute the operation — handshake uses `requested_instance_id:
+    // None` and the connector chooses its own id, which the gateway
+    // never captures. Passing a per-request random `InstanceId::new()`
+    // here used to satisfy the verifier's signature while being the
+    // worst of both worlds: tokens that declared an `instance_id`
+    // claim were always rejected (the random UUID never matched),
+    // while tokens that did NOT declare one passed without any
+    // instance check. Use `without_instance_binding` to honestly say
+    // "gateway can't enforce this; defer to the connector process"
+    // (br-flywheel_connectors-5qp7o).
+    let verifier = CapabilityVerifier::without_instance_binding(
         capability_key.to_bytes(),
         request.zone_id.clone(),
-        InstanceId::new(),
     );
     let verified_token = verifier
         .verify(

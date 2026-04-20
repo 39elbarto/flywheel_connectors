@@ -417,6 +417,9 @@ fn canonicalize_value_in_place(v: &mut Value, depth: usize) -> Result<(), Serial
         if f.is_nan() || f.is_infinite() {
             return Err(SerializationError::NonFiniteFloat);
         }
+        if f.to_bits() == (-0.0_f64).to_bits() {
+            *f = 0.0;
+        }
     }
 
     match v {
@@ -437,8 +440,6 @@ fn canonicalize_map(
     entries: &mut Vec<(Value, Value)>,
     depth: usize,
 ) -> Result<(), SerializationError> {
-    use std::cmp::Ordering;
-
     // Pre-allocate scratch buffer. Typical CBOR map keys are 10-50 bytes each.
     // Cap allocation to prevent memory amplification from maps with many tiny entries.
     let scratch_cap = entries
@@ -462,10 +463,7 @@ fn canonicalize_map(
     with_keys.sort_by(|(a_range, _, _), (b_range, _, _)| {
         let a_bytes = &scratch[a_range.clone()];
         let b_bytes = &scratch[b_range.clone()];
-        match a_bytes.len().cmp(&b_bytes.len()) {
-            Ordering::Equal => a_bytes.cmp(b_bytes),
-            other => other,
-        }
+        a_bytes.cmp(b_bytes)
     });
 
     for pair in with_keys.windows(2) {
@@ -614,8 +612,9 @@ mod tests {
     }
 
     #[test]
-    fn map_keys_sorted_length_first_then_lexicographic() {
-        // RFC 8949 §4.2.1: shorter keys first, then lexicographic.
+    fn map_keys_sorted_by_deterministic_encoding_bytes() {
+        // RFC 8949 §4.2.1 sorts map keys by bytewise lexicographic order of
+        // their deterministic encodings.
         let schema = SchemaId::new("fcp.test", "Map", Version::new(0, 1, 0));
 
         let mut map = HashMap::new();
@@ -642,8 +641,35 @@ mod tests {
                 })
                 .collect();
 
-            // Expected order: "a" (len=1), "z" (len=1), "bb" (len=2), "aaa" (len=3).
+            // Text keys still appear in this order because the encoded length
+            // header byte participates in the bytewise comparison.
             assert_eq!(keys, vec!["a", "z", "bb", "aaa"]);
+        } else {
+            panic!("Expected map");
+        }
+    }
+
+    #[test]
+    fn integer_map_keys_follow_rfc8949_bytewise_ordering() {
+        let schema = SchemaId::new("fcp.test", "IntKeyMap", Version::new(0, 1, 0));
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(100_i64, 1_u8);
+        map.insert(-1_i64, 2_u8);
+        map.insert(10_i64, 3_u8);
+
+        let bytes = CanonicalSerializer::serialize(&map, &schema).unwrap();
+        let cbor_bytes = &bytes[SCHEMA_HASH_LEN..];
+        let value: Value = ciborium::de::from_reader(cbor_bytes).unwrap();
+
+        if let Value::Map(entries) = value {
+            let keys: Vec<i128> = entries
+                .iter()
+                .filter_map(|(k, _)| match k {
+                    Value::Integer(i) => Some(i128::from(*i)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(keys, vec![10, 100, -1]);
         } else {
             panic!("Expected map");
         }
@@ -1627,14 +1653,14 @@ mod tests {
         let schema = SchemaId::new("fcp.test", "Map", Version::new(0, 1, 0));
 
         // Manually build: { "bb": 1, "a": 2 } — wrong order per RFC 8949.
-        // Canonical should be { "a": 2, "bb": 1 } (shorter keys first).
+        // Canonical should be { "a": 2, "bb": 1 } in deterministic byte order.
         let mut cbor_bytes = Vec::new();
         cbor_bytes.push(0xA2); // map with 2 entries
-                               // "bb" first (non-canonical)
+        // "bb" first (non-canonical)
         cbor_bytes.push(0x62); // text string, length 2
         cbor_bytes.extend_from_slice(b"bb");
         cbor_bytes.push(0x01); // integer 1
-                               // "a" second
+        // "a" second
         cbor_bytes.push(0x61); // text string, length 1
         cbor_bytes.push(b'a');
         cbor_bytes.push(0x02); // integer 2
@@ -1732,7 +1758,7 @@ mod tests {
     fn schema_hash_copy_trait() {
         let hash = SchemaHash::from_bytes([0xAB; 32]);
         let copied = hash; // Copy, not move
-                           // Both should still be usable (Copy semantics).
+        // Both should still be usable (Copy semantics).
         assert_eq!(hash, copied);
         assert_eq!(hash.as_bytes(), copied.as_bytes());
     }
@@ -1969,7 +1995,7 @@ mod tests {
 
         let bytes = to_canonical_cbor(&map).unwrap();
 
-        // Decode raw CBOR and check key order: length-first, then lexicographic.
+        // Decode raw CBOR and check deterministic encoded-byte ordering.
         let raw: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
         if let Value::Map(entries) = raw {
             let keys: Vec<&str> = entries
@@ -1982,8 +2008,9 @@ mod tests {
                     }
                 })
                 .collect();
-            // "ant" (3), "bee" (3), "zebra" (5), "caterpillar" (11)
-            // Within same length: lexicographic.
+            // For text keys the encoded-byte ordering still matches these
+            // length buckets because the map-key comparison includes the text
+            // header byte before the string payload.
             assert_eq!(keys, vec!["ant", "bee", "zebra", "caterpillar"]);
         } else {
             panic!("Expected map");
@@ -2607,7 +2634,8 @@ mod tests {
 
     #[test]
     fn map_keys_byte_string_prefix_sorted() {
-        // Byte strings sorted: shorter first, then lexicographic
+        // Byte strings are sorted by the bytewise lexicographic order of
+        // their deterministic encodings; prefix keys still come first.
         let mut entries = vec![
             (Value::Bytes(vec![0xAA, 0xBB]), Value::Integer(1.into())),
             (Value::Bytes(vec![0xAA]), Value::Integer(2.into())),
@@ -3215,6 +3243,26 @@ mod tests {
         let bytes = CanonicalSerializer::serialize(&val, &schema).unwrap();
         let decoded: f32 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
         assert!((decoded - val).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn roundtrip_negative_zero_serializes_as_positive_zero() {
+        let schema = SchemaId::new("fcp.test", "F64NegZero", Version::new(1, 0, 0));
+        let bytes = CanonicalSerializer::serialize(&(-0.0_f64), &schema).unwrap();
+        assert_eq!(&bytes[SCHEMA_HASH_LEN..], &[0xF9, 0x00, 0x00]);
+
+        let decoded: f64 = CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        assert_eq!(decoded.to_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn deserialize_rejects_negative_zero_encoding() {
+        let schema = SchemaId::new("fcp.test", "F64NegZeroStrict", Version::new(1, 0, 0));
+        let mut bytes = schema.hash().as_bytes().to_vec();
+        bytes.extend_from_slice(&[0xF9, 0x80, 0x00]);
+
+        let err = CanonicalSerializer::deserialize::<f64>(&bytes, &schema).unwrap_err();
+        assert!(matches!(err, SerializationError::NonCanonicalEncoding));
     }
 
     #[test]
@@ -4784,19 +4832,21 @@ mod tests {
     }
 
     #[test]
-    fn to_canonical_cbor_f64_value_encodes_as_9_bytes() {
-        // f64 always encodes in CBOR as 9 bytes (major type 7, additional 27)
-        let bytes = to_canonical_cbor(&1.23_f64).unwrap();
-        assert_eq!(bytes.len(), 9);
-        assert_eq!(bytes[0], 0xFB); // CBOR f64 prefix
+    fn to_canonical_cbor_f64_uses_shortest_float_width() {
+        let bytes = to_canonical_cbor(&1.5_f64).unwrap();
+        assert_eq!(bytes, vec![0xF9, 0x3E, 0x00]);
     }
 
     #[test]
-    fn to_canonical_cbor_f32_value_encodes_as_5_bytes() {
-        // f32 encodes in CBOR as 5 bytes (major type 7, additional 26)
-        let bytes = to_canonical_cbor(&1.23_f32).unwrap();
-        assert_eq!(bytes.len(), 5);
-        assert_eq!(bytes[0], 0xFA); // CBOR f32 prefix
+    fn to_canonical_cbor_f64_uses_binary32_when_half_is_not_exact() {
+        let bytes = to_canonical_cbor(&1_000_000.5_f64).unwrap();
+        assert_eq!(bytes, vec![0xFA, 0x49, 0x74, 0x24, 0x08]);
+    }
+
+    #[test]
+    fn to_canonical_cbor_normalizes_negative_zero() {
+        let bytes = to_canonical_cbor(&(-0.0_f64)).unwrap();
+        assert_eq!(bytes, vec![0xF9, 0x00, 0x00]);
     }
 
     // ========================================================================
@@ -5942,9 +5992,11 @@ mod tests {
             (Value::Float(1.5), Value::Integer(1.into())),
         ];
         canonicalize_map(&mut entries, 0).unwrap();
-        // Both floats are 9 bytes in CBOR, so sorted lexicographically by encoded bytes.
-        // Verify at least that the operation succeeds and entries are reordered.
+        // Float keys are sorted by the bytewise lexicographic order of their
+        // deterministic encodings.
         assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, Value::Float(1.5));
+        assert_eq!(entries[1].0, Value::Float(2.5));
     }
 
     #[test]
@@ -5952,6 +6004,16 @@ mod tests {
         let mut entries = vec![
             (Value::Float(1.5), Value::Integer(1.into())),
             (Value::Float(1.5), Value::Integer(2.into())),
+        ];
+        let err = canonicalize_map(&mut entries, 0).unwrap_err();
+        assert!(matches!(err, SerializationError::DuplicateMapKey { .. }));
+    }
+
+    #[test]
+    fn canonicalize_map_negative_zero_and_positive_zero_keys_rejected() {
+        let mut entries = vec![
+            (Value::Float(-0.0), Value::Integer(1.into())),
+            (Value::Float(0.0), Value::Integer(2.into())),
         ];
         let err = canonicalize_map(&mut entries, 0).unwrap_err();
         assert!(matches!(err, SerializationError::DuplicateMapKey { .. }));

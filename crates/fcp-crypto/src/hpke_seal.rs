@@ -657,7 +657,7 @@ mod tests {
                 .expect("base seal should succeed");
             let opened = hpke_open(&recipient_secret_key, &sealed, &aad)
                 .expect("base open should succeed");
-            prop_assert_eq!(opened, plaintext);
+            prop_assert_eq!(opened.as_slice(), plaintext.as_slice());
 
             let mut transformed_plaintext = plaintext.clone();
             transformed_plaintext.extend_from_slice(&suffix);
@@ -685,7 +685,7 @@ mod tests {
             // transformation itself.
             prop_assert_eq!(sealed.enc, transformed_sealed.enc);
             prop_assert_ne!(sealed.ciphertext, transformed_sealed.ciphertext);
-            prop_assert_eq!(transformed_opened, expected_transformed);
+            prop_assert_eq!(transformed_opened.as_slice(), expected_transformed.as_slice());
         }
     }
 

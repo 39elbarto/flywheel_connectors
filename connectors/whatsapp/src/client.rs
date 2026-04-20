@@ -366,6 +366,15 @@ fn normalize_base_url(base_url: &str) -> WhatsAppResult<String> {
 
     let parsed = Url::parse(trimmed)
         .map_err(|error| WhatsAppError::Config(format!("invalid base_url: {error}")))?;
+    if !matches!(parsed.scheme(), "https" | "http") {
+        // Previously only `http` was rejected, so a nonsense scheme like
+        // `ftp://graph.facebook.com/` slipped past the allowlist check
+        // and was only caught later by reqwest at request time. Fail
+        // fast at config time.
+        return Err(WhatsAppError::Config(
+            "base_url must use http or https".into(),
+        ));
+    }
     let host = parsed
         .host_str()
         .ok_or_else(|| WhatsAppError::Config("base_url must include a host".into()))?;
@@ -381,6 +390,18 @@ fn normalize_base_url(base_url: &str) -> WhatsAppResult<String> {
     if !host.eq_ignore_ascii_case("graph.facebook.com") && !is_local_test_host {
         return Err(WhatsAppError::Config(
             "base_url host must be graph.facebook.com or a local test host".into(),
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        // WhatsAppClient builds every request URL via
+        //   format!("{}/{safe_id}/messages", self.base_url)
+        // (see send_message / update_profile / get_* above). Userinfo
+        // embedded in base_url would survive `trim_end_matches('/')`
+        // below and get baked into every downstream URL, silently
+        // overriding the access_token the connector will try to send
+        // via the Authorization header. Reject at config time.
+        return Err(WhatsAppError::Config(
+            "base_url must not include userinfo".into(),
         ));
     }
     if parsed.query().is_some() || parsed.fragment().is_some() {
@@ -405,6 +426,53 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn normalize_base_url_accepts_graph_facebook_com() {
+        let out = normalize_base_url("https://graph.facebook.com/v21.0").unwrap();
+        assert_eq!(out, "https://graph.facebook.com/v21.0");
+    }
+
+    #[test]
+    fn normalize_base_url_rejects_userinfo() {
+        let err = normalize_base_url("https://attacker:pw@graph.facebook.com/v21.0")
+            .unwrap_err();
+        match err {
+            WhatsAppError::Config(msg) => assert!(msg.contains("userinfo"), "got: {msg}"),
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalize_base_url_rejects_unknown_scheme() {
+        // Previously only http was rejected; ftp://graph.facebook.com/...
+        // slipped past and was only caught later by reqwest.
+        let err = normalize_base_url("ftp://graph.facebook.com/v21.0").unwrap_err();
+        match err {
+            WhatsAppError::Config(msg) => assert!(msg.contains("http or https"), "got: {msg}"),
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalize_base_url_rejects_query_and_fragment() {
+        assert!(matches!(
+            normalize_base_url("https://graph.facebook.com/v21.0?leak=x").unwrap_err(),
+            WhatsAppError::Config(_)
+        ));
+        assert!(matches!(
+            normalize_base_url("https://graph.facebook.com/v21.0#frag").unwrap_err(),
+            WhatsAppError::Config(_)
+        ));
+    }
+
+    #[test]
+    fn normalize_base_url_still_pins_host() {
+        assert!(matches!(
+            normalize_base_url("https://evil.example.com/v21.0").unwrap_err(),
+            WhatsAppError::Config(_)
+        ));
+    }
 
     #[test]
     fn client_creation() {

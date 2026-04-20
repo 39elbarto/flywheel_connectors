@@ -808,9 +808,9 @@ impl WhatsAppConnector {
                                 message: format!("Webhook signature verification failed: {e}"),
                             }
                         }
-                        WebhookError::ReplayDetected { .. } => FcpError::RateLimited {
-                            retry_after_ms: 0,
-                            violation: Some("duplicate webhook event".into()),
+                        WebhookError::ReplayDetected { .. } => FcpError::InvalidRequest {
+                            code: 1003,
+                            message: format!("duplicate webhook event: {e}"),
                         },
                         other => FcpError::InvalidRequest {
                             code: 1007,

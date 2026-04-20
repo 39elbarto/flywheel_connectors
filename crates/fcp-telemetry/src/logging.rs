@@ -158,7 +158,15 @@ pub fn log_request_response(
     let redact_fields = vec![
         "password".to_string(),
         "api_key".to_string(),
+        // Hyphenated form: JSON maps surfaced from HTTP headers preserve
+        // "X-API-Key" / "X-Api-Key" as-is — underscore-only substrings
+        // silently miss them.
+        "api-key".to_string(),
         "apikey".to_string(),
+        // AWS-style: access_key / access_key_id / aws_access_key_id never
+        // contained any of the prior substrings and were being logged raw.
+        "access_key".to_string(),
+        "access-key".to_string(),
         "secret".to_string(),
         "token".to_string(),
         "authorization".to_string(),
@@ -166,6 +174,8 @@ pub fn log_request_response(
         "cookie".to_string(),
         "credential".to_string(),
         "private_key".to_string(),
+        // Hyphenated form for headers such as "X-Private-Key".
+        "private-key".to_string(),
         "session".to_string(),
     ];
 
@@ -980,5 +990,53 @@ mod tests {
 
         // Non-sensitive field passes through.
         assert_eq!(redacted["user_name"], "alice", "plain user_name untouched");
+    }
+
+    /// Regression: JSON surfaced from HTTP headers keeps the hyphenated
+    /// form (e.g. `X-API-Key`). An underscore-only substring list
+    /// (`api_key`) missed the header form entirely, so `X-API-Key: secret`
+    /// was being logged in the clear. Also verify AWS-style
+    /// `aws_access_key_id` is now caught. The `user_name` field must
+    /// still pass through to prove the additions didn't go over-broad.
+    #[test]
+    fn test_redact_catches_hyphenated_and_access_key_variants() {
+        let expanded = vec![
+            "password".to_string(),
+            "api_key".to_string(),
+            "api-key".to_string(),
+            "apikey".to_string(),
+            "access_key".to_string(),
+            "access-key".to_string(),
+            "secret".to_string(),
+            "token".to_string(),
+            "authorization".to_string(),
+            "bearer".to_string(),
+            "cookie".to_string(),
+            "credential".to_string(),
+            "private_key".to_string(),
+            "private-key".to_string(),
+            "session".to_string(),
+        ];
+
+        let value = json!({
+            "X-API-Key": "k_hyphenated",
+            "X-Api-Key": "k_hyphenated_mixed",
+            "aws_access_key_id": "AKIA_example_value",
+            "access_key": "raw_key",
+            "X-Private-Key": "-----BEGIN_example",
+            "user_name": "alice",
+        });
+
+        let redacted = redact_sensitive(&value, &expanded);
+
+        assert_eq!(redacted["X-API-Key"], "[REDACTED]", "X-API-Key");
+        assert_eq!(redacted["X-Api-Key"], "[REDACTED]", "X-Api-Key");
+        assert_eq!(
+            redacted["aws_access_key_id"], "[REDACTED]",
+            "aws_access_key_id"
+        );
+        assert_eq!(redacted["access_key"], "[REDACTED]", "access_key");
+        assert_eq!(redacted["X-Private-Key"], "[REDACTED]", "X-Private-Key");
+        assert_eq!(redacted["user_name"], "alice", "user_name must pass");
     }
 }

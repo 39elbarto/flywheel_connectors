@@ -311,11 +311,41 @@ impl RateLimitTracker {
     /// Returns `Some(error)` if any pool is exceeded, `None` if all pools have capacity.
     /// For soft limits, logs a warning but returns `None`.
     ///
+    /// # Fail-closed on unregistered pools
+    ///
+    /// If `operation_map` references a pool id that is not present in
+    /// `pools`, this method returns a hard [`RateLimitError`] rather
+    /// than silently admitting the operation
+    /// (br-flywheel_connectors-83xt1). Silent skip would be fail-open
+    /// — an admission-control primitive must fail closed by default.
+    /// Callers that build a tracker by hand (not via
+    /// [`Self::from_declarations`]) are responsible for keeping
+    /// `operation_map` and `pools` consistent; inconsistencies are
+    /// treated as a configuration error, not a free pass.
+    ///
     /// # Panics
     /// Panics if the internal lock is poisoned.
     pub fn try_consume(&self, operation: &str, amount: u32) -> Option<RateLimitError> {
         let pool_ids = self.operation_map.get(operation)?;
         let mut pools = self.pools.write().expect("lock poisoned");
+
+        // Fail-closed guard: reject up-front if any referenced pool is
+        // missing, so the subsequent phases operate on a consistent set.
+        for pool_id in pool_ids {
+            if !pools.contains_key(pool_id) {
+                return Some(RateLimitError {
+                    pool_id: pool_id.clone(),
+                    limit: 0,
+                    current: 0,
+                    retry_after_ms: 0,
+                    enforcement: RateLimitEnforcement::Hard,
+                    message: format!(
+                        "Rate limit pool '{pool_id}' referenced by operation \
+                         '{operation}' is not registered; rejecting fail-closed"
+                    ),
+                });
+            }
+        }
 
         // Phase 1: Check capacity (all-or-nothing)
         for pool_id in pool_ids {
@@ -2260,5 +2290,79 @@ mod tests {
         state.maybe_advance_window();
         assert_eq!(state.prev_count, 7);
         assert_eq!(state.curr_count, 0);
+    }
+
+    // ── br-flywheel_connectors-83xt1: fail-closed on unregistered pool ──
+
+    #[test]
+    fn try_consume_fails_closed_on_unregistered_pool() {
+        // Directly construct a tracker whose operation_map references a
+        // pool id that is NOT present in `pools`. Prior behavior silently
+        // skipped the missing pool and admitted every request for that
+        // operation. Fail-closed behavior must return a hard
+        // RateLimitError naming the missing pool.
+        let mut operation_map: HashMap<String, Vec<String>> = HashMap::new();
+        operation_map.insert("send_message".into(), vec!["phantom_pool".into()]);
+
+        let tracker = RateLimitTracker {
+            pools: Arc::new(RwLock::new(HashMap::new())),
+            operation_map: Arc::new(operation_map),
+        };
+
+        let err = tracker
+            .try_consume("send_message", 1)
+            .expect("missing pool must fail closed");
+        assert_eq!(err.pool_id, "phantom_pool");
+        assert!(!err.is_soft(), "unregistered-pool error must be hard");
+        assert!(
+            err.message.contains("phantom_pool") && err.message.contains("send_message"),
+            "message must name both pool and operation: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn try_consume_unknown_operation_still_returns_none() {
+        // An operation that doesn't appear in operation_map at all is a
+        // separate case from an operation whose pools are missing — the
+        // former means the caller is asking about an unknown op and the
+        // tracker has no opinion. Preserved behavior: return None.
+        let tracker = RateLimitTracker::new();
+        assert!(tracker.try_consume("anything", 1).is_none());
+    }
+
+    #[test]
+    fn try_consume_partial_missing_pool_fails_closed() {
+        // operation_map points at two pools; only one is registered. The
+        // missing-pool branch must fire before any capacity check so the
+        // registered pool is never consumed-from.
+        let pool = RateLimitPoolBuilder::new("real_pool")
+            .requests(100)
+            .window_secs(60)
+            .build();
+
+        let mut pools: HashMap<String, PoolState> = HashMap::new();
+        pools.insert("real_pool".into(), PoolState::new(pool));
+
+        let mut operation_map: HashMap<String, Vec<String>> = HashMap::new();
+        operation_map.insert(
+            "op".into(),
+            vec!["real_pool".into(), "ghost_pool".into()],
+        );
+
+        let tracker = RateLimitTracker {
+            pools: Arc::new(RwLock::new(pools)),
+            operation_map: Arc::new(operation_map),
+        };
+
+        let err = tracker.try_consume("op", 1).expect("must fail closed");
+        assert_eq!(err.pool_id, "ghost_pool");
+
+        // The registered pool's counter must be untouched: fail-closed
+        // happens in the up-front guard, before Phase 2 consume.
+        let status = tracker
+            .pool_status("real_pool")
+            .expect("real_pool is registered");
+        assert_eq!(status.remaining, 100, "real_pool must not have been consumed");
     }
 }

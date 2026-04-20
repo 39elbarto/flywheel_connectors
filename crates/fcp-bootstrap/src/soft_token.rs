@@ -175,7 +175,7 @@ struct MaterializedIdentity {
 /// certificate/key objects that exercise the full selection pipeline.
 struct SoftTokenDriver {
     /// The expected PIN.
-    pin: String,
+    pin: HardwareTokenPin,
     /// The canonical `DetectedToken` for this soft token.
     detected_token: DetectedToken,
     /// Pre-materialized identities indexed by their `CKA_ID`.
@@ -202,7 +202,7 @@ impl SoftTokenDriver {
         let identities = materialize_identities(&config.identities);
 
         Self {
-            pin: config.pin,
+            pin: HardwareTokenPin::new(config.pin),
             detected_token,
             identities,
             close_count: Arc::new(AtomicUsize::new(0)),
@@ -232,7 +232,7 @@ impl SoftTokenDriver {
 
     /// Build a `HardwareTokenPin` from the configured PIN.
     pub fn pin(&self) -> HardwareTokenPin {
-        HardwareTokenPin::new(&self.pin)
+        self.pin.clone()
     }
 
     /// Build a `HardwareTokenPin` with the wrong value (for negative tests).
@@ -252,17 +252,9 @@ impl HardwareTokenSessionDriver for SoftTokenDriver {
             return Err(TokenError::PinRequired);
         }
 
-        // Check PIN value by formatting the debug representation to compare.
-        // Since HardwareTokenPin redacts itself, we construct a reference pin
-        // and compare identity through the same path the real driver would:
-        // the PIN is passed to PKCS#11 login which validates it internally.
-        // For the soft token we validate against our stored PIN.
-        let expected = HardwareTokenPin::new(&self.pin);
-        // We can't compare HardwareTokenPin directly since the inner value is private.
-        // Instead, check if the pin matches by encoding and comparing through AuthPin.
-        // For now, we use a side-channel: try to sign with the pin and check the result.
-        // Actually, HardwareTokenPin implements PartialEq, so we can compare directly.
-        if *pin != expected {
+        // Authenticate against the stored redacted PIN wrapper so comparison stays
+        // on the constant-time path provided by `HardwareTokenPin`.
+        if pin != &self.pin {
             return Err(TokenError::InvalidPin);
         }
 
@@ -1031,7 +1023,8 @@ mod verification_pack {
     use super::*;
     use crate::error::BootstrapError;
     use crate::hardware_token::{
-        select_and_authenticate, select_certificate_for_provisioning, CertificateSelectionRefusal,
+        select_and_authenticate, select_certificate_for_provisioning, AuthenticatedTokenSession,
+        CertificateSelectionRefusal,
     };
     use crate::workflow::{BootstrapConfig, BootstrapMode, BootstrapWorkflow};
     use serde::Serialize;
@@ -1111,6 +1104,38 @@ mod verification_pack {
                 json.contains("fcp-verification-bundle/v1"),
                 "schema version missing from evidence JSON"
             );
+        }
+    }
+
+    /// Driver wrapper that keeps certificate enumeration intact but hides keys,
+    /// exercising the distinct `NoKeys` refusal path in the provisioning selector.
+    struct NoKeysSoftTokenDriver {
+        inner: SoftTokenDriver,
+    }
+
+    impl HardwareTokenSessionDriver for NoKeysSoftTokenDriver {
+        fn open_authenticated_session(
+            &self,
+            token: &DetectedToken,
+            pin: &HardwareTokenPin,
+        ) -> Result<AuthenticatedTokenSession, TokenError> {
+            self.inner.open_authenticated_session(token, pin)
+        }
+
+        fn enumerate_certificates(
+            &self,
+            token: &DetectedToken,
+            pin: &HardwareTokenPin,
+        ) -> Result<Vec<TokenCertificate>, TokenError> {
+            self.inner.enumerate_certificates(token, pin)
+        }
+
+        fn enumerate_keys(
+            &self,
+            _token: &DetectedToken,
+            _pin: &HardwareTokenPin,
+        ) -> Result<Vec<TokenKeyInfo>, TokenError> {
+            Ok(Vec::new())
         }
     }
 
@@ -1438,7 +1463,43 @@ mod verification_pack {
         record.assert_pass();
     }
 
-    // ── Scenario 8: Cleanup determinism ────────────────────────────────
+    // ── Scenario 8: Certificates present, keys missing ──────────────────
+
+    #[test]
+    fn scenario_no_keys_refusal() {
+        let mut record = VerificationRecord::new("hwtoken-no-keys");
+
+        let wrapped = NoKeysSoftTokenDriver {
+            inner: SoftTokenDriver::deterministic(SoftTokenConfig::default()),
+        };
+        let token = wrapped.inner.detected_token().clone();
+        let pin = wrapped.inner.pin();
+
+        {
+            let step = record.add_step("setup", "Provision soft-token certificates but suppress key enumeration");
+            step.passed = true;
+            step.evidence.push("certificates_present=true".to_string());
+            step.evidence.push("enumerate_keys=empty".to_string());
+        }
+
+        let t = Instant::now();
+        let err = select_certificate_for_provisioning(&token, &pin, &wrapped).unwrap_err();
+        {
+            let step = record.add_step("negative", "Attempt provisioning when token exposes no private keys");
+            step.passed = matches!(
+                err,
+                TokenError::CertificateSelectionFailed(CertificateSelectionRefusal::NoKeys)
+            );
+            step.duration_ms = millis_u64(t.elapsed());
+            step.evidence.push(format!("error={err}"));
+            step.evidence.push("refusal_type=NoKeys".to_string());
+        }
+
+        record.finalize();
+        record.assert_pass();
+    }
+
+    // ── Scenario 9: Cleanup determinism ────────────────────────────────
 
     #[test]
     fn scenario_cleanup_determinism() {
@@ -1504,7 +1565,7 @@ mod verification_pack {
         record.assert_pass();
     }
 
-    // ── Scenario 9: Workflow-level success path ────────────────────────
+    // ── Scenario 10: Workflow-level success path ───────────────────────
 
     #[test]
     fn scenario_workflow_success_path() {
@@ -1555,7 +1616,7 @@ mod verification_pack {
         record.assert_pass();
     }
 
-    // ── Scenario 10: Multi-key selection preference ────────────────────
+    // ── Scenario 11: Multi-key selection preference ────────────────────
 
     #[test]
     fn scenario_multi_key_selection_preference() {
@@ -1612,7 +1673,7 @@ mod verification_pack {
         record.assert_pass();
     }
 
-    // ── Scenario 11: Deterministic rerun ───────────────────────────────
+    // ── Scenario 12: Deterministic rerun ───────────────────────────────
 
     #[test]
     fn scenario_deterministic_rerun() {

@@ -2077,6 +2077,7 @@ pub enum DecisionReasonCode {
     ApprovalMissingElevation,
     ApprovalMissingDeclassification,
     ApprovalMissingExecution,
+    ApprovalElevationScopeMismatch,
     ApprovalExecutionScopeMismatch,
     ApprovalExpired,
     ApprovalZoneMismatch,
@@ -2117,6 +2118,7 @@ impl DecisionReasonCode {
             Self::ApprovalMissingElevation => "approval.missing_elevation",
             Self::ApprovalMissingDeclassification => "approval.missing_declassification",
             Self::ApprovalMissingExecution => "approval.missing_execution",
+            Self::ApprovalElevationScopeMismatch => "approval.elevation_scope_mismatch",
             Self::ApprovalExecutionScopeMismatch => "approval.execution_scope_mismatch",
             Self::ApprovalExpired => "approval.expired",
             Self::ApprovalZoneMismatch => "approval.zone_mismatch",
@@ -2859,23 +2861,57 @@ fn apply_elevation(
 ) -> Result<(), DecisionReasonCode> {
     let required = IntegrityLevel::from_zone(&input.zone_id);
 
-    let token = input
-        .approval_tokens
-        .iter()
-        .find(|token| token.is_valid(input.now_ms) && token.zone_id == input.zone_id)
-        .and_then(|token| match &token.scope {
-            ApprovalScope::Elevation(scope) => {
-                if scope.operation_id == input.operation_id.as_str()
-                    && scope.target_integrity >= required
-                {
-                    Some(token)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        })
-        .ok_or(DecisionReasonCode::ApprovalMissingElevation)?;
+    // NORMATIVE: requests may carry multiple approval tokens (CDDL:
+    // `approval_tokens: [* approval_token]`). A single scan that stops at
+    // the first valid+zone-matching token and THEN checks scope would miss
+    // a correctly-scoped Elevation token if it came after an unrelated
+    // Declassification/Execution token in the array. Iterate through every
+    // token and evaluate all criteria per-token, mirroring
+    // `find_execution_approval` so we can distinguish
+    // `ApprovalMissingElevation` (no elevation-scoped token at all) from
+    // `ApprovalElevationScopeMismatch` (elevation-scoped token present but
+    // its operation_id / target_integrity / original_provenance_id did not
+    // line up with this request).
+    let mut saw_elevation_scope = false;
+    let mut had_mismatch = false;
+    let mut matched: Option<&ApprovalToken> = None;
+    for token in input.approval_tokens {
+        if !token.is_valid(input.now_ms) || token.zone_id != input.zone_id {
+            continue;
+        }
+        let ApprovalScope::Elevation(scope) = &token.scope else {
+            continue;
+        };
+        saw_elevation_scope = true;
+        if scope.operation_id != input.operation_id.as_str() {
+            had_mismatch = true;
+            continue;
+        }
+        if scope.target_integrity < required {
+            had_mismatch = true;
+            continue;
+        }
+        // SECURITY: bind the elevation to a specific request. Without this
+        // check, a legitimate elevation token issued for request A in zone
+        // Z could be replayed against request B in zone Z carrying the
+        // same operation_id — silently granting an unauthorized integrity
+        // elevation on B's provenance. The CDDL declares
+        // `original_provenance_id` as a required field on `elevation_scope`
+        // precisely for this binding; enforce it here.
+        if scope.original_provenance_id != input.request_object_id {
+            had_mismatch = true;
+            continue;
+        }
+        matched = Some(token);
+        break;
+    }
+    let token = match matched {
+        Some(t) => t,
+        None if saw_elevation_scope && had_mismatch => {
+            return Err(DecisionReasonCode::ApprovalElevationScopeMismatch);
+        }
+        None => return Err(DecisionReasonCode::ApprovalMissingElevation),
+    };
 
     let token_id = approval_token_object_id(token);
     let target = match &token.scope {
@@ -2898,33 +2934,33 @@ fn apply_declassification(
 ) -> Result<(), DecisionReasonCode> {
     let target = ConfidentialityLevel::from_zone(&input.zone_id);
 
+    // See apply_elevation for why all criteria must be in one predicate:
+    // requests can carry multiple approval tokens and `.find(valid).and_then(scope)`
+    // would short-circuit on the first valid+zone-matching token even if its
+    // scope is Elevation/Execution rather than Declassification.
     let token = input
         .approval_tokens
         .iter()
-        .find(|token| token.is_valid(input.now_ms) && token.zone_id == input.zone_id)
-        .and_then(|token| match &token.scope {
-            ApprovalScope::Declassification(scope) => {
-                let objects_match = if input.related_object_ids.is_empty() {
-                    scope.object_ids.contains(&input.request_object_id)
-                } else {
-                    input
-                        .related_object_ids
-                        .iter()
-                        .all(|id| scope.object_ids.contains(id))
-                };
-
-                if scope.from_zone == provenance.current_zone
-                    && scope.to_zone == input.zone_id
-                    && scope.target_confidentiality <= provenance.confidentiality_label
-                    && scope.target_confidentiality == target
-                    && objects_match
-                {
-                    Some(token)
-                } else {
-                    None
-                }
+        .find(|token| {
+            if !token.is_valid(input.now_ms) || token.zone_id != input.zone_id {
+                return false;
             }
-            _ => None,
+            let ApprovalScope::Declassification(scope) = &token.scope else {
+                return false;
+            };
+            let objects_match = if input.related_object_ids.is_empty() {
+                scope.object_ids.contains(&input.request_object_id)
+            } else {
+                input
+                    .related_object_ids
+                    .iter()
+                    .all(|id| scope.object_ids.contains(id))
+            };
+            scope.from_zone == provenance.current_zone
+                && scope.to_zone == input.zone_id
+                && scope.target_confidentiality <= provenance.confidentiality_label
+                && scope.target_confidentiality == target
+                && objects_match
         })
         .ok_or(DecisionReasonCode::ApprovalMissingDeclassification)?;
 
@@ -4829,6 +4865,126 @@ mod tests {
         assert_eq!(
             decision.reason_code,
             DecisionReasonCode::ApprovalMissingExecution
+        );
+    }
+
+    // ── Elevation scope binding (C3.x) ─────────────────────────────────────
+    //
+    // Regression guard: ElevationScope carries `original_provenance_id` as a
+    // REQUIRED field (FCP_CDDL_V2.cddl:165). The policy engine must refuse
+    // to apply an elevation token whose `original_provenance_id` does not
+    // bind to this request. Without that check, a legitimate elevation
+    // token issued for request A can be replayed against request B in the
+    // same zone with the same operation_id, silently raising B's
+    // provenance integrity.
+
+    fn elevation_flow_input(
+        request_id: ObjectId,
+        approvals: &'static [ApprovalToken],
+    ) -> PolicyDecisionInput<'static> {
+        static EMPTY_RECEIPTS: &[SanitizerReceipt] = &[];
+        static EMPTY_OBJECTS: &[ObjectId] = &[];
+        PolicyDecisionInput {
+            request_object_id: request_id,
+            zone_id: ZoneId::work(),
+            principal: PrincipalId::new("user:alice").unwrap(),
+            connector_id: ConnectorId::from_static("test:conn:v1"),
+            operation_id: OperationId::from_static("op.elev"),
+            capability_id: CapabilityId::new("cap.test").unwrap(),
+            safety_tier: SafetyTier::Safe,
+            // Community integrity flowing into Work zone → RequiresElevation.
+            provenance: ProvenanceRecord::new(ZoneId::community()),
+            approval_tokens: approvals,
+            sanitizer_receipts: EMPTY_RECEIPTS,
+            request_input: None,
+            request_input_hash: None,
+            related_object_ids: EMPTY_OBJECTS,
+            transport: TransportMode::Lan,
+            checkpoint_fresh: true,
+            revocation_fresh: true,
+            execution_approval_required: false,
+            now_ms: 1_000,
+            posture_attestation: None,
+        }
+    }
+
+    fn elevation_token(original: ObjectId) -> ApprovalToken {
+        ApprovalToken {
+            token_id: "tok-elev".into(),
+            issued_at_ms: 0,
+            expires_at_ms: u64::MAX,
+            issuer: "node:authority".into(),
+            scope: ApprovalScope::Elevation(ElevationScope {
+                operation_id: "op.elev".into(),
+                original_provenance_id: original,
+                target_integrity: IntegrityLevel::Work,
+            }),
+            zone_id: ZoneId::work(),
+            signature: None,
+        }
+    }
+
+    #[test]
+    fn engine_elevation_rejects_token_bound_to_different_request() {
+        // Token was issued for request A; attacker replays it against
+        // request B. The engine must surface
+        // ApprovalElevationScopeMismatch, not Allow.
+        let request_b = ObjectId::from_unscoped_bytes(b"req-B");
+        static APPROVALS: std::sync::OnceLock<Vec<ApprovalToken>> = std::sync::OnceLock::new();
+        let approvals = APPROVALS.get_or_init(|| {
+            vec![elevation_token(ObjectId::from_unscoped_bytes(b"req-A"))]
+        });
+        let input = elevation_flow_input(request_b, approvals.as_slice());
+        let engine = PolicyEngine {
+            zone_policy: minimal_zone_policy(),
+        };
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Deny);
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::ApprovalElevationScopeMismatch,
+            "elevation token bound to a different request must not apply to this one",
+        );
+    }
+
+    #[test]
+    fn engine_elevation_accepts_token_bound_to_this_request() {
+        let request = ObjectId::from_unscoped_bytes(b"req-match");
+        static APPROVALS: std::sync::OnceLock<Vec<ApprovalToken>> = std::sync::OnceLock::new();
+        let approvals = APPROVALS.get_or_init(|| {
+            vec![elevation_token(ObjectId::from_unscoped_bytes(b"req-match"))]
+        });
+        let input = elevation_flow_input(request, approvals.as_slice());
+        let engine = PolicyEngine {
+            zone_policy: minimal_zone_policy(),
+        };
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(
+            decision.decision,
+            Decision::Allow,
+            "elevation bound to this request must allow; got reason {:?}",
+            decision.reason_code
+        );
+    }
+
+    #[test]
+    fn engine_elevation_missing_with_no_elevation_scope_reports_missing_not_mismatch() {
+        // If there are no elevation-scoped tokens at all, the engine should
+        // return ApprovalMissingElevation (preserving the existing
+        // distinction between "missing" and "mismatch"). This guards
+        // against the refactor collapsing the two states.
+        let request = ObjectId::from_unscoped_bytes(b"req-no-elev");
+        static APPROVALS: std::sync::OnceLock<Vec<ApprovalToken>> = std::sync::OnceLock::new();
+        let approvals = APPROVALS.get_or_init(Vec::new);
+        let input = elevation_flow_input(request, approvals.as_slice());
+        let engine = PolicyEngine {
+            zone_policy: minimal_zone_policy(),
+        };
+        let decision = engine.evaluate_invoke(&input);
+        assert_eq!(decision.decision, Decision::Deny);
+        assert_eq!(
+            decision.reason_code,
+            DecisionReasonCode::ApprovalMissingElevation,
         );
     }
 

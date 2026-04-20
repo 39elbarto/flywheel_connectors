@@ -1554,6 +1554,7 @@ fn decision_reason_code_string_roundtrip() {
         DecisionReasonCode::ApprovalMissingElevation,
         DecisionReasonCode::ApprovalMissingDeclassification,
         DecisionReasonCode::ApprovalMissingExecution,
+        DecisionReasonCode::ApprovalElevationScopeMismatch,
         DecisionReasonCode::ApprovalExecutionScopeMismatch,
         DecisionReasonCode::ApprovalTokenInvalid,
         DecisionReasonCode::TransportDerpForbidden,

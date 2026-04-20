@@ -238,6 +238,12 @@ impl Default for GraphqlClientConfig {
 pub struct GraphqlClientBuilder {
     endpoint: String,
     config: GraphqlClientConfig,
+    /// Optionally-shared HTTP client. When `None`, `build()` constructs
+    /// a fresh `HttpClient` with its own connection pool. When `Some`,
+    /// every `GraphqlClient` built from this builder reuses the provided
+    /// pool — the right choice when an application creates many
+    /// `GraphqlClient`s pointing at the same service.
+    http: Option<Arc<HttpClient>>,
 }
 
 impl GraphqlClientBuilder {
@@ -247,7 +253,24 @@ impl GraphqlClientBuilder {
         Self {
             endpoint: endpoint.into(),
             config: GraphqlClientConfig::default(),
+            http: None,
         }
+    }
+
+    /// Reuse an existing `HttpClient` (and its connection pool) instead
+    /// of letting `build()` spin up a fresh one.
+    ///
+    /// Use this when an application constructs many `GraphqlClient`s
+    /// that target the same backend; without it, each client gets its
+    /// own pool and TCP/TLS reuse across clients is impossible. The
+    /// preferred pattern is still "build once, `clone()` everywhere" —
+    /// this method only matters when a single shared `GraphqlClient`
+    /// is not a fit (e.g. per-tenant header injection requires distinct
+    /// clients pointing at one backend).
+    #[must_use]
+    pub fn with_http_client(mut self, http: Arc<HttpClient>) -> Self {
+        self.http = Some(http);
+        self
     }
 
     /// Set the service name for error mapping.
@@ -305,7 +328,14 @@ impl GraphqlClientBuilder {
 
     /// Build the client.
     pub fn build(self) -> Result<GraphqlClient, GraphqlClientError> {
-        GraphqlClient::with_config(self.endpoint, self.config)
+        let http = self
+            .http
+            .unwrap_or_else(|| Arc::new(HttpClientBuilder::new().build()));
+        Ok(GraphqlClient::new_with_client(
+            self.endpoint,
+            http,
+            self.config,
+        ))
     }
 }
 
@@ -345,6 +375,19 @@ impl fmt::Debug for GraphqlClient {
 
 impl GraphqlClient {
     /// Create a new client with default configuration.
+    ///
+    /// **Note:** each call to `new`/`with_config` constructs its own
+    /// `HttpClient` with its own connection pool. `GraphqlClient`
+    /// implements `Clone` by sharing the underlying `Arc<HttpClient>`,
+    /// so the preferred usage is "build once, `clone()` everywhere" —
+    /// that way every clone shares a single pool.
+    ///
+    /// If an application must construct many distinct `GraphqlClient`s
+    /// pointing at the same endpoint (e.g. per-tenant header
+    /// injection), prefer [`GraphqlClient::with_shared_http_client`] or
+    /// [`GraphqlClientBuilder::with_http_client`] so the clients
+    /// actually share a connection pool instead of each getting a
+    /// private one (br-flywheel_connectors-jdhaw).
     #[must_use]
     pub fn new(endpoint: impl Into<String>) -> Self {
         let endpoint = endpoint.into();
@@ -353,6 +396,8 @@ impl GraphqlClient {
     }
 
     /// Create a client with custom configuration.
+    ///
+    /// See [`GraphqlClient::new`] for the shared-pool guidance.
     pub fn with_config(
         endpoint: impl Into<String>,
         config: GraphqlClientConfig,
@@ -362,6 +407,22 @@ impl GraphqlClient {
             Arc::new(HttpClientBuilder::new().build()),
             config,
         ))
+    }
+
+    /// Create a client that reuses an externally-owned `HttpClient`
+    /// (and its connection pool). Use this when constructing many
+    /// `GraphqlClient`s that should share a single pool — typically
+    /// per-tenant clients pointing at one backend.
+    ///
+    /// Callers that only need a single logical client should prefer
+    /// [`GraphqlClient::new`] or [`GraphqlClient::with_config`] and
+    /// `clone()` the result.
+    pub fn with_shared_http_client(
+        endpoint: impl Into<String>,
+        http: Arc<HttpClient>,
+        config: GraphqlClientConfig,
+    ) -> Self {
+        Self::new_with_client(endpoint, http, config)
     }
 
     fn new_with_client(
@@ -1842,6 +1903,66 @@ mod tests {
             };
         }
         assert!(state.inner.lock().await.is_empty());
+    }
+
+    // ---- br-flywheel_connectors-jdhaw: shared HttpClient pool ----
+
+    #[test]
+    fn builder_with_http_client_shares_pool_across_builds() {
+        // Two GraphqlClients built from the same Arc<HttpClient> must
+        // observe identical pointer identity on their internal `http`
+        // field — proving they share one connection pool rather than
+        // each spinning up its own.
+        let shared: Arc<HttpClient> = Arc::new(HttpClientBuilder::new().build());
+
+        let client_a = GraphqlClientBuilder::new("https://a.example/graphql")
+            .with_http_client(Arc::clone(&shared))
+            .build()
+            .expect("build a");
+        let client_b = GraphqlClientBuilder::new("https://b.example/graphql")
+            .with_http_client(Arc::clone(&shared))
+            .build()
+            .expect("build b");
+
+        assert!(
+            Arc::ptr_eq(&client_a.http, &client_b.http),
+            "builders given the same Arc<HttpClient> must produce clients that share it",
+        );
+        // And the shared Arc has the expected additional strong count
+        // (one for `shared`, one per built client).
+        assert!(Arc::strong_count(&shared) >= 3);
+    }
+
+    #[test]
+    fn builder_default_allocates_independent_pools() {
+        // Without with_http_client, each build() allocates a fresh
+        // HttpClient. Prove the Arc pointers differ so a reader of the
+        // test understands the foot-gun the shared-pool API avoids.
+        let client_a = GraphqlClientBuilder::new("https://a.example/graphql")
+            .build()
+            .expect("build a");
+        let client_b = GraphqlClientBuilder::new("https://b.example/graphql")
+            .build()
+            .expect("build b");
+
+        assert!(
+            !Arc::ptr_eq(&client_a.http, &client_b.http),
+            "default builds must each own a distinct HttpClient (the foot-gun)",
+        );
+    }
+
+    #[test]
+    fn clone_shares_http_client_with_source() {
+        // The recommended "build once, clone everywhere" pattern: the
+        // clone must share the same Arc<HttpClient> as its source.
+        let client = GraphqlClientBuilder::new("https://a.example/graphql")
+            .build()
+            .expect("build");
+        let cloned = client.clone();
+        assert!(
+            Arc::ptr_eq(&client.http, &cloned.http),
+            "Clone must share the underlying HttpClient Arc",
+        );
     }
 
     // ---- br-flywheel_connectors-upp69: collision-free dedup keys ----

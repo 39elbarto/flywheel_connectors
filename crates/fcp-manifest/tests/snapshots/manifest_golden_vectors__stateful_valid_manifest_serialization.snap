@@ -1,0 +1,102 @@
+---
+source: crates/fcp-manifest/tests/manifest_golden_vectors.rs
+expression: manifest
+---
+{
+  "manifest": {
+    "format": "fcp-connector-manifest",
+    "schema_version": "2.1",
+    "min_mesh_version": "2.0.0",
+    "min_protocol": "fcp2-sym/2.0",
+    "protocol_features": [],
+    "max_datagram_bytes": 1200,
+    "interface_hash": "blake3-256:fcp.interface.v2:25ded1fe871478f6d61210cc61152194a4b586718813072fa37de4ea6248ef71"
+  },
+  "connector": {
+    "id": "fcp.test",
+    "name": "Test Connector",
+    "version": "1.0.0",
+    "description": "Test connector",
+    "archetypes": [
+      "operational"
+    ],
+    "format": "native",
+    "status": "ready",
+    "singleton_writer": null,
+    "state": {
+      "model": "crdt",
+      "state_schema_version": "1",
+      "migration_hint": null,
+      "crdt_type": "or_set",
+      "snapshot_every_updates": 1000,
+      "snapshot_every_bytes": 10485760
+    }
+  },
+  "zones": {
+    "home": "z:work",
+    "allowed_sources": [
+      "z:work"
+    ],
+    "allowed_targets": [
+      "z:work"
+    ],
+    "forbidden": []
+  },
+  "capabilities": {
+    "required": [
+      "network.dns",
+      "test.op"
+    ],
+    "optional": [],
+    "forbidden": [
+      "system.exec"
+    ]
+  },
+  "provides": {
+    "operations": {
+      "test_op": {
+        "description": "Test operation",
+        "capability": "test.op",
+        "risk_level": "low",
+        "safety_tier": "safe",
+        "requires_approval": "none",
+        "rate_limit": null,
+        "idempotency": "none",
+        "revocation_freshness": "safe",
+        "input_schema": {
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object"
+        },
+        "network_constraints": null,
+        "ai_hints": {
+          "when_to_use": "",
+          "common_mistakes": [],
+          "examples": [],
+          "related": []
+        }
+      }
+    }
+  },
+  "event_caps": null,
+  "timeouts": null,
+  "sandbox": {
+    "profile": "strict",
+    "memory_mb": 64,
+    "cpu_percent": 20,
+    "wall_clock_timeout_ms": 1000,
+    "fs_readonly_paths": [
+      "/usr"
+    ],
+    "fs_writable_paths": [
+      "$CONNECTOR_STATE"
+    ],
+    "deny_exec": true,
+    "deny_ptrace": true
+  },
+  "rate_limits": null,
+  "signatures": null,
+  "supply_chain": null,
+  "policy": null
+}

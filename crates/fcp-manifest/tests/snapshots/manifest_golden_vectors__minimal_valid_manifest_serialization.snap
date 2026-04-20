@@ -1,0 +1,95 @@
+---
+source: crates/fcp-manifest/tests/manifest_golden_vectors.rs
+expression: manifest
+---
+{
+  "manifest": {
+    "format": "fcp-connector-manifest",
+    "schema_version": "2.1",
+    "min_mesh_version": "2.0.0",
+    "min_protocol": "fcp2-sym/2.0",
+    "protocol_features": [],
+    "max_datagram_bytes": 1200,
+    "interface_hash": "blake3-256:fcp.interface.v2:fac6efd1d05d4158e47bcce4e49cfbea4390c4333ad324dfc553d03f7813a596"
+  },
+  "connector": {
+    "id": "fcp.test",
+    "name": "Test Connector",
+    "version": "1.0.0",
+    "description": "Test connector",
+    "archetypes": [
+      "operational"
+    ],
+    "format": "native",
+    "status": "ready",
+    "singleton_writer": null,
+    "state": null
+  },
+  "zones": {
+    "home": "z:work",
+    "allowed_sources": [
+      "z:work"
+    ],
+    "allowed_targets": [
+      "z:work"
+    ],
+    "forbidden": []
+  },
+  "capabilities": {
+    "required": [
+      "network.dns",
+      "test.op"
+    ],
+    "optional": [],
+    "forbidden": [
+      "system.exec"
+    ]
+  },
+  "provides": {
+    "operations": {
+      "test_op": {
+        "description": "Test operation",
+        "capability": "test.op",
+        "risk_level": "low",
+        "safety_tier": "safe",
+        "requires_approval": "none",
+        "rate_limit": null,
+        "idempotency": "none",
+        "revocation_freshness": "safe",
+        "input_schema": {
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object"
+        },
+        "network_constraints": null,
+        "ai_hints": {
+          "when_to_use": "",
+          "common_mistakes": [],
+          "examples": [],
+          "related": []
+        }
+      }
+    }
+  },
+  "event_caps": null,
+  "timeouts": null,
+  "sandbox": {
+    "profile": "strict",
+    "memory_mb": 64,
+    "cpu_percent": 20,
+    "wall_clock_timeout_ms": 1000,
+    "fs_readonly_paths": [
+      "/usr"
+    ],
+    "fs_writable_paths": [
+      "$CONNECTOR_STATE"
+    ],
+    "deny_exec": true,
+    "deny_ptrace": true
+  },
+  "rate_limits": null,
+  "signatures": null,
+  "supply_chain": null,
+  "policy": null
+}

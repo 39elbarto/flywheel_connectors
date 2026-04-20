@@ -5,6 +5,7 @@
 
 use chrono::Utc;
 use fcp_manifest::{ConnectorManifest, ManifestError};
+use insta::assert_json_snapshot;
 use serde_json::json;
 use std::path::Path;
 use std::time::Instant;
@@ -120,7 +121,7 @@ allowed_targets = ["z:work"]
 forbidden = []
 
 [capabilities]
-required = ["network.dns"]
+required = ["network.dns", "test.op"]
 optional = []
 forbidden = ["system.exec"]
 
@@ -145,6 +146,27 @@ deny_exec = true
 deny_ptrace = true
 "#
     )
+}
+
+fn parse_valid_manifest(raw: &str) -> ConnectorManifest {
+    let with_hash = with_computed_hash(raw);
+    ConnectorManifest::parse_str(&with_hash).expect("manifest should parse and validate")
+}
+
+#[test]
+fn snapshot_minimal_valid_manifest_serialization() {
+    let manifest = parse_valid_manifest(&base_manifest_toml(PLACEHOLDER_HASH));
+    assert_json_snapshot!("minimal_valid_manifest_serialization", manifest);
+}
+
+#[test]
+fn snapshot_stateful_valid_manifest_serialization() {
+    let raw = base_manifest_toml(PLACEHOLDER_HASH).replace(
+        "\n[zones]",
+        "\n[connector.state]\nmodel = \"crdt\"\nstate_schema_version = \"1\"\ncrdt_type = \"or_set\"\nsnapshot_every_updates = 1000\nsnapshot_every_bytes = 10485760\n\n[zones]",
+    );
+    let manifest = parse_valid_manifest(&raw);
+    assert_json_snapshot!("stateful_valid_manifest_serialization", manifest);
 }
 
 // =============================================================================

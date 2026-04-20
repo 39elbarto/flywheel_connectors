@@ -31,7 +31,7 @@ format = "native"
 home = "z:work"
 
 [capabilities]
-required = ["network.egress"]
+required = ["network.egress", "test.op"]
 forbidden = ["system.exec"]
 
 [provides.operations.test_op]

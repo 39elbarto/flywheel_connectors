@@ -93,6 +93,21 @@ mod schema_patterns {
     ];
 }
 
+/// Match a schema namespace against a well-known prefix using dot-delimited
+/// semantics: either an exact match or `{prefix}.{suffix}`. Prevents a
+/// pathological namespace like `fcp.heartbeat-evil` from matching the
+/// `fcp.heartbeat` ephemeral prefix via plain `starts_with` and evading the
+/// default-required audit retention.
+fn namespace_matches_prefix(ns: &str, prefix: &str) -> bool {
+    if ns == prefix {
+        return true;
+    }
+    if let Some(rest) = ns.strip_prefix(prefix) {
+        return rest.starts_with('.');
+    }
+    false
+}
+
 /// Determine retention requirement for a schema (NORMATIVE).
 ///
 /// Default is `Required` for unknown schemas (fail-safe toward auditability).
@@ -102,14 +117,14 @@ pub fn retention_for_schema(schema: &SchemaId) -> ControlPlaneRetention {
 
     // Check explicit required prefixes first.
     for prefix in schema_patterns::REQUIRED_PREFIXES {
-        if ns.starts_with(prefix) {
+        if namespace_matches_prefix(ns, prefix) {
             return ControlPlaneRetention::Required;
         }
     }
 
     // Check ephemeral patterns next (explicit opt-out of storage).
     for prefix in schema_patterns::EPHEMERAL_PREFIXES {
-        if ns.starts_with(prefix) {
+        if namespace_matches_prefix(ns, prefix) {
             return ControlPlaneRetention::Ephemeral;
         }
     }
@@ -137,6 +152,44 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────
     // ControlPlaneRetention Tests
     // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn retention_subnamespace_with_dot_inherits_retention() {
+        // Legitimate nested sub-namespaces with a proper dot separator must
+        // still resolve under the parent's retention class.
+        assert_eq!(
+            retention_for_schema(&test_schema("fcp.invoke.v2", "Request")),
+            ControlPlaneRetention::Required
+        );
+        assert_eq!(
+            retention_for_schema(&test_schema("fcp.heartbeat.sub", "P")),
+            ControlPlaneRetention::Ephemeral
+        );
+    }
+
+    #[test]
+    fn retention_near_prefix_does_not_inherit_retention() {
+        // Namespace that shares a byte-prefix but lacks a dot delimiter MUST
+        // NOT inherit the ephemeral class — otherwise an attacker can craft
+        // `fcp.heartbeat-exfil` to evade audit retention.
+        assert_eq!(
+            retention_for_schema(&test_schema("fcp.heartbeat-evil", "P")),
+            ControlPlaneRetention::Required,
+            "non-dot suffix must default to Required (fail-safe)"
+        );
+        assert_eq!(
+            retention_for_schema(&test_schema("fcp.healthy", "P")),
+            ControlPlaneRetention::Required,
+            "fcp.healthy must not inherit fcp.health Ephemeral retention"
+        );
+        // Same property in the Required direction — here the fail-safe
+        // naturally aligns (unknown => Required) so behavior is unchanged,
+        // but we lock it in so future refactors can't silently regress.
+        assert_eq!(
+            retention_for_schema(&test_schema("fcp.invoker", "P")),
+            ControlPlaneRetention::Required
+        );
+    }
 
     #[test]
     fn retention_invoke_is_required() {

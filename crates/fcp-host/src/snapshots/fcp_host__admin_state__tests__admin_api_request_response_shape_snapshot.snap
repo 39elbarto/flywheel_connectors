@@ -1,0 +1,102 @@
+---
+source: crates/fcp-host/src/admin_state.rs
+expression: canonicalize_json(snapshot)
+---
+{
+  "host_simulate_request": {
+    "check_availability": true,
+    "connector_id": "fcp.github",
+    "deadline_ms": 2500,
+    "estimate_cost": true,
+    "input": {
+      "body": "[redacted]",
+      "labels": [
+        "bug",
+        "triage"
+      ],
+      "repository": "flywheel-ai/flywheel_connectors",
+      "title": "Snapshot drift"
+    },
+    "operation": "issues.create",
+    "principal": "agent://cod-p9",
+    "request_id": "[request-id]",
+    "zone_id": "z:work"
+  },
+  "host_simulate_response": {
+    "availability": {
+      "available": true,
+      "details": "shared org quota",
+      "rate_limit_remaining": 4998,
+      "rate_limit_reset_at": 1776625600
+    },
+    "cost_estimate": {
+      "api_credits": 1,
+      "confidence": "high",
+      "estimated_bytes": 2048,
+      "estimated_duration_ms": 120
+    },
+    "denial_code": "FCP-3007",
+    "duration_ms": 37,
+    "failure_reason": "upstream dry-run rejected stale repository permissions",
+    "missing_capabilities": [
+      "github.repo:issues.write"
+    ],
+    "phase": "connector_reached",
+    "preflight_allowed": true,
+    "receipt": {
+      "connector_id": "fcp.github",
+      "duration_ms": 37,
+      "input_digest": "[input-digest]",
+      "operation": "issues.create",
+      "phase": "connector_reached",
+      "receipt_id": "[receipt-id]",
+      "simulated_at": "[timestamp]",
+      "would_succeed": false
+    },
+    "request_id": "[request-id]",
+    "would_succeed": false
+  },
+  "inventory_mutation_request": {
+    "connector": {
+      "args": [
+        "serve",
+        "--zone",
+        "z:work"
+      ],
+      "binary": "[connector-binary]",
+      "categories": [
+        "issues",
+        "scm"
+      ],
+      "config": {
+        "credential_id": "[credential-id]",
+        "webhook_secret": "[redacted]",
+        "workspace_root": "[workspace-root]"
+      },
+      "description": "GitHub connector",
+      "env": {
+        "FCP_LOG": "info",
+        "FCP_PROFILE": "work"
+      },
+      "id": "fcp.github",
+      "name": "GitHub",
+      "version": "1.2.3"
+    },
+    "dry_run": true,
+    "kind": "update"
+  },
+  "lifecycle_transition_request": {
+    "action": "reload",
+    "initiated_by": "admin-cli",
+    "reason": "config rollout"
+  },
+  "lifecycle_transition_response": {
+    "action": "reload",
+    "connector_id": "fcp.github",
+    "current_desired_state": "enabled",
+    "journal_sequence": 42,
+    "observed_state": "running",
+    "previous_desired_state": "enabled",
+    "transitioned_at": "[timestamp]"
+  }
+}

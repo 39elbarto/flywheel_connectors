@@ -46,3 +46,4 @@ uuid.workspace = true
 [dev-dependencies]
 reqwest = { workspace = true, features = ["json"] }
 wiremock.workspace = true
+insta.workspace = true

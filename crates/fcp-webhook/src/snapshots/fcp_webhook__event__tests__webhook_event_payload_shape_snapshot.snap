@@ -1,0 +1,51 @@
+---
+source: crates/fcp-webhook/src/event.rs
+expression: canonicalize_json(snapshot)
+---
+{
+  "event_type": "issue_comment.created",
+  "headers": {
+    "Content-Type": "application/json",
+    "X-GitHub-Delivery": "[delivery-id]",
+    "X-Hub-Signature-256": "[signature]"
+  },
+  "id": "[event-id]",
+  "metadata": {
+    "attempt": 2,
+    "custom": {
+      "region": "us-east-1",
+      "request_id": "[request-id]"
+    },
+    "first_attempt_at": "[timestamp]",
+    "last_attempt_at": "[timestamp]",
+    "last_error": "upstream timeout",
+    "next_retry_at": "[timestamp]",
+    "source_ip": "[source-ip]",
+    "status": "failed",
+    "taint_flags": [
+      "PublicInput",
+      "WebhookInjected"
+    ]
+  },
+  "payload": {
+    "action": "created",
+    "comment": {
+      "body": "Snapshot drift detected",
+      "id": "[comment-id]"
+    },
+    "issue": {
+      "number": 42,
+      "title": "Golden review follow-up"
+    },
+    "repository": {
+      "full_name": "flywheel-ai/flywheel_connectors",
+      "private": true
+    },
+    "sender": {
+      "id": "[sender-id]",
+      "login": "cod-p9"
+    }
+  },
+  "provider": "github",
+  "timestamp": "[timestamp]"
+}

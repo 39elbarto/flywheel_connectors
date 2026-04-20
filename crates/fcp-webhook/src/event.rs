@@ -244,6 +244,7 @@ impl Default for EventSubscription {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, TimeZone};
     use fcp_core::TaintFlag;
 
     fn test_event() -> WebhookEvent {
@@ -256,6 +257,31 @@ mod tests {
                 }
             }
         }))
+    }
+
+    fn canonicalize_json(value: Value) -> Value {
+        match value {
+            Value::Array(values) => Value::Array(
+                values
+                    .into_iter()
+                    .map(canonicalize_json)
+                    .collect::<Vec<_>>(),
+            ),
+            Value::Object(map) => {
+                let mut entries = map.into_iter().collect::<Vec<_>>();
+                entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+                let mut canonical = serde_json::Map::new();
+                for (key, value) in entries {
+                    canonical.insert(key, canonicalize_json(value));
+                }
+                Value::Object(canonical)
+            }
+            other => other,
+        }
+    }
+
+    fn scrub_json_pointer(snapshot: &mut Value, pointer: &str, replacement: &str) {
+        *snapshot.pointer_mut(pointer).expect("pointer exists") = Value::String(replacement.into());
     }
 
     #[test]
@@ -731,6 +757,72 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: WebhookEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.payload, payload);
+    }
+
+    #[test]
+    fn webhook_event_payload_shape_snapshot() {
+        let fixed_at = Utc.with_ymd_and_hms(2026, 4, 20, 1, 14, 0).unwrap();
+        let mut headers = HashMap::new();
+        headers.insert("Content-Type".into(), "application/json".into());
+        headers.insert("X-GitHub-Delivery".into(), "[delivery-id]".into());
+        headers.insert("X-Hub-Signature-256".into(), "[signature]".into());
+
+        let mut custom = HashMap::new();
+        custom.insert("region".into(), serde_json::json!("us-east-1"));
+        custom.insert("request_id".into(), serde_json::json!("[request-id]"));
+
+        let mut taint_flags = TaintFlags::default();
+        taint_flags.insert(TaintFlag::WebhookInjected);
+        taint_flags.insert(TaintFlag::PublicInput);
+
+        let mut event = WebhookEvent::new("[event-id]", "issue_comment.created", "github")
+            .with_payload(serde_json::json!({
+                "action": "created",
+                "comment": {
+                    "body": "Snapshot drift detected",
+                    "id": "[comment-id]",
+                },
+                "issue": {
+                    "number": 42,
+                    "title": "Golden review follow-up",
+                },
+                "repository": {
+                    "full_name": "flywheel-ai/flywheel_connectors",
+                    "private": true,
+                },
+                "sender": {
+                    "id": "[sender-id]",
+                    "login": "cod-p9",
+                }
+            }))
+            .with_headers(headers);
+        event.timestamp = fixed_at;
+        event.metadata = EventMetadata {
+            attempt: 2,
+            first_attempt_at: Some(fixed_at),
+            last_attempt_at: Some(fixed_at + Duration::seconds(5)),
+            next_retry_at: Some(fixed_at + Duration::seconds(30)),
+            status: DeliveryStatus::Failed,
+            last_error: Some("upstream timeout".into()),
+            source_ip: Some("[source-ip]".into()),
+            taint_flags,
+            custom,
+        };
+
+        let mut snapshot = serde_json::to_value(&event).expect("serialize event");
+        for pointer in [
+            "/timestamp",
+            "/metadata/first_attempt_at",
+            "/metadata/last_attempt_at",
+            "/metadata/next_retry_at",
+        ] {
+            scrub_json_pointer(&mut snapshot, pointer, "[timestamp]");
+        }
+
+        insta::assert_json_snapshot!(
+            "webhook_event_payload_shape_snapshot",
+            canonicalize_json(snapshot)
+        );
     }
 
     // ── DeliveryStatus serde ─────────────────────────────────────────

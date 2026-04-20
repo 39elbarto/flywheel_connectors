@@ -4909,6 +4909,31 @@ mod tests {
     use fcp_crypto::cose::CoseToken;
     use fcp_kernel::{CanaryPolicy, ConnectorHealth, HealthMetrics};
 
+    fn canonicalize_json(value: Value) -> Value {
+        match value {
+            Value::Array(values) => Value::Array(
+                values
+                    .into_iter()
+                    .map(canonicalize_json)
+                    .collect::<Vec<_>>(),
+            ),
+            Value::Object(map) => {
+                let mut entries = map.into_iter().collect::<Vec<_>>();
+                entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+                let mut canonical = serde_json::Map::new();
+                for (key, value) in entries {
+                    canonical.insert(key, canonicalize_json(value));
+                }
+                Value::Object(canonical)
+            }
+            other => other,
+        }
+    }
+
+    fn scrub_json_pointer(snapshot: &mut Value, pointer: &str, replacement: &str) {
+        *snapshot.pointer_mut(pointer).expect("pointer exists") = Value::String(replacement.into());
+    }
+
     fn connector_id() -> ConnectorId {
         ConnectorId::from_static("fcp.test.admin-state:utility:1.0.0")
     }
@@ -10005,6 +10030,130 @@ mod tests {
         let json = serde_json::to_string(&config).unwrap();
         let back: ManagedConnectorConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(config, back);
+    }
+
+    #[test]
+    fn admin_api_request_response_shape_snapshot() {
+        let fixed_at = Utc.with_ymd_and_hms(2026, 4, 20, 1, 14, 0).unwrap();
+
+        let inventory_mutation_request = ConnectorInventoryMutationRequest {
+            kind: ConnectorInventoryMutationKind::Update,
+            dry_run: true,
+            connector: ManagedConnectorConfig {
+                id: "fcp.github".to_string(),
+                binary: "[connector-binary]".to_string(),
+                name: Some("GitHub".to_string()),
+                description: Some("GitHub connector".to_string()),
+                args: vec![
+                    "serve".to_string(),
+                    "--zone".to_string(),
+                    "z:work".to_string(),
+                ],
+                env: BTreeMap::from([
+                    ("FCP_LOG".to_string(), "info".to_string()),
+                    ("FCP_PROFILE".to_string(), "work".to_string()),
+                ]),
+                config: Some(serde_json::json!({
+                    "credential_id": "[credential-id]",
+                    "webhook_secret": "[redacted]",
+                    "workspace_root": "[workspace-root]",
+                })),
+                categories: vec!["issues".to_string(), "scm".to_string()],
+                version: Some("1.2.3".to_string()),
+            },
+        };
+
+        let lifecycle_transition_request = LifecycleTransitionRequest {
+            action: LifecycleAction::Reload,
+            reason: Some("config rollout".to_string()),
+            initiated_by: Some("admin-cli".to_string()),
+            dry_run: false,
+        };
+
+        let lifecycle_transition_response = LifecycleTransitionResponse {
+            connector_id: "fcp.github".to_string(),
+            action: LifecycleAction::Reload,
+            dry_run: false,
+            previous_desired_state: DesiredRuntimeState::Enabled,
+            current_desired_state: DesiredRuntimeState::Enabled,
+            observed_state: ObservedRuntimeState::Running,
+            lifecycle_status: None,
+            journal_sequence: 42,
+            transitioned_at: fixed_at,
+        };
+
+        let host_simulate_request = HostSimulateRequest {
+            request_id: "[request-id]".to_string(),
+            connector_id: "fcp.github".to_string(),
+            operation: "issues.create".to_string(),
+            input: Some(serde_json::json!({
+                "body": "[redacted]",
+                "labels": ["bug", "triage"],
+                "repository": "flywheel-ai/flywheel_connectors",
+                "title": "Snapshot drift",
+            })),
+            zone_id: Some("z:work".to_string()),
+            principal: Some("agent://cod-p9".to_string()),
+            capability_token: None,
+            approval_tokens: Vec::new(),
+            estimate_cost: true,
+            check_availability: true,
+            deadline_ms: 2_500,
+        };
+
+        let host_simulate_response = HostSimulateResponse {
+            request_id: "[request-id]".to_string(),
+            would_succeed: false,
+            phase: SimulatePhase::ConnectorReached,
+            preflight_allowed: true,
+            failure_reason: Some(
+                "upstream dry-run rejected stale repository permissions".to_string(),
+            ),
+            denial_code: Some("FCP-3007".to_string()),
+            missing_capabilities: vec!["github.repo:issues.write".to_string()],
+            cost_estimate: Some(SimulateCostEstimate {
+                api_credits: Some(1),
+                estimated_duration_ms: Some(120),
+                estimated_bytes: Some(2_048),
+                confidence: Some(SimulateCostConfidence::High),
+            }),
+            availability: Some(SimulateResourceAvailability {
+                available: true,
+                rate_limit_remaining: Some(4_998),
+                rate_limit_reset_at: Some(1_776_625_600),
+                details: Some("shared org quota".to_string()),
+            }),
+            duration_ms: 37,
+            receipt: SimulateReceipt {
+                receipt_id: "[receipt-id]".to_string(),
+                connector_id: "fcp.github".to_string(),
+                operation: "issues.create".to_string(),
+                phase: SimulatePhase::ConnectorReached,
+                would_succeed: false,
+                input_digest: Some("[input-digest]".to_string()),
+                duration_ms: 37,
+                simulated_at: fixed_at,
+            },
+        };
+
+        let mut snapshot = serde_json::json!({
+            "inventory_mutation_request": inventory_mutation_request,
+            "lifecycle_transition_request": lifecycle_transition_request,
+            "lifecycle_transition_response": lifecycle_transition_response,
+            "host_simulate_request": host_simulate_request,
+            "host_simulate_response": host_simulate_response,
+        });
+        for pointer in [
+            "/lifecycle_transition_response/transitioned_at",
+            "/host_simulate_response/receipt/simulated_at",
+        ] {
+            scrub_json_pointer(&mut snapshot, pointer, "[timestamp]");
+        }
+
+        insta::assert_json_snapshot!(
+            "admin_api_request_response_shape_snapshot",
+            canonicalize_json(snapshot)
+        );
     }
 
     // ── HostAdminStateSnapshot default values ───────────────────────────

@@ -1257,12 +1257,14 @@ pub mod channel {
                 let mut state = self.shared.state.lock().expect("oneshot state poisoned");
                 if let Some(value) = state.value.take() {
                     state.waker = None;
+                    drop(state);
                     self.completed = true;
                     return Ok(value);
                 }
 
                 if state.sender_consumed {
                     state.waker = None;
+                    drop(state);
                     self.completed = true;
                     return Err(error::RecvError);
                 }
@@ -1291,12 +1293,14 @@ pub mod channel {
                 let mut state = self.shared.state.lock().expect("oneshot state poisoned");
                 if let Some(value) = state.value.take() {
                     state.waker = None;
+                    drop(state);
                     self.completed = true;
                     return Poll::Ready(Ok(value));
                 }
 
                 if state.sender_consumed {
                     state.waker = None;
+                    drop(state);
                     self.completed = true;
                     return Poll::Ready(Err(error::RecvError));
                 }

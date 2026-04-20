@@ -942,7 +942,13 @@ mod tests {
     fn test_noop_sandbox_verify_file_access() {
         let sandbox = NoOpSandbox;
         let section = test_sandbox_section();
-        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        // `$CONNECTOR_STATE` in fs_writable_paths only expands when a
+        // state_dir is supplied; without it, the writable set is empty
+        // and the cache.db assertion below fails spuriously. Mirror
+        // test_compile_policy's `state_dir` so the NoOp verifier has a
+        // populated writable set to match against.
+        let state_dir = Some(PathBuf::from("/var/lib/fcp/connectors/test"));
+        let policy = CompiledPolicy::from_manifest(&section, state_dir).unwrap();
         assert!(
             sandbox
                 .verify_file_access(&policy, std::path::Path::new("/usr/lib/libc.so"), false)
@@ -1611,7 +1617,11 @@ mod tests {
     fn test_noop_sandbox_verify_all_operations() {
         let sandbox = NoOpSandbox;
         let section = test_sandbox_section();
-        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        // Provide state_dir so `$CONNECTOR_STATE` in fs_writable_paths
+        // expands; without it the writable set is empty and the
+        // cache.db write assertion below fails spuriously.
+        let state_dir = Some(PathBuf::from("/var/lib/fcp/connectors/test"));
+        let policy = CompiledPolicy::from_manifest(&section, state_dir).unwrap();
 
         assert!(
             sandbox

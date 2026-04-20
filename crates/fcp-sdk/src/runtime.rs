@@ -5391,6 +5391,119 @@ mod tests {
     }
 
     #[test]
+    fn polling_supervisor_persists_cursor_after_successful_nonempty_poll() {
+        #[derive(Debug, Default)]
+        struct PersistBucketPollingCursor {
+            offset: Option<i64>,
+            last_poll_at: Option<Instant>,
+            last_poll_count: usize,
+            persist_with_items_calls: Arc<AtomicUsize>,
+            persist_without_items_calls: Arc<AtomicUsize>,
+        }
+
+        impl PersistBucketPollingCursor {
+            fn new(
+                persist_with_items_calls: Arc<AtomicUsize>,
+                persist_without_items_calls: Arc<AtomicUsize>,
+            ) -> Self {
+                Self {
+                    offset: None,
+                    last_poll_at: None,
+                    last_poll_count: 0,
+                    persist_with_items_calls,
+                    persist_without_items_calls,
+                }
+            }
+        }
+
+        impl PollingCursor for PersistBucketPollingCursor {
+            fn offset(&self) -> Option<i64> {
+                self.offset
+            }
+
+            fn set_offset(&mut self, offset: i64) {
+                self.offset = Some(offset);
+            }
+
+            fn last_poll_at(&self) -> Option<Instant> {
+                self.last_poll_at
+            }
+
+            fn record_poll(&mut self, at: Instant, updates_received: usize) {
+                self.last_poll_at = Some(at);
+                self.last_poll_count = updates_received;
+            }
+
+            fn last_poll_count(&self) -> usize {
+                self.last_poll_count
+            }
+
+            fn persist(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                if self.last_poll_count > 0 {
+                    self.persist_with_items_calls
+                        .fetch_add(1, Ordering::SeqCst);
+                } else {
+                    self.persist_without_items_calls
+                        .fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(())
+            }
+
+            fn restore(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                Ok(())
+            }
+        }
+
+        let _ = fcp_async_core::runtime::block_on_sync(async {
+            let config = SupervisorConfig::default().with_base_backoff_ms(1);
+            let persist_with_items_calls = Arc::new(AtomicUsize::new(0));
+            let persist_without_items_calls = Arc::new(AtomicUsize::new(0));
+            let cursor = PersistBucketPollingCursor::new(
+                Arc::clone(&persist_with_items_calls),
+                Arc::clone(&persist_without_items_calls),
+            );
+            let mut supervisor = PollingSupervisor::new(config, cursor);
+
+            let poll_count = Arc::new(AtomicUsize::new(0));
+            let poll_count_clone = Arc::clone(&poll_count);
+
+            let (shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
+            let shutdown_tx = Arc::new(shutdown_tx);
+            let shutdown_tx_clone = Arc::clone(&shutdown_tx);
+
+            let outcome = supervisor
+                .run(
+                    shutdown_rx,
+                    1,
+                    move |_offset| {
+                        let count = poll_count_clone.fetch_add(1, Ordering::SeqCst);
+                        let shutdown = Arc::clone(&shutdown_tx_clone);
+                        async move {
+                            if count == 0 {
+                                PollResult::success(vec![41])
+                            } else {
+                                let _ = shutdown.send(true);
+                                PollResult::<i32>::empty()
+                            }
+                        }
+                    },
+                    |items, cursor| {
+                        for item in &items {
+                            cursor.advance_if_newer(i64::from(*item));
+                        }
+                        Ok(())
+                    },
+                )
+                .await;
+
+            assert!(matches!(outcome, SupervisorOutcome::Shutdown));
+            assert_eq!(supervisor.cursor().offset(), Some(42));
+            assert_eq!(persist_with_items_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(persist_without_items_calls.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
     fn polling_supervisor_does_not_advance_or_persist_cursor_on_processing_failure() {
         let _ = fcp_async_core::runtime::block_on_sync(async {
             let config = SupervisorConfig::default()

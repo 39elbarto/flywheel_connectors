@@ -748,6 +748,91 @@ async fn create_pod_rejects_service_account_injection() {
     );
 }
 
+#[fcp_async_core::runtime::test]
+async fn create_pod_rejects_projected_service_account_token_volume() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.create_pod",
+            "input": {
+                "namespace": "default",
+                "name": "projected-token-pod",
+                "spec": {
+                    "volumes": [{
+                        "name": "service-account-token",
+                        "projected": {
+                            "sources": [{
+                                "serviceAccountToken": {"path": "token"}
+                            }]
+                        }
+                    }],
+                    "containers": [{
+                        "name": "debug",
+                        "image": "busybox",
+                        "volumeMounts": [{
+                            "name": "service-account-token",
+                            "mountPath": "/var/run/secrets/tokens"
+                        }]
+                    }]
+                }
+            }
+        }))
+        .await
+        .is_err()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_pod_rejects_host_port_binding() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.create_pod",
+            "input": {
+                "namespace": "default",
+                "name": "host-port-pod",
+                "spec": {
+                    "containers": [{
+                        "name": "debug",
+                        "image": "busybox",
+                        "ports": [{"containerPort": 8080, "hostPort": 8080}]
+                    }]
+                }
+            }
+        }))
+        .await
+        .is_err()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn create_pod_rejects_added_capabilities() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.create_pod",
+            "input": {
+                "namespace": "default",
+                "name": "cap-add-pod",
+                "spec": {
+                    "containers": [{
+                        "name": "debug",
+                        "image": "busybox",
+                        "securityContext": {
+                            "capabilities": {"add": ["NET_ADMIN"]}
+                        }
+                    }]
+                }
+            }
+        }))
+        .await
+        .is_err()
+    );
+}
+
 // -- apply_deployment --
 
 #[fcp_async_core::runtime::test]
@@ -1555,6 +1640,77 @@ async fn exec_rejects_system_namespaces() {
                 "namespace": "kube-system",
                 "name": "coredns",
                 "command": ["cat", "/etc/resolv.conf"]
+            }
+        }))
+        .await
+        .is_err()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn exec_rejects_hostpath_target_pod() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/namespaces/default/pods/debug-pod"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "Pod",
+            "metadata": {
+                "name": "debug-pod",
+                "labels": {"fcp.flywheel.ai/exec-approved": "true"}
+            },
+            "spec": {
+                "volumes": [{"name": "host-root", "hostPath": {"path": "/"}}],
+                "containers": [{"name": "debug", "image": "busybox"}]
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.exec",
+            "input": {
+                "namespace": "default",
+                "name": "debug-pod",
+                "command": ["ls", "/app"]
+            }
+        }))
+        .await
+        .is_err()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn exec_rejects_privileged_target_pod() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/namespaces/default/pods/debug-pod"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "kind": "Pod",
+            "metadata": {
+                "name": "debug-pod",
+                "labels": {"fcp.flywheel.ai/exec-approved": "true"}
+            },
+            "spec": {
+                "containers": [{
+                    "name": "debug",
+                    "image": "busybox",
+                    "securityContext": {"privileged": true}
+                }]
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    assert!(
+        c.handle_invoke(json!({
+            "operation_id": "kubernetes.exec",
+            "input": {
+                "namespace": "default",
+                "name": "debug-pod",
+                "command": ["ls", "/app"]
             }
         }))
         .await

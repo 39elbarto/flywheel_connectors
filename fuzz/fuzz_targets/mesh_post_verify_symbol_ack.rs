@@ -64,7 +64,7 @@ fn test_object_header() -> ObjectHeader {
     }
 }
 
-fn test_request(object_id: ObjectId, request_nonce: u64) -> SymbolRequest {
+fn test_request(object_id: ObjectId) -> SymbolRequest {
     SymbolRequest::new(
         test_object_header(),
         object_id,
@@ -72,7 +72,7 @@ fn test_request(object_id: ObjectId, request_nonce: u64) -> SymbolRequest {
         ZoneKeyId::from_bytes([0x22; 8]),
         1,
         2,
-        request_nonce,
+        0,
     )
 }
 
@@ -107,13 +107,18 @@ fn install_symbol_data(node: &MeshNode, object_id: ObjectId) -> bool {
     .is_ok()
 }
 
-fn seed_active_transfer(node: &mut MeshNode, object_id: ObjectId, peer: &NodeId, now_ms: u64) -> bool {
+fn seed_active_transfer(
+    node: &mut MeshNode,
+    object_id: ObjectId,
+    peer: &NodeId,
+    now_ms: u64,
+) -> bool {
     if !install_symbol_data(node, object_id) {
         return false;
     }
 
     block_on_sync(async {
-        node.handle_symbol_request(test_request(object_id, 1), peer, true, now_ms)
+        node.handle_symbol_request(test_request(object_id), peer, true, now_ms)
             .await
             .map(|_| ())
     })
@@ -126,9 +131,14 @@ fn follow_up_result(
     now_ms: u64,
 ) -> Result<(), SymbolRequestError> {
     block_on_sync(async {
-        node.handle_symbol_request(test_request(object_id, 2), &NodeId::new("peer-follow"), true, now_ms)
-            .await
-            .map(|_| ())
+        node.handle_symbol_request(
+            test_request(object_id),
+            &NodeId::new("peer-follow"),
+            true,
+            now_ms,
+        )
+        .await
+        .map(|_| ())
     })
     .unwrap_or_else(|_| Ok(()))
 }
@@ -192,7 +202,10 @@ fuzz_target!(|data: &[u8]| {
 
     let before_acks = node.metrics().symbol_requests.acks_received;
     let result = node.handle_symbol_ack(&peer, &ack, input.now_ms);
-    assert!(result.is_ok(), "valid signature should reach post-verify symbol-ack handling");
+    assert!(
+        result.is_ok(),
+        "valid signature should reach post-verify symbol-ack handling"
+    );
     assert_eq!(
         node.metrics().symbol_requests.acks_received,
         before_acks.saturating_add(1)

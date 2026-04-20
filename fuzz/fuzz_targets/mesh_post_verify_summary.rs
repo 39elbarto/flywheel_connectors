@@ -3,9 +3,7 @@
 use std::sync::Arc;
 
 use arbitrary::{Arbitrary, Unstructured};
-use fcp_core::{
-    EpochId, NodeId as SignatureNodeId, NodeSignature, TailscaleNodeId, ZoneId,
-};
+use fcp_core::{EpochId, NodeId as SignatureNodeId, NodeSignature, TailscaleNodeId, ZoneId};
 use fcp_crypto::Ed25519SigningKey;
 use fcp_mesh::{
     GossipConfig, GossipSummary, IbltPlaceholder, MeshNode, MeshNodeConfig, ObjectAdmissionClass,
@@ -92,9 +90,15 @@ fuzz_target!(|data: &[u8]| {
 
     let config = GossipConfig {
         summary_ttl_secs: u64::from(input.summary_ttl_secs % 300).saturating_add(1),
-        max_objects_per_summary: usize::from((input.max_objects_per_summary % 128).saturating_add(1)),
-        max_symbols_per_summary: usize::from((input.max_symbols_per_summary % 256).saturating_add(1)),
-        reconciliation_batch_size: usize::from((input.reconciliation_batch_size % 32).saturating_add(1)),
+        max_objects_per_summary: usize::from(
+            (input.max_objects_per_summary % 128).saturating_add(1),
+        ),
+        max_symbols_per_summary: usize::from(
+            (input.max_symbols_per_summary % 256).saturating_add(1),
+        ),
+        reconciliation_batch_size: usize::from(
+            (input.reconciliation_batch_size % 32).saturating_add(1),
+        ),
         ..GossipConfig::default()
     };
     let mut node = test_node(config.clone());
@@ -126,8 +130,14 @@ fuzz_target!(|data: &[u8]| {
     let should_install_peer_state = accepted_summary(&summary, &config, input.now_secs);
     let before_updates = node.metrics().gossip_updates;
     let result = node.handle_summary(summary, input.now_secs);
-    assert!(result.is_ok(), "valid signature should reach post-verify summary handling");
-    assert_eq!(node.metrics().gossip_updates, before_updates.saturating_add(1));
+    assert!(
+        result.is_ok(),
+        "valid signature should reach post-verify summary handling"
+    );
+    assert_eq!(
+        node.metrics().gossip_updates,
+        before_updates.saturating_add(1)
+    );
 
     let prune_at_ms = input
         .now_secs
@@ -137,7 +147,10 @@ fuzz_target!(|data: &[u8]| {
     let pruned = node.prune_stale_state(prune_at_ms);
 
     if should_install_peer_state {
-        assert!(pruned >= 1, "accepted summary should leave stale gossip peer state to prune");
+        assert!(
+            pruned >= 1,
+            "accepted summary should leave stale gossip peer state to prune"
+        );
     } else {
         assert_eq!(pruned, 0, "rejected summary must not install peer state");
     }

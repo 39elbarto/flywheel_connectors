@@ -66,7 +66,7 @@ fn test_object_header() -> ObjectHeader {
     }
 }
 
-fn test_request(object_id: ObjectId, request_nonce: u64) -> SymbolRequest {
+fn test_request(object_id: ObjectId) -> SymbolRequest {
     SymbolRequest::new(
         test_object_header(),
         object_id,
@@ -74,7 +74,7 @@ fn test_request(object_id: ObjectId, request_nonce: u64) -> SymbolRequest {
         ZoneKeyId::from_bytes([0x22; 8]),
         1,
         2,
-        request_nonce,
+        0,
     )
 }
 
@@ -109,13 +109,18 @@ fn install_symbol_data(node: &MeshNode, object_id: ObjectId) -> bool {
     .is_ok()
 }
 
-fn seed_active_transfer(node: &mut MeshNode, object_id: ObjectId, peer: &NodeId, now_ms: u64) -> bool {
+fn seed_active_transfer(
+    node: &mut MeshNode,
+    object_id: ObjectId,
+    peer: &NodeId,
+    now_ms: u64,
+) -> bool {
     if !install_symbol_data(node, object_id) {
         return false;
     }
 
     block_on_sync(async {
-        node.handle_symbol_request(test_request(object_id, 1), peer, true, now_ms)
+        node.handle_symbol_request(test_request(object_id), peer, true, now_ms)
             .await
             .map(|_| ())
     })
@@ -128,9 +133,14 @@ fn follow_up_result(
     now_ms: u64,
 ) -> Result<(), SymbolRequestError> {
     block_on_sync(async {
-        node.handle_symbol_request(test_request(object_id, 2), &NodeId::new("peer-follow"), true, now_ms)
-            .await
-            .map(|_| ())
+        node.handle_symbol_request(
+            test_request(object_id),
+            &NodeId::new("peer-follow"),
+            true,
+            now_ms,
+        )
+        .await
+        .map(|_| ())
     })
     .unwrap_or_else(|_| Ok(()))
 }
@@ -181,20 +191,17 @@ fuzz_target!(|data: &[u8]| {
         received_unique: input.received_unique,
         needed: input.needed,
         complete: input.complete,
-        missing_hint: Some(
-            input
-                .missing_hint
-                .into_iter()
-                .take(128)
-                .collect::<Vec<_>>(),
-        )
-        .filter(|hint| !hint.is_empty()),
+        missing_hint: Some(input.missing_hint.into_iter().take(128).collect::<Vec<_>>())
+            .filter(|hint| !hint.is_empty()),
         signature: Ed25519Signature::from_bytes(&[0u8; 64]),
     };
     status.sign(&signing_key);
 
     let result = node.handle_decode_status(&peer, &status, input.now_ms);
-    assert!(result.is_ok(), "valid signature should reach post-verify decode-status handling");
+    assert!(
+        result.is_ok(),
+        "valid signature should reach post-verify decode-status handling"
+    );
 
     let follow = follow_up_result(&mut node, tracked_object, input.now_ms.saturating_add(1));
     if input.use_tracked_object && input.complete {

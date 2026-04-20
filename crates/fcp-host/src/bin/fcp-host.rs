@@ -15,9 +15,11 @@ use axum::{
     body::Body,
     extract::{Path, State},
     http::{
-        HeaderMap, HeaderValue, StatusCode,
+        HeaderMap, HeaderValue, Request, StatusCode,
         header::{CACHE_CONTROL, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, VARY},
     },
+    middleware::{Next, from_fn_with_state},
+    response::Response,
     routing::{get, post},
 };
 use base64::Engine;
@@ -837,6 +839,7 @@ struct AppState {
     supply_chain: Arc<SupplyChainGate>,
     capability_verifying_key: Option<Ed25519VerifyingKey>,
     approval_verifying_key: Option<Ed25519VerifyingKey>,
+    admin_bearer_token: Option<Arc<str>>,
     connectors_file: Option<PathBuf>,
     started_at: Instant,
 }
@@ -846,6 +849,57 @@ struct VerifiedLiveRequest {
     principal: String,
     approval_required: bool,
     safety_tier: SafetyTier,
+}
+
+fn resolve_admin_bearer_token() -> HostResult<Option<Arc<str>>> {
+    match std::env::var("FCP_HOST_ADMIN_BEARER_TOKEN") {
+        Ok(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(Arc::<str>::from(trimmed.to_owned())))
+            }
+        }
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(HostError::InvalidFilter(
+            "FCP_HOST_ADMIN_BEARER_TOKEN contains non-unicode data".to_string(),
+        )),
+    }
+}
+
+fn validate_admin_authorization(state: &AppState, headers: &HeaderMap) -> HostResult<()> {
+    let expected = state.admin_bearer_token.as_deref().ok_or_else(|| {
+        HostError::Unavailable(
+            "admin API requires FCP_HOST_ADMIN_BEARER_TOKEN to be configured".to_string(),
+        )
+    })?;
+    let provided = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            HostError::PreflightFailed(
+                "missing or invalid Authorization header for admin API".to_string(),
+            )
+        })?;
+
+    if provided != expected {
+        return Err(HostError::PreflightFailed(
+            "admin bearer token rejected".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn admin_auth_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response, (StatusCode, String)> {
+    validate_admin_authorization(state.as_ref(), request.headers()).map_err(map_host_error)?;
+    Ok(next.run(request).await)
 }
 
 fn parse_public_key_str(raw: &str, source: &str) -> HostResult<Option<Ed25519VerifyingKey>> {
@@ -2092,21 +2146,15 @@ async fn async_main() -> HostResult<()> {
         supply_chain,
         capability_verifying_key,
         approval_verifying_key,
+        admin_bearer_token: resolve_admin_bearer_token()?,
         connectors_file: loaded_configs.connectors_file,
         started_at: Instant::now(),
     });
 
-    let app = Router::new()
-        .route("/doctor", post(doctor_handler))
-        .route("/rpc/discover", post(discover_handler))
-        .route("/rpc/connectors/{connector_id}", get(connector_handler))
-        .route(
-            "/rpc/connectors/{connector_id}/status",
-            get(connector_status_handler),
-        )
+    let protected_routes = Router::new()
         .route(
             "/rpc/connectors/{connector_id}/artifact",
-            get(connector_artifact_metadata_handler).post(connector_artifact_register_handler),
+            post(connector_artifact_register_handler),
         )
         .route(
             "/rpc/connectors/{connector_id}/config",
@@ -2140,20 +2188,10 @@ async fn async_main() -> HostResult<()> {
             "/rpc/connectors/apply",
             post(connector_inventory_apply_handler),
         )
-        .route("/rpc/introspect/{connector_id}", get(introspect_handler))
-        .route("/rpc/invoke", post(invoke_handler))
-        .route("/rpc/cancel", post(cancel_handler))
-        .route("/rpc/operations/cancel", post(cancel_handler))
-        .route("/rpc/batch", post(batch_invoke_handler))
-        .route("/rpc/batch-invoke", post(batch_invoke_handler))
-        .route("/rpc/preflight", post(preflight_handler))
-        .route("/rpc/simulate", post(simulate_handler))
-        .route("/rpc/budget/report", post(budget_report_handler))
         .route(
             "/rpc/supply-chain/verify",
             post(supply_chain_verify_handler),
         )
-        .route("/rpc/health", get(health_handler))
         .route(
             "/rpc/rollout/pin/{connector_id}",
             get(rollout_pin_status_handler)
@@ -2167,7 +2205,6 @@ async fn async_main() -> HostResult<()> {
             post(rollout_manual_rollback_handler),
         )
         .route("/rpc/rollout/{connector_id}", get(rollout_status_handler))
-        // ── Lifecycle transition and journal RPCs ──
         .route(
             "/rpc/lifecycle/{connector_id}",
             post(lifecycle_transition_handler).get(lifecycle_record_handler),
@@ -2177,7 +2214,6 @@ async fn async_main() -> HostResult<()> {
             "/rpc/admin/journal/{connector_id}",
             get(journal_connector_handler),
         )
-        // ── Logs, events, and receipt RPCs ──
         .route("/rpc/admin/logs", post(log_query_handler))
         .route("/rpc/admin/receipts", post(receipt_query_handler))
         .route(
@@ -2189,6 +2225,34 @@ async fn async_main() -> HostResult<()> {
             "/rpc/admin/events/acknowledge",
             post(event_acknowledge_handler),
         )
+        .route_layer(from_fn_with_state(
+            Arc::clone(&state),
+            admin_auth_middleware,
+        ));
+
+    let app = Router::new()
+        .route("/doctor", post(doctor_handler))
+        .route("/rpc/discover", post(discover_handler))
+        .route("/rpc/connectors/{connector_id}", get(connector_handler))
+        .route(
+            "/rpc/connectors/{connector_id}/status",
+            get(connector_status_handler),
+        )
+        .route(
+            "/rpc/connectors/{connector_id}/artifact",
+            get(connector_artifact_metadata_handler),
+        )
+        .route("/rpc/introspect/{connector_id}", get(introspect_handler))
+        .route("/rpc/invoke", post(invoke_handler))
+        .route("/rpc/cancel", post(cancel_handler))
+        .route("/rpc/operations/cancel", post(cancel_handler))
+        .route("/rpc/batch", post(batch_invoke_handler))
+        .route("/rpc/batch-invoke", post(batch_invoke_handler))
+        .route("/rpc/preflight", post(preflight_handler))
+        .route("/rpc/simulate", post(simulate_handler))
+        .route("/rpc/budget/report", post(budget_report_handler))
+        .route("/rpc/health", get(health_handler))
+        .merge(protected_routes)
         .with_state(Arc::clone(&state));
 
     let (shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
@@ -5037,6 +5101,7 @@ mod tests {
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
             approval_verifying_key: None,
+            admin_bearer_token: None,
             connectors_file: Some(connectors_file),
             started_at: Instant::now(),
         })
@@ -6279,6 +6344,71 @@ mod tests {
     }
 
     #[test]
+    fn validate_admin_authorization_rejects_missing_header() {
+        let state = AppState {
+            registry: Arc::new(empty_registry(1)),
+            doctor: DoctorService::new(Arc::new(empty_registry(1))),
+            budget: Arc::new(BudgetPolicyEngine::new()),
+            discovery: Arc::new(DiscoveryEndpoint::new(
+                Arc::new(empty_registry(1)),
+                Arc::new(BudgetPolicyEngine::new()),
+            )),
+            cancellation: Arc::new(CancellationController::new()),
+            lifecycle: Arc::new(HostAdminStateStore::new()),
+            rollout: Arc::new(RolloutController::new(
+                Arc::new(empty_registry(1)),
+                Arc::new(HostAdminStateStore::new()),
+            )),
+            supply_chain: Arc::new(SupplyChainGate::default()),
+            capability_verifying_key: None,
+            approval_verifying_key: None,
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            connectors_file: None,
+            started_at: Instant::now(),
+        };
+
+        let error =
+            validate_admin_authorization(&state, &HeaderMap::new()).expect_err("missing auth");
+        assert!(error.to_string().contains("Authorization"));
+    }
+
+    #[test]
+    fn validate_admin_authorization_accepts_matching_bearer_token() {
+        let registry = Arc::new(empty_registry(1));
+        let budget = Arc::new(BudgetPolicyEngine::new());
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = AppState {
+            registry: Arc::clone(&registry),
+            doctor: DoctorService::new(Arc::clone(&registry)),
+            budget: Arc::clone(&budget),
+            discovery: Arc::new(DiscoveryEndpoint::new(
+                Arc::clone(&registry),
+                Arc::clone(&budget),
+            )),
+            cancellation: Arc::new(CancellationController::new()),
+            lifecycle: Arc::clone(&lifecycle),
+            rollout: Arc::new(RolloutController::new(
+                Arc::clone(&registry),
+                Arc::clone(&lifecycle),
+            )),
+            supply_chain: Arc::new(SupplyChainGate::default()),
+            capability_verifying_key: None,
+            approval_verifying_key: None,
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            connectors_file: None,
+            started_at: Instant::now(),
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer topsecret"),
+        );
+
+        validate_admin_authorization(&state, &headers).expect("matching token");
+    }
+
+    #[test]
     fn connector_config_array_json() {
         let json = r#"[
             {"id": "fcp.a:b:1.0.0", "binary": "/bin/a"},
@@ -6363,6 +6493,7 @@ mod tests {
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
             approval_verifying_key: None,
+            admin_bearer_token: None,
             connectors_file: None,
             started_at: Instant::now(),
         };
@@ -6409,6 +6540,7 @@ mod tests {
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
             approval_verifying_key: None,
+            admin_bearer_token: None,
             connectors_file: None,
             started_at: Instant::now(),
         });

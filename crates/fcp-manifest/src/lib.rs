@@ -1683,8 +1683,52 @@ pub struct RateLimitsSection {
     pub operation_pools: std::collections::HashMap<String, Vec<String>>,
 }
 
+/// Hard caps on the size/shape of declared rate-limit sections. Manifests
+/// that exceed these bounds are rejected at validation time so that a
+/// malicious or buggy author cannot submit a declaration that degenerates
+/// into "unlimited" — e.g. `requests = u32::MAX, window_ms = 1` — or that
+/// blows up memory via millions of pool entries.
+const MAX_RATE_LIMIT_POOLS: usize = 1024;
+const MAX_RATE_LIMIT_OPERATION_POOL_MAP: usize = 4096;
+const MAX_RATE_LIMIT_POOL_IDS_PER_OPERATION: usize = 16;
+const MAX_RATE_LIMIT_REQUESTS: u32 = 1_000_000_000;
+const MAX_RATE_LIMIT_BURST: u32 = 1_000_000_000;
+const MAX_RATE_LIMIT_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
+
 impl RateLimitsSection {
     fn validate(&self) -> Result<(), ManifestError> {
+        if self.pools.len() > MAX_RATE_LIMIT_POOLS {
+            return Err(ManifestError::Invalid {
+                field: "rate_limits.pools",
+                message: format!(
+                    "declared {} pools; maximum is {}",
+                    self.pools.len(),
+                    MAX_RATE_LIMIT_POOLS
+                ),
+            });
+        }
+        if self.operation_pools.len() > MAX_RATE_LIMIT_OPERATION_POOL_MAP {
+            return Err(ManifestError::Invalid {
+                field: "rate_limits.operation_pools",
+                message: format!(
+                    "declared {} operation->pool mappings; maximum is {}",
+                    self.operation_pools.len(),
+                    MAX_RATE_LIMIT_OPERATION_POOL_MAP
+                ),
+            });
+        }
+        for (op, pool_ids) in &self.operation_pools {
+            if pool_ids.len() > MAX_RATE_LIMIT_POOL_IDS_PER_OPERATION {
+                return Err(ManifestError::Invalid {
+                    field: "rate_limits.operation_pools.*",
+                    message: format!(
+                        "operation `{op}` references {} pools; maximum is {}",
+                        pool_ids.len(),
+                        MAX_RATE_LIMIT_POOL_IDS_PER_OPERATION
+                    ),
+                });
+            }
+        }
         for pool in &self.pools {
             pool.validate()?;
         }
@@ -1773,6 +1817,39 @@ pub struct RateLimitPoolSection {
 
 impl RateLimitPoolSection {
     fn validate(&self) -> Result<(), ManifestError> {
+        // Upper bounds on pool quotas: a manifest that declares
+        // `requests = u32::MAX, window_ms = 1` degenerates into "no rate
+        // limit at all" at the host, which defeats the purpose of
+        // declaring a pool. Reject before the host has to enforce.
+        if self.requests > MAX_RATE_LIMIT_REQUESTS {
+            return Err(ManifestError::Invalid {
+                field: "rate_limits.pools.*.requests",
+                message: format!(
+                    "pool `{}` declares requests={} exceeding maximum {}",
+                    self.id, self.requests, MAX_RATE_LIMIT_REQUESTS
+                ),
+            });
+        }
+        if self.window_ms > MAX_RATE_LIMIT_WINDOW_MS {
+            return Err(ManifestError::Invalid {
+                field: "rate_limits.pools.*.window_ms",
+                message: format!(
+                    "pool `{}` declares window_ms={} exceeding maximum {} ms (24h)",
+                    self.id, self.window_ms, MAX_RATE_LIMIT_WINDOW_MS
+                ),
+            });
+        }
+        if let Some(burst) = self.burst {
+            if burst > MAX_RATE_LIMIT_BURST {
+                return Err(ManifestError::Invalid {
+                    field: "rate_limits.pools.*.burst",
+                    message: format!(
+                        "pool `{}` declares burst={} exceeding maximum {}",
+                        self.id, burst, MAX_RATE_LIMIT_BURST
+                    ),
+                });
+            }
+        }
         if let Some(unit) = self.unit.as_deref() {
             match unit {
                 "requests" | "tokens" | "bytes" | "custom" => {}

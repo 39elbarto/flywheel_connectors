@@ -1908,6 +1908,30 @@ mod tests {
     // ---- br-flywheel_connectors-jdhaw: shared HttpClient pool ----
 
     #[test]
+    fn with_shared_http_client_matches_builder_pool() {
+        // The constructor variant must produce the same pool-sharing
+        // behavior as the builder. If a caller prefers the direct
+        // constructor (e.g. to avoid building a Config separately),
+        // they must not silently lose pool sharing.
+        let shared: Arc<HttpClient> = Arc::new(HttpClientBuilder::new().build());
+
+        let via_constructor = GraphqlClient::with_shared_http_client(
+            "https://a.example/graphql",
+            Arc::clone(&shared),
+            GraphqlClientConfig::default(),
+        );
+        let via_builder = GraphqlClientBuilder::new("https://b.example/graphql")
+            .with_http_client(Arc::clone(&shared))
+            .build()
+            .expect("build");
+
+        assert!(
+            Arc::ptr_eq(&via_constructor.http, &via_builder.http),
+            "with_shared_http_client and builder.with_http_client must share the pool",
+        );
+    }
+
+    #[test]
     fn builder_with_http_client_shares_pool_across_builds() {
         // Two GraphqlClients built from the same Arc<HttpClient> must
         // observe identical pointer identity on their internal `http`

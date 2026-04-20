@@ -180,6 +180,31 @@ fn acl_generator_all_zone_rules() {
 }
 
 #[test]
+fn acl_mapping_and_rule_snapshot() {
+    let acl_gen = ZoneAclGenerator::new(4200, 4201);
+    let mappings = ZoneTagMapping::standard_zones()
+        .iter()
+        .map(|zone| {
+            let tag = ZoneTagMapping::zone_to_tag(zone).expect("zone tag");
+            serde_json::json!({
+                "zone": zone,
+                "tag": tag.as_str(),
+                "roundtrip_zone": ZoneTagMapping::tag_to_zone(&tag).expect("roundtrip"),
+            })
+        })
+        .collect::<Vec<_>>();
+    let rules = acl_gen.all_zone_rules().expect("all rules");
+
+    insta::assert_json_snapshot!(
+        "acl_mapping_and_rule_snapshot",
+        serde_json::json!({
+            "mappings": mappings,
+            "rules": rules,
+        })
+    );
+}
+
+#[test]
 fn acl_generator_custom_ports() {
     let acl_gen = ZoneAclGenerator::new(5000, 5001);
     let rule = acl_gen.zone_access_rule("z:work").expect("acl rule");

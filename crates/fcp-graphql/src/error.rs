@@ -122,6 +122,13 @@ impl From<HttpClientError> for HttpErrorInfo {
                 is_connect: true,
                 is_request: false,
             },
+            HttpClientError::PoolExhausted { host, port } => Self {
+                message: format!("connection pool exhausted for {host}:{port}"),
+                status_code: None,
+                is_timeout: false,
+                is_connect: false,
+                is_request: true,
+            },
             HttpClientError::Cancelled => Self {
                 message: "request cancelled".to_string(),
                 status_code: None,
@@ -858,6 +865,22 @@ mod tests {
         assert!(!info.is_request);
         assert!(info.status_code.is_none());
         assert_eq!(info.message, "request cancelled");
+    }
+
+    #[test]
+    fn http_error_info_from_pool_exhausted() {
+        let info = HttpErrorInfo::from(HttpClientError::PoolExhausted {
+            host: "graphql.internal".into(),
+            port: 443,
+        });
+        assert_eq!(
+            info.message,
+            "connection pool exhausted for graphql.internal:443"
+        );
+        assert!(info.status_code.is_none());
+        assert!(!info.is_timeout);
+        assert!(!info.is_connect);
+        assert!(info.is_request);
     }
 
     // ---- HttpErrorInfo Clone/Debug ----

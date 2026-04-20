@@ -1,0 +1,40 @@
+---
+source: crates/fcp-protocol/tests/session_golden_vectors.rs
+expression: "serde_json::json!({\n    \"hello\":\n    {\n        \"cbor_hex\": hex::encode(&hello_cbor), \"transcript_hex\":\n        hex::encode(&hello_transcript), \"shape\":\n        {\n            \"from\": \"[initiator-node-id]\", \"to\": \"[responder-node-id]\",\n            \"eph_pubkey_hex\": hello.eph_pubkey.to_hex(), \"nonce_hex\":\n            hex::encode(hello.nonce.as_bytes()), \"cookie\":\n            hello.cookie.as_ref().map(|cookie|\n            hex::encode(cookie.as_bytes())), \"timestamp\": \"[timestamp]\",\n            \"suites\":\n            hello.suites.iter().map(|suite|\n            suite.as_str()).collect::<Vec<_>>(), \"transport_limits\":\n            {\n                \"max_datagram_bytes\":\n                hello.transport_limits.as_ref().map_or(0, |limits|\n                limits.effective_max()),\n            }, \"has_signature\": hello.signature.is_some(),\n        },\n    }, \"ack\":\n    {\n        \"cbor_hex\": hex::encode(&ack_cbor), \"transcript_hex\":\n        hex::encode(&ack_transcript), \"shape\":\n        {\n            \"from\": \"[responder-node-id]\", \"to\": \"[initiator-node-id]\",\n            \"eph_pubkey_hex\": ack.eph_pubkey.to_hex(), \"nonce_hex\":\n            hex::encode(ack.nonce.as_bytes()), \"session_id\": \"[session-id]\",\n            \"suite\": ack.suite.as_str(), \"timestamp\": \"[timestamp]\",\n            \"has_signature\": ack.signature.is_some(),\n        },\n    },\n})"
+---
+{
+  "ack": {
+    "cbor_hex": "a862746f6e6e6f64652d696e69746961746f726466726f6d6e6e6f64652d726573706f6e646572656e6f6e6365507777777777777777777777777777777765737569746501697369676e61747572655840eee2ffb96e73ef7fb9b369ebac5beb3f1104346c6388ea9027d166b0a709da0c4ddd671812dc9dbf8d46aadfd29cd27211090a072c98bbf695ea715d40db90006974696d657374616d701a659200856a6570685f7075626b65795820ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6b6a73657373696f6e5f69645088888888888888888888888888888888",
+    "shape": {
+      "eph_pubkey_hex": "ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6b",
+      "from": "[responder-node-id]",
+      "has_signature": true,
+      "nonce_hex": "77777777777777777777777777777777",
+      "session_id": "[session-id]",
+      "suite": "suite1-hmacsha256",
+      "timestamp": "[timestamp]",
+      "to": "[initiator-node-id]"
+    },
+    "transcript_hex": "464350322d41434b2d56316e6e6f64652d726573706f6e6465726e6e6f64652d696e69746961746f725820ff2ee45601ec1b67310c7790404585ae697331eee1c1f8cf2419731c1fff3e6b50777777777777777777777777777777775088888888888888888888888888888888011a6592008558207b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b145066666666666666666666666666666666"
+  },
+  "hello": {
+    "cbor_hex": "a862746f6e6e6f64652d726573706f6e6465726466726f6d6e6e6f64652d696e69746961746f72656e6f6e6365506666666666666666666666666666666666737569746573820102697369676e61747572655840d0d1cbbcb7a65e0247f9513a9d5487837e3e724091c5bf800a59a5fd39e033da7d59784a95a13451fd16f45ce8497315de011319ed30d5fc718041657f22f60d6974696d657374616d701a659200806a6570685f7075626b657958207b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14707472616e73706f72745f6c696d6974731904b0",
+    "shape": {
+      "cookie": null,
+      "eph_pubkey_hex": "7b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14",
+      "from": "[initiator-node-id]",
+      "has_signature": true,
+      "nonce_hex": "66666666666666666666666666666666",
+      "suites": [
+        "suite1-hmacsha256",
+        "suite2-blake3"
+      ],
+      "timestamp": "[timestamp]",
+      "to": "[responder-node-id]",
+      "transport_limits": {
+        "max_datagram_bytes": 1200
+      }
+    },
+    "transcript_hex": "464350322d48454c4c4f2d56316e6e6f64652d696e69746961746f726e6e6f64652d726573706f6e64657258207b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b145066666666666666666666666666666666f61a659200808201021904b0"
+  }
+}

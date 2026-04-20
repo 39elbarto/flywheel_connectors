@@ -292,6 +292,58 @@ mod tests {
         assert_eq!(resp.errors.len(), 1);
     }
 
+    #[test]
+    fn request_and_response_shape_snapshot() {
+        let request = GraphqlRequest::new(
+            GraphqlQuery::new(
+                "query ViewerById($id: ID!, $includeTeams: Boolean!) {\n  viewer(id: $id) {\n    id\n    teams @include(if: $includeTeams) {\n      id\n      slug\n    }\n  }\n}",
+            ),
+            serde_json::json!({
+                "id": "[id]",
+                "includeTeams": true,
+            }),
+        )
+        .with_operation_name("ViewerById");
+        let response = GraphqlResponse::<serde_json::Value> {
+            data: Some(serde_json::json!({
+                "viewer": {
+                    "id": "[id]",
+                    "teams": [
+                        {
+                            "id": "[id]",
+                            "slug": "platform"
+                        }
+                    ]
+                }
+            })),
+            errors: vec![GraphqlError {
+                message: "viewer team edge is stale".into(),
+                locations: vec![crate::error::GraphqlErrorLocation { line: 4, column: 7 }],
+                path: vec![
+                    crate::error::GraphqlPathSegment::Key("viewer".into()),
+                    crate::error::GraphqlPathSegment::Key("teams".into()),
+                    crate::error::GraphqlPathSegment::Index(0),
+                ],
+                extensions: Some(serde_json::json!({
+                    "code": "STALE_EDGE",
+                    "trace_id": "[trace-id]",
+                })),
+            }],
+            extensions: Some(serde_json::json!({
+                "cost": 7,
+                "request_id": "[request-id]",
+            })),
+        };
+
+        insta::assert_json_snapshot!(
+            "request_and_response_shape_snapshot",
+            serde_json::json!({
+                "request": serde_json::to_value(&request).unwrap(),
+                "response": serde_json::to_value(&response).unwrap(),
+            })
+        );
+    }
+
     // ---- GraphqlQuery additional tests ----
 
     #[test]

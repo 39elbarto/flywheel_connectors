@@ -26,3 +26,4 @@ chrono = { workspace = true }
 fcp-testkit = { workspace = true }
 pretty_assertions = { workspace = true }
 wiremock = { workspace = true }
+insta.workspace = true

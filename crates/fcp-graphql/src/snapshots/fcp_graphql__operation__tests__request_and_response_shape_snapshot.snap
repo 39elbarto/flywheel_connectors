@@ -1,0 +1,53 @@
+---
+source: crates/fcp-graphql/src/operation.rs
+expression: "serde_json::json!({\n    \"request\": serde_json::to_value(&request).unwrap(), \"response\":\n    serde_json::to_value(&response).unwrap(),\n})"
+---
+{
+  "request": {
+    "operation_name": "ViewerById",
+    "query": {
+      "query": "query ViewerById($id: ID!, $includeTeams: Boolean!) {\n  viewer(id: $id) {\n    id\n    teams @include(if: $includeTeams) {\n      id\n      slug\n    }\n  }\n}"
+    },
+    "variables": {
+      "id": "[id]",
+      "includeTeams": true
+    }
+  },
+  "response": {
+    "data": {
+      "viewer": {
+        "id": "[id]",
+        "teams": [
+          {
+            "id": "[id]",
+            "slug": "platform"
+          }
+        ]
+      }
+    },
+    "errors": [
+      {
+        "extensions": {
+          "code": "STALE_EDGE",
+          "trace_id": "[trace-id]"
+        },
+        "locations": [
+          {
+            "column": 7,
+            "line": 4
+          }
+        ],
+        "message": "viewer team edge is stale",
+        "path": [
+          "viewer",
+          "teams",
+          0
+        ]
+      }
+    ],
+    "extensions": {
+      "cost": 7,
+      "request_id": "[request-id]"
+    }
+  }
+}

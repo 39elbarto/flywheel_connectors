@@ -175,6 +175,63 @@ fn build_ack(
 }
 
 #[test]
+fn session_handshake_cbor_wire_format_snapshot() {
+    let (initiator_sign, responder_sign) = fixed_signing_keys();
+    let (initiator_eph, responder_eph) = fixed_ephemeral_keys();
+    let hello = build_hello(&initiator_sign, &initiator_eph);
+    let ack = build_ack(&responder_sign, &hello, &responder_eph);
+
+    let hello_cbor = fcp_cbor::to_canonical_cbor(&hello).expect("encode hello");
+    let ack_cbor = fcp_cbor::to_canonical_cbor(&ack).expect("encode ack");
+    let hello_transcript = hello.transcript_bytes().expect("hello transcript");
+    let ack_transcript = ack.transcript_bytes(&hello).expect("ack transcript");
+
+    insta::assert_json_snapshot!(
+        "session_handshake_cbor_wire_format",
+        serde_json::json!({
+            "hello": {
+                "cbor_hex": hex::encode(&hello_cbor),
+                "transcript_hex": hex::encode(&hello_transcript),
+                "shape": {
+                    "from": "[initiator-node-id]",
+                    "to": "[responder-node-id]",
+                    "eph_pubkey_hex": hello.eph_pubkey.to_hex(),
+                    "nonce_hex": hex::encode(hello.nonce.as_bytes()),
+                    "cookie": hello.cookie.as_ref().map(|cookie| hex::encode(cookie.as_bytes())),
+                    "timestamp": "[timestamp]",
+                    "suites": hello
+                        .suites
+                        .iter()
+                        .map(|suite| suite.as_str())
+                        .collect::<Vec<_>>(),
+                    "transport_limits": {
+                        "max_datagram_bytes": hello
+                            .transport_limits
+                            .as_ref()
+                            .map_or(0, |limits| limits.effective_max()),
+                    },
+                    "has_signature": hello.signature.is_some(),
+                },
+            },
+            "ack": {
+                "cbor_hex": hex::encode(&ack_cbor),
+                "transcript_hex": hex::encode(&ack_transcript),
+                "shape": {
+                    "from": "[responder-node-id]",
+                    "to": "[initiator-node-id]",
+                    "eph_pubkey_hex": ack.eph_pubkey.to_hex(),
+                    "nonce_hex": hex::encode(ack.nonce.as_bytes()),
+                    "session_id": "[session-id]",
+                    "suite": ack.suite.as_str(),
+                    "timestamp": "[timestamp]",
+                    "has_signature": ack.signature.is_some(),
+                },
+            },
+        })
+    );
+}
+
+#[test]
 fn test_generate_hello_vector() {
     let mut log = TestLogEntry::new(
         "test_generate_hello_vector",

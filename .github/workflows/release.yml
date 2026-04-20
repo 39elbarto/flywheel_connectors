@@ -29,31 +29,50 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        # `binary` is the cargo bin name; `bin_file` is the on-disk
+        # filename that goes into the tarball/zip (Windows adds .exe).
+        # We ship both `fwc` (the agent-facing CLI) and `fcp-host`
+        # (the Gateway/Orchestrator that README's Quick Start tells
+        # users to run as `fwc --host http://127.0.0.1:8787`). Both
+        # share the workspace's dependency graph, so building them
+        # back-to-back inside one matrix leg is much cheaper than a
+        # parallel matrix that would re-fetch and re-compile every
+        # workspace dep twice.
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: fwc
-            asset: fwc-linux-amd64
+            asset_suffix: linux-amd64
+            ext: ""
+            archive_ext: tar.xz
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            artifact: fwc
-            asset: fwc-linux-arm64
+            asset_suffix: linux-arm64
+            ext: ""
+            archive_ext: tar.xz
           - os: macos-14
             target: aarch64-apple-darwin
-            artifact: fwc
-            asset: fwc-darwin-arm64
+            asset_suffix: darwin-arm64
+            ext: ""
+            archive_ext: tar.xz
           - os: macos-14
             target: x86_64-apple-darwin
-            artifact: fwc
-            asset: fwc-darwin-amd64
+            asset_suffix: darwin-amd64
+            ext: ""
+            archive_ext: tar.xz
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: fwc.exe
-            asset: fwc-windows-amd64
+            asset_suffix: windows-amd64
+            ext: ".exe"
+            archive_ext: zip
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            asset_suffix: windows-arm64
+            ext: ".exe"
+            archive_ext: zip
     steps:
       - uses: actions/checkout@v4
       - name: Checkout external dependencies
@@ -73,31 +92,41 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
-      - name: Build release binary
-        run: cargo build --release --package fwc --target ${{ matrix.target }}
+      - name: Build release binaries (fwc + fcp-host)
+        run: |
+          cargo build --release --package fwc --target ${{ matrix.target }}
+          cargo build --release --package fcp-host --bin fcp-host --target ${{ matrix.target }}
 
-      - name: Create tarball (Unix)
+      - name: Package binaries (Unix)
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist
           cd target/${{ matrix.target }}/release
-          tar -cJf ../../../dist/${{ matrix.asset }}.tar.xz ${{ matrix.artifact }}
+          for binary in fwc fcp-host; do
+            asset="${binary}-${{ matrix.asset_suffix }}.${{ matrix.archive_ext }}"
+            tar -cJf "../../../dist/${asset}" "${binary}"
+          done
           cd ../../../dist
-          shasum -a 256 "${{ matrix.asset }}.tar.xz" > "${{ matrix.asset }}.tar.xz.sha256"
+          for f in *.${{ matrix.archive_ext }}; do
+            shasum -a 256 "$f" > "$f.sha256"
+          done
 
-      - name: Create zip (Windows)
+      - name: Package binaries (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist
-          Compress-Archive -Path "target/${{ matrix.target }}/release/${{ matrix.artifact }}" -DestinationPath "dist/${{ matrix.asset }}.zip"
-          cd dist
-          $hash = (Get-FileHash -Algorithm SHA256 "${{ matrix.asset }}.zip").Hash.ToLower()
-          "$hash  ${{ matrix.asset }}.zip" | Out-File -Encoding ASCII "${{ matrix.asset }}.zip.sha256"
+          foreach ($binary in @("fwc", "fcp-host")) {
+            $exe = "${binary}${{ matrix.ext }}"
+            $asset = "${binary}-${{ matrix.asset_suffix }}.${{ matrix.archive_ext }}"
+            Compress-Archive -Path "target/${{ matrix.target }}/release/$exe" -DestinationPath "dist/$asset"
+            $hash = (Get-FileHash -Algorithm SHA256 "dist/$asset").Hash.ToLower()
+            "$hash  $asset" | Out-File -Encoding ASCII "dist/$asset.sha256"
+          }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
+          name: cli-and-host-${{ matrix.asset_suffix }}
           path: dist/*
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -126,6 +155,9 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             suffix: windows-amd64
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            suffix: windows-arm64
     steps:
       - uses: actions/checkout@v4
       - name: Checkout external dependencies
@@ -217,6 +249,9 @@ jobs:
       - name: Generate combined checksums
         run: |
           cd dist
+          # Exclude any pre-existing SHA256SUMS.txt so re-runs don't
+          # double-count themselves; the per-asset .sha256 files are the
+          # source of truth.
           cat *.sha256 | sort > SHA256SUMS.txt
 
       - name: Install Cosign
@@ -246,13 +281,13 @@ jobs:
 
             ### Downloads
 
-            | Platform | CLI | Anthropic | Discord | OpenAI | Telegram |
-            |----------|-----|-----------|---------|--------|----------|
-            | Linux (x64) | [fwc](fwc-linux-amd64.tar.xz) | [anthropic](fcp-anthropic-linux-amd64.tar.xz) | [discord](fcp-discord-linux-amd64.tar.xz) | [openai](fcp-openai-linux-amd64.tar.xz) | [telegram](fcp-telegram-linux-amd64.tar.xz) |
-            | Linux (ARM64) | [fwc](fwc-linux-arm64.tar.xz) | [anthropic](fcp-anthropic-linux-arm64.tar.xz) | [discord](fcp-discord-linux-arm64.tar.xz) | [openai](fcp-openai-linux-arm64.tar.xz) | [telegram](fcp-telegram-linux-arm64.tar.xz) |
-            | macOS (ARM64) | [fwc](fwc-darwin-arm64.tar.xz) | [anthropic](fcp-anthropic-darwin-arm64.tar.xz) | [discord](fcp-discord-darwin-arm64.tar.xz) | [openai](fcp-openai-darwin-arm64.tar.xz) | [telegram](fcp-telegram-darwin-arm64.tar.xz) |
-            | macOS (x64) | [fwc](fwc-darwin-amd64.tar.xz) | [anthropic](fcp-anthropic-darwin-amd64.tar.xz) | [discord](fcp-discord-darwin-amd64.tar.xz) | [openai](fcp-openai-darwin-amd64.tar.xz) | [telegram](fcp-telegram-darwin-amd64.tar.xz) |
-            | Windows (x64) | [fwc](fwc-windows-amd64.zip) | [anthropic](fcp-anthropic-windows-amd64.zip) | [discord](fcp-discord-windows-amd64.zip) | [openai](fcp-openai-windows-amd64.zip) | [telegram](fcp-telegram-windows-amd64.zip) |
+            | Platform | CLI | Host | Anthropic | Discord | OpenAI | Telegram |
+            |----------|-----|------|-----------|---------|--------|----------|
+            | Linux (x64) | [fwc](fwc-linux-amd64.tar.xz) | [fcp-host](fcp-host-linux-amd64.tar.xz) | [anthropic](fcp-anthropic-linux-amd64.tar.xz) | [discord](fcp-discord-linux-amd64.tar.xz) | [openai](fcp-openai-linux-amd64.tar.xz) | [telegram](fcp-telegram-linux-amd64.tar.xz) |
+            | Linux (ARM64) | [fwc](fwc-linux-arm64.tar.xz) | [fcp-host](fcp-host-linux-arm64.tar.xz) | [anthropic](fcp-anthropic-linux-arm64.tar.xz) | [discord](fcp-discord-linux-arm64.tar.xz) | [openai](fcp-openai-linux-arm64.tar.xz) | [telegram](fcp-telegram-linux-arm64.tar.xz) |
+            | macOS (ARM64) | [fwc](fwc-darwin-arm64.tar.xz) | [fcp-host](fcp-host-darwin-arm64.tar.xz) | [anthropic](fcp-anthropic-darwin-arm64.tar.xz) | [discord](fcp-discord-darwin-arm64.tar.xz) | [openai](fcp-openai-darwin-arm64.tar.xz) | [telegram](fcp-telegram-darwin-arm64.tar.xz) |
+            | macOS (x64) | [fwc](fwc-darwin-amd64.tar.xz) | [fcp-host](fcp-host-darwin-amd64.tar.xz) | [anthropic](fcp-anthropic-darwin-amd64.tar.xz) | [discord](fcp-discord-darwin-amd64.tar.xz) | [openai](fcp-openai-darwin-amd64.tar.xz) | [telegram](fcp-telegram-darwin-amd64.tar.xz) |
+            | Windows (x64) | [fwc](fwc-windows-amd64.zip) | [fcp-host](fcp-host-windows-amd64.zip) | [anthropic](fcp-anthropic-windows-amd64.zip) | [discord](fcp-discord-windows-amd64.zip) | [openai](fcp-openai-windows-amd64.zip) | [telegram](fcp-telegram-windows-amd64.zip) |
 
             ### Verification
 

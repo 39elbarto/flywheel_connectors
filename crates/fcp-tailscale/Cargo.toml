@@ -27,3 +27,4 @@ tracing.workspace = true
 [dev-dependencies]
 semver = "1.0"
 fcp-cbor = { path = "../fcp-cbor" }
+insta.workspace = true

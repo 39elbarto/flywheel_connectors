@@ -1,0 +1,85 @@
+---
+source: crates/fcp-tailscale/tests/no_mock_integration.rs
+expression: "serde_json::json!({ \"mappings\": mappings, \"rules\": rules, })"
+---
+{
+  "mappings": [
+    {
+      "roundtrip_zone": "z:owner",
+      "tag": "tag:fcp-owner",
+      "zone": "z:owner"
+    },
+    {
+      "roundtrip_zone": "z:private",
+      "tag": "tag:fcp-private",
+      "zone": "z:private"
+    },
+    {
+      "roundtrip_zone": "z:work",
+      "tag": "tag:fcp-work",
+      "zone": "z:work"
+    },
+    {
+      "roundtrip_zone": "z:community",
+      "tag": "tag:fcp-community",
+      "zone": "z:community"
+    },
+    {
+      "roundtrip_zone": "z:public",
+      "tag": "tag:fcp-public",
+      "zone": "z:public"
+    }
+  ],
+  "rules": [
+    {
+      "action": "accept",
+      "dst": [
+        "tag:fcp-owner:4200",
+        "tag:fcp-owner:4201"
+      ],
+      "src": [
+        "tag:fcp-owner"
+      ]
+    },
+    {
+      "action": "accept",
+      "dst": [
+        "tag:fcp-private:4200",
+        "tag:fcp-private:4201"
+      ],
+      "src": [
+        "tag:fcp-private"
+      ]
+    },
+    {
+      "action": "accept",
+      "dst": [
+        "tag:fcp-work:4200",
+        "tag:fcp-work:4201"
+      ],
+      "src": [
+        "tag:fcp-work"
+      ]
+    },
+    {
+      "action": "accept",
+      "dst": [
+        "tag:fcp-community:4200",
+        "tag:fcp-community:4201"
+      ],
+      "src": [
+        "tag:fcp-community"
+      ]
+    },
+    {
+      "action": "accept",
+      "dst": [
+        "tag:fcp-public:4200",
+        "tag:fcp-public:4201"
+      ],
+      "src": [
+        "tag:fcp-public"
+      ]
+    }
+  ]
+}

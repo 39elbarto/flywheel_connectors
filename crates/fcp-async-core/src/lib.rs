@@ -1141,9 +1141,31 @@ pub mod channel {
         }
 
         /// Oneshot receiver wrapper.
-        #[derive(Debug)]
         pub struct Receiver<T> {
-            inner: asupersync::channel::oneshot::Receiver<T>,
+            state: ReceiverState<T>,
+        }
+
+        #[derive(Debug)]
+        enum ReceiverState<T> {
+            Idle(asupersync::channel::oneshot::Receiver<T>),
+            Waiting(crate::task::JoinHandle<Result<T, error::RecvError>>),
+            Done,
+        }
+
+        impl<T> std::fmt::Debug for Receiver<T> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("Receiver")
+                    .field("state", &self.state)
+                    .finish()
+            }
+        }
+
+        impl<T> Drop for Receiver<T> {
+            fn drop(&mut self) {
+                if let ReceiverState::Waiting(handle) = &self.state {
+                    handle.abort();
+                }
+            }
         }
 
         impl<T> Sender<T> {
@@ -1174,17 +1196,49 @@ pub mod channel {
             /// # Errors
             /// Returns `RecvError` when the value is not yet available or the sender was dropped.
             pub fn try_recv(&mut self) -> Result<T, error::RecvError> {
-                self.inner.try_recv().map_err(|_| error::RecvError)
+                match &mut self.state {
+                    ReceiverState::Idle(inner) => inner.try_recv().map_err(|_| error::RecvError),
+                    ReceiverState::Waiting(_) | ReceiverState::Done => Err(error::RecvError),
+                }
             }
         }
 
-        impl<T> Future for Receiver<T> {
+        impl<T: Send + 'static> Future for Receiver<T> {
             type Output = Result<T, error::RecvError>;
 
             fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-                let compat = compatibility_cx();
-                let mut recv = Box::pin(self.inner.recv(&compat));
-                recv.as_mut().poll(cx).map_err(|_| error::RecvError)
+                if let ReceiverState::Idle(_) = &self.state {
+                    let ReceiverState::Idle(mut inner) =
+                        std::mem::replace(&mut self.state, ReceiverState::Done)
+                    else {
+                        unreachable!("receiver state changed unexpectedly");
+                    };
+
+                    let handle = crate::task::spawn(async move {
+                        let compat = compatibility_cx();
+                        inner.recv(&compat).await.map_err(|_| error::RecvError)
+                    });
+
+                    self.state = ReceiverState::Waiting(handle);
+                }
+
+                match &mut self.state {
+                    ReceiverState::Waiting(handle) => match Pin::new(handle).poll(cx) {
+                        Poll::Ready(Ok(result)) => {
+                            self.state = ReceiverState::Done;
+                            Poll::Ready(result)
+                        }
+                        Poll::Ready(Err(_)) => {
+                            self.state = ReceiverState::Done;
+                            Poll::Ready(Err(error::RecvError))
+                        }
+                        Poll::Pending => Poll::Pending,
+                    },
+                    ReceiverState::Done => Poll::Ready(Err(error::RecvError)),
+                    ReceiverState::Idle(_) => {
+                        unreachable!("receiver should transition before poll")
+                    }
+                }
             }
         }
 
@@ -1196,7 +1250,9 @@ pub mod channel {
                 Sender {
                     inner: Some(sender),
                 },
-                Receiver { inner: receiver },
+                Receiver {
+                    state: ReceiverState::Idle(receiver),
+                },
             )
         }
     }
@@ -3126,6 +3182,18 @@ mod tests {
     }
 
     #[runtime::test]
+    async fn oneshot_channel_delayed_send_after_pending_poll() {
+        let (tx, rx) = channel::oneshot::channel::<u32>();
+        let sender = task::spawn(async move {
+            task::yield_now().await;
+            tx.send(42).unwrap();
+        });
+
+        assert_eq!(rx.await.unwrap(), 42);
+        sender.await.expect("sender task should join");
+    }
+
+    #[runtime::test]
     async fn watch_channel_basic() {
         let (tx, mut rx) = channel::watch::channel(0_u32);
         assert_eq!(*rx.borrow(), 0);
@@ -3799,6 +3867,26 @@ mod tests {
         drop(tx);
         let err = rx.await.expect_err("sender dropped");
         assert_eq!(err, channel::oneshot::error::RecvError);
+    }
+
+    #[runtime::test]
+    async fn oneshot_drop_after_pending_poll_closes_channel() {
+        let (tx, rx) = channel::oneshot::channel::<u32>();
+
+        let waiter = task::spawn(async move {
+            let mut rx = std::pin::pin!(rx);
+            std::future::poll_fn(|cx| {
+                assert!(matches!(rx.as_mut().poll(cx), Poll::Pending));
+                Poll::Ready(())
+            })
+            .await;
+        });
+
+        waiter.await.expect("waiter task should join");
+        let err = tx
+            .send(7)
+            .expect_err("receiver should be dropped after pending poll");
+        assert_eq!(err.0, 7);
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -5799,6 +5887,8 @@ mod tests {
     fn async_error_all_variants_are_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<AsyncError>();
+        assert_send_sync::<CancellationToken>();
+        assert_send_sync::<ExecutionContext>();
     }
 
     #[test]

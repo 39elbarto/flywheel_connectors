@@ -102,18 +102,33 @@ impl ReconnectConfig {
             base
         };
 
-        // Clamp to [0, max_delay] in finite f64 space before constructing the
-        // Duration. `Duration::from_secs_f64` panics on negative, NaN, or
-        // infinite input; misconfigured backoff_multiplier (e.g., negative,
-        // NaN, or large enough to overflow to +inf at high attempt counts)
-        // could otherwise turn a recoverable retry into a process abort.
-        let max = self.max_delay.as_secs_f64();
+        // Clamp to a non-negative, finite f64 that is *exactly* representable
+        // as a `Duration`. `Duration::from_secs_f64` panics on negative, NaN,
+        // non-finite, OR overflowing inputs. Two separate failure modes had
+        // to be guarded:
+        //
+        // 1. A misconfigured `backoff_multiplier` (negative, NaN, or large
+        //    enough to overflow `powi` to +inf at high attempt counts) could
+        //    otherwise turn a recoverable retry into a process abort.
+        //
+        // 2. `max_delay.as_secs_f64()` rounds up past `u64::MAX` when
+        //    `max_delay` is near `Duration::MAX` (the nearest f64 to
+        //    `u64::MAX` is `2^64`, one more than the largest Duration can
+        //    hold). The old clamp trusted that value as the ceiling, so a
+        //    user-configured huge `max_delay` combined with a +inf `jittered`
+        //    would pick up `2^64` seconds and panic inside `from_secs_f64`.
+        //
+        // `2^53` seconds (~285 million years) is the largest integer
+        // exactly representable as `f64`; capping there guarantees the
+        // value round-trips safely. We then intersect with `max_delay`
+        // back in `Duration` space so legitimate small ceilings still win.
+        const MAX_SAFE_SECS_F64: f64 = (1_u64 << 53) as f64;
         let clamped = if jittered.is_nan() || jittered < 0.0 {
             0.0
         } else {
-            jittered.min(max)
+            jittered.min(MAX_SAFE_SECS_F64)
         };
-        Duration::from_secs_f64(clamped)
+        Duration::from_secs_f64(clamped).min(self.max_delay)
     }
 }
 
@@ -505,6 +520,54 @@ mod tests {
         // attempt 1 yields base = 1 * (-2)^1 = -2.0; must clamp to 0.
         let delay = config.delay_for_attempt(1);
         assert_eq!(delay, Duration::from_secs(0));
+    }
+
+    #[test]
+    fn test_delay_huge_max_delay_does_not_panic() {
+        // Regression: when `max_delay` is near `Duration::MAX`, its
+        // `as_secs_f64()` rounds up past `u64::MAX` (the nearest f64 to
+        // `u64::MAX` is `2^64`, which is one more than `Duration` can
+        // hold). At high attempt counts the backoff overflows `powi` to
+        // `+inf`, and the old `jittered.min(max)` clamp picked up that
+        // rounded-up ceiling, causing `Duration::from_secs_f64` to panic
+        // inside the retry hot path — a misconfig turning into a
+        // process abort. Must be clamped to a safe f64 value first, then
+        // intersected with `max_delay` back in Duration space.
+        let config = ReconnectConfig::new()
+            .with_initial_delay(Duration::from_secs(1))
+            .with_max_delay(Duration::from_secs(u64::MAX))
+            .with_backoff_multiplier(2.0)
+            .with_jitter(false);
+
+        // Large attempt forces `2.0.powi(exponent)` to `+inf`.
+        let delay = config.delay_for_attempt(100);
+        assert!(
+            delay <= Duration::from_secs(u64::MAX),
+            "delay must not exceed max_delay: got {delay:?}"
+        );
+        assert!(
+            delay > Duration::ZERO,
+            "delay should have saturated to a large finite value, got {delay:?}"
+        );
+    }
+
+    #[test]
+    fn test_delay_huge_max_delay_with_jitter_does_not_panic() {
+        // Same hazard as above but with jitter enabled — jitter
+        // multiplies `+inf` by a value in `[0.5, 1.5)`, still `+inf`,
+        // and the clamp path must still produce a valid Duration
+        // instead of panicking on the oversized f64.
+        let config = ReconnectConfig::new()
+            .with_initial_delay(Duration::from_secs(1))
+            .with_max_delay(Duration::from_secs(u64::MAX))
+            .with_backoff_multiplier(2.0)
+            .with_jitter(true);
+
+        let delay = config.delay_for_attempt(100);
+        assert!(
+            delay <= Duration::from_secs(u64::MAX),
+            "delay must not exceed max_delay: got {delay:?}"
+        );
     }
 
     #[test]

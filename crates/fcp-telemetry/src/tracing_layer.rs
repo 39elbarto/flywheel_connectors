@@ -354,7 +354,7 @@ macro_rules! fcp_span {
     ($name:expr $(, $key:ident = $value:expr)* $(,)?) => {
         tracing::info_span!(
             $name,
-            $($key = %$value,)*
+            $($key = %$crate::sanitize_log_value(&$value),)*
             otel.kind = "internal",
         )
     };
@@ -366,7 +366,7 @@ macro_rules! fcp_client_span {
     ($name:expr $(, $key:ident = $value:expr)* $(,)?) => {
         tracing::info_span!(
             $name,
-            $($key = %$value,)*
+            $($key = %$crate::sanitize_log_value(&$value),)*
             otel.kind = "client",
         )
     };
@@ -378,7 +378,7 @@ macro_rules! fcp_server_span {
     ($name:expr $(, $key:ident = $value:expr)* $(,)?) => {
         tracing::info_span!(
             $name,
-            $($key = %$value,)*
+            $($key = %$crate::sanitize_log_value(&$value),)*
             otel.kind = "server",
         )
     };

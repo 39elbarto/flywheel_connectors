@@ -1,5 +1,7 @@
 //! Structured logging with JSON output and sensitive data redaction.
 
+use std::fmt;
+
 use tracing_subscriber::{
     EnvFilter,
     fmt::{self, format::FmtSpan},
@@ -97,13 +99,31 @@ fn redact_sensitive_with_depth(
     }
 }
 
+/// Escape control characters so attacker-controlled values cannot inject
+/// multi-line or terminal-control sequences into pretty span/log output.
+#[must_use]
+pub fn sanitize_log_value(value: &impl fmt::Display) -> String {
+    let rendered = value.to_string();
+    let mut sanitized = String::with_capacity(rendered.len());
+
+    for ch in rendered.chars() {
+        if ch.is_control() {
+            sanitized.extend(ch.escape_default());
+        } else {
+            sanitized.push(ch);
+        }
+    }
+
+    sanitized
+}
+
 /// Log a structured event with automatic field injection.
 #[macro_export]
 macro_rules! log_event {
     ($level:ident, $message:expr $(, $key:ident = $value:expr)* $(,)?) => {
         tracing::$level!(
-            message = $message,
-            $($key = %$value,)*
+            message = %$crate::sanitize_log_value(&$message),
+            $($key = %$crate::sanitize_log_value(&$value),)*
         );
     };
 }
@@ -113,10 +133,10 @@ macro_rules! log_event {
 macro_rules! log_error {
     ($err:expr, $message:expr $(, $key:ident = $value:expr)* $(,)?) => {
         tracing::error!(
-            error = %$err,
+            error = %$crate::sanitize_log_value(&$err),
             error_type = %std::any::type_name_of_val(&$err),
-            message = $message,
-            $($key = %$value,)*
+            message = %$crate::sanitize_log_value(&$message),
+            $($key = %$crate::sanitize_log_value(&$value),)*
         );
     };
 }
@@ -139,20 +159,23 @@ pub fn log_request_response(
 
     let redacted_request = redact_sensitive(request, &redact_fields);
     let redacted_response = redact_sensitive(response, &redact_fields);
+    let operation = sanitize_log_value(&operation);
+    let request = sanitize_log_value(&redacted_request);
+    let response = sanitize_log_value(&redacted_response);
 
     if success {
         tracing::info!(
             operation = operation,
-            request = %redacted_request,
-            response = %redacted_response,
+            request = %request,
+            response = %response,
             duration_ms = duration_ms,
             "Request completed successfully"
         );
     } else {
         tracing::warn!(
             operation = operation,
-            request = %redacted_request,
-            response = %redacted_response,
+            request = %request,
+            response = %response,
             duration_ms = duration_ms,
             "Request completed with error"
         );
@@ -874,5 +897,21 @@ mod tests {
         let value = json!({"outer": {"inner": {}}});
         let redacted = redact_sensitive(&value, &["password".to_string()]);
         assert_eq!(redacted["outer"]["inner"], json!({}));
+    }
+
+    #[test]
+    fn sanitize_log_value_escapes_control_characters() {
+        let sanitized = sanitize_log_value(&"line one\nline two\t\x1b[31m");
+
+        assert_eq!(sanitized, "line one\\nline two\\t\\u{1b}[31m");
+        assert!(!sanitized.contains('\n'));
+        assert!(!sanitized.contains('\t'));
+        assert!(!sanitized.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn sanitize_log_value_preserves_plain_text() {
+        let sanitized = sanitize_log_value(&"connector:stripe");
+        assert_eq!(sanitized, "connector:stripe");
     }
 }

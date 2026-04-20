@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
+const AUDIT_ENTRY_ID_DOMAIN: &[u8] = b"FCP2-AUDIT-ENTRY-V1";
+
 // ============================================================================
 // Event type constants
 // ============================================================================
@@ -182,6 +184,22 @@ pub struct AuditEntry {
     pub metadata: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
+#[derive(Serialize)]
+struct AuditEntryIdMaterial<'a> {
+    event_type: &'a str,
+    severity: Severity,
+    actor: &'a str,
+    zone_id: &'a str,
+    seq: u64,
+    occurred_at: u64,
+    prev: Option<&'a str>,
+    correlation_id: &'a str,
+    trace_context: Option<&'a TraceContext>,
+    connector_id: Option<&'a str>,
+    operation_id: Option<&'a str>,
+    metadata: &'a std::collections::BTreeMap<String, serde_json::Value>,
+}
+
 impl AuditEntry {
     /// Check if this is a genesis entry (seq 0, no prev).
     #[must_use]
@@ -203,6 +221,43 @@ impl AuditEntry {
     #[must_use]
     pub fn computed_severity(&self) -> Severity {
         Severity::for_event_type(&self.event_type)
+    }
+
+    /// Recompute the canonical entry ID from the entry payload itself.
+    ///
+    /// The `id` field is excluded from the canonical bytes so verification does
+    /// not trust producer-supplied identifiers.
+    ///
+    /// # Errors
+    /// Returns [`AuditError::SerializationError`] when canonical CBOR encoding
+    /// of the entry payload fails.
+    pub fn computed_id(&self) -> Result<String, AuditError> {
+        let material = AuditEntryIdMaterial {
+            event_type: &self.event_type,
+            severity: self.severity,
+            actor: &self.actor,
+            zone_id: &self.zone_id,
+            seq: self.seq,
+            occurred_at: self.occurred_at,
+            prev: self.prev.as_deref(),
+            correlation_id: &self.correlation_id,
+            trace_context: self.trace_context.as_ref(),
+            connector_id: self.connector_id.as_deref(),
+            operation_id: self.operation_id.as_deref(),
+            metadata: &self.metadata,
+        };
+
+        let canonical = fcp_cbor::to_canonical_cbor(&material).map_err(|err| {
+            AuditError::SerializationError(format!(
+                "failed to canonicalize audit entry {}: {err}",
+                self.id
+            ))
+        })?;
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(AUDIT_ENTRY_ID_DOMAIN);
+        hasher.update(&canonical);
+        Ok(hex::encode(hasher.finalize().as_bytes()))
     }
 }
 
@@ -486,6 +541,9 @@ pub struct DecisionReceipt {
     /// Evidence references that support this decision.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
+    /// Canonical audit entry that recorded the decision, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_entry_id: Option<String>,
     /// Optional human-readable explanation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explanation: Option<String>,
@@ -493,6 +551,18 @@ pub struct DecisionReceipt {
     pub decided_at: u64,
     /// Zone context.
     pub zone_id: String,
+    /// Correlation ID tying the receipt to the evaluated request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    /// Trace context for distributed request attribution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_context: Option<TraceContext>,
+    /// Connector that produced or was evaluated by this decision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connector_id: Option<String>,
+    /// Connector operation associated with the decision.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
 }
 
 impl DecisionReceipt {
@@ -754,6 +824,8 @@ impl VerifyIssue {
         matches!(
             self.code.as_str(),
             "audit.fork_detected"
+                | "audit.object_id_mismatch"
+                | "audit.object_id_unverifiable"
                 | "audit.prev_mismatch"
                 | "audit.seq_gap"
                 | "audit.genesis_invalid"
@@ -873,6 +945,38 @@ pub fn verify_chain(
         return report;
     }
 
+    let mut canonical_ids = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match entry.computed_id() {
+            Ok(canonical_id) => {
+                if entry.id != canonical_id {
+                    issues.push(
+                        VerifyIssue::new(
+                            "audit.object_id_mismatch",
+                            format!(
+                                "entry id does not match canonical payload hash; expected {canonical_id}"
+                            ),
+                        )
+                        .with_seq(entry.seq)
+                        .with_entry_id(&entry.id),
+                    );
+                }
+                canonical_ids.push(Some(canonical_id));
+            }
+            Err(err) => {
+                issues.push(
+                    VerifyIssue::new(
+                        "audit.object_id_unverifiable",
+                        format!("entry id could not be recomputed: {err}"),
+                    )
+                    .with_seq(entry.seq)
+                    .with_entry_id(&entry.id),
+                );
+                canonical_ids.push(None);
+            }
+        }
+    }
+
     // Check zone filter
     if let Some(zone) = zone_id {
         for entry in entries {
@@ -894,9 +998,10 @@ pub fn verify_chain(
 
     // Check duplicate seqs
     let mut seen_seq: std::collections::HashMap<u64, &str> = std::collections::HashMap::new();
-    for entry in entries {
-        if let Some(prev_id) = seen_seq.insert(entry.seq, &entry.id) {
-            if prev_id != entry.id {
+    for (entry, canonical_id) in entries.iter().zip(&canonical_ids) {
+        let effective_id = canonical_id.as_deref().unwrap_or(entry.id.as_str());
+        if let Some(prev_id) = seen_seq.insert(entry.seq, effective_id) {
+            if prev_id != effective_id {
                 issues.push(
                     VerifyIssue::new(
                         "audit.fork_detected",
@@ -910,8 +1015,8 @@ pub fn verify_chain(
     }
 
     // Check genesis and chain linking
-    let mut iter = entries.iter();
-    if let Some(first) = iter.next() {
+    let mut iter = entries.iter().zip(canonical_ids.iter()).enumerate();
+    if let Some((_, (first, _))) = iter.next() {
         if first.seq != 0 || first.prev.is_some() {
             issues.push(
                 VerifyIssue::new(
@@ -924,7 +1029,8 @@ pub fn verify_chain(
         }
 
         let mut prev = first;
-        for entry in iter {
+        let mut prev_canonical_id = canonical_ids[0].as_deref().unwrap_or(prev.id.as_str());
+        for (_, (entry, canonical_id)) in iter {
             // Use checked_add so seq == u64::MAX is correctly treated as a
             // terminal state, consistent with AuditEntry::follows().
             // saturating_add would silently accept a stalled chain.
@@ -957,7 +1063,7 @@ pub fn verify_chain(
                 );
             }
 
-            if entry.prev.as_deref() != Some(prev.id.as_str()) {
+            if entry.prev.as_deref() != Some(prev_canonical_id) {
                 issues.push(
                     VerifyIssue::new(
                         "audit.prev_mismatch",
@@ -985,13 +1091,17 @@ pub fn verify_chain(
             }
 
             prev = entry;
+            prev_canonical_id = canonical_id.as_deref().unwrap_or(prev.id.as_str());
         }
     }
 
     // Verify head
     if let Some(head) = head {
         if let Some(last) = entries.last() {
-            if head.head_entry != last.id {
+            let last_canonical_id = canonical_ids[entries.len() - 1]
+                .as_deref()
+                .unwrap_or(last.id.as_str());
+            if head.head_entry != last_canonical_id {
                 issues.push(
                     VerifyIssue::new(
                         "audit.head_mismatch",
@@ -1221,7 +1331,7 @@ mod tests {
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
-    fn genesis_entry() -> AuditEntry {
+    fn raw_genesis_entry() -> AuditEntry {
         AuditEntry {
             id: "entry-0".to_string(),
             event_type: event_types::CAPABILITY_INVOKE.to_string(),
@@ -1239,7 +1349,7 @@ mod tests {
         }
     }
 
-    fn chain_entry(seq: u64, prev_id: &str) -> AuditEntry {
+    fn raw_chain_entry(seq: u64, prev_id: &str) -> AuditEntry {
         AuditEntry {
             id: format!("entry-{seq}"),
             event_type: event_types::SECRET_ACCESS.to_string(),
@@ -1257,10 +1367,43 @@ mod tests {
         }
     }
 
+    fn with_computed_id(mut entry: AuditEntry) -> AuditEntry {
+        entry.id = entry.computed_id().unwrap();
+        entry
+    }
+
+    fn canonical_test_entry(seq: u64) -> AuditEntry {
+        if seq == 0 {
+            with_computed_id(raw_genesis_entry())
+        } else {
+            let prev = canonical_test_entry(seq - 1);
+            with_computed_id(raw_chain_entry(seq, &prev.id))
+        }
+    }
+
+    fn canonicalize_prev_reference(prev_id: &str) -> String {
+        prev_id
+            .strip_prefix("entry-")
+            .and_then(|value| value.parse::<u64>().ok())
+            .map_or_else(|| prev_id.to_string(), |seq| canonical_test_entry(seq).id)
+    }
+
+    fn canonicalize_head_reference(entry_id: &str) -> String {
+        canonicalize_prev_reference(entry_id)
+    }
+
+    fn genesis_entry() -> AuditEntry {
+        canonical_test_entry(0)
+    }
+
+    fn chain_entry(seq: u64, prev_id: &str) -> AuditEntry {
+        with_computed_id(raw_chain_entry(seq, &canonicalize_prev_reference(prev_id)))
+    }
+
     fn sample_head(entry_id: &str, seq: u64) -> ChainHead {
         ChainHead {
             zone_id: "z:work".to_string(),
-            head_entry: entry_id.to_string(),
+            head_entry: canonicalize_head_reference(entry_id),
             head_seq: seq,
             coverage: 0.85,
             epoch_id: "epoch-1".to_string(),
@@ -1275,9 +1418,14 @@ mod tests {
             decision: Decision::Allow,
             reason_code: "policy.match".to_string(),
             evidence: vec!["evidence-1".to_string(), "evidence-2".to_string()],
+            audit_entry_id: None,
             explanation: Some("Policy matched capability grant".to_string()),
             decided_at: 1_700_000_000,
             zone_id: "z:work".to_string(),
+            correlation_id: None,
+            trace_context: None,
+            connector_id: None,
+            operation_id: None,
         }
     }
 
@@ -1584,7 +1732,7 @@ mod tests {
     fn audit_entry_follows_wrong_seq() {
         let first = genesis_entry();
         let mut second = chain_entry(2, "entry-0"); // gap
-        second.prev = Some("entry-0".to_string());
+        second.prev = Some(first.id.clone());
         assert!(!second.follows(&first));
     }
 
@@ -1675,7 +1823,7 @@ mod tests {
         let entry = genesis_entry();
         let debug = format!("{entry:?}");
         assert!(debug.contains("AuditEntry"));
-        assert!(debug.contains("entry-0"));
+        assert!(debug.contains(&entry.id));
     }
 
     #[test]
@@ -1687,6 +1835,15 @@ mod tests {
         let mut c = genesis_entry();
         c.id = "different".to_string();
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn audit_entry_computed_id_is_deterministic() {
+        let entry = genesis_entry();
+        let computed_a = entry.computed_id().unwrap();
+        let computed_b = entry.computed_id().unwrap();
+        assert_eq!(computed_a, computed_b);
+        assert_eq!(computed_a, entry.id);
     }
 
     #[test]
@@ -2440,6 +2597,8 @@ mod tests {
     fn verify_issue_is_critical_true() {
         let critical_codes = [
             "audit.fork_detected",
+            "audit.object_id_mismatch",
+            "audit.object_id_unverifiable",
             "audit.prev_mismatch",
             "audit.seq_gap",
             "audit.genesis_invalid",
@@ -2607,7 +2766,10 @@ mod tests {
             report.issues
         );
         assert!(
-            !report.issues.iter().any(|issue| issue.code == "audit.seq_gap"),
+            !report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "audit.seq_gap"),
             "overflow should terminate chain validation before seq-gap checks"
         );
     }
@@ -2675,7 +2837,7 @@ mod tests {
     fn verify_chain_duplicate_seq_fork() {
         let e0 = genesis_entry();
         let mut e0_fork = genesis_entry();
-        e0_fork.id = "entry-0-fork".to_string();
+        e0_fork.actor = "user:eve".to_string();
         let report = verify_chain(&[e0, e0_fork], None, None);
         assert_eq!(report.status, VerifyStatus::Fail);
         assert!(
@@ -3361,9 +3523,14 @@ mod tests {
             decision: Decision::Deny,
             reason_code: "policy.denied".to_string(),
             evidence: vec![],
+            audit_entry_id: None,
             explanation: None,
             decided_at: 0,
             zone_id: "z:test".to_string(),
+            correlation_id: None,
+            trace_context: None,
+            connector_id: None,
+            operation_id: None,
         };
         assert_eq!(receipt.evidence_count(), 0);
         assert!(!receipt.has_explanation());
@@ -3373,6 +3540,34 @@ mod tests {
         assert!(!json.contains("explanation"));
         let parsed: DecisionReceipt = serde_json::from_str(&json).unwrap();
         assert_eq!(receipt, parsed);
+    }
+
+    #[test]
+    fn receipt_with_provenance_fields_roundtrips() {
+        let receipt = DecisionReceipt {
+            id: "r-2".to_string(),
+            request_id: "req-2".to_string(),
+            decision: Decision::Allow,
+            reason_code: "policy.allowed".to_string(),
+            evidence: vec!["audit:e-1".to_string()],
+            audit_entry_id: Some("e-1".to_string()),
+            explanation: Some("Matched exact connector policy".to_string()),
+            decided_at: 42,
+            zone_id: "z:prod".to_string(),
+            correlation_id: Some("corr-2".to_string()),
+            trace_context: Some(TraceContext::new("trace-2", "span-2").with_flags(0x01)),
+            connector_id: Some("stripe".to_string()),
+            operation_id: Some("charges.create".to_string()),
+        };
+
+        let json = serde_json::to_string(&receipt).unwrap();
+        assert!(json.contains("\"audit_entry_id\":\"e-1\""));
+        assert!(json.contains("\"correlation_id\":\"corr-2\""));
+        assert!(json.contains("\"connector_id\":\"stripe\""));
+        assert!(json.contains("\"operation_id\":\"charges.create\""));
+
+        let parsed: DecisionReceipt = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, receipt);
     }
 
     #[test]
@@ -3662,7 +3857,7 @@ mod tests {
         let head = sample_head("entry-0", 0);
         let report = verify_chain(&[e0], Some(&head), None);
         assert_eq!(report.head_seq, Some(0));
-        assert_eq!(report.head_entry, Some("entry-0".to_string()));
+        assert_eq!(report.head_entry, Some(head.head_entry));
     }
 
     #[test]
@@ -4695,14 +4890,20 @@ mod tests {
             decision: Decision::Allow,
             reason_code: "policy.match".into(),
             evidence: vec![evidence_id],
+            audit_entry_id: Some(entry.id.clone()),
             explanation: Some("Matched wildcard capability grant".into()),
             decided_at: 1_001,
             zone_id: entry.zone_id,
+            correlation_id: Some(entry.correlation_id.clone()),
+            trace_context: entry.trace_context.clone(),
+            connector_id: entry.connector_id.clone(),
+            operation_id: entry.operation_id.clone(),
         };
 
         assert!(receipt.is_allow());
         assert_eq!(receipt.evidence_count(), 1);
         assert_eq!(receipt.evidence[0], "e-1");
+        assert_eq!(receipt.audit_entry_id.as_deref(), Some("e-1"));
         assert_eq!(receipt.request_id, "request-abc");
     }
 
@@ -4717,7 +4918,7 @@ mod tests {
         let report = verify_chain(&entries, Some(&head), Some("z:work"));
         assert!(report.status.is_ok());
         assert_eq!(report.head_seq, Some(2));
-        assert_eq!(report.head_entry, Some("entry-2".into()));
+        assert_eq!(report.head_entry, Some(head.head_entry.clone()));
         assert_eq!(report.zone_id, Some("z:work".into()));
 
         // e1 has Warning severity (chain_entry sets it)
@@ -4726,6 +4927,46 @@ mod tests {
             ..Default::default()
         };
         assert!(filter.matches(&e1));
+    }
+
+    #[test]
+    fn verify_chain_rejects_forged_ids_even_when_links_match_forged_values() {
+        let mut e0 = genesis_entry();
+        e0.id = "forged-entry-0".to_string();
+
+        let mut e1 = chain_entry(1, "entry-0");
+        e1.prev = Some(e0.id.clone());
+        e1.id = "forged-entry-1".to_string();
+
+        let head = ChainHead {
+            zone_id: "z:work".to_string(),
+            head_entry: e1.id.clone(),
+            head_seq: 1,
+            coverage: 1.0,
+            epoch_id: "epoch-attack".to_string(),
+            signature_count: 1,
+        };
+
+        let report = verify_chain(&[e0, e1], Some(&head), None);
+        assert!(report.status.is_fail());
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "audit.object_id_mismatch")
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "audit.prev_mismatch")
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "audit.head_mismatch")
+        );
     }
 
     #[test]

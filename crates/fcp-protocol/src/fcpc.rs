@@ -226,7 +226,22 @@ impl FcpcFrame {
             });
         }
 
-        let expected_len = FCPC_HEADER_LEN + claimed + FCPC_TAG_LEN;
+        // `FCPC_HEADER_LEN + claimed + FCPC_TAG_LEN` can overflow `usize`
+        // on 32-bit targets (where `usize == u32`) when the caller
+        // passes an unbounded `max_payload_len` and the header claims a
+        // near-`u32::MAX` length. Use `checked_add` so a bad claim
+        // fails closed with `PayloadTooLarge` instead of wrapping to a
+        // small value and either panicking on the subsequent slice
+        // indexing or silently accepting a mismatched frame. On 64-bit
+        // targets this branch is unreachable — kept as belt-and-braces
+        // for the 32-bit embedded mesh agents.
+        let expected_len = FCPC_HEADER_LEN
+            .checked_add(claimed)
+            .and_then(|sum| sum.checked_add(FCPC_TAG_LEN))
+            .ok_or(FcpcError::PayloadTooLarge {
+                len: claimed,
+                max: max_payload_len,
+            })?;
         if bytes.len() != expected_len {
             return Err(FcpcError::LengthMismatch {
                 claimed,
@@ -1637,5 +1652,53 @@ mod tests {
         // The window should use SessionReplayPolicy default max_reorder_window
         let policy = SessionReplayPolicy::default();
         assert_eq!(policy.max_reorder_window, 128);
+    }
+
+    /// Regression: `decode_with_limit` must not wrap `usize` arithmetic
+    /// when the caller passes a very large `max_payload_len` alongside
+    /// a header whose declared length is close to `u32::MAX`. On
+    /// 32-bit targets the old code did `FCPC_HEADER_LEN + claimed +
+    /// FCPC_TAG_LEN`, which wraps to a small value and then either
+    /// panics on subsequent slice indexing or silently admits a
+    /// mismatched frame. With `checked_add` the overflow maps to
+    /// `PayloadTooLarge`, failing closed. On 64-bit targets the branch
+    /// is unreachable in practice; the test still documents the
+    /// intended contract by driving a synthetic header through the
+    /// check path.
+    #[test]
+    fn decode_with_limit_rejects_overflowing_claim() {
+        // Craft a minimal-size input that starts with a valid header
+        // whose `len` field is u32::MAX. A 64-bit build computes
+        // `FCPC_HEADER_LEN + u32::MAX + FCPC_TAG_LEN` in usize space
+        // cleanly (no overflow) and returns LengthMismatch because
+        // bytes.len() is far smaller than the claimed total. A 32-bit
+        // build would have wrapped before this fix; with `checked_add`
+        // it returns PayloadTooLarge instead.
+        let mut buf = vec![0u8; FCPC_HEADER_LEN + FCPC_TAG_LEN];
+        buf[0..4].copy_from_slice(&FCPC_MAGIC);
+        buf[4..6].copy_from_slice(&FCPC_VERSION.to_le_bytes());
+        // bytes[6..22] = session_id (zero)
+        // bytes[22..30] = seq (zero)
+        // bytes[30..32] = flags (zero)
+        buf[32..36].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        // Call with max_payload_len = usize::MAX so the caller-side
+        // cap doesn't short-circuit us before the arithmetic runs.
+        let err = FcpcFrame::decode_with_limit(&buf, usize::MAX).expect_err("must fail closed");
+        match err {
+            // 64-bit: arithmetic succeeds, LengthMismatch fires because
+            // the buffer is much smaller than claimed total.
+            FcpcError::LengthMismatch { claimed, actual: _ } => {
+                assert_eq!(claimed, u32::MAX as usize);
+            }
+            // 32-bit: arithmetic overflows, PayloadTooLarge fires from
+            // the checked_add fallback.
+            FcpcError::PayloadTooLarge { len, .. } => {
+                assert_eq!(len, u32::MAX as usize);
+            }
+            other => panic!(
+                "expected LengthMismatch (64-bit) or PayloadTooLarge (32-bit), got {other:?}"
+            ),
+        }
     }
 }

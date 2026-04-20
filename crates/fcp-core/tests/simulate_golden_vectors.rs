@@ -214,6 +214,60 @@ mod schema_validation {
         assert_eq!(req.estimate_cost, parsed.estimate_cost);
         assert_eq!(req.check_availability, parsed.check_availability);
     }
+
+    /// Simulate with a zone that is not the connector's home/authorized zone.
+    ///
+    /// A simulator consumer uses the request's `zone_id` to resolve policy;
+    /// policy denies cross-zone operations unless explicitly allowed. This
+    /// test locks down that (a) the request preserves a mismatched zone
+    /// verbatim through CBOR round-trip (no silent rewriting), and (b)
+    /// distinct zones produce distinct canonical bytes — otherwise a
+    /// policy consumer could be fooled into granting based on a
+    /// coincidentally-equivalent serialization.
+    #[test]
+    fn request_with_zone_mismatch_preserves_zone_verbatim() {
+        // Build the same request with two different zones; the connector
+        // and operation are identical, only zone differs.
+        let conn = ConnectorId::new("vendor", "test", "v1").unwrap();
+        let op = OperationId::new("op.echo").unwrap();
+        let body = json!({"message": "hello"});
+        let tok = CapabilityToken::test_token();
+
+        let req_work = SimulateRequest::new(
+            conn.clone(),
+            op.clone(),
+            ZoneId::work(),
+            body.clone(),
+            tok.clone(),
+        );
+        let req_public = SimulateRequest::new(conn, op, ZoneId::public(), body, tok);
+
+        // Both requests are valid shape-wise.
+        assert_eq!(req_work.r#type, "simulate");
+        assert_eq!(req_public.r#type, "simulate");
+        assert_ne!(
+            req_work.zone_id.as_str(),
+            req_public.zone_id.as_str(),
+            "fixture must actually differ"
+        );
+
+        // CBOR bytes MUST differ — zone mismatch is not silently normalized.
+        let mut work_bytes = Vec::new();
+        ciborium::into_writer(&req_work, &mut work_bytes).unwrap();
+        let mut public_bytes = Vec::new();
+        ciborium::into_writer(&req_public, &mut public_bytes).unwrap();
+        assert_ne!(
+            work_bytes, public_bytes,
+            "distinct zones must produce distinct canonical bytes"
+        );
+
+        // Round-trip preserves the zone verbatim; no sanitization/coercion.
+        let parsed_work: SimulateRequest = ciborium::from_reader(work_bytes.as_slice()).unwrap();
+        let parsed_public: SimulateRequest =
+            ciborium::from_reader(public_bytes.as_slice()).unwrap();
+        assert_eq!(parsed_work.zone_id.as_str(), "z:work");
+        assert_eq!(parsed_public.zone_id.as_str(), "z:public");
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -1147,6 +1147,61 @@ mod enrollment_flow {
         );
     }
 
+    /// Enrollment with a wrong/tampered identity field (analogue of "wrong
+    /// NodeId type"): the request is signed for device A, but the
+    /// `device_id` on the wire has been rewritten to B. Verification MUST
+    /// reject this — the proof-of-possession is bound to the canonical
+    /// payload, which includes `device_id`.
+    ///
+    /// Spec source: FCP V3 §2.2.1 (Mesh Identity and Node Attestation),
+    /// bullet 3 — "enrolment proof MUST bind the declared identity".
+    #[test]
+    fn test_enrollment_rejects_tampered_identity() {
+        log_test_event(
+            "test_enrollment_rejects_tampered_identity",
+            "test_start",
+            &serde_json::json!({
+                "purpose": "Proof of possession must reject mismatched device_id"
+            }),
+        );
+
+        let (signing_secret, signing_key, encryption_key, issuance_key, _owner) =
+            create_test_keys();
+
+        let mut request = DeviceEnrollmentRequest::new(
+            "device-honest",
+            signing_key,
+            encryption_key,
+            issuance_key,
+            DeviceMetadata::default(),
+            &signing_secret,
+        )
+        .expect("request creation should succeed");
+
+        // Baseline: the honest request verifies.
+        assert!(
+            request.verify_proof().is_ok(),
+            "baseline proof must verify before tampering"
+        );
+
+        // Tamper: rewrite the identity on the wire without re-signing.
+        request.device_id = DeviceId::from("device-attacker");
+
+        // Verification MUST fail: the proof is no longer bound to the
+        // declared identity.
+        let verdict = request.verify_proof();
+        assert!(
+            verdict.is_err(),
+            "tampered device_id MUST reject verification, got {verdict:?}"
+        );
+
+        log_test_event(
+            "test_enrollment_rejects_tampered_identity",
+            "test_complete",
+            &serde_json::json!({ "rejected": true }),
+        );
+    }
+
     /// Test approval preserves request keys.
     #[test]
     fn test_approval_preserves_request_keys() {

@@ -565,6 +565,85 @@ fn decision_vector_allows_after_sanitize_unverified_link() {
     make_allow_vector("decision_allow_after_sanitize", &decision);
 }
 
+/// Deny-after-sanitize: the sanitizer receipt is valid and cleared the
+/// flag it was authorized to clear, but RESIDUAL taint remains and the
+/// operation is Dangerous, so downstream checks still reject.
+///
+/// Concretely: provenance carries BOTH `UnverifiedLink` and `PublicInput`;
+/// the sanitizer is authorized for `UnverifiedLink` only. After apply,
+/// `UnverifiedLink` is gone and evidence is accumulated — but the
+/// `PublicInput + Dangerous` check downstream denies, producing
+/// `TaintPublicInputDangerous`. This locks down the spec guarantee that
+/// sanitization does NOT grant carte blanche — each flag is cleared
+/// independently, and residual taint is still enforceable.
+///
+/// Spec source: FCP V3 §7 (Provenance and Taint), MUST clause that a
+/// sanitizer receipt clears only the flags it authorizes.
+#[test]
+fn decision_vector_denies_after_sanitize_residual_taint() {
+    let zone = ZoneId::work();
+    let policy = base_policy(zone.clone());
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
+
+    let mut provenance = ProvenanceRecord::new(zone.clone());
+    provenance.taint_flags.insert(TaintFlag::UnverifiedLink);
+    provenance.taint_flags.insert(TaintFlag::PublicInput);
+    provenance.input_sources = vec![ObjectId::from_unscoped_bytes(b"input-1")];
+
+    // Sanitizer authorized only for UnverifiedLink; cannot touch PublicInput.
+    let receipt = SanitizerReceipt {
+        receipt_id: "receipt-partial".to_string(),
+        timestamp_ms: 1_700_000_000_000,
+        sanitizer_id: "sanitizer:link-only".to_string(),
+        sanitizer_zone: zone.clone(),
+        authorized_flags: vec![TaintFlag::UnverifiedLink],
+        covered_inputs: vec![ObjectId::from_unscoped_bytes(b"input-1")],
+        cleared_flags: vec![TaintFlag::UnverifiedLink],
+        signature: None,
+    };
+
+    let receipts = vec![receipt];
+
+    let input = PolicyDecisionInput {
+        request_object_id: ObjectId::from_unscoped_bytes(b"req-deny-after-sanitize"),
+        zone_id: zone,
+        principal: fcp_core::PrincipalId::new("user:alice").expect("principal"),
+        connector_id: ConnectorId::from_static("connector:test"),
+        operation_id: OperationId::from_static("op.dangerous"),
+        capability_id: fcp_core::CapabilityId::from_static("cap.dangerous"),
+        safety_tier: SafetyTier::Dangerous,
+        provenance,
+        approval_tokens: &[],
+        sanitizer_receipts: receipts.as_slice(),
+        request_input: None,
+        request_input_hash: None,
+        related_object_ids: &[],
+        transport: TransportMode::Lan,
+        checkpoint_fresh: true,
+        revocation_fresh: true,
+        execution_approval_required: false,
+        now_ms: 1_700_000_000_000,
+        posture_attestation: None,
+    };
+
+    let decision = engine.evaluate_invoke(&input);
+    assert_eq!(
+        decision.reason_code,
+        DecisionReasonCode::TaintPublicInputDangerous,
+        "sanitize cleared UnverifiedLink, but residual PublicInput + Dangerous MUST deny"
+    );
+    // Evidence set is non-empty: the valid sanitizer receipt was consulted
+    // and referenced, even though the operation ultimately denies.
+    assert!(
+        !decision.evidence.is_empty(),
+        "sanitizer receipt should appear in evidence even when the final verdict denies"
+    );
+
+    make_allow_vector("decision_deny_after_sanitize", &decision);
+}
+
 #[test]
 fn decision_vector_requires_declassification() {
     let zone = ZoneId::public();

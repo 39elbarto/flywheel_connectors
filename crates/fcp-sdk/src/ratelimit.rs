@@ -89,13 +89,25 @@ impl std::fmt::Display for RateLimitError {
 impl std::error::Error for RateLimitError {}
 
 /// Runtime state for a single rate limit pool.
+///
+/// Implements a two-counter sliding-window approximation rather than a hard
+/// fixed-window reset. With a hard reset, an attacker can issue `limit`
+/// requests just before the window boundary and another `limit` immediately
+/// after, sustaining ~2× throughput across the boundary instant
+/// (br-flywheel_connectors-e8v7i). The sliding-window approximation
+/// estimates the effective in-window count as
+/// `prev_count * (1 - elapsed_in_curr_window / window) + curr_count`,
+/// closing the boundary-burst gap with two counters and a multiply.
 #[derive(Debug)]
 struct PoolState {
     /// Pool configuration.
     config: RateLimitPool,
-    /// Current usage count in the window.
-    count: u32,
-    /// Window start time.
+    /// Counter from the immediately-preceding window (decays linearly to 0
+    /// over the current window's duration via the sliding-window estimate).
+    prev_count: u32,
+    /// Counter for requests landing in the current window.
+    curr_count: u32,
+    /// Aligned start of the current window.
     window_start: Instant,
 }
 
@@ -103,30 +115,76 @@ impl PoolState {
     fn new(config: RateLimitPool) -> Self {
         Self {
             config,
-            count: 0,
+            prev_count: 0,
+            curr_count: 0,
             window_start: Instant::now(),
         }
     }
 
-    /// Reset window if expired.
-    fn maybe_reset_window(&mut self) {
+    /// Advance window state if the current window has fully elapsed.
+    ///
+    /// On a single-window roll-over, `prev_count := curr_count` and
+    /// `curr_count := 0`. On multi-window gaps (e.g. the connector was idle
+    /// for several windows), both counters reset — the previous window is
+    /// no longer "immediately preceding" so it should not contribute.
+    ///
+    /// `window_start` is advanced by an exact integer number of windows so
+    /// the rolling estimate stays anchored to the configured window grid;
+    /// snapping to `Instant::now()` would shift the grid each call and let
+    /// the boundary-burst gap reopen.
+    fn maybe_advance_window(&mut self) {
+        let window = self.config.config.window;
         let elapsed = self.window_start.elapsed();
-        if elapsed >= self.config.config.window {
-            self.count = 0;
-            self.window_start = Instant::now();
+        if elapsed < window || window.is_zero() {
+            return;
         }
+        let elapsed_nanos = elapsed.as_nanos();
+        let window_nanos = window.as_nanos().max(1);
+        let windows_elapsed = elapsed_nanos / window_nanos;
+        if windows_elapsed >= 2 {
+            // Idle gap of two or more full windows: previous window is no
+            // longer immediately preceding the current one.
+            self.prev_count = 0;
+            self.curr_count = 0;
+        } else {
+            self.prev_count = self.curr_count;
+            self.curr_count = 0;
+        }
+        let advance_nanos = windows_elapsed.saturating_mul(window_nanos);
+        let advance = Duration::from_nanos(u64::try_from(advance_nanos).unwrap_or(u64::MAX));
+        self.window_start = self.window_start.checked_add(advance).unwrap_or(Instant::now());
+    }
+
+    /// Sliding-window effective count: `prev * (1 - fraction) + curr`.
+    ///
+    /// `fraction` is how far we are into the current window in `[0.0, 1.0]`.
+    /// Saturates to `u32::MAX` so a pathological prev_count can't wrap.
+    fn effective_count(&self) -> u32 {
+        let window = self.config.config.window;
+        if window.is_zero() {
+            return self.curr_count;
+        }
+        let elapsed = self.window_start.elapsed();
+        let fraction = (elapsed.as_secs_f64() / window.as_secs_f64()).clamp(0.0, 1.0);
+        let prev_weight = (1.0 - fraction).clamp(0.0, 1.0);
+        // round() to integer to avoid persistent off-by-fractional-request
+        // bias. as-cast to u32 is saturating for negative/NaN inputs because
+        // both prev_weight and prev_count are non-negative finite.
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let prev_contribution = (f64::from(self.prev_count) * prev_weight).round() as u32;
+        self.curr_count.saturating_add(prev_contribution)
     }
 
     /// Try to consume requests, returns error if exceeded.
     fn try_consume(&mut self, amount: u32) -> Result<(), RateLimitError> {
         self.check_consume(amount)?;
-        self.count = self.count.saturating_add(amount);
+        self.curr_count = self.curr_count.saturating_add(amount);
         Ok(())
     }
 
     /// Check if requests can be consumed without actually consuming them.
     fn check_consume(&mut self, amount: u32) -> Result<(), RateLimitError> {
-        self.maybe_reset_window();
+        self.maybe_advance_window();
 
         let effective_limit = self
             .config
@@ -134,11 +192,12 @@ impl PoolState {
             .requests
             .saturating_add(self.config.config.burst.unwrap_or(0));
 
-        if self.count.saturating_add(amount) > effective_limit {
+        let projected = self.effective_count().saturating_add(amount);
+        if projected > effective_limit {
             let retry_after_ms = self.ms_until_reset();
             return Err(RateLimitError::for_pool(
                 &self.config,
-                self.count,
+                self.effective_count(),
                 retry_after_ms,
             ));
         }
@@ -148,35 +207,37 @@ impl PoolState {
 
     /// Force consume requests (used for soft limits).
     fn force_consume(&mut self, amount: u32) {
-        self.maybe_reset_window();
-        self.count = self.count.saturating_add(amount);
+        self.maybe_advance_window();
+        self.curr_count = self.curr_count.saturating_add(amount);
     }
 
-    /// Get milliseconds until window reset.
+    /// Get milliseconds until enough capacity returns to admit one more request.
+    ///
+    /// For the sliding-window estimator this is "time until the prev_count
+    /// contribution decays enough to free one slot," which simplifies to the
+    /// time remaining in the current window when prev_count > 0, and 0
+    /// otherwise (the curr_count alone is over-limit and the next window
+    /// roll-over is the relevant horizon).
     fn ms_until_reset(&self) -> u64 {
         let elapsed = self.window_start.elapsed();
-        if elapsed >= self.config.config.window {
+        let window = self.config.config.window;
+        if elapsed >= window {
             0
         } else {
-            let remaining = self
-                .config
-                .config
-                .window
-                .checked_sub(elapsed)
-                .unwrap_or(Duration::ZERO);
+            let remaining = window.checked_sub(elapsed).unwrap_or(Duration::ZERO);
             u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX)
         }
     }
 
     /// Get current status.
     fn status(&mut self) -> RateLimitStatus {
-        self.maybe_reset_window();
+        self.maybe_advance_window();
         let effective_limit = self
             .config
             .config
             .requests
             .saturating_add(self.config.config.burst.unwrap_or(0));
-        let remaining = effective_limit.saturating_sub(self.count);
+        let remaining = effective_limit.saturating_sub(self.effective_count());
         let reset_at = {
             let elapsed_secs = self.window_start.elapsed().as_secs();
             let window_secs = self.config.config.window.as_secs();
@@ -357,7 +418,8 @@ impl RateLimitTracker {
     pub fn reset_all(&self) {
         let mut pools = self.pools.write().expect("lock poisoned");
         for state in pools.values_mut() {
-            state.count = 0;
+            state.prev_count = 0;
+            state.curr_count = 0;
             state.window_start = Instant::now();
         }
     }
@@ -2045,5 +2107,158 @@ mod tests {
         let err = RateLimitError::for_pool(&pool, 0, 0);
         assert_eq!(err.enforcement, RateLimitEnforcement::Advisory);
         assert!(err.is_soft());
+    }
+
+    // ── br-flywheel_connectors-e8v7i: sliding-window boundary protection ──
+
+    /// Build a `PoolState` directly so we can drive the time-of-day-style
+    /// boundary scenarios without sleeping in tests. We splice the
+    /// `window_start` to simulate "elapsed time" deterministically.
+    fn pool_state(id: &str, requests: u32, window: Duration) -> PoolState {
+        let pool = RateLimitPoolBuilder::new(id)
+            .requests(requests)
+            .window_secs(window.as_secs().max(1))
+            .build();
+        let mut state = PoolState::new(pool);
+        // Use the requested window directly (build-from-secs only takes whole
+        // seconds; we want to test sub-second windows too).
+        state.config.config.window = window;
+        state
+    }
+
+    #[test]
+    fn sliding_window_blocks_boundary_burst_2x() {
+        // Classic fixed-window exploit: consume `limit` near the end of window
+        // N, then immediately consume `limit` more at the start of window N+1.
+        // A hard fixed-window reset would admit all 2*limit requests in a few
+        // milliseconds. The sliding-window estimator must reject the second
+        // burst because prev_count still contributes most of its weight at
+        // the start of the new window.
+        let mut state = pool_state("burst", 10, Duration::from_secs(60));
+
+        // Phase 1: consume the full limit in the first window.
+        for _ in 0..10 {
+            state.try_consume(1).expect("phase1 within limit");
+        }
+
+        // Cross the window boundary: rewind window_start by exactly one
+        // window so maybe_advance_window rolls prev_count := curr_count = 10.
+        state.window_start -= Duration::from_secs(60);
+        state.maybe_advance_window();
+        assert_eq!(state.prev_count, 10);
+        assert_eq!(state.curr_count, 0);
+
+        // We're effectively at "elapsed = 0" in the new window. The sliding
+        // estimate is prev * (1 - 0) + curr = 10 + 0 = 10. The limit is 10,
+        // so any further consumption MUST be rejected.
+        let err = state
+            .try_consume(1)
+            .expect_err("boundary burst must be rejected");
+        assert_eq!(err.current, 10, "effective count == prev_count at t=0");
+
+        // Even consuming a single request must fail until the prev_count
+        // contribution decays. Walk forward halfway through the new window:
+        // estimate = 10 * 0.5 + 0 = 5, so we should be able to consume up
+        // to 5 more.
+        state.window_start -= Duration::from_secs(30);
+        state.try_consume(5).expect("at t=window/2, 5 slots free");
+        let err = state
+            .try_consume(1)
+            .expect_err("at t=window/2, the 6th request must be rejected");
+        assert_eq!(err.current, 10);
+    }
+
+    #[test]
+    fn sliding_window_full_idle_window_clears_prev_count() {
+        // If the connector is idle for 2+ full windows, the previous window
+        // is no longer "immediately preceding" so it must not contribute.
+        let mut state = pool_state("idle", 10, Duration::from_secs(60));
+        for _ in 0..10 {
+            state.try_consume(1).expect("phase1");
+        }
+
+        // Skip two full windows.
+        state.window_start -= Duration::from_secs(120);
+        state.maybe_advance_window();
+        assert_eq!(state.prev_count, 0, "two-window gap drops prev");
+        assert_eq!(state.curr_count, 0);
+
+        // Full capacity is available immediately.
+        for _ in 0..10 {
+            state.try_consume(1).expect("post-idle full capacity");
+        }
+    }
+
+    #[test]
+    fn sliding_window_within_window_behaves_like_fixed_window() {
+        // Backward-compat sanity: simple sequential consume in a single
+        // window must still admit exactly `limit` and reject the next.
+        let mut state = pool_state("seq", 5, Duration::from_secs(60));
+        for _ in 0..5 {
+            state.try_consume(1).expect("within limit");
+        }
+        let err = state
+            .try_consume(1)
+            .expect_err("over limit within single window");
+        assert_eq!(err.current, 5);
+    }
+
+    #[test]
+    fn sliding_window_throughput_over_two_windows_bounded_by_2x() {
+        // Across two windows, the total admitted requests must be at most
+        // 2 * limit (and in the boundary-burst pattern, strictly less).
+        let mut state = pool_state("throughput", 10, Duration::from_secs(60));
+
+        // Window 1: consume to the limit.
+        let mut admitted = 0u32;
+        while state.try_consume(1).is_ok() {
+            admitted += 1;
+            if admitted >= 100 {
+                break;
+            }
+        }
+        assert_eq!(admitted, 10, "window 1 admits exactly limit");
+
+        // Roll to window 2.
+        state.window_start -= Duration::from_secs(60);
+        state.maybe_advance_window();
+
+        // Drain window 2 trying to maximize admission. Walk window in
+        // small steps so the prev_count contribution decays.
+        let step = Duration::from_millis(100);
+        let mut window_extra = 0u32;
+        while state.window_start.elapsed() < Duration::from_secs(60)
+            && admitted + window_extra < 100
+        {
+            if state.try_consume(1).is_ok() {
+                window_extra += 1;
+            }
+            state.window_start -= step;
+        }
+
+        // Total across the two windows must not exceed 2 * limit. With the
+        // sliding estimator and 100ms steps, the achievable total is the
+        // remainder after the prev_count's linear decay — comfortably
+        // bounded below 2 * limit and never above it.
+        let total = admitted + window_extra;
+        assert!(
+            total <= 20,
+            "total admissions across two windows must not exceed 2*limit; got {total}"
+        );
+    }
+
+    #[test]
+    fn sliding_window_force_consume_increments_curr_only() {
+        // Soft/advisory limits use force_consume; it must accumulate into
+        // curr_count and roll over the same way under maybe_advance_window.
+        let mut state = pool_state("soft", 10, Duration::from_secs(60));
+        state.force_consume(7);
+        assert_eq!(state.curr_count, 7);
+        assert_eq!(state.prev_count, 0);
+
+        state.window_start -= Duration::from_secs(60);
+        state.maybe_advance_window();
+        assert_eq!(state.prev_count, 7);
+        assert_eq!(state.curr_count, 0);
     }
 }

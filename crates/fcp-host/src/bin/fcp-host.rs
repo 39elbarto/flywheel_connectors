@@ -925,9 +925,7 @@ where
 
     match remaining.as_slice() {
         [] => Ok(CliAction::Run),
-        [arg] if arg == OsStr::new("-h") || arg == OsStr::new("--help") => {
-            Ok(CliAction::PrintHelp)
-        }
+        [arg] if arg == OsStr::new("-h") || arg == OsStr::new("--help") => Ok(CliAction::PrintHelp),
         [arg] if arg == OsStr::new("-V") || arg == OsStr::new("--version") => {
             Ok(CliAction::PrintVersion)
         }
@@ -993,19 +991,20 @@ fn read_optional_trimmed_env_string_from_result(
     name: &str,
     value: Result<String, std::env::VarError>,
 ) -> HostResult<Option<String>> {
-    Ok(read_optional_env_string_from_result(name, value)?.and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_owned())
-        }
-    }))
+    Ok(
+        read_optional_env_string_from_result(name, value)?.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        }),
+    )
 }
 
 fn resolve_admin_bearer_token() -> HostResult<Option<Arc<str>>> {
-    Ok(read_optional_trimmed_env_string("FCP_HOST_ADMIN_BEARER_TOKEN")?
-        .map(Arc::<str>::from))
+    Ok(read_optional_trimmed_env_string("FCP_HOST_ADMIN_BEARER_TOKEN")?.map(Arc::<str>::from))
 }
 
 /// HTTP header name for binding the caller's asserted principal to the
@@ -2172,8 +2171,8 @@ fn read_env_usize(name: &str) -> HostResult<Option<usize>> {
 }
 
 fn resolve_bind_target() -> HostResult<BindTarget> {
-    let raw = read_optional_env_string("FCP_HOST_BIND")?
-        .unwrap_or_else(|| "127.0.0.1:9090".to_string());
+    let raw =
+        read_optional_env_string("FCP_HOST_BIND")?.unwrap_or_else(|| "127.0.0.1:9090".to_string());
     parse_bind_target(&raw)
 }
 
@@ -6328,6 +6327,85 @@ mod tests {
         let remaining = registry.list().await;
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, second_id);
+    }
+
+    #[test]
+    fn parse_cli_action_accepts_help() {
+        let action =
+            parse_cli_action_from_args(["fcp-host", "--help"]).expect("help flag should parse");
+        assert_eq!(action, CliAction::PrintHelp);
+    }
+
+    #[test]
+    fn parse_cli_action_accepts_version() {
+        let action = parse_cli_action_from_args(["fcp-host", "--version"])
+            .expect("version flag should parse");
+        assert_eq!(action, CliAction::PrintVersion);
+    }
+
+    #[test]
+    fn parse_cli_action_rejects_unexpected_arguments() {
+        let err = parse_cli_action_from_args(["fcp-host", "--bind", "0.0.0.0:9090"])
+            .expect_err("unsupported CLI args should fail closed");
+        assert!(matches!(err, HostError::InvalidFilter(_)));
+        assert!(err.to_string().contains("unexpected CLI arguments"));
+    }
+
+    #[test]
+    fn read_optional_env_string_rejects_non_unicode_values() {
+        let err = read_optional_env_string_from_result(
+            "FCP_HOST_BIND",
+            Err(std::env::VarError::NotUnicode(std::ffi::OsString::from(
+                "bad-value",
+            ))),
+        )
+        .expect_err("non-unicode env should fail");
+        assert!(matches!(err, HostError::InvalidFilter(_)));
+        assert!(
+            err.to_string()
+                .contains("FCP_HOST_BIND contains non-unicode data")
+        );
+    }
+
+    #[test]
+    fn read_optional_trimmed_env_string_treats_blank_as_unset() {
+        let value = read_optional_trimmed_env_string_from_result(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            Ok("   ".to_string()),
+        )
+        .expect("blank env should decode");
+        assert_eq!(value, None);
+    }
+
+    #[test]
+    fn resolve_verifying_key_falls_back_to_file_when_inline_value_is_blank() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("capability.pub");
+        let signing_key =
+            fcp_crypto::ed25519::Ed25519SigningKey::from_bytes(&[7_u8; 32]).expect("test key");
+        let expected = signing_key.verifying_key().to_bytes();
+        std::fs::write(&file, hex::encode(expected)).expect("write verifying key file");
+
+        let inline = read_optional_trimmed_env_string_from_result(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            Ok("   ".to_string()),
+        )
+        .expect("blank inline env should decode");
+        let file_value = read_optional_trimmed_env_string_from_result(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY_FILE",
+            Ok(format!("  {}  ", file.display())),
+        )
+        .expect("file env should decode");
+
+        let resolved = resolve_verifying_key_from_sources(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            inline,
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY_FILE",
+            file_value,
+        )
+        .expect("file fallback should parse")
+        .expect("verifying key should load");
+        assert_eq!(resolved.to_bytes(), expected);
     }
 
     // ── parse_bind_target: TCP ──

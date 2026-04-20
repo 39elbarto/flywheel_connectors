@@ -31,6 +31,7 @@ const DEFAULT_LINKED_RECORD_DEPTH: u32 = 1;
 const MAX_LINKED_RECORD_DEPTH: u32 = 3;
 const DEFAULT_LINKED_RECORD_LIMIT: u32 = 25;
 const MAX_LINKED_RECORD_LIMIT: u32 = 50;
+const MAX_AIRTABLE_OFFSET_BYTES: usize = 512;
 
 /// Validated configuration for the Airtable connector.
 struct AirtableConfig {
@@ -43,10 +44,7 @@ impl AirtableConfig {
     ///
     /// Strict auth: exactly one of `token` or `credential_id` must be supplied.
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
-        let token = params
-            .get("token")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        let token = optional_config_string(params, "token")?;
         let credential_id = match params.get("credential_id") {
             Some(value) => {
                 let raw = value.as_str().ok_or(FcpError::InvalidRequest {
@@ -85,9 +83,60 @@ impl AirtableConfig {
             .and_then(|v| v.as_str())
             .unwrap_or(DEFAULT_BASE_URL)
             .to_string();
+        let base_url = validate_base_url_for_auth(&base_url, &auth)?;
 
         Ok(Self { auth, base_url })
     }
+}
+
+fn optional_config_string(
+    params: &serde_json::Value,
+    field: &str,
+) -> FcpResult<Option<String>> {
+    let Some(value) = params.get(field) else {
+        return Ok(None);
+    };
+    let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a string"),
+    })?;
+    if raw.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must be a non-empty string"),
+        });
+    }
+    Ok(Some(raw.to_string()))
+}
+
+fn validate_base_url_for_auth(raw_url: &str, auth: &AirtableAuth) -> FcpResult<String> {
+    let parsed = reqwest::Url::parse(raw_url).map_err(|_| FcpError::InvalidRequest {
+        code: 1003,
+        message: "base_url must be an absolute URL".into(),
+    })?;
+    let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "base_url must include a host".into(),
+    })?;
+    let host_lower = host.to_ascii_lowercase();
+    let is_local = matches!(host_lower.as_str(), "localhost" | "127.0.0.1" | "::1");
+    let scheme = parsed.scheme();
+    let token_origin_allowed = match auth {
+        AirtableAuth::Token(_) => {
+            (scheme == "https" && host_lower == "api.airtable.com")
+                || (is_local && matches!(scheme, "http" | "https"))
+        }
+        AirtableAuth::CredentialId(_) => true,
+    };
+
+    if !token_origin_allowed {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must target https://api.airtable.com for direct token mode".into(),
+        });
+    }
+
+    Ok(parsed.to_string().trim_end_matches('/').to_string())
 }
 
 /// Structured readiness diagnostic for the doctor command.
@@ -1530,10 +1579,10 @@ impl AirtableConnector {
 
     async fn invoke_list_bases(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let offset = input.get("offset").and_then(|v| v.as_str());
+        let offset = optional_pagination_offset(&input, "offset")?;
 
         let result = client
-            .list_bases(offset)
+            .list_bases(offset.as_deref())
             .await
             .map_err(|e: AirtableError| e.to_fcp_error())?;
 
@@ -1665,7 +1714,7 @@ impl AirtableConnector {
         let filter_by_formula = parse_filter_by_formula(&input)?;
         let max_records = parse_record_bound(&input, "max_records")?;
         let page_size = parse_record_bound(&input, "page_size")?;
-        let offset = optional_nonempty_string(&input, "offset")?;
+        let offset = optional_pagination_offset(&input, "offset")?;
 
         let result = client
             .list_records(
@@ -1718,7 +1767,7 @@ impl AirtableConnector {
         let view = optional_nonempty_string(&input, "view")?
             .map(|view_ref| resolve_view(&table.views, &view_ref).map(|view| view.id.clone()))
             .transpose()?;
-        let offset = optional_nonempty_string(&input, "offset")?;
+        let offset = optional_pagination_offset(&input, "offset")?;
 
         let result = client
             .list_records(
@@ -2970,6 +3019,29 @@ fn optional_nonempty_string(input: &serde_json::Value, field: &str) -> FcpResult
     Ok(Some(trimmed.to_string()))
 }
 
+fn optional_pagination_offset(input: &serde_json::Value, field: &str) -> FcpResult<Option<String>> {
+    let Some(offset) = optional_nonempty_string(input, field)? else {
+        return Ok(None);
+    };
+
+    if offset.len() > MAX_AIRTABLE_OFFSET_BYTES {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "{field} exceeds maximum length of {MAX_AIRTABLE_OFFSET_BYTES} bytes"
+            ),
+        });
+    }
+    if offset.chars().any(char::is_control) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must not contain control characters"),
+        });
+    }
+
+    Ok(Some(offset))
+}
+
 fn parse_optional_u64(value: Option<&serde_json::Value>, field: &str) -> FcpResult<Option<u64>> {
     let Some(value) = value else {
         return Ok(None);
@@ -3517,15 +3589,47 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_configure_custom_base_url() {
         let mut connector = AirtableConnector::new();
-        connector
+        let result = connector
             .handle_configure(json!({
                 "token": "tok",
-                "base_url": "http://localhost:8080"
+                "base_url": "https://evil.example.com/v0"
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("api.airtable.com"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_credential_id_allows_custom_base_url() {
+        let mut connector = AirtableConnector::new();
+        let cid = uuid::Uuid::new_v4().to_string();
+        connector
+            .handle_configure(json!({
+                "credential_id": cid,
+                "base_url": "https://proxy.internal.example/v0"
             }))
             .await
             .unwrap();
         let config = connector.config.as_ref().unwrap();
-        assert_eq!(config.base_url, "http://localhost:8080");
+        assert_eq!(config.base_url, "https://proxy.internal.example/v0");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_empty_token() {
+        let mut connector = AirtableConnector::new();
+        let result = connector.handle_configure(json!({ "token": "" })).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("non-empty"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
     }
 
     #[fcp_async_core::runtime::test]

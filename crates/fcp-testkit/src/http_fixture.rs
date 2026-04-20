@@ -533,16 +533,12 @@ impl HttpFixtureResponseSpec {
     }
 
     fn to_response(&self) -> HttpFixtureResponse {
-        let mut response = HttpFixtureResponse {
+        HttpFixtureResponse {
             status: self.status,
             headers: self.headers.clone(),
             body: self.body.to_body(),
             delay: self.delay_ms.map(Duration::from_millis),
-        };
-        if let Some(delay_ms) = self.delay_ms {
-            response = response.with_delay(Duration::from_millis(delay_ms));
         }
-        response
     }
 
     fn redacted(&self) -> Self {
@@ -709,17 +705,19 @@ impl HttpFixtureReplayRequest {
     }
 
     fn shell_command(&self, base_url: &str) -> String {
+        // `base_url` is expected to be a literal shell fragment like `$BASE_URL`
+        // that must survive into the emitted script unquoted so the variable
+        // expansion fires. The path + query portion is shell-quoted separately
+        // so `&` in multi-param URLs doesn't background the curl invocation.
+        let path_and_query = format!("{}{}", self.path, render_query_string(&self.query));
+        let url_arg = format!("{base_url}{}", shell_quote(&path_and_query));
         let mut parts = vec![
             "curl".to_string(),
             "-sS".to_string(),
             "-i".to_string(),
             "-X".to_string(),
             self.method.clone(),
-            shell_quote(&format!(
-                "{base_url}{}{}",
-                self.path,
-                render_query_string(&self.query)
-            )),
+            url_arg,
         ];
         for (name, value) in &self.headers {
             parts.push("-H".to_string());
@@ -1925,6 +1923,15 @@ fn is_sensitive_header(name: &str) -> bool {
             | "x-api-key"
             | "api-key"
             | "x-auth-token"
+            | "x-access-token"
+            | "x-session-token"
+            | "x-csrf-token"
+            | "x-xsrf-token"
+            | "x-hub-signature"
+            | "x-hub-signature-256"
+            | "x-webhook-signature"
+            | "x-slack-signature"
+            | "stripe-signature"
     )
 }
 
@@ -1996,9 +2003,14 @@ fn shell_quote(value: &str) -> String {
         return "''".to_string();
     }
 
+    // `$` and `&` are deliberately excluded: `$` triggers variable expansion
+    // (leaking env vars or breaking replay fidelity) and `&` backgrounds the
+    // command before the rest of the URL is consumed. Callers that need a
+    // literal `$BASE_URL` prefix (see `shell_command`) must emit it outside of
+    // `shell_quote` and concatenate a quoted tail.
     if value
         .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || b"-_./:=+$?&".contains(&byte))
+        .all(|byte| byte.is_ascii_alphanumeric() || b"-_./:=+?".contains(&byte))
     {
         return value.to_string();
     }

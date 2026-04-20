@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use reqwest::StatusCode;
+use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
 
 pub mod auth;
@@ -87,6 +87,15 @@ pub enum DiscoveryError {
         url: String,
         /// JSON parser error.
         source: serde_json::Error,
+    },
+
+    /// Endpoint override pointed at an untrusted remote host.
+    #[error("untrusted discovery endpoint `{url}`: {reason}")]
+    UntrustedEndpoint {
+        /// Rejected URL.
+        url: String,
+        /// Human-readable rejection reason.
+        reason: String,
     },
 
     /// Both standard and alternate endpoints failed.
@@ -407,6 +416,7 @@ impl DiscoveryFetcher {
         endpoint: DiscoveryEndpointKind,
         url: &str,
     ) -> Result<FetchedDiscoverySnapshot, DiscoveryError> {
+        validate_discovery_endpoint_url(url)?;
         let resp =
             self.client
                 .get(url)
@@ -436,6 +446,63 @@ impl DiscoveryFetcher {
 
         Ok(snapshot)
     }
+}
+
+fn validate_discovery_endpoint_url(url: &str) -> Result<(), DiscoveryError> {
+    let parsed = Url::parse(url).map_err(|error| DiscoveryError::UntrustedEndpoint {
+        url: url.to_string(),
+        reason: format!("invalid URL: {error}"),
+    })?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| DiscoveryError::UntrustedEndpoint {
+            url: url.to_string(),
+            reason: "missing host".to_string(),
+        })?;
+
+    if is_local_test_host(host) {
+        if parsed.fragment().is_some() {
+            return Err(DiscoveryError::UntrustedEndpoint {
+                url: url.to_string(),
+                reason: "local test endpoints must not include fragments".to_string(),
+            });
+        }
+        return Ok(());
+    }
+
+    if parsed.scheme() != "https" {
+        return Err(DiscoveryError::UntrustedEndpoint {
+            url: url.to_string(),
+            reason: "remote discovery endpoints must use https".to_string(),
+        });
+    }
+    if parsed.username() != "" || parsed.password().is_some() {
+        return Err(DiscoveryError::UntrustedEndpoint {
+            url: url.to_string(),
+            reason: "userinfo is not allowed in discovery endpoints".to_string(),
+        });
+    }
+    if parsed.fragment().is_some() {
+        return Err(DiscoveryError::UntrustedEndpoint {
+            url: url.to_string(),
+            reason: "fragments are not allowed in discovery endpoints".to_string(),
+        });
+    }
+    if host.eq_ignore_ascii_case("www.googleapis.com")
+        || host.eq_ignore_ascii_case("googleapis.com")
+        || host.ends_with(".googleapis.com")
+    {
+        return Ok(());
+    }
+
+    Err(DiscoveryError::UntrustedEndpoint {
+        url: url.to_string(),
+        reason: "remote discovery endpoints must target Google APIs hosts".to_string(),
+    })
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
 }
 
 /// Build a deterministic snapshot storage key.
@@ -1638,6 +1705,65 @@ mod tests {
                 }
                 other => panic!("expected AllEndpointsFailed, got {other}"),
             }
+        });
+    }
+
+    #[test]
+    fn fetch_snapshot_rejects_untrusted_remote_standard_base() {
+        run_with_test_runtime(async {
+            let server = MockServer::start().await;
+            let service = DiscoveryServiceId::new("gmail", "v1").expect("valid");
+            let alternate_template = format!(
+                "{}/$discovery/rest?api={{api_name}}&version={{api_version}}",
+                server.uri()
+            );
+            let fetcher = DiscoveryFetcher::new()
+                .with_client(mock_http_client())
+                .with_standard_base("https://evil.example.com/discovery/v1/apis")
+                .with_alternate_template(alternate_template);
+
+            let err = fetcher
+                .fetch_snapshot(&service)
+                .await
+                .expect_err("untrusted remote base should be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("untrusted discovery endpoint"),
+                "error should mention trust rejection: {msg}"
+            );
+            assert!(
+                msg.contains("evil.example.com"),
+                "error should include the rejected host: {msg}"
+            );
+        });
+    }
+
+    #[test]
+    fn fetch_snapshot_rejects_untrusted_remote_alternate_template() {
+        run_with_test_runtime(async {
+            let server = MockServer::start().await;
+            let service = DiscoveryServiceId::new("gmail", "v1").expect("valid");
+            let standard_base = format!("{}/discovery/v1/apis", server.uri());
+            let fetcher = DiscoveryFetcher::new()
+                .with_client(mock_http_client())
+                .with_standard_base(standard_base)
+                .with_alternate_template(
+                    "https://evil.example.com/$discovery/rest?api={api_name}&version={api_version}",
+                );
+
+            let err = fetcher
+                .fetch_snapshot(&service)
+                .await
+                .expect_err("untrusted alternate template should be rejected");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("untrusted discovery endpoint"),
+                "error should mention trust rejection: {msg}"
+            );
+            assert!(
+                msg.contains("evil.example.com"),
+                "error should include the rejected host: {msg}"
+            );
         });
     }
 

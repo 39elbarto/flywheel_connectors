@@ -220,12 +220,17 @@ impl SecretBag {
         let mut missing = Vec::new();
 
         for req in requirements {
+            // `File` and `EnvVar` sources behaved inconsistently: files were
+            // trimmed, env vars were not. That let whitespace-only env vars
+            // past the `is_empty` gate and produced silently-broken auth
+            // headers later. Normalize by trimming both, and by treating
+            // whitespace-only `TestDefault` the same way.
             let value = match &req.source {
-                SecretSource::EnvVar(var) => std::env::var(var).ok(),
+                SecretSource::EnvVar(var) => std::env::var(var).ok().map(|s| s.trim().to_owned()),
                 SecretSource::File(path) => std::fs::read_to_string(path)
                     .ok()
                     .map(|s| s.trim().to_owned()),
-                SecretSource::TestDefault(val) => Some(val.clone()),
+                SecretSource::TestDefault(val) => Some(val.trim().to_owned()),
             };
 
             if let Some(val) = value {

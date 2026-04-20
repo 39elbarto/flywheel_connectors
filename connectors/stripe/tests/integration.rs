@@ -17,6 +17,11 @@ use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use hmac::{Hmac, Mac};
 use serde_json::json;
 use sha2::Sha256;
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::TcpListener as StdTcpListener;
+use std::sync::{Arc, Mutex};
+use std::thread;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{header, method, path},
@@ -99,6 +104,169 @@ fn build_webhook_signature(secret: &str, payload: &str, timestamp: i64) -> Strin
     format!("t={timestamp},v1={}", hex::encode(digest))
 }
 
+#[derive(Clone, Debug)]
+struct StructuredHttpRequest {
+    method: String,
+    path: String,
+    headers: HashMap<String, String>,
+    body: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+struct StructuredHttpResponse {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+impl StructuredHttpResponse {
+    fn json(status: u16, body: serde_json::Value) -> Self {
+        Self {
+            status,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: body.to_string().into_bytes(),
+        }
+    }
+
+    fn empty(status: u16) -> Self {
+        Self {
+            status,
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+}
+
+struct StructuredFakeHttpServer {
+    base_url: String,
+    requests: Arc<Mutex<Vec<StructuredHttpRequest>>>,
+    _join: thread::JoinHandle<()>,
+}
+
+impl StructuredFakeHttpServer {
+    fn spawn<F>(expected_requests: usize, responder: F) -> Self
+    where
+        F: Fn(usize, &StructuredHttpRequest) -> StructuredHttpResponse + Send + Sync + 'static,
+    {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind fake http server");
+        let addr = listener.local_addr().expect("fake http server addr");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_thread = Arc::clone(&requests);
+        let responder = Arc::new(responder);
+
+        let join = thread::spawn(move || {
+            for idx in 0..expected_requests {
+                let (mut stream, _) = listener.accept().expect("accept fake http connection");
+                let request = read_structured_http_request(&mut stream);
+                let response = responder(idx, &request);
+                requests_for_thread
+                    .lock()
+                    .expect("lock fake http requests")
+                    .push(request);
+                write_structured_http_response(&mut stream, response);
+            }
+        });
+
+        Self {
+            base_url: format!("http://{addr}"),
+            requests,
+            _join: join,
+        }
+    }
+
+    fn url(&self) -> &str {
+        &self.base_url
+    }
+
+    fn requests(&self) -> Vec<StructuredHttpRequest> {
+        self.requests
+            .lock()
+            .expect("lock fake http requests")
+            .clone()
+    }
+}
+
+fn read_structured_http_request(stream: &mut std::net::TcpStream) -> StructuredHttpRequest {
+    let mut buffer = Vec::new();
+    let mut temp = [0u8; 1024];
+    let header_end = loop {
+        let read = stream.read(&mut temp).expect("read fake http request");
+        assert!(read > 0, "unexpected EOF while reading fake http request");
+        buffer.extend_from_slice(&temp[..read]);
+        if let Some(pos) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            break pos + 4;
+        }
+    };
+
+    let header_text = std::str::from_utf8(&buffer[..header_end]).expect("request headers utf8");
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines.next().expect("request line");
+    let mut request_line_parts = request_line.split_whitespace();
+    let method = request_line_parts
+        .next()
+        .expect("request method")
+        .to_string();
+    let path = request_line_parts.next().expect("request path").to_string();
+
+    let mut headers = HashMap::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let (name, value) = line.split_once(':').expect("header separator");
+        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+    }
+
+    let content_length = headers
+        .get("content-length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut body = buffer[header_end..].to_vec();
+    while body.len() < content_length {
+        let read = stream.read(&mut temp).expect("read fake http body");
+        assert!(read > 0, "unexpected EOF while reading fake http body");
+        body.extend_from_slice(&temp[..read]);
+    }
+    body.truncate(content_length);
+
+    StructuredHttpRequest {
+        method,
+        path,
+        headers,
+        body,
+    }
+}
+
+fn write_structured_http_response(
+    stream: &mut std::net::TcpStream,
+    response: StructuredHttpResponse,
+) {
+    let reason = match response.status {
+        200 => "OK",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        _ => "OK",
+    };
+    let mut raw = format!(
+        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        response.status,
+        reason,
+        response.body.len()
+    );
+    for (name, value) in response.headers {
+        raw.push_str(&format!("{name}: {value}\r\n"));
+    }
+    raw.push_str("\r\n");
+    stream
+        .write_all(raw.as_bytes())
+        .expect("write fake http response headers");
+    stream
+        .write_all(&response.body)
+        .expect("write fake http response body");
+}
+
 // ============================================================================
 // Error taxonomy mapping tests
 // ============================================================================
@@ -106,17 +274,15 @@ fn build_webhook_signature(secret: &str, payload: &str, timestamp: i64) -> Strin
 /// 401 Unauthorized maps to `StripeError::Unauthorized` -> `FcpError::Unauthorized`.
 #[fcp_async_core::runtime::test]
 async fn error_401_maps_to_unauthorized() {
-    let mock_server = MockServer::start().await;
-
-    Mock::given(method("GET"))
-        .and(path("/v1/balance"))
-        .respond_with(ResponseTemplate::new(401))
-        .mount(&mock_server)
-        .await;
+    let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path, "/v1/balance");
+        StructuredHttpResponse::empty(401)
+    });
 
     let client = StripeClient::new("bad-key")
         .unwrap()
-        .with_api_url(&format!("{}/v1", mock_server.uri()))
+        .with_api_url(&format!("{}/v1", fake_server.url()))
         .with_retry_config(0);
 
     let err = client.get_balance().await.unwrap_err();
@@ -152,19 +318,20 @@ async fn error_403_maps_to_unauthorized() {
 /// 404 Not Found maps to `StripeError::NotFound` -> `FcpError::ResourceNotFound`.
 #[fcp_async_core::runtime::test]
 async fn error_404_maps_to_not_found() {
-    let mock_server = MockServer::start().await;
-
-    Mock::given(method("GET"))
-        .and(path("/v1/customers/cus_missing"))
-        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
-            "error": { "type": "invalid_request_error", "message": "No such customer" }
-        })))
-        .mount(&mock_server)
-        .await;
+    let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path, "/v1/customers/cus_missing");
+        StructuredHttpResponse::json(
+            404,
+            json!({
+                "error": { "type": "invalid_request_error", "message": "No such customer" }
+            }),
+        )
+    });
 
     let client = StripeClient::new("sk_test")
         .unwrap()
-        .with_api_url(&format!("{}/v1", mock_server.uri()))
+        .with_api_url(&format!("{}/v1", fake_server.url()))
         .with_retry_config(0);
 
     let err = client.get_customer("cus_missing").await.unwrap_err();
@@ -331,26 +498,33 @@ async fn redaction_secret_key_not_in_error_message() {
 /// Secret key is sent as Bearer auth header.
 #[fcp_async_core::runtime::test]
 async fn secret_key_sent_as_bearer_auth() {
-    let mock_server = MockServer::start().await;
-
-    Mock::given(method("GET"))
-        .and(path("/v1/balance"))
-        .and(header("authorization", "Bearer sk_test_auth_check"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "object": "balance",
-            "available": [{ "amount": 100, "currency": "usd" }],
-            "pending": [{ "amount": 0, "currency": "usd" }]
-        })))
-        .mount(&mock_server)
-        .await;
+    let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path, "/v1/balance");
+        StructuredHttpResponse::json(
+            200,
+            json!({
+                "object": "balance",
+                "available": [{ "amount": 100, "currency": "usd" }],
+                "pending": [{ "amount": 0, "currency": "usd" }]
+            }),
+        )
+    });
 
     let client = StripeClient::new("sk_test_auth_check")
         .unwrap()
-        .with_api_url(&format!("{}/v1", mock_server.uri()))
+        .with_api_url(&format!("{}/v1", fake_server.url()))
         .with_retry_config(0);
 
     let balance = client.get_balance().await.unwrap();
     assert_eq!(balance.available[0].amount, 100);
+
+    let requests = fake_server.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].headers.get("authorization").map(String::as_str),
+        Some("Bearer sk_test_auth_check")
+    );
 }
 
 // ============================================================================

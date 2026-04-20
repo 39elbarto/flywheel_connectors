@@ -277,6 +277,10 @@ async fn error_401_maps_to_unauthorized() {
     let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
         assert_eq!(request.method, "GET");
         assert_eq!(request.path, "/v1/balance");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer bad-key")
+        );
         StructuredHttpResponse::empty(401)
     });
 
@@ -321,6 +325,10 @@ async fn error_404_maps_to_not_found() {
     let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
         assert_eq!(request.method, "GET");
         assert_eq!(request.path, "/v1/customers/cus_missing");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer sk_test")
+        );
         StructuredHttpResponse::json(
             404,
             json!({
@@ -501,6 +509,10 @@ async fn secret_key_sent_as_bearer_auth() {
     let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
         assert_eq!(request.method, "GET");
         assert_eq!(request.path, "/v1/balance");
+        assert!(
+            request.headers.get("content-type").is_none(),
+            "GET balance should not send a content-type header"
+        );
         StructuredHttpResponse::json(
             200,
             json!({

@@ -484,6 +484,11 @@ fn normalize_chat_id(id: &str) -> Result<String, TelegramError> {
 mod tests {
     use super::*;
     use fcp_core::FcpError;
+    use std::collections::HashMap;
+    use std::io::{Read, Write};
+    use std::net::TcpListener as StdTcpListener;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -525,23 +530,177 @@ mod tests {
         (mock_server, client)
     }
 
+    #[derive(Clone, Debug)]
+    struct StructuredHttpRequest {
+        method: String,
+        path: String,
+        headers: HashMap<String, String>,
+        body: Vec<u8>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct StructuredHttpResponse {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    }
+
+    impl StructuredHttpResponse {
+        fn json(status: u16, body: serde_json::Value) -> Self {
+            Self {
+                status,
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: body.to_string().into_bytes(),
+            }
+        }
+    }
+
+    struct StructuredFakeHttpServer {
+        base_url: String,
+        _requests: Arc<Mutex<Vec<StructuredHttpRequest>>>,
+        _join: thread::JoinHandle<()>,
+    }
+
+    impl StructuredFakeHttpServer {
+        fn spawn<F>(expected_requests: usize, responder: F) -> Self
+        where
+            F: Fn(usize, &StructuredHttpRequest) -> StructuredHttpResponse + Send + Sync + 'static,
+        {
+            let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind fake http server");
+            let addr = listener.local_addr().expect("fake http server addr");
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let requests_for_thread = Arc::clone(&requests);
+            let responder = Arc::new(responder);
+
+            let join = thread::spawn(move || {
+                for idx in 0..expected_requests {
+                    let (mut stream, _) = listener.accept().expect("accept fake http connection");
+                    let request = read_structured_http_request(&mut stream);
+                    let response = responder(idx, &request);
+                    requests_for_thread
+                        .lock()
+                        .expect("lock fake http requests")
+                        .push(request);
+                    write_structured_http_response(&mut stream, response);
+                }
+            });
+
+            Self {
+                base_url: format!("http://{addr}"),
+                _requests: requests,
+                _join: join,
+            }
+        }
+
+        fn uri(&self) -> String {
+            self.base_url.clone()
+        }
+    }
+
+    fn read_structured_http_request(stream: &mut std::net::TcpStream) -> StructuredHttpRequest {
+        let mut buffer = Vec::new();
+        let mut temp = [0u8; 1024];
+        let header_end = loop {
+            let read = stream.read(&mut temp).expect("read fake http request");
+            assert!(read > 0, "unexpected EOF while reading fake http request");
+            buffer.extend_from_slice(&temp[..read]);
+            if let Some(pos) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+
+        let header_text = std::str::from_utf8(&buffer[..header_end]).expect("request headers utf8");
+        let mut lines = header_text.split("\r\n");
+        let request_line = lines.next().expect("request line");
+        let mut request_line_parts = request_line.split_whitespace();
+        let method = request_line_parts
+            .next()
+            .expect("request method")
+            .to_string();
+        let path = request_line_parts.next().expect("request path").to_string();
+
+        let mut headers = HashMap::new();
+        for line in lines {
+            if line.is_empty() {
+                continue;
+            }
+            let (name, value) = line.split_once(':').expect("header separator");
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+
+        let content_length = headers
+            .get("content-length")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let mut body = buffer[header_end..].to_vec();
+        while body.len() < content_length {
+            let read = stream.read(&mut temp).expect("read fake http body");
+            assert!(read > 0, "unexpected EOF while reading fake http body");
+            body.extend_from_slice(&temp[..read]);
+        }
+        body.truncate(content_length);
+
+        StructuredHttpRequest {
+            method,
+            path,
+            headers,
+            body,
+        }
+    }
+
+    fn write_structured_http_response(
+        stream: &mut std::net::TcpStream,
+        response: StructuredHttpResponse,
+    ) {
+        let reason = match response.status {
+            200 => "OK",
+            401 => "Unauthorized",
+            429 => "Too Many Requests",
+            _ => "OK",
+        };
+        let mut raw = format!(
+            "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            response.status,
+            reason,
+            response.body.len()
+        );
+        for (name, value) in response.headers {
+            raw.push_str(&format!("{name}: {value}\r\n"));
+        }
+        raw.push_str("\r\n");
+        stream
+            .write_all(raw.as_bytes())
+            .expect("write fake http response headers");
+        stream
+            .write_all(&response.body)
+            .expect("write fake http response body");
+    }
+
     #[fcp_async_core::runtime::test]
     async fn test_get_me_success() {
-        let (mock_server, client) = setup_mock_client().await;
-
-        Mock::given(method("GET"))
-            .and(path("/bottest_token_12345/getMe"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": {
-                    "id": 123456789,
-                    "is_bot": true,
-                    "first_name": "Test Bot",
-                    "username": "test_bot"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
+        let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
+            assert_eq!(request.method, "GET");
+            assert_eq!(request.path, "/bottest_token_12345/getMe");
+            assert!(
+                request.headers.get("content-type").is_none(),
+                "GET getMe should not send a content-type header"
+            );
+            StructuredHttpResponse::json(
+                200,
+                serde_json::json!({
+                    "ok": true,
+                    "result": {
+                        "id": 123456789,
+                        "is_bot": true,
+                        "first_name": "Test Bot",
+                        "username": "test_bot"
+                    }
+                }),
+            )
+        });
+        let client = TelegramClient::new("test_token_12345")
+            .unwrap()
+            .with_base_url(fake_server.uri());
 
         let bot_info = client.get_me().await.unwrap();
         assert_eq!(bot_info.id, 123456789);
@@ -552,17 +711,21 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_get_me_unauthorized() {
-        let (mock_server, client) = setup_mock_client().await;
-
-        Mock::given(method("GET"))
-            .and(path("/bottest_token_12345/getMe"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
-                "ok": false,
-                "error_code": 401,
-                "description": "Unauthorized"
-            })))
-            .mount(&mock_server)
-            .await;
+        let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
+            assert_eq!(request.method, "GET");
+            assert_eq!(request.path, "/bottest_token_12345/getMe");
+            StructuredHttpResponse::json(
+                401,
+                serde_json::json!({
+                    "ok": false,
+                    "error_code": 401,
+                    "description": "Unauthorized"
+                }),
+            )
+        });
+        let client = TelegramClient::new("test_token_12345")
+            .unwrap()
+            .with_base_url(fake_server.uri());
 
         let result = client.get_me().await;
         assert!(result.is_err());
@@ -576,25 +739,37 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_send_message_success() {
-        let (mock_server, client) = setup_mock_client().await;
-
-        Mock::given(method("POST"))
-            .and(path("/bottest_token_12345/sendMessage"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "ok": true,
-                "result": {
-                    "message_id": 42,
-                    "chat": {
-                        "id": 123456,
-                        "type": "private",
-                        "first_name": "Test"
-                    },
-                    "date": 1234567890,
-                    "text": "Hello, World!"
-                }
-            })))
-            .mount(&mock_server)
-            .await;
+        let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/bottest_token_12345/sendMessage");
+            assert_eq!(
+                request.headers.get("content-type").map(String::as_str),
+                Some("application/json")
+            );
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("telegram send body json");
+            assert_eq!(body["chat_id"], "123456");
+            assert_eq!(body["text"], "Hello, World!");
+            StructuredHttpResponse::json(
+                200,
+                serde_json::json!({
+                    "ok": true,
+                    "result": {
+                        "message_id": 42,
+                        "chat": {
+                            "id": 123456,
+                            "type": "private",
+                            "first_name": "Test"
+                        },
+                        "date": 1234567890,
+                        "text": "Hello, World!"
+                    }
+                }),
+            )
+        });
+        let client = TelegramClient::new("test_token_12345")
+            .unwrap()
+            .with_base_url(fake_server.uri());
 
         let message = client
             .send_message("123456", "Hello, World!", SendMessageOptions::default())
@@ -681,18 +856,25 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_send_message_rate_limited() {
-        let (mock_server, client) = setup_mock_client().await;
-
-        Mock::given(method("POST"))
-            .and(path("/bottest_token_12345/sendMessage"))
-            .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
-                "ok": false,
-                "error_code": 429,
-                "description": "Too Many Requests: retry after 1",
-                "parameters": {"retry_after": 1}
-            })))
-            .mount(&mock_server)
-            .await;
+        let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/bottest_token_12345/sendMessage");
+            StructuredHttpResponse {
+                status: 429,
+                headers: vec![("retry-after".into(), "1".into())],
+                body: serde_json::json!({
+                    "ok": false,
+                    "error_code": 429,
+                    "description": "Too Many Requests: retry after 1",
+                    "parameters": {"retry_after": 1}
+                })
+                .to_string()
+                .into_bytes(),
+            }
+        });
+        let client = TelegramClient::new("test_token_12345")
+            .unwrap()
+            .with_base_url(fake_server.uri());
 
         let result = client
             .send_message("123456", "Test", SendMessageOptions::default())

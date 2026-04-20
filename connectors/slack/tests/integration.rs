@@ -1,6 +1,7 @@
 //! Slack connector integration tests (flywheel_connectors-i1b.6).
 //!
-//! Deterministic integration tests using wiremock to mock the Slack Web API.
+//! Deterministic integration tests using wiremock plus structured HTTP fakes
+//! to exercise the Slack Web API transport more realistically.
 //! No real API calls. Covers:
 //! - Messages (post, reply, history, search)
 //! - Channels (list, set topic)
@@ -360,6 +361,22 @@ async fn post_message_happy_path() {
     let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
         assert_eq!(request.method, "POST");
         assert_eq!(request.path, "/chat.postMessage");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer xoxb-test-token-xyz")
+        );
+        assert_eq!(
+            request.headers.get("accept").map(String::as_str),
+            Some("application/json")
+        );
+        assert_eq!(
+            request.headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&request.body).expect("slack post body json");
+        assert_eq!(body["channel"], "C01234567");
+        assert_eq!(body["text"], "Hello from FCP!");
         StructuredHttpResponse::json(
             200,
             json!({
@@ -387,13 +404,7 @@ async fn post_message_happy_path() {
 
     assert_eq!(result["message"]["text"], "Hello from FCP!");
     assert_eq!(result["message"]["ts"], "1234567890.123456");
-    let requests = fake_server.requests();
-    assert_eq!(requests.len(), 1);
-    assert!(
-        String::from_utf8_lossy(&requests[0].body).contains("Hello+from+FCP%21"),
-        "expected form-encoded post body, got {:?}",
-        requests[0].body
-    );
+    assert_eq!(fake_server.requests().len(), 1);
 }
 
 #[fcp_async_core::runtime::test]
@@ -518,6 +529,18 @@ async fn list_channels_happy_path() {
     let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
         assert_eq!(request.method, "GET");
         assert_eq!(request.path, "/conversations.list?types=public_channel");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer xoxb-test-token-xyz")
+        );
+        assert_eq!(
+            request.headers.get("accept").map(String::as_str),
+            Some("application/json")
+        );
+        assert!(
+            request.headers.get("content-type").is_none(),
+            "GET list_channels should not send a content-type header"
+        );
         StructuredHttpResponse::json(
             200,
             json!({
@@ -1014,6 +1037,14 @@ async fn error_not_authed_maps_to_unauthorized() {
     let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
         assert_eq!(request.method, "POST");
         assert_eq!(request.path, "/chat.postMessage");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer bad-token")
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&request.body).expect("slack error body json");
+        assert_eq!(body["channel"], "C01234567");
+        assert_eq!(body["text"], "hello");
         StructuredHttpResponse::json(
             200,
             json!({
@@ -1184,6 +1215,14 @@ async fn error_http_429_maps_to_rate_limited() {
     let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
         assert_eq!(request.method, "GET");
         assert_eq!(request.path, "/conversations.list");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer valid-token")
+        );
+        assert_eq!(
+            request.headers.get("accept").map(String::as_str),
+            Some("application/json")
+        );
         StructuredHttpResponse {
             status: 429,
             headers: vec![

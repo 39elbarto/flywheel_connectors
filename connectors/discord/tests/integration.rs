@@ -1,6 +1,7 @@
 //! Discord connector integration tests (flywheel_connectors-bngd).
 //!
-//! Deterministic integration tests using wiremock to mock the Discord REST API.
+//! Deterministic integration tests using wiremock plus structured HTTP fakes
+//! to exercise the Discord REST API transport more realistically.
 //! No real Discord calls. Covers:
 //! - Lifecycle: configure → handshake → invoke
 //! - REST operation happy paths (send, edit, delete, get, react, threads)
@@ -16,6 +17,11 @@ use fcp_core::CapabilityConstraints;
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use serde_json::json;
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::TcpListener as StdTcpListener;
+use std::sync::{Arc, Mutex};
+use std::thread;
 use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -76,6 +82,159 @@ fn unique_zone_dir(label: &str) -> String {
         .join(format!("{label}-{}", Uuid::new_v4()))
         .to_string_lossy()
         .into_owned()
+}
+
+#[derive(Clone, Debug)]
+struct StructuredHttpRequest {
+    method: String,
+    path: String,
+    headers: HashMap<String, String>,
+    body: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+struct StructuredHttpResponse {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+impl StructuredHttpResponse {
+    fn json(status: u16, body: serde_json::Value) -> Self {
+        Self {
+            status,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: body.to_string().into_bytes(),
+        }
+    }
+}
+
+struct StructuredFakeHttpServer {
+    base_url: String,
+    requests: Arc<Mutex<Vec<StructuredHttpRequest>>>,
+    _join: thread::JoinHandle<()>,
+}
+
+impl StructuredFakeHttpServer {
+    fn spawn<F>(expected_requests: usize, responder: F) -> Self
+    where
+        F: Fn(usize, &StructuredHttpRequest) -> StructuredHttpResponse + Send + Sync + 'static,
+    {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind fake http server");
+        let addr = listener.local_addr().expect("fake http server addr");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_thread = Arc::clone(&requests);
+        let responder = Arc::new(responder);
+
+        let join = thread::spawn(move || {
+            for idx in 0..expected_requests {
+                let (mut stream, _) = listener.accept().expect("accept fake http connection");
+                let request = read_structured_http_request(&mut stream);
+                let response = responder(idx, &request);
+                requests_for_thread
+                    .lock()
+                    .expect("lock fake http requests")
+                    .push(request);
+                write_structured_http_response(&mut stream, response);
+            }
+        });
+
+        Self {
+            base_url: format!("http://{addr}"),
+            requests,
+            _join: join,
+        }
+    }
+
+    fn url(&self) -> &str {
+        &self.base_url
+    }
+
+    fn requests(&self) -> Vec<StructuredHttpRequest> {
+        self.requests
+            .lock()
+            .expect("lock fake http requests")
+            .clone()
+    }
+}
+
+fn read_structured_http_request(stream: &mut std::net::TcpStream) -> StructuredHttpRequest {
+    let mut buffer = Vec::new();
+    let mut temp = [0u8; 1024];
+    let header_end = loop {
+        let read = stream.read(&mut temp).expect("read fake http request");
+        assert!(read > 0, "unexpected EOF while reading fake http request");
+        buffer.extend_from_slice(&temp[..read]);
+        if let Some(pos) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            break pos + 4;
+        }
+    };
+
+    let header_text = std::str::from_utf8(&buffer[..header_end]).expect("request headers utf8");
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines.next().expect("request line");
+    let mut request_line_parts = request_line.split_whitespace();
+    let method = request_line_parts
+        .next()
+        .expect("request method")
+        .to_string();
+    let path = request_line_parts.next().expect("request path").to_string();
+
+    let mut headers = HashMap::new();
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let (name, value) = line.split_once(':').expect("header separator");
+        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+    }
+
+    let content_length = headers
+        .get("content-length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut body = buffer[header_end..].to_vec();
+    while body.len() < content_length {
+        let read = stream.read(&mut temp).expect("read fake http body");
+        assert!(read > 0, "unexpected EOF while reading fake http body");
+        body.extend_from_slice(&temp[..read]);
+    }
+    body.truncate(content_length);
+
+    StructuredHttpRequest {
+        method,
+        path,
+        headers,
+        body,
+    }
+}
+
+fn write_structured_http_response(
+    stream: &mut std::net::TcpStream,
+    response: StructuredHttpResponse,
+) {
+    let reason = match response.status {
+        200 => "OK",
+        401 => "Unauthorized",
+        429 => "Too Many Requests",
+        _ => "OK",
+    };
+    let mut raw = format!(
+        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        response.status,
+        reason,
+        response.body.len()
+    );
+    for (name, value) in response.headers {
+        raw.push_str(&format!("{name}: {value}\r\n"));
+    }
+    raw.push_str("\r\n");
+    stream
+        .write_all(raw.as_bytes())
+        .expect("write fake http response headers");
+    stream
+        .write_all(&response.body)
+        .expect("write fake http response body");
 }
 
 async fn mock_current_user_ok(mock_server: &MockServer, token: &str) {
@@ -213,21 +372,54 @@ async fn lifecycle_introspect_operations() {
 
 #[fcp_async_core::runtime::test]
 async fn send_message_happy_path() {
-    let mock_server = MockServer::start().await;
+    let fake_server = StructuredFakeHttpServer::spawn(2, |idx, request| match idx {
+        0 => {
+            assert_eq!(request.method, "GET");
+            assert_eq!(request.path, "/users/@me");
+            assert_eq!(
+                request.headers.get("authorization").map(String::as_str),
+                Some("Bot test_token")
+            );
+            StructuredHttpResponse::json(
+                200,
+                json!({
+                    "id": "123456789",
+                    "username": "TestBot",
+                    "discriminator": "0",
+                    "bot": true
+                }),
+            )
+        }
+        1 => {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/channels/111/messages");
+            assert_eq!(
+                request.headers.get("authorization").map(String::as_str),
+                Some("Bot test_token")
+            );
+            assert_eq!(
+                request.headers.get("content-type").map(String::as_str),
+                Some("application/json")
+            );
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("discord send body json");
+            assert_eq!(body["content"], "Hello Discord!");
+            StructuredHttpResponse::json(
+                200,
+                json!({
+                    "id": "100000000000000001",
+                    "channel_id": "111",
+                    "content": "Hello Discord!",
+                    "timestamp": "2026-03-02T12:00:00.000000+00:00",
+                    "author": {"id": "123456789", "username": "TestBot", "discriminator": "0"}
+                }),
+            )
+        }
+        _ => panic!("unexpected request index {idx}"),
+    });
     let mut connector = DiscordConnector::new();
-    let signing_key = setup_full(&mut connector, &mock_server, &["discord.send"]).await;
-
-    Mock::given(method("POST"))
-        .and(path("/channels/111/messages"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "100000000000000001",
-            "channel_id": "111",
-            "content": "Hello Discord!",
-            "timestamp": "2026-03-02T12:00:00.000000+00:00",
-            "author": {"id": "123456789", "username": "TestBot", "discriminator": "0"}
-        })))
-        .mount(&mock_server)
-        .await;
+    setup_configure(&mut connector, fake_server.url()).await;
+    let signing_key = setup_handshake(&mut connector, &["discord.send"]).await;
 
     let token = generate_valid_token(&signing_key, "discord.send_message");
     let result = connector
@@ -245,6 +437,7 @@ async fn send_message_happy_path() {
     assert_eq!(result["id"], "100000000000000001");
     assert_eq!(result["channel_id"], "111");
     assert_eq!(result["content"], "Hello Discord!");
+    assert_eq!(fake_server.requests().len(), 2);
 }
 
 #[fcp_async_core::runtime::test]
@@ -693,18 +886,33 @@ async fn invoke_with_wrong_capability_fails() {
 
 #[fcp_async_core::runtime::test]
 async fn api_401_maps_to_unauthorized() {
-    let mock_server = MockServer::start().await;
+    let fake_server = StructuredFakeHttpServer::spawn(2, |idx, request| match idx {
+        0 => {
+            assert_eq!(request.path, "/users/@me");
+            StructuredHttpResponse::json(
+                200,
+                json!({
+                    "id": "123456789",
+                    "username": "TestBot",
+                    "discriminator": "0",
+                    "bot": true
+                }),
+            )
+        }
+        1 => {
+            assert_eq!(request.method, "GET");
+            assert_eq!(request.path, "/channels/111");
+            assert_eq!(
+                request.headers.get("authorization").map(String::as_str),
+                Some("Bot test_token")
+            );
+            StructuredHttpResponse::json(401, json!({"message": "401: Unauthorized", "code": 0}))
+        }
+        _ => panic!("unexpected request index {idx}"),
+    });
     let mut connector = DiscordConnector::new();
-    let signing_key = setup_full(&mut connector, &mock_server, &["discord.read"]).await;
-
-    Mock::given(method("GET"))
-        .and(path("/channels/111"))
-        .respond_with(
-            ResponseTemplate::new(401)
-                .set_body_json(json!({"message": "401: Unauthorized", "code": 0})),
-        )
-        .mount(&mock_server)
-        .await;
+    setup_configure(&mut connector, fake_server.url()).await;
+    let signing_key = setup_handshake(&mut connector, &["discord.read"]).await;
 
     let token = generate_valid_token(&signing_key, "discord.get_channel");
     let result = connector
@@ -720,21 +928,39 @@ async fn api_401_maps_to_unauthorized() {
 
 #[fcp_async_core::runtime::test]
 async fn api_429_maps_to_rate_limited() {
-    let mock_server = MockServer::start().await;
+    let fake_server = StructuredFakeHttpServer::spawn(2, |idx, request| match idx {
+        0 => StructuredHttpResponse::json(
+            200,
+            json!({
+                "id": "123456789",
+                "username": "TestBot",
+                "discriminator": "0",
+                "bot": true
+            }),
+        ),
+        1 => {
+            assert_eq!(request.method, "GET");
+            assert_eq!(request.path, "/channels/111");
+            assert_eq!(
+                request.headers.get("authorization").map(String::as_str),
+                Some("Bot test_token")
+            );
+            StructuredHttpResponse {
+                status: 429,
+                headers: vec![
+                    ("content-type".into(), "application/json".into()),
+                    ("retry-after".into(), "1".into()),
+                ],
+                body: json!({"message": "You are being rate limited.", "retry_after": 1.0})
+                    .to_string()
+                    .into_bytes(),
+            }
+        }
+        _ => panic!("unexpected request index {idx}"),
+    });
     let mut connector = DiscordConnector::new();
-    let signing_key = setup_full(&mut connector, &mock_server, &["discord.read"]).await;
-
-    Mock::given(method("GET"))
-        .and(path("/channels/111"))
-        .respond_with(
-            ResponseTemplate::new(429)
-                .set_body_json(
-                    json!({"message": "You are being rate limited.", "retry_after": 1.0}),
-                )
-                .append_header("Retry-After", "1"),
-        )
-        .mount(&mock_server)
-        .await;
+    setup_configure(&mut connector, fake_server.url()).await;
+    let signing_key = setup_handshake(&mut connector, &["discord.read"]).await;
 
     let token = generate_valid_token(&signing_key, "discord.get_channel");
 

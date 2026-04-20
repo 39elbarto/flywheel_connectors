@@ -537,6 +537,52 @@ impl RateLimiter {
     }
 }
 
+/// Aging boost applied to a deferred repair's priority per evaluation
+/// cycle it remained in the queue without being drained.
+///
+/// Under heavy churn (new high-priority repairs continuously arriving),
+/// a pure priority-first scheduler starves lower-priority items
+/// indefinitely. Aging gives each deferred item a monotonic priority
+/// boost on every `evaluate_zone*` pass that upserts it again, so a
+/// P=500 item that has sat through 10 evaluation cycles effectively
+/// competes at P=1500 against fresh P=1000 arrivals. Saturates at
+/// [`MAX_DEFERRAL_COUNT`] to keep arithmetic bounded.
+const AGING_BOOST_PER_DEFERRAL: u32 = 100;
+
+/// Cap on the deferral counter so the aging arithmetic stays bounded
+/// and the sort key doesn't keep growing forever. Once an item has
+/// been deferred this many cycles, further aging is a no-op — it's
+/// already at top-of-queue and additional aging doesn't change
+/// ordering relative to other saturated items.
+const MAX_DEFERRAL_COUNT: u32 = 1_000_000;
+
+/// Internal queue entry: a `RepairRequest` plus the bookkeeping the
+/// controller needs to prevent cross-cycle starvation.
+#[derive(Debug, Clone)]
+struct QueuedRepair {
+    request: RepairRequest,
+    /// Number of `evaluate_zone*` cycles this entry has been refreshed
+    /// without being drained. Incremented by [`RepairController::upsert_repair`]
+    /// when an existing entry is refreshed. Reset to zero only on
+    /// removal (`next_repair`, `remove_queued_repair`, `prune_zone_repairs`,
+    /// `clear_queue`).
+    deferral_count: u32,
+}
+
+impl QueuedRepair {
+    /// Effective priority for sorting: base priority plus the aging
+    /// boost proportional to how long this item has been waiting.
+    /// Saturating arithmetic so a pathological `deferral_count` can't
+    /// wrap back to a low value.
+    fn effective_priority(&self) -> u32 {
+        let boost = self
+            .deferral_count
+            .min(MAX_DEFERRAL_COUNT)
+            .saturating_mul(AGING_BOOST_PER_DEFERRAL);
+        self.request.priority.saturating_add(boost)
+    }
+}
+
 /// Repair controller for maintaining coverage across the mesh.
 ///
 /// Implements bounded, rate-limited repair with convergent behavior.
@@ -545,17 +591,18 @@ pub struct RepairController {
     semaphore: Arc<Semaphore>,
     rate_limiter: RateLimiter,
     stats: RwLock<RepairStats>,
-    queue: RwLock<Vec<RepairRequest>>,
+    queue: RwLock<Vec<QueuedRepair>>,
 }
 
 impl RepairController {
-    fn sort_queue(queue: &mut [RepairRequest]) {
-        // Deterministic ordering: highest priority first, then stable object-id tie-break.
+    fn sort_queue(queue: &mut [QueuedRepair]) {
+        // Highest effective priority first (priority + aging boost),
+        // then stable object-id tie-break.
         queue.sort_by(|left, right| {
             right
-                .priority
-                .cmp(&left.priority)
-                .then_with(|| left.object_id.cmp(&right.object_id))
+                .effective_priority()
+                .cmp(&left.effective_priority())
+                .then_with(|| left.request.object_id.cmp(&right.request.object_id))
         });
     }
 
@@ -566,7 +613,7 @@ impl RepairController {
     fn remove_queued_repair(&self, object_id: &ObjectId) -> bool {
         let mut queue = self.queue.write();
         let original_len = queue.len();
-        queue.retain(|request| request.object_id != *object_id);
+        queue.retain(|queued| queued.request.object_id != *object_id);
         let removed = queue.len() != original_len;
         if removed {
             self.sync_queue_depth(queue.len());
@@ -577,8 +624,9 @@ impl RepairController {
     fn prune_zone_repairs(&self, zone_id: &ZoneId, tracked_objects: &BTreeSet<ObjectId>) -> usize {
         let mut queue = self.queue.write();
         let original_len = queue.len();
-        queue.retain(|request| {
-            request.zone_id != *zone_id || tracked_objects.contains(&request.object_id)
+        queue.retain(|queued| {
+            queued.request.zone_id != *zone_id
+                || tracked_objects.contains(&queued.request.object_id)
         });
         let removed = original_len.saturating_sub(queue.len());
         if removed > 0 {
@@ -607,12 +655,26 @@ impl RepairController {
 
         let action = if let Some(existing) = queue
             .iter_mut()
-            .find(|queued| queued.object_id == request.object_id)
+            .find(|queued| queued.request.object_id == request.object_id)
         {
-            *existing = request;
+            // Refresh: preserve and advance the deferral counter so an
+            // item that evaluate_zone keeps noticing but that
+            // next_repair keeps deferring climbs the queue over time.
+            // Starvation-prevention: under heavy churn where fresh
+            // high-priority items continuously arrive, this is the
+            // only thing keeping a low-priority-but-persistently-queued
+            // item from waiting forever.
+            existing.request = request;
+            existing.deferral_count = existing
+                .deferral_count
+                .saturating_add(1)
+                .min(MAX_DEFERRAL_COUNT);
             RepairQueueAction::Refresh
         } else {
-            queue.push(request);
+            queue.push(QueuedRepair {
+                request,
+                deferral_count: 0,
+            });
             RepairQueueAction::Queue
         };
 
@@ -641,7 +703,7 @@ impl RepairController {
             return None;
         }
 
-        let request = Some(queue.remove(0));
+        let request = Some(queue.remove(0).request);
         self.stats.write().queue_depth = queue.len();
         request
     }
@@ -1245,7 +1307,8 @@ impl TargetedRepairRequest {
     /// Set preferred sources.
     #[must_use]
     pub fn with_preferred_sources(mut self, sources: Vec<u64>) -> Self {
-        let excluded: std::collections::HashSet<_> = self.excluded_sources.iter().copied().collect();
+        let excluded: std::collections::HashSet<_> =
+            self.excluded_sources.iter().copied().collect();
         self.preferred_sources = normalize_u64_ids(sources)
             .into_iter()
             .filter(|source| !excluded.contains(source))
@@ -1257,7 +1320,8 @@ impl TargetedRepairRequest {
     #[must_use]
     pub fn with_excluded_sources(mut self, sources: Vec<u64>) -> Self {
         self.excluded_sources = normalize_u64_ids(sources);
-        let excluded: std::collections::HashSet<_> = self.excluded_sources.iter().copied().collect();
+        let excluded: std::collections::HashSet<_> =
+            self.excluded_sources.iter().copied().collect();
         self.preferred_sources
             .retain(|source| !excluded.contains(source));
         self
@@ -5411,6 +5475,131 @@ mod tests {
         assert_eq!(
             stats.queue_depth, 1,
             "diversity-deficit object should be queued for repair"
+        );
+    }
+
+    // ── Starvation-prevention: aging under heavy churn ──
+
+    /// Regression: under heavy churn a high-priority item stream starves
+    /// low-priority repairs indefinitely. Aging must lift a persistently-
+    /// deferred low-priority item above fresh high-priority arrivals
+    /// after enough cycles. Without aging, the low-priority item sits
+    /// at the back of the queue forever.
+    #[test]
+    fn aging_lifts_persistently_deferred_low_priority_above_fresh_high_priority() {
+        use crate::coverage::CoverageEvaluation;
+
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let zone = test_zone_id();
+        let low = ObjectId::from_bytes([1; 32]);
+        let fresh_high = ObjectId::from_bytes([2; 32]);
+
+        // Construct a CoverageEvaluation suitable for RepairRequest; the
+        // exact coverage values don't affect queue ordering — only
+        // `priority` and aging do.
+        let coverage = CoverageEvaluation::from_distribution(
+            low,
+            &crate::coverage::SymbolDistribution::new(1),
+        );
+
+        let policy = test_policy();
+
+        // Seed: one low-priority request for `low`. This becomes the
+        // "persistently queued but never drained" item.
+        controller.queue_repair(RepairRequest {
+            object_id: low,
+            zone_id: zone.clone(),
+            coverage: coverage.clone(),
+            policy: policy.clone(),
+            priority: 500,
+        });
+
+        // Simulate many evaluate cycles — each cycle re-upserts the
+        // same low-priority item (evaluate_zone keeps noticing it's
+        // still below target). Each refresh bumps its deferral_count.
+        // After enough cycles the aging boost should exceed the
+        // fresh high-priority arrivals' delta (1000 - 500 = 500, so
+        // 500 / AGING_BOOST_PER_DEFERRAL = 5 cycles of deferral).
+        for _ in 0..10 {
+            controller.queue_repair(RepairRequest {
+                object_id: low,
+                zone_id: zone.clone(),
+                coverage: coverage.clone(),
+                policy: policy.clone(),
+                priority: 500,
+            });
+        }
+
+        // Now a fresh high-priority arrival appears (first upsert, so
+        // deferral_count=0, no aging boost).
+        controller.queue_repair(RepairRequest {
+            object_id: fresh_high,
+            zone_id: zone.clone(),
+            coverage: coverage.clone(),
+            policy: policy.clone(),
+            priority: 1000,
+        });
+
+        // Aging expectation: after 10 refreshes the low-priority item
+        // has effective priority 500 + 10*100 = 1500, beating the
+        // fresh high's 1000. next_repair must dequeue `low` first.
+        let first = controller
+            .next_repair()
+            .expect("queue is non-empty")
+            .object_id;
+        assert_eq!(
+            first, low,
+            "aging must lift a persistently-deferred low-priority item \
+             above fresh high-priority arrivals — without this, heavy churn \
+             starves low-priority repairs forever",
+        );
+    }
+
+    /// A fresh arrival at a higher priority than a never-deferred
+    /// sibling must STILL win — aging is a tie-breaker over time,
+    /// not a global priority inversion. This guards against the fix
+    /// going too far and making the queue FIFO-ish regardless of
+    /// priority.
+    #[test]
+    fn aging_does_not_invert_priority_on_fresh_inputs() {
+        use crate::coverage::CoverageEvaluation;
+
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let zone = test_zone_id();
+        let low = ObjectId::from_bytes([1; 32]);
+        let high = ObjectId::from_bytes([2; 32]);
+
+        let coverage = CoverageEvaluation::from_distribution(
+            low,
+            &crate::coverage::SymbolDistribution::new(1),
+        );
+        let policy = test_policy();
+
+        // Both are fresh upserts (deferral_count=0 for both). Priority
+        // alone must decide the order.
+        controller.queue_repair(RepairRequest {
+            object_id: low,
+            zone_id: zone.clone(),
+            coverage: coverage.clone(),
+            policy: policy.clone(),
+            priority: 500,
+        });
+        controller.queue_repair(RepairRequest {
+            object_id: high,
+            zone_id: zone.clone(),
+            coverage: coverage.clone(),
+            policy: policy.clone(),
+            priority: 1000,
+        });
+
+        let first = controller
+            .next_repair()
+            .expect("queue is non-empty")
+            .object_id;
+        assert_eq!(
+            first, high,
+            "fresh high-priority arrival must win against fresh low-priority \
+             sibling — priority still dominates when no aging has accumulated",
         );
     }
 }

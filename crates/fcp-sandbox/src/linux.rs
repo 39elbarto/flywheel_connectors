@@ -495,16 +495,16 @@ impl LinuxSandbox {
 
     /// Apply resource limits using rlimit.
     fn apply_rlimits(&self, policy: &CompiledPolicy) -> Result<(), SandboxError> {
-        // Virtual memory limits (RLIMIT_AS) are specifically NOT set here because
-        // modern runtimes like Go and Rust (with certain allocators) reserve large
-        // blocks of virtual address space up-front. Limiting RLIMIT_AS will cause
-        // them to crash immediately on startup, even if their actual physical memory
-        // usage is well within bounds. Memory limits should be enforced via cgroups
-        // or by the runtime itself where possible.
-
-        // Data segment limit
+        // Enforce both heap/data growth and total address-space growth. RLIMIT_DATA
+        // alone does not cover mmap-backed allocations, so guests could otherwise
+        // bypass the memory budget via repeated anonymous mappings.
         set_rlimit(
             libc::RLIMIT_DATA,
+            policy.memory_limit_bytes,
+            policy.memory_limit_bytes,
+        )?;
+        set_rlimit(
+            libc::RLIMIT_AS,
             policy.memory_limit_bytes,
             policy.memory_limit_bytes,
         )?;
@@ -670,6 +670,13 @@ impl Sandbox for LinuxSandbox {
                     rlim_max: memory_limit_bytes,
                 };
                 if libc::setrlimit(libc::RLIMIT_DATA, &limit_data) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let limit_as = libc::rlimit {
+                    rlim_cur: memory_limit_bytes,
+                    rlim_max: memory_limit_bytes,
+                };
+                if libc::setrlimit(libc::RLIMIT_AS, &limit_as) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
 

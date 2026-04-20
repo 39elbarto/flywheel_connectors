@@ -1121,41 +1121,25 @@ impl WasiRuntime {
         // Mount only explicitly allowed directories. Preopening a parent of a
         // file-scoped allowlist entry widens access to sibling paths.
         for path in &self.config.readonly_paths {
-            if !path.is_dir() {
+            let Some(host_dir) = prepare_preopened_dir(path, false)? else {
                 continue;
-            }
-
-            if path.exists() {
-                let guest_path = path.display().to_string();
-                preopened_dirs.insert(guest_path, (path.as_path(), DirPerms::READ, FilePerms::READ));
-            }
+            };
+            let guest_path = path.display().to_string();
+            preopened_dirs.insert(guest_path, (host_dir, DirPerms::READ, FilePerms::READ));
         }
 
         for path in &self.config.writable_paths {
-            if !path.exists() {
-                // If the path doesn't exist, attempt to create it (especially important for state_dir)
-                // If it fails, we silently ignore here and let the later is_dir check skip it or fail access,
-                // as we might not have permissions to create it, but we should try.
-                let _ = std::fs::create_dir_all(path);
-            }
-
-            if !path.is_dir() {
+            let Some(host_dir) = prepare_preopened_dir(path, true)? else {
                 continue;
-            }
-
-            if path.exists() {
-                let guest_path = path.display().to_string();
-                // Overwrite with writable permissions if there's a conflict
-                preopened_dirs.insert(
-                    guest_path,
-                    (path.as_path(), DirPerms::all(), FilePerms::all()),
-                );
-            }
+            };
+            let guest_path = path.display().to_string();
+            // Overwrite with writable permissions if there's a conflict
+            preopened_dirs.insert(guest_path, (host_dir, DirPerms::all(), FilePerms::all()));
         }
 
         for (guest_path, (host_dir, d_perms, f_perms)) in preopened_dirs {
             wasi_builder
-                .preopened_dir(host_dir, &guest_path, d_perms, f_perms)
+                .preopened_dir(&host_dir, &guest_path, d_perms, f_perms)
                 .map_err(|e| {
                     WasiError::EngineCreation(format!(
                         "failed to mount {}: {e}",
@@ -1272,6 +1256,64 @@ impl WasiRuntime {
     pub const fn engine(&self) -> &Engine {
         &self.engine
     }
+}
+
+fn prepare_preopened_dir(path: &Path, writable: bool) -> WasiResult<Option<PathBuf>> {
+    ensure_preopen_path_is_stable(path, writable)?;
+
+    if writable && !path.exists() {
+        std::fs::create_dir_all(path).map_err(|error| WasiError::FsAccessDenied {
+            path: path.display().to_string(),
+            reason: format!("failed to create writable preopen directory: {error}"),
+        })?;
+    }
+
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    if !path.is_dir() {
+        return Ok(None);
+    }
+
+    path.canonicalize()
+        .map(Some)
+        .map_err(|error| WasiError::FsAccessDenied {
+            path: path.display().to_string(),
+            reason: format!("failed to canonicalize preopen directory: {error}"),
+        })
+}
+
+fn ensure_preopen_path_is_stable(path: &Path, writable: bool) -> WasiResult<()> {
+    let requested = normalize_preopen_path(path);
+    let resolved = resolve_policy_path(path);
+    if requested != resolved {
+        return Err(WasiError::FsAccessDenied {
+            path: path.display().to_string(),
+            reason: if writable {
+                "writable preopen path resolves through a symlinked ancestor; refusing to create or mount outside the declared path".into()
+            } else {
+                "readonly preopen path resolves through a symlinked ancestor; refusing to mount outside the declared path".into()
+            },
+        });
+    }
+    Ok(())
+}
+
+fn normalize_preopen_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn validate_preopened_paths(config: &WasiConfig) -> WasiResult<()> {
@@ -2229,36 +2271,133 @@ mod tests {
 
     #[test]
     fn test_wasi_runtime_rejects_existing_readonly_file_preopen() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("readonly.txt");
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("fcp-wasi-readonly-file-{}-{unique}", std::process::id()));
+        let file = dir.join("readonly.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&file, b"data").unwrap();
 
-        let err = WasiRuntime::new(WasiConfig {
+        let err = match WasiRuntime::new(WasiConfig {
             readonly_paths: vec![file.clone()],
             ..WasiConfig::default()
-        })
-        .unwrap_err();
+        }) {
+            Ok(_) => panic!("expected readonly file preopen to be rejected"),
+            Err(err) => err,
+        };
 
         assert!(matches!(err, WasiError::FsAccessDenied { .. }));
         assert!(err.to_string().contains("must be directories"));
         assert!(err.to_string().contains(&file.display().to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_wasi_runtime_rejects_existing_writable_file_preopen() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("writable.txt");
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("fcp-wasi-writable-file-{}-{unique}", std::process::id()));
+        let file = dir.join("writable.txt");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&file, b"data").unwrap();
 
-        let err = WasiRuntime::new(WasiConfig {
+        let err = match WasiRuntime::new(WasiConfig {
             writable_paths: vec![file.clone()],
             ..WasiConfig::default()
-        })
-        .unwrap_err();
+        }) {
+            Ok(_) => panic!("expected writable file preopen to be rejected"),
+            Err(err) => err,
+        };
 
         assert!(matches!(err, WasiError::FsAccessDenied { .. }));
         assert!(err.to_string().contains("must be directories"));
         assert!(err.to_string().contains(&file.display().to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_wasi_runtime_rejects_readonly_symlink_escape_preopen() {
+        use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("fcp-wasi-readonly-symlink-{}-{unique}", std::process::id()));
+        let escaped = dir.join("escaped");
+        let link = dir.join("link");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&escaped).unwrap();
+        symlink(&escaped, &link).unwrap();
+
+        let runtime = WasiRuntime::new(WasiConfig {
+            readonly_paths: vec![link.clone()],
+            ..WasiConfig::default()
+        })
+        .expect("runtime construction should succeed before store creation");
+        let err = match runtime.create_store() {
+            Ok(_) => panic!("expected symlinked readonly preopen to be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, WasiError::FsAccessDenied { .. }));
+        assert!(err.to_string().contains("symlinked ancestor"));
+        assert!(err.to_string().contains(&link.display().to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_wasi_runtime_rejects_writable_symlink_escape_preopen() {
+        use std::os::unix::fs::symlink;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("fcp-wasi-writable-symlink-{}-{unique}", std::process::id()));
+        let state = dir.join("state");
+        let escaped = dir.join("escaped");
+        let link = state.join("link");
+        let pending = link.join("nested");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::create_dir_all(&escaped).unwrap();
+        symlink(&escaped, &link).unwrap();
+
+        let runtime = WasiRuntime::new(WasiConfig {
+            writable_paths: vec![pending.clone()],
+            ..WasiConfig::default()
+        })
+        .expect("runtime construction should succeed before store creation");
+        let err = match runtime.create_store() {
+            Ok(_) => panic!("expected symlinked writable preopen to be rejected"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, WasiError::FsAccessDenied { .. }));
+        assert!(err.to_string().contains("symlinked ancestor"));
+        assert!(err.to_string().contains(&pending.display().to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

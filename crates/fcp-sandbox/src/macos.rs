@@ -195,13 +195,9 @@ impl MacOsSandbox {
 
     /// Apply resource limits using setrlimit.
     fn apply_rlimits(policy: &CompiledPolicy) {
-        // Virtual memory limits (RLIMIT_AS) are specifically NOT set here because
-        // modern runtimes like Go and Rust (with certain allocators) reserve large
-        // blocks of virtual address space up-front. Limiting RLIMIT_AS will cause
-        // them to crash immediately on startup, even if their actual physical memory
-        // usage is well within bounds.
-
-        // Data segment limit instead
+        // Enforce both heap/data growth and total address-space growth. RLIMIT_DATA
+        // alone does not cover mmap-backed allocations, so guests could otherwise
+        // bypass the memory budget via repeated anonymous mappings.
         let memory_limit = libc::rlimit {
             rlim_cur: policy.memory_limit_bytes,
             rlim_max: policy.memory_limit_bytes,
@@ -211,6 +207,12 @@ impl MacOsSandbox {
                 warn!(
                     error = %std::io::Error::last_os_error(),
                     "Failed to set memory limit"
+                );
+            }
+            if libc::setrlimit(libc::RLIMIT_AS, &memory_limit) != 0 {
+                warn!(
+                    error = %std::io::Error::last_os_error(),
+                    "Failed to set address-space limit"
                 );
             }
         }
@@ -341,13 +343,16 @@ impl Sandbox for MacOsSandbox {
 
         unsafe {
             cmd.pre_exec(move || {
-                // Virtual memory limits (RLIMIT_AS) are specifically NOT set here.
-                // We use RLIMIT_DATA instead.
+                // Enforce both heap/data growth and total address-space growth. RLIMIT_DATA
+                // alone does not cover mmap-backed allocations.
                 let memory_limit = libc::rlimit {
                     rlim_cur: memory_limit_bytes,
                     rlim_max: memory_limit_bytes,
                 };
                 if libc::setrlimit(libc::RLIMIT_DATA, &memory_limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::setrlimit(libc::RLIMIT_AS, &memory_limit) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
 

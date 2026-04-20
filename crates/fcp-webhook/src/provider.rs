@@ -11,8 +11,22 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     HmacSha256Verifier, SignatureVerifier, WebhookError, WebhookEvent, WebhookResult,
-    default_timestamp_tolerance,
+    default_max_payload_size, default_timestamp_tolerance,
 };
+
+/// Cap every Stripe `t=` timestamp value at this many characters before
+/// we copy it into the signed-payload buffer. Unix seconds fit in 10
+/// decimal digits until the year 2286, so 20 is ample for legitimate
+/// traffic but keeps a malicious upstream from blowing up
+/// `signed_payload.len()` with a multi-megabyte timestamp prefix.
+const MAX_STRIPE_TIMESTAMP_LEN: usize = 20;
+
+/// Cap every `v1=` signature string from the `Stripe-Signature` header
+/// at this many characters. HMAC-SHA-256 in hex is 64 chars; the cap
+/// leaves headroom for future wider-hash algorithms while rejecting
+/// a 1 MB "v1" value that would allocate memory in `sig.to_string()`
+/// before ever reaching the HMAC verifier.
+const MAX_STRIPE_SIGNATURE_LEN: usize = 128;
 
 fn header_value_case_insensitive<'a>(
     headers: &'a HashMap<String, String>,
@@ -79,9 +93,25 @@ impl std::fmt::Display for WebhookProvider {
 }
 
 /// GitHub webhook handler.
+///
+/// # Replay protection
+///
+/// GitHub webhook deliveries do **not** carry a timestamp header, so
+/// [`verify_and_parse`](Self::verify_and_parse) cannot enforce a replay
+/// window the way Stripe's `Stripe-Signature` timestamp does. A captured
+/// delivery remains valid forever for the lifetime of the shared HMAC
+/// secret. Callers **must** enforce replay protection at a higher layer,
+/// typically by feeding the `X-GitHub-Delivery` header (exposed as the
+/// event `id` on the parsed [`WebhookEvent`]) into the idempotency
+/// tracking offered by [`crate::WebhookHandler::check_replay`] /
+/// [`crate::WebhookHandler::record_event`]. Signature verification
+/// alone is not sufficient; treating it as sufficient allows an attacker
+/// who captures one legitimate delivery to replay it against the
+/// endpoint indefinitely.
 #[derive(Debug)]
 pub struct GitHubWebhook {
     verifier: HmacSha256Verifier,
+    max_payload_size: usize,
 }
 
 impl GitHubWebhook {
@@ -90,7 +120,19 @@ impl GitHubWebhook {
     pub fn new(secret: impl AsRef<[u8]>) -> Self {
         Self {
             verifier: HmacSha256Verifier::new(secret),
+            max_payload_size: default_max_payload_size(),
         }
+    }
+
+    /// Override the maximum webhook body size this handler will verify
+    /// or parse. Bodies larger than the limit are rejected with
+    /// [`WebhookError::PayloadTooLarge`] before HMAC verification runs,
+    /// so an attacker cannot amplify HMAC CPU cost or JSON parse memory
+    /// by delivering an unbounded body.
+    #[must_use]
+    pub const fn with_max_payload_size(mut self, size: usize) -> Self {
+        self.max_payload_size = size;
+        self
     }
 
     /// Verify and parse a GitHub webhook.
@@ -103,6 +145,16 @@ impl GitHubWebhook {
         headers: &HashMap<String, String>,
         body: &[u8],
     ) -> WebhookResult<WebhookEvent> {
+        // Bound body size before any HMAC or JSON work runs, so an
+        // attacker cannot force the verifier to chew through an
+        // unbounded payload.
+        if body.len() > self.max_payload_size {
+            return Err(WebhookError::PayloadTooLarge {
+                size: body.len(),
+                limit: self.max_payload_size,
+            });
+        }
+
         // Get signature header
         let signature = header_value_case_insensitive(headers, "x-hub-signature-256")
             .ok_or_else(|| WebhookError::MissingSignature("X-Hub-Signature-256".into()))?;
@@ -136,6 +188,7 @@ impl GitHubWebhook {
 pub struct StripeWebhook {
     verifier: HmacSha256Verifier,
     timestamp_tolerance: Duration,
+    max_payload_size: usize,
 }
 
 impl StripeWebhook {
@@ -145,6 +198,7 @@ impl StripeWebhook {
         Self {
             verifier: HmacSha256Verifier::new(secret),
             timestamp_tolerance: default_timestamp_tolerance(),
+            max_payload_size: default_max_payload_size(),
         }
     }
 
@@ -152,6 +206,16 @@ impl StripeWebhook {
     #[must_use]
     pub const fn with_timestamp_tolerance(mut self, tolerance: Duration) -> Self {
         self.timestamp_tolerance = tolerance;
+        self
+    }
+
+    /// Override the maximum webhook body size this handler will verify
+    /// or parse. Bodies larger than the limit are rejected with
+    /// [`WebhookError::PayloadTooLarge`] before the timestamp check or
+    /// HMAC verification runs.
+    #[must_use]
+    pub const fn with_max_payload_size(mut self, size: usize) -> Self {
+        self.max_payload_size = size;
         self
     }
 
@@ -165,6 +229,17 @@ impl StripeWebhook {
         headers: &HashMap<String, String>,
         body: &[u8],
     ) -> WebhookResult<WebhookEvent> {
+        // Bound body size before timestamp parsing or HMAC verification.
+        // `verify_and_parse` internally builds `signed_payload` as
+        // `timestamp_str + "." + body`, so a large body forces a second
+        // allocation of similar size; reject early.
+        if body.len() > self.max_payload_size {
+            return Err(WebhookError::PayloadTooLarge {
+                size: body.len(),
+                limit: self.max_payload_size,
+            });
+        }
+
         // Get Stripe-Signature header
         let signature_header = header_value_case_insensitive(headers, "stripe-signature")
             .ok_or_else(|| WebhookError::MissingSignature("Stripe-Signature".into()))?;
@@ -233,11 +308,26 @@ impl StripeWebhook {
         for part in header.split(',') {
             let part = part.trim();
             if let Some(ts) = part.strip_prefix("t=") {
+                // Cap timestamp length before `to_string()` so a
+                // malicious upstream can't force a huge allocation
+                // by sending a megabyte-long "t=" value. Anything
+                // that fails `parse::<i64>()` is rejected below, but
+                // the allocation happens first — bound it here.
+                if ts.len() > MAX_STRIPE_TIMESTAMP_LEN {
+                    return Err(WebhookError::InvalidPayload(
+                        "Stripe-Signature timestamp exceeds maximum length".into(),
+                    ));
+                }
                 timestamp = ts.parse().ok().map(|parsed| (ts.to_string(), parsed));
             } else if let Some(sig) = part.strip_prefix("v1=") {
                 if signatures.len() >= Self::MAX_STRIPE_SIGNATURES {
                     return Err(WebhookError::InvalidPayload(
                         "too many signatures in Stripe-Signature header".into(),
+                    ));
+                }
+                if sig.len() > MAX_STRIPE_SIGNATURE_LEN {
+                    return Err(WebhookError::InvalidPayload(
+                        "Stripe-Signature v1 value exceeds maximum length".into(),
                     ));
                 }
                 signatures.push(sig.to_string());
@@ -278,6 +368,7 @@ impl StripeWebhook {
 pub struct SlackWebhook {
     verifier: HmacSha256Verifier,
     timestamp_tolerance: Duration,
+    max_payload_size: usize,
 }
 
 impl SlackWebhook {
@@ -287,7 +378,27 @@ impl SlackWebhook {
         Self {
             verifier: HmacSha256Verifier::new(signing_secret),
             timestamp_tolerance: default_timestamp_tolerance(),
+            max_payload_size: default_max_payload_size(),
         }
+    }
+
+    /// Override the maximum webhook body size this handler will verify
+    /// or parse. Bodies larger than the limit are rejected with
+    /// [`WebhookError::PayloadTooLarge`] before timestamp parsing or
+    /// HMAC verification runs. The Slack signing base string is
+    /// `v0:{timestamp}:{body}`, so an unbounded body forces a second
+    /// allocation of comparable size; reject early.
+    #[must_use]
+    pub const fn with_max_payload_size(mut self, size: usize) -> Self {
+        self.max_payload_size = size;
+        self
+    }
+
+    /// Override the timestamp tolerance window used for replay protection.
+    #[must_use]
+    pub const fn with_timestamp_tolerance(mut self, tolerance: Duration) -> Self {
+        self.timestamp_tolerance = tolerance;
+        self
     }
 
     /// Verify and parse a Slack webhook.
@@ -300,6 +411,16 @@ impl SlackWebhook {
         headers: &HashMap<String, String>,
         body: &[u8],
     ) -> WebhookResult<WebhookEvent> {
+        // Bound body size before timestamp parsing or HMAC verification.
+        // The signing base string is built as `v0:{timestamp}:{body}`,
+        // so a large body forces a second allocation of similar size.
+        if body.len() > self.max_payload_size {
+            return Err(WebhookError::PayloadTooLarge {
+                size: body.len(),
+                limit: self.max_payload_size,
+            });
+        }
+
         // Get headers
         let signature = header_value_case_insensitive(headers, "x-slack-signature")
             .ok_or_else(|| WebhookError::MissingSignature("X-Slack-Signature".into()))?;
@@ -364,9 +485,23 @@ impl SlackWebhook {
 }
 
 /// Linear webhook handler.
+///
+/// # Replay protection
+///
+/// Linear webhook deliveries do not carry a timestamp header that is
+/// covered by the HMAC, so [`verify_and_parse`](Self::verify_and_parse)
+/// cannot enforce a replay window the way Stripe's `Stripe-Signature`
+/// timestamp does. A captured delivery remains valid forever for the
+/// lifetime of the shared signing secret. Callers **must** enforce
+/// replay protection at a higher layer, typically by feeding the parsed
+/// event `id` (Linear's `webhookId`) into
+/// [`crate::WebhookHandler::check_replay`] /
+/// [`crate::WebhookHandler::record_event`]. Signature verification
+/// alone is not sufficient.
 #[derive(Debug)]
 pub struct LinearWebhook {
     verifier: HmacSha256Verifier,
+    max_payload_size: usize,
 }
 
 impl LinearWebhook {
@@ -375,7 +510,17 @@ impl LinearWebhook {
     pub fn new(signing_secret: impl AsRef<[u8]>) -> Self {
         Self {
             verifier: HmacSha256Verifier::new(signing_secret),
+            max_payload_size: default_max_payload_size(),
         }
+    }
+
+    /// Override the maximum webhook body size this handler will verify
+    /// or parse. Bodies larger than the limit are rejected with
+    /// [`WebhookError::PayloadTooLarge`] before HMAC verification runs.
+    #[must_use]
+    pub const fn with_max_payload_size(mut self, size: usize) -> Self {
+        self.max_payload_size = size;
+        self
     }
 
     /// Verify and parse a Linear webhook.
@@ -388,6 +533,16 @@ impl LinearWebhook {
         headers: &HashMap<String, String>,
         body: &[u8],
     ) -> WebhookResult<WebhookEvent> {
+        // Bound body size before any HMAC or JSON work runs, so an
+        // attacker cannot force the verifier to chew through an
+        // unbounded payload.
+        if body.len() > self.max_payload_size {
+            return Err(WebhookError::PayloadTooLarge {
+                size: body.len(),
+                limit: self.max_payload_size,
+            });
+        }
+
         // Get signature
         let signature = header_value_case_insensitive(headers, "linear-signature")
             .ok_or_else(|| WebhookError::MissingSignature("Linear-Signature".into()))?;
@@ -427,6 +582,144 @@ mod tests {
     use fcp_core::TaintFlag;
     use wiremock::matchers::{body_string_contains, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // ── Regression tests for audit findings ──
+
+    #[test]
+    fn github_rejects_oversized_body_before_verification() {
+        // [HIGH] GitHubWebhook::verify_and_parse must cap body size before
+        // running HMAC verification so an attacker cannot amplify CPU cost
+        // with an unbounded payload.
+        let handler = GitHubWebhook::new("secret").with_max_payload_size(64);
+        let body = vec![b'x'; 128];
+
+        let mut headers = HashMap::new();
+        // A made-up signature header is fine — the size check must fire
+        // *before* signature verification so we never reach the HMAC.
+        headers.insert("x-hub-signature-256".into(), "sha256=deadbeef".into());
+        headers.insert("x-github-event".into(), "push".into());
+
+        match handler.verify_and_parse(&headers, &body) {
+            Err(WebhookError::PayloadTooLarge { size, limit }) => {
+                assert_eq!(size, 128);
+                assert_eq!(limit, 64);
+            }
+            other => panic!("expected PayloadTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stripe_rejects_oversized_body_before_signature_parse() {
+        // [HIGH] Same guard on the Stripe handler: reject oversized
+        // bodies before parsing the signature header or building the
+        // signed_payload allocation.
+        let handler = StripeWebhook::new("secret").with_max_payload_size(32);
+        let body = vec![b'y'; 128];
+
+        let mut headers = HashMap::new();
+        headers.insert(
+            "stripe-signature".into(),
+            "t=1700000000,v1=deadbeef".into(),
+        );
+
+        match handler.verify_and_parse(&headers, &body) {
+            Err(WebhookError::PayloadTooLarge { size, limit }) => {
+                assert_eq!(size, 128);
+                assert_eq!(limit, 32);
+            }
+            other => panic!("expected PayloadTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stripe_rejects_oversized_timestamp_value() {
+        // [MEDIUM] parse_stripe_signature must cap the timestamp
+        // string length before `to_string()` so a malicious upstream
+        // cannot allocate an oversized raw_timestamp that later gets
+        // prepended to the signed_payload.
+        let huge_ts = "1".repeat(MAX_STRIPE_TIMESTAMP_LEN + 1);
+        let header = format!("t={huge_ts},v1=abc");
+        let err = StripeWebhook::parse_stripe_signature(&header).unwrap_err();
+        match err {
+            WebhookError::InvalidPayload(msg) => {
+                assert!(msg.contains("timestamp"), "message should name the field: {msg}");
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stripe_rejects_oversized_v1_value() {
+        // [MEDIUM] Cap per-signature string length so 10 × huge v1
+        // entries can't force 10× giant hex decodes.
+        let huge_sig = "a".repeat(MAX_STRIPE_SIGNATURE_LEN + 1);
+        let header = format!("t=1700000000,v1={huge_sig}");
+        let err = StripeWebhook::parse_stripe_signature(&header).unwrap_err();
+        match err {
+            WebhookError::InvalidPayload(msg) => {
+                assert!(
+                    msg.contains("v1") || msg.contains("signature"),
+                    "message should name the field: {msg}"
+                );
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stripe_accepts_boundary_sized_timestamp_and_signature() {
+        // Positive-side boundary: the exactly-at-limit values must
+        // still parse (with a valid numeric timestamp).
+        let ts = "1".repeat(MAX_STRIPE_TIMESTAMP_LEN);
+        let sig = "a".repeat(MAX_STRIPE_SIGNATURE_LEN);
+        let header = format!("t={ts},v1={sig}");
+        // At-limit timestamp parses as a bare integer; result Ok.
+        let (raw, _parsed, sigs) =
+            StripeWebhook::parse_stripe_signature(&header).expect("at-limit must parse");
+        assert_eq!(raw.len(), MAX_STRIPE_TIMESTAMP_LEN);
+        assert_eq!(sigs, vec![sig]);
+    }
+
+    #[test]
+    fn slack_rejects_oversized_body_before_signature_parse() {
+        // [MEDIUM] Same guard on the Slack handler: reject oversized
+        // bodies before parsing the signature header or building the
+        // `v0:{ts}:{body}` base-string allocation.
+        let handler = SlackWebhook::new("secret").with_max_payload_size(32);
+        let body = vec![b'z'; 128];
+
+        let mut headers = HashMap::new();
+        headers.insert("x-slack-signature".into(), "v0=deadbeef".into());
+        headers.insert("x-slack-request-timestamp".into(), "1700000000".into());
+
+        match handler.verify_and_parse(&headers, &body) {
+            Err(WebhookError::PayloadTooLarge { size, limit }) => {
+                assert_eq!(size, 128);
+                assert_eq!(limit, 32);
+            }
+            other => panic!("expected PayloadTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn linear_rejects_oversized_body_before_verification() {
+        // [MEDIUM] LinearWebhook::verify_and_parse must cap body size
+        // before running HMAC verification so an attacker cannot
+        // amplify CPU cost with an unbounded payload.
+        let handler = LinearWebhook::new("secret").with_max_payload_size(64);
+        let body = vec![b'q'; 128];
+
+        let mut headers = HashMap::new();
+        headers.insert("linear-signature".into(), "deadbeef".into());
+
+        match handler.verify_and_parse(&headers, &body) {
+            Err(WebhookError::PayloadTooLarge { size, limit }) => {
+                assert_eq!(size, 128);
+                assert_eq!(limit, 64);
+            }
+            other => panic!("expected PayloadTooLarge, got {other:?}"),
+        }
+    }
 
     #[test]
     fn test_github_webhook() {

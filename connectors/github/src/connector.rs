@@ -8,7 +8,11 @@ use fcp_core::{
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
-use fcp_oauth::{AuthorizationCallback, OAuth2Client, OAuthError, OAuthProvider};
+use fcp_oauth::{
+    AuthorizationCallback, OAuth2Client, OAuthError, OAuthProvider,
+    ensure_allowlisted_redirect_uri, ensure_callback_redirect_is_allowlisted,
+    normalize_registered_redirect_uri,
+};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1082,7 +1086,8 @@ impl GitHubConnector {
         let redirect_uri = ensure_allowlisted_redirect_uri(
             require_str(&input, "redirect_uri")?,
             &allowed_redirect_uris,
-        )?;
+        )
+        .map_err(map_oauth_error_to_fcp)?;
         let scopes = optional_scopes(&input)?;
 
         let oauth_client =
@@ -1106,7 +1111,8 @@ impl GitHubConnector {
         let expected_state = require_str(&input, "expected_state")?;
         let allowed_redirect_uris = require_redirect_allowlist(&input)?;
         let callback_redirect_uri =
-            ensure_callback_redirect_is_allowlisted(callback_url, &allowed_redirect_uris)?;
+            ensure_callback_redirect_is_allowlisted(callback_url, &allowed_redirect_uris)
+                .map_err(map_oauth_error_to_fcp)?;
         let callback =
             AuthorizationCallback::from_url(callback_url).map_err(map_oauth_error_to_fcp)?;
         let authorization_code = callback
@@ -1354,100 +1360,9 @@ fn require_redirect_allowlist(input: &serde_json::Value) -> FcpResult<Vec<Url>> 
                 message: "allowed_redirect_uris must contain only strings".into(),
             })?;
             normalize_registered_redirect_uri(raw, "allowed_redirect_uris")
+                .map_err(map_oauth_error_to_fcp)
         })
         .collect()
-}
-
-fn ensure_allowlisted_redirect_uri(raw: &str, allowlist: &[Url]) -> FcpResult<Url> {
-    let redirect_uri = normalize_registered_redirect_uri(raw, "redirect_uri")?;
-    if allowlist.iter().any(|allowed| *allowed == redirect_uri) {
-        return Ok(redirect_uri);
-    }
-
-    Err(FcpError::InvalidRequest {
-        code: 1003,
-        message: "redirect_uri is not present in allowed_redirect_uris".into(),
-    })
-}
-
-fn ensure_callback_redirect_is_allowlisted(
-    callback_url: &str,
-    allowlist: &[Url],
-) -> FcpResult<Url> {
-    let callback_redirect_uri = normalize_callback_redirect_uri(callback_url)?;
-    if allowlist
-        .iter()
-        .any(|allowed| *allowed == callback_redirect_uri)
-    {
-        return Ok(callback_redirect_uri);
-    }
-
-    Err(FcpError::InvalidRequest {
-        code: 1003,
-        message: "callback_url resolved to a redirect URI outside allowed_redirect_uris".into(),
-    })
-}
-
-fn normalize_registered_redirect_uri(raw: &str, field: &str) -> FcpResult<Url> {
-    let url = Url::parse(raw).map_err(|e| FcpError::InvalidRequest {
-        code: 1003,
-        message: format!("{field} must be a valid absolute URL: {e}"),
-    })?;
-    validate_redirect_uri_shape(&url, field, false)?;
-    Ok(url)
-}
-
-fn normalize_callback_redirect_uri(callback_url: &str) -> FcpResult<Url> {
-    let mut url = Url::parse(callback_url).map_err(|e| FcpError::InvalidRequest {
-        code: 1003,
-        message: format!("callback_url must be a valid absolute URL: {e}"),
-    })?;
-    validate_redirect_uri_shape(&url, "callback_url", true)?;
-    url.set_query(None);
-    url.set_fragment(None);
-    Ok(url)
-}
-
-fn validate_redirect_uri_shape(url: &Url, field: &str, allow_query: bool) -> FcpResult<()> {
-    if url.cannot_be_a_base() || url.host_str().is_none() {
-        return Err(FcpError::InvalidRequest {
-            code: 1003,
-            message: format!("{field} must include a network host"),
-        });
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(FcpError::InvalidRequest {
-            code: 1003,
-            message: format!("{field} must not include embedded credentials"),
-        });
-    }
-    if url.fragment().is_some() {
-        return Err(FcpError::InvalidRequest {
-            code: 1003,
-            message: format!("{field} must not include a fragment"),
-        });
-    }
-    if !allow_query && url.query().is_some() {
-        return Err(FcpError::InvalidRequest {
-            code: 1003,
-            message: format!("{field} must not include query parameters"),
-        });
-    }
-    if !is_secure_or_loopback_redirect(url) {
-        return Err(FcpError::InvalidRequest {
-            code: 1003,
-            message: format!("{field} must use https or loopback http"),
-        });
-    }
-    Ok(())
-}
-
-fn is_secure_or_loopback_redirect(url: &Url) -> bool {
-    match url.scheme() {
-        "https" => true,
-        "http" => matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1")),
-        _ => false,
-    }
 }
 
 fn build_github_oauth_client(
@@ -1490,9 +1405,15 @@ fn map_oauth_error_to_fcp(error: OAuthError) -> FcpError {
         | OAuthError::SignatureError(message)
         | OAuthError::UnsupportedProvider(message)
         | OAuthError::TokenNotFound(message)
-        | OAuthError::PkceError(message) => FcpError::InvalidRequest {
+        | OAuthError::PkceError(message)
+        | OAuthError::InvalidRedirectUri(message) => FcpError::InvalidRequest {
             code: 1003,
             message: format!("GitHub OAuth request invalid: {message}"),
+        },
+        OAuthError::RedirectUriNotAllowlisted => FcpError::InvalidRequest {
+            code: 1003,
+            message: "GitHub OAuth request invalid: redirect URI outside allowed_redirect_uris"
+                .into(),
         },
         OAuthError::TokenExpired(duration) => FcpError::InvalidRequest {
             code: 1003,

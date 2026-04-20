@@ -38,6 +38,7 @@ mod oauth1;
 mod oauth2;
 mod pkce;
 mod provider;
+mod redirect_allowlist;
 mod token;
 
 pub use error::*;
@@ -45,6 +46,12 @@ pub use oauth1::*;
 pub use oauth2::*;
 pub use pkce::*;
 pub use provider::*;
+pub use redirect_allowlist::{
+    ensure_allowlisted_redirect_uri, ensure_callback_redirect_is_allowlisted,
+    is_secure_or_loopback_redirect, normalize_callback_redirect_uri,
+    normalize_registered_redirect_uri, parse_registered_redirect_allowlist,
+    validate_redirect_uri_shape,
+};
 pub use token::*;
 
 use std::time::Duration;

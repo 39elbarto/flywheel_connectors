@@ -89,6 +89,27 @@ fn validate_api_url_for_auth(raw_url: &str, auth: &LinearAuth) -> FcpResult<Stri
         code: 1003,
         message: "api_url must be an absolute URL".into(),
     })?;
+    // Strip query/fragment/userinfo before host/scheme enforcement. The
+    // validator returns parsed.to_string() which preserves those
+    // components; LinearClient then concatenates the result into its
+    // downstream request URLs. A payload like
+    //   {"api_key": "lin_x", "api_url": "https://api.linear.app?leak=x"}
+    // would otherwise pass validation and leak `?leak=x` on every
+    // request with the POST body's GraphQL endpoint appended after
+    // the `?` boundary. Userinfo would bake into every URL and
+    // silently override the bearer the connector sets in the header.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "api_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "api_url must not include a query string or fragment".into(),
+        });
+    }
     let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
         code: 1003,
         message: "api_url must include a host".into(),
@@ -1417,6 +1438,74 @@ mod tests {
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
     use std::path::PathBuf;
+
+    #[test]
+    fn validate_api_url_for_auth_accepts_api_linear_app_with_api_key() {
+        let auth = LinearAuth::ApiKey("lin_api_test".into());
+        let out =
+            validate_api_url_for_auth("https://api.linear.app/graphql", &auth).unwrap();
+        assert_eq!(out, "https://api.linear.app/graphql");
+    }
+
+    #[test]
+    fn validate_api_url_for_auth_rejects_query_string_with_api_key() {
+        let auth = LinearAuth::ApiKey("lin_api_test".into());
+        let err =
+            validate_api_url_for_auth("https://api.linear.app/graphql?leak=x", &auth)
+                .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("query"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_api_url_for_auth_rejects_fragment_with_api_key() {
+        let auth = LinearAuth::ApiKey("lin_api_test".into());
+        let err = validate_api_url_for_auth("https://api.linear.app/graphql#frag", &auth)
+            .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_api_url_for_auth_rejects_userinfo_with_api_key() {
+        let auth = LinearAuth::ApiKey("lin_api_test".into());
+        let err = validate_api_url_for_auth(
+            "https://attacker:pw@api.linear.app/graphql",
+            &auth,
+        )
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("userinfo"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_api_url_for_auth_rejects_query_string_with_credential_id() {
+        let cid = fcp_core::CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        let auth = LinearAuth::CredentialId(cid);
+        let err = validate_api_url_for_auth(
+            "https://vault-proxy.example/graphql?leak=x",
+            &auth,
+        )
+        .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_api_url_for_auth_rejects_substring_smuggle_with_api_key() {
+        // Parsed host is evil.com, not api.linear.app — rejected.
+        let auth = LinearAuth::ApiKey("lin_api_test".into());
+        let err =
+            validate_api_url_for_auth("https://evil.com/api.linear.app/graphql", &auth)
+                .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
 
     fn generate_token_with_constraints(
         signing_key: &Ed25519SigningKey,

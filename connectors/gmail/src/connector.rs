@@ -1284,7 +1284,7 @@ fn resolve_gmail_required_scopes(params: &serde_json::Value) -> FcpResult<Vec<St
         });
     }
     if !explicit_scopes.is_empty() {
-        return Ok(explicit_scopes);
+        return validate_declared_gmail_scopes(explicit_scopes);
     }
 
     let bundle =
@@ -1297,6 +1297,40 @@ fn resolve_gmail_required_scopes(params: &serde_json::Value) -> FcpResult<Vec<St
             code: 1003,
             message: format!("Invalid Gmail scope trigger selection: {error}"),
         })
+}
+
+fn validate_declared_gmail_scopes(scopes: Vec<String>) -> FcpResult<Vec<String>> {
+    let bundle =
+        load_default_google_provisioning_bundle("gmail").map_err(|error| FcpError::Internal {
+            message: format!("Failed to load embedded Gmail provisioning bundle: {error}"),
+        })?;
+    let mut allowed = BTreeSet::new();
+    allowed.extend(bundle.surface.default_scopes);
+    for escalation in bundle.surface.escalation_paths {
+        allowed.extend(escalation.add_scopes);
+    }
+
+    let normalized: Vec<String> = scopes
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let undeclared: Vec<String> = normalized
+        .iter()
+        .filter(|scope| !allowed.contains(scope.as_str()))
+        .cloned()
+        .collect();
+    if !undeclared.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "required_scopes contains scopes outside the Gmail provisioning policy: {}",
+                undeclared.join(", ")
+            ),
+        });
+    }
+
+    Ok(normalized)
 }
 
 #[allow(clippy::needless_pass_by_value)] // required by map_err(fn) signature
@@ -1655,8 +1689,8 @@ fn build_raw_message_from_fields(input: &serde_json::Value) -> FcpResult<String>
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_core::CredentialId;
     use fcp_core::CapabilityConstraints;
+    use fcp_core::CredentialId;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use wiremock::{
@@ -1881,6 +1915,43 @@ mod tests {
             "scope_triggers": ["User enables outbound send or draft-send workflows."]
         }));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_gmail_required_scopes_rejects_undeclared_google_scopes() {
+        let result = resolve_gmail_required_scopes(&json!({
+            "required_scopes": [
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://www.googleapis.com/auth/drive.readonly"
+            ]
+        }));
+        let err = result.expect_err("undeclared scope must fail");
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("outside the Gmail provisioning policy"));
+                assert!(message.contains("drive.readonly"));
+            }
+            other => panic!("expected invalid request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_gmail_required_scopes_accepts_declared_escalations_and_dedups() {
+        let result = resolve_gmail_required_scopes(&json!({
+            "required_scopes": [
+                "https://mail.google.com/",
+                "https://www.googleapis.com/auth/gmail.readonly",
+                "https://mail.google.com/"
+            ]
+        }))
+        .unwrap();
+        assert_eq!(
+            result,
+            vec![
+                "https://mail.google.com/".to_string(),
+                "https://www.googleapis.com/auth/gmail.readonly".to_string(),
+            ]
+        );
     }
 
     // ── parse_history_cursor_path ──────────────────────────────────

@@ -51,6 +51,8 @@ pub enum AuthorityReasonCode {
     LeaseExpired,
     /// Multiple active leases were detected for the same subject/purpose.
     LeaseConflictDetected,
+    /// Lease acquisition rejected by local coordinator admission rules.
+    LeaseAcquisitionRejected,
     /// A holder voluntarily released its lease.
     LeaseReleased,
     /// A release request did not match any active held lease.

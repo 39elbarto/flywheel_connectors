@@ -69,6 +69,8 @@ impl Default for LeaseCoordinatorConfig {
 pub enum AcquireOutcome {
     /// Lease granted to the requester.
     Granted { fencing_token: u64, expires_at: u64 },
+    /// Lease rejected before holder comparison (capacity or local admission).
+    Rejected { reason: String },
     /// Lease denied because another node holds it.
     Denied {
         current_holder: TailscaleNodeId,
@@ -196,17 +198,35 @@ impl LeaseCoordinator {
         self.rebase_next_seq(existing_leases);
 
         // Filter to active leases for this subject/purpose
-        let active: Vec<&ObservedLeaseAuthority> = existing_leases
-            .iter()
-            .filter(|obs| {
-                obs.lease.subject_id == *subject_id
-                    && obs.lease.purpose == *purpose
-                    && obs.lease.is_active(now_secs)
-            })
-            .collect();
+        let active =
+            canonical_active_leases_for_subject(existing_leases, subject_id, purpose, now_secs);
 
         // No active leases — grant immediately
         if active.is_empty() {
+            let active_leases_for_requester =
+                canonical_active_lease_count_for_holder(existing_leases, requester, now_secs);
+            if active_leases_for_requester >= self.config.max_leases_per_node {
+                let reason = format!(
+                    "Lease rejected: {} already holds {} active leases (limit={})",
+                    requester.as_str(),
+                    active_leases_for_requester,
+                    self.config.max_leases_per_node
+                );
+                timeline.push(AuthorityTimelineEvent {
+                    observed_at_ms: now_secs * 1000,
+                    operation: "lease.acquire_rejected".into(),
+                    subject_id: *subject_id,
+                    purpose: purpose.clone(),
+                    holder: Some(requester.clone()),
+                    coordinator: select_coordinator(zone_id, subject_id, eligible_nodes),
+                    reason_code: AuthorityReasonCode::LeaseAcquisitionRejected,
+                    fencing_token: None,
+                    expires_at: None,
+                    explanation: reason.clone(),
+                });
+                return (AcquireOutcome::Rejected { reason }, timeline);
+            }
+
             let Some(token) = self.next_fencing_token() else {
                 // Fencing token space exhausted. Unreachable via legitimate
                 // operation (u64 holds ~18e18 values) but reachable when an
@@ -221,17 +241,14 @@ impl LeaseCoordinator {
                     purpose: purpose.clone(),
                     holder: None,
                     coordinator: select_coordinator(zone_id, subject_id, eligible_nodes),
-                    reason_code: AuthorityReasonCode::LeaseConflictDetected,
+                    reason_code: AuthorityReasonCode::LeaseAcquisitionRejected,
                     fencing_token: None,
                     expires_at: None,
-                    explanation:
-                        "Fencing token space exhausted — refusing to grant lease".into(),
+                    explanation: "Fencing token space exhausted — refusing to grant lease".into(),
                 });
 
                 return (
-                    AcquireOutcome::Conflict {
-                        holders: Vec::new(),
-                        fencing_tokens: Vec::new(),
+                    AcquireOutcome::Rejected {
                         reason: "fencing token space exhausted".into(),
                     },
                     timeline,
@@ -480,14 +497,7 @@ impl LeaseCoordinator {
         observed: &[ObservedLeaseAuthority],
         now_secs: u64,
     ) -> Option<LeaseConflict> {
-        let active: Vec<&ObservedLeaseAuthority> = observed
-            .iter()
-            .filter(|obs| {
-                obs.lease.subject_id == *subject_id
-                    && obs.lease.purpose == *purpose
-                    && obs.lease.is_active(now_secs)
-            })
-            .collect();
+        let active = canonical_active_leases_for_subject(observed, subject_id, purpose, now_secs);
 
         if active.len() <= 1 {
             return None;
@@ -605,6 +615,65 @@ fn compare_conflicting_leases(
         .cmp(&right.lease.fencing_token)
         .then_with(|| left.lease.expires_at.cmp(&right.lease.expires_at))
         .then_with(|| right.holder.as_str().cmp(left.holder.as_str()))
+}
+
+fn same_lease_scope(left: &ObservedLeaseAuthority, right: &ObservedLeaseAuthority) -> bool {
+    left.holder == right.holder
+        && left.lease.subject_id == right.lease.subject_id
+        && left.lease.purpose == right.lease.purpose
+}
+
+fn push_canonical_active<'a>(
+    canonical: &mut Vec<&'a ObservedLeaseAuthority>,
+    candidate: &'a ObservedLeaseAuthority,
+) {
+    if let Some(existing) = canonical
+        .iter_mut()
+        .find(|existing| same_lease_scope(existing, candidate))
+    {
+        if compare_conflicting_leases(candidate, existing).is_gt() {
+            *existing = candidate;
+        }
+    } else {
+        canonical.push(candidate);
+    }
+}
+
+fn canonical_active_leases<'a>(
+    observed: &'a [ObservedLeaseAuthority],
+    now_secs: u64,
+) -> Vec<&'a ObservedLeaseAuthority> {
+    let mut canonical = Vec::new();
+    for entry in observed
+        .iter()
+        .filter(|entry| entry.lease.is_active(now_secs))
+    {
+        push_canonical_active(&mut canonical, entry);
+    }
+    canonical
+}
+
+fn canonical_active_leases_for_subject<'a>(
+    observed: &'a [ObservedLeaseAuthority],
+    subject_id: &ObjectId,
+    purpose: &LeasePurpose,
+    now_secs: u64,
+) -> Vec<&'a ObservedLeaseAuthority> {
+    canonical_active_leases(observed, now_secs)
+        .into_iter()
+        .filter(|entry| entry.lease.subject_id == *subject_id && entry.lease.purpose == *purpose)
+        .collect()
+}
+
+fn canonical_active_lease_count_for_holder(
+    observed: &[ObservedLeaseAuthority],
+    holder: &TailscaleNodeId,
+    now_secs: u64,
+) -> usize {
+    canonical_active_leases(observed, now_secs)
+        .into_iter()
+        .filter(|entry| entry.holder == *holder)
+        .count()
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
@@ -743,6 +812,66 @@ mod tests {
             timeline
                 .iter()
                 .any(|e| e.reason_code == AuthorityReasonCode::LeaseConflictDetected)
+        );
+    }
+
+    // ── Admission hardening (regression, HIGH) ───────────────────
+
+    #[test]
+    fn acquire_rejects_when_requester_exceeds_active_lease_cap() {
+        let mut coord = LeaseCoordinator::new(LeaseCoordinatorConfig {
+            max_leases_per_node: 1,
+            ..LeaseCoordinatorConfig::default()
+        });
+        let eligible = vec![node("a"), node("b")];
+        let existing = vec![ObservedLeaseAuthority::new(
+            node("a"),
+            HeldLease {
+                subject_id: ObjectId::from_bytes([0xDD; 32]),
+                purpose: purpose(),
+                expires_at: 2_000,
+                fencing_token: 1,
+            },
+        )];
+
+        let (outcome, timeline) = coord.acquire(
+            &node("a"),
+            &zone(),
+            &subject(),
+            &purpose(),
+            &existing,
+            &eligible,
+            1_000,
+            None,
+        );
+
+        assert!(matches!(outcome, AcquireOutcome::Rejected { .. }));
+        assert!(timeline.iter().any(|event| {
+            event.reason_code == AuthorityReasonCode::LeaseAcquisitionRejected
+                && event.operation == "lease.acquire_rejected"
+        }));
+    }
+
+    #[test]
+    fn acquire_collapses_duplicate_same_holder_observations_before_conflict_check() {
+        let mut coord = LeaseCoordinator::with_defaults();
+        let eligible = vec![node("a"), node("b")];
+        let existing = vec![held_lease("a", 7, 2_000), held_lease("a", 7, 1_900)];
+
+        let (outcome, _timeline) = coord.acquire(
+            &node("b"),
+            &zone(),
+            &subject(),
+            &purpose(),
+            &existing,
+            &eligible,
+            1_000,
+            None,
+        );
+
+        assert!(
+            matches!(outcome, AcquireOutcome::Denied { .. }),
+            "duplicate observations from one holder must not escalate into a split-brain conflict"
         );
     }
 
@@ -923,6 +1052,16 @@ mod tests {
     }
 
     #[test]
+    fn detect_conflicts_ignores_duplicate_same_holder_observations() {
+        let coord = LeaseCoordinator::with_defaults();
+        let existing = vec![held_lease("a", 7, 2_000), held_lease("a", 7, 1_900)];
+
+        let conflict = coord.detect_conflicts(&zone(), &subject(), &purpose(), &existing, 1_000);
+
+        assert!(conflict.is_none());
+    }
+
+    #[test]
     fn detect_conflicts_breaks_ties_deterministically() {
         let coord = LeaseCoordinator::with_defaults();
         let existing = vec![held_lease("b", 7, 2000), held_lease("a", 7, 2000)];
@@ -1096,7 +1235,7 @@ mod tests {
         // the grant branch reaches next_fencing_token(). Previously this path
         // panicked via checked_add(1).expect("... exhausted"). The fix makes
         // next_fencing_token() return Option<u64> and refuses to grant when
-        // the space is exhausted, mapping to AcquireOutcome::Conflict with a
+        // the space is exhausted, mapping to AcquireOutcome::Rejected with a
         // clear reason string.
         let mut coordinator = LeaseCoordinator::with_defaults();
         let poisoned_expired = vec![ObservedLeaseAuthority::new(
@@ -1121,13 +1260,13 @@ mod tests {
         );
 
         match outcome {
-            AcquireOutcome::Conflict { reason, .. } => {
+            AcquireOutcome::Rejected { reason } => {
                 assert!(
                     reason.contains("exhausted"),
                     "expected exhausted reason, got {reason}"
                 );
             }
-            other => panic!("expected Conflict(exhausted), got {other:?}"),
+            other => panic!("expected Rejected(exhausted), got {other:?}"),
         }
     }
 

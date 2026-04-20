@@ -54,6 +54,12 @@ const VERSION_MISMATCH_PENALTY: f64 = 500.0;
 /// Penalty for singleton lease conflict.
 const LEASE_CONFLICT_PENALTY: f64 = 1000.0;
 
+/// Penalty for violating an explicit target-zone routing constraint.
+const ZONE_RESTRICTION_PENALTY: f64 = 1000.0;
+
+/// Soft penalty per active lease to avoid deterministic hotspotting.
+const ACTIVE_LEASE_LOAD_PENALTY: f64 = 5.0;
+
 /// Maximum candidates to return in ranked list.
 const MAX_CANDIDATES: usize = 10;
 
@@ -538,9 +544,21 @@ impl ExecutionPlanner {
 
         // Check connector version if specified
         self.check_connector_version(&mut candidate, node, context);
+        if !candidate.eligible {
+            return candidate;
+        }
+
+        // Enforce explicit target-zone routing before scoring soft preferences.
+        self.check_target_zone(&mut candidate, context);
+        if !candidate.eligible {
+            return candidate;
+        }
 
         // Check required symbols (hard constraint)
         self.check_required_symbols(&mut candidate, node, context);
+        if !candidate.eligible {
+            return candidate;
+        }
 
         // Check data locality (soft bonus, already partially handled by fitness)
         self.add_data_locality_bonus(&mut candidate, node, context);
@@ -612,6 +630,41 @@ impl ExecutionPlanner {
         }
     }
 
+    /// Enforce an explicit target-zone requirement.
+    fn check_target_zone(&self, candidate: &mut CandidateNode, context: &PlannerContext) {
+        let Some(target_zone) = &context.target_zone else {
+            return;
+        };
+
+        if candidate.zones.is_empty() {
+            candidate.adjust(ScoreAdjustment::penalty(
+                AdjustmentFactor::ZoneRestriction,
+                ZONE_RESTRICTION_PENALTY,
+                format!(
+                    "target zone {} requested but node zone membership is unknown",
+                    target_zone
+                ),
+            ));
+            candidate.mark_ineligible(DecisionReason::ZoneRestriction {
+                zone: target_zone.to_string(),
+                reason: "unknown zone membership".to_string(),
+            });
+            return;
+        }
+
+        if !candidate.zones.iter().any(|zone| zone == target_zone) {
+            candidate.adjust(ScoreAdjustment::penalty(
+                AdjustmentFactor::ZoneRestriction,
+                ZONE_RESTRICTION_PENALTY,
+                format!("node is not enrolled in target zone {target_zone}"),
+            ));
+            candidate.mark_ineligible(DecisionReason::ZoneRestriction {
+                zone: target_zone.to_string(),
+                reason: "target zone mismatch".to_string(),
+            });
+        }
+    }
+
     /// Add data locality bonus for preferred symbols.
     fn add_data_locality_bonus(
         &self,
@@ -648,7 +701,7 @@ impl ExecutionPlanner {
     fn check_lease_constraints(
         &self,
         candidate: &mut CandidateNode,
-        _node: &NodeInfo,
+        node: &NodeInfo,
         input: &PlannerInput,
         context: &PlannerContext,
     ) {
@@ -665,8 +718,26 @@ impl ExecutionPlanner {
                         holder: NodeId::new(holder_id),
                         lease_purpose: "singleton_writer".to_string(),
                     });
+                    return;
                 }
             }
+        }
+
+        let active_lease_count = node
+            .held_leases
+            .iter()
+            .filter(|lease| lease.is_active(input.current_time))
+            .count();
+        if active_lease_count > 0 {
+            let active_lease_count_f64 =
+                f64::from(u32::try_from(active_lease_count).unwrap_or(u32::MAX));
+            candidate.adjust(ScoreAdjustment::penalty(
+                AdjustmentFactor::LeaseConstraint,
+                ACTIVE_LEASE_LOAD_PENALTY * active_lease_count_f64,
+                format!(
+                    "{active_lease_count} active leases already assigned on node; biasing away from hotspot"
+                ),
+            ));
         }
     }
 
@@ -1707,6 +1778,26 @@ mod tests {
     }
 
     #[test]
+    fn target_zone_restricts_plain_plan() {
+        let planner = ExecutionPlanner::new();
+        let work_zone: ZoneId = "z:work".parse().unwrap();
+        let private_zone: ZoneId = "z:private".parse().unwrap();
+
+        let mut node_work = make_node_info("work", 4096, true, "1.0.0", vec![]);
+        node_work.zones = vec![work_zone.clone()];
+
+        let mut node_private = make_node_info("private", 4096, true, "1.0.0", vec![]);
+        node_private.zones = vec![private_zone];
+
+        let input = PlannerInput::new(vec![node_private, node_work], 1000);
+        let context = PlannerContext::new(test_connector_id()).with_target_zone(work_zone);
+        let candidates = planner.plan(&input, &context);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].node_id.as_str(), "node-work");
+    }
+
+    #[test]
     fn zone_policy_filters_candidates_by_zone() {
         let planner = ExecutionPlanner::new();
         let work_zone: ZoneId = "z:work".parse().unwrap();
@@ -1999,6 +2090,32 @@ mod tests {
         // Node with 3 symbols should score higher than node with 1
         assert_eq!(candidates[0].node_id.as_str(), "node-three");
         assert!(candidates[0].score > candidates[1].score);
+    }
+
+    #[test]
+    fn active_lease_load_penalty_biases_away_from_hotspots() {
+        let planner = ExecutionPlanner::new();
+
+        let mut hot = make_node_info("hot", 4096, true, "1.0.0", vec![]);
+        hot.held_leases = vec![HeldLease {
+            subject_id: test_object_id(8),
+            purpose: LeasePurpose::OperationExecution,
+            expires_at: 5_000,
+            fencing_token: 1,
+        }];
+
+        let idle = make_node_info("idle", 4096, true, "1.0.0", vec![]);
+
+        let input = PlannerInput::new(vec![hot, idle], 1000);
+        let context = PlannerContext::new(test_connector_id());
+        let candidates = planner.plan(&input, &context);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].node_id.as_str(), "node-idle");
+        assert!(
+            candidates[0].score > candidates[1].score,
+            "active lease load should break otherwise-equal placements away from the hot node"
+        );
     }
 
     // === Singleton writer: holder gets through ===

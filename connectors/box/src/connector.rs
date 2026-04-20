@@ -74,12 +74,14 @@ impl BoxConfig {
             .and_then(serde_json::Value::as_str)
             .unwrap_or(DEFAULT_BASE_URL)
             .to_string();
+        let base_url = validate_endpoint_url_for_auth(&base_url, &auth, "base_url")?;
 
         let upload_url = params
             .get("upload_url")
             .and_then(serde_json::Value::as_str)
             .unwrap_or(DEFAULT_UPLOAD_URL)
             .to_string();
+        let upload_url = validate_endpoint_url_for_auth(&upload_url, &auth, "upload_url")?;
 
         Ok(Self {
             auth,
@@ -104,6 +106,48 @@ impl BoxConfig {
             base_url: self.base_url.clone(),
         }
     }
+}
+
+fn validate_endpoint_url_for_auth(
+    endpoint_url: &str,
+    auth: &BoxAuth,
+    field_name: &str,
+) -> FcpResult<String> {
+    let parsed = Url::parse(endpoint_url).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field_name} could not be parsed: {error}"),
+    })?;
+    let canonical = parsed.to_string().trim_end_matches('/').to_string();
+
+    match auth {
+        BoxAuth::BearerToken(_) => {
+            let (allowed, message) = base_url_policy(&canonical);
+            if !allowed {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message,
+                });
+            }
+        }
+        BoxAuth::CredentialId(_) => {
+            let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("{field_name} must include a host"),
+            })?;
+            let local = is_local_test_host(host);
+            let secure_or_local = parsed.scheme() == "https" || local;
+            if !secure_or_local {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!(
+                        "{field_name} must use https unless targeting localhost/127.0.0.1/::1 for tests"
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(canonical)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -791,8 +835,26 @@ mod tests {
 
     #[test]
     fn config_custom_base_url() {
-        let config = BoxConfig::from_params(&json!({
+        let result = BoxConfig::from_params(&json!({
             "access_token": "tok",
+            "base_url": "https://box.example.com/2.0",
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_custom_upload_url() {
+        let result = BoxConfig::from_params(&json!({
+            "access_token": "tok",
+            "upload_url": "https://upload.example.com/api/2.0",
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_credential_id_allows_custom_base_url() {
+        let config = BoxConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": "https://box.example.com/2.0",
         }))
         .unwrap();
@@ -800,9 +862,9 @@ mod tests {
     }
 
     #[test]
-    fn config_custom_upload_url() {
+    fn config_credential_id_allows_custom_upload_url() {
         let config = BoxConfig::from_params(&json!({
-            "access_token": "tok",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "upload_url": "https://upload.example.com/api/2.0",
         }))
         .unwrap();
@@ -1198,7 +1260,7 @@ mod tests {
     #[test]
     fn config_both_custom_urls() {
         let config = BoxConfig::from_params(&json!({
-            "access_token": "tok",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": "https://custom.api.box.com",
             "upload_url": "https://custom.upload.box.com",
         }))
@@ -1353,7 +1415,7 @@ mod tests {
     #[test]
     fn provisioning_readiness_custom_base_url_rejected() {
         let config = BoxConfig::from_params(&json!({
-            "access_token": "tok",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": "https://evil.example.com",
         }))
         .unwrap();

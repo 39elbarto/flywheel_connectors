@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:2bc4eddddcd12d6a78b4df4a7346ce770ec9e695b0d31051ed2f362b6c932e10"
+interface_hash = "blake3-256:fcp.interface.v2:d3fd8bed3b63965542562ad8515076b945c7d30dbf8bbedc403c286bffcaba96"
 
 [connector]
 id = "fcp.github"
@@ -28,7 +28,14 @@ forbidden = ["z:public"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = ["media.download"]
+optional = [
+    "media.download",
+    "github.read",
+    "github.write",
+    "github.admin",
+    "github.search",
+    "github.process_webhook",
+]
 forbidden = ["system.exec", "network.listen"]
 
 # ── Operations ──────────────────────────────────────────────────

@@ -73,6 +73,7 @@ impl HubSpotConfig {
             .and_then(|v| v.as_str())
             .unwrap_or(DEFAULT_BASE_URL)
             .to_string();
+        let base_url = validate_base_url_for_auth(&base_url, &auth)?;
 
         Ok(Self { auth, base_url })
     }
@@ -93,6 +94,44 @@ impl HubSpotConfig {
             base_url: self.base_url.clone(),
         }
     }
+}
+
+fn validate_base_url_for_auth(base_url: &str, auth: &HubSpotAuth) -> FcpResult<String> {
+    let parsed = Url::parse(base_url).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("base_url could not be parsed: {error}"),
+    })?;
+    let canonical = parsed.to_string().trim_end_matches('/').to_string();
+
+    match auth {
+        HubSpotAuth::BearerToken(_) => {
+            let (allowed, message) = base_url_policy(&canonical);
+            if !allowed {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message,
+                });
+            }
+        }
+        HubSpotAuth::CredentialId(_) => {
+            let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "base_url must include a host".into(),
+            })?;
+            let local = is_local_test_host(host);
+            let secure_or_local = parsed.scheme() == "https" || local;
+            if !secure_or_local {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message:
+                        "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
+                            .into(),
+                });
+            }
+        }
+    }
+
+    Ok(canonical)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2159,8 +2198,17 @@ mod tests {
 
     #[test]
     fn config_custom_base_url() {
-        let config = HubSpotConfig::from_params(&json!({
+        let result = HubSpotConfig::from_params(&json!({
             "access_token": "tok",
+            "base_url": "https://custom.hubspot.test",
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_credential_id_allows_custom_base_url() {
+        let config = HubSpotConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": "https://custom.hubspot.test",
         }))
         .unwrap();
@@ -3033,9 +3081,10 @@ mod tests {
 
     #[test]
     fn provisioning_readiness_network_fail_bad_url() {
-        let config = HubSpotConfig::from_params(
-            &json!({ "access_token": "tok", "base_url": "https://evil.example.com" }),
-        )
+        let config = HubSpotConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+            "base_url": "https://evil.example.com"
+        }))
         .unwrap();
         let readiness = config.provisioning_readiness();
         assert!(!readiness.network_ok);

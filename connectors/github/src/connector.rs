@@ -25,6 +25,7 @@ use crate::types::{CreateIssueRequest, CreatePullRequestRequest, MergePullReques
 
 const GITHUB_DEFAULT_OAUTH_SCOPES: &[&str] = &["repo", "read:user"];
 const WEBHOOK_DELIVERY_CACHE_LIMIT: usize = 1024;
+const GITHUB_API_HOST: &str = "api.github.com";
 
 /// Parsed configuration for the GitHub connector.
 struct GitHubConfig {
@@ -61,11 +62,84 @@ impl GitHubConfig {
             }
         };
 
-        Ok(Self {
-            auth,
-            base_url: base_url.map_or_else(|| DEFAULT_BASE_URL.to_string(), String::from),
-        })
+        let base_url = base_url.map_or_else(|| DEFAULT_BASE_URL.to_string(), String::from);
+        let base_url = validate_base_url_for_auth(&base_url, &auth)?;
+
+        Ok(Self { auth, base_url })
     }
+}
+
+fn validate_base_url_for_auth(base_url: &str, auth: &GitHubAuth) -> FcpResult<String> {
+    let parsed = Url::parse(base_url).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("base_url could not be parsed: {error}"),
+    })?;
+    let canonical = parsed.to_string().trim_end_matches('/').to_string();
+
+    match auth {
+        GitHubAuth::Token(_) => {
+            let (allowed, message) = base_url_policy(&canonical);
+            if !allowed {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message,
+                });
+            }
+        }
+        GitHubAuth::CredentialId(_) => {
+            let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "base_url must include a host".into(),
+            })?;
+            let local = is_local_test_host(host);
+            let secure_or_local = parsed.scheme() == "https" || local;
+            if !secure_or_local {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message:
+                        "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
+                            .into(),
+                });
+            }
+        }
+    }
+
+    Ok(canonical)
+}
+
+fn base_url_policy(base_url: &str) -> (bool, String) {
+    let parsed = match Url::parse(base_url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return (false, format!("base_url could not be parsed: {error}"));
+        }
+    };
+
+    let Some(host) = parsed.host_str() else {
+        return (false, "base_url must include a host".into());
+    };
+
+    let local = is_local_test_host(host);
+    let allowed_host = host.eq_ignore_ascii_case(GITHUB_API_HOST) || local;
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if allowed_host && secure_or_local {
+        (
+            true,
+            format!("Endpoint accepted by policy checks: {base_url}"),
+        )
+    } else {
+        (
+            false,
+            format!(
+                "Endpoint must use https and {GITHUB_API_HOST} (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+            ),
+        )
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -121,9 +195,9 @@ impl GitHubConnector {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if seen.contains(delivery_id) {
-            return Err(FcpError::RateLimited {
-                retry_after_ms: 0,
-                violation: Some(format!("duplicate webhook delivery_id: {delivery_id}")),
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("duplicate webhook delivery_id: {delivery_id}"),
             });
         }
 
@@ -287,6 +361,13 @@ impl GitHubConnector {
             .config
             .as_ref()
             .map_or("not_configured", |c| c.base_url.as_str());
+        let network_message = match self.config.as_ref() {
+            Some(cfg) if cfg.auth.is_secretless() => {
+                format!("Credential-injected mode allows custom https base_url (via {base_url})")
+            }
+            Some(_) => format!("Egress target pinned to {GITHUB_API_HOST} (via {base_url})"),
+            None => "Egress target not configured".into(),
+        };
         checks.push(DoctorCheck {
             name: "base_url".into(),
             status: DoctorStatus::Pass,
@@ -312,7 +393,7 @@ impl GitHubConnector {
         checks.push(DoctorCheck {
             name: "network_constraints".into(),
             status: DoctorStatus::Pass,
-            message: format!("Egress target: api.github.com (via {base_url})"),
+            message: network_message,
         });
 
         // 6. credential_injection
@@ -735,9 +816,13 @@ impl GitHubConnector {
                     "Process an inbound GitHub webhook payload forwarded by fcp-host",
                     json!({
                         "type": "object",
-                        "required": ["payload"],
+                        "required": ["payload", "signature_validated"],
                         "properties": {
-                            "payload": { "type": "object" }
+                            "payload": { "type": "object" },
+                            "signature_validated": {
+                                "type": "boolean",
+                                "description": "True only when fcp-host already verified the X-Hub-Signature-256 header"
+                            }
                         }
                     }),
                     json!({
@@ -752,9 +837,12 @@ impl GitHubConnector {
                     IdempotencyClass::Strict,
                     AgentHint {
                         when_to_use: "Process a pre-verified GitHub webhook payload forwarded by fcp-host.".into(),
-                        common_mistakes: vec!["Sending raw HTTP bodies instead of typed WebhookPayload".into()],
+                        common_mistakes: vec![
+                            "Sending raw HTTP bodies instead of typed WebhookPayload".into(),
+                            "Forwarding webhook payloads before fcp-host has validated the signature".into(),
+                        ],
                         examples: vec![
-                            r#"{"payload": {"event_type": "issues", "delivery_id": "d-1", "data": {"action": "opened"}}}"#.into(),
+                            r#"{"signature_validated": true, "payload": {"event_type": "issues", "delivery_id": "d-1", "data": {"action": "opened"}}}"#.into(),
                         ],
                         related: vec![CapabilityId::from_static("github.get_issue"), CapabilityId::from_static("github.get_pull_request")],
                     },
@@ -1165,6 +1253,21 @@ impl GitHubConnector {
     ) -> FcpResult<serde_json::Value> {
         use crate::types::{WebhookEventType, WebhookPayload};
 
+        let signature_validated = input
+            .get("signature_validated")
+            .and_then(|value| value.as_bool())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "signature_validated must be a boolean".into(),
+            })?;
+        if !signature_validated {
+            return Err(FcpError::Unauthorized {
+                code: 2001,
+                message: "signature_validated must be true before processing webhook payloads"
+                    .into(),
+            });
+        }
+
         let payload_value = input.get("payload").ok_or(FcpError::InvalidRequest {
             code: 1003,
             message: "Missing required field: payload".into(),
@@ -1514,6 +1617,7 @@ fn map_oauth_error_to_fcp(error: OAuthError) -> FcpError {
         // so no separate match arm is needed for the
         // "outside allowlist" case.
         OAuthError::InvalidConfig(message)
+        | OAuthError::InvalidState(message)
         | OAuthError::InvalidTokenResponse(message)
         | OAuthError::TokenExchangeFailed(message)
         | OAuthError::RefreshFailed(message)
@@ -1524,6 +1628,10 @@ fn map_oauth_error_to_fcp(error: OAuthError) -> FcpError {
         | OAuthError::PkceError(message) => FcpError::InvalidRequest {
             code: 1003,
             message: format!("GitHub OAuth request invalid: {message}"),
+        },
+        OAuthError::AuthorizationSessionConsumed => FcpError::InvalidRequest {
+            code: 1003,
+            message: "GitHub OAuth authorization session has already been consumed".into(),
         },
         OAuthError::TokenExpired(duration) => FcpError::InvalidRequest {
             code: 1003,
@@ -1890,6 +1998,7 @@ mod tests {
     async fn test_process_webhook_rejects_duplicate_delivery_id() {
         let connector = GitHubConnector::new();
         let input = json!({
+            "signature_validated": true,
             "payload": {
                 "event_type": "pull_request",
                 "delivery_id": "dup-1",
@@ -1914,14 +2023,42 @@ mod tests {
 
         let err = connector.invoke_process_webhook(input).await.unwrap_err();
         match err {
-            FcpError::RateLimited { violation, .. } => {
-                assert!(
-                    violation
-                        .as_deref()
-                        .is_some_and(|v| v.contains("duplicate webhook delivery_id"))
-                );
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("duplicate webhook delivery_id"));
             }
-            other => panic!("expected RateLimited, got {other:?}"),
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_process_webhook_requires_verified_signature() {
+        let connector = GitHubConnector::new();
+        let err = connector
+            .invoke_process_webhook(json!({
+                "signature_validated": false,
+                "payload": {
+                    "event_type": "issues",
+                    "delivery_id": "dup-2",
+                    "repository": {
+                        "id": 1,
+                        "full_name": "octocat/hello-world",
+                        "html_url": "https://github.com/octocat/hello-world",
+                        "private": false
+                    },
+                    "data": {
+                        "action": "opened",
+                        "issue": { "number": 7 }
+                    }
+                }
+            }))
+            .await
+            .unwrap_err();
+
+        match err {
+            FcpError::Unauthorized { message, .. } => {
+                assert!(message.contains("signature_validated"));
+            }
+            other => panic!("expected Unauthorized, got {other:?}"),
         }
     }
 
@@ -2003,6 +2140,19 @@ mod tests {
         let result = connector
             .handle_configure(json!({
                 "token": "ghp_test",
+                "base_url": "https://github.example.com/api/v3"
+            }))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_credential_id_custom_base_url() {
+        let mut connector = GitHubConnector::new();
+        let cid = uuid::Uuid::new_v4().to_string();
+        let result = connector
+            .handle_configure(json!({
+                "credential_id": cid,
                 "base_url": "https://github.example.com/api/v3"
             }))
             .await

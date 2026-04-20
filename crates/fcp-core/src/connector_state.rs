@@ -34,6 +34,17 @@ use crate::{
     validate_lease_handoff,
 };
 
+/// Maximum accepted size for a canonical CBOR blob decoded by
+/// [`CursorState::from_cbor`].
+///
+/// `CursorState` is a small three-field struct (i64 + optional String + u64);
+/// a realistic encoding is well under 256 bytes. The cap is set to 64 KiB —
+/// several orders of magnitude above any legitimate cursor state — so that a
+/// malicious or corrupted `ConnectorStateObject::state_cbor` cannot force
+/// unbounded allocation inside `ciborium::de::from_reader` before the
+/// downstream canonical re-encode check would catch the drift.
+pub const MAX_CURSOR_STATE_BYTES: usize = 64 * 1024;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Signature Type
 // ─────────────────────────────────────────────────────────────────────────────
@@ -523,8 +534,15 @@ impl CursorState {
     ///
     /// # Errors
     /// Returns a [`SerializationError`] if decoding fails, if trailing bytes are
-    /// present, or if the encoding is not canonical.
+    /// present, if the encoding is not canonical, or if the input exceeds
+    /// [`MAX_CURSOR_STATE_BYTES`].
     pub fn from_cbor(bytes: &[u8]) -> Result<Self, SerializationError> {
+        if bytes.len() > MAX_CURSOR_STATE_BYTES {
+            return Err(SerializationError::PayloadTooLarge {
+                len: bytes.len(),
+                max: MAX_CURSOR_STATE_BYTES,
+            });
+        }
         let mut reader = bytes;
         let decoded: Self = ciborium::de::from_reader(&mut reader)?;
         if !reader.is_empty() {
@@ -2481,6 +2499,34 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────
     // CursorState Tests
     // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cursor_state_from_cbor_rejects_oversized_payload() {
+        // An oversized blob must fail at the size-cap check before ciborium
+        // attempts to allocate for the decode, irrespective of well-formedness.
+        let blob = vec![0u8; MAX_CURSOR_STATE_BYTES + 1];
+        let err = CursorState::from_cbor(&blob).expect_err("oversized blob must be rejected");
+        match err {
+            SerializationError::PayloadTooLarge { len, max } => {
+                assert_eq!(len, MAX_CURSOR_STATE_BYTES + 1);
+                assert_eq!(max, MAX_CURSOR_STATE_BYTES);
+            }
+            other => panic!("expected PayloadTooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cursor_state_from_cbor_accepts_at_cap_boundary() {
+        // A blob exactly at the cap passes the size gate. Random bytes are
+        // not valid CBOR so the decode will fail, but crucially NOT with the
+        // size-cap error — proves the check is inclusive and off-by-one safe.
+        let blob = vec![0u8; MAX_CURSOR_STATE_BYTES];
+        let err = CursorState::from_cbor(&blob).expect_err("random bytes must not decode");
+        assert!(
+            !matches!(err, SerializationError::PayloadTooLarge { .. }),
+            "at-cap input must bypass the size check and fail on CBOR parse: got {err:?}"
+        );
+    }
 
     #[test]
     fn cursor_state_cbor_roundtrip() {

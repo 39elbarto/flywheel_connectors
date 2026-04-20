@@ -1,0 +1,13 @@
+---
+source: crates/fcp-audit/tests/golden_receipts.rs
+expression: entry
+---
+{
+  "id": "entry-min-0001",
+  "event_type": "capability.invoke",
+  "severity": "info",
+  "actor": "agent:local",
+  "zone_id": "z:work",
+  "seq": 0,
+  "occurred_at": 1700000000
+}

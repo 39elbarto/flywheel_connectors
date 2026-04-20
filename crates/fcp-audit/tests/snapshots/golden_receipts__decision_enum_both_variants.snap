@@ -1,0 +1,8 @@
+---
+source: crates/fcp-audit/tests/golden_receipts.rs
+expression: "json!({ \"allow\": Decision::Allow, \"deny\": Decision::Deny, })"
+---
+{
+  "allow": "allow",
+  "deny": "deny"
+}

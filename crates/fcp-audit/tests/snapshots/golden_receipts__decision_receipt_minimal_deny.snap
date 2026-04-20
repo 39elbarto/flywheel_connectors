@@ -1,0 +1,12 @@
+---
+source: crates/fcp-audit/tests/golden_receipts.rs
+expression: receipt
+---
+{
+  "id": "rcpt_deny_minimal",
+  "request_id": "req_minimal",
+  "decision": "deny",
+  "reason_code": "policy.default_deny",
+  "decided_at": 1700000000,
+  "zone_id": "z:work"
+}

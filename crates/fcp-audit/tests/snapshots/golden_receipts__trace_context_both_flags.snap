@@ -1,0 +1,16 @@
+---
+source: crates/fcp-audit/tests/golden_receipts.rs
+expression: "json!({ \"unsampled\": unsampled, \"sampled\": sampled, })"
+---
+{
+  "sampled": {
+    "flags": 1,
+    "span_id": "b7ad6b7169203331",
+    "trace_id": "0af7651916cd43dd8448eb211c80319c"
+  },
+  "unsampled": {
+    "flags": 0,
+    "span_id": "b7ad6b7169203331",
+    "trace_id": "0af7651916cd43dd8448eb211c80319c"
+  }
+}

@@ -4944,40 +4944,46 @@ mod tests {
 
     #[test]
     fn build_chain_verify_and_filter() {
-        let e0 = AuditEntryBuilder::new()
-            .id("chain-0")
-            .event_type(event_types::CAPABILITY_INVOKE)
-            .actor("user:alice")
-            .zone_id("z:work")
-            .seq(0)
-            .occurred_at(1_000)
-            .connector_id("fcp.telegram:base:v1")
-            .operation_id("send_message")
-            .build()
-            .unwrap();
+        let e0 = with_computed_id(
+            AuditEntryBuilder::new()
+                .id("chain-0")
+                .event_type(event_types::CAPABILITY_INVOKE)
+                .actor("user:alice")
+                .zone_id("z:work")
+                .seq(0)
+                .occurred_at(1_000)
+                .connector_id("fcp.telegram:base:v1")
+                .operation_id("send_message")
+                .build()
+                .unwrap(),
+        );
 
-        let e1 = AuditEntryBuilder::new()
-            .id("chain-1")
-            .event_type(event_types::SECRET_ACCESS)
-            .actor("user:bob")
-            .zone_id("z:work")
-            .seq(1)
-            .occurred_at(2_000)
-            .prev("chain-0")
-            .correlation_id("corr-1")
-            .build()
-            .unwrap();
+        let e1 = with_computed_id(
+            AuditEntryBuilder::new()
+                .id("chain-1")
+                .event_type(event_types::SECRET_ACCESS)
+                .actor("user:bob")
+                .zone_id("z:work")
+                .seq(1)
+                .occurred_at(2_000)
+                .prev(&e0.id)
+                .correlation_id("corr-1")
+                .build()
+                .unwrap(),
+        );
 
-        let e2 = AuditEntryBuilder::new()
-            .id("chain-2")
-            .event_type(event_types::SECURITY_VIOLATION)
-            .actor("user:eve")
-            .zone_id("z:work")
-            .seq(2)
-            .occurred_at(3_000)
-            .prev("chain-1")
-            .build()
-            .unwrap();
+        let e2 = with_computed_id(
+            AuditEntryBuilder::new()
+                .id("chain-2")
+                .event_type(event_types::SECURITY_VIOLATION)
+                .actor("user:eve")
+                .zone_id("z:work")
+                .seq(2)
+                .occurred_at(3_000)
+                .prev(&e1.id)
+                .build()
+                .unwrap(),
+        );
 
         // Verify chain is valid
         let entries = [e0.clone(), e1.clone(), e2.clone()];

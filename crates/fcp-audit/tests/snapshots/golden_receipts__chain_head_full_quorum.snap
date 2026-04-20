@@ -1,0 +1,12 @@
+---
+source: crates/fcp-audit/tests/golden_receipts.rs
+expression: head
+---
+{
+  "zone_id": "z:prod",
+  "head_entry": "entry-beef-5678",
+  "head_seq": 9223372036854775807,
+  "coverage": 1.0,
+  "epoch_id": "epoch-stable",
+  "signature_count": 65535
+}

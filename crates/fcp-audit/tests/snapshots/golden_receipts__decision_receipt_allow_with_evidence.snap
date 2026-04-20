@@ -1,0 +1,26 @@
+---
+source: crates/fcp-audit/tests/golden_receipts.rs
+expression: receipt
+---
+{
+  "id": "rcpt_allow_001",
+  "request_id": "req_invoke_42",
+  "decision": "allow",
+  "reason_code": "policy.capability.granted",
+  "evidence": [
+    "cap:stripe.charges.create",
+    "zone:work",
+    "role:billing-writer"
+  ],
+  "audit_entry_id": "entry-full-0042",
+  "decided_at": 1700000000,
+  "zone_id": "z:work",
+  "correlation_id": "req_invoke_42",
+  "trace_context": {
+    "trace_id": "0af7651916cd43dd8448eb211c80319c",
+    "span_id": "b7ad6b7169203331",
+    "flags": 1
+  },
+  "connector_id": "stripe",
+  "operation_id": "charges.create"
+}

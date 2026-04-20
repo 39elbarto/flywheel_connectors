@@ -1,0 +1,12 @@
+---
+source: crates/fcp-audit/tests/golden_receipts.rs
+expression: head
+---
+{
+  "zone_id": "z:work",
+  "head_entry": "entry-cafe-1234",
+  "head_seq": 4096,
+  "coverage": 0.875,
+  "epoch_id": "epoch-2026-04-20",
+  "signature_count": 7
+}

@@ -1,0 +1,13 @@
+---
+source: crates/fcp-audit/tests/golden_receipts.rs
+expression: entry
+---
+{
+  "id": "entry-genesis",
+  "event_type": "chain.bootstrap",
+  "severity": "info",
+  "actor": "host:fcp-mesh",
+  "zone_id": "z:genesis",
+  "seq": 0,
+  "occurred_at": 1700000000
+}

@@ -1,0 +1,10 @@
+---
+source: crates/fcp-audit/tests/golden_receipts.rs
+expression: all
+---
+[
+  "info",
+  "warning",
+  "error",
+  "critical"
+]

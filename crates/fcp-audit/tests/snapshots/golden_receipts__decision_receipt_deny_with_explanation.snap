@@ -1,0 +1,20 @@
+---
+source: crates/fcp-audit/tests/golden_receipts.rs
+expression: receipt
+---
+{
+  "id": "rcpt_deny_002",
+  "request_id": "req_invoke_99",
+  "decision": "deny",
+  "reason_code": "policy.capability.revoked",
+  "evidence": [
+    "revocation:2026-04-19T12:00:00Z"
+  ],
+  "audit_entry_id": "entry-deny-0099",
+  "explanation": "capability cap:stripe.refunds.create was revoked by operator@example.com on 2026-04-19 with reason \"incident-2026-Q2-001\"",
+  "decided_at": 1700086400,
+  "zone_id": "z:prod",
+  "correlation_id": "req_invoke_99",
+  "connector_id": "stripe",
+  "operation_id": "refunds.create"
+}

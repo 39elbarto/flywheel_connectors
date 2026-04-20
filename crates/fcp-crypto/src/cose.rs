@@ -22,6 +22,14 @@ use std::collections::BTreeMap;
 /// COSE algorithm identifier for Ed25519.
 pub const COSE_ALG_EDDSA: i64 = iana::Algorithm::EdDSA as i64;
 
+/// Maximum accepted byte length for any CBOR input fed into COSE/CWT
+/// parsing (`CoseToken::from_cbor`, `CwtClaims::from_cbor`).
+///
+/// FCP capability tokens are typically 300–500 bytes; this cap is two orders
+/// of magnitude above that, but stops attackers from exhausting memory by
+/// pushing giant crafted CBOR payloads through the token-verify path.
+pub const MAX_COSE_TOKEN_BYTES: usize = 64 * 1024;
+
 /// CWT claim keys (registered claims from RFC 8392).
 pub mod cwt_claims {
     /// Issuer claim key.
@@ -388,6 +396,14 @@ impl CwtClaims {
     ///
     /// Returns an error if deserialization fails.
     pub fn from_cbor(bytes: &[u8]) -> CryptoResult<Self> {
+        if bytes.len() > MAX_COSE_TOKEN_BYTES {
+            return Err(CryptoError::SerializationError(format!(
+                "CWT claims payload exceeds {} byte cap (got {})",
+                MAX_COSE_TOKEN_BYTES,
+                bytes.len()
+            )));
+        }
+
         let value: ciborium::Value = ciborium::from_reader(bytes)
             .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
 
@@ -675,6 +691,14 @@ impl CoseToken {
     ///
     /// Returns an error if deserialization fails.
     pub fn from_cbor(bytes: &[u8]) -> CryptoResult<Self> {
+        if bytes.len() > MAX_COSE_TOKEN_BYTES {
+            return Err(CryptoError::SerializationError(format!(
+                "COSE token payload exceeds {} byte cap (got {})",
+                MAX_COSE_TOKEN_BYTES,
+                bytes.len()
+            )));
+        }
+
         let inner = CoseSign1::from_slice(bytes)
             .or_else(|_| CoseSign1::from_tagged_slice(bytes))
             .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
@@ -886,6 +910,54 @@ mod tests {
         let token = CoseToken::sign(&sk1, &claims).unwrap();
 
         assert!(token.verify(&pk2).is_err());
+    }
+
+    #[test]
+    fn cose_token_from_cbor_rejects_oversized_payload() {
+        let blob = vec![0u8; MAX_COSE_TOKEN_BYTES + 1];
+        let err = CoseToken::from_cbor(&blob).expect_err("oversized blob must be rejected");
+        match err {
+            CryptoError::SerializationError(msg) => {
+                assert!(
+                    msg.contains("exceeds") && msg.contains("byte cap"),
+                    "error message should flag the size cap, got: {msg}"
+                );
+            }
+            other => panic!("expected SerializationError for oversized input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cwt_claims_from_cbor_rejects_oversized_payload() {
+        let blob = vec![0u8; MAX_COSE_TOKEN_BYTES + 1];
+        let err = CwtClaims::from_cbor(&blob).expect_err("oversized blob must be rejected");
+        match err {
+            CryptoError::SerializationError(msg) => {
+                assert!(
+                    msg.contains("exceeds") && msg.contains("byte cap"),
+                    "error message should flag the size cap, got: {msg}"
+                );
+            }
+            other => panic!("expected SerializationError for oversized input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cose_token_from_cbor_accepts_payload_at_cap() {
+        // A blob exactly at the cap must pass the size check (and fail later
+        // on parse, since it's random bytes) — proves the cap is inclusive
+        // and isn't off-by-one in the rejection direction.
+        let blob = vec![0u8; MAX_COSE_TOKEN_BYTES];
+        let err = CoseToken::from_cbor(&blob).expect_err("random bytes won't parse as COSE");
+        match err {
+            CryptoError::SerializationError(msg) => {
+                assert!(
+                    !msg.contains("byte cap"),
+                    "at-cap payload must fail on CBOR/COSE parse, not the size check: {msg}"
+                );
+            }
+            other => panic!("expected SerializationError for malformed input, got {other:?}"),
+        }
     }
 
     #[test]

@@ -16,8 +16,10 @@ bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 parking_lot.workspace = true
 async-trait.workspace = true
+blake3.workspace = true
 
 # Internal crates
 fcp-async-core = { path = "../fcp-async-core" }
@@ -34,6 +36,7 @@ chrono.workspace = true
 uuid.workspace = true
 rand.workspace = true
 criterion = { version = "0.8", features = ["html_reports"] }
+tempfile = "3"
 
 [[bench]]
 name = "symbol_store"

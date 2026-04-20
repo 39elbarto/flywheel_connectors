@@ -33,6 +33,7 @@
 #![allow(clippy::option_if_let_else)]
 
 mod coverage;
+mod durable;
 mod error;
 mod gc;
 mod object_store;
@@ -42,6 +43,9 @@ mod repair;
 mod symbol_store;
 
 pub use coverage::{CoverageEvaluation, CoverageHealth, SymbolDistribution};
+pub use durable::{
+    DurableObjectStore, DurableObjectStoreConfig, DurableSymbolStore, DurableSymbolStoreConfig,
+};
 pub use error::{
     GcError, LifecycleSnapshotError, ObjectStoreError, QuarantineError, RepairError,
     SymbolStoreError,

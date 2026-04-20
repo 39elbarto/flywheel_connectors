@@ -521,6 +521,76 @@ mod tests {
         assert_eq!(delay, Duration::from_secs(0));
     }
 
+    // ── Metamorphic relations ─────────────────────────────────────
+
+    /// Metamorphic: with jitter disabled and a positive backoff_multiplier
+    /// >= 1.0, delay_for_attempt must be monotonically non-decreasing in
+    /// the attempt counter all the way up to max_delay. A regression that
+    /// inverted the exponent or corrupted the clamp would surface here.
+    #[test]
+    fn test_delay_monotonic_without_jitter() {
+        let config = ReconnectConfig::new()
+            .with_initial_delay(Duration::from_millis(100))
+            .with_max_delay(Duration::from_secs(3600))
+            .with_backoff_multiplier(2.0)
+            .with_jitter(false);
+
+        let mut prev = config.delay_for_attempt(0);
+        for attempt in 1..20 {
+            let d = config.delay_for_attempt(attempt);
+            assert!(
+                d >= prev,
+                "delay must not decrease: attempt={attempt} prev={prev:?} d={d:?}"
+            );
+            prev = d;
+        }
+    }
+
+    /// Metamorphic: delay_for_attempt is a pure function of (config, attempt)
+    /// when jitter is disabled — repeated calls with identical inputs must
+    /// produce byte-identical Duration values. This pins the invariant that
+    /// the clamp and backoff math have no hidden state and no implicit RNG
+    /// use when jitter=false.
+    #[test]
+    fn test_delay_for_attempt_is_deterministic_without_jitter() {
+        let config = ReconnectConfig::new()
+            .with_initial_delay(Duration::from_millis(250))
+            .with_max_delay(Duration::from_secs(60))
+            .with_backoff_multiplier(1.5)
+            .with_jitter(false);
+
+        for attempt in [0, 1, 3, 7, 15, 31] {
+            let a = config.delay_for_attempt(attempt);
+            let b = config.delay_for_attempt(attempt);
+            assert_eq!(a, b, "attempt={attempt} a={a:?} b={b:?}");
+        }
+    }
+
+    /// Metamorphic: reset() is idempotent. Calling reset after a reset must
+    /// leave the handler in the same observable state as a single reset.
+    /// Also verifies that record_failure → reset collapses cleanly, which
+    /// is the hot-path invariant invoked by ReconnectingWsStream when a
+    /// message finally arrives on a freshly-reconnected stream.
+    #[test]
+    fn test_handler_reset_is_idempotent() {
+        let config = ReconnectConfig::new().with_max_attempts(10);
+        let mut a = ReconnectHandler::new(config.clone());
+        let mut b = ReconnectHandler::new(config);
+
+        for _ in 0..5 {
+            a.record_failure();
+            b.record_failure();
+        }
+        assert_eq!(a.attempts(), b.attempts());
+
+        a.reset();
+        b.reset();
+        b.reset(); // second reset must be a no-op
+        assert_eq!(a.attempts(), b.attempts());
+        assert_eq!(a.attempts(), 0);
+        assert!(a.can_reconnect() == b.can_reconnect());
+    }
+
     #[test]
     fn test_config_new_equals_default() {
         let new = ReconnectConfig::new();

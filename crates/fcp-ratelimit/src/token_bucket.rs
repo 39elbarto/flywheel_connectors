@@ -698,6 +698,64 @@ mod tests {
         assert_eq!(limiter.remaining(), 0);
     }
 
+    // ── Metamorphic relations ──────────────────────────────────────────
+
+    /// Metamorphic: try_acquire_n(0) is a no-op on state. Any number of
+    /// zero-permit requests must leave `remaining()` unchanged from the
+    /// pre-call value. This is the adjoint of the "permit-then-refund"
+    /// idempotency relation — the bucket has no refund API, but a
+    /// zero-cost permit must behave as a refund-after-acquire so that
+    /// callers can cheaply probe availability.
+    #[fcp_async_core::runtime::test]
+    async fn try_acquire_zero_permits_is_state_neutral() {
+        let limiter = TokenBucket::new(5, Duration::from_secs(60));
+        // Partially drain so "full and idle" isn't the only case exercised.
+        assert!(limiter.try_acquire_n(2).await);
+        let before = limiter.remaining();
+
+        for _ in 0..16 {
+            assert!(
+                limiter.try_acquire_n(0).await,
+                "zero-permit acquire must always succeed"
+            );
+        }
+
+        assert_eq!(
+            limiter.remaining(),
+            before,
+            "zero-permit calls must not mutate bucket state"
+        );
+    }
+
+    /// Metamorphic: `remaining()` is monotonically non-decreasing under
+    /// pure idle (no concurrent acquire). The refill hardening in
+    /// 50f9e9d8 changed `remaining()` to actively pull refill credit;
+    /// this test pins the invariant that back-to-back reads without
+    /// any try_acquire between them never regress the observable
+    /// token count — a refill-accounting regression that dropped
+    /// tokens would surface here.
+    #[fcp_async_core::runtime::test]
+    async fn remaining_is_monotonic_under_idle() {
+        let limiter = TokenBucket::new(3, Duration::from_millis(30));
+        // Drain so refill has something to do.
+        assert!(limiter.try_acquire_n(3).await);
+        assert_eq!(limiter.remaining(), 0);
+
+        let mut prev = limiter.remaining();
+        for _ in 0..10 {
+            sleep(Duration::from_millis(5)).await;
+            let now = limiter.remaining();
+            assert!(
+                now >= prev,
+                "remaining() regressed under idle: prev={prev} now={now}"
+            );
+            prev = now;
+        }
+        // After >= one refill interval of cumulative sleep, must see at
+        // least one replenished token.
+        assert!(prev >= 1, "at least one token must refill under idle");
+    }
+
     // ── with_burst edge cases ──────────────────────────────────────────
 
     #[fcp_async_core::runtime::test]

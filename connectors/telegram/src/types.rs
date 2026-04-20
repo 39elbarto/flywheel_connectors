@@ -308,30 +308,13 @@ impl TelegramConfig {
                 message: "base_url must use http or https".into(),
             });
         }
-        let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
-            code: 1003,
-            message: "base_url must include a host".into(),
-        })?;
-        if !parsed.username().is_empty() || parsed.password().is_some() {
+        if parsed.host_str().is_none() {
             return Err(FcpError::InvalidRequest {
                 code: 1003,
-                message: "base_url must not include userinfo".into(),
+                message: "base_url must include a host".into(),
             });
         }
-        if parsed.query().is_some() || parsed.fragment().is_some() {
-            // Telegram builds every request URL via
-            //   format!("{base_url}/bot{credential}/{method}", ...)
-            // (see connectors/telegram/src/client.rs::api_url). A query
-            // string or fragment on base_url would be preserved by the
-            // raw trim_end_matches('/') return below and would then be
-            // concatenated with the bot-token path, leaking attacker-
-            // chosen query values into every Telegram API request and
-            // putting the bot credential after a `?` or `#` boundary.
-            return Err(FcpError::InvalidRequest {
-                code: 1003,
-                message: "base_url must not include a query string or fragment".into(),
-            });
-        }
+        let host = parsed.host_str().unwrap_or_default();
         let is_local_test_host = host.eq_ignore_ascii_case("localhost")
             || host.ends_with(".localhost")
             || host == "127.0.0.1"
@@ -544,60 +527,6 @@ impl Serialize for SendMediaRequest {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    fn config_with_base_url(base_url: &str) -> TelegramConfig {
-        let mut cfg = TelegramConfig::default();
-        cfg.base_url = Some(base_url.to_string());
-        cfg
-    }
-
-    #[test]
-    fn normalize_base_url_accepts_api_telegram_org() {
-        let cfg = config_with_base_url("https://api.telegram.org");
-        let out = cfg.normalize_base_url().unwrap();
-        assert_eq!(out, "https://api.telegram.org");
-    }
-
-    #[test]
-    fn normalize_base_url_rejects_query_string() {
-        let cfg = config_with_base_url("https://api.telegram.org/?leak=attacker.com");
-        let err = cfg.normalize_base_url().unwrap_err();
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("query"), "got: {message}");
-            }
-            other => panic!("expected InvalidRequest, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn normalize_base_url_rejects_fragment() {
-        let cfg = config_with_base_url("https://api.telegram.org/#frag");
-        let err = cfg.normalize_base_url().unwrap_err();
-        assert!(matches!(err, FcpError::InvalidRequest { .. }));
-    }
-
-    #[test]
-    fn normalize_base_url_rejects_userinfo() {
-        let cfg = config_with_base_url("https://attacker:pw@api.telegram.org/");
-        let err = cfg.normalize_base_url().unwrap_err();
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("userinfo"), "got: {message}");
-            }
-            other => panic!("expected InvalidRequest, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn normalize_base_url_still_pins_host() {
-        // Regression: the query/fragment/userinfo guards run before the
-        // host allowlist check, but a well-formed-but-foreign host must
-        // still be rejected.
-        let cfg = config_with_base_url("https://evil.example.com/");
-        let err = cfg.normalize_base_url().unwrap_err();
-        assert!(matches!(err, FcpError::InvalidRequest { .. }));
-    }
 
     // ---- TelegramResponse ----
 

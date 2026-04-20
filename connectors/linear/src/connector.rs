@@ -1,7 +1,10 @@
 //! FCP Linear Connector implementation.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 
+use chrono::Utc;
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest,
@@ -11,12 +14,15 @@ use fcp_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
+use uuid::Uuid;
 
 use crate::{
     client::{DEFAULT_API_URL, LinearAuth, LinearClient},
     error::LinearError,
     types::{BeadSyncSnapshot, LinearSyncSnapshot, SyncConflictPolicy, SyncOperationIntent},
 };
+
+const MAX_LINEAR_WEBHOOK_SKEW_MS: u64 = 60_000;
 
 /// Parsed and validated Linear connector configuration.
 #[derive(Debug, Clone)]
@@ -72,9 +78,40 @@ impl LinearConfig {
             .and_then(|v| v.as_str())
             .unwrap_or(DEFAULT_API_URL)
             .to_string();
+        let api_url = validate_api_url_for_auth(&api_url, &auth)?;
 
         Ok(Self { auth, api_url })
     }
+}
+
+fn validate_api_url_for_auth(raw_url: &str, auth: &LinearAuth) -> FcpResult<String> {
+    let parsed = reqwest::Url::parse(raw_url).map_err(|_| FcpError::InvalidRequest {
+        code: 1003,
+        message: "api_url must be an absolute URL".into(),
+    })?;
+    let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "api_url must include a host".into(),
+    })?;
+    let host_lower = host.to_ascii_lowercase();
+    let is_local = matches!(host_lower.as_str(), "localhost" | "127.0.0.1" | "::1");
+    let scheme = parsed.scheme();
+    let token_origin_allowed = match auth {
+        LinearAuth::ApiKey(_) => {
+            (scheme == "https" && host_lower == "api.linear.app")
+                || (is_local && matches!(scheme, "http" | "https"))
+        }
+        LinearAuth::CredentialId(_) => true,
+    };
+
+    if !token_origin_allowed {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "api_url must target https://api.linear.app for direct api_key mode".into(),
+        });
+    }
+
+    Ok(parsed.to_string().trim_end_matches('/').to_string())
 }
 
 /// Doctor check result.
@@ -135,6 +172,7 @@ pub struct LinearConnector {
     client: Option<LinearClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
+    webhook_replay_receipts: Mutex<BTreeMap<Uuid, i64>>,
 }
 
 impl LinearConnector {
@@ -147,7 +185,27 @@ impl LinearConnector {
             client: None,
             verifier: None,
             session_id: None,
+            webhook_replay_receipts: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    fn record_webhook_delivery(&self, delivery_id: Uuid, webhook_timestamp: i64) -> FcpResult<()> {
+        let min_allowed_timestamp = webhook_timestamp - MAX_LINEAR_WEBHOOK_SKEW_MS as i64;
+        let mut receipts = self
+            .webhook_replay_receipts
+            .lock()
+            .map_err(|_| FcpError::Internal {
+                message: "webhook replay cache poisoned".into(),
+            })?;
+        receipts.retain(|_, seen_timestamp| *seen_timestamp >= min_allowed_timestamp);
+        if receipts.contains_key(&delivery_id) {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "delivery_id has already been processed within the replay window".into(),
+            });
+        }
+        receipts.insert(delivery_id, webhook_timestamp);
+        Ok(())
     }
 
     /// Handle configure method.
@@ -652,8 +710,16 @@ impl LinearConnector {
                     "Process an inbound Linear webhook payload forwarded by fcp-host",
                     json!({
                         "type": "object",
-                        "required": ["payload"],
+                        "required": ["payload", "delivery_id", "signature_validated"],
                         "properties": {
+                            "delivery_id": {
+                                "type": "string",
+                                "description": "Linear-Delivery header UUID forwarded by fcp-host"
+                            },
+                            "signature_validated": {
+                                "type": "boolean",
+                                "description": "True only when fcp-host has already verified Linear-Signature against the raw body"
+                            },
                             "payload": {
                                 "type": "object",
                                 "description": "Raw Linear webhook payload"
@@ -670,7 +736,10 @@ impl LinearConnector {
                                     "resource_type": { "type": "string" },
                                     "action": { "type": "string" },
                                     "resource_uri": { "type": "string" },
-                                    "data": { "type": "object" }
+                                    "data": { "type": "object" },
+                                    "delivery_id": { "type": "string" },
+                                    "idempotency_key": { "type": "string" },
+                                    "webhook_timestamp": { "type": "integer" }
                                 }
                             }
                         }
@@ -683,9 +752,11 @@ impl LinearConnector {
                         when_to_use: "Process a webhook event forwarded by fcp-host.".into(),
                         common_mistakes: vec![
                             "Sending the payload without the wrapper object".into(),
+                            "Forwarding parsed webhook JSON before fcp-host verifies the Linear-Signature header".into(),
+                            "Dropping the Linear-Delivery header; without it downstream idempotency receipts cannot be stable".into(),
                         ],
                         examples: vec![
-                            r#"{"payload": {"action": "create", "type": "Issue", "createdAt": "2026-03-07T00:00:00Z", "data": {"id": "i1"}}}"#.into(),
+                            r#"{"delivery_id":"234d1a4e-b617-4388-90fe-adc3633d6b72","signature_validated":true,"payload":{"action":"create","type":"Issue","createdAt":"2026-03-07T00:00:00Z","webhookTimestamp":1762459200000,"data":{"id":"i1"}}}"#.into(),
                         ],
                         related: vec![
                             CapabilityId::from_static("linear.get_issue"),
@@ -1120,6 +1191,27 @@ impl LinearConnector {
     ) -> FcpResult<serde_json::Value> {
         use crate::types::{WebhookPayload, WebhookResourceType};
 
+        let delivery_id_raw = require_str(&input, "delivery_id")?;
+        let delivery_id =
+            Uuid::parse_str(delivery_id_raw).map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "delivery_id must be a UUID from the Linear-Delivery header".into(),
+            })?;
+        let signature_validated = input
+            .get("signature_validated")
+            .and_then(|value| value.as_bool())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "signature_validated must be a boolean".into(),
+            })?;
+        if !signature_validated {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "signature_validated must be true before processing webhook payloads"
+                    .into(),
+            });
+        }
+
         let payload_value = input.get("payload").ok_or(FcpError::InvalidRequest {
             code: 1003,
             message: "Missing required field: payload".into(),
@@ -1132,14 +1224,31 @@ impl LinearConnector {
                     message: format!("Invalid webhook payload: {e}"),
                 }
             })?;
+        let webhook_timestamp = payload.webhook_timestamp.ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "payload.webhookTimestamp is required for replay protection".into(),
+        })?;
+        let skew_ms = Utc::now().timestamp_millis().abs_diff(webhook_timestamp);
+        if skew_ms > MAX_LINEAR_WEBHOOK_SKEW_MS {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "payload.webhookTimestamp is outside the accepted {}ms replay window",
+                    MAX_LINEAR_WEBHOOK_SKEW_MS
+                ),
+            });
+        }
+        self.record_webhook_delivery(delivery_id, webhook_timestamp)?;
 
         let topic = payload.resource_type.to_topic(payload.action);
+        let idempotency_key = format!("linear.webhook.{}", delivery_id.as_hyphenated());
 
         info!(
             event = "linear.webhook.processed",
             topic = %topic,
             resource_type = %payload.resource_type,
             action = %payload.action,
+            delivery_id = %delivery_id,
             webhook_id = ?payload.webhook_id,
             "Linear webhook event processed"
         );
@@ -1169,7 +1278,10 @@ impl LinearConnector {
                 "resource_id": resource_id,
                 "actor": payload.actor,
                 "timestamp": payload.created_at,
+                "webhook_timestamp": webhook_timestamp,
                 "data": payload.data,
+                "delivery_id": delivery_id.to_string(),
+                "idempotency_key": idempotency_key,
                 "webhook_id": payload.webhook_id,
             }
         }))
@@ -1521,7 +1633,7 @@ mod tests {
         let mut connector = LinearConnector::new();
         connector
             .handle_configure(json!({
-                "api_key": "test",
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000",
                 "api_url": "https://evil.example.com/graphql"
             }))
             .await
@@ -1644,6 +1756,154 @@ mod tests {
         }
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn test_process_webhook_requires_verified_signature() {
+        let mut connector = LinearConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["linear.process_webhook"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token(&signing_key, "linear.process_webhook");
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "linear.process_webhook",
+                "input": {
+                    "delivery_id": Uuid::new_v4().to_string(),
+                    "signature_validated": false,
+                    "payload": {
+                        "action": "create",
+                        "type": "Issue",
+                        "createdAt": "2026-03-07T00:00:00Z",
+                        "webhookTimestamp": Utc::now().timestamp_millis(),
+                        "data": { "id": "issue-1" }
+                    }
+                },
+                "capability_token": token
+            }))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("signature_validated"));
+            }
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_process_webhook_rejects_stale_timestamp() {
+        let mut connector = LinearConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["linear.process_webhook"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token(&signing_key, "linear.process_webhook");
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "linear.process_webhook",
+                "input": {
+                    "delivery_id": Uuid::new_v4().to_string(),
+                    "signature_validated": true,
+                    "payload": {
+                        "action": "create",
+                        "type": "Issue",
+                        "createdAt": "2026-03-07T00:00:00Z",
+                        "webhookTimestamp": Utc::now().timestamp_millis() - 120_000,
+                        "data": { "id": "issue-1" }
+                    }
+                },
+                "capability_token": token
+            }))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("replay window"));
+            }
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_process_webhook_rejects_duplicate_delivery_id() {
+        let mut connector = LinearConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["linear.process_webhook"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token(&signing_key, "linear.process_webhook");
+        let delivery_id = Uuid::new_v4().to_string();
+        let input = json!({
+            "delivery_id": delivery_id,
+            "signature_validated": true,
+            "payload": {
+                "action": "create",
+                "type": "Issue",
+                "createdAt": "2026-03-07T00:00:00Z",
+                "webhookTimestamp": Utc::now().timestamp_millis(),
+                "data": { "id": "issue-1" }
+            }
+        });
+
+        let first = connector
+            .handle_invoke(json!({
+                "operation": "linear.process_webhook",
+                "input": input.clone(),
+                "capability_token": token.clone()
+            }))
+            .await
+            .expect("first delivery should succeed");
+        assert_eq!(first["event"]["resource_id"], "issue-1");
+
+        let second = connector
+            .handle_invoke(json!({
+                "operation": "linear.process_webhook",
+                "input": input,
+                "capability_token": token
+            }))
+            .await;
+
+        assert!(second.is_err());
+        match second.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("already been processed"));
+            }
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
     #[test]
     fn manifest_interface_hash_is_deterministic() {
         let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
@@ -1686,12 +1946,21 @@ mod tests {
 
     #[test]
     fn config_custom_api_url() {
-        let cfg = LinearConfig::from_params(&json!({
+        let result = LinearConfig::from_params(&json!({
             "api_key": "test",
             "api_url": "https://linear.example.com/graphql"
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_credential_id_allows_custom_api_url() {
+        let cfg = LinearConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+            "api_url": "https://linear-proxy.internal/graphql"
         }))
         .unwrap();
-        assert_eq!(cfg.api_url, "https://linear.example.com/graphql");
+        assert_eq!(cfg.api_url, "https://linear-proxy.internal/graphql");
     }
 
     #[test]

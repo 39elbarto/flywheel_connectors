@@ -205,6 +205,9 @@ pub struct WebhookPayload {
     /// Webhook ID for deduplication.
     #[serde(default)]
     pub webhook_id: Option<String>,
+    /// Millisecond timestamp used for replay-window validation.
+    #[serde(default)]
+    pub webhook_timestamp: Option<i64>,
 }
 
 /// Webhook action discriminant.
@@ -2501,6 +2504,7 @@ mod tests {
         assert_eq!(payload.actor.as_ref().unwrap().name, "Alice");
         assert_eq!(payload.organization_id.as_deref(), Some("org-1"));
         assert_eq!(payload.webhook_id.as_deref(), Some("wh-1"));
+        assert!(payload.webhook_timestamp.is_none());
     }
 
     #[test]
@@ -2519,6 +2523,7 @@ mod tests {
             data: json!({"id": "i1"}),
             organization_id: None,
             webhook_id: Some("wh-123".into()),
+            webhook_timestamp: None,
         };
 
         let json_str = serde_json::to_string(&payload).unwrap();

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:ca99a982c0c7068a4497c5e4eafa4e9a712d3507703ec0c5207904dcd3d5144d"
+interface_hash = "blake3-256:fcp.interface.v2:3afcdebfb498b635c056407f598f5abf7795f301f35ecc1d57de7c310761901d"
 
 [connector]
 id = "fcp.linear"
@@ -28,7 +28,7 @@ forbidden = ["z:public"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
-optional = []
+optional = ["linear.read", "linear.write", "linear.process_webhook"]
 forbidden = ["system.exec", "network.listen"]
 
 # ── Operations ──────────────────────────────────────────────────
@@ -431,6 +431,38 @@ common_mistakes = ["planned_at is required so the audit artifact stays explicit"
 examples = ['{"planned_at":"2026-03-15T00:00:00Z","policy":"prefer_freshest","bead":{"bead_id":"br-123","title":"New title","description":"Body","status":"open","priority":1,"updated_at":"2026-03-15T00:00:00Z"},"linear":{"issue_id":"lin-1","identifier":"LIN-123","title":"Old title","description":"Body","status":"open","priority":1,"updated_at":"2026-03-14T23:00:00Z"}}']
 related = ["linear.get_issue", "linear.update_issue"]
 
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."linear.process_webhook"]
+description = "Process a pre-verified Linear webhook payload forwarded by fcp-host"
+capability = "linear.process_webhook"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."linear.process_webhook".input_schema]
+required = ["payload", "delivery_id", "signature_validated"]
+type = "object"
+[provides.operations."linear.process_webhook".input_schema.properties.payload]
+type = "object"
+[provides.operations."linear.process_webhook".input_schema.properties.delivery_id]
+type = "string"
+[provides.operations."linear.process_webhook".input_schema.properties.signature_validated]
+type = "boolean"
+
+[provides.operations."linear.process_webhook".output_schema]
+required = ["event"]
+type = "object"
+[provides.operations."linear.process_webhook".output_schema.properties.event]
+type = "object"
+
+[provides.operations."linear.process_webhook".ai_hints]
+when_to_use = "Process a pre-verified Linear webhook payload forwarded by fcp-host."
+common_mistakes = ["Forwarding parsed JSON before fcp-host verifies the Linear-Signature header.", "Dropping the Linear-Delivery header, which prevents stable downstream idempotency receipts."]
+examples = ['{"delivery_id":"234d1a4e-b617-4388-90fe-adc3633d6b72","signature_validated":true,"payload":{"action":"create","type":"Issue","createdAt":"2026-03-07T00:00:00Z","webhookTimestamp":1762459200000,"data":{"id":"i1"}}}']
+related = ["linear.get_issue", "linear.plan_sync"]
+
 # ── Events ──────────────────────────────────────────────────────
 
 [event_caps]
@@ -476,3 +508,4 @@ scope = "instance"
 "linear.add_comment" = ["linear.write"]
 "linear.list_projects" = ["linear.read"]
 "linear.plan_sync" = ["linear.read"]
+"linear.process_webhook" = ["linear.read"]

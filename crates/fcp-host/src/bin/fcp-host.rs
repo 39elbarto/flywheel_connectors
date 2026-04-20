@@ -526,6 +526,20 @@ impl SubprocessRegistry {
         connector.invoke(request).await
     }
 
+    /// Snapshot of a connector's allowed-zone set, if configured.
+    ///
+    /// `Some(set)` means the operator pinned the connector to those zones
+    /// and `verify_live_request` MUST reject requests outside them. `None`
+    /// means the connector is unknown. An empty `set` means the operator
+    /// did not configure the binding (back-compat permissive path).
+    async fn allowed_zones(&self, connector_id: &ConnectorId) -> Option<Vec<String>> {
+        let state = self.state.read().await;
+        state
+            .connectors
+            .get(connector_id)
+            .map(|entry| entry.config.allowed_zones.clone())
+    }
+
     async fn simulate(&self, request: SimulateRequest) -> HostResult<SimulateResponse> {
         let connector_id = request.connector_id.clone();
         let connector = {
@@ -865,6 +879,31 @@ fn resolve_admin_bearer_token() -> HostResult<Option<Arc<str>>> {
         Err(std::env::VarError::NotUnicode(_)) => Err(HostError::InvalidFilter(
             "FCP_HOST_ADMIN_BEARER_TOKEN contains non-unicode data".to_string(),
         )),
+    }
+}
+
+/// HTTP header name for binding the caller's asserted principal to the
+/// capability token's subject/principal_id claim.
+///
+/// When present, the value is forwarded as `principal_override` to
+/// [`evaluate_live_preflight`]; [`verify_live_request`] rejects the
+/// request if the header value does not match the token's principal.
+/// When absent, the capability-based identity model applies — the
+/// token IS the principal (br-flywheel_connectors-t623k).
+const PRINCIPAL_HEADER: &str = "x-principal";
+
+/// Extract the caller's asserted principal from the `X-Principal` header.
+///
+/// Returns `None` when the header is absent, non-UTF-8, or trimmed to
+/// empty — all treated as "caller did not assert a principal, rely on
+/// the token alone."
+fn extract_principal_header(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(PRINCIPAL_HEADER)?.to_str().ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
     }
 }
 
@@ -1251,6 +1290,33 @@ async fn verify_live_request(
     request: &InvokeRequest,
     principal_override: Option<&str>,
 ) -> HostResult<VerifiedLiveRequest> {
+    // Connector home-zone binding (br-flywheel_connectors-by4vu).
+    //
+    // Without this gate, a structurally-valid capability token signed for
+    // zone Z lets the holder invoke ANY connector whose operations match
+    // the token's `capability` claim — even connectors whose manifest pins
+    // them to a different zone (e.g. a `home = z:work` connector reachable
+    // from a `z:secure` request). The gateway never consulted any
+    // connector-side zone declaration before this check.
+    //
+    // Enforcement is opt-in: when `allowed_zones` is empty (the default for
+    // existing inventories), the gateway preserves pre-binding behavior.
+    // Operators set the list per-connector to fail-closed against
+    // unintended zones. The error path emits a distinct rejection message
+    // so receipts and logs distinguish zone-binding violations from
+    // generic preflight failures.
+    if let Some(allowed) = state.registry.allowed_zones(&request.connector_id).await
+        && !allowed.is_empty()
+        && !allowed.iter().any(|zone| zone == request.zone_id.as_str())
+    {
+        return Err(HostError::PreflightFailed(format!(
+            "connector `{}` is not bound to zone `{}` (allowed: [{}])",
+            request.connector_id,
+            request.zone_id.as_str(),
+            allowed.join(", ")
+        )));
+    }
+
     let introspection = state.discovery.introspect(&request.connector_id).await?;
     let tool = introspection
         .tools
@@ -3790,8 +3856,22 @@ async fn cancel_handler(
     Ok(Json(response))
 }
 
+/// Handle POST /invoke.
+///
+/// Identity binding:
+///   - The default capability-based identity model treats the
+///     `capability_token` claim set as the request's authoritative
+///     principal. Callers that want defense-in-depth — e.g. an
+///     upstream proxy that has already authenticated the caller —
+///     can set the `X-Principal` header; its value is forwarded as
+///     `principal_override` and `verify_live_request` rejects the
+///     request if the header does not match the token's subject/
+///     principal_id claim.
+///   - Absent the header, behavior is unchanged: the token's claim
+///     set drives the principal (br-flywheel_connectors-t623k).
 async fn invoke_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(request): Json<InvokeRequest>,
 ) -> Result<Json<InvokeResponse>, (StatusCode, String)> {
     request.validate_idempotency_key().map_err(|err| {
@@ -3810,6 +3890,7 @@ async fn invoke_handler(
     let operation_id = request.id.to_string();
     let idempotency_key = request.idempotency_key.clone();
     let zone_id = request.zone_id.clone();
+    let asserted_principal = extract_principal_header(&headers);
     let started_at = Instant::now();
 
     tracing::debug!(
@@ -3818,10 +3899,12 @@ async fn invoke_handler(
         operation = %operation,
         operation_id = %operation_id,
         correlation_id,
+        asserted_principal = asserted_principal.as_deref(),
         "processing invoke request"
     );
 
-    let preflight = evaluate_live_preflight(&state, &request, None).await;
+    let preflight =
+        evaluate_live_preflight(&state, &request, asserted_principal.as_deref()).await;
     if !preflight.allowed {
         let reason = preflight
             .reason
@@ -3946,7 +4029,10 @@ async fn record_invoke_budget_usage(
     let mut metrics = response
         .and_then(|response| response.usage_metrics.clone())
         .unwrap_or_default();
-    if !metrics.iter().any(|metric| metric.kind == UsageMetricKind::Requests) {
+    if !metrics
+        .iter()
+        .any(|metric| metric.kind == UsageMetricKind::Requests)
+    {
         metrics.push(UsageMetric::requests(1));
     }
     let Some(evaluation) = budget.record_usage(zone_id, metrics.as_slice()).await else {
@@ -5006,6 +5092,7 @@ mod tests {
             config: Some(json!({})),
             categories: vec!["test".to_string()],
             version: None,
+            allowed_zones: Vec::new(),
         }
     }
 
@@ -5204,6 +5291,74 @@ mod tests {
             .expect_err("revoked token should be rejected before live execution");
         assert!(error.to_string().contains("host state"));
         assert!(error.to_string().contains("revoked"));
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn verify_live_request_rejects_zone_outside_connector_binding() {
+        // br-flywheel_connectors-by4vu: a structurally-valid capability
+        // token signed for zone Z must NOT let a request reach a connector
+        // whose `allowed_zones` does not include Z. Before this guard, the
+        // gateway looked the connector up by id only and let the request
+        // through as long as the token's zone matched the request's zone
+        // — completely ignoring whether the operator had bound the
+        // connector to that zone.
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping zone-binding test");
+            return;
+        }
+
+        let connector_id = "fcp.test.zone-binding:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+
+        let mut config = subprocess_test_connector_config(connector_id);
+        config.allowed_zones = vec![ZoneId::work().as_str().to_string()];
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![config],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            ..(*base_state).clone()
+        });
+
+        // Token issued for z:secure (different from the connector's
+        // allowed_zones). Without the binding check this slips past:
+        // verifier binds itself to z:secure, token's zone claim matches.
+        let cross_zone_token =
+            test_capability_token(&signing_key, "cap.test.echo", "test.echo", "z:secure");
+
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::try_from("z:secure".to_string()).expect("zone id"),
+            input: json!({ "message": "cross-zone attempt" }),
+            capability_token: cross_zone_token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let error = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("z:secure request to z:work-only connector must be rejected");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("not bound to zone") && msg.contains("z:secure"),
+            "expected zone-binding rejection naming `z:secure`, got: {msg}"
+        );
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
@@ -5495,7 +5650,10 @@ mod tests {
             Some(&zone),
             &connector_id,
             "test.echo",
-            Some(&InvokeResponse::ok(RequestId::random(), json!({"ok": true}))),
+            Some(&InvokeResponse::ok(
+                RequestId::random(),
+                json!({"ok": true}),
+            )),
         )
         .await;
 
@@ -5531,7 +5689,10 @@ mod tests {
             Some(&zone),
             &connector_id,
             "test.echo",
-            Some(&InvokeResponse::ok(RequestId::random(), json!({"ok": true}))),
+            Some(&InvokeResponse::ok(
+                RequestId::random(),
+                json!({"ok": true}),
+            )),
         )
         .await;
 
@@ -5547,8 +5708,7 @@ mod tests {
     async fn record_invoke_budget_usage_counts_failed_invoke_attempt() {
         let budget = BudgetPolicyEngine::new();
         let zone = ZoneId::work();
-        let connector_id =
-            ConnectorId::from_static("fcp.test.budget-failed-request:utility:1.0.0");
+        let connector_id = ConnectorId::from_static("fcp.test.budget-failed-request:utility:1.0.0");
         budget
             .upsert_policy(
                 zone.clone(),
@@ -6664,6 +6824,7 @@ mod tests {
             config: None,
             categories: vec![],
             version: None,
+            allowed_zones: Vec::new(),
         };
         let dbg = format!("{config:?}");
         assert!(dbg.contains("ConnectorConfig"));
@@ -6863,5 +7024,58 @@ mod tests {
 
         let inventory = state.registry.inventory().await;
         assert_eq!(inventory, vec![original]);
+    }
+
+    // ---- br-flywheel_connectors-t623k: X-Principal header ----
+
+    #[test]
+    fn extract_principal_header_absent_returns_none() {
+        let headers = HeaderMap::new();
+        assert_eq!(extract_principal_header(&headers), None);
+    }
+
+    #[test]
+    fn extract_principal_header_reads_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            PRINCIPAL_HEADER,
+            HeaderValue::from_static("user:alice"),
+        );
+        assert_eq!(
+            extract_principal_header(&headers),
+            Some("user:alice".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_principal_header_trims_surrounding_whitespace() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            PRINCIPAL_HEADER,
+            HeaderValue::from_static("  user:bob  "),
+        );
+        assert_eq!(
+            extract_principal_header(&headers),
+            Some("user:bob".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_principal_header_empty_after_trim_returns_none() {
+        let mut headers = HeaderMap::new();
+        headers.insert(PRINCIPAL_HEADER, HeaderValue::from_static("   "));
+        assert_eq!(extract_principal_header(&headers), None);
+    }
+
+    #[test]
+    fn extract_principal_header_rejects_non_utf8_as_none() {
+        // HeaderValue::from_bytes accepts non-ASCII; the `.to_str()` path
+        // in extract_principal_header rejects it, falling back to None
+        // rather than forwarding a lossy value as an asserted principal.
+        let mut headers = HeaderMap::new();
+        let bad = HeaderValue::from_bytes(&[0xff, 0xfe, 0xfd])
+            .expect("HeaderValue accepts arbitrary bytes");
+        headers.insert(PRINCIPAL_HEADER, bad);
+        assert_eq!(extract_principal_header(&headers), None);
     }
 }

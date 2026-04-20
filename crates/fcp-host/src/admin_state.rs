@@ -56,6 +56,15 @@ pub struct ManagedConnectorConfig {
     /// Optional explicit semantic version override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// Allowed invocation zones — when non-empty, the host gateway rejects
+    /// any `InvokeRequest` whose `zone_id` is not present here, even with
+    /// a structurally-valid capability token. Empty (the default) preserves
+    /// pre-binding behavior so existing inventories don't break, but
+    /// production deployments should pin every connector to its declared
+    /// home/allowed_sources set per the manifest's `[zones]` section.
+    /// br-flywheel_connectors-by4vu.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_zones: Vec<String>,
 }
 
 /// Live connector inventory mutation kind handled by the host admin plane.
@@ -10026,6 +10035,7 @@ mod tests {
             config: Some(serde_json::json!({"port": 8080})),
             categories: vec!["test".to_string()],
             version: Some("1.0.0".to_string()),
+            allowed_zones: Vec::new(),
         };
         let json = serde_json::to_string(&config).unwrap();
         let back: ManagedConnectorConfig = serde_json::from_str(&json).unwrap();
@@ -10060,6 +10070,7 @@ mod tests {
                 })),
                 categories: vec!["issues".to_string(), "scm".to_string()],
                 version: Some("1.2.3".to_string()),
+                allowed_zones: Vec::new(),
             },
         };
 

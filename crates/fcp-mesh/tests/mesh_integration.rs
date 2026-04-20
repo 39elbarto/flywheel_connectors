@@ -1461,7 +1461,7 @@ mod meshnode {
         let mut decoded = None;
         for frame in frames {
             if let Some(result) = node
-                .decode_control_plane(&frame, &zone_id, RetentionClass::Required)
+                .decode_control_plane(&NodeId::new("node-1"), &frame, &zone_id, RetentionClass::Required, 42)
                 .expect("decode control plane")
             {
                 decoded = Some(result);
@@ -1518,7 +1518,7 @@ mod meshnode {
         let handler = InMemoryControlPlaneHandler::new();
         for frame in frames {
             let _ = node
-                .process_control_plane_frame(&frame, &zone_id, RetentionClass::Required, &handler)
+                .process_control_plane_frame(&NodeId::new("node-1"), &frame, &zone_id, RetentionClass::Required, 77, &handler)
                 .expect("process control plane");
         }
 
@@ -1665,7 +1665,7 @@ mod meshnode {
         let handler = InMemoryControlPlaneHandler::new();
         for frame in frames {
             let _ = node_b
-                .process_control_plane_frame(&frame, &zone_id, RetentionClass::Required, &handler)
+                .process_control_plane_frame(&NodeId::new("node-a"), &frame, &zone_id, RetentionClass::Required, 99, &handler)
                 .expect("process control plane");
         }
 

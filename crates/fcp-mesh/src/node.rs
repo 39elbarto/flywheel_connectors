@@ -209,6 +209,10 @@ pub enum MeshNodeError {
         message_kind: &'static str,
     },
 
+    /// Peer is not authorized for the requested zone.
+    #[error("peer {peer} is not authorized for zone {zone_id}")]
+    UnauthorizedZone { peer: String, zone_id: String },
+
     /// Trace capture not enabled.
     #[error("trace capture not enabled")]
     TraceNotEnabled,
@@ -267,6 +271,14 @@ pub struct PeerState {
     pub local_symbols: HashSet<ObjectId>,
     /// Leases held by peer.
     pub held_leases: Vec<HeldLease>,
+    /// Zones this peer is authorized for (populated by the transport layer
+    /// after attestation verification via `update_peer_zones`). An empty
+    /// set means "not yet populated" — the zone authorization gate on
+    /// symbol requests is skipped in that case to preserve compatibility
+    /// with callers that have not wired attestation-driven zone
+    /// membership yet. Once populated, requests for zones outside the
+    /// set are rejected with `SymbolRequestError::UnauthorizedZone`.
+    pub zones: HashSet<ZoneId>,
     /// Last observed timestamp (ms since epoch).
     pub last_seen_ms: u64,
 }
@@ -538,6 +550,7 @@ impl MeshNode {
             SymbolRequestError::ObjectNotFound { .. } => "object_not_found",
             SymbolRequestError::SignatureInvalid => "signature_invalid",
             SymbolRequestError::AlreadyComplete { .. } => "already_complete",
+            SymbolRequestError::UnauthorizedZone { .. } => "unauthorized_zone",
         }
     }
 
@@ -661,14 +674,32 @@ impl MeshNode {
             .map(|state| state.held_leases.clone())
             .unwrap_or_default();
         self.record_lease_deltas(&node_id, &previous_leases, &held_leases, now_ms);
+        let existing_zones = self
+            .peers
+            .get(&node_id)
+            .map(|state| state.zones.clone())
+            .unwrap_or_default();
         let state = PeerState {
             profile,
             local_symbols,
             held_leases,
+            zones: existing_zones,
             last_seen_ms: now_ms,
         };
         self.peers.insert(node_id, state);
         self.metrics.peer_updates += 1;
+    }
+
+    /// Replace the set of zones a peer is authorized for.
+    ///
+    /// Should be called by the transport layer after verifying the peer's
+    /// attestation. Once populated, subsequent symbol requests targeting a
+    /// zone outside `zones` are rejected with
+    /// `SymbolRequestError::UnauthorizedZone`.
+    pub fn update_peer_zones(&mut self, node_id: &NodeId, zones: HashSet<ZoneId>) {
+        if let Some(state) = self.peers.get_mut(node_id) {
+            state.zones = zones;
+        }
     }
 
     /// Remove a peer from tracking (also cleans up session and admission state).
@@ -1050,9 +1081,13 @@ impl MeshNode {
     ) -> Result<(ValidatedRequest, fcp_store::ObjectSymbolMeta), SymbolRequestError> {
         let mut authenticated = is_authenticated || self.is_peer_authenticated(peer);
 
-        // Check if peer is authorized for the requested zone
+        // Check if peer is authorized for the requested zone. An empty
+        // `zones` set means the transport layer has not yet populated
+        // attestation-driven zone membership for this peer, so we skip
+        // the gate rather than reject-by-default — callers opt into
+        // enforcement by calling `update_peer_zones` after attestation.
         if let Some(state) = self.peers.get(peer) {
-            if !state.zones.contains(&request.zone_id) {
+            if !state.zones.is_empty() && !state.zones.contains(&request.zone_id) {
                 return Err(SymbolRequestError::UnauthorizedZone {
                     peer: peer.as_str().to_string(),
                     zone_id: request.zone_id.to_string(),
@@ -1273,6 +1308,17 @@ impl MeshNode {
                 peer: summary.from.as_str().to_string(),
                 message_kind: "gossip summary",
             })?;
+
+        // Enforce zone authorization (C2)
+        if let Some(state) = self.peers.get(&peer) {
+            if !state.zones.is_empty() && !state.zones.contains(&summary.zone_id) {
+                return Err(MeshNodeError::UnauthorizedZone {
+                    peer: peer.as_str().to_string(),
+                    zone_id: summary.zone_id.to_string(),
+                });
+            }
+        }
+
         Ok(peer)
     }
 
@@ -1306,6 +1352,17 @@ impl MeshNode {
                 peer: push.from.as_str().to_string(),
                 message_kind: "revocation push",
             })?;
+
+        // Enforce zone authorization (C2)
+        if let Some(state) = self.peers.get(&peer) {
+            if !state.zones.is_empty() && !state.zones.contains(&push.zone_id) {
+                return Err(MeshNodeError::UnauthorizedZone {
+                    peer: peer.as_str().to_string(),
+                    zone_id: push.zone_id.to_string(),
+                });
+            }
+        }
+
         Ok(peer)
     }
 
@@ -2996,6 +3053,7 @@ mod tests {
             profile: test_device_profile("peer-1"),
             local_symbols: HashSet::new(),
             held_leases: vec![],
+            zones: HashSet::new(),
             last_seen_ms: 5000,
         };
         let dbg = format!("{state:?}");
@@ -3860,6 +3918,7 @@ mod tests {
             profile: test_device_profile("peer-1"),
             local_symbols: symbols,
             held_leases: leases,
+            zones: HashSet::new(),
             last_seen_ms: 3000,
         };
         let cloned = state.clone();

@@ -2043,10 +2043,11 @@ fn mesh_node_control_plane_encode_decode() {
     let frames = node.encode_control_plane(&envelope, 1).expect("encode");
     assert!(!frames.is_empty());
 
+    let peer = NodeId::new("cp-peer");
     let mut result = None;
     for frame in &frames {
         if let Some(decoded) = node
-            .decode_control_plane(frame, &zone, RetentionClass::Required)
+            .decode_control_plane(&peer, frame, &zone, RetentionClass::Required, 1_000)
             .expect("decode")
         {
             result = Some(decoded);
@@ -2070,9 +2071,17 @@ fn mesh_node_process_control_plane_with_handler() {
     let handler = InMemoryControlPlaneHandler::new();
 
     let frames = node.encode_control_plane(&envelope, 2).expect("encode");
+    let peer = NodeId::new("handler-peer");
     for frame in &frames {
-        node.process_control_plane_frame(frame, &zone, RetentionClass::Required, &handler)
-            .expect("process");
+        node.process_control_plane_frame(
+            &peer,
+            frame,
+            &zone,
+            RetentionClass::Required,
+            2_000,
+            &handler,
+        )
+        .expect("process");
     }
     assert_eq!(handler.count(), 1);
     let stored = handler.get(&test_object_id(80)).expect("stored");

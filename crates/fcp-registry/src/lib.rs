@@ -1827,7 +1827,14 @@ impl LocalRegistryCatalog {
         }
 
         let binary_path = package_dir.join(binary_file);
-        let binary_bytes = std::fs::read(&binary_path).map_err(|source| {
+        let canonical_package_dir =
+            package_dir
+                .canonicalize()
+                .map_err(|source| RegistryCatalogError::ReadFile {
+                    path: package_dir.to_path_buf(),
+                    source,
+                })?;
+        let canonical_binary_path = binary_path.canonicalize().map_err(|source| {
             if source.kind() == std::io::ErrorKind::NotFound {
                 RegistryCatalogError::MissingBinary {
                     path: package_dir.to_path_buf(),
@@ -1836,6 +1843,24 @@ impl LocalRegistryCatalog {
             } else {
                 RegistryCatalogError::ReadFile {
                     path: binary_path.clone(),
+                    source,
+                }
+            }
+        })?;
+        if !canonical_binary_path.starts_with(&canonical_package_dir) {
+            return Err(RegistryCatalogError::PathTraversal {
+                binary_name: signature.binary_name.clone(),
+            });
+        }
+        let binary_bytes = std::fs::read(&canonical_binary_path).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                RegistryCatalogError::MissingBinary {
+                    path: package_dir.to_path_buf(),
+                    binary_name: signature.binary_name.clone(),
+                }
+            } else {
+                RegistryCatalogError::ReadFile {
+                    path: canonical_binary_path.clone(),
                     source,
                 }
             }
@@ -2154,6 +2179,16 @@ mod tests {
     use std::panic::{self, AssertUnwindSafe};
     use std::time::Instant;
     use uuid::Uuid;
+
+    #[cfg(unix)]
+    fn symlink_file(src: &Path, dst: &Path) {
+        std::os::unix::fs::symlink(src, dst).expect("create file symlink");
+    }
+
+    #[cfg(windows)]
+    fn symlink_file(src: &Path, dst: &Path) {
+        std::os::windows::fs::symlink_file(src, dst).expect("create file symlink");
+    }
 
     const PLACEHOLDER_HASH: &str = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -11758,6 +11793,38 @@ trusted_builders = ["trusted-ci"]
 
         let err = LocalRegistryCatalog::from_signed_package_dirs(&[package_dir])
             .expect_err("absolute path should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("path traversal"),
+            "expected PathTraversal error, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn local_registry_catalog_rejects_symlinked_binary_outside_package_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = ConnectorTarget {
+            os: "linux".to_string(),
+            arch: "amd64".to_string(),
+        };
+
+        let external_binary = temp.path().join("outside-binary");
+        std::fs::write(&external_binary, b"outside-binary").expect("write outside binary");
+
+        let package_dir = write_signed_package_dir(
+            temp.path(),
+            "fcp.symlink-test",
+            "1.0.0",
+            target,
+            "connector-bin",
+            b"outside-binary",
+        );
+        let package_binary = package_dir.join("connector-bin");
+        std::fs::remove_file(&package_binary).expect("remove package binary");
+        symlink_file(&external_binary, &package_binary);
+
+        let err = LocalRegistryCatalog::from_signed_package_dirs(&[package_dir])
+            .expect_err("symlink escape should be rejected");
         let msg = err.to_string();
         assert!(
             msg.contains("path traversal"),

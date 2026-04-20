@@ -11,7 +11,7 @@
 
 use std::fmt;
 
-use ciborium::de::from_reader;
+use ciborium::de::from_reader_with_recursion_limit;
 use ciborium::ser::into_writer;
 use ciborium::value::Value;
 use semver::Version;
@@ -177,6 +177,10 @@ pub enum SerializationError {
     #[error("duplicate map key (canonical key bytes: {key_hex})")]
     DuplicateMapKey { key_hex: String },
 
+    /// CBOR tags are not part of the FCP canonical serialization surface.
+    #[error("CBOR tag {tag} is not allowed in canonical FCP payloads")]
+    UnsupportedTag { tag: u64 },
+
     /// CBOR serialization failed.
     #[error("cbor serialization error: {0}")]
     CborSerialize(#[from] ciborium::ser::Error<std::io::Error>),
@@ -234,18 +238,36 @@ impl CanonicalSerializer {
     /// Returns `SerializationError::TrailingBytes` if extra bytes remain after decoding one value.
     /// Returns `SerializationError::NonCanonicalEncoding` if the decoded value does not re-encode
     /// to the exact input bytes using canonical encoding.
-    pub fn deserialize<T: Serialize + DeserializeOwned>(
+    pub fn deserialize<T: DeserializeOwned>(
         data: &[u8],
         expected_schema: &SchemaId,
     ) -> Result<T, SerializationError> {
-        let value = Self::deserialize_unchecked::<T>(data, expected_schema)?;
-        let canonical = Self::serialize(&value, expected_schema)?;
+        if data.len() > MAX_CANONICAL_OBJECT_BYTES {
+            return Err(SerializationError::PayloadTooLarge {
+                len: data.len(),
+                max: MAX_CANONICAL_OBJECT_BYTES,
+            });
+        }
+
+        let (got_hash, body) = split_schema_prefix(data)?;
+        let expected_hash = expected_schema.hash();
+        if got_hash != expected_hash {
+            return Err(SerializationError::SchemaMismatch {
+                expected: expected_hash,
+                got: got_hash,
+            });
+        }
+
+        let canonical_body = canonicalize_decoded_body(body)?;
+        let mut canonical = Vec::with_capacity(SCHEMA_HASH_LEN + canonical_body.len());
+        canonical.extend_from_slice(expected_hash.as_bytes());
+        canonical.extend_from_slice(&canonical_body);
 
         if canonical != data {
             return Err(SerializationError::NonCanonicalEncoding);
         }
 
-        Ok(value)
+        deserialize_cbor_body(&canonical_body)
     }
 
     /// Deserialize with schema verification but **without** canonical encoding enforcement.
@@ -281,14 +303,9 @@ impl CanonicalSerializer {
             });
         }
 
-        // Deserialize content (single CBOR item, no trailing bytes).
-        let mut reader = body;
-        let value = from_reader(&mut reader)?;
-        if !reader.is_empty() {
-            return Err(SerializationError::TrailingBytes);
-        }
+        validate_decoded_body(body)?;
 
-        Ok(value)
+        deserialize_cbor_body(body)
     }
 }
 
@@ -336,6 +353,57 @@ fn write_canonical_cbor<T: Serialize>(
 }
 
 const MAX_CANONICALIZATION_DEPTH: usize = 128;
+const MAX_DESERIALIZATION_RECURSION_LIMIT: usize = MAX_CANONICALIZATION_DEPTH + 1;
+
+fn map_cbor_deserialize_error(err: ciborium::de::Error<std::io::Error>) -> SerializationError {
+    match err {
+        ciborium::de::Error::RecursionLimitExceeded => SerializationError::DepthExceeded {
+            depth: MAX_DESERIALIZATION_RECURSION_LIMIT,
+            max: MAX_CANONICALIZATION_DEPTH,
+        },
+        other => SerializationError::CborDeserialize(other),
+    }
+}
+
+fn decode_cbor_body_as_value(body: &[u8]) -> Result<Value, SerializationError> {
+    let mut reader = body;
+    let value = from_reader_with_recursion_limit::<Value, _>(
+        &mut reader,
+        MAX_DESERIALIZATION_RECURSION_LIMIT,
+    )
+    .map_err(map_cbor_deserialize_error)?;
+    if !reader.is_empty() {
+        return Err(SerializationError::TrailingBytes);
+    }
+    Ok(value)
+}
+
+fn deserialize_cbor_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, SerializationError> {
+    let mut reader = body;
+    let value =
+        from_reader_with_recursion_limit::<T, _>(&mut reader, MAX_DESERIALIZATION_RECURSION_LIMIT)
+            .map_err(map_cbor_deserialize_error)?;
+    if !reader.is_empty() {
+        return Err(SerializationError::TrailingBytes);
+    }
+    Ok(value)
+}
+
+fn validate_decoded_body(body: &[u8]) -> Result<(), SerializationError> {
+    let value = decode_cbor_body_as_value(body)?;
+    let mut canonical = value.clone();
+    canonicalize_value_in_place(&mut canonical, 0)?;
+    Ok(())
+}
+
+fn canonicalize_decoded_body(body: &[u8]) -> Result<Vec<u8>, SerializationError> {
+    let mut value = decode_cbor_body_as_value(body)?;
+    canonicalize_value_in_place(&mut value, 0)?;
+
+    let mut out = Vec::with_capacity(body.len());
+    into_writer(&value, &mut out)?;
+    Ok(out)
+}
 
 fn canonicalize_value_in_place(v: &mut Value, depth: usize) -> Result<(), SerializationError> {
     if depth > MAX_CANONICALIZATION_DEPTH {
@@ -358,7 +426,7 @@ fn canonicalize_value_in_place(v: &mut Value, depth: usize) -> Result<(), Serial
             }
         }
         Value::Map(entries) => canonicalize_map(entries, depth + 1)?,
-        Value::Tag(_, boxed) => canonicalize_value_in_place(boxed, depth + 1)?,
+        Value::Tag(tag, _) => return Err(SerializationError::UnsupportedTag { tag: *tag }),
         _ => {}
     }
 
@@ -373,7 +441,10 @@ fn canonicalize_map(
 
     // Pre-allocate scratch buffer. Typical CBOR map keys are 10-50 bytes each.
     // Cap allocation to prevent memory amplification from maps with many tiny entries.
-    let scratch_cap = entries.len().saturating_mul(32).min(MAX_CANONICAL_OBJECT_BYTES);
+    let scratch_cap = entries
+        .len()
+        .saturating_mul(32)
+        .min(MAX_CANONICAL_OBJECT_BYTES);
     let mut scratch = Vec::with_capacity(scratch_cap);
     let mut with_keys = Vec::with_capacity(entries.len());
 
@@ -1061,6 +1132,51 @@ mod tests {
         assert!(matches!(err, SerializationError::NonCanonicalEncoding));
     }
 
+    #[test]
+    fn deserialize_unchecked_rejects_tagged_payload() {
+        let schema = SchemaId::new("fcp.test", "TaggedU8", Version::new(0, 1, 0));
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(schema.hash().as_bytes());
+        bytes.extend_from_slice(&[0xC0, 0x01]); // tag(0, 1)
+
+        let err = CanonicalSerializer::deserialize_unchecked::<u8>(&bytes, &schema).unwrap_err();
+        assert!(matches!(err, SerializationError::UnsupportedTag { tag: 0 }));
+    }
+
+    #[test]
+    fn deserialize_rejects_tagged_payload_before_retyping() {
+        let schema = SchemaId::new("fcp.test", "TaggedBool", Version::new(0, 1, 0));
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(schema.hash().as_bytes());
+        bytes.extend_from_slice(&[0xC1, 0xF5]); // tag(1, true)
+
+        let err = CanonicalSerializer::deserialize::<bool>(&bytes, &schema).unwrap_err();
+        assert!(matches!(err, SerializationError::UnsupportedTag { tag: 1 }));
+    }
+
+    #[test]
+    fn deserialize_unchecked_rejects_inputs_beyond_canonical_depth_limit() {
+        let schema = SchemaId::new("fcp.test", "Deep", Version::new(0, 1, 0));
+        let mut body = Vec::new();
+        for _ in 0..=MAX_CANONICALIZATION_DEPTH {
+            body.push(0x81); // array(1)
+        }
+        body.push(0x00);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(schema.hash().as_bytes());
+        bytes.extend_from_slice(&body);
+
+        let err = CanonicalSerializer::deserialize_unchecked::<Value>(&bytes, &schema).unwrap_err();
+        assert!(matches!(
+            err,
+            SerializationError::DepthExceeded {
+                depth: MAX_DESERIALIZATION_RECURSION_LIMIT,
+                max: MAX_CANONICALIZATION_DEPTH
+            }
+        ));
+    }
+
     // ============================================================================
     // to_canonical_cbor Tests (without schema prefix)
     // ============================================================================
@@ -1082,6 +1198,16 @@ mod tests {
         // CBOR for 42 is 0x18 0x2A (2 bytes).
         assert_eq!(bytes.len(), 2);
         assert_eq!(bytes, vec![0x18, 0x2A]);
+    }
+
+    #[test]
+    fn to_canonical_cbor_rejects_tagged_value() {
+        let tagged = Value::Tag(24, Box::new(Value::Bytes(vec![0x01])));
+        let err = to_canonical_cbor(&tagged).unwrap_err();
+        assert!(matches!(
+            err,
+            SerializationError::UnsupportedTag { tag: 24 }
+        ));
     }
 
     // ============================================================================
@@ -1131,6 +1257,15 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "duplicate map key (canonical key bytes: 6161)"
+        );
+    }
+
+    #[test]
+    fn error_display_unsupported_tag() {
+        let err = SerializationError::UnsupportedTag { tag: 24 };
+        assert_eq!(
+            err.to_string(),
+            "CBOR tag 24 is not allowed in canonical FCP payloads"
         );
     }
 
@@ -1495,11 +1630,11 @@ mod tests {
         // Canonical should be { "a": 2, "bb": 1 } (shorter keys first).
         let mut cbor_bytes = Vec::new();
         cbor_bytes.push(0xA2); // map with 2 entries
-        // "bb" first (non-canonical)
+                               // "bb" first (non-canonical)
         cbor_bytes.push(0x62); // text string, length 2
         cbor_bytes.extend_from_slice(b"bb");
         cbor_bytes.push(0x01); // integer 1
-        // "a" second
+                               // "a" second
         cbor_bytes.push(0x61); // text string, length 1
         cbor_bytes.push(b'a');
         cbor_bytes.push(0x02); // integer 2
@@ -1597,7 +1732,7 @@ mod tests {
     fn schema_hash_copy_trait() {
         let hash = SchemaHash::from_bytes([0xAB; 32]);
         let copied = hash; // Copy, not move
-        // Both should still be usable (Copy semantics).
+                           // Both should still be usable (Copy semantics).
         assert_eq!(hash, copied);
         assert_eq!(hash.as_bytes(), copied.as_bytes());
     }
@@ -2084,40 +2219,17 @@ mod tests {
     }
 
     // ========================================================================
-    // canonicalize_value_in_place — Tag variant
+    // canonicalize_value_in_place — Tag rejection
     // ========================================================================
 
     #[test]
-    fn canonicalize_tag_recurses_into_content() {
-        // A Tag wrapping a map should still canonicalize the inner map.
-        let inner_map = Value::Map(vec![
-            (Value::Text("bb".into()), Value::Integer(2.into())),
-            (Value::Text("a".into()), Value::Integer(1.into())),
-        ]);
-        let mut tagged = Value::Tag(42, Box::new(inner_map));
-        canonicalize_value_in_place(&mut tagged, 0).unwrap();
-
-        if let Value::Tag(tag, inner) = &tagged {
-            assert_eq!(*tag, 42);
-            if let Value::Map(entries) = inner.as_ref() {
-                // Keys should be sorted: "a" (len 1) before "bb" (len 2).
-                let keys: Vec<&str> = entries
-                    .iter()
-                    .filter_map(|(k, _)| {
-                        if let Value::Text(s) = k {
-                            Some(s.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                assert_eq!(keys, vec!["a", "bb"]);
-            } else {
-                panic!("expected map inside tag");
-            }
-        } else {
-            panic!("expected tag");
-        }
+    fn canonicalize_tag_is_rejected() {
+        let mut tagged = Value::Tag(42, Box::new(Value::Text("tagged".into())));
+        let err = canonicalize_value_in_place(&mut tagged, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            SerializationError::UnsupportedTag { tag: 42 }
+        ));
     }
 
     // ========================================================================
@@ -2415,42 +2527,17 @@ mod tests {
     }
 
     // ========================================================================
-    // Tag with nested tag (double-wrapped)
+    // Nested tag rejection
     // ========================================================================
 
     #[test]
-    fn canonicalize_double_nested_tag() {
-        let inner = Value::Map(vec![
-            (Value::Text("y".into()), Value::Integer(2.into())),
-            (Value::Text("x".into()), Value::Integer(1.into())),
-        ]);
-        let mut v = Value::Tag(1, Box::new(Value::Tag(2, Box::new(inner))));
-        canonicalize_value_in_place(&mut v, 0).unwrap();
-
-        // Verify inner map is sorted.
-        if let Value::Tag(1, outer) = &v {
-            if let Value::Tag(2, inner_box) = outer.as_ref() {
-                if let Value::Map(entries) = inner_box.as_ref() {
-                    let keys: Vec<&str> = entries
-                        .iter()
-                        .filter_map(|(k, _)| {
-                            if let Value::Text(s) = k {
-                                Some(s.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    assert_eq!(keys, vec!["x", "y"]);
-                } else {
-                    panic!("expected map");
-                }
-            } else {
-                panic!("expected inner tag");
-            }
-        } else {
-            panic!("expected outer tag");
-        }
+    fn canonicalize_double_nested_tag_is_rejected_at_outer_tag() {
+        let mut v = Value::Tag(
+            1,
+            Box::new(Value::Tag(2, Box::new(Value::Text("payload".into())))),
+        );
+        let err = canonicalize_value_in_place(&mut v, 0).unwrap_err();
+        assert!(matches!(err, SerializationError::UnsupportedTag { tag: 1 }));
     }
 
     // ========================================================================
@@ -3983,36 +4070,23 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn canonicalize_tag_with_array() {
-        let mut v = Value::Tag(
-            99,
-            Box::new(Value::Array(vec![
-                Value::Integer(3.into()),
-                Value::Integer(1.into()),
-            ])),
-        );
-        canonicalize_value_in_place(&mut v, 0).unwrap();
-        // Arrays don't get sorted, only maps do
-        if let Value::Tag(99, inner) = &v {
-            if let Value::Array(items) = inner.as_ref() {
-                assert_eq!(items.len(), 2);
-            } else {
-                panic!("expected array inside tag");
-            }
-        } else {
-            panic!("expected tag");
-        }
+    fn canonicalize_tag_with_array_is_rejected() {
+        let mut v = Value::Tag(99, Box::new(Value::Array(vec![Value::Integer(3.into())])));
+        let err = canonicalize_value_in_place(&mut v, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            SerializationError::UnsupportedTag { tag: 99 }
+        ));
     }
 
     #[test]
-    fn canonicalize_tag_with_integer() {
+    fn canonicalize_tag_with_integer_is_rejected() {
         let mut v = Value::Tag(100, Box::new(Value::Integer(42.into())));
-        canonicalize_value_in_place(&mut v, 0).unwrap();
-        if let Value::Tag(100, inner) = &v {
-            assert_eq!(*inner.as_ref(), Value::Integer(42.into()));
-        } else {
-            panic!("expected tag");
-        }
+        let err = canonicalize_value_in_place(&mut v, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            SerializationError::UnsupportedTag { tag: 100 }
+        ));
     }
 
     // ========================================================================
@@ -4847,56 +4921,32 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_depth_with_tags_and_maps() {
-        // Tag(1, Map(Tag(2, Map(...))))
+    fn canonicalize_depth_with_tags_and_maps_is_rejected() {
         let inner = Value::Map(vec![
             (Value::Text("b".into()), Value::Integer(2.into())),
             (Value::Text("a".into()), Value::Integer(1.into())),
         ]);
         let tagged_inner = Value::Tag(2, Box::new(inner));
         let mut v = Value::Map(vec![(Value::Text("wrapper".into()), tagged_inner)]);
-        canonicalize_value_in_place(&mut v, 0).unwrap();
-
-        // Verify inner map within tag is sorted.
-        if let Value::Map(outer) = &v {
-            if let Value::Tag(2, inner_box) = &outer[0].1 {
-                if let Value::Map(entries) = inner_box.as_ref() {
-                    let keys: Vec<&str> = entries
-                        .iter()
-                        .filter_map(|(k, _)| {
-                            if let Value::Text(s) = k {
-                                Some(s.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    assert_eq!(keys, vec!["a", "b"]);
-                }
-            }
-        }
+        let err = canonicalize_value_in_place(&mut v, 0).unwrap_err();
+        assert!(matches!(err, SerializationError::UnsupportedTag { tag: 2 }));
     }
 
     #[test]
-    fn canonicalize_tag_with_text() {
+    fn canonicalize_tag_with_text_is_rejected() {
         let mut v = Value::Tag(55, Box::new(Value::Text("tagged string".into())));
-        canonicalize_value_in_place(&mut v, 0).unwrap();
-        if let Value::Tag(55, inner) = &v {
-            assert_eq!(*inner.as_ref(), Value::Text("tagged string".into()));
-        } else {
-            panic!("expected tag");
-        }
+        let err = canonicalize_value_in_place(&mut v, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            SerializationError::UnsupportedTag { tag: 55 }
+        ));
     }
 
     #[test]
-    fn canonicalize_tag_with_null() {
+    fn canonicalize_tag_with_null_is_rejected() {
         let mut v = Value::Tag(0, Box::new(Value::Null));
-        canonicalize_value_in_place(&mut v, 0).unwrap();
-        if let Value::Tag(0, inner) = &v {
-            assert_eq!(*inner.as_ref(), Value::Null);
-        } else {
-            panic!("expected tag");
-        }
+        let err = canonicalize_value_in_place(&mut v, 0).unwrap_err();
+        assert!(matches!(err, SerializationError::UnsupportedTag { tag: 0 }));
     }
 
     // ========================================================================
@@ -5658,6 +5708,7 @@ mod tests {
             SerializationError::TrailingBytes,
             SerializationError::NonCanonicalEncoding,
             SerializationError::NonFiniteFloat,
+            SerializationError::UnsupportedTag { tag: 99 },
         ];
         for err in &simple_errors {
             assert!(err.source().is_none(), "expected no source for {err}");
@@ -5943,7 +5994,7 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_map_with_tag_in_value() {
+    fn canonicalize_map_with_tag_in_value_is_rejected() {
         let tagged = Value::Tag(
             42,
             Box::new(Value::Map(vec![
@@ -5952,23 +6003,11 @@ mod tests {
             ])),
         );
         let mut entries = vec![(Value::Text("wrapper".into()), tagged)];
-        canonicalize_map(&mut entries, 0).unwrap();
-        // Inner tagged map should be canonicalized.
-        if let Value::Tag(42, inner) = &entries[0].1 {
-            if let Value::Map(inner_entries) = inner.as_ref() {
-                let keys: Vec<&str> = inner_entries
-                    .iter()
-                    .filter_map(|(k, _)| {
-                        if let Value::Text(s) = k {
-                            Some(s.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                assert_eq!(keys, vec!["a", "b"]);
-            }
-        }
+        let err = canonicalize_map(&mut entries, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            SerializationError::UnsupportedTag { tag: 42 }
+        ));
     }
 
     // ========================================================================
@@ -5976,37 +6015,34 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn canonicalize_depth_with_mixed_nesting_types() {
-        // Array(Tag(Map(Array(Integer))))  = 4 levels of nesting
+    fn canonicalize_depth_with_mixed_nesting_types_rejects_tag() {
         let leaf = Value::Integer(42.into());
         let arr_leaf = Value::Array(vec![leaf]);
         let inner_map = Value::Map(vec![(Value::Text("k".into()), arr_leaf)]);
         let tagged = Value::Tag(1, Box::new(inner_map));
         let mut v = Value::Array(vec![tagged]);
-        canonicalize_value_in_place(&mut v, 0).unwrap();
+        let err = canonicalize_value_in_place(&mut v, 0).unwrap_err();
+        assert!(matches!(err, SerializationError::UnsupportedTag { tag: 1 }));
     }
 
     #[test]
-    fn canonicalize_tag_at_max_depth_boundary() {
-        // Build Tag(Tag(Tag(...Integer...))) at exactly MAX_CANONICALIZATION_DEPTH
+    fn canonicalize_tag_at_max_depth_boundary_is_rejected() {
         let mut v = Value::Integer(1.into());
         for _ in 0..MAX_CANONICALIZATION_DEPTH {
             v = Value::Tag(0, Box::new(v));
         }
-        canonicalize_value_in_place(&mut v, 0).unwrap();
+        let err = canonicalize_value_in_place(&mut v, 0).unwrap_err();
+        assert!(matches!(err, SerializationError::UnsupportedTag { tag: 0 }));
     }
 
     #[test]
-    fn canonicalize_tag_exceeding_max_depth_fails() {
+    fn canonicalize_tag_exceeding_max_depth_is_rejected_before_depth_walk() {
         let mut v = Value::Integer(1.into());
         for _ in 0..=MAX_CANONICALIZATION_DEPTH {
             v = Value::Tag(0, Box::new(v));
         }
         let err = canonicalize_value_in_place(&mut v, 0).unwrap_err();
-        assert!(
-            matches!(err, SerializationError::DepthExceeded { max, .. } if max == MAX_CANONICALIZATION_DEPTH),
-            "expected DepthExceeded, got {err:?}"
-        );
+        assert!(matches!(err, SerializationError::UnsupportedTag { tag: 0 }));
     }
 
     #[test]

@@ -421,4 +421,337 @@ mod tests {
             "different zones must produce different IDs"
         );
     }
+
+    // ── Spec-derived determinism matrix (FCP V3 §6) ──────────
+    //
+    // These tests lock down the normative MUST clauses for
+    // canonical serialization and keyed ObjectId derivation.
+    // Each test captures exactly one metamorphic relation;
+    // failures should narrow to a single violated invariant.
+
+    use fcp_cbor::{CanonicalSerializer, SchemaId};
+    use fcp_core::{ObjectId, ObjectIdKey, ZoneId};
+    use semver::Version;
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct SampleStruct {
+        id: u64,
+        name: String,
+        active: bool,
+    }
+
+    fn sample() -> SampleStruct {
+        SampleStruct {
+            id: 12_345,
+            name: "test".into(),
+            active: true,
+        }
+    }
+
+    fn schema_v1() -> SchemaId {
+        SchemaId::new("fcp.test", "GoldenStruct", Version::new(1, 0, 0))
+    }
+
+    fn all_canonical_zones() -> Vec<ZoneId> {
+        vec![
+            ZoneId::owner(),
+            ZoneId::private(),
+            ZoneId::work(),
+            ZoneId::community(),
+            ZoneId::public(),
+        ]
+    }
+
+    // ── Canonical serializer determinism ─────────────────────
+
+    #[test]
+    fn canonical_serializer_is_deterministic_across_invocations() {
+        let schema = schema_v1();
+        let value = sample();
+        let a = CanonicalSerializer::serialize(&value, &schema).unwrap();
+        let b = CanonicalSerializer::serialize(&value, &schema).unwrap();
+        assert_eq!(a, b, "repeated serialization must produce identical bytes");
+    }
+
+    #[test]
+    fn schema_version_bump_changes_schema_hash_prefix() {
+        let value = sample();
+        let v1 = schema_v1();
+        let v2 = SchemaId::new("fcp.test", "GoldenStruct", Version::new(2, 0, 0));
+        let a = CanonicalSerializer::serialize(&value, &v1).unwrap();
+        let b = CanonicalSerializer::serialize(&value, &v2).unwrap();
+        assert_ne!(
+            &a[..32],
+            &b[..32],
+            "major version change MUST produce a different schema hash"
+        );
+    }
+
+    #[test]
+    fn schema_namespace_change_changes_schema_hash_prefix() {
+        let value = sample();
+        let a_schema = SchemaId::new("fcp.test", "GoldenStruct", Version::new(1, 0, 0));
+        let b_schema = SchemaId::new("fcp.other", "GoldenStruct", Version::new(1, 0, 0));
+        let a = CanonicalSerializer::serialize(&value, &a_schema).unwrap();
+        let b = CanonicalSerializer::serialize(&value, &b_schema).unwrap();
+        assert_ne!(&a[..32], &b[..32]);
+    }
+
+    #[test]
+    fn schema_name_change_changes_schema_hash_prefix() {
+        let value = sample();
+        let a_schema = SchemaId::new("fcp.test", "GoldenStruct", Version::new(1, 0, 0));
+        let b_schema = SchemaId::new("fcp.test", "OtherStruct", Version::new(1, 0, 0));
+        let a = CanonicalSerializer::serialize(&value, &a_schema).unwrap();
+        let b = CanonicalSerializer::serialize(&value, &b_schema).unwrap();
+        assert_ne!(&a[..32], &b[..32]);
+    }
+
+    #[test]
+    fn schema_patch_bump_changes_schema_hash_prefix() {
+        let value = sample();
+        let a_schema = SchemaId::new("fcp.test", "GoldenStruct", Version::new(1, 0, 0));
+        let b_schema = SchemaId::new("fcp.test", "GoldenStruct", Version::new(1, 0, 1));
+        let a = CanonicalSerializer::serialize(&value, &a_schema).unwrap();
+        let b = CanonicalSerializer::serialize(&value, &b_schema).unwrap();
+        assert_ne!(
+            &a[..32],
+            &b[..32],
+            "any version component change MUST change the schema hash"
+        );
+    }
+
+    #[test]
+    fn canonical_payload_layout_is_schema_hash_then_cbor() {
+        // Layout MUST be: SCHEMA_HASH_LEN bytes || canonical CBOR bytes
+        let schema = schema_v1();
+        let value = sample();
+        let payload = CanonicalSerializer::serialize(&value, &schema).unwrap();
+        assert!(payload.len() >= 32, "payload must contain schema hash prefix");
+        // CBOR bytes come after the 32-byte hash
+        let cbor = &payload[32..];
+        assert!(!cbor.is_empty(), "payload must contain CBOR body");
+    }
+
+    // ── ObjectId determinism matrix ──────────────────────────
+
+    #[test]
+    fn object_id_all_five_canonical_zones_produce_distinct_ids() {
+        let schema = SchemaId::new("fcp.core", "CapabilityObject", Version::new(1, 0, 0));
+        let key = ObjectIdKey::from_bytes([0u8; 32]);
+        let content = b"determinism";
+        let ids: Vec<String> = all_canonical_zones()
+            .iter()
+            .map(|z| ObjectId::new(content, z, &schema, &key).to_string())
+            .collect();
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(
+            unique.len(),
+            5,
+            "the 5 canonical zones must derive 5 distinct ObjectIds for identical content"
+        );
+    }
+
+    #[test]
+    fn object_id_key_change_changes_id() {
+        let zone = ZoneId::work();
+        let schema = SchemaId::new("fcp.core", "CapabilityObject", Version::new(1, 0, 0));
+        let content = b"hello";
+        let id_a = ObjectId::new(
+            content,
+            &zone,
+            &schema,
+            &ObjectIdKey::from_bytes([0x00; 32]),
+        );
+        let id_b = ObjectId::new(
+            content,
+            &zone,
+            &schema,
+            &ObjectIdKey::from_bytes([0xFF; 32]),
+        );
+        assert_ne!(
+            id_a.to_string(),
+            id_b.to_string(),
+            "different ObjectIdKey MUST produce different ObjectId"
+        );
+    }
+
+    #[test]
+    fn object_id_schema_change_changes_id() {
+        let zone = ZoneId::work();
+        let key = ObjectIdKey::from_bytes([0u8; 32]);
+        let content = b"hello";
+        let s_a = SchemaId::new("fcp.core", "CapabilityObject", Version::new(1, 0, 0));
+        let s_b = SchemaId::new("fcp.core", "OtherObject", Version::new(1, 0, 0));
+        let id_a = ObjectId::new(content, &zone, &s_a, &key);
+        let id_b = ObjectId::new(content, &zone, &s_b, &key);
+        assert_ne!(
+            id_a.to_string(),
+            id_b.to_string(),
+            "different schema MUST produce different ObjectId"
+        );
+    }
+
+    #[test]
+    fn object_id_content_change_changes_id() {
+        let zone = ZoneId::work();
+        let schema = SchemaId::new("fcp.core", "CapabilityObject", Version::new(1, 0, 0));
+        let key = ObjectIdKey::from_bytes([0u8; 32]);
+        let id_a = ObjectId::new(b"hello", &zone, &schema, &key);
+        let id_b = ObjectId::new(b"hellp", &zone, &schema, &key);
+        assert_ne!(
+            id_a.to_string(),
+            id_b.to_string(),
+            "single-bit content change MUST produce a different ObjectId"
+        );
+    }
+
+    #[test]
+    fn object_id_empty_content_is_valid_and_deterministic() {
+        let zone = ZoneId::work();
+        let schema = SchemaId::new("fcp.core", "CapabilityObject", Version::new(1, 0, 0));
+        let key = ObjectIdKey::from_bytes([0u8; 32]);
+        let a = ObjectId::new(&[], &zone, &schema, &key);
+        let b = ObjectId::new(&[], &zone, &schema, &key);
+        assert_eq!(a.to_string(), b.to_string());
+        assert_eq!(a.to_string().len(), 64);
+    }
+
+    #[test]
+    fn object_id_large_content_is_stable_across_invocations() {
+        let zone = ZoneId::work();
+        let schema = SchemaId::new("fcp.core", "CapabilityObject", Version::new(1, 0, 0));
+        let key = ObjectIdKey::from_bytes([0x42; 32]);
+        let content = vec![0xABu8; 1_048_576]; // 1 MiB
+        let a = ObjectId::new(&content, &zone, &schema, &key);
+        let b = ObjectId::new(&content, &zone, &schema, &key);
+        assert_eq!(
+            a.to_string(),
+            b.to_string(),
+            "large content must derive deterministically"
+        );
+    }
+
+    #[test]
+    fn object_id_is_32_bytes_64_hex_chars_lowercase() {
+        let zone = ZoneId::work();
+        let schema = SchemaId::new("fcp.core", "CapabilityObject", Version::new(1, 0, 0));
+        let key = ObjectIdKey::from_bytes([0x01; 32]);
+        let id = ObjectId::new(b"x", &zone, &schema, &key);
+        let s = id.to_string();
+        assert_eq!(s.len(), 64, "ObjectId hex must be 64 chars (32 bytes)");
+        assert!(
+            s.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "ObjectId hex must be lowercase ascii hex"
+        );
+    }
+
+    #[test]
+    fn object_id_zero_key_still_deterministic() {
+        // Regression: all-zero key is a degenerate but valid input.
+        // It MUST still produce a deterministic, 32-byte id.
+        let zone = ZoneId::private();
+        let schema = SchemaId::new("fcp.core", "CapabilityObject", Version::new(1, 0, 0));
+        let key = ObjectIdKey::from_bytes([0u8; 32]);
+        let a = ObjectId::new(b"determinism", &zone, &schema, &key);
+        let b = ObjectId::new(b"determinism", &zone, &schema, &key);
+        assert_eq!(a.to_string(), b.to_string());
+    }
+
+    #[test]
+    fn object_id_bit_flip_in_key_changes_id() {
+        // Stronger key-separation: flipping a single bit in the 32-byte
+        // ObjectIdKey MUST produce a different ObjectId.
+        let zone = ZoneId::work();
+        let schema = SchemaId::new("fcp.core", "CapabilityObject", Version::new(1, 0, 0));
+        let k1 = [0x42u8; 32];
+        let mut k2 = k1;
+        k2[17] ^= 0x01;
+        let id_a = ObjectId::new(b"hello", &zone, &schema, &ObjectIdKey::from_bytes(k1));
+        let id_b = ObjectId::new(b"hello", &zone, &schema, &ObjectIdKey::from_bytes(k2));
+        assert_ne!(id_a.to_string(), id_b.to_string());
+    }
+
+    // ── ZoneId canonical surface ─────────────────────────────
+
+    #[test]
+    fn zone_id_canonical_strings_match_constants() {
+        assert_eq!(ZoneId::owner().as_str(), "z:owner");
+        assert_eq!(ZoneId::private().as_str(), "z:private");
+        assert_eq!(ZoneId::work().as_str(), "z:work");
+        assert_eq!(ZoneId::community().as_str(), "z:community");
+        assert_eq!(ZoneId::public().as_str(), "z:public");
+    }
+
+    #[test]
+    fn zone_id_tailscale_tag_roundtrip_for_all_canonical_zones() {
+        for zone in all_canonical_zones() {
+            let tag = zone.to_tailscale_tag();
+            assert!(
+                tag.starts_with("tag:fcp-"),
+                "tailscale tag must have 'tag:fcp-' prefix, got {tag}"
+            );
+            let back = ZoneId::from_tailscale_tag(&tag)
+                .unwrap_or_else(|e| panic!("roundtrip failed for {zone:?}: {e:?}"));
+            assert_eq!(zone.as_str(), back.as_str(), "roundtrip lost canonical name");
+        }
+    }
+
+    #[test]
+    fn zone_id_hash_is_deterministic() {
+        let z = ZoneId::work();
+        let h1 = z.hash();
+        let h2 = z.hash();
+        assert_eq!(h1, h2, "ZoneId hash must be deterministic");
+    }
+
+    #[test]
+    fn zone_id_hash_distinguishes_all_canonical_zones() {
+        let hashes: Vec<_> = all_canonical_zones().iter().map(ZoneId::hash).collect();
+        let unique: std::collections::HashSet<_> = hashes.iter().collect();
+        assert_eq!(
+            unique.len(),
+            5,
+            "canonical zones must produce 5 distinct hashes"
+        );
+    }
+
+    #[test]
+    fn zone_id_hash_output_is_32_bytes() {
+        let bytes = ZoneId::work().hash();
+        assert_eq!(
+            bytes.as_ref().len(),
+            32,
+            "ZoneIdHash must be 32 bytes (BLAKE3 output)"
+        );
+    }
+
+    #[test]
+    fn zone_id_tailscale_tag_rejects_non_fcp_prefix() {
+        let bad = ["", "fcp-work", "tag:other-work", "tag:fcp", "work"];
+        for tag in bad {
+            assert!(
+                ZoneId::from_tailscale_tag(tag).is_err(),
+                "tag {tag:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn object_id_produced_by_new_is_independent_of_call_order() {
+        // Calling ObjectId::new on inputs in any order (A then B, B then A)
+        // MUST produce the same hashes — i.e., no hidden global state.
+        let zone = ZoneId::work();
+        let schema = SchemaId::new("fcp.core", "CapabilityObject", Version::new(1, 0, 0));
+        let key = ObjectIdKey::from_bytes([0x11; 32]);
+
+        let first_a = ObjectId::new(b"alpha", &zone, &schema, &key);
+        let first_b = ObjectId::new(b"beta", &zone, &schema, &key);
+
+        let second_b = ObjectId::new(b"beta", &zone, &schema, &key);
+        let second_a = ObjectId::new(b"alpha", &zone, &schema, &key);
+
+        assert_eq!(first_a.to_string(), second_a.to_string());
+        assert_eq!(first_b.to_string(), second_b.to_string());
+    }
 }

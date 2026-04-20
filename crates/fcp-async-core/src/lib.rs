@@ -2547,6 +2547,7 @@ impl Default for TaskGroup {
 #[cfg(test)]
 mod tests {
     use std::future;
+    use std::task::Poll;
     use std::time::{Duration, Instant};
     use std::{
         sync::Arc,
@@ -4044,6 +4045,118 @@ mod tests {
             .send(7)
             .expect_err("receiver should be dropped after pending poll");
         assert_eq!(err.0, 7);
+    }
+
+    // Regression: 745e32ff.
+    //
+    // `Receiver::try_recv` and `Receiver::poll` both hold a `MutexGuard` for
+    // `self.shared.state` across `self.completed = true`. Under current NLL
+    // rules the guard keeps an immutable borrow of `self.shared` alive, so
+    // mutating `self.completed` through `self` is a hard compile error. The
+    // fix releases the guard via an explicit `drop(state)` before the
+    // completion assignment.
+    //
+    // This test drives all four completion branches (try_recv+value,
+    // try_recv+sender_dropped, poll+value, poll+sender_dropped) end-to-end
+    // and asserts that post-completion the receiver returns `RecvError` on
+    // subsequent calls. Any regression that stops releasing the guard early
+    // fails to compile; any regression that forgets to set `completed`
+    // before returning fails the second-call assertions below.
+    #[runtime::test]
+    async fn oneshot_completion_paths_release_lock_and_latch_completed_flag() {
+        // Path 1: try_recv with value present.
+        {
+            let (tx, mut rx) = channel::oneshot::channel::<u32>();
+            tx.send(11).expect("send should succeed");
+            assert_eq!(rx.try_recv().expect("value present"), 11);
+            assert_eq!(
+                rx.try_recv(),
+                Err(channel::oneshot::error::RecvError),
+                "second try_recv after successful take must observe completed flag",
+            );
+        }
+
+        // Path 2: try_recv with sender dropped.
+        {
+            let (tx, mut rx) = channel::oneshot::channel::<u32>();
+            drop(tx);
+            assert_eq!(rx.try_recv(), Err(channel::oneshot::error::RecvError));
+            assert_eq!(
+                rx.try_recv(),
+                Err(channel::oneshot::error::RecvError),
+                "second try_recv after sender-dropped branch must latch completed",
+            );
+        }
+
+        // Path 3: poll with value present.
+        {
+            let (tx, mut rx) = channel::oneshot::channel::<u32>();
+            tx.send(22).expect("send should succeed");
+            // Await drives `poll`, returning Ready(Ok(_)) through the
+            // value-present branch that sets `self.completed = true`.
+            assert_eq!((&mut rx).await.expect("await should receive value"), 22);
+            assert_eq!(
+                rx.try_recv(),
+                Err(channel::oneshot::error::RecvError),
+                "try_recv after completed poll must observe completed flag",
+            );
+        }
+
+        // Path 4: poll with sender dropped.
+        {
+            let (tx, mut rx) = channel::oneshot::channel::<u32>();
+            drop(tx);
+            let err = (&mut rx).await.expect_err("sender dropped");
+            assert_eq!(err, channel::oneshot::error::RecvError);
+            assert_eq!(
+                rx.try_recv(),
+                Err(channel::oneshot::error::RecvError),
+                "try_recv after sender-dropped poll must latch completed",
+            );
+        }
+    }
+
+    // Regression: 31902a6b.
+    //
+    // `JoinHandle::drop` now aborts the underlying task unless the handle
+    // was explicitly detached. `task::spawn_detached(fut)` is the convenience
+    // wrapper for `task::spawn(fut).detach()`; prior to the fix there was
+    // no way to keep a spawned task alive past the handle drop, so callers
+    // leaked futures at scope exit. A straight `task::spawn(async move { …
+    // tx.send(value) })` call followed by dropping the handle would cancel
+    // the future before the send completed.
+    //
+    // This test verifies that `spawn_detached` keeps the task alive long
+    // enough to deliver a value through a oneshot channel after the spawn
+    // site has dropped its reference. A regression that forgets to mark the
+    // detached handle as retained (or brings back the automatic abort in
+    // `Drop`) fails the await here with `RecvError`.
+    #[runtime::test]
+    async fn spawn_detached_keeps_task_running_past_caller_scope() {
+        let (tx, rx) = channel::oneshot::channel::<u32>();
+
+        // The `spawn_detached` helper must return nothing abortable, so the
+        // caller cannot accidentally cancel the task by dropping a handle.
+        fn assert_returns_unit<F>(f: F)
+        where
+            F: FnOnce() -> (),
+        {
+            f();
+        }
+        assert_returns_unit(|| {
+            task::spawn_detached(async move {
+                time::sleep(Duration::from_millis(20)).await;
+                tx.send(99).expect("detached sender should remain alive");
+            });
+        });
+
+        // Even without holding any handle, the task must still run to
+        // completion and deliver the value.
+        let value = time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("detached task should finish inside budget")
+            .expect("receiver should get detached result");
+        assert_eq!(value, 99);
     }
 
     // ─────────────────────────────────────────────────────────────────────

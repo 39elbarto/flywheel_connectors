@@ -633,6 +633,8 @@ pub trait ConnectorApp: FcpConnector {
 mod tests {
     use super::*;
 
+    use async_trait::async_trait;
+
     use crate::{
         AgentHint, ApprovalMode, EventCaps, EventInfo, HealthSnapshot, IdempotencyClass,
         InvokeRequest, InvokeResponse, RequestId, RiskLevel, SelfCheckReport, SessionId,
@@ -644,6 +646,12 @@ mod tests {
     #[derive(Debug)]
     struct ContractTestConnector {
         id: ConnectorId,
+    }
+
+    impl Default for ContractTestConnector {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl ContractTestConnector {

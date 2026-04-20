@@ -2059,25 +2059,75 @@ impl<C: PollingCursor> PollingSupervisor<C> {
                 PollResult::Success(items) => {
                     let item_count = items.len();
                     self.cursor.record_poll(Instant::now(), item_count);
+                    let previous_offset = self.cursor.offset();
+
+                    // Process items.
+                    let mut processing_failed = false;
+                    if !items.is_empty() {
+                        if let Err(e) = process_fn(items, &mut self.cursor) {
+                            if let Some(offset) = previous_offset {
+                                self.cursor.set_offset(offset);
+                            }
+                            tracing::error!(error = %e, "Failed to process poll results");
+                            processing_failed = true;
+                        }
+                    }
+
+                    if processing_failed {
+                        self.stats.failed_polls += 1;
+                        consecutive_failures = consecutive_failures.saturating_add(1);
+
+                        let message = "poll result processing failed".to_string();
+                        self.health.record_failure(&message);
+                        self.health.evaluate(&self.config);
+
+                        if consecutive_failures >= self.config.max_consecutive_failures {
+                            tracing::error!(
+                                failures = consecutive_failures,
+                                max = self.config.max_consecutive_failures,
+                                "Maximum consecutive failures reached"
+                            );
+                            if let Err(e) = self.cursor.persist() {
+                                tracing::error!(error = %e, "Failed to persist cursor");
+                            }
+                            return SupervisorOutcome::MaxFailuresReached {
+                                failures: consecutive_failures,
+                            };
+                        }
+
+                        let delay = self.compute_delay(consecutive_failures - 1, None);
+                        self.stats.backoff_time_ms +=
+                            u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+
+                        tracing::info!(
+                            delay_ms = delay.as_millis(),
+                            attempt = consecutive_failures,
+                            "Backing off before retry after processing failure"
+                        );
+
+                        if fcp_async_core::shutdown::sleep_or_shutdown(delay, &mut shutdown)
+                            .await
+                            .is_err()
+                        {
+                            if let Err(e) = self.cursor.persist() {
+                                tracing::error!(error = %e, "Failed to persist cursor on shutdown");
+                            }
+                            return SupervisorOutcome::Shutdown;
+                        }
+                        continue;
+                    }
+
                     self.stats.successful_polls += 1;
                     self.stats.items_processed += item_count as u64;
                     consecutive_failures = 0;
 
-                    // Record success for health tracking
                     self.health.record_success();
                     self.health.evaluate(&self.config);
 
-                    // Process items
-                    if !items.is_empty() {
-                        if let Err(e) = process_fn(items, &mut self.cursor) {
-                            tracing::error!(error = %e, "Failed to process poll results");
-                            // Don't fail the supervisor for processing errors
-                        }
-
-                        // Persist cursor after successful processing
-                        if let Err(e) = self.cursor.persist() {
-                            tracing::warn!(error = %e, "Failed to persist cursor");
-                        }
+                    if !items.is_empty()
+                        && let Err(e) = self.cursor.persist()
+                    {
+                        tracing::warn!(error = %e, "Failed to persist cursor");
                     }
 
                     tracing::debug!(
@@ -5138,6 +5188,99 @@ mod tests {
             assert_eq!(supervisor.stats().successful_polls, 2);
             assert_eq!(supervisor.stats().items_processed, 3);
             assert_eq!(supervisor.cursor().offset(), Some(31));
+        });
+    }
+
+    #[derive(Debug, Default)]
+    struct PersistTrackingPollingCursor {
+        offset: Option<i64>,
+        last_poll_at: Option<Instant>,
+        last_poll_count: usize,
+        persist_calls: Arc<AtomicUsize>,
+    }
+
+    impl PersistTrackingPollingCursor {
+        fn new(persist_calls: Arc<AtomicUsize>) -> Self {
+            Self {
+                offset: None,
+                last_poll_at: None,
+                last_poll_count: 0,
+                persist_calls,
+            }
+        }
+    }
+
+    impl PollingCursor for PersistTrackingPollingCursor {
+        fn offset(&self) -> Option<i64> {
+            self.offset
+        }
+
+        fn set_offset(&mut self, offset: i64) {
+            self.offset = Some(offset);
+        }
+
+        fn last_poll_at(&self) -> Option<Instant> {
+            self.last_poll_at
+        }
+
+        fn record_poll(&mut self, at: Instant, updates_received: usize) {
+            self.last_poll_at = Some(at);
+            self.last_poll_count = updates_received;
+        }
+
+        fn last_poll_count(&self) -> usize {
+            self.last_poll_count
+        }
+
+        fn persist(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.persist_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn restore(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn polling_supervisor_does_not_advance_or_persist_cursor_on_processing_failure() {
+        let _ = fcp_async_core::runtime::block_on_sync(async {
+            let config = SupervisorConfig::default()
+                .with_base_backoff_ms(1)
+                .with_max_consecutive_failures(2);
+            let persist_calls = Arc::new(AtomicUsize::new(0));
+            let cursor = PersistTrackingPollingCursor::new(Arc::clone(&persist_calls));
+            let mut supervisor = PollingSupervisor::new(config, cursor);
+
+            let poll_count = Arc::new(AtomicUsize::new(0));
+            let poll_count_clone = Arc::clone(&poll_count);
+
+            let outcome = supervisor
+                .run(
+                    fcp_async_core::channel::watch::channel(false).1,
+                    1,
+                    move |_offset| {
+                        poll_count_clone.fetch_add(1, Ordering::SeqCst);
+                        async { PollResult::success(vec![41]) }
+                    },
+                    |items, cursor| {
+                        for item in &items {
+                            cursor.advance_if_newer(i64::from(*item));
+                        }
+                        Err("processor failed".into())
+                    },
+                )
+                .await;
+
+            assert!(matches!(
+                outcome,
+                SupervisorOutcome::MaxFailuresReached { failures: 2 }
+            ));
+            assert_eq!(poll_count.load(Ordering::SeqCst), 2);
+            assert_eq!(supervisor.stats().successful_polls, 0);
+            assert_eq!(supervisor.stats().failed_polls, 2);
+            assert_eq!(supervisor.cursor().offset(), None);
+            assert_eq!(persist_calls.load(Ordering::SeqCst), 1);
         });
     }
 }

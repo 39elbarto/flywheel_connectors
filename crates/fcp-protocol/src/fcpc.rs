@@ -351,6 +351,43 @@ mod tests {
         assert_eq!(opened, plaintext);
     }
 
+    // Metamorphic: for every valid encoded frame, `decode(bytes).encode() ==
+    // bytes` must hold exactly — no field reordering, no length recomputation
+    // drift, no silent header normalization. This is strictly stronger than
+    // `seal_round_trip` (which only checks plaintext recovery after open).
+    #[test]
+    fn encode_decode_encode_is_byte_stable_across_flags_and_sizes() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let dir = SessionDirection::InitiatorToResponder;
+        let flag_sets = [
+            FcpcFrameFlags::default(),
+            FcpcFrameFlags::ENCRYPTED,
+            FcpcFrameFlags::all(),
+        ];
+        let payload_sizes = [0usize, 1, 15, 16, 17, 256, 4096];
+
+        for flags in flag_sets {
+            for &size in &payload_sizes {
+                let plaintext: Vec<u8> = (0..size).map(|i| (i as u8).wrapping_mul(31)).collect();
+                let frame = FcpcFrame::seal(session_id, 0xDEAD_BEEF, dir, flags, &plaintext, &K_CTX)
+                    .expect("seal should succeed");
+                let encoded = frame.encode();
+                let decoded = FcpcFrame::decode(&encoded).expect("decode should succeed");
+                let re_encoded = decoded.encode();
+                assert_eq!(
+                    encoded, re_encoded,
+                    "FcpcFrame encode must be byte-stable across decode roundtrip \
+                     (flags={flags:?}, size={size})"
+                );
+                // Also assert the post-decode frame opens back to the original
+                // plaintext — guards against decode succeeding on bytes that
+                // would subsequently fail AEAD verification.
+                let opened = decoded.open(dir, &K_CTX).expect("open should succeed");
+                assert_eq!(opened, plaintext);
+            }
+        }
+    }
+
     #[test]
     fn decode_rejects_bad_magic() {
         let session_id = MeshSessionId(SESSION_ID_BYTES);

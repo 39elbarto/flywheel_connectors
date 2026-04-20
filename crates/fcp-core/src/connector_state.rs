@@ -45,6 +45,17 @@ use crate::{
 /// downstream canonical re-encode check would catch the drift.
 pub const MAX_CURSOR_STATE_BYTES: usize = 64 * 1024;
 
+/// Maximum accepted size for either CRDT branch state fed into
+/// [`merge_crdt_states`].
+///
+/// CRDT states legitimately grow with the number of logical keys/entries,
+/// so the cap is larger than [`MAX_CURSOR_STATE_BYTES`]. 4 MiB accommodates
+/// realistic multi-thousand-entry `LwwMap`/`OrSet` states while still
+/// rejecting pathological branches crafted to force unbounded allocation
+/// during `ciborium::from_reader` — each merge deserializes both branches,
+/// so unbounded branches are a two-sided DoS surface.
+pub const MAX_CRDT_STATE_BYTES: usize = 4 * 1024 * 1024;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Signature Type
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1968,6 +1979,27 @@ pub fn merge_crdt_states(
     state_a: &[u8],
     state_b: &[u8],
 ) -> Result<Vec<u8>, CrdtMergeError> {
+    if state_a.len() > MAX_CRDT_STATE_BYTES {
+        return Err(CrdtMergeError::Deserialization {
+            crdt_type,
+            message: format!(
+                "branch_a: payload {} bytes exceeds {}-byte cap",
+                state_a.len(),
+                MAX_CRDT_STATE_BYTES
+            ),
+        });
+    }
+    if state_b.len() > MAX_CRDT_STATE_BYTES {
+        return Err(CrdtMergeError::Deserialization {
+            crdt_type,
+            message: format!(
+                "branch_b: payload {} bytes exceeds {}-byte cap",
+                state_b.len(),
+                MAX_CRDT_STATE_BYTES
+            ),
+        });
+    }
+
     match crdt_type {
         CrdtType::LwwMap => {
             let mut a: crate::LwwMap<String, serde_json::Value> = ciborium::from_reader(state_a)
@@ -3033,6 +3065,40 @@ mod tests {
     }
 
     // ── CRDT merge tests ──
+
+    #[test]
+    fn merge_crdt_states_rejects_oversized_branch_a() {
+        let oversized = vec![0u8; MAX_CRDT_STATE_BYTES + 1];
+        let small = vec![0xA0]; // valid-ish single-byte CBOR (empty map)
+        let err = merge_crdt_states(CrdtType::LwwMap, &oversized, &small)
+            .expect_err("oversized branch_a must be rejected");
+        match err {
+            CrdtMergeError::Deserialization { message, .. } => {
+                assert!(
+                    message.contains("branch_a") && message.contains("exceeds"),
+                    "expected branch_a size-cap error, got: {message}"
+                );
+            }
+            other => panic!("expected Deserialization, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_crdt_states_rejects_oversized_branch_b() {
+        let small = vec![0xA0];
+        let oversized = vec![0u8; MAX_CRDT_STATE_BYTES + 1];
+        let err = merge_crdt_states(CrdtType::LwwMap, &small, &oversized)
+            .expect_err("oversized branch_b must be rejected");
+        match err {
+            CrdtMergeError::Deserialization { message, .. } => {
+                assert!(
+                    message.contains("branch_b") && message.contains("exceeds"),
+                    "expected branch_b size-cap error, got: {message}"
+                );
+            }
+            other => panic!("expected Deserialization, got {other:?}"),
+        }
+    }
 
     #[test]
     fn merge_crdt_states_lww_map() {

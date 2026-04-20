@@ -1259,13 +1259,31 @@ impl WasiRuntime {
 }
 
 fn prepare_preopened_dir(path: &Path, writable: bool) -> WasiResult<Option<PathBuf>> {
-    ensure_preopen_path_is_stable(path, writable)?;
+    // First stability check: fails if the *declared* path already
+    // resolves through a symlinked ancestor.
+    let pre_create = ensure_preopen_path_is_stable(path, writable)?;
 
     if writable && !path.exists() {
         std::fs::create_dir_all(path).map_err(|error| WasiError::FsAccessDenied {
             path: path.display().to_string(),
             reason: format!("failed to create writable preopen directory: {error}"),
         })?;
+        // Re-verify after the FS mutation. create_dir_all walks the
+        // declared path component-by-component; an attacker with write
+        // access to an ancestor can race a regular directory for a
+        // symlink between our first check and the completed mkdir. If
+        // the post-create resolved path does not match what the pre-
+        // create check predicted, refuse instead of mounting the
+        // attacker-chosen target.
+        let post_create = ensure_preopen_path_is_stable(path, writable)?;
+        if post_create != pre_create {
+            return Err(WasiError::FsAccessDenied {
+                path: path.display().to_string(),
+                reason:
+                    "preopen path resolved to a different location after create_dir_all (symlink race)"
+                        .into(),
+            });
+        }
     }
 
     if !path.exists() {
@@ -1276,15 +1294,19 @@ fn prepare_preopened_dir(path: &Path, writable: bool) -> WasiResult<Option<PathB
         return Ok(None);
     }
 
-    path.canonicalize()
-        .map(Some)
-        .map_err(|error| WasiError::FsAccessDenied {
-            path: path.display().to_string(),
-            reason: format!("failed to canonicalize preopen directory: {error}"),
-        })
+    // Reuse the canonical path from the stability check instead of
+    // calling path.canonicalize() again. Two separate canonicalize
+    // syscalls over the same declared path open a TOCTOU window: an
+    // attacker can swap a regular dir for a symlink in between, and
+    // the second call silently follows the link — widening the guest
+    // mount to the attacker's chosen target. The stability check
+    // already canonicalized (via resolve_policy_path) and verified
+    // the resolved form matches the lexical normalization, so its
+    // output is the safest available path to hand to wasmtime.
+    Ok(Some(pre_create))
 }
 
-fn ensure_preopen_path_is_stable(path: &Path, writable: bool) -> WasiResult<()> {
+fn ensure_preopen_path_is_stable(path: &Path, writable: bool) -> WasiResult<PathBuf> {
     let requested = normalize_preopen_path(path);
     let resolved = resolve_policy_path(path);
     if requested != resolved {
@@ -1297,7 +1319,7 @@ fn ensure_preopen_path_is_stable(path: &Path, writable: bool) -> WasiResult<()> 
             },
         });
     }
-    Ok(())
+    Ok(resolved)
 }
 
 fn normalize_preopen_path(path: &Path) -> PathBuf {

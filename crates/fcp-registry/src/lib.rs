@@ -1815,7 +1815,9 @@ impl LocalRegistryCatalog {
         if binary_file.components().any(|c| {
             matches!(
                 c,
-                std::path::Component::ParentDir | std::path::Component::RootDir
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
             )
         }) || binary_file.is_absolute()
         {
@@ -2229,15 +2231,23 @@ mod tests {
     }
 
     fn minimal_manifest() -> ConnectorManifest {
-        let raw = include_str!("../../../tests/vectors/manifest/manifest_minimal.toml");
-        ConnectorManifest::parse_str_unchecked(raw).expect("manifest parse")
+        ConnectorManifest::parse_str_unchecked(&base_manifest_toml()).expect("manifest parse")
     }
 
     fn base_manifest_toml() -> String {
         let raw = include_str!("../../../tests/vectors/manifest/manifest_minimal.toml");
-        let unchecked = ConnectorManifest::parse_str_unchecked(raw).expect("manifest");
+        let patched = raw.replacen(
+            "required = [\"network.dns\"]\noptional = []",
+            "required = [\"network.dns\"]\noptional = [\"minimal.op\"]",
+            1,
+        );
+        assert_ne!(
+            patched, raw,
+            "minimal manifest fixture drifted; update base_manifest_toml"
+        );
+        let unchecked = ConnectorManifest::parse_str_unchecked(&patched).expect("manifest");
         let hash = unchecked.compute_interface_hash().expect("interface hash");
-        raw.replace(PLACEHOLDER_HASH, &hash.to_string())
+        patched.replace(PLACEHOLDER_HASH, &hash.to_string())
     }
 
     fn unsigned_manifest_toml(extra_sections: &str) -> String {
@@ -11748,6 +11758,38 @@ trusted_builders = ["trusted-ci"]
 
         let err = LocalRegistryCatalog::from_signed_package_dirs(&[package_dir])
             .expect_err("absolute path should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("path traversal"),
+            "expected PathTraversal error, got: {msg}",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn local_registry_catalog_rejects_windows_drive_prefixed_binary_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = ConnectorTarget {
+            os: "windows".to_string(),
+            arch: "amd64".to_string(),
+        };
+
+        let package_dir = write_signed_package_dir(
+            temp.path(),
+            "fcp.drive-prefix-test",
+            "1.0.0",
+            target,
+            "legit-binary.exe",
+            b"binary-content",
+        );
+
+        let sig_path = package_dir.join(REGISTRY_MANIFEST_SIGNATURE_FILENAME);
+        let sig_json = std::fs::read_to_string(&sig_path).expect("read signature");
+        let poisoned = sig_json.replace("legit-binary.exe", "C:evil.exe");
+        std::fs::write(&sig_path, poisoned).expect("write poisoned signature");
+
+        let err = LocalRegistryCatalog::from_signed_package_dirs(&[package_dir])
+            .expect_err("drive-prefixed binary_name should be rejected");
         let msg = err.to_string();
         assert!(
             msg.contains("path traversal"),

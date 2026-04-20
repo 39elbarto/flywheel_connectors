@@ -308,11 +308,22 @@ impl DurableSymbolState {
         removed_bytes
     }
 
+    fn scrub_corrupt_symbols(&mut self) -> u64 {
+        let mut removed_bytes = 0_u64;
+        for object in self.objects.values_mut() {
+            removed_bytes =
+                removed_bytes.saturating_add(Self::scrub_corrupt_symbols_locked(object));
+        }
+        self.used_bytes = self.used_bytes.saturating_sub(removed_bytes);
+        removed_bytes
+    }
+
     fn from_snapshot(snapshot: SymbolSnapshot) -> Self {
         let mut state = Self::default();
         for entry in snapshot.objects {
             state.load_entry(entry);
         }
+        state.scrub_corrupt_symbols();
         state
     }
 
@@ -955,6 +966,10 @@ fn load_durable_symbol_state(
     let mut last_seq = last_snapshot_seq;
     for record in records {
         last_seq = record.seq;
+        // A WAL checksum only proves the record was not torn mid-write. It
+        // does not prove the symbol payload still matches the object metadata,
+        // so replay must re-run semantic validation before mutating state.
+        state.validate_mutation(&record.op, u64::MAX)?;
         state.apply_loaded_mutation(record.op)?;
     }
 
@@ -1381,6 +1396,83 @@ mod tests {
             .await
             .expect("fetch honest");
         assert_eq!(fetched.data, honest.data);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn durable_symbol_store_rejects_semantically_invalid_wal_on_recovery() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut config = DurableSymbolStoreConfig::new(temp_dir.path().join("symbols"));
+        config.checkpoint_after_ops = 0;
+
+        let store = DurableSymbolStore::open(config.clone()).expect("open symbol store");
+        store
+            .put_object_meta(test_symbol_meta(10))
+            .await
+            .expect("put meta");
+        drop(store);
+
+        let wal_path = config.root_dir.join("symbols.wal.jsonl");
+        let forged = PersistentStoredSymbol {
+            meta: test_symbol(10, 0, 5).meta,
+            data: vec![0xAB; 7],
+        };
+        append_wal_record(&wal_path, 2, &SymbolWalOp::PutSymbol(forged)).expect("append wal");
+
+        match DurableSymbolStore::open(config) {
+            Err(SymbolStoreError::InvalidSymbol { reason }) => {
+                assert!(
+                    reason.contains("Symbol size mismatch"),
+                    "expected size mismatch, got {reason}"
+                );
+            }
+            Err(other) => panic!("expected InvalidSymbol, got {other:?}"),
+            Ok(_) => panic!("expected reopen to fail on invalid replayed symbol"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn durable_symbol_store_open_scrubs_invalid_snapshot_symbols_before_quota_checks() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut config = DurableSymbolStoreConfig::new(temp_dir.path().join("symbols"));
+        config.max_bytes = 256;
+        config.checkpoint_after_ops = 0;
+
+        fs::create_dir_all(&config.root_dir).expect("create root dir");
+        let snapshot_path = config.root_dir.join("symbols.snapshot.json");
+        let wal_path = config.root_dir.join("symbols.wal.jsonl");
+        clear_wal(&wal_path).expect("clear wal");
+
+        let object_meta = test_symbol_meta(11);
+        let invalid_symbol = PersistentStoredSymbol {
+            meta: SymbolMeta {
+                object_id: object_meta.object_id,
+                esi: 0,
+                zone_id: object_meta.zone_id.clone(),
+                source_node: Some(7),
+                stored_at: 100,
+            },
+            data: vec![0xCD; 200],
+        };
+        let snapshot = SymbolSnapshot {
+            objects: vec![SymbolSnapshotEntry {
+                meta: object_meta,
+                symbols: vec![invalid_symbol],
+            }],
+        };
+        write_snapshot(&snapshot_path, 0, &snapshot).expect("write snapshot");
+
+        let reopened = DurableSymbolStore::open(config).expect("open symbol store");
+        assert_eq!(
+            reopened.storage_used().await,
+            0,
+            "invalid snapshot symbol should be scrubbed"
+        );
+
+        reopened
+            .put_symbol(test_symbol(11, 0, 7))
+            .await
+            .expect("honest symbol should fit once invalid bytes are scrubbed");
+        assert_eq!(reopened.symbol_count(&test_object_id(11)).await, 1);
     }
 
     #[fcp_async_core::runtime::test]

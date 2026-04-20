@@ -274,8 +274,27 @@ impl TelegramClient {
     ///
     /// The `file_path` is percent-encoded to prevent path injection from
     /// potentially user-controlled values returned in Telegram API responses.
-    pub fn file_download_url(&self, file_path: &str) -> String {
+    pub fn file_download_url(&self, file_path: &str) -> Result<String, TelegramError> {
         use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+
+        if file_path.is_empty() {
+            return Err(TelegramError::InvalidFilePath(
+                "path must not be empty".into(),
+            ));
+        }
+        if file_path.starts_with('/') {
+            return Err(TelegramError::InvalidFilePath(
+                "absolute paths are not allowed".into(),
+            ));
+        }
+        if file_path
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+        {
+            return Err(TelegramError::InvalidFilePath(
+                "path traversal segments are not allowed".into(),
+            ));
+        }
 
         // Encode everything except unreserved chars and forward slash (path separator).
         const PATH_SEGMENT: &AsciiSet = &CONTROLS
@@ -292,10 +311,10 @@ impl TelegramClient {
             .add(b'\\');
 
         let encoded_path = utf8_percent_encode(file_path, PATH_SEGMENT).to_string();
-        format!(
+        Ok(format!(
             "{}/file/bot{}/{}",
             self.base_url, self.credential, encoded_path
-        )
+        ))
     }
 
     /// Send a photo to a chat.
@@ -994,7 +1013,7 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_file_download_url() {
         let client = TelegramClient::new("my_bot_token").unwrap();
-        let url = client.file_download_url("photos/file_0.jpg");
+        let url = client.file_download_url("photos/file_0.jpg").unwrap();
         assert_eq!(
             url,
             "https://api.telegram.org/file/botmy_bot_token/photos/file_0.jpg"
@@ -1500,7 +1519,7 @@ mod tests {
     #[test]
     fn test_file_download_url_default_base() {
         let client = TelegramClient::new("bot_token_123").unwrap();
-        let url = client.file_download_url("documents/file.pdf");
+        let url = client.file_download_url("documents/file.pdf").unwrap();
         assert_eq!(
             url,
             "https://api.telegram.org/file/botbot_token_123/documents/file.pdf"
@@ -1512,27 +1531,32 @@ mod tests {
         let client = TelegramClient::new("tok")
             .unwrap()
             .with_base_url("http://localhost:9999");
-        let url = client.file_download_url("pics/photo.jpg");
+        let url = client.file_download_url("pics/photo.jpg").unwrap();
         assert_eq!(url, "http://localhost:9999/file/bottok/pics/photo.jpg");
     }
 
     #[test]
-    fn test_file_download_url_encodes_special_chars() {
+    fn test_file_download_url_rejects_path_traversal() {
         let client = TelegramClient::new("tok").unwrap();
-        // A malicious file_path with path traversal and query injection
-        let url = client.file_download_url("../../../etc/passwd?foo=bar");
-        // Path traversal dots and slashes are preserved (slashes are valid path separators),
-        // but ? is encoded to prevent query injection
-        assert!(url.contains("%3F"), "query ? should be encoded: {url}");
-        assert!(!url.contains('?'), "raw ? should not appear: {url}");
+        let err = client
+            .file_download_url("../../../etc/passwd?foo=bar")
+            .unwrap_err();
+        assert!(matches!(err, TelegramError::InvalidFilePath(_)));
     }
 
     #[test]
     fn test_file_download_url_encodes_spaces_and_hashes() {
         let client = TelegramClient::new("tok").unwrap();
-        let url = client.file_download_url("photos/my file#2.jpg");
+        let url = client.file_download_url("photos/my file#2.jpg").unwrap();
         assert!(url.contains("%20"), "space should be encoded: {url}");
         assert!(url.contains("%23"), "hash should be encoded: {url}");
+    }
+
+    #[test]
+    fn test_file_download_url_rejects_absolute_paths() {
+        let client = TelegramClient::new("tok").unwrap();
+        let err = client.file_download_url("/etc/passwd").unwrap_err();
+        assert!(matches!(err, TelegramError::InvalidFilePath(_)));
     }
 
     // ─── SendMessageOptions tests ───────────────────────────────────

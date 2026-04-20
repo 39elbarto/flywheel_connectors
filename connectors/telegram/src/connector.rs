@@ -1425,7 +1425,12 @@ impl TelegramConnector {
                     retry_after: None,
                 })?;
 
-        let download_url = file.file_path.as_ref().map(|p| client.file_download_url(p));
+        let download_url = file
+            .file_path
+            .as_ref()
+            .map(|p| client.file_download_url(p))
+            .transpose()
+            .map_err(TelegramError::to_fcp_error)?;
 
         let response = json!({
             "file_id": file.file_id,
@@ -2539,6 +2544,41 @@ mod tests {
             assert_eq!(operation, "telegram.send_message");
         } else {
             assert!(false, "unexpected error: {err:?}");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_get_file_rejects_traversal_download_path() {
+        let (connector, token, server) = setup_connector_with_token("telegram.get_file").await;
+
+        Mock::given(method("GET"))
+            .and(path(token_path("getFile")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "file_id": "AgACAgIAAxkBAAI",
+                    "file_unique_id": "unique",
+                    "file_path": "../../../etc/passwd"
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = connector
+            .handle_invoke(serde_json::json!({
+                "operation": "telegram.get_file",
+                "input": { "file_id": "AgACAgIAAxkBAAI" },
+                "capability_token": token
+            }))
+            .await;
+
+        match result {
+            Err(FcpError::InvalidRequest { code, message }) => {
+                assert_eq!(code, 1003);
+                assert!(message.contains("Invalid file path"));
+            }
+            other => panic!("expected InvalidRequest for traversal file path, got {other:?}"),
         }
     }
 

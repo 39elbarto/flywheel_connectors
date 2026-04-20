@@ -21,6 +21,9 @@ pub enum TelegramError {
 
     #[error("Invalid chat ID: {0}")]
     InvalidChatId(String),
+
+    #[error("Invalid file path: {0}")]
+    InvalidFilePath(String),
 }
 
 impl TelegramError {
@@ -31,6 +34,7 @@ impl TelegramError {
             Self::Http(error) => error.is_timeout() || error.is_connect(),
             Self::Api { code, .. } => *code == 429 || *code >= 500,
             Self::InvalidChatId(_) => false,
+            Self::InvalidFilePath(_) => false,
         }
     }
 
@@ -83,6 +87,10 @@ impl TelegramError {
             Self::InvalidChatId(message) => FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid chat ID: {message}"),
+            },
+            Self::InvalidFilePath(message) => FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid file path: {message}"),
             },
         }
     }

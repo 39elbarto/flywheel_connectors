@@ -12,6 +12,7 @@ use fcp_core::{
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_sdk::prelude::*;
+use fcp_webhook::WebhookError;
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -800,9 +801,21 @@ impl WhatsAppConnector {
 
                 let events = webhook
                     .verify_and_parse(&headers, body_str.as_bytes())
-                    .map_err(|e| FcpError::InvalidRequest {
-                        code: 1007,
-                        message: format!("Webhook verification failed: {e}"),
+                    .map_err(|e| match e {
+                        WebhookError::InvalidSignature | WebhookError::MissingSignature(_) => {
+                            FcpError::Unauthorized {
+                                code: 2002,
+                                message: format!("Webhook signature verification failed: {e}"),
+                            }
+                        }
+                        WebhookError::ReplayDetected { .. } => FcpError::RateLimited {
+                            retry_after_ms: 0,
+                            violation: Some("duplicate webhook event".into()),
+                        },
+                        other => FcpError::InvalidRequest {
+                            code: 1007,
+                            message: format!("Webhook payload rejected: {other}"),
+                        },
                     })?;
 
                 // Apply replay detection to each event
@@ -1224,6 +1237,38 @@ mod tests {
         });
         let result = connector.invoke(req).await;
         assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_webhook_receive_invalid_signature_is_unauthorized() {
+        let mut connector = WhatsAppConnector::new();
+        connector
+            .configure(json!({
+                "phone_number_id": "123",
+                "access_token": "tok",
+                "app_secret": "secret",
+                "webhook_verify_token": "verify"
+            }))
+            .await
+            .unwrap();
+        connector.handshake(base_handshake()).await.unwrap();
+
+        let mut req = base_invoke(connector.id(), OP_WEBHOOK_RECEIVE);
+        req.input = json!({
+            "headers": {
+                "x-hub-signature-256": "sha256=deadbeef"
+            },
+            "body": "{\"object\":\"whatsapp_business_account\",\"entry\":[]}"
+        });
+
+        let err = connector.invoke(req).await.unwrap_err();
+        match err {
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2002);
+                assert!(message.contains("Webhook signature verification failed"));
+            }
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
     }
 
     #[test]

@@ -4922,9 +4922,12 @@ mod tests {
             (Value::Null, Value::Integer(2.into())),
         ];
         canonicalize_map(&mut entries, 0).unwrap();
-        // Null = 0xF6 (1 byte), Text "a" = 0x61 0x61 (2 bytes)
-        // Null should come first (shorter byte encoding).
-        assert_eq!(entries[0].0, Value::Null);
+        // RFC 8949 §4.2.1 uses bytewise lexicographic ordering of the
+        // deterministic encodings — NOT length-first. Text "a" encodes as
+        // 0x61 0x61 and Null as 0xF6; 0x61 < 0xF6 on the first byte, so
+        // Text "a" sorts before Null.
+        assert_eq!(entries[0].0, Value::Text("a".into()));
+        assert_eq!(entries[1].0, Value::Null);
     }
 
     // ========================================================================

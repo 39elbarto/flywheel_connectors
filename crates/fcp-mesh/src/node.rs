@@ -186,6 +186,14 @@ pub enum MeshNodeError {
         message_kind: &'static str,
     },
 
+    /// Control-plane message was signed for a different recipient node.
+    #[error("{message_kind} recipient mismatch: expected {expected}, got {actual}")]
+    RecipientMismatch {
+        message_kind: &'static str,
+        expected: String,
+        actual: String,
+    },
+
     /// Attached node signature is bound to the wrong node identifier.
     #[error("{message_kind} signature node mismatch: expected {expected}, got {actual}")]
     SignatureNodeMismatch {
@@ -1401,6 +1409,13 @@ impl MeshNode {
         status: &DecodeStatus,
         now_ms: u64,
     ) -> Result<(), MeshNodeError> {
+        if status.recipient_node_id != self.local_node_ts {
+            return Err(MeshNodeError::RecipientMismatch {
+                message_kind: "decode status",
+                expected: self.local_node_ts.as_str().to_string(),
+                actual: status.recipient_node_id.as_str().to_string(),
+            });
+        }
         let key = self.peer_signing_key(peer)?;
         status
             .verify(key)
@@ -1419,6 +1434,13 @@ impl MeshNode {
         ack: &SymbolAck,
         now_ms: u64,
     ) -> Result<(), MeshNodeError> {
+        if ack.recipient_node_id != self.local_node_ts {
+            return Err(MeshNodeError::RecipientMismatch {
+                message_kind: "symbol ack",
+                expected: self.local_node_ts.as_str().to_string(),
+                actual: ack.recipient_node_id.as_str().to_string(),
+            });
+        }
         let key = self.peer_signing_key(peer)?;
         ack.verify(key)
             .map_err(|_| MeshNodeError::PeerSignatureInvalid {
@@ -2411,6 +2433,8 @@ mod tests {
             zone_id: ZoneId::work(),
             zone_key_id: ZoneKeyId::from_bytes([0x55; 8]),
             epoch_id: 1,
+            recipient_node_id: TailscaleNodeId::new("node-1"),
+            request_nonce: 101,
             received_unique: 10,
             needed: 0,
             complete: true,
@@ -2437,6 +2461,8 @@ mod tests {
             ZoneId::work(),
             ZoneKeyId::from_bytes([0x77; 8]),
             1,
+            TailscaleNodeId::new("node-1"),
+            202,
             SymbolAckReason::Complete,
             5,
         );
@@ -3107,6 +3133,8 @@ mod tests {
                 zone_id.clone(),
                 ZoneKeyId::from_bytes([i; 8]),
                 1,
+                TailscaleNodeId::new("node-1"),
+                u64::from(i),
                 SymbolAckReason::Complete,
                 5,
             );
@@ -3894,6 +3922,8 @@ mod tests {
             zone_id: ZoneId::work(),
             zone_key_id: ZoneKeyId::from_bytes([0x66; 8]),
             epoch_id: 1,
+            recipient_node_id: TailscaleNodeId::new("node-1"),
+            request_nonce: 303,
             received_unique: 5,
             needed: 3,
             complete: false,
@@ -3904,6 +3934,73 @@ mod tests {
 
         node.handle_decode_status(&peer, &status, 2000)
             .expect("status should verify");
+    }
+
+    #[test]
+    fn handle_decode_status_rejects_replay_to_different_recipient() {
+        let mut node = test_node("node-2");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+
+        let mut status = DecodeStatus {
+            header: test_object_header(),
+            object_id: ObjectId::from_bytes([0x88; 32]),
+            zone_id: ZoneId::work(),
+            zone_key_id: ZoneKeyId::from_bytes([0x89; 8]),
+            epoch_id: 1,
+            recipient_node_id: TailscaleNodeId::new("node-1"),
+            request_nonce: 404,
+            received_unique: 1,
+            needed: 2,
+            complete: false,
+            missing_hint: None,
+            signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
+        };
+        status.sign(&signing_key);
+
+        let err = node
+            .handle_decode_status(&peer, &status, 1000)
+            .expect_err("replay to a different recipient should be rejected");
+        assert!(matches!(
+            err,
+            MeshNodeError::RecipientMismatch {
+                message_kind: "decode status",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn handle_symbol_ack_rejects_replay_to_different_recipient() {
+        let mut node = test_node("node-2");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+
+        let mut ack = SymbolAck::new(
+            test_object_header(),
+            ObjectId::from_bytes([0x90; 32]),
+            ZoneId::work(),
+            ZoneKeyId::from_bytes([0x91; 8]),
+            1,
+            TailscaleNodeId::new("node-1"),
+            505,
+            SymbolAckReason::Complete,
+            3,
+        );
+        ack.sign(&signing_key);
+
+        let err = node
+            .handle_symbol_ack(&peer, &ack, 1000)
+            .expect_err("replay to a different recipient should be rejected");
+        assert!(matches!(
+            err,
+            MeshNodeError::RecipientMismatch {
+                message_kind: "symbol ack",
+                ..
+            }
+        ));
     }
 
     // ---- Announce duplicate ----

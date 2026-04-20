@@ -585,6 +585,10 @@ pub struct DecodeStatus {
     pub zone_key_id: ZoneKeyId,
     /// Epoch ID for replay protection.
     pub epoch_id: u64,
+    /// Intended recipient node for this status update.
+    pub recipient_node_id: TailscaleNodeId,
+    /// Nonce unique to the symbol-request exchange this status belongs to.
+    pub request_nonce: u64,
     /// Unique symbols received so far for this object.
     pub received_unique: u32,
     /// Target required to decode (K-prime).
@@ -605,7 +609,7 @@ impl DecodeStatus {
     #[must_use]
     pub fn transcript_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(b"FCP2-DECODE-STATUS-V1");
+        buf.extend_from_slice(b"FCP2-DECODE-STATUS-V2");
         buf.extend_from_slice(self.object_id.as_bytes());
 
         let zone_bytes = self.zone_id.as_bytes();
@@ -615,6 +619,11 @@ impl DecodeStatus {
 
         buf.extend_from_slice(self.zone_key_id.as_bytes());
         buf.extend_from_slice(&self.epoch_id.to_le_bytes());
+        let recipient_bytes = self.recipient_node_id.as_str().as_bytes();
+        let recipient_len = u32::try_from(recipient_bytes.len()).unwrap_or(u32::MAX);
+        buf.extend_from_slice(&recipient_len.to_le_bytes());
+        buf.extend_from_slice(recipient_bytes);
+        buf.extend_from_slice(&self.request_nonce.to_le_bytes());
         buf.extend_from_slice(&self.received_unique.to_le_bytes());
         buf.extend_from_slice(&self.needed.to_le_bytes());
         buf.push(u8::from(self.complete));
@@ -681,7 +690,16 @@ impl DecodeStatus {
 /// ```rust,ignore
 /// use fcp_protocol::fcps::SymbolAck;
 ///
-/// let ack = SymbolAck::new(header, object_id, zone_id, zone_key_id, epoch_id, reason);
+/// let ack = SymbolAck::new(
+///     header,
+///     object_id,
+///     zone_id,
+///     zone_key_id,
+///     epoch_id,
+///     recipient_node_id,
+///     request_nonce,
+///     reason,
+/// );
 /// ack.sign(&signing_key);
 /// // Send via FCPC control plane
 /// ```
@@ -697,6 +715,10 @@ pub struct SymbolAck {
     pub zone_key_id: ZoneKeyId,
     /// Epoch ID for replay protection.
     pub epoch_id: u64,
+    /// Intended recipient node for this acknowledgment.
+    pub recipient_node_id: TailscaleNodeId,
+    /// Nonce unique to the symbol-request exchange this ack belongs to.
+    pub request_nonce: u64,
     /// Reason for the acknowledgment.
     pub reason: SymbolAckReason,
     /// Final count of unique symbols received (for metrics).
@@ -728,6 +750,8 @@ impl SymbolAck {
         zone_id: ZoneId,
         zone_key_id: ZoneKeyId,
         epoch_id: u64,
+        recipient_node_id: TailscaleNodeId,
+        request_nonce: u64,
         reason: SymbolAckReason,
         final_symbol_count: u32,
     ) -> Self {
@@ -737,6 +761,8 @@ impl SymbolAck {
             zone_id,
             zone_key_id,
             epoch_id,
+            recipient_node_id,
+            request_nonce,
             reason,
             final_symbol_count,
             signature: Ed25519Signature::from_bytes(&[0u8; 64]),
@@ -747,7 +773,7 @@ impl SymbolAck {
     #[must_use]
     pub fn transcript_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(b"FCP2-SYMBOL-ACK-V1");
+        buf.extend_from_slice(b"FCP2-SYMBOL-ACK-V2");
         buf.extend_from_slice(self.object_id.as_bytes());
 
         let zone_bytes = self.zone_id.as_bytes();
@@ -757,6 +783,11 @@ impl SymbolAck {
 
         buf.extend_from_slice(self.zone_key_id.as_bytes());
         buf.extend_from_slice(&self.epoch_id.to_le_bytes());
+        let recipient_bytes = self.recipient_node_id.as_str().as_bytes();
+        let recipient_len = u32::try_from(recipient_bytes.len()).unwrap_or(u32::MAX);
+        buf.extend_from_slice(&recipient_len.to_le_bytes());
+        buf.extend_from_slice(recipient_bytes);
+        buf.extend_from_slice(&self.request_nonce.to_le_bytes());
         buf.push(self.reason as u8);
         buf.extend_from_slice(&self.final_symbol_count.to_le_bytes());
         buf
@@ -1483,6 +1514,8 @@ mod tests {
             zone_id,
             zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
             epoch_id: 1000,
+            recipient_node_id: TailscaleNodeId::new("node-recipient"),
+            request_nonce: 11,
             received_unique: 500,
             needed: 1003,
             complete: false,
@@ -1523,6 +1556,8 @@ mod tests {
             zone_id,
             zone_key_id: ZoneKeyId::from_bytes([0x44; 8]),
             epoch_id: 2000,
+            recipient_node_id: TailscaleNodeId::new("node-recipient"),
+            request_nonce: 22,
             received_unique: 100,
             needed: 200,
             complete: true,
@@ -1543,6 +1578,8 @@ mod tests {
             zone_id,
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
             epoch_id: 0,
+            recipient_node_id: TailscaleNodeId::new("node-recipient"),
+            request_nonce: 0,
             received_unique: 0,
             needed: 100,
             complete: false,
@@ -1561,6 +1598,8 @@ mod tests {
             zone_id,
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
             epoch_id: 1,
+            recipient_node_id: TailscaleNodeId::new("node-recipient"),
+            request_nonce: 1,
             received_unique: 50,
             needed: 100,
             complete: false,
@@ -1600,6 +1639,8 @@ mod tests {
             zone_id,
             ZoneKeyId::from_bytes([0x22; 8]),
             1000,
+            TailscaleNodeId::new("node-recipient"),
+            11,
             SymbolAckReason::Complete,
             500,
         );
@@ -1635,6 +1676,8 @@ mod tests {
             zone_id,
             ZoneKeyId::from_bytes([0x44; 8]),
             2000,
+            TailscaleNodeId::new("node-recipient"),
+            22,
             SymbolAckReason::Cancelled,
             250,
         );
@@ -2099,6 +2142,8 @@ mod tests {
             zone_id,
             zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
             epoch_id: 1000,
+            recipient_node_id: TailscaleNodeId::new("node-det"),
+            request_nonce: 1,
             received_unique: 50,
             needed: 100,
             complete: false,
@@ -2108,7 +2153,7 @@ mod tests {
         let a = status.transcript_bytes();
         let b = status.transcript_bytes();
         assert_eq!(a, b);
-        assert!(a.starts_with(b"FCP2-DECODE-STATUS-V1"));
+        assert!(a.starts_with(b"FCP2-DECODE-STATUS-V2"));
     }
 
     #[test]
@@ -2135,6 +2180,8 @@ mod tests {
             zone_id: zone_id.clone(),
             zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
             epoch_id: 1,
+            recipient_node_id: TailscaleNodeId::new("node-det"),
+            request_nonce: 2,
             received_unique: 10,
             needed: 20,
             complete: false,
@@ -2147,6 +2194,8 @@ mod tests {
             zone_id,
             zone_key_id: ZoneKeyId::from_bytes([0x22; 8]),
             epoch_id: 1,
+            recipient_node_id: TailscaleNodeId::new("node-det"),
+            request_nonce: 2,
             received_unique: 10,
             needed: 20,
             complete: false,
@@ -2427,6 +2476,8 @@ mod tests {
             zone_id,
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
             epoch_id: 1,
+            recipient_node_id: TailscaleNodeId::new("node-helper"),
+            request_nonce: 1,
             received_unique: 100,
             needed: 100,
             complete: true,
@@ -2446,6 +2497,8 @@ mod tests {
             zone_id,
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
             epoch_id: 1,
+            recipient_node_id: TailscaleNodeId::new("node-helper"),
+            request_nonce: 1,
             received_unique: 50,
             needed: 100,
             complete: false,
@@ -2464,6 +2517,8 @@ mod tests {
             zone_id,
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
             epoch_id: 1,
+            recipient_node_id: TailscaleNodeId::new("node-helper"),
+            request_nonce: 1,
             received_unique: 50,
             needed: 100,
             complete: false,
@@ -2625,11 +2680,13 @@ mod tests {
             zone_id,
             ZoneKeyId::from_bytes([0; 8]),
             1,
+            TailscaleNodeId::new("node-ack"),
+            1,
             SymbolAckReason::Complete,
             100,
         );
         let transcript = ack.transcript_bytes();
-        assert!(transcript.starts_with(b"FCP2-SYMBOL-ACK-V1"));
+        assert!(transcript.starts_with(b"FCP2-SYMBOL-ACK-V2"));
     }
 
     #[test]
@@ -2640,6 +2697,8 @@ mod tests {
             ObjectId::from_bytes([0x11; 32]),
             zone_id,
             ZoneKeyId::from_bytes([0x22; 8]),
+            42,
+            TailscaleNodeId::new("node-ack"),
             42,
             SymbolAckReason::Cancelled,
             200,
@@ -2746,6 +2805,8 @@ mod tests {
             zone_id,
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
             epoch_id: 0,
+            recipient_node_id: TailscaleNodeId::new("node-none"),
+            request_nonce: 0,
             received_unique: 0,
             needed: 0,
             complete: true,
@@ -2894,6 +2955,8 @@ mod tests {
             zone_id: zone_id.clone(),
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
             epoch_id: 1,
+            recipient_node_id: TailscaleNodeId::new("node-comp"),
+            request_nonce: 1,
             received_unique: 10,
             needed: 10,
             complete: true,
@@ -2906,6 +2969,8 @@ mod tests {
             zone_id,
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
             epoch_id: 1,
+            recipient_node_id: TailscaleNodeId::new("node-comp"),
+            request_nonce: 1,
             received_unique: 10,
             needed: 10,
             complete: false,
@@ -2927,6 +2992,8 @@ mod tests {
             zone_id.clone(),
             ZoneKeyId::from_bytes([0; 8]),
             1,
+            TailscaleNodeId::new("node-ack-diff"),
+            1,
             SymbolAckReason::Complete,
             100,
         );
@@ -2935,6 +3002,8 @@ mod tests {
             ObjectId::from_bytes([0; 32]),
             zone_id,
             ZoneKeyId::from_bytes([0; 8]),
+            1,
+            TailscaleNodeId::new("node-ack-diff"),
             1,
             SymbolAckReason::Cancelled,
             100,
@@ -2954,6 +3023,8 @@ mod tests {
             zone_id.clone(),
             ZoneKeyId::from_bytes([0; 8]),
             1,
+            TailscaleNodeId::new("node-ack-cnt"),
+            1,
             SymbolAckReason::Complete,
             100,
         );
@@ -2962,6 +3033,8 @@ mod tests {
             ObjectId::from_bytes([0; 32]),
             zone_id,
             ZoneKeyId::from_bytes([0; 8]),
+            1,
+            TailscaleNodeId::new("node-ack-cnt"),
             1,
             SymbolAckReason::Complete,
             200,
@@ -3150,6 +3223,8 @@ mod tests {
             zone_id: zone_id.clone(),
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
             epoch_id: 0,
+            recipient_node_id: TailscaleNodeId::new("node-empty-hint"),
+            request_nonce: 0,
             received_unique: 0,
             needed: 0,
             complete: false,
@@ -3164,6 +3239,8 @@ mod tests {
             zone_id: zone_id.clone(),
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
             epoch_id: 0,
+            recipient_node_id: TailscaleNodeId::new("node-empty-hint"),
+            request_nonce: 0,
             received_unique: 0,
             needed: 0,
             complete: false,
@@ -3178,6 +3255,8 @@ mod tests {
             zone_id,
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
             epoch_id: 0,
+            recipient_node_id: TailscaleNodeId::new("node-empty-hint"),
+            request_nonce: 0,
             received_unique: 0,
             needed: 0,
             complete: false,
@@ -3221,6 +3300,8 @@ mod tests {
                 ObjectId::from_bytes([0; 32]),
                 zone_id.clone(),
                 ZoneKeyId::from_bytes([0; 8]),
+                1,
+                TailscaleNodeId::new("node-all-reasons"),
                 1,
                 reason,
                 100,
@@ -3345,6 +3426,8 @@ mod tests {
             zone_id: zone_id.clone(),
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
             epoch_id: 1,
+            recipient_node_id: TailscaleNodeId::new("node-diff"),
+            request_nonce: 1,
             received_unique,
             needed: 100,
             complete: false,
@@ -3366,6 +3449,8 @@ mod tests {
             zone_id: zone_id.clone(),
             zone_key_id: ZoneKeyId::from_bytes([0; 8]),
             epoch_id: 1,
+            recipient_node_id: TailscaleNodeId::new("node-diff"),
+            request_nonce: 1,
             received_unique: 50,
             needed,
             complete: false,

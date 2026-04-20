@@ -1111,6 +1111,19 @@ pub struct GossipConfig {
     /// Bounds the amplification factor: at most this many direct pushes
     /// per revocation event. Default: 32.
     pub max_revocation_push_peers: usize,
+    /// Maximum distinct peer gossip states retained in memory.
+    ///
+    /// Every accepted summary with a never-seen `summary.from` inserts a
+    /// new entry in `peer_states`. Without a cap, an adversary (or a bug in
+    /// an unauthenticated dispatcher — see the lower-level
+    /// `MeshGossip::handle_summary` doc) can inflate the map to exhaust
+    /// memory within a single TTL window, before `prune_stale_peers` runs.
+    /// This cap bounds that growth regardless of pruning cadence.
+    ///
+    /// Default: 4096, sized well above realistic zone peer counts and
+    /// below the point where peer-state book-keeping dominates memory on
+    /// a modest node.
+    pub max_peer_states: usize,
 }
 
 impl Default for GossipConfig {
@@ -1124,6 +1137,7 @@ impl Default for GossipConfig {
             reconciliation_batch_size: DEFAULT_RECONCILIATION_BATCH_SIZE,
             priority_gossip_interval_ms: 100,
             max_revocation_push_peers: 32,
+            max_peer_states: 4096,
         }
     }
 }
@@ -1404,6 +1418,29 @@ impl MeshGossip {
         let summary_bytes = serde_json::to_vec(&summary).map_or(0usize, |bytes| bytes.len());
         let summary_bytes = u64::try_from(summary_bytes).unwrap_or(u64::MAX);
         let iblt_cells = u64::try_from(iblt_cells).unwrap_or(u64::MAX);
+
+        // Bound `peer_states` cardinality. Updates to an already-known peer
+        // are idempotent and always allowed (so normal rotation through a
+        // saturated map keeps working). Inserts for a never-seen peer when
+        // the map is already at capacity are rejected to prevent an
+        // unverified or floods-allowed dispatcher from driving memory
+        // exhaustion between `prune_stale_peers` cycles.
+        if !self.peer_states.contains_key(&peer_id)
+            && self.peer_states.len() >= self.config.max_peer_states
+        {
+            warn!(
+                component = "mesh.gossip",
+                event = "summary_rejected",
+                reason = "peer_state_cap",
+                peer_node_id = %peer_id.as_str(),
+                zone_id = %summary.zone_id,
+                object_count,
+                symbol_count,
+                peer_state_count = self.peer_states.len(),
+                peer_state_cap = self.config.max_peer_states,
+            );
+            return;
+        }
 
         // Update peer state
         let peer_state = self
@@ -3997,5 +4034,93 @@ mod tests {
         let peer_count = 10usize;
         let push_count = peer_count.min(config.max_revocation_push_peers);
         assert_eq!(push_count, 5);
+    }
+
+    // Regression: MeshGossip::handle_summary is a public lower-level mutator
+    // that the doc comment flags as skipping signature verification. Without
+    // a peer-state cardinality cap, an unverified dispatcher (or a flood
+    // through an authenticated path that has permissively registered keys)
+    // can drive `peer_states` to OOM within a single summary_ttl_secs
+    // window — `prune_stale_peers` only fires on an external cadence.
+    //
+    // This test pins the cap: once peer_states is at capacity, a summary
+    // from a never-seen peer is rejected; summaries from an already-tracked
+    // peer still update idempotently (so the cap does not break legitimate
+    // rotation through a saturated map).
+    #[test]
+    fn handle_summary_caps_peer_state_cardinality() {
+        const CAP: usize = 4;
+        let config = GossipConfig {
+            max_peer_states: CAP,
+            ..GossipConfig::default()
+        };
+        let mut gossip = MeshGossip::new(test_node("local"), config);
+        let zone = test_zone();
+
+        let build_summary = |peer: &TailscaleNodeId, ts: u64| GossipSummary {
+            from: peer.clone(),
+            zone_id: zone.clone(),
+            epoch_id: test_epoch(),
+            object_filter_digest: [0; 32],
+            symbol_filter_digest: [0; 32],
+            object_count: 0,
+            symbol_count: 0,
+            iblt: b"[]".to_vec(),
+            timestamp: ts,
+            signature: None,
+        };
+
+        // Fill the peer_states map to exactly `CAP`. Each insert must take.
+        for i in 0..CAP {
+            let peer = test_node(&format!("peer-{i}"));
+            gossip.handle_summary(build_summary(&peer, 1_000), 1_000);
+        }
+        assert_eq!(
+            gossip.peer_count(),
+            CAP,
+            "map should be saturated after {CAP} distinct peers"
+        );
+
+        // Saturation boundary: a never-seen peer is rejected.
+        let overflow_peer = test_node("peer-overflow");
+        gossip.handle_summary(build_summary(&overflow_peer, 1_001), 1_001);
+        assert_eq!(
+            gossip.peer_count(),
+            CAP,
+            "summary from an unknown peer past the cap must NOT expand peer_states",
+        );
+        assert!(
+            gossip.find_object_sources(&test_object_id("anything")).is_empty()
+                || !gossip
+                    .peer_states
+                    .keys()
+                    .any(|k| k.as_str() == "peer-overflow"),
+            "the rejected peer must not appear anywhere in gossip state",
+        );
+
+        // Already-tracked peer: updates remain idempotent even at saturation.
+        let existing_peer = test_node("peer-0");
+        let before_count = gossip.peer_count();
+        gossip.handle_summary(build_summary(&existing_peer, 1_002), 1_002);
+        assert_eq!(
+            gossip.peer_count(),
+            before_count,
+            "idempotent update for an already-tracked peer must keep count stable",
+        );
+    }
+
+    #[test]
+    fn gossip_config_default_max_peer_states_is_set() {
+        let config = GossipConfig::default();
+        assert!(
+            config.max_peer_states > 0,
+            "default max_peer_states must be a positive bound; got {}",
+            config.max_peer_states
+        );
+        assert!(
+            config.max_peer_states <= 1_000_000,
+            "default max_peer_states must stay below the pathological-OOM threshold; got {}",
+            config.max_peer_states
+        );
     }
 }

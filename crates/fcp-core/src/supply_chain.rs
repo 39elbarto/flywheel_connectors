@@ -13,6 +13,7 @@
 use std::collections::HashSet;
 use std::fmt;
 
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use fcp_crypto::canonicalize::{canonical_signing_bytes, to_deterministic_cbor};
 use serde::{Deserialize, Serialize};
@@ -243,6 +244,16 @@ impl SupplyChainSignature {
         if self.signature.trim().is_empty() {
             return Err(SupplyChainError::InvalidSignature {
                 reason: "signature cannot be empty".to_string(),
+            });
+        }
+        let signature_len = decode_signature_bytes(&self.signature).map_err(|reason| {
+            SupplyChainError::InvalidSignature { reason }
+        })?;
+        if signature_len != 64 {
+            return Err(SupplyChainError::InvalidSignature {
+                reason: format!(
+                    "signature must decode to 64 bytes for ed25519, got {signature_len}"
+                ),
             });
         }
         let expected: Vec<String> = expected_fields
@@ -768,6 +779,32 @@ fn is_lower_hex_64(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn decode_signature_bytes(signature: &str) -> Result<usize, String> {
+    let trimmed = signature.trim();
+    if trimmed.len() % 2 == 0
+        && trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return hex::decode(trimmed)
+            .map(|bytes| bytes.len())
+            .map_err(|error| format!("signature hex decoding failed: {error}"));
+    }
+
+    for engine in [
+        &base64::engine::general_purpose::STANDARD,
+        &base64::engine::general_purpose::STANDARD_NO_PAD,
+        &base64::engine::general_purpose::URL_SAFE,
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+    ] {
+        if let Ok(bytes) = engine.decode(trimmed) {
+            return Ok(bytes.len());
+        }
+    }
+
+    Err("signature must be valid hex or base64".to_string())
+}
+
 fn canonical_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, SupplyChainError> {
     let as_value =
         serde_json::to_value(value).map_err(|err| SupplyChainError::CanonicalizationFailed {
@@ -1182,10 +1219,14 @@ mod tests {
 
     use super::*;
 
+    fn valid_signature_repr() -> String {
+        hex::encode([0x5a; 64])
+    }
+
     fn attestation_signature() -> SupplyChainSignature {
         SupplyChainSignature::new(
             "owner-key-1",
-            "sig-data",
+            valid_signature_repr(),
             SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS
                 .iter()
                 .map(|field| (*field).to_string())
@@ -1196,7 +1237,7 @@ mod tests {
     fn sbom_signature() -> SupplyChainSignature {
         SupplyChainSignature::new(
             "owner-key-1",
-            "sig-data",
+            valid_signature_repr(),
             SBOM_SIGNED_FIELDS
                 .iter()
                 .map(|field| (*field).to_string())
@@ -2861,12 +2902,38 @@ mod tests {
         let sig = SupplyChainSignature {
             algorithm: "ed25519".to_string(),
             key_id: "   ".to_string(),
-            signature: "data".to_string(),
+            signature: valid_signature_repr(),
             signed_fields: vec!["format".to_string()],
         };
         let err = sig.validate(&["format"]).unwrap_err();
         assert!(matches!(err, SupplyChainError::InvalidSignature { .. }));
         assert!(err.to_string().contains("key_id"));
+    }
+
+    #[test]
+    fn signature_validate_rejects_non_decodable_signature() {
+        let sig = SupplyChainSignature {
+            algorithm: "ed25519".to_string(),
+            key_id: "key-1".to_string(),
+            signature: "not base64 or hex !!!".to_string(),
+            signed_fields: vec!["format".to_string()],
+        };
+        let err = sig.validate(&["format"]).unwrap_err();
+        assert!(matches!(err, SupplyChainError::InvalidSignature { .. }));
+        assert!(err.to_string().contains("hex or base64"));
+    }
+
+    #[test]
+    fn signature_validate_rejects_wrong_length_signature() {
+        let sig = SupplyChainSignature {
+            algorithm: "ed25519".to_string(),
+            key_id: "key-1".to_string(),
+            signature: hex::encode([0x11; 32]),
+            signed_fields: vec!["format".to_string()],
+        };
+        let err = sig.validate(&["format"]).unwrap_err();
+        assert!(matches!(err, SupplyChainError::InvalidSignature { .. }));
+        assert!(err.to_string().contains("64 bytes"));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

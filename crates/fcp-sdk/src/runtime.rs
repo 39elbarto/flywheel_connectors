@@ -2160,7 +2160,7 @@ impl<C: PollingCursor> PollingSupervisor<C> {
                     self.health.record_success();
                     self.health.evaluate(&self.config);
 
-                    if !items.is_empty()
+                    if item_count > 0
                         && let Err(e) = self.cursor.persist()
                     {
                         tracing::warn!(error = %e, "Failed to persist cursor");

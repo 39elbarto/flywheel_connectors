@@ -822,8 +822,11 @@ allowed_targets = ["{zone}"]
 forbidden = ["z:public"]
 
 [capabilities]
-# Start capability-free. Add only the smallest slice you can verify.
-required = []
+# The scaffold_status operation requires its own capability; every
+# operation's `capability` entry MUST appear in `required` or `optional`
+# per manifest lint.  Add further required caps only after you have a
+# matching invoke path and verification evidence.
+required = ["{short_name}.scaffold_status"]
 optional = []
 # Default-deny: explicitly forbid dangerous capabilities
 forbidden = ["system.exec", "system.privileged"]
@@ -2654,37 +2657,112 @@ async fn test_happy_path_scaffold_status() {{
 
 #[fcp_async_core::runtime::test]
 async fn test_missing_capability_denied() {{
-    // TODO: Test that operations fail without proper capability tokens
-    // This verifies the default-deny security model
+    // Default-deny security model: an invoke whose capability token
+    // does not cover the requested operation must be rejected.  We
+    // build a token with an empty `operations` list (signed with the
+    // correct key, so signature verification passes and we exercise
+    // the capability-matching path) and assert the connector refuses
+    // the call with an FCP-3xxx capability-class error code.
+    let mut connector = {struct_name}Connector::new();
+    let signing_key = test_signing_key();
+
+    connector
+        .configure(serde_json::json!({{}}))
+        .await
+        .expect("configure");
+    connector
+        .handshake(base_handshake(&signing_key))
+        .await
+        .expect("handshake");
+
+    let now = chrono::Utc::now();
+    let empty_ops_token = CapabilityToken::from_raw(
+        fcp_crypto::cose::CapabilityTokenBuilder::new()
+            .capability_id(CAP_SCAFFOLD_STATUS)
+            .zone_id("z:work")
+            .principal("user:test")
+            .issuer("node:test")
+            .operations(&[])
+            .validity(now, now + chrono::Duration::hours(1))
+            .sign(&signing_key)
+            .expect("capability token should sign"),
+    );
+
+    let mut req = base_invoke(connector.id(), OP_SCAFFOLD_STATUS, &signing_key);
+    req.capability_token = empty_ops_token;
+
+    let err = connector
+        .invoke(req)
+        .await
+        .expect_err("invoke with zero-operation capability token must be denied");
+    let code = err.error_code();
+    assert!(
+        code.starts_with("FCP-3") || code.starts_with("FCP-4"),
+        "denial must surface a capability/zone-class error code (FCP-3xxx/FCP-4xxx), got {{code}}",
+    );
 }}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Network constraint tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
-async fn test_network_constraints_enforced() {{
-    // TODO: Test that network requests to non-allowed hosts are blocked
-    // This verifies the default-deny NetworkConstraints
+#[test]
+fn test_network_constraints_enforced() {{
+    // Default-deny network posture: the scaffolded manifest MUST NOT
+    // declare any `host_allow` entries, and system.exec /
+    // system.privileged MUST remain in the forbidden-capability list.
+    // The host-side proxy enforces the network policy at runtime; this
+    // test freezes the manifest's own declarations so future widening
+    // requires an intentional, reviewable change.
+    let manifest_toml = include_str!("../fcp.toml");
+    assert!(
+        !manifest_toml.contains("host_allow"),
+        "scaffolded fcp.toml must not declare network host_allow entries without explicit review",
+    );
+    assert!(
+        manifest_toml.contains("forbidden = [\"system.exec\", \"system.privileged\"]"),
+        "scaffolded fcp.toml must keep system.exec/system.privileged in the forbidden list",
+    );
+    assert!(
+        manifest_toml.contains("profile = \"strict\""),
+        "scaffolded fcp.toml must declare a strict sandbox profile",
+    );
 }}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Secret redaction tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[fcp_async_core::runtime::test]
-async fn test_secrets_not_logged() {{
-    // TODO: Verify that sensitive data is never logged
-    // - Capture tracing output
-    // - Perform operations with sensitive data
-    // - Assert no sensitive values appear in logs
+#[test]
+fn test_secrets_not_logged() {{
+    // Secret-redaction discipline: the Debug rendering of the connector's
+    // Config must not surface secret-shaped fields (api_key, client_secret,
+    // refresh_token, access_token, password, bearer).  The scaffold ships
+    // with no secrets, so this test passes today; it acts as a forward-
+    // looking regression gate — the moment a future author adds a field
+    // with one of those names, they must either rename it, mark it
+    // `#[serde(skip)]`, or implement a redacting Debug impl (e.g.
+    // secrecy::Secret<T>) before this test will pass again.
+    use {crate_ident}::config::{struct_name}Config;
 
-    // Example pattern:
-    // let (subscriber, logs) = test_subscriber();
-    // tracing::subscriber::with_default(subscriber, || {{
-    //     // Perform operations...
-    // }});
-    // assert!(!logs.contains("secret_value"));
+    let config = {struct_name}Config::default();
+    let debug_output = format!("{{config:?}}").to_ascii_lowercase();
+
+    for forbidden in &[
+        "api_key",
+        "client_secret",
+        "refresh_token",
+        "access_token",
+        "password",
+        "bearer",
+        "private_key",
+    ] {{
+        assert!(
+            !debug_output.contains(forbidden),
+            "Config Debug output appears to expose a secret-shaped field `{{forbidden}}`; \
+             rename, mark `#[serde(skip)]`, or implement a redacting Debug impl: {{debug_output}}",
+        );
+    }}
 }}
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2693,16 +2771,28 @@ async fn test_secrets_not_logged() {{
 
 #[fcp_async_core::runtime::test]
 async fn test_error_codes_correct() {{
+    // Error taxonomy: every surfaced FcpError must expose a stable
+    // error_code() in the "FCP-NNNN" format.  Unknown operations
+    // specifically fall in the protocol-error range (FCP-1xxx) per
+    // `fcp_core::FcpError::numeric_code`; the invariant we freeze here
+    // is the shape of the code, plus the class for the unknown-op path.
     let connector = {struct_name}Connector::new();
     let signing_key = test_signing_key();
 
-    // Test unknown operation returns correct error
-    let result = connector
+    let err = connector
         .invoke(base_invoke(connector.id(), "unknown.operation", &signing_key))
-        .await;
+        .await
+        .expect_err("unknown operation must be rejected");
 
-    assert!(result.is_err());
-    // TODO: Verify error code is in correct range (FCP-5xxx for connector errors)
+    let code = err.error_code();
+    assert!(
+        code.starts_with("FCP-") && code.len() == 8,
+        "error_code must match FCP-NNNN shape, got `{{code}}`",
+    );
+    assert!(
+        matches!(err, FcpError::InvalidRequest {{ .. }}),
+        "unknown operation must surface as FcpError::InvalidRequest, got {{err:?}}",
+    );
 }}
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3073,11 +3163,31 @@ fn test_e2e_unknown_method_rejected() {{
 #[test]
 #[ignore = "requires integration environment"]
 fn test_e2e_decision_receipt_shape() {{
-    // TODO: Verify DecisionReceipt is emitted with correct fields:
-    // - operation_id
-    // - decision (allow/deny)
-    // - policy_chain
-    // - timestamp
+    // DecisionReceipt shape regression: when the host records an
+    // allow/deny decision, the receipt MUST carry every field the
+    // `fcp explain` surface depends on.  This test is ignored by
+    // default because it requires a host-backed integration harness
+    // that exposes the receipt side-channel; enable it behind your
+    // integration runner once you can capture receipts.
+    //
+    // Expected receipt shape (per fcp_audit::DecisionReceipt):
+    //   {{
+    //     "id":           <non-empty string>,
+    //     "request_id":   <matches InvokeRequest.id>,
+    //     "decision":     "allow" | "deny",
+    //     "reason_code":  <stable FCP-NNNN or policy.* code>,
+    //     "evidence":     [<zero or more evidence refs>],
+    //     "decided_at":   <unix seconds, u64>,
+    //     "zone_id":      "z:work"
+    //   }}
+    //
+    // Skeleton assertion (uncomment once receipt capture is wired):
+    // let receipt: fcp_audit::DecisionReceipt = capture_last_receipt();
+    // assert!(!receipt.id.is_empty());
+    // assert_eq!(receipt.zone_id, "z:work");
+    // assert!(matches!(receipt.decision, fcp_audit::Decision::Allow | fcp_audit::Decision::Deny));
+    // assert!(receipt.reason_code.starts_with("FCP-") || receipt.reason_code.starts_with("policy."));
+    // assert!(receipt.decided_at > 0);
 }}
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3087,12 +3197,36 @@ fn test_e2e_decision_receipt_shape() {{
 #[test]
 #[ignore = "requires integration environment"]
 fn test_e2e_audit_event_shape() {{
-    // TODO: Verify AuditEvent is emitted with correct fields:
-    // - event_type
-    // - connector_id
-    // - correlation_id
-    // - zone_id
-    // - timestamp
+    // AuditEvent shape regression: every capability.invoke / secret.access
+    // path MUST emit an AuditEvent whose fields are sufficient for
+    // chain verification (see fcp_audit::verify_chain).  This test is
+    // ignored by default because it requires a host-backed integration
+    // harness that exposes the audit side-channel; enable it behind your
+    // integration runner once you can capture events.
+    //
+    // Expected event shape (per fcp_core::AuditEvent):
+    //   {{
+    //     "header":         <ObjectHeader with schema/zone/provenance>,
+    //     "correlation_id": <16 bytes, matches the invoke's correlation_id>,
+    //     "event_type":     "capability.invoke" | "secret.access" | ...,
+    //     "actor":          <PrincipalId>,
+    //     "zone_id":        "z:work",
+    //     "connector_id":   <Some("{connector_id}") for connector-sourced events>,
+    //     "operation":      <Some(OperationId::from_static(OP_SCAFFOLD_STATUS))>,
+    //     "seq":            <monotonic u64>,
+    //     "occurred_at":    <unix seconds, u64>,
+    //     "signature":      <NodeSignature — required for chain verification>
+    //   }}
+    //
+    // Skeleton assertion (uncomment once event capture is wired):
+    // let event: fcp_core::AuditEvent = capture_last_audit_event();
+    // assert_eq!(event.zone_id.as_str(), "z:work");
+    // assert_eq!(event.connector_id.as_ref().map(|c| c.as_str()), Some("{connector_id}"));
+    // assert_eq!(event.operation.as_ref().map(|o| o.as_str()), Some(OP_SCAFFOLD_STATUS));
+    // assert!(event.occurred_at > 0);
+    // assert!(!event.correlation_id.as_bytes().iter().all(|b| *b == 0));
+    // assert!(event.signature.to_bytes().iter().any(|b| *b != 0),
+    //     "AuditEvent must carry a non-zero node signature for tamper-evidence");
 }}
 
 // ─────────────────────────────────────────────────────────────────────────────

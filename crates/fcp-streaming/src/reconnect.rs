@@ -102,7 +102,18 @@ impl ReconnectConfig {
             base
         };
 
-        Duration::from_secs_f64(jittered.min(self.max_delay.as_secs_f64()))
+        // Clamp to [0, max_delay] in finite f64 space before constructing the
+        // Duration. `Duration::from_secs_f64` panics on negative, NaN, or
+        // infinite input; misconfigured backoff_multiplier (e.g., negative,
+        // NaN, or large enough to overflow to +inf at high attempt counts)
+        // could otherwise turn a recoverable retry into a process abort.
+        let max = self.max_delay.as_secs_f64();
+        let clamped = if jittered.is_nan() || jittered < 0.0 {
+            0.0
+        } else {
+            jittered.min(max)
+        };
+        Duration::from_secs_f64(clamped)
     }
 }
 
@@ -477,6 +488,37 @@ mod tests {
         // u32::MAX attempt should gracefully handle i32 overflow
         let delay = config.delay_for_attempt(u32::MAX);
         assert_eq!(delay, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_delay_negative_multiplier_does_not_panic() {
+        // A negative backoff_multiplier alternates the sign of the computed
+        // base delay. Without clamping, Duration::from_secs_f64 panics on
+        // negative input — turning a recoverable misconfig into a process
+        // abort. The clamp must coerce negative to zero.
+        let config = ReconnectConfig::new()
+            .with_initial_delay(Duration::from_secs(1))
+            .with_max_delay(Duration::from_secs(60))
+            .with_backoff_multiplier(-2.0)
+            .with_jitter(false);
+
+        // attempt 1 yields base = 1 * (-2)^1 = -2.0; must clamp to 0.
+        let delay = config.delay_for_attempt(1);
+        assert_eq!(delay, Duration::from_secs(0));
+    }
+
+    #[test]
+    fn test_delay_nan_multiplier_does_not_panic() {
+        // A NaN multiplier propagates through powi/mul_add to a NaN delay.
+        // Duration::from_secs_f64 panics on NaN; clamp must coerce to zero.
+        let config = ReconnectConfig::new()
+            .with_initial_delay(Duration::from_secs(1))
+            .with_max_delay(Duration::from_secs(60))
+            .with_backoff_multiplier(f64::NAN)
+            .with_jitter(false);
+
+        let delay = config.delay_for_attempt(3);
+        assert_eq!(delay, Duration::from_secs(0));
     }
 
     #[test]

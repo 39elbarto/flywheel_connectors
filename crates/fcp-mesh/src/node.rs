@@ -2491,7 +2491,7 @@ mod tests {
             iblt: b"[]".to_vec(),
             timestamp: 1_000,
             signature: Some(fcp_core::NodeSignature::new(
-                peer.clone(),
+                fcp_core::NodeId::new(peer.as_str()),
                 signing_key
                     .sign(
                         &GossipSummary {
@@ -2565,7 +2565,7 @@ mod tests {
             1_000,
         );
         push.signature = Some(fcp_core::NodeSignature::new(
-            peer,
+            fcp_core::NodeId::new(peer.as_str()),
             signing_key.sign(&push.signing_bytes()).to_bytes(),
             1_000,
         ));
@@ -2592,7 +2592,7 @@ mod tests {
             100,
         );
         push.signature = Some(fcp_core::NodeSignature::new(
-            peer,
+            fcp_core::NodeId::new(peer.as_str()),
             signing_key.sign(&push.signing_bytes()).to_bytes(),
             100,
         ));

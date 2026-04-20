@@ -3013,7 +3013,7 @@ mod tests {
         };
 
         let evidence = planner.evidence_from_plan(&plan, &connector_id, None);
-        assert_eq!(evidence.connector_id.as_str(), "fcp.test");
+        assert_eq!(evidence.connector_id.as_str(), "fcp:test:1.0.0");
         assert!(evidence.chosen_node.is_some());
         assert_eq!(evidence.candidate_scores.len(), 2);
         assert_eq!(evidence.nodes_considered, 5);

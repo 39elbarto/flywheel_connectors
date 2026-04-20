@@ -571,7 +571,7 @@ impl MultiNodeMeshHarness {
         if sign {
             let signature = handle.identity.signing_key.sign(&push.signing_bytes());
             push.signature = Some(NodeSignature::new(
-                from.clone(),
+                fcp_core::NodeId::new(from.as_str()),
                 signature.to_bytes(),
                 push.timestamp,
             ));
@@ -992,7 +992,7 @@ async fn run_node_task(
                                     let signature =
                                         identity.signing_key.sign(&summary.signing_bytes());
                                     summary.signature = Some(NodeSignature::new(
-                                        identity.node_id.clone(),
+                                        fcp_core::NodeId::new(identity.node_id.as_str()),
                                         signature.to_bytes(),
                                         summary.timestamp,
                                     ));

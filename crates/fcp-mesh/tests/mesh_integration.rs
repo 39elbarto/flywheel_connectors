@@ -3639,9 +3639,14 @@ mod policy_enforcement {
         let planner = ExecutionPlanner::new();
         let candidates = planner.plan(&input, &context);
 
-        // Zone targeting should work (specific zone policy enforcement
-        // would be in a higher-level coordinator)
-        assert!(!candidates.is_empty());
+        // Zone-boundary enforcement: with a target_zone set and a candidate
+        // whose zone membership is unknown (empty `zones`), the planner
+        // MUST drop it via check_target_zone (ZoneRestriction). A non-empty
+        // result here would mean zone targeting was silently ignored.
+        assert!(
+            candidates.is_empty(),
+            "candidate with unknown zone membership must be rejected when a target_zone is set"
+        );
 
         emit_test_pass(
             TEST_NAME,
@@ -3649,6 +3654,7 @@ mod policy_enforcement {
             serde_json::json!({
                 "target_zone": work_zone.as_str(),
                 "candidates_count": candidates.len(),
+                "enforcement": "unknown_zone_rejected",
             }),
         );
     }
@@ -5482,7 +5488,7 @@ mod real_component_integration {
     ) -> GossipSummary {
         let signature = signing_key.sign(&summary.signing_bytes());
         summary.signature = Some(NodeSignature::new(
-            node_id.clone(),
+            fcp_core::NodeId::new(node_id.as_str()),
             signature.to_bytes(),
             summary.timestamp,
         ));
@@ -6369,7 +6375,9 @@ mod real_component_integration {
             zone_id: zone_id.clone(),
             zone_key_id,
             epoch_id: 1,
-            recipient_node_id: TailscaleNodeId::new("node-repair"),
+            // Must match the build_node("node-decode", ...) identity so
+            // MeshNode::handle_decode_status's recipient-binding check passes.
+            recipient_node_id: TailscaleNodeId::new("node-decode"),
             request_nonce: 3,
             received_unique: 4,
             needed: 0,

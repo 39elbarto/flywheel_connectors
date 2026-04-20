@@ -75,9 +75,9 @@ use fcp_host::{
 use fcp_host::{HostError, HostResult};
 use fcp_kernel::{
     ApprovalMode, ConnectorHealth, ConnectorId, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
-    LifecycleError, LifecycleManager, LifecycleState, LifecycleStatus, RateLimitDeclarations,
-    RequestId, SelfCheckReport, SimulateRequest, SimulateResponse,
+    HealthSnapshot, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, LifecycleError,
+    LifecycleManager, LifecycleState, LifecycleStatus, RateLimitDeclarations, RequestId,
+    SelfCheckReport, SimulateRequest, SimulateResponse,
 };
 use futures_util::future::join_all;
 use hyper::body::Incoming;
@@ -855,7 +855,44 @@ struct AppState {
     approval_verifying_key: Option<Ed25519VerifyingKey>,
     admin_bearer_token: Option<Arc<str>>,
     connectors_file: Option<PathBuf>,
+    /// Per-zone policy override map (br-flywheel_connectors-d4cij).
+    ///
+    /// `verify_live_request` looks the request's zone up here before
+    /// invoking `simulate_policy_decision`. Without an entry, the gate
+    /// falls back to `host_runtime_policy()` — which is structurally a
+    /// no-op for rule-based denial because every pattern list is empty
+    /// and every transport allowed. The fallback emits a `warn!` so
+    /// operators notice the missing configuration.
+    ///
+    /// Entries are populated either at startup from
+    /// `FCP_HOST_ZONE_POLICIES_FILE` (a JSON map keyed by ZoneId string)
+    /// or via a future admin endpoint. Loading is intentionally separate
+    /// from connector inventory so a connector-config rollout cannot
+    /// accidentally drop policy state.
+    zone_policies: Arc<RwLock<HashMap<ZoneId, ZonePolicyObject>>>,
     started_at: Instant,
+}
+
+impl AppState {
+    /// Resolve the zone policy object for a request.
+    ///
+    /// Returns the configured policy when one is registered for `zone_id`,
+    /// otherwise falls back to the permissive `host_runtime_policy` and
+    /// emits a `warn!` so operators see that rule-based denial is not
+    /// active for this zone.
+    async fn lookup_zone_policy(&self, zone_id: &ZoneId) -> ZonePolicyObject {
+        let policies = self.zone_policies.read().await;
+        if let Some(policy) = policies.get(zone_id) {
+            return policy.clone();
+        }
+        drop(policies);
+        tracing::warn!(
+            zone_id = %zone_id.as_str(),
+            event = "zone_policy_fallback_to_permissive",
+            "no zone policy configured for zone; admin deny rules cannot fire (br-d4cij)",
+        );
+        host_runtime_policy(zone_id.clone())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1408,8 +1445,14 @@ async fn verify_live_request(
         .approval_mode
         .is_some_and(|mode| !matches!(mode, ApprovalMode::None));
     let request_input_hash = request_input_hash(&request.input)?;
+    // br-flywheel_connectors-d4cij: pull the per-zone policy from the
+    // configured store before evaluating. host_runtime_policy is the
+    // permissive fallback (every pattern list empty, every transport
+    // allowed) — when it fires, AppState::lookup_zone_policy emits a
+    // warn so operators can see that rule-based denial is not active.
+    let zone_policy = state.lookup_zone_policy(&request.zone_id).await;
     let receipt = simulate_policy_decision(&PolicySimulationInput {
-        zone_policy: host_runtime_policy(request.zone_id.clone()),
+        zone_policy,
         invoke_request: request.clone(),
         transport: TransportMode::Lan,
         checkpoint_fresh: true,
@@ -2225,6 +2268,7 @@ async fn async_main() -> HostResult<()> {
         approval_verifying_key,
         admin_bearer_token: resolve_admin_bearer_token()?,
         connectors_file: loaded_configs.connectors_file,
+        zone_policies: Arc::new(RwLock::new(HashMap::new())),
         started_at: Instant::now(),
     });
 
@@ -3903,8 +3947,7 @@ async fn invoke_handler(
         "processing invoke request"
     );
 
-    let preflight =
-        evaluate_live_preflight(&state, &request, asserted_principal.as_deref()).await;
+    let preflight = evaluate_live_preflight(&state, &request, asserted_principal.as_deref()).await;
     if !preflight.allowed {
         let reason = preflight
             .reason
@@ -5201,6 +5244,7 @@ mod tests {
             approval_verifying_key: None,
             admin_bearer_token: None,
             connectors_file: Some(connectors_file),
+            zone_policies: Arc::new(RwLock::new(HashMap::new())),
             started_at: Instant::now(),
         })
     }
@@ -5358,6 +5402,75 @@ mod tests {
         assert!(
             msg.contains("not bound to zone") && msg.contains("z:secure"),
             "expected zone-binding rejection naming `z:secure`, got: {msg}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn verify_live_request_applies_configured_zone_principal_deny() {
+        // br-flywheel_connectors-d4cij: when a zone policy with a populated
+        // principal_deny pattern list is registered for the request's zone,
+        // simulate_policy_decision must see it and the gate must reject —
+        // not silently fall back to the permissive host_runtime_policy.
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping zone-policy-deny test");
+            return;
+        }
+
+        let connector_id = "fcp.test.zone-policy-deny:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![subprocess_test_connector_config(connector_id)],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+
+        let mut deny_policy = host_runtime_policy(ZoneId::work());
+        deny_policy.principal_deny = vec!["user:test".to_string()];
+        let mut policies: HashMap<ZoneId, ZonePolicyObject> = HashMap::new();
+        policies.insert(ZoneId::work(), deny_policy);
+
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            zone_policies: Arc::new(RwLock::new(policies)),
+            ..(*base_state).clone()
+        });
+
+        let token = test_capability_token(
+            &signing_key,
+            "cap.test.echo",
+            "test.echo",
+            ZoneId::work().as_str(),
+        );
+
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "should be denied by zone policy" }),
+            capability_token: token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let error = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("principal_deny pattern must reject the live request");
+        assert!(
+            error.to_string().contains("policy denied"),
+            "expected policy-deny rejection, got: {error}"
         );
     }
 
@@ -6535,6 +6648,7 @@ mod tests {
             approval_verifying_key: None,
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
+            zone_policies: Arc::new(RwLock::new(HashMap::new())),
             started_at: Instant::now(),
         };
 
@@ -6567,6 +6681,7 @@ mod tests {
             approval_verifying_key: None,
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
+            zone_policies: Arc::new(RwLock::new(HashMap::new())),
             started_at: Instant::now(),
         };
 
@@ -6666,6 +6781,7 @@ mod tests {
             approval_verifying_key: None,
             admin_bearer_token: None,
             connectors_file: None,
+            zone_policies: Arc::new(RwLock::new(HashMap::new())),
             started_at: Instant::now(),
         };
         let cloned = state.clone();
@@ -6713,6 +6829,7 @@ mod tests {
             approval_verifying_key: None,
             admin_bearer_token: None,
             connectors_file: None,
+            zone_policies: Arc::new(RwLock::new(HashMap::new())),
             started_at: Instant::now(),
         });
         let version = semver::Version::new(1, 2, 0);
@@ -7037,10 +7154,7 @@ mod tests {
     #[test]
     fn extract_principal_header_reads_value() {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            PRINCIPAL_HEADER,
-            HeaderValue::from_static("user:alice"),
-        );
+        headers.insert(PRINCIPAL_HEADER, HeaderValue::from_static("user:alice"));
         assert_eq!(
             extract_principal_header(&headers),
             Some("user:alice".to_owned())
@@ -7050,10 +7164,7 @@ mod tests {
     #[test]
     fn extract_principal_header_trims_surrounding_whitespace() {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            PRINCIPAL_HEADER,
-            HeaderValue::from_static("  user:bob  "),
-        );
+        headers.insert(PRINCIPAL_HEADER, HeaderValue::from_static("  user:bob  "));
         assert_eq!(
             extract_principal_header(&headers),
             Some("user:bob".to_owned())

@@ -8,6 +8,8 @@ use fcp_core::{
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use fcp_oauth::{AuthorizationCallback, OAuth2Client, OAuthError, OAuthProvider};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -15,6 +17,8 @@ use tracing::{info, instrument};
 use crate::client::{DEFAULT_BASE_URL, GitHubAuth, GitHubClient};
 use crate::error::GitHubError;
 use crate::types::{CreateIssueRequest, CreatePullRequestRequest, MergePullRequestRequest};
+
+const GITHUB_DEFAULT_OAUTH_SCOPES: &[&str] = &["repo", "read:user"];
 
 /// Parsed configuration for the GitHub connector.
 struct GitHubConfig {
@@ -1071,6 +1075,51 @@ impl GitHubConnector {
         }))
     }
 
+    async fn invoke_begin_oauth(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client_id = require_str(&input, "client_id")?;
+        let client_secret = require_str(&input, "client_secret")?;
+        let allowed_redirect_uris = require_redirect_allowlist(&input)?;
+        let redirect_uri = ensure_allowlisted_redirect_uri(
+            require_str(&input, "redirect_uri")?,
+            &allowed_redirect_uris,
+        )?;
+        let scopes = optional_scopes(&input)?;
+
+        let oauth_client =
+            build_github_oauth_client(client_id, client_secret, redirect_uri.as_str(), scopes)?;
+        let (authorization_url, state) = oauth_client
+            .authorization_url(&[])
+            .map_err(map_oauth_error_to_fcp)?;
+
+        Ok(json!({
+            "authorization_url": authorization_url,
+            "state": state,
+            "redirect_uri": redirect_uri.as_str(),
+        }))
+    }
+
+    async fn invoke_complete_oauth(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let callback_url = require_str(&input, "callback_url")?;
+        let expected_state = require_str(&input, "expected_state")?;
+        let allowed_redirect_uris = require_redirect_allowlist(&input)?;
+        let callback_redirect_uri =
+            ensure_callback_redirect_is_allowlisted(callback_url, &allowed_redirect_uris)?;
+        let callback =
+            AuthorizationCallback::from_url(callback_url).map_err(map_oauth_error_to_fcp)?;
+        let authorization_code = callback
+            .validate(expected_state)
+            .map_err(map_oauth_error_to_fcp)?;
+
+        Ok(json!({
+            "authorization_code": authorization_code,
+            "redirect_uri": callback_redirect_uri.as_str(),
+            "state_verified": true,
+        }))
+    }
+
     async fn invoke_process_webhook(
         &self,
         input: serde_json::Value,
@@ -1244,6 +1293,224 @@ fn require_u32(input: &serde_json::Value, field: &str) -> FcpResult<u32> {
             code: 1003,
             message: format!("Missing required field: {field}"),
         })
+}
+
+fn optional_scopes(input: &serde_json::Value) -> FcpResult<Vec<String>> {
+    match input.get("scopes") {
+        Some(value) => {
+            let array = value.as_array().ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "scopes must be an array of strings".into(),
+            })?;
+            let scopes = array
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|scope| !scope.is_empty())
+                        .map(str::to_owned)
+                })
+                .collect::<Option<Vec<_>>>()
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "scopes must contain only non-empty strings".into(),
+                })?;
+            if scopes.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "scopes must not be empty when provided".into(),
+                });
+            }
+            Ok(scopes)
+        }
+        None => Ok(GITHUB_DEFAULT_OAUTH_SCOPES
+            .iter()
+            .map(|scope| (*scope).to_string())
+            .collect()),
+    }
+}
+
+fn require_redirect_allowlist(input: &serde_json::Value) -> FcpResult<Vec<Url>> {
+    let allowlist = input
+        .get("allowed_redirect_uris")
+        .and_then(|value| value.as_array())
+        .ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "allowed_redirect_uris must be a non-empty array of strings".into(),
+        })?;
+    if allowlist.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "allowed_redirect_uris must not be empty".into(),
+        });
+    }
+
+    allowlist
+        .iter()
+        .map(|value| {
+            let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "allowed_redirect_uris must contain only strings".into(),
+            })?;
+            normalize_registered_redirect_uri(raw, "allowed_redirect_uris")
+        })
+        .collect()
+}
+
+fn ensure_allowlisted_redirect_uri(raw: &str, allowlist: &[Url]) -> FcpResult<Url> {
+    let redirect_uri = normalize_registered_redirect_uri(raw, "redirect_uri")?;
+    if allowlist.iter().any(|allowed| *allowed == redirect_uri) {
+        return Ok(redirect_uri);
+    }
+
+    Err(FcpError::InvalidRequest {
+        code: 1003,
+        message: "redirect_uri is not present in allowed_redirect_uris".into(),
+    })
+}
+
+fn ensure_callback_redirect_is_allowlisted(
+    callback_url: &str,
+    allowlist: &[Url],
+) -> FcpResult<Url> {
+    let callback_redirect_uri = normalize_callback_redirect_uri(callback_url)?;
+    if allowlist
+        .iter()
+        .any(|allowed| *allowed == callback_redirect_uri)
+    {
+        return Ok(callback_redirect_uri);
+    }
+
+    Err(FcpError::InvalidRequest {
+        code: 1003,
+        message: "callback_url resolved to a redirect URI outside allowed_redirect_uris".into(),
+    })
+}
+
+fn normalize_registered_redirect_uri(raw: &str, field: &str) -> FcpResult<Url> {
+    let url = Url::parse(raw).map_err(|e| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a valid absolute URL: {e}"),
+    })?;
+    validate_redirect_uri_shape(&url, field, false)?;
+    Ok(url)
+}
+
+fn normalize_callback_redirect_uri(callback_url: &str) -> FcpResult<Url> {
+    let mut url = Url::parse(callback_url).map_err(|e| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("callback_url must be a valid absolute URL: {e}"),
+    })?;
+    validate_redirect_uri_shape(&url, "callback_url", true)?;
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
+}
+
+fn validate_redirect_uri_shape(url: &Url, field: &str, allow_query: bool) -> FcpResult<()> {
+    if url.cannot_be_a_base() || url.host_str().is_none() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must include a network host"),
+        });
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must not include embedded credentials"),
+        });
+    }
+    if url.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must not include a fragment"),
+        });
+    }
+    if !allow_query && url.query().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must not include query parameters"),
+        });
+    }
+    if !is_secure_or_loopback_redirect(url) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must use https or loopback http"),
+        });
+    }
+    Ok(())
+}
+
+fn is_secure_or_loopback_redirect(url: &Url) -> bool {
+    match url.scheme() {
+        "https" => true,
+        "http" => matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1")),
+        _ => false,
+    }
+}
+
+fn build_github_oauth_client(
+    client_id: &str,
+    client_secret: &str,
+    redirect_uri: &str,
+    scopes: Vec<String>,
+) -> FcpResult<OAuth2Client> {
+    let config = OAuthProvider::GitHub
+        .oauth2_config(client_id, client_secret)
+        .ok_or_else(|| FcpError::Internal {
+            message: "GitHub OAuth provider configuration is unavailable".into(),
+        })?
+        .with_redirect_uri(redirect_uri)
+        .with_scopes(scopes);
+    OAuth2Client::new(config).map_err(map_oauth_error_to_fcp)
+}
+
+fn map_oauth_error_to_fcp(error: OAuthError) -> FcpError {
+    match error {
+        OAuthError::StateMismatch { .. } => FcpError::Unauthorized {
+            code: 2001,
+            message: "GitHub OAuth state verification failed".into(),
+        },
+        OAuthError::AuthorizationError {
+            error, description, ..
+        } => FcpError::Unauthorized {
+            code: 2001,
+            message: if description.is_empty() {
+                format!("GitHub OAuth authorization failed: {error}")
+            } else {
+                format!("GitHub OAuth authorization failed: {error}: {description}")
+            },
+        },
+        OAuthError::InvalidConfig(message)
+        | OAuthError::InvalidTokenResponse(message)
+        | OAuthError::TokenExchangeFailed(message)
+        | OAuthError::RefreshFailed(message)
+        | OAuthError::HttpError(message)
+        | OAuthError::SignatureError(message)
+        | OAuthError::UnsupportedProvider(message)
+        | OAuthError::TokenNotFound(message)
+        | OAuthError::PkceError(message) => FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("GitHub OAuth request invalid: {message}"),
+        },
+        OAuthError::TokenExpired(duration) => FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("GitHub OAuth token expired {:?} ago", duration),
+        },
+        OAuthError::NoRefreshToken => FcpError::InvalidRequest {
+            code: 1003,
+            message: "GitHub OAuth refresh token is unavailable".into(),
+        },
+        OAuthError::JsonError(error) => FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("GitHub OAuth request invalid: {error}"),
+        },
+        OAuthError::UrlError(error) => FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("GitHub OAuth request invalid: {error}"),
+        },
+    }
 }
 
 #[allow(clippy::fn_params_excessive_bools)]
@@ -1434,6 +1701,112 @@ mod tests {
         assert!(op_ids.contains(&"github.search_code"));
         assert!(op_ids.contains(&"github.process_webhook"));
         assert_eq!(ops.len(), 13);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_begin_oauth_generates_state_for_allowlisted_redirect() {
+        let connector = GitHubConnector::new();
+        let result = connector
+            .invoke_begin_oauth(json!({
+                "client_id": "gh-client-id",
+                "client_secret": "gh-client-secret",
+                "redirect_uri": "https://example.com/github/callback",
+                "allowed_redirect_uris": ["https://example.com/github/callback"],
+                "scopes": ["repo", "read:user"]
+            }))
+            .await
+            .unwrap();
+
+        let authorization_url = result["authorization_url"].as_str().unwrap();
+        let state = result["state"].as_str().unwrap();
+        assert_eq!(
+            result["redirect_uri"],
+            "https://example.com/github/callback"
+        );
+        assert_eq!(state.len(), 43);
+        assert!(authorization_url.contains("https://github.com/login/oauth/authorize"));
+        assert!(
+            authorization_url
+                .contains("redirect_uri=https%3A%2F%2Fexample.com%2Fgithub%2Fcallback")
+        );
+        assert!(authorization_url.contains("scope=repo+read%3Auser"));
+        assert!(authorization_url.contains(&format!("state={state}")));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_begin_oauth_rejects_unallowlisted_redirect_uri() {
+        let connector = GitHubConnector::new();
+        let err = connector
+            .invoke_begin_oauth(json!({
+                "client_id": "gh-client-id",
+                "client_secret": "gh-client-secret",
+                "redirect_uri": "https://evil.example/callback",
+                "allowed_redirect_uris": ["https://example.com/github/callback"]
+            }))
+            .await
+            .unwrap_err();
+
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("redirect_uri is not present"));
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_complete_oauth_validates_state_and_callback_allowlist() {
+        let connector = GitHubConnector::new();
+        let result = connector
+            .invoke_complete_oauth(json!({
+                "callback_url": "https://example.com/github/callback?code=auth-code-123&state=expected-state",
+                "expected_state": "expected-state",
+                "allowed_redirect_uris": ["https://example.com/github/callback"]
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["authorization_code"], "auth-code-123");
+        assert_eq!(
+            result["redirect_uri"],
+            "https://example.com/github/callback"
+        );
+        assert_eq!(result["state_verified"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_complete_oauth_rejects_state_mismatch() {
+        let connector = GitHubConnector::new();
+        let err = connector
+            .invoke_complete_oauth(json!({
+                "callback_url": "https://example.com/github/callback?code=auth-code-123&state=wrong-state",
+                "expected_state": "expected-state",
+                "allowed_redirect_uris": ["https://example.com/github/callback"]
+            }))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, FcpError::Unauthorized { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_complete_oauth_rejects_callback_outside_allowlist() {
+        let connector = GitHubConnector::new();
+        let err = connector
+            .invoke_complete_oauth(json!({
+                "callback_url": "https://evil.example/callback?code=auth-code-123&state=expected-state",
+                "expected_state": "expected-state",
+                "allowed_redirect_uris": ["https://example.com/github/callback"]
+            }))
+            .await
+            .unwrap_err();
+
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("outside allowed_redirect_uris"));
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
     }
 
     #[test]

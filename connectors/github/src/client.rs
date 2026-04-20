@@ -604,7 +604,7 @@ impl GitHubClient {
         } else {
             // Check for secondary rate limit (403 with low remaining)
             if status == StatusCode::FORBIDDEN && rate_limit_remaining == Some(0) {
-                let retry_ms = retry_after_secs.unwrap_or(60) * 1000;
+                let retry_ms = retry_after_secs.unwrap_or(60).saturating_mul(1000);
                 return Err(GitHubError::RateLimited {
                     retry_after_ms: retry_ms,
                 });
@@ -623,7 +623,7 @@ fn parse_error_response(
     if let Ok(err_resp) = serde_json::from_slice::<ApiErrorResponse>(bytes) {
         if status == StatusCode::TOO_MANY_REQUESTS {
             return GitHubError::RateLimited {
-                retry_after_ms: retry_after_secs.unwrap_or(60) * 1000,
+                retry_after_ms: retry_after_secs.unwrap_or(60).saturating_mul(1000),
             };
         }
         if status == StatusCode::UNAUTHORIZED {
@@ -654,7 +654,7 @@ fn parse_error_response(
 
     if status == StatusCode::TOO_MANY_REQUESTS {
         return GitHubError::RateLimited {
-            retry_after_ms: retry_after_secs.unwrap_or(60) * 1000,
+            retry_after_ms: retry_after_secs.unwrap_or(60).saturating_mul(1000),
         };
     }
 

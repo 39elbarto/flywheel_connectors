@@ -637,13 +637,13 @@ impl StripeClient {
                                 .headers()
                                 .get("retry-after")
                                 .and_then(|v| v.to_str().ok())
-                                .and_then(|v| v.parse::<u64>().ok());
-                            let retry_after = retry_after_secs
-                                .map_or(Duration::from_secs(60), Duration::from_secs);
+                                .and_then(|v| v.parse::<u64>().ok())
+                                .unwrap_or(60);
+                            let retry_after = Duration::from_secs(retry_after_secs);
 
                             return AttemptOutcome::Retryable {
                                 error: StripeError::RateLimited {
-                                    retry_after_ms: retry_after.as_millis() as u64,
+                                    retry_after_ms: retry_after_secs.saturating_mul(1000),
                                 },
                                 retry_after: Some(retry_after),
                             };

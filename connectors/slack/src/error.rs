@@ -179,7 +179,7 @@ impl SlackError {
                 }
             }
             Self::RateLimited { retry_after_secs } => FcpError::RateLimited {
-                retry_after_ms: retry_after_secs * 1000,
+                retry_after_ms: retry_after_secs.saturating_mul(1000),
                 violation: None,
             },
             Self::Unauthorized => FcpError::Unauthorized {

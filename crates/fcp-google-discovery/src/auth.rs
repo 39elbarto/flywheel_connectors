@@ -196,7 +196,7 @@ pub enum GoogleAuthError {
 }
 
 /// Refresh-token exchange input.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct GoogleRefreshExchangeRequest {
     /// OAuth client id.
     pub client_id: String,
@@ -208,6 +208,18 @@ pub struct GoogleRefreshExchangeRequest {
     pub token_url: String,
     /// Requested scope set.
     pub requested_scopes: Vec<String>,
+}
+
+impl std::fmt::Debug for GoogleRefreshExchangeRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GoogleRefreshExchangeRequest")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("refresh_token", &"[REDACTED]")
+            .field("token_url", &self.token_url)
+            .field("requested_scopes", &self.requested_scopes)
+            .finish()
+    }
 }
 
 /// Refresh-token exchange output.
@@ -275,7 +287,7 @@ impl GoogleRefreshTokenExchanger for FcpOAuthRefreshTokenExchanger {
 }
 
 /// Refresh-token source details.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct GoogleOAuthRefreshSource {
     /// OAuth client id.
     pub client_id: String,
@@ -287,8 +299,24 @@ pub struct GoogleOAuthRefreshSource {
     pub token_url: String,
 }
 
+impl std::fmt::Debug for GoogleOAuthRefreshSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GoogleOAuthRefreshSource")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("refresh_token", &"[REDACTED]")
+            .field("token_url", &self.token_url)
+            .finish()
+    }
+}
+
 /// Selected auth source from provider chain.
-#[derive(Debug, Clone, Eq, PartialEq)]
+///
+/// Manual `Debug` impl redacts secret-bearing variants (`AccessToken` and
+/// `OAuthRefresh`) so accidental `tracing::debug!(?source)` or
+/// `format!("{:?}", ...)` does not leak access/refresh tokens or the OAuth
+/// client secret to logs.
+#[derive(Clone, Eq, PartialEq)]
 pub enum GoogleAuthSource {
     /// Explicit access token.
     AccessToken {
@@ -316,6 +344,33 @@ pub enum GoogleAuthSource {
     DefaultCredentials,
     /// Application Default Credentials chain.
     ApplicationDefaultCredentials,
+}
+
+impl std::fmt::Debug for GoogleAuthSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AccessToken { .. } => f
+                .debug_struct("AccessToken")
+                .field("access_token", &"[REDACTED]")
+                .finish(),
+            Self::CredentialId { credential_id } => f
+                .debug_struct("CredentialId")
+                .field("credential_id", credential_id)
+                .finish(),
+            Self::OAuthRefresh(source) => {
+                f.debug_tuple("OAuthRefresh").field(source).finish()
+            }
+            Self::CredentialsFile { path } => {
+                f.debug_struct("CredentialsFile").field("path", path).finish()
+            }
+            Self::EncryptedLocalCredentials { profile } => f
+                .debug_struct("EncryptedLocalCredentials")
+                .field("profile", profile)
+                .finish(),
+            Self::DefaultCredentials => f.write_str("DefaultCredentials"),
+            Self::ApplicationDefaultCredentials => f.write_str("ApplicationDefaultCredentials"),
+        }
+    }
 }
 
 impl GoogleAuthSource {
@@ -493,7 +548,10 @@ impl GoogleAuthSelection {
 }
 
 /// Runtime auth output.
-#[derive(Debug, Clone, Eq, PartialEq)]
+///
+/// Manual `Debug` impl redacts `access_token` so accidental
+/// `tracing::debug!(?materialized)` does not leak the bearer token to logs.
+#[derive(Clone, Eq, PartialEq)]
 pub enum GoogleMaterializedAuth {
     /// Bearer-token auth.
     BearerToken {
@@ -513,6 +571,33 @@ pub enum GoogleMaterializedAuth {
         /// Optional quota project id.
         quota_project_id: Option<String>,
     },
+}
+
+impl std::fmt::Debug for GoogleMaterializedAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BearerToken {
+                source,
+                granted_scopes,
+                quota_project_id,
+                ..
+            } => f
+                .debug_struct("BearerToken")
+                .field("access_token", &"[REDACTED]")
+                .field("source", source)
+                .field("granted_scopes", granted_scopes)
+                .field("quota_project_id", quota_project_id)
+                .finish(),
+            Self::CredentialReference {
+                credential_id,
+                quota_project_id,
+            } => f
+                .debug_struct("CredentialReference")
+                .field("credential_id", credential_id)
+                .field("quota_project_id", quota_project_id)
+                .finish(),
+        }
+    }
 }
 
 impl GoogleMaterializedAuth {
@@ -908,6 +993,85 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    // ── Secret-redaction regression tests ─────────────────────────────────
+
+    #[test]
+    fn debug_redacts_refresh_exchange_request_secrets() {
+        let request = GoogleRefreshExchangeRequest {
+            client_id: "client-id-public".into(),
+            client_secret: "very-secret-client-secret".into(),
+            refresh_token: "very-secret-refresh-token".into(),
+            token_url: "https://oauth2.googleapis.com/token".into(),
+            requested_scopes: vec!["https://www.googleapis.com/auth/drive.readonly".into()],
+        };
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("very-secret-client-secret"));
+        assert!(!debug.contains("very-secret-refresh-token"));
+        assert!(debug.contains("[REDACTED]"));
+        // Non-secret fields stay visible for diagnostics.
+        assert!(debug.contains("client-id-public"));
+        assert!(debug.contains("oauth2.googleapis.com"));
+        assert!(debug.contains("drive.readonly"));
+    }
+
+    #[test]
+    fn debug_redacts_oauth_refresh_source_secrets() {
+        let source = GoogleOAuthRefreshSource {
+            client_id: "client-id-public".into(),
+            client_secret: "very-secret-client-secret".into(),
+            refresh_token: "very-secret-refresh-token".into(),
+            token_url: "https://oauth2.googleapis.com/token".into(),
+        };
+        let debug = format!("{source:?}");
+        assert!(!debug.contains("very-secret-client-secret"));
+        assert!(!debug.contains("very-secret-refresh-token"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("client-id-public"));
+    }
+
+    #[test]
+    fn debug_redacts_auth_source_access_token_variant() {
+        let source = GoogleAuthSource::AccessToken {
+            access_token: "very-secret-bearer-token".into(),
+        };
+        let debug = format!("{source:?}");
+        assert!(!debug.contains("very-secret-bearer-token"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn debug_redacts_auth_source_oauth_refresh_variant_transitively() {
+        // GoogleAuthSource::OAuthRefresh delegates to the inner
+        // GoogleOAuthRefreshSource Debug, which must redact.
+        let source = GoogleAuthSource::OAuthRefresh(GoogleOAuthRefreshSource {
+            client_id: "client-id-public".into(),
+            client_secret: "very-secret-client-secret".into(),
+            refresh_token: "very-secret-refresh-token".into(),
+            token_url: "https://oauth2.googleapis.com/token".into(),
+        });
+        let debug = format!("{source:?}");
+        assert!(!debug.contains("very-secret-client-secret"));
+        assert!(!debug.contains("very-secret-refresh-token"));
+        assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn debug_redacts_materialized_bearer_access_token() {
+        let materialized = GoogleMaterializedAuth::BearerToken {
+            access_token: "very-secret-bearer-token".into(),
+            source: GoogleAuthSourceKind::OAuthRefresh,
+            granted_scopes: vec!["https://www.googleapis.com/auth/drive.readonly".into()],
+            quota_project_id: Some("project-123".into()),
+        };
+        let debug = format!("{materialized:?}");
+        assert!(!debug.contains("very-secret-bearer-token"));
+        assert!(debug.contains("[REDACTED]"));
+        // Non-secret fields stay visible.
+        assert!(debug.contains("OAuthRefresh"));
+        assert!(debug.contains("drive.readonly"));
+        assert!(debug.contains("project-123"));
+    }
 
     #[derive(Debug, Default)]
     struct FailIfCalledExchanger;

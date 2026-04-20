@@ -1238,23 +1238,42 @@ impl TargetedRepairRequest {
     /// Add ESIs to request.
     #[must_use]
     pub fn with_esis(mut self, esis: Vec<u32>) -> Self {
-        self.esis = esis;
+        self.esis = normalize_u32_ids(esis);
         self
     }
 
     /// Set preferred sources.
     #[must_use]
     pub fn with_preferred_sources(mut self, sources: Vec<u64>) -> Self {
-        self.preferred_sources = sources;
+        let excluded: std::collections::HashSet<_> = self.excluded_sources.iter().copied().collect();
+        self.preferred_sources = normalize_u64_ids(sources)
+            .into_iter()
+            .filter(|source| !excluded.contains(source))
+            .collect();
         self
     }
 
     /// Set excluded sources.
     #[must_use]
     pub fn with_excluded_sources(mut self, sources: Vec<u64>) -> Self {
-        self.excluded_sources = sources;
+        self.excluded_sources = normalize_u64_ids(sources);
+        let excluded: std::collections::HashSet<_> = self.excluded_sources.iter().copied().collect();
+        self.preferred_sources
+            .retain(|source| !excluded.contains(source));
         self
     }
+}
+
+fn normalize_u32_ids(mut ids: Vec<u32>) -> Vec<u32> {
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+fn normalize_u64_ids(mut ids: Vec<u64>) -> Vec<u64> {
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 #[cfg(test)]
@@ -1801,6 +1820,18 @@ mod tests {
         assert_eq!(request.esis.len(), 3);
         assert_eq!(request.preferred_sources.len(), 2);
         assert_eq!(request.excluded_sources.len(), 1);
+    }
+
+    #[test]
+    fn targeted_repair_request_normalizes_and_resolves_conflicts() {
+        let request = TargetedRepairRequest::new(ObjectId::from_bytes([2; 32]))
+            .with_preferred_sources(vec![300, 200, 200, 100])
+            .with_esis(vec![9, 2, 2, 7, 9, 1])
+            .with_excluded_sources(vec![300, 400, 300]);
+
+        assert_eq!(request.esis, vec![1, 2, 7, 9]);
+        assert_eq!(request.preferred_sources, vec![100, 200]);
+        assert_eq!(request.excluded_sources, vec![300, 400]);
     }
 
     #[test]

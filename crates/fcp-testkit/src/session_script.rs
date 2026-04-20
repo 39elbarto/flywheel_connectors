@@ -51,6 +51,7 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Transport {
+    #[serde(rename = "websocket")]
     WebSocket,
     Sse,
     LongPoll,
@@ -1000,7 +1001,9 @@ mod tests {
             serde_json::json!({
                 "websocket_hello_pong": scenarios::websocket_hello_pong("/ws"),
                 "websocket_reconnect": scenarios::websocket_reconnect("/ws"),
+                "sse_receive_events": scenarios::sse_receive_events("/events", 3),
                 "webhook_deliver_and_ack": scenarios::webhook_deliver_and_ack("push"),
+                "long_poll_cycle": scenarios::long_poll_cycle("/poll"),
                 "nack_redelivery": scenarios::nack_redelivery(Transport::WebSocket, "/ws"),
             })
         );
@@ -1012,6 +1015,23 @@ mod tests {
         assert_eq!(Transport::Sse.to_string(), "sse");
         assert_eq!(Transport::LongPoll.to_string(), "long_poll");
         assert_eq!(Transport::WebhookIngress.to_string(), "webhook_ingress");
+    }
+
+    #[test]
+    fn transport_serde_uses_canonical_tags() {
+        assert_eq!(
+            serde_json::to_string(&Transport::WebSocket).unwrap(),
+            "\"websocket\""
+        );
+        assert_eq!(serde_json::to_string(&Transport::Sse).unwrap(), "\"sse\"");
+        assert_eq!(
+            serde_json::to_string(&Transport::LongPoll).unwrap(),
+            "\"long_poll\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Transport::WebhookIngress).unwrap(),
+            "\"webhook_ingress\""
+        );
     }
 
     #[test]

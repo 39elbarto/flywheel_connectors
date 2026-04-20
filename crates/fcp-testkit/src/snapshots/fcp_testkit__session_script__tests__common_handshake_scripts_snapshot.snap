@@ -1,17 +1,48 @@
 ---
 source: crates/fcp-testkit/src/session_script.rs
-expression: "serde_json::json!({\n    \"websocket_hello_pong\": scenarios::websocket_hello_pong(\"/ws\"),\n    \"websocket_reconnect\": scenarios::websocket_reconnect(\"/ws\"),\n    \"webhook_deliver_and_ack\": scenarios::webhook_deliver_and_ack(\"push\"),\n    \"nack_redelivery\":\n    scenarios::nack_redelivery(Transport::WebSocket, \"/ws\"),\n})"
+expression: "serde_json::json!({\n    \"websocket_hello_pong\": scenarios::websocket_hello_pong(\"/ws\"),\n    \"websocket_reconnect\": scenarios::websocket_reconnect(\"/ws\"),\n    \"sse_receive_events\": scenarios::sse_receive_events(\"/events\", 3),\n    \"webhook_deliver_and_ack\": scenarios::webhook_deliver_and_ack(\"push\"),\n    \"long_poll_cycle\": scenarios::long_poll_cycle(\"/poll\"),\n    \"nack_redelivery\":\n    scenarios::nack_redelivery(Transport::WebSocket, \"/ws\"),\n})"
 ---
 {
+  "long_poll_cycle": {
+    "default_transport": "long_poll",
+    "description": "Long-poll receive batch and reconnect cycle",
+    "scenario_id": "long_poll.receive_cycle",
+    "steps": [
+      {
+        "action": "connect",
+        "path": "/poll",
+        "transport": "long_poll"
+      },
+      {
+        "ack": "auto",
+        "action": "expect_message",
+        "matcher": {
+          "mode": "any"
+        },
+        "timeout": "5000ms"
+      },
+      {
+        "action": "assert_health",
+        "expected": "connected"
+      },
+      {
+        "action": "expect_silence",
+        "duration": "500ms"
+      },
+      {
+        "action": "disconnect"
+      }
+    ]
+  },
   "nack_redelivery": {
-    "default_transport": "web_socket",
+    "default_transport": "websocket",
     "description": "Verify message redelivery when ack is suppressed",
     "scenario_id": "delivery.nack_redelivery",
     "steps": [
       {
         "action": "connect",
         "path": "/ws",
-        "transport": "web_socket"
+        "transport": "websocket"
       },
       {
         "ack": "suppress",
@@ -42,6 +73,37 @@ expression: "serde_json::json!({\n    \"websocket_hello_pong\": scenarios::webso
       }
     ]
   },
+  "sse_receive_events": {
+    "default_transport": "sse",
+    "description": "Receive and count SSE events",
+    "scenario_id": "sse.receive_events",
+    "steps": [
+      {
+        "action": "connect",
+        "path": "/events",
+        "transport": "sse"
+      },
+      {
+        "action": "assert_health",
+        "expected": "connected"
+      },
+      {
+        "action": "expect_count",
+        "count": 3,
+        "matcher": {
+          "mode": "any"
+        },
+        "timeout": "5000ms"
+      },
+      {
+        "action": "assert_messages_received",
+        "min": 3
+      },
+      {
+        "action": "disconnect"
+      }
+    ]
+  },
   "webhook_deliver_and_ack": {
     "default_transport": "webhook_ingress",
     "description": "Deliver webhook event and verify acknowledgement",
@@ -66,14 +128,14 @@ expression: "serde_json::json!({\n    \"websocket_hello_pong\": scenarios::webso
     ]
   },
   "websocket_hello_pong": {
-    "default_transport": "web_socket",
+    "default_transport": "websocket",
     "description": "Basic WebSocket hello/pong exchange",
     "scenario_id": "websocket.hello_pong",
     "steps": [
       {
         "action": "connect",
         "path": "/ws",
-        "transport": "web_socket"
+        "transport": "websocket"
       },
       {
         "ack": "auto",
@@ -113,14 +175,14 @@ expression: "serde_json::json!({\n    \"websocket_hello_pong\": scenarios::webso
     ]
   },
   "websocket_reconnect": {
-    "default_transport": "web_socket",
+    "default_transport": "websocket",
     "description": "Verify reconnection after connection drop",
     "scenario_id": "websocket.reconnect_after_drop",
     "steps": [
       {
         "action": "connect",
         "path": "/ws",
-        "transport": "web_socket"
+        "transport": "websocket"
       },
       {
         "action": "assert_health",

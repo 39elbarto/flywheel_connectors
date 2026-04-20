@@ -72,6 +72,7 @@ impl SegmentConfig {
             .and_then(serde_json::Value::as_str)
             .unwrap_or(DEFAULT_BASE_URL)
             .to_string();
+        let base_url = validate_base_url_for_auth(&base_url, &auth)?;
 
         Ok(Self { auth, base_url })
     }
@@ -531,6 +532,58 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
     }
 }
 
+fn validate_base_url_for_auth(raw_url: &str, auth: &SegmentAuth) -> FcpResult<String> {
+    let parsed = Url::parse(raw_url).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("base_url could not be parsed: {error}"),
+    })?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
+
+    let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "base_url must include a host".into(),
+    })?;
+    let host_lower = host.to_ascii_lowercase();
+    let local = is_local_test_host(&host_lower);
+    let secure_or_local = parsed.scheme() == "https" || local;
+    let canonical = parsed.to_string().trim_end_matches('/').to_string();
+
+    match auth {
+        SegmentAuth::BearerToken(_) => {
+            let (allowed, message) = base_url_policy(&canonical);
+            if !allowed {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message,
+                });
+            }
+        }
+        SegmentAuth::CredentialId(_) => {
+            if !secure_or_local {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message:
+                        "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
+                            .into(),
+                });
+            }
+        }
+    }
+
+    Ok(canonical)
+}
+
 fn is_local_test_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
@@ -694,10 +747,10 @@ mod tests {
     fn config_custom_base_url() {
         let config = SegmentConfig::from_params(&json!({
             "api_token": "tok",
-            "base_url": "https://segment.example.com/v2",
+            "base_url": "https://api.segmentapis.com/v2",
         }))
         .unwrap();
-        assert_eq!(config.base_url, "https://segment.example.com/v2");
+        assert_eq!(config.base_url, "https://api.segmentapis.com/v2");
     }
 
     #[test]
@@ -745,6 +798,36 @@ mod tests {
             "credential_id": "not-a-uuid",
         }));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_untrusted_base_url_for_api_token() {
+        let result = SegmentConfig::from_params(&json!({
+            "api_token": "tok",
+            "base_url": "https://evil.example.com",
+        }));
+        let err = result.expect_err("attacker host should be rejected");
+        assert!(err.to_string().contains("api.segment.io"));
+    }
+
+    #[test]
+    fn config_rejects_base_url_query_string() {
+        let result = SegmentConfig::from_params(&json!({
+            "api_token": "tok",
+            "base_url": "https://api.segment.io/v1?leak=1",
+        }));
+        let err = result.expect_err("query-bearing base_url should be rejected");
+        assert!(err.to_string().contains("query string or fragment"));
+    }
+
+    #[test]
+    fn config_allows_custom_https_base_url_for_credential_id() {
+        let config = SegmentConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+            "base_url": "https://vault-proxy.internal/segment",
+        }))
+        .unwrap();
+        assert_eq!(config.base_url, "https://vault-proxy.internal/segment");
     }
 
     #[test]
@@ -1578,7 +1661,7 @@ mod tests {
     #[test]
     fn provisioning_readiness_custom_base_url_rejected() {
         let config = SegmentConfig::from_params(&json!({
-            "api_token": "tok",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": "https://evil.example.com",
         }))
         .unwrap();

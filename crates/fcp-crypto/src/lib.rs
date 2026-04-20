@@ -113,7 +113,10 @@ pub use frost::{
     FrostSigningShare, aggregate, commit, commit_with_rng, dkg_part1, dkg_part1_with_rng,
     dkg_part2, dkg_part3, sign, signing_package,
 };
-pub use hkdf::{DerivedKey, Fcp2KeyDerivation, HkdfSha256, hkdf_sha256, hkdf_sha256_array};
+pub use hkdf::{
+    DerivedKey, Fcp2KeyDerivation, HkdfSha256, MacKeyPurpose, SessionDirection, hkdf_sha256,
+    hkdf_sha256_array,
+};
 pub use hpke_seal::{Fcp2Aad, HpkeSealedBox, hpke_open, hpke_seal};
 pub use kid::KeyId;
 pub use mac::{Blake3Mac, MacKey, blake3_mac, blake3_mac_full, blake3_mac_verify};

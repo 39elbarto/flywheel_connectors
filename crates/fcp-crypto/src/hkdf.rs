@@ -143,6 +143,47 @@ impl<const N: usize> std::fmt::Debug for DerivedKey<N> {
 /// variable-length components cannot collide through simple concatenation.
 pub struct Fcp2KeyDerivation;
 
+/// Direction label for session-key derivation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionDirection {
+    /// Key material for frames sent to the peer.
+    Send,
+    /// Key material for frames received from the peer.
+    Recv,
+}
+
+impl SessionDirection {
+    #[must_use]
+    const fn label(self) -> &'static [u8] {
+        match self {
+            Self::Send => b"send",
+            Self::Recv => b"recv",
+        }
+    }
+}
+
+/// Purpose label for per-session MAC-key derivation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacKeyPurpose {
+    /// Authenticate complete frames.
+    Frame,
+    /// Authenticate frame headers.
+    Header,
+    /// Authenticate generic session traffic.
+    Auth,
+}
+
+impl MacKeyPurpose {
+    #[must_use]
+    const fn label(self) -> &'static [u8] {
+        match self {
+            Self::Frame => b"frame",
+            Self::Header => b"header",
+            Self::Auth => b"auth",
+        }
+    }
+}
+
 impl Fcp2KeyDerivation {
     fn framed_info(label: &[u8], parts: &[&[u8]]) -> Vec<u8> {
         let mut info = Vec::with_capacity(
@@ -190,9 +231,9 @@ impl Fcp2KeyDerivation {
     pub fn derive_session_key(
         shared_secret: &[u8],
         session_id: &[u8],
-        direction: &str,
+        direction: SessionDirection,
     ) -> CryptoResult<DerivedKey<32>> {
-        let info = Self::framed_info(b"FCP2-SESSION", &[direction.as_bytes(), session_id]);
+        let info = Self::framed_info(b"FCP2-SESSION", &[direction.label(), session_id]);
         DerivedKey::derive(None, shared_secret, &info)
     }
 
@@ -201,8 +242,11 @@ impl Fcp2KeyDerivation {
     /// # Errors
     ///
     /// Returns an error if key derivation fails.
-    pub fn derive_mac_key(session_key: &[u8], purpose: &str) -> CryptoResult<DerivedKey<32>> {
-        let info = Self::framed_info(b"FCP2-MAC", &[purpose.as_bytes()]);
+    pub fn derive_mac_key(
+        session_key: &[u8],
+        purpose: MacKeyPurpose,
+    ) -> CryptoResult<DerivedKey<32>> {
+        let info = Self::framed_info(b"FCP2-MAC", &[purpose.label()]);
         DerivedKey::derive(None, session_key, &info)
     }
 }
@@ -364,17 +408,29 @@ mod tests {
         let shared_secret = [42u8; 32];
         let session_id = b"session-12345";
 
-        let send_key =
-            Fcp2KeyDerivation::derive_session_key(&shared_secret, session_id, "send").unwrap();
-        let recv_key =
-            Fcp2KeyDerivation::derive_session_key(&shared_secret, session_id, "recv").unwrap();
+        let send_key = Fcp2KeyDerivation::derive_session_key(
+            &shared_secret,
+            session_id,
+            SessionDirection::Send,
+        )
+        .unwrap();
+        let recv_key = Fcp2KeyDerivation::derive_session_key(
+            &shared_secret,
+            session_id,
+            SessionDirection::Recv,
+        )
+        .unwrap();
 
         // Different directions should produce different keys
         assert_ne!(send_key.as_bytes(), recv_key.as_bytes());
 
         // Same direction should be deterministic
-        let send_key2 =
-            Fcp2KeyDerivation::derive_session_key(&shared_secret, session_id, "send").unwrap();
+        let send_key2 = Fcp2KeyDerivation::derive_session_key(
+            &shared_secret,
+            session_id,
+            SessionDirection::Send,
+        )
+        .unwrap();
         assert_eq!(send_key.as_bytes(), send_key2.as_bytes());
     }
 
@@ -382,8 +438,10 @@ mod tests {
     fn fcp2_mac_key_derivation() {
         let session_key = [42u8; 32];
 
-        let mac_key1 = Fcp2KeyDerivation::derive_mac_key(&session_key, "frame").unwrap();
-        let mac_key2 = Fcp2KeyDerivation::derive_mac_key(&session_key, "header").unwrap();
+        let mac_key1 =
+            Fcp2KeyDerivation::derive_mac_key(&session_key, MacKeyPurpose::Frame).unwrap();
+        let mac_key2 =
+            Fcp2KeyDerivation::derive_mac_key(&session_key, MacKeyPurpose::Header).unwrap();
 
         // Different purposes should produce different keys
         assert_ne!(mac_key1.as_bytes(), mac_key2.as_bytes());
@@ -507,32 +565,37 @@ mod tests {
     #[test]
     fn fcp2_session_key_different_session_ids() {
         let shared = [42u8; 32];
-        let k1 = Fcp2KeyDerivation::derive_session_key(&shared, b"sess-1", "send").unwrap();
-        let k2 = Fcp2KeyDerivation::derive_session_key(&shared, b"sess-2", "send").unwrap();
+        let k1 = Fcp2KeyDerivation::derive_session_key(&shared, b"sess-1", SessionDirection::Send)
+            .unwrap();
+        let k2 = Fcp2KeyDerivation::derive_session_key(&shared, b"sess-2", SessionDirection::Send)
+            .unwrap();
         assert_ne!(k1.as_bytes(), k2.as_bytes());
     }
 
     #[test]
     fn fcp2_mac_key_deterministic() {
         let session_key = [99u8; 32];
-        let k1 = Fcp2KeyDerivation::derive_mac_key(&session_key, "auth").unwrap();
-        let k2 = Fcp2KeyDerivation::derive_mac_key(&session_key, "auth").unwrap();
+        let k1 = Fcp2KeyDerivation::derive_mac_key(&session_key, MacKeyPurpose::Auth).unwrap();
+        let k2 = Fcp2KeyDerivation::derive_mac_key(&session_key, MacKeyPurpose::Auth).unwrap();
         assert_eq!(k1.as_bytes(), k2.as_bytes());
     }
 
     #[test]
     fn fcp2_session_key_framing_prevents_concat_collisions() {
+        let info1 = Fcp2KeyDerivation::framed_info(b"FCP2-SESSION", &[b"a", b"bc"]);
+        let info2 = Fcp2KeyDerivation::framed_info(b"FCP2-SESSION", &[b"ab", b"c"]);
         let shared = [7u8; 32];
-        let k1 = Fcp2KeyDerivation::derive_session_key(&shared, b"bc", "a").unwrap();
-        let k2 = Fcp2KeyDerivation::derive_session_key(&shared, b"c", "ab").unwrap();
+        let k1 = DerivedKey::<32>::derive(None, &shared, &info1).unwrap();
+        let k2 = DerivedKey::<32>::derive(None, &shared, &info2).unwrap();
+        assert_ne!(info1, info2);
         assert_ne!(k1.as_bytes(), k2.as_bytes());
     }
 
     #[test]
     fn fcp2_mac_key_framing_matches_explicit_helper() {
         let session_key = [11u8; 32];
-        let direct = Fcp2KeyDerivation::derive_mac_key(&session_key, "frame").unwrap();
-        let info = Fcp2KeyDerivation::framed_info(b"FCP2-MAC", &[b"frame"]);
+        let direct = Fcp2KeyDerivation::derive_mac_key(&session_key, MacKeyPurpose::Frame).unwrap();
+        let info = Fcp2KeyDerivation::framed_info(b"FCP2-MAC", &[MacKeyPurpose::Frame.label()]);
         let expected = DerivedKey::<32>::derive(None, &session_key, &info).unwrap();
         assert_eq!(direct.as_bytes(), expected.as_bytes());
     }
@@ -580,15 +643,22 @@ mod tests {
     }
 
     #[test]
-    fn fcp2_session_key_empty_direction() {
-        let key = Fcp2KeyDerivation::derive_session_key(&[1u8; 32], b"sess", "").unwrap();
-        assert_eq!(key.as_bytes().len(), 32);
-    }
+    fn fcp2_direction_and_purpose_labels_are_domain_separated() {
+        let shared = [1u8; 32];
+        let session_id = b"sess";
+        let send_key =
+            Fcp2KeyDerivation::derive_session_key(&shared, session_id, SessionDirection::Send)
+                .unwrap();
+        let recv_key =
+            Fcp2KeyDerivation::derive_session_key(&shared, session_id, SessionDirection::Recv)
+                .unwrap();
+        let frame_key =
+            Fcp2KeyDerivation::derive_mac_key(send_key.as_bytes(), MacKeyPurpose::Frame).unwrap();
+        let header_key =
+            Fcp2KeyDerivation::derive_mac_key(send_key.as_bytes(), MacKeyPurpose::Header).unwrap();
 
-    #[test]
-    fn fcp2_mac_key_empty_purpose() {
-        let key = Fcp2KeyDerivation::derive_mac_key(&[1u8; 32], "").unwrap();
-        assert_eq!(key.as_bytes().len(), 32);
+        assert_ne!(send_key.as_bytes(), recv_key.as_bytes());
+        assert_ne!(frame_key.as_bytes(), header_key.as_bytes());
     }
 
     // ---- HKDF expand to same size gives same result ----

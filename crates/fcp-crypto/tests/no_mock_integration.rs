@@ -36,6 +36,8 @@ use fcp_crypto::{
     // KID
     KeyId,
     MacKey,
+    MacKeyPurpose,
+    SessionDirection,
     // Shamir
     ShamirShare,
     // X25519
@@ -86,8 +88,10 @@ fn fcp2_session_key_derivation_directional() {
     let shared = b"diffie-hellman-shared-secret-val";
     let session_id = b"ses-42";
 
-    let send_key = Fcp2KeyDerivation::derive_session_key(shared, session_id, "send").unwrap();
-    let recv_key = Fcp2KeyDerivation::derive_session_key(shared, session_id, "recv").unwrap();
+    let send_key =
+        Fcp2KeyDerivation::derive_session_key(shared, session_id, SessionDirection::Send).unwrap();
+    let recv_key =
+        Fcp2KeyDerivation::derive_session_key(shared, session_id, SessionDirection::Recv).unwrap();
 
     // Directional keys must differ
     assert_ne!(send_key.as_bytes(), recv_key.as_bytes());
@@ -109,7 +113,8 @@ fn fcp2_session_key_derivation_directional() {
 #[test]
 fn hkdf_derived_mac_key_roundtrip() {
     let session_key = b"session-key-bytes-for-mac-derivt";
-    let mac_key_bytes = Fcp2KeyDerivation::derive_mac_key(session_key, "frame").unwrap();
+    let mac_key_bytes =
+        Fcp2KeyDerivation::derive_mac_key(session_key, MacKeyPurpose::Frame).unwrap();
 
     let mac_key = MacKey::from_bytes(*mac_key_bytes.as_bytes());
     let mac = Blake3Mac::new(&mac_key);
@@ -150,8 +155,12 @@ fn x25519_key_agreement_to_aead_session() {
     assert_eq!(alice_shared.as_bytes(), bob_shared.as_bytes());
 
     // Derive session key from shared secret
-    let session_key =
-        Fcp2KeyDerivation::derive_session_key(alice_shared.as_bytes(), b"sess-1", "send").unwrap();
+    let session_key = Fcp2KeyDerivation::derive_session_key(
+        alice_shared.as_bytes(),
+        b"sess-1",
+        SessionDirection::Send,
+    )
+    .unwrap();
 
     let key = AeadKey::from_bytes(*session_key.as_bytes());
     let cipher = XChaCha20Poly1305Cipher::new(&key);
@@ -777,9 +786,14 @@ fn full_frame_authentication_pipeline() {
     let bob = X25519SecretKey::generate();
 
     let shared = alice.diffie_hellman(&bob.public_key()).unwrap();
-    let session_key =
-        Fcp2KeyDerivation::derive_session_key(shared.as_bytes(), b"frame-sess", "send").unwrap();
-    let mac_derived = Fcp2KeyDerivation::derive_mac_key(session_key.as_bytes(), "header").unwrap();
+    let session_key = Fcp2KeyDerivation::derive_session_key(
+        shared.as_bytes(),
+        b"frame-sess",
+        SessionDirection::Send,
+    )
+    .unwrap();
+    let mac_derived =
+        Fcp2KeyDerivation::derive_mac_key(session_key.as_bytes(), MacKeyPurpose::Header).unwrap();
 
     let mac_key = MacKey::from_bytes(*mac_derived.as_bytes());
 

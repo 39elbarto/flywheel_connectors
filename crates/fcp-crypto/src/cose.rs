@@ -466,6 +466,52 @@ impl CoseToken {
         Ok(())
     }
 
+    fn validate_verification_headers(&self) -> CryptoResult<()> {
+        // FCP capability tokens require the security-sensitive headers we
+        // consume (`alg`, `kid`, `crit`) to be unambiguous and integrity
+        // protected, even though bare COSE allows some of them to be
+        // unprotected hints.
+        self.reject_unprotected_security_headers()?;
+
+        // RFC 8152 §4.4: bind the verifier to a specific algorithm.
+        // Without this, alg is only implicitly bound through the TBS bytes,
+        // which works for our single-algorithm registry but is brittle once
+        // additional verifiers (or downgrade-prone callers) appear.
+        match &self.inner.protected.header.alg {
+            Some(Algorithm::Assigned(iana::Algorithm::EdDSA)) => {}
+            Some(other) => {
+                return Err(CryptoError::AlgorithmMismatch {
+                    expected: "EdDSA",
+                    got: format!("{other:?}"),
+                });
+            }
+            None => {
+                return Err(CryptoError::MissingField("alg in protected header".into()));
+            }
+        }
+
+        // RFC 8152 §3.1: every label in `crit` MUST be one the recipient
+        // understands; otherwise the message MUST be rejected. We process
+        // only `Alg` and `Kid` from the protected header, so any other
+        // label — assigned, private-use, or text — is unhandled.
+        for label in &self.inner.protected.header.crit {
+            match label {
+                RegisteredLabelWithPrivate::Assigned(
+                    iana::HeaderParameter::Alg | iana::HeaderParameter::Kid,
+                ) => {}
+                other => {
+                    return Err(CryptoError::UnsupportedCriticalHeader(format!("{other:?}")));
+                }
+            }
+        }
+
+        // RFC 9052 §3.1: `crit` can only list labels that are actually
+        // carried in the protected header bucket.
+        self.require_critical_headers_present_in_protected_bucket()?;
+
+        Ok(())
+    }
+
     /// Create and sign a new `COSE_Sign1` token.
     ///
     /// # Errors
@@ -514,28 +560,7 @@ impl CoseToken {
     ///
     /// Returns an error if verification fails.
     pub fn verify(&self, verifying_key: &Ed25519VerifyingKey) -> CryptoResult<CwtClaims> {
-        // FCP capability tokens require the security-sensitive headers we
-        // consume (`alg`, `kid`, `crit`) to be unambiguous and integrity
-        // protected, even though bare COSE allows some of them to be
-        // unprotected hints.
-        self.reject_unprotected_security_headers()?;
-
-        // RFC 8152 §4.4: bind the verifier to a specific algorithm.
-        // Without this, alg is only implicitly bound through the TBS bytes,
-        // which works for our single-algorithm registry but is brittle once
-        // additional verifiers (or downgrade-prone callers) appear.
-        match &self.inner.protected.header.alg {
-            Some(Algorithm::Assigned(iana::Algorithm::EdDSA)) => {}
-            Some(other) => {
-                return Err(CryptoError::AlgorithmMismatch {
-                    expected: "EdDSA",
-                    got: format!("{other:?}"),
-                });
-            }
-            None => {
-                return Err(CryptoError::MissingField("alg in protected header".into()));
-            }
-        }
+        self.validate_verification_headers()?;
 
         // FCP routes issuance keys by protected `kid`, so direct verification
         // must reject tokens whose signed key hint does not match the
@@ -548,25 +573,6 @@ impl CoseToken {
                 got: hex::encode(kid_bytes),
             });
         }
-
-        // RFC 8152 §3.1: every label in `crit` MUST be one the recipient
-        // understands; otherwise the message MUST be rejected. We process
-        // only `Alg` and `Kid` from the protected header, so any other
-        // label — assigned, private-use, or text — is unhandled.
-        for label in &self.inner.protected.header.crit {
-            match label {
-                RegisteredLabelWithPrivate::Assigned(
-                    iana::HeaderParameter::Alg | iana::HeaderParameter::Kid,
-                ) => {}
-                other => {
-                    return Err(CryptoError::UnsupportedCriticalHeader(format!("{other:?}")));
-                }
-            }
-        }
-
-        // RFC 9052 §3.1: `crit` can only list labels that are actually
-        // carried in the protected header bucket.
-        self.require_critical_headers_present_in_protected_bucket()?;
 
         // Extract signature
         let signature = Ed25519Signature::try_from_slice(&self.inner.signature)?;
@@ -617,6 +623,8 @@ impl CoseToken {
     where
         F: FnOnce(&KeyId) -> Option<Ed25519VerifyingKey>,
     {
+        self.validate_verification_headers()?;
+
         // Extract KID from protected header
         let kid_bytes = self.get_key_id()?;
         let kid = KeyId::try_from_slice(&kid_bytes)?;
@@ -829,6 +837,7 @@ impl Default for CapabilityTokenBuilder {
 mod tests {
     use super::*;
     use chrono::Duration;
+    use std::cell::Cell;
 
     #[test]
     fn cwt_claims_cbor_roundtrip() {
@@ -1438,7 +1447,7 @@ mod tests {
         let err = token
             .verify_with_lookup(|k| if k == &kid { Some(pk2) } else { None })
             .unwrap_err();
-        assert!(matches!(err, CryptoError::SignatureVerificationFailed));
+        assert!(matches!(err, CryptoError::KeyIdMismatch { .. }));
     }
 
     #[test]
@@ -1450,6 +1459,30 @@ mod tests {
         // Lookup always returns None
         let err = token.verify_with_lookup(|_| None).unwrap_err();
         assert!(matches!(err, CryptoError::InvalidKeyId(_)));
+    }
+
+    #[test]
+    fn verify_with_lookup_rejects_wrong_algorithm_before_key_lookup() {
+        let sk = Ed25519SigningKey::generate();
+        let header = HeaderBuilder::new()
+            .algorithm(iana::Algorithm::ES256)
+            .key_id(sk.key_id().as_bytes().to_vec())
+            .build();
+        let token = build_signed_token(&sk, header);
+        let lookup_called = Cell::new(false);
+
+        let err = token
+            .verify_with_lookup(|_| {
+                lookup_called.set(true);
+                Some(sk.verifying_key())
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, CryptoError::AlgorithmMismatch { .. }));
+        assert!(
+            !lookup_called.get(),
+            "malformed alg must fail before key lookup"
+        );
     }
 
     // ---- validate_timing edge cases ----

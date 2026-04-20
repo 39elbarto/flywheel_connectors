@@ -316,7 +316,7 @@ pub struct RegistryVerificationReport {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Transparency log entry with proof data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TransparencyLogEntry {
     /// Log index of the entry.
     pub log_index: u64,
@@ -331,7 +331,7 @@ pub struct TransparencyLogEntry {
 }
 
 /// Merkle inclusion proof for transparency log verification.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InclusionProof {
     /// Merkle tree root hash.
     pub root_hash: String,
@@ -426,6 +426,8 @@ pub struct SigstoreVerificationResult {
 pub enum SupplyChainVerificationError {
     #[error("transparency log entry not found")]
     TransparencyEntryNotFound,
+    #[error("transparency log entry mismatch")]
+    TransparencyEntryMismatch,
     #[error("transparency log inclusion proof invalid")]
     TransparencyProofInvalid,
     #[error("transparency log signature invalid")]
@@ -530,11 +532,7 @@ impl TransparencyLogVerifier for NoOpTransparencyVerifier {
         _entry_hash: &str,
         _expected_entry: Option<&TransparencyLogEntry>,
     ) -> Result<TransparencyVerificationResult, SupplyChainVerificationError> {
-        Ok(TransparencyVerificationResult {
-            verified: true,
-            log_index: Some(0),
-            logged_at: Some(0),
-        })
+        Err(SupplyChainVerificationError::NotConfigured)
     }
 }
 
@@ -549,21 +547,11 @@ impl TufVerifier for NoOpTufVerifier {
         _pinned_root: &TufRootMetadata,
         _target_path: &str,
     ) -> Result<TufVerificationResult, SupplyChainVerificationError> {
-        Ok(TufVerificationResult {
-            verified: true,
-            root_version: 1,
-            target: None,
-        })
+        Err(SupplyChainVerificationError::NotConfigured)
     }
 
     async fn fetch_root(&self) -> Result<TufRootMetadata, SupplyChainVerificationError> {
-        Ok(TufRootMetadata {
-            version: 1,
-            root_hash: String::new(),
-            expires: u64::MAX,
-            key_ids: Vec::new(),
-            threshold: 1,
-        })
+        Err(SupplyChainVerificationError::NotConfigured)
     }
 }
 
@@ -580,12 +568,7 @@ impl SigstoreVerifier for NoOpSigstoreVerifier {
         _trusted_identities: &[String],
         _trusted_issuers: &[String],
     ) -> Result<SigstoreVerificationResult, SupplyChainVerificationError> {
-        Ok(SigstoreVerificationResult {
-            verified: true,
-            identity: None,
-            issuer: None,
-            rekor_log_index: None,
-        })
+        Err(SupplyChainVerificationError::NotConfigured)
     }
 }
 
@@ -611,10 +594,15 @@ impl TransparencyLogVerifier for MockTransparencyVerifier {
     async fn verify_entry(
         &self,
         entry_hash: &str,
-        _expected_entry: Option<&TransparencyLogEntry>,
+        expected_entry: Option<&TransparencyLogEntry>,
     ) -> Result<TransparencyVerificationResult, SupplyChainVerificationError> {
         let entries = self.valid_entries.lock().unwrap();
         if let Some(entry) = entries.get(entry_hash) {
+            if let Some(expected) = expected_entry
+                && entry != expected
+            {
+                return Err(SupplyChainVerificationError::TransparencyEntryMismatch);
+            }
             Ok(TransparencyVerificationResult {
                 verified: true,
                 log_index: Some(entry.log_index),
@@ -4198,6 +4186,59 @@ sig = "base64:{sig_b64}"
     }
 
     #[test]
+    fn mock_transparency_verifier_rejects_mismatched_expected_entry() {
+        run_registry_test(
+            "mock_transparency_verifier_rejects_mismatched_expected_entry",
+            "verify",
+            "transparency-adapter",
+            1,
+            || async {
+                let verifier = MockTransparencyVerifier::new();
+                let entry = TransparencyLogEntry {
+                    log_index: 12345,
+                    entry_hash: "sha256:abc123".to_string(),
+                    inclusion_proof: InclusionProof {
+                        root_hash: "sha256:root".to_string(),
+                        tree_size: 10000,
+                        hashes: vec!["sha256:h1".to_string()],
+                        leaf_index: 12345,
+                    },
+                    signed_entry_timestamp: vec![1, 2, 3, 4],
+                    log_id: "rekor.sigstore.dev".to_string(),
+                };
+                verifier.add_valid_entry("sha256:abc123".to_string(), entry);
+
+                let expected = TransparencyLogEntry {
+                    log_index: 99999,
+                    entry_hash: "sha256:abc123".to_string(),
+                    inclusion_proof: InclusionProof {
+                        root_hash: "sha256:different-root".to_string(),
+                        tree_size: 10000,
+                        hashes: vec!["sha256:h1".to_string()],
+                        leaf_index: 12345,
+                    },
+                    signed_entry_timestamp: vec![1, 2, 3, 4],
+                    log_id: "rekor.sigstore.dev".to_string(),
+                };
+
+                let err = verifier
+                    .verify_entry("sha256:abc123", Some(&expected))
+                    .await
+                    .expect_err("mismatched expected entry");
+                assert!(matches!(
+                    err,
+                    SupplyChainVerificationError::TransparencyEntryMismatch
+                ));
+
+                RegistryLogData {
+                    reason_code: Some("transparency_entry_mismatch".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
     fn mock_tuf_verifier_accepts_valid_target() {
         run_registry_test(
             "mock_tuf_verifier_accepts_valid_target",
@@ -4569,22 +4610,20 @@ sig = "base64:{sig_b64}"
     }
 
     #[test]
-    fn noop_verifiers_always_succeed() {
+    fn noop_verifiers_fail_closed() {
         run_registry_test(
-            "noop_verifiers_always_succeed",
+            "noop_verifiers_fail_closed",
             "verify",
             "noop-adapters",
             3,
             || async {
-                // Test NoOp Transparency verifier
                 let transparency = NoOpTransparencyVerifier;
-                let result = transparency
+                let err = transparency
                     .verify_entry("any_hash", None)
                     .await
-                    .expect("noop always succeeds");
-                assert!(result.verified);
+                    .expect_err("noop transparency must fail closed");
+                assert!(matches!(err, SupplyChainVerificationError::NotConfigured));
 
-                // Test NoOp TUF verifier
                 let tuf = NoOpTufVerifier;
                 let pinned = TufRootMetadata {
                     version: 1,
@@ -4593,15 +4632,17 @@ sig = "base64:{sig_b64}"
                     key_ids: Vec::new(),
                     threshold: 1,
                 };
-                let result = tuf
+                let err = tuf
                     .verify_target(&pinned, "any/target")
                     .await
-                    .expect("noop always succeeds");
-                assert!(result.verified);
-                let root = tuf.fetch_root().await.expect("noop returns default root");
-                assert_eq!(root.version, 1);
+                    .expect_err("noop tuf must fail closed");
+                assert!(matches!(err, SupplyChainVerificationError::NotConfigured));
+                let err = tuf
+                    .fetch_root()
+                    .await
+                    .expect_err("noop tuf fetch_root must fail closed");
+                assert!(matches!(err, SupplyChainVerificationError::NotConfigured));
 
-                // Test NoOp Sigstore verifier
                 let sigstore = NoOpSigstoreVerifier;
                 let bundle = SigstoreBundle {
                     signature: String::new(),
@@ -4610,14 +4651,14 @@ sig = "base64:{sig_b64}"
                     identity: String::new(),
                     issuer: String::new(),
                 };
-                let result = sigstore
+                let err = sigstore
                     .verify_bundle(&bundle, "any_hash", &[], &[])
                     .await
-                    .expect("noop always succeeds");
-                assert!(result.verified);
+                    .expect_err("noop sigstore must fail closed");
+                assert!(matches!(err, SupplyChainVerificationError::NotConfigured));
 
                 RegistryLogData {
-                    reason_code: Some("noop_verifiers_succeed".to_string()),
+                    reason_code: Some("noop_verifiers_fail_closed".to_string()),
                     ..RegistryLogData::default()
                 }
             },
@@ -7359,21 +7400,22 @@ sig = "{reg_sig}"
     // ── NoOp verifier async paths ────────────────────────────────────
 
     #[test]
-    fn noop_transparency_always_verified() {
+    fn noop_transparency_fails_closed() {
         run_registry_test(
-            "noop_transparency_always_verified",
+            "noop_transparency_fails_closed",
             "unit",
             "verifier",
             3,
             || async {
                 let v = NoOpTransparencyVerifier;
-                let result = v.verify_entry("sha256:anything", None).await.unwrap();
-                assert!(result.verified);
-                assert_eq!(result.log_index, Some(0));
-                assert_eq!(result.logged_at, Some(0));
+                let err = v
+                    .verify_entry("sha256:anything", None)
+                    .await
+                    .expect_err("noop transparency must fail closed");
+                assert!(matches!(err, SupplyChainVerificationError::NotConfigured));
 
                 RegistryLogData {
-                    reason_code: Some("noop_transparency_ok".to_string()),
+                    reason_code: Some("noop_transparency_fail_closed".to_string()),
                     ..RegistryLogData::default()
                 }
             },
@@ -7381,54 +7423,50 @@ sig = "{reg_sig}"
     }
 
     #[test]
-    fn noop_tuf_always_verified() {
-        run_registry_test(
-            "noop_tuf_always_verified",
-            "unit",
-            "verifier",
-            3,
-            || async {
-                let v = NoOpTufVerifier;
-                let root = TufRootMetadata {
-                    version: 1,
-                    root_hash: String::new(),
-                    expires: 0,
-                    key_ids: vec![],
-                    threshold: 1,
-                };
-                let result = v.verify_target(&root, "any/path").await.unwrap();
-                assert!(result.verified);
-                assert_eq!(result.root_version, 1);
-                assert!(result.target.is_none());
-
-                RegistryLogData {
-                    reason_code: Some("noop_tuf_ok".to_string()),
-                    ..RegistryLogData::default()
-                }
-            },
-        );
-    }
-
-    #[test]
-    fn noop_tuf_fetch_root() {
-        run_registry_test("noop_tuf_fetch_root", "unit", "verifier", 3, || async {
+    fn noop_tuf_fails_closed() {
+        run_registry_test("noop_tuf_fails_closed", "unit", "verifier", 3, || async {
             let v = NoOpTufVerifier;
-            let root = v.fetch_root().await.unwrap();
-            assert_eq!(root.version, 1);
-            assert!(root.root_hash.is_empty());
-            assert_eq!(root.expires, u64::MAX);
+            let root = TufRootMetadata {
+                version: 1,
+                root_hash: String::new(),
+                expires: 0,
+                key_ids: vec![],
+                threshold: 1,
+            };
+            let err = v
+                .verify_target(&root, "any/path")
+                .await
+                .expect_err("noop tuf must fail closed");
+            assert!(matches!(err, SupplyChainVerificationError::NotConfigured));
 
             RegistryLogData {
-                reason_code: Some("noop_tuf_root_ok".to_string()),
+                reason_code: Some("noop_tuf_fail_closed".to_string()),
                 ..RegistryLogData::default()
             }
         });
     }
 
     #[test]
-    fn noop_sigstore_always_verified() {
+    fn noop_tuf_fetch_root() {
+        run_registry_test("noop_tuf_fetch_root", "unit", "verifier", 3, || async {
+            let v = NoOpTufVerifier;
+            let err = v
+                .fetch_root()
+                .await
+                .expect_err("noop tuf fetch_root must fail closed");
+            assert!(matches!(err, SupplyChainVerificationError::NotConfigured));
+
+            RegistryLogData {
+                reason_code: Some("noop_tuf_root_fail_closed".to_string()),
+                ..RegistryLogData::default()
+            }
+        });
+    }
+
+    #[test]
+    fn noop_sigstore_fails_closed() {
         run_registry_test(
-            "noop_sigstore_always_verified",
+            "noop_sigstore_fails_closed",
             "unit",
             "verifier",
             4,
@@ -7441,17 +7479,14 @@ sig = "{reg_sig}"
                     identity: "id".into(),
                     issuer: "iss".into(),
                 };
-                let result = v
+                let err = v
                     .verify_bundle(&bundle, "sha256:hash", &[], &[])
                     .await
-                    .unwrap();
-                assert!(result.verified);
-                assert!(result.identity.is_none());
-                assert!(result.issuer.is_none());
-                assert!(result.rekor_log_index.is_none());
+                    .expect_err("noop sigstore must fail closed");
+                assert!(matches!(err, SupplyChainVerificationError::NotConfigured));
 
                 RegistryLogData {
-                    reason_code: Some("noop_sigstore_ok".to_string()),
+                    reason_code: Some("noop_sigstore_fail_closed".to_string()),
                     ..RegistryLogData::default()
                 }
             },

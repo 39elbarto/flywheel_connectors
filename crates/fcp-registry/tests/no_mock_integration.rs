@@ -1528,19 +1528,22 @@ sig = "{}"
 // ── NoOp verifiers ──
 
 #[fcp_async_core::runtime::test]
-async fn noop_transparency_verifier_returns_verified() {
+async fn noop_transparency_verifier_fails_closed() {
     use fcp_registry::{NoOpTransparencyVerifier, TransparencyLogVerifier};
 
     let verifier = NoOpTransparencyVerifier;
-    let result = verifier
+    let err = verifier
         .verify_entry("sha256:abc", None)
         .await
-        .expect("noop verify");
-    assert!(result.verified, "NoOp transparency should return verified");
+        .expect_err("noop verify must fail closed");
+    assert!(matches!(
+        err,
+        fcp_registry::SupplyChainVerificationError::NotConfigured
+    ));
 }
 
 #[fcp_async_core::runtime::test]
-async fn noop_tuf_verifier_returns_verified() {
+async fn noop_tuf_verifier_fails_closed() {
     use fcp_registry::{NoOpTufVerifier, TufRootMetadata, TufVerifier};
 
     let verifier = NoOpTufVerifier;
@@ -1551,16 +1554,18 @@ async fn noop_tuf_verifier_returns_verified() {
         key_ids: vec![],
         threshold: 1,
     };
-    let result = verifier
+    let err = verifier
         .verify_target(&root, "some/target")
         .await
-        .expect("noop verify");
-    assert!(result.verified, "NoOp TUF should return verified");
-    assert_eq!(result.root_version, 1);
+        .expect_err("noop verify must fail closed");
+    assert!(matches!(
+        err,
+        fcp_registry::SupplyChainVerificationError::NotConfigured
+    ));
 }
 
 #[fcp_async_core::runtime::test]
-async fn noop_sigstore_verifier_returns_verified() {
+async fn noop_sigstore_verifier_fails_closed() {
     use fcp_registry::{NoOpSigstoreVerifier, SigstoreBundle, SigstoreVerifier};
 
     let verifier = NoOpSigstoreVerifier;
@@ -1571,11 +1576,14 @@ async fn noop_sigstore_verifier_returns_verified() {
         identity: "test@test.com".to_string(),
         issuer: "https://issuer".to_string(),
     };
-    let result = verifier
+    let err = verifier
         .verify_bundle(&bundle, "sha256:artifact", &[], &[])
         .await
-        .expect("noop verify");
-    assert!(result.verified, "NoOp Sigstore should return verified");
+        .expect_err("noop verify must fail closed");
+    assert!(matches!(
+        err,
+        fcp_registry::SupplyChainVerificationError::NotConfigured
+    ));
 }
 
 // ── Mock verifiers ──
@@ -1606,6 +1614,47 @@ async fn mock_transparency_verifier_accepts_valid_entry() {
         .expect("mock verify");
     assert!(result.verified);
     assert_eq!(result.log_index, Some(42));
+}
+
+#[fcp_async_core::runtime::test]
+async fn mock_transparency_verifier_rejects_mismatched_expected_entry() {
+    use fcp_registry::{
+        InclusionProof, MockTransparencyVerifier, TransparencyLogEntry, TransparencyLogVerifier,
+    };
+
+    let verifier = MockTransparencyVerifier::new();
+    let entry = TransparencyLogEntry {
+        log_index: 42,
+        entry_hash: "sha256:abc".to_string(),
+        inclusion_proof: InclusionProof {
+            root_hash: "sha256:root".to_string(),
+            tree_size: 100,
+            hashes: vec![],
+            leaf_index: 42,
+        },
+        signed_entry_timestamp: vec![],
+        log_id: "test-log".to_string(),
+    };
+    verifier.add_valid_entry("sha256:abc".to_string(), entry);
+
+    let expected = TransparencyLogEntry {
+        log_index: 7,
+        entry_hash: "sha256:abc".to_string(),
+        inclusion_proof: InclusionProof {
+            root_hash: "sha256:other-root".to_string(),
+            tree_size: 100,
+            hashes: vec![],
+            leaf_index: 42,
+        },
+        signed_entry_timestamp: vec![],
+        log_id: "test-log".to_string(),
+    };
+
+    let result = verifier.verify_entry("sha256:abc", Some(&expected)).await;
+    assert!(matches!(
+        result,
+        Err(fcp_registry::SupplyChainVerificationError::TransparencyEntryMismatch)
+    ));
 }
 
 #[fcp_async_core::runtime::test]

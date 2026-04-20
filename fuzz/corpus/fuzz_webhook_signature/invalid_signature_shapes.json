@@ -1,0 +1,8 @@
+{
+  "header": "sha256=not-hex",
+  "event_type": "issues",
+  "body": "{}",
+  "secret": "",
+  "stripe_timestamp": "1700000000",
+  "stripe_signatures": ["aa", "bb", "cc"]
+}

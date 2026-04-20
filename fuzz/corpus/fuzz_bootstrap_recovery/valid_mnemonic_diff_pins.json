@@ -1,0 +1,7 @@
+{
+  "pin_a": "123456",
+  "pin_b": "654321",
+  "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+  "key_name": "owner-key",
+  "incompatible_key_types": [0, 4]
+}

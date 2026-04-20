@@ -1,0 +1,4 @@
+{
+  "issuer": "node:fuzz",
+  "capability_id": "cap:fuzz"
+}

@@ -1,0 +1,8 @@
+{
+  "vector_path": "audit/valid_audit_chain.json",
+  "tamper": [
+    { "action": "duplicate_seq", "index": 2, "target": 1 },
+    { "action": "break_prev", "index": 2, "value": "tampered-prev" },
+    { "action": "head_mismatch", "value": "wrong-tip" }
+  ]
+}

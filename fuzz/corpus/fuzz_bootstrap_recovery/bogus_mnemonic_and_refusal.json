@@ -1,0 +1,7 @@
+{
+  "pin_a": "é",
+  "pin_b": "é",
+  "mnemonic": "not-a-word not-a-word not-a-word not-a-word not-a-word not-a-word not-a-word not-a-word not-a-word not-a-word not-a-word not-a-word",
+  "key_name": "recovery-key",
+  "incompatible_key_types": [1, 2, 5]
+}

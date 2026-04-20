@@ -1,0 +1,10 @@
+{
+  "header": "sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "event_type": "push",
+  "body": "{\"event\":\"push\",\"delivery\":\"seed-1\"}",
+  "secret": "seed-secret",
+  "stripe_timestamp": "1700000000",
+  "stripe_signatures": [
+    "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  ]
+}

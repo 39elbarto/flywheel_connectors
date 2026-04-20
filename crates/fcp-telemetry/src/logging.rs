@@ -1,6 +1,6 @@
 //! Structured logging with JSON output and sensitive data redaction.
 
-use std::fmt;
+use std::fmt as std_fmt;
 
 use tracing_subscriber::{
     EnvFilter,
@@ -102,7 +102,7 @@ fn redact_sensitive_with_depth(
 /// Escape control characters so attacker-controlled values cannot inject
 /// multi-line or terminal-control sequences into pretty span/log output.
 #[must_use]
-pub fn sanitize_log_value(value: &impl fmt::Display) -> String {
+pub fn sanitize_log_value(value: &impl std_fmt::Display) -> String {
     let rendered = value.to_string();
     let mut sanitized = String::with_capacity(rendered.len());
 

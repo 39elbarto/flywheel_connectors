@@ -691,6 +691,8 @@ impl<B: CursorStoreBackend> CursorStore<B> {
             return Ok(None);
         };
 
+        self.validate_state_identity(&head)?;
+
         let cursor = CursorState::from_cbor(&head.state_cbor)
             .map_err(|err| CursorStoreError::CursorDecoding(err.to_string()))?;
 
@@ -715,6 +717,11 @@ impl<B: CursorStoreBackend> CursorStore<B> {
         signature: Signature,
     ) -> Result<ObjectId, CursorStoreError> {
         self.validate_commit(&cursor, lease.lease_seq)?;
+        if header.zone_id != self.zone_id {
+            return Err(CursorStoreError::Storage(
+                "connector state header zone_id mismatch".to_string(),
+            ));
+        }
 
         if !header.refs.contains(&lease.lease_object_id) {
             header.refs.push(lease.lease_object_id);
@@ -788,6 +795,31 @@ impl<B: CursorStoreBackend> CursorStore<B> {
             {
                 return Err(CursorStoreError::WatermarkRegression { current, incoming });
             }
+        }
+
+        Ok(())
+    }
+
+    fn validate_state_identity(
+        &self,
+        state: &ConnectorStateObject,
+    ) -> Result<(), CursorStoreError> {
+        if state.connector_id != self.connector_id || state.zone_id != self.zone_id {
+            return Err(CursorStoreError::Storage(
+                "loaded connector state belongs to a different connector/zone".to_string(),
+            ));
+        }
+
+        if state.instance_id != self.instance_id {
+            return Err(CursorStoreError::Storage(
+                "loaded connector state instance_id mismatch".to_string(),
+            ));
+        }
+
+        if state.header.zone_id != self.zone_id {
+            return Err(CursorStoreError::Storage(
+                "loaded connector state header zone_id mismatch".to_string(),
+            ));
         }
 
         Ok(())
@@ -3750,6 +3782,33 @@ mod tests {
     }
 
     #[test]
+    fn cursor_store_load_rejects_mismatched_instance_state() {
+        let backend = Arc::new(InMemoryCursorStoreBackend::new());
+        let expected_instance_id = InstanceId::new();
+        let mut store = CursorStore::new(Arc::clone(&backend), test_connector_id(), test_zone_id())
+            .with_instance_id(expected_instance_id);
+
+        let mismatched_state = ConnectorStateObject {
+            header: test_object_header(),
+            connector_id: test_connector_id(),
+            instance_id: Some(InstanceId::new()),
+            zone_id: test_zone_id(),
+            prev: None,
+            seq: 0,
+            state_cbor: test_cursor_state(100, 50).to_cbor().unwrap(),
+            updated_at: 1_000_000,
+            lease_seq: 1,
+            lease_object_id: ObjectId::from_bytes([99; 32]),
+            signature: Signature::from_bytes([0u8; 64]),
+        };
+
+        backend.store_state_object(mismatched_state).unwrap();
+
+        let err = store.load_cursor().unwrap_err();
+        assert!(matches!(err, CursorStoreError::Storage(message) if message.contains("instance_id mismatch")));
+    }
+
+    #[test]
     fn cursor_store_rejects_stale_lease() {
         let backend = InMemoryCursorStoreBackend::new();
         let mut store = CursorStore::new(backend, test_connector_id(), test_zone_id());
@@ -4762,6 +4821,22 @@ mod tests {
 
         let (_, stored) = backend.load_head().unwrap().unwrap();
         assert_eq!(stored.instance_id, Some(instance_id));
+    }
+
+    #[test]
+    fn cursor_store_commit_rejects_mismatched_header_zone() {
+        let backend = InMemoryCursorStoreBackend::new();
+        let mut store = CursorStore::new(backend, test_connector_id(), test_zone_id());
+
+        let cursor = test_cursor_state(100, 50);
+        let mut header = test_object_header();
+        header.zone_id = ZoneId::work();
+
+        let lease = test_lease(1);
+        let sig = Signature::from_bytes([0u8; 64]);
+        let err = store.commit_cursor(cursor, header, lease, sig).unwrap_err();
+
+        assert!(matches!(err, CursorStoreError::Storage(message) if message.contains("header zone_id mismatch")));
     }
 
     #[test]

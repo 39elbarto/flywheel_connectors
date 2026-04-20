@@ -1,6 +1,7 @@
 //! FCP GitHub Connector implementation.
 
-use std::sync::Arc;
+use std::collections::{HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
@@ -23,6 +24,7 @@ use crate::error::GitHubError;
 use crate::types::{CreateIssueRequest, CreatePullRequestRequest, MergePullRequestRequest};
 
 const GITHUB_DEFAULT_OAUTH_SCOPES: &[&str] = &["repo", "read:user"];
+const WEBHOOK_DELIVERY_CACHE_LIMIT: usize = 1024;
 
 /// Parsed configuration for the GitHub connector.
 struct GitHubConfig {
@@ -94,6 +96,8 @@ pub struct GitHubConnector {
     config: Option<GitHubConfig>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
+    seen_webhook_deliveries: Mutex<HashSet<String>>,
+    webhook_delivery_order: Mutex<VecDeque<String>>,
 }
 
 impl GitHubConnector {
@@ -106,7 +110,35 @@ impl GitHubConnector {
             config: None,
             verifier: None,
             session_id: None,
+            seen_webhook_deliveries: Mutex::new(HashSet::new()),
+            webhook_delivery_order: Mutex::new(VecDeque::new()),
         }
+    }
+
+    fn claim_webhook_delivery(&self, delivery_id: &str) -> FcpResult<()> {
+        let mut seen = self
+            .seen_webhook_deliveries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if seen.contains(delivery_id) {
+            return Err(FcpError::RateLimited {
+                retry_after_ms: 0,
+                violation: Some(format!("duplicate webhook delivery_id: {delivery_id}")),
+            });
+        }
+
+        let mut order = self
+            .webhook_delivery_order
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        seen.insert(delivery_id.to_string());
+        order.push_back(delivery_id.to_string());
+        while order.len() > WEBHOOK_DELIVERY_CACHE_LIMIT {
+            if let Some(evicted) = order.pop_front() {
+                seen.remove(&evicted);
+            }
+        }
+        Ok(())
     }
 
     /// Handle configure method.
@@ -819,8 +851,9 @@ impl GitHubConnector {
             message: "Invalid capability ID format".into(),
         })?;
 
+        let resource_uris = resource_uris_for_operation(operation, &input)?;
         if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
+            verifier.verify(token, &cap_id, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -1145,6 +1178,15 @@ impl GitHubConnector {
                 }
             })?;
 
+        let repository = payload
+            .repository
+            .as_ref()
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Webhook payload missing repository context".into(),
+            })?;
+        self.claim_webhook_delivery(&payload.delivery_id)?;
+
         // Extract action from payload data if present
         let action = payload.data.get("action").and_then(|v| v.as_str());
 
@@ -1155,7 +1197,7 @@ impl GitHubConnector {
             topic = %topic,
             event_type = %payload.event_type,
             delivery_id = %payload.delivery_id,
-            repository = ?payload.repository.as_ref().map(|r| &r.full_name),
+            repository = %repository.full_name,
             "GitHub webhook event processed"
         );
 
@@ -1167,10 +1209,7 @@ impl GitHubConnector {
                     .get("issue")
                     .and_then(|i| i.get("number"))
                     .and_then(|n| n.as_u64());
-                let repo = payload
-                    .repository
-                    .as_ref()
-                    .map_or("unknown", |r| r.full_name.as_str());
+                let repo = repository.full_name.as_str();
                 match num {
                     Some(n) => format!("github://{repo}/issues/{n}"),
                     None => format!("github://{repo}/issues"),
@@ -1182,10 +1221,7 @@ impl GitHubConnector {
                     .get("comment")
                     .and_then(|c| c.get("id"))
                     .and_then(|i| i.as_u64());
-                let repo = payload
-                    .repository
-                    .as_ref()
-                    .map_or("unknown", |r| r.full_name.as_str());
+                let repo = repository.full_name.as_str();
                 match comment_id {
                     Some(id) => format!("github://{repo}/comments/{id}"),
                     None => format!("github://{repo}/comments"),
@@ -1197,10 +1233,7 @@ impl GitHubConnector {
                     .get("pull_request")
                     .and_then(|p| p.get("number"))
                     .and_then(|n| n.as_u64());
-                let repo = payload
-                    .repository
-                    .as_ref()
-                    .map_or("unknown", |r| r.full_name.as_str());
+                let repo = repository.full_name.as_str();
                 match num {
                     Some(n) => format!("github://{repo}/pulls/{n}"),
                     None => format!("github://{repo}/pulls"),
@@ -1212,10 +1245,7 @@ impl GitHubConnector {
                     .get("ref")
                     .and_then(|r| r.as_str())
                     .unwrap_or("unknown");
-                let repo = payload
-                    .repository
-                    .as_ref()
-                    .map_or("unknown", |r| r.full_name.as_str());
+                let repo = repository.full_name.as_str();
                 format!("github://{repo}/ref/{ref_name}")
             }
             WebhookEventType::WorkflowRun => {
@@ -1224,20 +1254,14 @@ impl GitHubConnector {
                     .get("workflow_run")
                     .and_then(|w| w.get("id"))
                     .and_then(|i| i.as_u64());
-                let repo = payload
-                    .repository
-                    .as_ref()
-                    .map_or("unknown", |r| r.full_name.as_str());
+                let repo = repository.full_name.as_str();
                 match run_id {
                     Some(id) => format!("github://{repo}/actions/runs/{id}"),
                     None => format!("github://{repo}/actions"),
                 }
             }
             _ => {
-                let repo = payload
-                    .repository
-                    .as_ref()
-                    .map_or("unknown", |r| r.full_name.as_str());
+                let repo = repository.full_name.as_str();
                 format!("github://{repo}/{}", payload.event_type)
             }
         };
@@ -1299,6 +1323,90 @@ fn require_u32(input: &serde_json::Value, field: &str) -> FcpResult<u32> {
             code: 1003,
             message: format!("Missing required field: {field}"),
         })
+}
+
+fn resource_uris_for_operation(
+    operation: &str,
+    input: &serde_json::Value,
+) -> FcpResult<Vec<String>> {
+    let repo_uri = |owner: &str, repo: &str| format!("github://{owner}/{repo}");
+
+    let uris = match operation {
+        "github.create_issue" => {
+            let owner = require_str(input, "owner")?;
+            let repo = require_str(input, "repo")?;
+            vec![format!("{}/issues", repo_uri(owner, repo))]
+        }
+        "github.get_issue" => {
+            let owner = require_str(input, "owner")?;
+            let repo = require_str(input, "repo")?;
+            let issue_number = require_u32(input, "issue_number")?;
+            vec![format!("{}/issues/{issue_number}", repo_uri(owner, repo))]
+        }
+        "github.create_pull_request" => {
+            let owner = require_str(input, "owner")?;
+            let repo = require_str(input, "repo")?;
+            vec![format!("{}/pulls", repo_uri(owner, repo))]
+        }
+        "github.get_pull_request" | "github.merge_pull_request" => {
+            let owner = require_str(input, "owner")?;
+            let repo = require_str(input, "repo")?;
+            let pull_number = require_u32(input, "pull_number")?;
+            vec![format!("{}/pulls/{pull_number}", repo_uri(owner, repo))]
+        }
+        "github.get_repo" => {
+            let owner = require_str(input, "owner")?;
+            let repo = require_str(input, "repo")?;
+            vec![repo_uri(owner, repo)]
+        }
+        "github.list_workflows" => {
+            let owner = require_str(input, "owner")?;
+            let repo = require_str(input, "repo")?;
+            vec![format!("{}/actions/workflows", repo_uri(owner, repo))]
+        }
+        "github.trigger_workflow" => {
+            let owner = require_str(input, "owner")?;
+            let repo = require_str(input, "repo")?;
+            let workflow_id = require_str(input, "workflow_id")?;
+            vec![format!(
+                "{}/actions/workflows/{workflow_id}",
+                repo_uri(owner, repo)
+            )]
+        }
+        "github.get_file_content" => {
+            let owner = require_str(input, "owner")?;
+            let repo = require_str(input, "repo")?;
+            let path = require_str(input, "path")?;
+            vec![format!("{}/contents/{}", repo_uri(owner, repo), path)]
+        }
+        "github.process_webhook" => {
+            let payload_value = input.get("payload").ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing required field: payload".into(),
+            })?;
+            let payload: crate::types::WebhookPayload =
+                serde_json::from_value(payload_value.clone()).map_err(|e| {
+                    FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("Invalid webhook payload: {e}"),
+                    }
+                })?;
+            let repo = payload
+                .repository
+                .as_ref()
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Webhook payload missing repository context".into(),
+                })?;
+            vec![format!(
+                "github://{}/webhooks/deliveries/{}",
+                repo.full_name, payload.delivery_id
+            )]
+        }
+        _ => Vec::new(),
+    };
+
+    Ok(uris)
 }
 
 fn optional_scopes(input: &serde_json::Value) -> FcpResult<Vec<String>> {
@@ -1729,6 +1837,91 @@ mod tests {
                 assert!(message.contains("outside allowed_redirect_uris"));
             }
             other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resource_uris_bind_repo_scoped_operations() {
+        let uris = resource_uris_for_operation(
+            "github.get_issue",
+            &json!({
+                "owner": "octocat",
+                "repo": "hello-world",
+                "issue_number": 42
+            }),
+        )
+        .unwrap();
+        assert_eq!(uris, vec!["github://octocat/hello-world/issues/42"]);
+
+        let uris = resource_uris_for_operation(
+            "github.get_repo",
+            &json!({
+                "owner": "octocat",
+                "repo": "hello-world"
+            }),
+        )
+        .unwrap();
+        assert_eq!(uris, vec!["github://octocat/hello-world"]);
+    }
+
+    #[test]
+    fn test_resource_uris_require_repository_for_webhook() {
+        let err = resource_uris_for_operation(
+            "github.process_webhook",
+            &json!({
+                "payload": {
+                    "event_type": "pull_request",
+                    "delivery_id": "d-1",
+                    "data": { "action": "opened" }
+                }
+            }),
+        )
+        .unwrap_err();
+
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("repository context"));
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_process_webhook_rejects_duplicate_delivery_id() {
+        let connector = GitHubConnector::new();
+        let input = json!({
+            "payload": {
+                "event_type": "pull_request",
+                "delivery_id": "dup-1",
+                "repository": {
+                    "id": 1,
+                    "full_name": "octocat/hello-world",
+                    "html_url": "https://github.com/octocat/hello-world",
+                    "private": false
+                },
+                "data": {
+                    "action": "opened",
+                    "pull_request": { "number": 42 }
+                }
+            }
+        });
+
+        let first = connector
+            .invoke_process_webhook(input.clone())
+            .await
+            .unwrap();
+        assert_eq!(first["event"]["delivery_id"], "dup-1");
+
+        let err = connector.invoke_process_webhook(input).await.unwrap_err();
+        match err {
+            FcpError::RateLimited { violation, .. } => {
+                assert!(
+                    violation
+                        .as_deref()
+                        .is_some_and(|v| v.contains("duplicate webhook delivery_id"))
+                );
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
         }
     }
 

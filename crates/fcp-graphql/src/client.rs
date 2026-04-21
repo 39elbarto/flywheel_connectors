@@ -599,7 +599,29 @@ impl GraphqlClient {
         let expected_responses = items.len();
         let body = serde_json::to_value(&items)?;
         let bytes = self.execute_bytes(body, idempotent).await?;
-        let response: Vec<GraphqlResponse<R>> = serde_json::from_slice(&bytes)?;
+        let response = self.decode_batch_response(&bytes, expected_responses, response_schema)?;
+
+        if response.iter().all(|item| item.errors.is_empty()) {
+            self.metrics
+                .requests_success
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.metrics.requests_error.fetch_add(1, Ordering::Relaxed);
+        }
+
+        Ok(response)
+    }
+
+    fn decode_batch_response<R>(
+        &self,
+        bytes: &[u8],
+        expected_responses: usize,
+        response_schema: Option<&'static str>,
+    ) -> Result<Vec<GraphqlResponse<R>>, GraphqlClientError>
+    where
+        R: DeserializeOwned + Serialize,
+    {
+        let response: Vec<GraphqlResponse<R>> = serde_json::from_slice(bytes)?;
         if response.len() != expected_responses {
             return Err(GraphqlClientError::Protocol {
                 message: format!(
@@ -620,14 +642,6 @@ impl GraphqlClient {
                     self.schema_cache.validate(schema, &value)?;
                 }
             }
-        }
-
-        if response.iter().all(|item| item.errors.is_empty()) {
-            self.metrics
-                .requests_success
-                .fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.metrics.requests_error.fetch_add(1, Ordering::Relaxed);
         }
 
         Ok(response)
@@ -1711,6 +1725,42 @@ mod tests {
         let snap1 = client.metrics();
         let snap2 = snap1;
         assert_eq!(snap1, snap2);
+    }
+
+    #[test]
+    fn decode_batch_response_accepts_matching_count() {
+        let client = GraphqlClient::new("https://api.test.com/graphql");
+        let bytes = serde_json::to_vec(&serde_json::json!([
+            {"data": {"viewer": {"id": "user-1"}}},
+            {"data": {"viewer": {"id": "user-2"}}}
+        ]))
+        .expect("serialize response");
+
+        let response = client
+            .decode_batch_response::<serde_json::Value>(&bytes, 2, None)
+            .expect("matching batch response should parse");
+
+        assert_eq!(response.len(), 2);
+    }
+
+    #[test]
+    fn decode_batch_response_rejects_response_count_mismatch() {
+        let client = GraphqlClient::new("https://api.test.com/graphql");
+        let bytes = serde_json::to_vec(&serde_json::json!([
+            {"data": {"viewer": {"id": "user-1"}}}
+        ]))
+        .expect("serialize response");
+
+        let err = client
+            .decode_batch_response::<serde_json::Value>(&bytes, 2, None)
+            .expect_err("short batch response should fail closed");
+
+        match err {
+            GraphqlClientError::Protocol { message } => {
+                assert!(message.contains("expected 2, got 1"), "got: {message}");
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
     }
 
     // ---- map_request_async_error tests ----

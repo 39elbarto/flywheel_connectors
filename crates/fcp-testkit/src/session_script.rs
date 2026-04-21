@@ -720,6 +720,21 @@ pub mod scenarios {
     }
 }
 
+/// Stable golden fixture bundle covering the canonical handshake/reconnect
+/// session-script patterns downstream tests can snapshot or replay verbatim.
+#[must_use]
+pub fn common_handshake_script_fixtures() -> serde_json::Value {
+    serde_json::json!({
+        "websocket_hello_pong": scenarios::websocket_hello_pong("/ws"),
+        "websocket_reconnect": scenarios::websocket_reconnect("/ws"),
+        "sse_receive_events": scenarios::sse_receive_events("/events", 3),
+        "webhook_deliver_and_ack": scenarios::webhook_deliver_and_ack("push"),
+        "long_poll_cycle": scenarios::long_poll_cycle("/poll"),
+        "graceful_shutdown": scenarios::graceful_shutdown(Transport::WebSocket, "/ws"),
+        "nack_redelivery": scenarios::nack_redelivery(Transport::WebSocket, "/ws"),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // humantime_serde helper for Duration serialization
 // ---------------------------------------------------------------------------
@@ -995,18 +1010,27 @@ mod tests {
     }
 
     #[test]
+    fn common_handshake_script_fixtures_cover_expected_scenarios() {
+        let fixtures = common_handshake_script_fixtures();
+        let object = fixtures
+            .as_object()
+            .expect("common handshake fixtures should serialize as an object");
+
+        assert_eq!(object.len(), 7);
+        assert!(object.contains_key("websocket_hello_pong"));
+        assert!(object.contains_key("websocket_reconnect"));
+        assert!(object.contains_key("sse_receive_events"));
+        assert!(object.contains_key("webhook_deliver_and_ack"));
+        assert!(object.contains_key("long_poll_cycle"));
+        assert!(object.contains_key("graceful_shutdown"));
+        assert!(object.contains_key("nack_redelivery"));
+    }
+
+    #[test]
     fn common_handshake_scripts_snapshot() {
         insta::assert_json_snapshot!(
             "common_handshake_scripts_snapshot",
-            serde_json::json!({
-                "websocket_hello_pong": scenarios::websocket_hello_pong("/ws"),
-                "websocket_reconnect": scenarios::websocket_reconnect("/ws"),
-                "sse_receive_events": scenarios::sse_receive_events("/events", 3),
-                "webhook_deliver_and_ack": scenarios::webhook_deliver_and_ack("push"),
-                "long_poll_cycle": scenarios::long_poll_cycle("/poll"),
-                "graceful_shutdown": scenarios::graceful_shutdown(Transport::WebSocket, "/ws"),
-                "nack_redelivery": scenarios::nack_redelivery(Transport::WebSocket, "/ws"),
-            })
+            common_handshake_script_fixtures()
         );
     }
 

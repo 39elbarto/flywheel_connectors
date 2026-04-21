@@ -24,6 +24,7 @@
 //! - [`hpke_seal`] - HPKE (RFC 9180) for sealed boxes
 //! - [`cose`] - `COSE_Sign1/CWT` helpers for capability tokens
 //! - [`kid`] - Key identifier (KID) types
+//! - [`shamir`] - Shamir secret sharing (split, seal, reconstruct) for owner-key distribution
 //! - [`canonicalize`] - Signature canonicalization helpers
 //!
 //! # Example: Signing and Verifying

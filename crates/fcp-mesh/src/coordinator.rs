@@ -48,6 +48,9 @@ pub struct LeaseCoordinatorConfig {
     pub escalate_dangerous_conflicts: bool,
 }
 
+/// Maximum allowed drift for fencing tokens during rebase (prevents poisoning).
+const MAX_FENCING_TOKEN_DRIFT: u64 = 1_000_000;
+
 impl Default for LeaseCoordinatorConfig {
     fn default() -> Self {
         Self {
@@ -195,7 +198,7 @@ impl LeaseCoordinator {
     ) -> (AcquireOutcome, Vec<AuthorityTimelineEvent>) {
         let mut timeline = Vec::new();
         let ttl = self.clamp_ttl(requested_ttl.unwrap_or(self.config.default_ttl_secs));
-        self.rebase_next_seq(existing_leases);
+        self.rebase_next_seq(existing_leases, now_secs);
 
         // Filter to active leases for this subject/purpose
         let active =
@@ -660,18 +663,24 @@ impl LeaseCoordinator {
         Some(token)
     }
 
-    fn rebase_next_seq(&mut self, existing_leases: &[ObservedLeaseAuthority]) {
+    fn rebase_next_seq(&mut self, existing_leases: &[ObservedLeaseAuthority], now_secs: u64) {
+        // Only rebase against active, verified leases to prevent replayed
+        // or poisoned history from pinning the local sequence counter.
         if let Some(max_observed) = existing_leases
             .iter()
+            .filter(|obs| obs.lease.is_active(now_secs))
             .map(|observed| observed.lease.fencing_token)
             .max()
         {
-            // A malicious/buggy peer reporting fencing_token == u64::MAX must
-            // not be able to panic the coordinator via this rebase path.
-            // saturating_add(1) pins next_seq at u64::MAX in that case;
-            // next_fencing_token() will later refuse to hand out the final
-            // token when the counter reaches u64::MAX.
-            self.next_seq = self.next_seq.max(max_observed.saturating_add(1));
+            // Enforce a maximum drift limit. If a peer reports a token that
+            // is too far ahead of our local counter, we suspect poisoning
+            // and ignore it for the purpose of rebasing our local sequence.
+            let next_candidate = max_observed.saturating_add(1);
+            if next_candidate > self.next_seq
+                && next_candidate.saturating_sub(self.next_seq) <= MAX_FENCING_TOKEN_DRIFT
+            {
+                self.next_seq = next_candidate;
+            }
         }
     }
 
@@ -1404,13 +1413,15 @@ mod tests {
 
         // Since the poisoned lease is active (expires_at = u64::MAX > 1_000),
         // the requester (who isn't the holder) is denied — but crucially we
-        // did not panic during the rebase path.
+        // did not panic during the rebase path, and we didn't update next_seq
+        // because u64::MAX is beyond the drift limit.
         match outcome {
             AcquireOutcome::Denied { current_holder, .. } => {
                 assert_eq!(current_holder, node("malicious-peer"));
             }
             other => panic!("expected Denied, got {other:?}"),
         }
+        assert_eq!(coordinator.next_seq, 1);
     }
 
     #[test]

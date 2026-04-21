@@ -225,9 +225,24 @@ impl MeshIdentity {
     }
 
     /// Get the FCP tags (zone memberships) for this node.
+    ///
+    /// This method only returns tags if the attestation is present and valid
+    /// (not expired). Unverified tags are ignored to prevent spoofing.
     #[must_use]
     pub fn fcp_tags(&self) -> Vec<&TailscaleTag> {
+        if !self.is_attestation_valid() {
+            return Vec::new();
+        }
         self.tags.iter().filter(|t| t.is_fcp_tag()).collect()
+    }
+
+    /// Get verified FCP tags, returning an error if verification fails.
+    ///
+    /// # Errors
+    /// Returns `TailscaleError` if the attestation is missing, invalid, or expired.
+    pub fn verified_fcp_tags(&self) -> TailscaleResult<Vec<&TailscaleTag>> {
+        self.verify_attestation()?;
+        Ok(self.tags.iter().filter(|t| t.is_fcp_tag()).collect())
     }
 }
 

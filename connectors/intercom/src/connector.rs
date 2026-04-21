@@ -73,6 +73,7 @@ impl IntercomConfig {
             .and_then(serde_json::Value::as_str)
             .unwrap_or(DEFAULT_BASE_URL)
             .to_string();
+        reject_base_url_qfu(&base_url)?;
 
         Ok(Self { auth, base_url })
     }
@@ -742,6 +743,35 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
         )
         .depends_on(StepId::new("enter_token")),
     )
+}
+
+/// Reject base_url overrides with userinfo, query, or fragment. The
+/// IntercomClient concatenates via format!("{}{path}", self.base_url)
+/// in every request method (client.rs:158/176/188); without this
+/// check, a base_url like `https://api.intercom.io?leak=x` would leak
+/// attacker-chosen query values on every request and put the endpoint
+/// path after the `?` boundary. Userinfo would bake into every
+/// request URL and silently override the Authorization header.
+/// Matches the hygiene in airtable / asana / gmail / notion / hubspot
+/// / whatsapp / linear / clickup / monday / bitbucket.
+fn reject_base_url_qfu(base_url: &str) -> FcpResult<()> {
+    let parsed = Url::parse(base_url).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("base_url could not be parsed: {error}"),
+    })?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
+    Ok(())
 }
 
 fn base_url_policy(base_url: &str) -> (bool, String) {
@@ -1512,5 +1542,65 @@ mod tests {
         let readiness = config.provisioning_readiness();
         assert!(!readiness.network_ok);
         assert!(readiness.network_message.contains("api.intercom.io"));
+    }
+
+    #[test]
+    fn from_params_accepts_clean_base_url() {
+        let config = IntercomConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://api.intercom.io",
+        }))
+        .unwrap();
+        assert_eq!(config.base_url, "https://api.intercom.io");
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_query_string() {
+        let err = IntercomConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://api.intercom.io?leak=x",
+        }))
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("query"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_fragment() {
+        let err = IntercomConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://api.intercom.io#frag",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_userinfo() {
+        let err = IntercomConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://attacker:pw@api.intercom.io",
+        }))
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("userinfo"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_unparseable() {
+        let err = IntercomConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "not a url",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 }

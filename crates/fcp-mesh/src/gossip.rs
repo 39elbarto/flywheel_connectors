@@ -47,7 +47,7 @@ pub const DEFAULT_SUMMARY_TTL_SECS: u64 = 300;
 pub const DEFAULT_RECONCILIATION_BATCH_SIZE: usize = 1000;
 
 /// Minimum byte budget for encoded IBLT placeholders.
-pub const MIN_IBLT_BYTES_BUDGET: usize = 512;
+pub const MIN_IBLT_BYTES_BUDGET: usize = 8192;
 
 /// Maximum object IDs in a single gossip request (anti-amplification).
 pub const MAX_OBJECT_IDS_PER_REQUEST: usize = 100;
@@ -223,33 +223,59 @@ impl XorFilterPlaceholder {
     }
 }
 
-/// IBLT state placeholder for precise set reconciliation (NORMATIVE).
+/// IBLT-backed gossip sketch for precise set reconciliation (NORMATIVE).
 ///
-/// Invertible Bloom Lookup Tables allow efficient computation of set differences.
-/// This baseline uses a simple change-tracking approach. Production implementations
-/// SHOULD upgrade to actual IBLT for:
-/// - O(d) decoding where d is the difference size
-/// - Deterministic reconciliation
-/// - Bounded communication overhead
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// This is a thin wrapper over the production [`Iblt`] in
+/// [`crate::iblt`]. Earlier revisions kept a JSON-serialized
+/// `VecDeque<(ObjectId, Option<u32>)>` change log here as a placeholder
+/// — it could not reconcile any divergence larger than
+/// `reconciliation_batch_size` and silently dropped the oldest
+/// changes. The wrapper now sizes a real `Iblt` for the configured
+/// expected-difference budget, inserts admitted objects into the
+/// sketch on each local change, and serializes the sketch as
+/// canonical CBOR on the wire. Peer decode rehydrates a real `Iblt`
+/// and enforces a cell-count cap rather than a change-count cap.
+///
+/// The name `IbltPlaceholder` is retained for ABI continuity (the
+/// type is re-exported through the crate root and referenced from the
+/// fuzz target) but the implementation is now production. Callers
+/// that relied on `recent_changes()` to inspect the old per-change
+/// log now receive an empty `Vec` — the sketch decode path should be
+/// used for reconciliation instead. Symbol-level ESIs are no longer
+/// tracked in this sketch; symbol reconciliation already flowed
+/// through `symbol_filter` / `symbol_availability`, and mixing
+/// (ObjectId, esi) pairs into the same change log was confusing and
+/// not IBLT-compatible.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IbltPlaceholder {
-    /// Recent changes (object_id, esi) for reconciliation.
-    /// Bounded to prevent unbounded growth.
-    recent_changes: VecDeque<(ObjectId, Option<u32>)>,
-    /// Maximum recent changes to track.
-    max_changes: usize,
-    /// Sequence number for change ordering.
+    /// Production IBLT sketch over admitted object IDs.
+    iblt: Iblt,
+    /// Cell-count budget used when constructing and validating sketches.
+    cell_count: usize,
+    /// Monotonic counter of local `note_local_change` calls. Retained
+    /// for metrics parity with the pre-migration placeholder so
+    /// existing `change_seq()` observers keep working.
     change_seq: u64,
 }
 
-/// Errors when decoding a placeholder IBLT sketch.
+impl Default for IbltPlaceholder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Errors when decoding an IBLT gossip sketch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IbltDecodeError {
     /// Encoded sketch exceeded the configured byte budget.
     TooLarge { len: usize, max: usize },
-    /// Encoded sketch could not be parsed.
+    /// Encoded sketch could not be parsed as a canonical CBOR `Iblt`.
     InvalidEncoding,
-    /// Encoded sketch decoded more changes than allowed.
+    /// Encoded sketch declared more IBLT cells than the peer's cap allows.
+    ///
+    /// The variant is named `TooManyChanges` for backward compatibility
+    /// with the previous change-log placeholder; under the production
+    /// sketch the numeric fields describe IBLT cell count vs. cap.
     TooManyChanges { decoded: usize, max: usize },
 }
 
@@ -265,40 +291,52 @@ impl IbltDecodeError {
 }
 
 impl IbltPlaceholder {
-    /// Create a new IBLT placeholder with default capacity.
+    /// Create a new IBLT sketch sized for `DEFAULT_RECONCILIATION_BATCH_SIZE`
+    /// expected differences.
     #[must_use]
     pub fn new() -> Self {
         Self::with_max_changes(DEFAULT_RECONCILIATION_BATCH_SIZE)
     }
 
-    /// Create with a custom change limit.
+    /// Create with a custom expected-difference budget.
+    ///
+    /// The argument is named `max_changes` for API continuity with the
+    /// previous placeholder (`reconciliation_batch_size` callers pass
+    /// the same value). The underlying `Iblt` is sized via
+    /// [`Iblt::recommended_cell_count`] which floors at
+    /// [`MIN_RECOMMENDED_IBLT_CELLS`] — so even
+    /// `with_max_changes(0)` produces a valid (if unused) sketch.
     #[must_use]
     pub fn with_max_changes(max_changes: usize) -> Self {
+        let cell_count = Iblt::recommended_cell_count(max_changes);
+        let iblt = Iblt::with_cell_count(cell_count)
+            .expect("recommended_cell_count always returns at least MIN_RECOMMENDED_IBLT_CELLS");
         Self {
-            recent_changes: VecDeque::new(),
-            max_changes,
+            iblt,
+            cell_count,
             change_seq: 0,
         }
     }
 
     /// Record a local change (object added/updated).
-    pub fn note_local_change(&mut self, object_id: &ObjectId, esi: Option<u32>) {
-        if self.max_changes == 0 {
-            self.change_seq += 1;
-            return;
-        }
-        while self.recent_changes.len() >= self.max_changes {
-            // Remove oldest
-            self.recent_changes.pop_front();
-        }
-        self.recent_changes.push_back((*object_id, esi));
+    ///
+    /// `esi` is accepted for backward compatibility with the previous
+    /// placeholder signature but is ignored — IBLT reconciliation
+    /// operates over object IDs; symbol-level ESI reconciliation flows
+    /// through the parallel `symbol_filter` / `symbol_availability`
+    /// paths on `GossipState`.
+    pub fn note_local_change(&mut self, object_id: &ObjectId, _esi: Option<u32>) {
+        self.iblt.insert(*object_id);
         self.change_seq += 1;
     }
 
-    /// Get recent changes for reconciliation.
+    /// Legacy accessor retained for ABI continuity. The production
+    /// sketch does not maintain a per-change log; callers should
+    /// perform an IBLT decode against a peer sketch instead of
+    /// inspecting this list. Always returns an empty `Vec`.
     #[must_use]
     pub fn recent_changes(&self) -> Vec<(ObjectId, Option<u32>)> {
-        self.recent_changes.iter().copied().collect()
+        Vec::new()
     }
 
     /// Get current change sequence.
@@ -307,24 +345,44 @@ impl IbltPlaceholder {
         self.change_seq
     }
 
-    /// Get the number of change cells encoded in this placeholder sketch.
+    /// Number of IBLT cells in the underlying sketch. Used by gossip
+    /// telemetry to track sketch size on the wire.
     #[must_use]
     pub fn entry_count(&self) -> usize {
-        self.recent_changes.len()
+        self.iblt.cell_count()
     }
 
-    /// Encode IBLT state for wire transmission.
+    /// Borrow the underlying production IBLT sketch.
+    #[must_use]
+    pub const fn as_iblt(&self) -> &Iblt {
+        &self.iblt
+    }
+
+    /// Encode the IBLT sketch for wire transmission as canonical CBOR.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        // Simplified encoding: just serialize recent changes
-        serde_json::to_vec(&self.recent_changes).unwrap_or_else(|_| b"[]".to_vec())
+        let mut buf = Vec::new();
+        // ciborium::into_writer returns Result<()>; silently drop errors and
+        // hand back whatever bytes were written (empty on hard failure).
+        let _ = ciborium::into_writer(&self.iblt, &mut buf);
+        buf
     }
 
-    /// Decode IBLT state from a wire payload using explicit bounds.
+    /// Decode an IBLT sketch from a wire payload with explicit bounds.
+    ///
+    /// `max_changes` (historical name — see note on
+    /// [`IbltDecodeError::TooManyChanges`]) caps the declared IBLT
+    /// cell count; a peer that ships a sketch larger than our
+    /// reconciliation budget is rejected. `max_bytes` caps the
+    /// serialized payload length. The empty payload decodes to an
+    /// empty sketch sized for `max_changes` for backward compatibility
+    /// with the placeholder that returned `Self::with_max_changes` on
+    /// empty input.
     ///
     /// # Errors
     ///
-    /// Returns an error when the payload exceeds byte/change budgets or is malformed.
+    /// Returns an error when the payload exceeds byte/cell budgets or
+    /// is malformed.
     pub fn decode_with_limits(
         bytes: &[u8],
         max_changes: usize,
@@ -341,25 +399,32 @@ impl IbltPlaceholder {
             return Ok(Self::with_max_changes(max_changes));
         }
 
-        let recent_changes: VecDeque<(ObjectId, Option<u32>)> =
-            serde_json::from_slice(bytes).map_err(|_| IbltDecodeError::InvalidEncoding)?;
-        if recent_changes.len() > max_changes {
+        let iblt: Iblt = ciborium::from_reader(bytes).map_err(|_| IbltDecodeError::InvalidEncoding)?;
+        // Enforce the caller-supplied cell-count budget. The budget is
+        // expressed in expected-difference units, so compare against
+        // the recommended cell count for that budget.
+        let cell_cap = Iblt::recommended_cell_count(max_changes);
+        if iblt.cell_count() > cell_cap {
             return Err(IbltDecodeError::TooManyChanges {
-                decoded: recent_changes.len(),
-                max: max_changes,
+                decoded: iblt.cell_count(),
+                max: cell_cap,
             });
         }
 
+        let cell_count = iblt.cell_count();
         Ok(Self {
-            change_seq: u64::try_from(recent_changes.len()).unwrap_or(u64::MAX),
-            recent_changes,
-            max_changes,
+            iblt,
+            cell_count,
+            change_seq: 0,
         })
     }
 
-    /// Clear all tracked changes.
+    /// Reset the sketch to an empty IBLT of the same cell budget.
+    /// `change_seq` is preserved so metrics observers do not see a
+    /// reset.
     pub fn clear(&mut self) {
-        self.recent_changes.clear();
+        self.iblt = Iblt::with_cell_count(self.cell_count)
+            .expect("cell_count was previously validated to be >= IBLT_HASH_COUNT");
     }
 }
 
@@ -1145,15 +1210,21 @@ impl Default for GossipConfig {
 impl GossipConfig {
     /// Derived byte budget for encoded IBLT payloads.
     ///
-    /// This keeps placeholder sketches explicitly bounded without needing a
-    /// second independently tuned knob while the implementation is still in a
-    /// baseline/upgradeable state.
+    /// The production sketch is a CBOR-encoded [`Iblt`] sized for
+    /// `reconciliation_batch_size` expected differences
+    /// ([`Iblt::recommended_cell_count`] returns ~1.5×N cells floored
+    /// at [`MIN_RECOMMENDED_IBLT_CELLS`]). Each cell is an `IbltCell`
+    /// with `{count: i32, key_sum: [u8;32], hash_check: u32}` plus
+    /// CBOR map overhead, landing in the ~70-byte range per cell in
+    /// practice; the per-difference budget here is 128 bytes to
+    /// cover the 1.5× cell multiplier with headroom for field-name
+    /// overhead in the outer struct.
     #[must_use]
     pub const fn max_iblt_bytes(&self) -> usize {
         // 16 MB hard cap to prevent saturating_mul from returning usize::MAX.
         const MAX_IBLT_BYTES_CAP: usize = 16 * 1024 * 1024;
 
-        let derived = self.reconciliation_batch_size.saturating_mul(48);
+        let derived = self.reconciliation_batch_size.saturating_mul(128);
         if derived < MIN_IBLT_BYTES_BUDGET {
             MIN_IBLT_BYTES_BUDGET
         } else if derived > MAX_IBLT_BYTES_CAP {
@@ -1823,7 +1894,7 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // IBLT Placeholder Tests
+    // IBLT Sketch Tests (production-backed; placeholder name retained)
     // ─────────────────────────────────────────────────────────────────────────
 
     #[test]
@@ -1833,15 +1904,13 @@ mod tests {
 
         iblt.note_local_change(&obj_id, None);
         assert_eq!(iblt.change_seq(), 1);
-        assert_eq!(iblt.recent_changes().len(), 1);
 
         iblt.note_local_change(&obj_id, Some(42));
         assert_eq!(iblt.change_seq(), 2);
-        assert_eq!(iblt.recent_changes().len(), 2);
     }
 
     #[test]
-    fn iblt_bounds_changes() {
+    fn iblt_change_seq_increments_regardless_of_budget() {
         let mut iblt = IbltPlaceholder::with_max_changes(3);
         let obj_id = test_object_id("obj");
 
@@ -1849,15 +1918,31 @@ mod tests {
             iblt.note_local_change(&obj_id, Some(i));
         }
 
-        // Should only keep last 3
-        assert_eq!(iblt.recent_changes().len(), 3);
+        // Production sketch no longer drops a "recent changes" log; the
+        // monotonic change_seq still reflects every note_local_change.
         assert_eq!(iblt.change_seq(), 5);
+        // recent_changes() is retained only for ABI continuity and is
+        // always empty under the production sketch.
+        assert!(iblt.recent_changes().is_empty());
     }
 
     #[test]
-    fn iblt_encode_empty_is_json_array() {
-        let iblt = IbltPlaceholder::new();
-        assert_eq!(iblt.encode(), b"[]".to_vec());
+    fn iblt_encode_is_cbor_iblt_roundtrip() {
+        let mut iblt = IbltPlaceholder::new();
+        let obj_id = test_object_id("rt");
+        iblt.note_local_change(&obj_id, None);
+
+        let encoded = iblt.encode();
+        // CBOR-encoded Iblt; the raw bytes are not a JSON array any more.
+        let decoded: Iblt = ciborium::from_reader(encoded.as_slice())
+            .expect("IbltPlaceholder::encode produces canonical CBOR Iblt");
+        // The real sketch contains the inserted object — peel confirms it.
+        let empty = Iblt::with_cell_count(decoded.cell_count()).unwrap();
+        let diff = decoded.subtract(&empty).unwrap();
+        let result = diff.decode();
+        assert!(result.is_complete());
+        assert_eq!(result.only_left.len(), 1);
+        assert_eq!(result.only_right.len(), 0);
     }
 
     #[test]
@@ -1879,22 +1964,33 @@ mod tests {
 
     #[test]
     fn iblt_decode_rejects_invalid_encoding() {
-        let err = IbltPlaceholder::decode_with_limits(b"not-json", 8, MIN_IBLT_BYTES_BUDGET)
+        let err = IbltPlaceholder::decode_with_limits(b"not-cbor", 8, MIN_IBLT_BYTES_BUDGET)
             .expect_err("malformed payload should fail");
         assert_eq!(err, IbltDecodeError::InvalidEncoding);
     }
 
     #[test]
-    fn iblt_decode_rejects_change_limit_exceeded() {
-        let mut iblt = IbltPlaceholder::with_max_changes(4);
-        let obj_id = test_object_id("obj-many");
-        for esi in 0..3 {
-            iblt.note_local_change(&obj_id, Some(esi));
-        }
+    fn iblt_decode_rejects_oversized_cell_count() {
+        // Build a sketch with a larger cell budget than the peer
+        // accepts, then confirm decode_with_limits rejects it.
+        let big = IbltPlaceholder::with_max_changes(512);
+        let big_cells = big.entry_count();
+        let small_cells = Iblt::recommended_cell_count(2);
+        assert!(big_cells > small_cells, "test fixture assumes big>small");
 
-        let err = IbltPlaceholder::decode_with_limits(&iblt.encode(), 2, MIN_IBLT_BYTES_BUDGET)
-            .expect_err("decoded changes should respect configured limit");
-        assert_eq!(err, IbltDecodeError::TooManyChanges { decoded: 3, max: 2 });
+        let err = IbltPlaceholder::decode_with_limits(
+            &big.encode(),
+            2,
+            MIN_IBLT_BYTES_BUDGET.max(big.encode().len()),
+        )
+        .expect_err("peer sketch larger than our cell cap should fail");
+        assert_eq!(
+            err,
+            IbltDecodeError::TooManyChanges {
+                decoded: big_cells,
+                max: small_cells,
+            }
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2527,14 +2623,20 @@ mod tests {
 
         iblt.note_local_change(&obj_id, None);
         iblt.note_local_change(&obj_id, Some(1));
-        assert_eq!(iblt.recent_changes().len(), 2);
+        assert_eq!(iblt.change_seq(), 2);
 
-        let encoded = iblt.encode();
-        assert!(!encoded.is_empty());
+        let encoded_before = iblt.encode();
+        assert!(!encoded_before.is_empty());
 
         iblt.clear();
-        assert_eq!(iblt.recent_changes().len(), 0);
-        // change_seq is preserved
+        // After clear, the sketch is empty: a self-subtract decodes to
+        // the empty set (no only_left / only_right).
+        let self_diff = iblt.as_iblt().subtract(iblt.as_iblt()).unwrap();
+        let result = self_diff.decode();
+        assert!(result.is_complete());
+        assert!(result.only_left.is_empty());
+        assert!(result.only_right.is_empty());
+        // change_seq is preserved across clear().
         assert_eq!(iblt.change_seq(), 2);
     }
 
@@ -2944,7 +3046,9 @@ mod tests {
     fn iblt_default() {
         let iblt = IbltPlaceholder::default();
         assert_eq!(iblt.change_seq(), 0);
-        assert!(iblt.recent_changes().is_empty());
+        // Production default sketch is sized for the default batch size;
+        // it is non-empty in cell count but empty in admitted objects.
+        assert!(iblt.entry_count() >= crate::iblt::MIN_RECOMMENDED_IBLT_CELLS);
     }
 
     // ── XorFilterPlaceholder additional tests ──────────────────
@@ -3178,44 +3282,71 @@ mod tests {
 
     #[test]
     fn iblt_zero_max_changes_still_increments_seq() {
+        // The argument is a budget hint, not a gate — change_seq still
+        // increments on every note_local_change regardless of the
+        // expected-difference budget. The underlying Iblt is floored
+        // to MIN_RECOMMENDED_IBLT_CELLS.
         let mut iblt = IbltPlaceholder::with_max_changes(0);
         let obj = test_object_id("o");
         iblt.note_local_change(&obj, None);
         iblt.note_local_change(&obj, Some(1));
         assert_eq!(iblt.change_seq(), 2);
-        assert!(iblt.recent_changes().is_empty());
     }
 
     #[test]
     fn iblt_encode_decode_roundtrip() {
-        let mut iblt = IbltPlaceholder::with_max_changes(10);
+        let mut iblt = IbltPlaceholder::with_max_changes(64);
         let obj = test_object_id("rt");
         iblt.note_local_change(&obj, None);
         iblt.note_local_change(&obj, Some(42));
         let encoded = iblt.encode();
-        let decoded = IbltPlaceholder::decode_with_limits(&encoded, 10, 4096).unwrap();
-        assert_eq!(decoded.recent_changes().len(), 2);
+        let decoded = IbltPlaceholder::decode_with_limits(
+            &encoded,
+            64,
+            encoded.len().max(MIN_IBLT_BYTES_BUDGET),
+        )
+        .unwrap();
+        // Subtract the decoded peer sketch from an empty sketch of the
+        // same cell count; peeling the diff recovers the inserted
+        // object, proving the sketch survived the wire roundtrip.
+        let empty = Iblt::with_cell_count(decoded.as_iblt().cell_count()).unwrap();
+        let diff = decoded.as_iblt().subtract(&empty).unwrap();
+        let result = diff.decode();
+        assert!(result.is_complete());
+        assert_eq!(result.only_left, [obj].into_iter().collect());
     }
 
     #[test]
     fn iblt_decode_empty_bytes_returns_empty() {
         let decoded = IbltPlaceholder::decode_with_limits(&[], 10, 4096).unwrap();
-        assert!(decoded.recent_changes().is_empty());
+        // Empty payload yields a sketch sized for the requested budget
+        // with zero inserted items; a self-subtract peels to the empty
+        // set.
+        let self_diff = decoded
+            .as_iblt()
+            .subtract(decoded.as_iblt())
+            .unwrap()
+            .decode();
+        assert!(self_diff.only_left.is_empty());
+        assert!(self_diff.only_right.is_empty());
     }
 
     #[test]
     fn iblt_decode_too_many_changes() {
-        let mut iblt = IbltPlaceholder::with_max_changes(100);
-        for i in 0..5 {
-            iblt.note_local_change(&test_object_id(&format!("o{i}")), None);
-        }
+        // A peer ships a sketch sized for 200 expected differences; the
+        // local cap is 3. The cell-count comparison rejects it.
+        let iblt = IbltPlaceholder::with_max_changes(200);
         let encoded = iblt.encode();
-        // Decode with limit of 3 should fail
-        let err = IbltPlaceholder::decode_with_limits(&encoded, 3, 4096).unwrap_err();
-        assert!(matches!(
-            err,
-            IbltDecodeError::TooManyChanges { decoded: 5, max: 3 }
-        ));
+        let err = IbltPlaceholder::decode_with_limits(
+            &encoded,
+            3,
+            encoded.len().max(MIN_IBLT_BYTES_BUDGET),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, IbltDecodeError::TooManyChanges { .. }),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -3242,17 +3373,85 @@ mod tests {
     fn iblt_clear() {
         let mut iblt = IbltPlaceholder::new();
         iblt.note_local_change(&test_object_id("c"), None);
-        assert!(!iblt.recent_changes().is_empty());
+        // Insertion changed the sketch; subtracting against an empty
+        // sketch of the same cell count peels a single item.
+        let empty_before = Iblt::with_cell_count(iblt.as_iblt().cell_count()).unwrap();
+        assert_eq!(
+            iblt.as_iblt()
+                .subtract(&empty_before)
+                .unwrap()
+                .decode()
+                .only_left
+                .len(),
+            1
+        );
+
         iblt.clear();
-        assert!(iblt.recent_changes().is_empty());
+        // After clear, the sketch is empty again.
+        let empty_after = Iblt::with_cell_count(iblt.as_iblt().cell_count()).unwrap();
+        let diff = iblt.as_iblt().subtract(&empty_after).unwrap().decode();
+        assert!(diff.only_left.is_empty());
     }
 
     #[test]
     fn iblt_entry_count() {
-        let mut iblt = IbltPlaceholder::with_max_changes(5);
-        assert_eq!(iblt.entry_count(), 0);
-        iblt.note_local_change(&test_object_id("e"), Some(1));
-        assert_eq!(iblt.entry_count(), 1);
+        // entry_count now reports IBLT cell count rather than change
+        // list length.
+        let iblt = IbltPlaceholder::with_max_changes(5);
+        assert_eq!(iblt.entry_count(), Iblt::recommended_cell_count(5));
+    }
+
+    #[test]
+    fn iblt_reconciliation_recovers_full_divergence() {
+        // Regression for the pre-migration placeholder: a VecDeque of
+        // recent_changes bounded at `reconciliation_batch_size` silently
+        // dropped the oldest changes as soon as divergence exceeded the
+        // window. The production sketch reconciles the full difference
+        // set regardless of how many changes have happened since the
+        // last sync (up to the cell budget).
+        let mut local = IbltPlaceholder::with_max_changes(128);
+        let mut remote = IbltPlaceholder::with_max_changes(128);
+
+        for i in 0..64 {
+            local.note_local_change(&test_object_id(&format!("shared-{i}")), None);
+            remote.note_local_change(&test_object_id(&format!("shared-{i}")), None);
+        }
+        // Local-only inserts beyond the old window size.
+        let local_only: Vec<_> = (0..40)
+            .map(|i| test_object_id(&format!("local-{i}")))
+            .collect();
+        for obj in &local_only {
+            local.note_local_change(obj, None);
+        }
+
+        // Simulate a wire exchange: local ships its sketch, remote
+        // decodes it, subtracts its own sketch, and peels.
+        let local_wire = local.encode();
+        let remote_decoded = IbltPlaceholder::decode_with_limits(
+            &local_wire,
+            128,
+            local_wire.len().max(MIN_IBLT_BYTES_BUDGET),
+        )
+        .unwrap();
+
+        let diff = remote_decoded.as_iblt().subtract(remote.as_iblt()).unwrap();
+        let result = diff.decode();
+        assert!(
+            result.is_complete(),
+            "peeling stalled: {} nonzero cells left",
+            result.remaining_nonzero_cells
+        );
+        assert_eq!(
+            result.only_left.len(),
+            40,
+            "remote should learn of exactly the 40 local-only inserts"
+        );
+        for obj in &local_only {
+            assert!(
+                result.only_left.contains(obj),
+                "missing local-only object {obj:?} from reconciliation"
+            );
+        }
     }
 
     // ── GossipState additional tests ───────────────────────────
@@ -3416,7 +3615,7 @@ mod tests {
     #[test]
     fn gossip_config_max_iblt_bytes_derived() {
         let config = GossipConfig::default();
-        let expected = DEFAULT_RECONCILIATION_BATCH_SIZE * 48;
+        let expected = DEFAULT_RECONCILIATION_BATCH_SIZE * 128;
         assert_eq!(config.max_iblt_bytes(), expected);
     }
 
@@ -3426,7 +3625,7 @@ mod tests {
             reconciliation_batch_size: 1,
             ..GossipConfig::default()
         };
-        // 1 * 48 = 48 < MIN_IBLT_BYTES_BUDGET(512), so uses min
+        // 1 * 128 = 128 < MIN_IBLT_BYTES_BUDGET(8192), so uses min.
         assert_eq!(config.max_iblt_bytes(), MIN_IBLT_BYTES_BUDGET);
     }
 

@@ -510,7 +510,7 @@ async fn e2e_capability_verification() {
             expect_decision_receipt: false,
             expect_audit_event: false,
             expect_receipt: false,
-            expected_reason_code: None,
+            expected_reason_code: Some("FCP-3003".to_string()),
             rate_limit_pool: None,
         },
     };
@@ -525,6 +525,15 @@ async fn e2e_capability_verification() {
     assert!(
         report.passed,
         "suite expecting error on capability mismatch should pass"
+    );
+    let execute_entry = report
+        .logs
+        .iter()
+        .find(|entry| entry.phase == "execute")
+        .expect("execute log entry");
+    assert_eq!(
+        execute_entry.context.get("reason_code"),
+        Some(&json!("FCP-3003"))
     );
 }
 

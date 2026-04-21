@@ -15513,6 +15513,9 @@ fn managed_connector_from_artifact(
         config: existing.and_then(|entry| entry.config.clone()),
         categories: existing.map_or_else(Vec::new, |entry| entry.categories.clone()),
         version: Some(artifact.manifest.connector.version.to_string()),
+        // Preserve any zone binding the operator has pinned for this
+        // connector; default (empty) keeps pre-binding behavior.
+        allowed_zones: existing.map_or_else(Vec::new, |entry| entry.allowed_zones.clone()),
     }
 }
 

@@ -247,10 +247,13 @@ impl BootstrapWorkflow {
                 Err(BootstrapError::AlreadyExists { fingerprint })
             }
             InitCheckResult::PartialState { phase } => {
-                // A Failed lock is not resumable: the caller supplied the
-                // prior error; they decide whether to wipe with
-                // force_overwrite and retry.
-                if matches!(phase, BootstrapPhase::Failed { .. }) {
+                // Only phases marked `is_resumable()` can be safely
+                // re-entered — Failed, Completed, CeremonyRound2,
+                // GenesisCreate and Enrollment have committed state
+                // that a restart would corrupt. Surface PartialState
+                // so the caller wipes with force_overwrite or
+                // manually recovers from the specific phase.
+                if !phase.is_resumable() {
                     return Err(BootstrapError::PartialState {
                         phase: format!("{phase}"),
                     });
@@ -1091,6 +1094,26 @@ mod tests {
         match BootstrapWorkflow::resume(config) {
             Err(BootstrapError::NotInitialized) => {}
             Err(other) => panic!("expected NotInitialized, got {other}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn resume_refuses_on_non_resumable_phase() {
+        // CeremonyRound2, GenesisCreate, and Enrollment have
+        // committed state that a restart would corrupt. resume()
+        // must refuse them and push the caller toward
+        // force_overwrite.
+        let dir = tempdir().unwrap();
+        crate::phase::write_phase_lock(dir.path(), &BootstrapPhase::GenesisCreate).unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .build()
+            .unwrap();
+        match BootstrapWorkflow::resume(config) {
+            Err(BootstrapError::PartialState { .. }) => {}
+            Err(other) => panic!("expected PartialState for GenesisCreate, got {other}"),
             Ok(_) => panic!("expected error, got Ok"),
         }
     }

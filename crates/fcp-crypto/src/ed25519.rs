@@ -5,7 +5,7 @@
 
 use crate::error::{CryptoError, CryptoResult};
 use crate::kid::KeyId;
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use zeroize::ZeroizeOnDrop;
 
@@ -201,8 +201,14 @@ impl Ed25519VerifyingKey {
     ///
     /// Returns an error if the signature is invalid.
     pub fn verify(&self, message: &[u8], signature: &Ed25519Signature) -> CryptoResult<()> {
+        // verify_strict rejects signatures with small-subgroup R or non-canonical
+        // S. Plain verify (the Verifier trait impl) accepts these, permitting
+        // signature malleability: a valid FCP capability token or audit
+        // signature can be re-randomized into a bytewise-different signature
+        // that still verifies. This breaks any code that dedupes or caches by
+        // signature bytes. See https://hdevalence.ca/blog/2020-10-04-its-25519am.
         self.inner
-            .verify(message, &signature.inner)
+            .verify_strict(message, &signature.inner)
             .map_err(|_| CryptoError::SignatureVerificationFailed)
     }
 

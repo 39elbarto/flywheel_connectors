@@ -256,6 +256,19 @@ async fn setup_configure(connector: &mut DiscordConnector, base_url: &str) {
         .handle_configure(json!({
             "bot_credential": "test_token",
             "api_url": base_url,
+            // Pin an unreachable gateway_url so handle_handshake's background
+            // gateway-connect task cannot race the REST fake server by
+            // issuing a GET /gateway/bot over the same 127.0.0.1:<port>
+            // listener. Without this pin, a targeted single-crate run of
+            // `send_message_happy_path` is flaky: the gateway task's
+            // discovery GET can win the second accept() slot, consuming
+            // the response intended for POST /channels/111/messages and
+            // leaving the send_message call with Connection refused.
+            // The WebSocket connect to port 1 fails immediately; the
+            // supervisor retries with backoff long enough to outlive the
+            // test, and the gateway task is torn down when the connector
+            // drops.
+            "gateway_url": "ws://127.0.0.1:1/",
             "intents": ALL_REQUIRED_INTENTS
         }))
         .await

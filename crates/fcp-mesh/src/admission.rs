@@ -571,7 +571,11 @@ impl PeerUsage {
     /// usage.
     const fn prev_window_weight(&self, now_ms: u64) -> u64 {
         let elapsed = now_ms.saturating_sub(self.window_start_ms);
-        WINDOW_MS.saturating_sub(elapsed.min(WINDOW_MS))
+        // `u64::min` calls `Ord::min`, which isn't stable as a const trait
+        // method yet (rust-lang #143874). Inline the comparison so this
+        // function and its const callers continue to compile.
+        let clamped = if elapsed < WINDOW_MS { elapsed } else { WINDOW_MS };
+        WINDOW_MS.saturating_sub(clamped)
     }
 
     /// Return the effective bytes used in the trailing sliding window.

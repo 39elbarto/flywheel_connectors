@@ -566,6 +566,30 @@ impl FrostKeyPackage {
             max_signers,
         })
     }
+
+    /// Validate that this `FrostKeyPackage` is internally consistent.
+    ///
+    /// Checks that all wrapped fields decode as valid upstream FROST
+    /// encodings and that the participant's `verifying_share` equals
+    /// `signing_share * G`. This catches mismatched signing/verifying
+    /// share pairs introduced by corrupted storage or a malicious
+    /// dealer; it does NOT check consistency against the rest of the
+    /// group (that requires [`FrostPublicKeyPackage::validate`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any consistency check fails.
+    pub fn validate(&self) -> CryptoResult<()> {
+        let key_package = self.to_frost()?;
+        let derived_verifying: frost::keys::VerifyingShare =
+            (*key_package.signing_share()).into();
+        if derived_verifying != *key_package.verifying_share() {
+            return Err(CryptoError::FrostFailed(
+                "signing share does not match verifying share".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for FrostKeyPackage {
@@ -671,6 +695,99 @@ impl FrostPublicKeyPackage {
             min_signers,
             max_signers,
         })
+    }
+
+    /// Validate that this `FrostPublicKeyPackage` is internally consistent.
+    ///
+    /// Performs basic structural checks (signer bounds, share count,
+    /// well-formed encodings) AND a cryptographic aggregate check:
+    /// Lagrange-interpolates the group public key from a
+    /// `min_signers`-sized subset of the verifying shares and verifies
+    /// it matches the stored `group_public_key`. This catches a
+    /// malicious or corrupted coordinator that supplies a
+    /// `group_public_key` inconsistent with the per-participant shares.
+    ///
+    /// The check is O(t²) in scalar/group operations where `t =
+    /// min_signers`, so it is exposed as an explicit method rather than
+    /// enforced on every `from_frost` construction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any consistency check fails or if the
+    /// Lagrange aggregate of the chosen subset does not equal
+    /// `group_public_key`.
+    pub fn validate(&self) -> CryptoResult<()> {
+        use frost::{Field, Group};
+        type FieldT = frost::Ed25519ScalarField;
+        type GroupT = frost::Ed25519Group;
+        type Scalar = <FieldT as Field>::Scalar;
+        type Element = <GroupT as Group>::Element;
+
+        let public_key_package = self.to_frost()?;
+
+        if usize::from(self.min_signers) > self.verifying_shares.len() {
+            return Err(CryptoError::FrostFailed(
+                "min_signers exceeds available verifying shares".to_string(),
+            ));
+        }
+
+        let take_count = usize::from(self.min_signers);
+        let mut id_scalars: Vec<Scalar> = Vec::with_capacity(take_count);
+        let mut id_elements: Vec<Element> = Vec::with_capacity(take_count);
+        for (id, vshare) in public_key_package.verifying_shares().iter().take(take_count) {
+            let id_bytes_vec = id.serialize();
+            let id_bytes: [u8; 32] = id_bytes_vec.as_slice().try_into().map_err(|_| {
+                CryptoError::FrostFailed("frost identifier serialization length".to_string())
+            })?;
+            let scalar: Scalar = FieldT::deserialize(&id_bytes).map_err(|e| {
+                CryptoError::FrostFailed(format!("frost identifier deserialize: {e:?}"))
+            })?;
+
+            let v_bytes_vec = vshare.serialize().map_err(frost_error)?;
+            let v_bytes: [u8; 32] = v_bytes_vec.as_slice().try_into().map_err(|_| {
+                CryptoError::FrostFailed("verifying share serialization length".to_string())
+            })?;
+            let element: Element = GroupT::deserialize(&v_bytes).map_err(|e| {
+                CryptoError::FrostFailed(format!("verifying share deserialize: {e:?}"))
+            })?;
+
+            id_scalars.push(scalar);
+            id_elements.push(element);
+        }
+
+        let mut accum: Element = GroupT::identity();
+        for i in 0..id_scalars.len() {
+            let x_i = id_scalars[i];
+            let mut num = FieldT::one();
+            let mut den = FieldT::one();
+            for j in 0..id_scalars.len() {
+                if i == j {
+                    continue;
+                }
+                let x_j = id_scalars[j];
+                num = num * x_j;
+                den = den * (x_j - x_i);
+            }
+            let den_inv = FieldT::invert(&den).map_err(|e| {
+                CryptoError::FrostFailed(format!("lagrange denominator inverse: {e:?}"))
+            })?;
+            let lambda = num * den_inv;
+            accum = accum + (id_elements[i] * lambda);
+        }
+
+        let stored_bytes = self.group_public_key.to_bytes();
+        let stored_element: Element = GroupT::deserialize(&stored_bytes).map_err(|e| {
+            CryptoError::FrostFailed(format!("group public key deserialize: {e:?}"))
+        })?;
+
+        if accum != stored_element {
+            return Err(CryptoError::FrostFailed(
+                "group public key does not match Lagrange aggregate of verifying shares"
+                    .to_string(),
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -1690,5 +1807,75 @@ mod tests {
                 .to_string()
                 .contains("missing signature shares from participants [2]")
         );
+    }
+
+    #[test]
+    fn key_package_validate_accepts_well_formed_dkg_output() {
+        let (key_packages, _public_packages) = execute_dkg(2, 3);
+        for participant in 1..=3 {
+            key_packages
+                .get(&participant)
+                .unwrap()
+                .validate()
+                .expect("DKG-produced key package must validate");
+        }
+    }
+
+    #[test]
+    fn key_package_validate_rejects_mismatched_signing_share() {
+        let (key_packages, _public_packages) = execute_dkg(2, 3);
+        let mut tampered = key_packages.get(&1).unwrap().clone();
+        let other_verifying = key_packages.get(&2).unwrap().verifying_share().clone();
+        tampered.verifying_share = other_verifying;
+
+        let err = tampered.validate().unwrap_err();
+        assert!(matches!(err, CryptoError::FrostFailed(_)));
+        assert!(
+            err.to_string()
+                .contains("signing share does not match verifying share")
+        );
+    }
+
+    #[test]
+    fn public_key_package_validate_accepts_well_formed_dkg_output() {
+        let (_key_packages, public_packages) = execute_dkg(2, 3);
+        public_packages
+            .get(&1)
+            .unwrap()
+            .validate()
+            .expect("DKG-produced public key package must validate");
+    }
+
+    #[test]
+    fn public_key_package_validate_rejects_mismatched_group_public_key() {
+        let (_keys_a, public_a) = execute_dkg(2, 3);
+        let (_keys_b, public_b) = execute_dkg(2, 4);
+        let mut tampered = public_a.get(&1).unwrap().clone();
+        tampered.group_public_key = public_b.get(&1).unwrap().group_public_key().clone();
+
+        let err = tampered.validate().unwrap_err();
+        assert!(matches!(err, CryptoError::FrostFailed(_)));
+        assert!(
+            err.to_string()
+                .contains("does not match Lagrange aggregate")
+        );
+    }
+
+    #[test]
+    fn public_key_package_validate_rejects_swapped_verifying_share() {
+        let (_keys_a, public_a) = execute_dkg(2, 3);
+        let (_keys_b, public_b) = execute_dkg(2, 4);
+        let mut tampered = public_a.get(&1).unwrap().clone();
+        let other_share = public_b
+            .get(&1)
+            .unwrap()
+            .verifying_shares()
+            .get(&1)
+            .unwrap()
+            .clone();
+        tampered.verifying_shares.insert(1, other_share);
+
+        let err = tampered.validate().unwrap_err();
+        assert!(matches!(err, CryptoError::FrostFailed(_)));
     }
 }

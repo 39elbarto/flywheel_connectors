@@ -164,6 +164,13 @@ impl ChunkedObjectManifest {
             });
         }
 
+        // `from_payload` asserts `chunk_size > 0`, but `ChunkedObjectManifest`
+        // is `Deserialize`, so a peer can ship `chunk_size: 0`. Reject it
+        // here rather than panicking on `total_len % 0` for the last chunk.
+        if self.chunk_size == 0 {
+            return Err(ChunkError::InvalidChunkSize);
+        }
+
         // Last chunk may be smaller
         if index == self.chunks.len() - 1 {
             let remaining = self.total_len as usize % self.chunk_size as usize;
@@ -255,6 +262,54 @@ mod tests {
         let chunk1 = RawChunk::new(vec![1, 2, 3]);
         let chunk2 = RawChunk::new(vec![4, 5, 6]);
         assert_ne!(chunk1.content_id(), chunk2.content_id());
+    }
+
+    #[test]
+    fn chunk_size_at_rejects_zero_chunk_size_without_panic() {
+        // Regression: `ChunkedObjectManifest` is `Deserialize`, so a peer
+        // can ship `chunk_size: 0` even though `from_payload` asserts
+        // non-zero. `chunk_size_at(last_index)` previously computed
+        // `total_len % chunk_size`, which panics with attempt-to-divide-by-zero
+        // for the last chunk. Must return `InvalidChunkSize` instead.
+        let payload_hash = *blake3::hash(b"forged").as_bytes();
+        let manifest = ChunkedObjectManifest {
+            total_len: 1024,
+            chunk_size: 0,
+            chunks: vec![ObjectId::from_unscoped_bytes(b"a")],
+            payload_hash,
+        };
+
+        // Last chunk: would otherwise panic on `1024 % 0`.
+        assert_eq!(
+            manifest.chunk_size_at(0).unwrap_err(),
+            ChunkError::InvalidChunkSize
+        );
+
+        // Multi-chunk manifest with chunk_size: 0 — non-last chunks must
+        // also error rather than returning a misleading `0`.
+        let multi = ChunkedObjectManifest {
+            total_len: 1024,
+            chunk_size: 0,
+            chunks: vec![
+                ObjectId::from_unscoped_bytes(b"a"),
+                ObjectId::from_unscoped_bytes(b"b"),
+            ],
+            payload_hash,
+        };
+        assert_eq!(
+            multi.chunk_size_at(0).unwrap_err(),
+            ChunkError::InvalidChunkSize
+        );
+        assert_eq!(
+            multi.chunk_size_at(1).unwrap_err(),
+            ChunkError::InvalidChunkSize
+        );
+
+        // Out-of-bounds index still wins over chunk_size check.
+        assert!(matches!(
+            multi.chunk_size_at(99).unwrap_err(),
+            ChunkError::InvalidChunkIndex { index: 99, count: 2 }
+        ));
     }
 
     #[test]

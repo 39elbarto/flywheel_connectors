@@ -35,6 +35,11 @@ pub enum ChunkError {
         /// Total chunk count.
         count: usize,
     },
+
+    /// Manifest declares `chunk_size = 0`, which makes per-chunk size
+    /// computation a divide-by-zero.
+    #[error("invalid manifest: chunk_size must be non-zero")]
+    InvalidChunkSize,
 }
 
 /// `RaptorQ` encode errors.

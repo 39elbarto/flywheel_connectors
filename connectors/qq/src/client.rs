@@ -229,6 +229,21 @@ impl QqClient {
 fn validate_host(raw: &str, allowed_hosts: &[&str]) -> QqResult<()> {
     let url =
         Url::parse(raw.trim()).map_err(|e| QqError::Config(format!("invalid URL `{raw}`: {e}")))?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(QqError::Config(format!(
+            "URL `{raw}` must not include userinfo"
+        )));
+    }
+    if url.query().is_some() {
+        return Err(QqError::Config(format!(
+            "URL `{raw}` must not include a query string"
+        )));
+    }
+    if url.fragment().is_some() {
+        return Err(QqError::Config(format!(
+            "URL `{raw}` must not include a fragment"
+        )));
+    }
     let host = url
         .host_str()
         .ok_or_else(|| QqError::Config(format!("URL `{raw}` must include a host")))?;
@@ -507,6 +522,54 @@ mod tests {
             request_timeout_ms: 30_000,
         };
         assert!(QqClient::new(config).is_err());
+    }
+
+    #[test]
+    fn rejects_base_url_with_query_fragment_or_userinfo() {
+        let query = test_config(
+            "https://api.sgroup.qq.com/api?trace=1",
+            "https://bots.qq.com/app",
+        );
+        let err = QqClient::new(query).unwrap_err().to_string();
+        assert!(err.contains("must not include a query string"));
+
+        let fragment = test_config(
+            "https://api.sgroup.qq.com/api#fragment",
+            "https://bots.qq.com/app",
+        );
+        let err = QqClient::new(fragment).unwrap_err().to_string();
+        assert!(err.contains("must not include a fragment"));
+
+        let userinfo = test_config(
+            "https://bot:secret@api.sgroup.qq.com/api",
+            "https://bots.qq.com/app",
+        );
+        let err = QqClient::new(userinfo).unwrap_err().to_string();
+        assert!(err.contains("must not include userinfo"));
+    }
+
+    #[test]
+    fn rejects_token_base_url_with_query_fragment_or_userinfo() {
+        let query = test_config(
+            "https://api.sgroup.qq.com/api",
+            "https://bots.qq.com/oauth2/token?trace=1",
+        );
+        let err = QqClient::new(query).unwrap_err().to_string();
+        assert!(err.contains("must not include a query string"));
+
+        let fragment = test_config(
+            "https://api.sgroup.qq.com/api",
+            "https://bots.qq.com/oauth2/token#fragment",
+        );
+        let err = QqClient::new(fragment).unwrap_err().to_string();
+        assert!(err.contains("must not include a fragment"));
+
+        let userinfo = test_config(
+            "https://api.sgroup.qq.com/api",
+            "https://bot:secret@bots.qq.com/oauth2/token",
+        );
+        let err = QqClient::new(userinfo).unwrap_err().to_string();
+        assert!(err.contains("must not include userinfo"));
     }
 
     #[test]

@@ -704,6 +704,41 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn configure_rejects_base_url_query_and_fragment() {
+        let mut connector = QqConnector::new();
+        let query = serde_json::json!({
+            "app_id": "test-app",
+            "client_secret": "test-secret",
+            "base_url": "https://api.sgroup.qq.com/api?trace=1",
+            "token_base_url": "http://localhost:9999"
+        });
+        let err = connector.configure(query).await.unwrap_err().to_string();
+        assert!(err.contains("must not include a query string"));
+
+        let fragment = serde_json::json!({
+            "app_id": "test-app",
+            "client_secret": "test-secret",
+            "base_url": "https://api.sgroup.qq.com/api#fragment",
+            "token_base_url": "http://localhost:9999"
+        });
+        let err = connector.configure(fragment).await.unwrap_err().to_string();
+        assert!(err.contains("must not include a fragment"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_token_base_url_userinfo() {
+        let mut connector = QqConnector::new();
+        let config = serde_json::json!({
+            "app_id": "test-app",
+            "client_secret": "test-secret",
+            "base_url": "http://localhost:9999",
+            "token_base_url": "https://bot:secret@bots.qq.com/oauth2/token"
+        });
+        let err = connector.configure(config).await.unwrap_err().to_string();
+        assert!(err.contains("must not include userinfo"));
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn shutdown_clears_state() {
         let mut connector = QqConnector::new();
         let config = serde_json::json!({

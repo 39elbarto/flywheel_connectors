@@ -1659,6 +1659,21 @@ FCP integrates with the broader Agent Flywheel ecosystem:
 - Rust nightly (2024 edition)
 - Cargo
 - Tailscale (for mesh features)
+- **Sibling repositories** (required for a fresh-clone build): this workspace depends on two external repos via relative `path = "../../../..."` entries in several `Cargo.toml` files, so they must be cloned as siblings at the same directory level as this repo:
+
+  ```bash
+  # Expected layout — all three repos share a parent directory:
+  #   parent/
+  #   ├── asupersync/          ← native async runtime (required)
+  #   ├── toon_rust/           ← TOON serializer / `tru` binary (required)
+  #   └── flywheel_connectors/ ← this repo
+
+  git clone https://github.com/Dicklesworthstone/asupersync.git
+  git clone https://github.com/Dicklesworthstone/toon_rust.git
+  git clone https://github.com/Dicklesworthstone/flywheel_connectors.git
+  ```
+
+  `asupersync` is consumed by `fcp-host`, `fcp-async-core`, `fcp-graphql`, `fcp-tailscale`, `fcp-telemetry`, and the Slack/Discord connectors. `toon_rust` is consumed by `crates/fwc`. If either sibling is missing, Cargo will fail early with `error: failed to load manifest for dependency 'asupersync'` (or `'toon'`) — that is the fingerprint of a missing sibling checkout rather than a code problem.
 
 ### Building
 

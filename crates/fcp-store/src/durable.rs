@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -316,6 +317,24 @@ impl DurableSymbolState {
         }
         self.used_bytes = self.used_bytes.saturating_sub(removed_bytes);
         removed_bytes
+    }
+
+    fn scrub_object_if_present(&mut self, object_id: &ObjectId) -> bool {
+        let removed_bytes = {
+            let Some(object) = self.objects.get_mut(object_id) else {
+                return false;
+            };
+            Self::scrub_corrupt_symbols_locked(object)
+        };
+
+        // Keep the scrub and quota repair inside one state-lock scope so a
+        // concurrent durable write cannot validate against stale `used_bytes`
+        // after a read path removes corrupt symbols.
+        if removed_bytes > 0 {
+            self.used_bytes = self.used_bytes.saturating_sub(removed_bytes);
+        }
+
+        true
     }
 
     fn from_snapshot(snapshot: SymbolSnapshot) -> Self {
@@ -776,18 +795,15 @@ impl SymbolStore for DurableSymbolStore {
         esi: u32,
     ) -> Result<StoredSymbol, SymbolStoreError> {
         let mut state = self.state.write();
-        let object = state
-            .objects
-            .get_mut(object_id)
-            .ok_or(SymbolStoreError::ObjectNotFound(*object_id))?;
-        let removed_bytes = DurableSymbolState::scrub_corrupt_symbols_locked(object);
-        let symbol = object.symbols.get(&esi).cloned();
-        drop(state);
-
-        if removed_bytes > 0 {
-            let mut state = self.state.write();
-            state.used_bytes = state.used_bytes.saturating_sub(removed_bytes);
+        if !state.scrub_object_if_present(object_id) {
+            return Err(SymbolStoreError::ObjectNotFound(*object_id));
         }
+        let symbol = state
+            .objects
+            .get(object_id)
+            .and_then(|object| object.symbols.get(&esi))
+            .cloned();
+        drop(state);
 
         symbol.ok_or(SymbolStoreError::NotFound {
             object_id: *object_id,
@@ -809,17 +825,15 @@ impl SymbolStore for DurableSymbolStore {
 
     async fn get_all_symbols(&self, object_id: &ObjectId) -> Vec<StoredSymbol> {
         let mut state = self.state.write();
-        let Some(object) = state.objects.get_mut(object_id) else {
+        if !state.scrub_object_if_present(object_id) {
             return Vec::new();
-        };
-        let removed_bytes = DurableSymbolState::scrub_corrupt_symbols_locked(object);
-        let mut symbols: Vec<_> = object.symbols.values().cloned().collect();
-        drop(state);
-
-        if removed_bytes > 0 {
-            let mut state = self.state.write();
-            state.used_bytes = state.used_bytes.saturating_sub(removed_bytes);
         }
+        let mut symbols: Vec<_> = state
+            .objects
+            .get(object_id)
+            .map(|object| object.symbols.values().cloned().collect())
+            .unwrap_or_default();
+        drop(state);
 
         symbols.sort_unstable_by_key(|symbol| symbol.meta.esi);
         symbols
@@ -827,17 +841,15 @@ impl SymbolStore for DurableSymbolStore {
 
     async fn symbol_count(&self, object_id: &ObjectId) -> u32 {
         let mut state = self.state.write();
-        let Some(object) = state.objects.get_mut(object_id) else {
+        if !state.scrub_object_if_present(object_id) {
             return 0;
-        };
-        let removed_bytes = DurableSymbolState::scrub_corrupt_symbols_locked(object);
-        let count = u32::try_from(object.symbols.len()).unwrap_or(u32::MAX);
-        drop(state);
-
-        if removed_bytes > 0 {
-            let mut state = self.state.write();
-            state.used_bytes = state.used_bytes.saturating_sub(removed_bytes);
         }
+        let count = state
+            .objects
+            .get(object_id)
+            .map(|object| u32::try_from(object.symbols.len()).unwrap_or(u32::MAX))
+            .unwrap_or(0);
+        drop(state);
 
         count
     }
@@ -857,8 +869,10 @@ impl SymbolStore for DurableSymbolStore {
 
     async fn get_distribution(&self, object_id: &ObjectId) -> Option<SymbolDistribution> {
         let mut state = self.state.write();
-        let object = state.objects.get_mut(object_id)?;
-        let removed_bytes = DurableSymbolState::scrub_corrupt_symbols_locked(object);
+        if !state.scrub_object_if_present(object_id) {
+            return None;
+        }
+        let object = state.objects.get(object_id)?;
 
         let mut distribution = SymbolDistribution::new(object.meta.source_symbols);
         for symbol in object.symbols.values() {
@@ -868,11 +882,6 @@ impl SymbolStore for DurableSymbolStore {
             distribution.add_symbol(node_id, size);
         }
         drop(state);
-
-        if removed_bytes > 0 {
-            let mut state = self.state.write();
-            state.used_bytes = state.used_bytes.saturating_sub(removed_bytes);
-        }
 
         Some(distribution)
     }
@@ -897,20 +906,17 @@ impl SymbolStore for DurableSymbolStore {
 
     async fn can_reconstruct(&self, object_id: &ObjectId) -> bool {
         let mut state = self.state.write();
-        let Some(object) = state.objects.get_mut(object_id) else {
+        if !state.scrub_object_if_present(object_id) {
+            return false;
+        }
+        let Some(object) = state.objects.get(object_id) else {
             return false;
         };
-        let removed_bytes = DurableSymbolState::scrub_corrupt_symbols_locked(object);
         let reconstructable = DurableSymbolState::has_required_symbols(
             object.symbols.len(),
             object.meta.source_symbols,
         );
         drop(state);
-
-        if removed_bytes > 0 {
-            let mut state = self.state.write();
-            state.used_bytes = state.used_bytes.saturating_sub(removed_bytes);
-        }
 
         reconstructable
     }
@@ -1131,17 +1137,12 @@ where
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("invalid snapshot path {}", path.display()))?;
-    let temp_path = path.with_file_name(format!(
+    let temp_file_name = format!(
         "{file_name}.tmp.{}.{}",
         std::process::id(),
         last_seq
-    ));
-
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temp_path)
-        .map_err(|error| format!("create temp snapshot {}: {error}", temp_path.display()))?;
+    );
+    let (temp_path, mut file) = open_unique_snapshot_temp_file(path, &temp_file_name)?;
     file.write_all(&bytes)
         .map_err(|error| format!("write temp snapshot {}: {error}", temp_path.display()))?;
     file.sync_all()
@@ -1158,6 +1159,38 @@ where
     sync_parent_dir(path)
         .map_err(|error| format!("sync snapshot dir {}: {error}", path.display()))?;
     Ok(())
+}
+
+fn open_unique_snapshot_temp_file(path: &Path, base_name: &str) -> Result<(PathBuf, File), String> {
+    const MAX_TEMP_FILE_RETRIES: u32 = 32;
+
+    for suffix in 0..=MAX_TEMP_FILE_RETRIES {
+        let candidate = if suffix == 0 {
+            path.with_file_name(base_name)
+        } else {
+            path.with_file_name(format!("{base_name}.{suffix}"))
+        };
+
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&candidate)
+        {
+            Ok(file) => return Ok((candidate, file)),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "create temp snapshot {}: {error}",
+                    candidate.display()
+                ));
+            }
+        }
+    }
+
+    Err(format!(
+        "create temp snapshot {}: exhausted unique-name retries for {base_name}",
+        path.display()
+    ))
 }
 
 fn clear_wal(path: &Path) -> Result<(), String> {
@@ -1359,6 +1392,37 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn durable_object_store_checkpoint_retries_past_stale_snapshot_temp_file() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut config = DurableObjectStoreConfig::new(temp_dir.path().join("objects"));
+        config.checkpoint_after_ops = 0;
+
+        let store = DurableObjectStore::open(config.clone()).expect("open store");
+        let object = test_object(13);
+        let object_id = object.object_id;
+        store.put(object.clone()).await.expect("put object");
+
+        let snapshot_path = config.root_dir.join("objects.snapshot.json");
+        let stale_temp = snapshot_path.with_file_name(format!(
+            "objects.snapshot.json.tmp.{}.1",
+            std::process::id()
+        ));
+        fs::write(&stale_temp, b"stale snapshot temp").expect("write stale temp");
+
+        store
+            .checkpoint()
+            .expect("checkpoint should ignore orphaned temp file names");
+        assert!(
+            snapshot_path.exists(),
+            "checkpoint should still materialize the durable snapshot"
+        );
+
+        let reopened = DurableObjectStore::open(config).expect("reopen store");
+        let recovered = reopened.get(&object_id).await.expect("recover object");
+        assert_eq!(recovered.body, object.body);
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn durable_symbol_store_rejects_conflicting_esi() {
         // Regression: silent first-write-wins on ESI let a crafted symbol
         // block all later honest writes and permanently deny repair for
@@ -1473,6 +1537,69 @@ mod tests {
             .await
             .expect("honest symbol should fit once invalid bytes are scrubbed");
         assert_eq!(reopened.symbol_count(&test_object_id(11)).await, 1);
+    }
+
+    #[test]
+    fn durable_symbol_state_scrub_repairs_used_bytes_in_same_lock_scope() {
+        let meta = test_symbol_meta(12);
+        let valid = test_symbol(12, 0, 9);
+        let valid_size = DurableSymbolState::symbol_size(&valid);
+
+        let mut state = DurableSymbolState::default();
+        state
+            .apply_put_object_meta(meta.clone())
+            .expect("object meta should load");
+        state
+            .apply_put_symbol(PersistentStoredSymbol {
+                meta: valid.meta.clone(),
+                data: valid.data.to_vec(),
+            })
+            .expect("valid symbol should load");
+
+        let corrupt = StoredSymbol {
+            meta: SymbolMeta {
+                object_id: meta.object_id,
+                esi: 99,
+                zone_id: meta.zone_id.clone(),
+                source_node: Some(99),
+                stored_at: 99,
+            },
+            data: Bytes::from(vec![0xAB; usize::from(meta.oti.symbol_size) - 1]),
+        };
+        let corrupt_size = DurableSymbolState::symbol_size(&corrupt);
+        state.used_bytes = state.used_bytes.saturating_add(corrupt_size);
+        state
+            .objects
+            .get_mut(&meta.object_id)
+            .expect("object must exist")
+            .symbols
+            .insert(corrupt.meta.esi, corrupt);
+
+        assert_eq!(
+            state.used_bytes,
+            valid_size + corrupt_size,
+            "setup should include the invalid symbol in used_bytes"
+        );
+
+        assert!(
+            state.scrub_object_if_present(&meta.object_id),
+            "object should still be present"
+        );
+        assert_eq!(
+            state.used_bytes,
+            valid_size,
+            "scrub must repair quota accounting before releasing the state lock"
+        );
+        assert_eq!(
+            state
+                .objects
+                .get(&meta.object_id)
+                .expect("object should remain")
+                .symbols
+                .len(),
+            1,
+            "corrupt symbol should be removed"
+        );
     }
 
     #[fcp_async_core::runtime::test]

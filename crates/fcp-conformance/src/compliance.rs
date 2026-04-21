@@ -642,16 +642,26 @@ mod tests {
     use std::collections::HashMap;
 
     use fcp_core::{
-        ConnectorId, ConnectorMetrics, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-        HealthSnapshot, HealthState, Introspection, InvokeRequest, InvokeResponse, RequestId,
-        ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-        SubscribeResult, UnsubscribeRequest,
+        CapabilityToken, ConnectorId, ConnectorMetrics, FcpError, FcpResult, HandshakeRequest,
+        HandshakeResponse, HealthSnapshot, HealthState, Introspection, InvokeRequest,
+        InvokeResponse, OperationId, RequestId, ShutdownRequest, SimulateRequest,
+        SimulateResponse, SubscribeRequest, SubscribeResponse, SubscribeResult,
+        UnsubscribeRequest,
     };
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    enum MockInvokeBehavior {
+        #[default]
+        Success,
+        CapabilityDeniedError,
+        UnauthorizedError,
+    }
 
     struct MockConnector {
         configure_ok: bool,
         handshake_accepted: bool,
         health_ok: bool,
+        invoke_behavior: MockInvokeBehavior,
     }
 
     impl MockConnector {
@@ -660,6 +670,7 @@ mod tests {
                 configure_ok: true,
                 handshake_accepted: true,
                 health_ok: true,
+                invoke_behavior: MockInvokeBehavior::Success,
             }
         }
 
@@ -680,6 +691,20 @@ mod tests {
         fn unhealthy() -> Self {
             Self {
                 health_ok: false,
+                ..Self::healthy()
+            }
+        }
+
+        fn capability_denied_error() -> Self {
+            Self {
+                invoke_behavior: MockInvokeBehavior::CapabilityDeniedError,
+                ..Self::healthy()
+            }
+        }
+
+        fn unauthorized_error() -> Self {
+            Self {
+                invoke_behavior: MockInvokeBehavior::UnauthorizedError,
                 ..Self::healthy()
             }
         }
@@ -755,7 +780,19 @@ mod tests {
         }
 
         async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
-            Ok(InvokeResponse::ok(req.id, serde_json::json!({"ok": true})))
+            match self.invoke_behavior {
+                MockInvokeBehavior::Success => {
+                    Ok(InvokeResponse::ok(req.id, serde_json::json!({"ok": true})))
+                }
+                MockInvokeBehavior::CapabilityDeniedError => Err(FcpError::CapabilityDenied {
+                    capability: "cap.read".into(),
+                    reason: "missing capability".into(),
+                }),
+                MockInvokeBehavior::UnauthorizedError => Err(FcpError::Unauthorized {
+                    code: 401,
+                    message: "invalid bearer".into(),
+                }),
+            }
         }
 
         async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
@@ -791,6 +828,26 @@ mod tests {
             host: None,
             transport_caps: None,
             requested_instance_id: None,
+        }
+    }
+
+    fn make_invoke(operation: &'static str) -> InvokeRequest {
+        InvokeRequest {
+            r#type: "invoke".into(),
+            id: RequestId::from("req-mock"),
+            connector_id: ConnectorId::from_static("test.mock:utility:1.0.0"),
+            operation: OperationId::from_static(operation),
+            zone_id: "z:test".parse().expect("test zone id"),
+            input: serde_json::json!({}),
+            capability_token: CapabilityToken::test_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
         }
     }
 
@@ -877,6 +934,65 @@ mod tests {
         assert!(check_ids.contains(&"handshake"));
         assert!(check_ids.contains(&"introspect"));
         assert!(check_ids.contains(&"health"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn dynamic_capability_denied_error_counts_as_capability_denial() {
+        let mut connector = MockConnector::capability_denied_error();
+        let suite = DynamicSuite {
+            config: serde_json::json!({}),
+            handshake: make_handshake(),
+            invoke: Some(make_invoke("protected_op")),
+            expect_invoke_error: true,
+            simulate: None,
+            expect_simulate_would_succeed: None,
+            require_simulate_denial_details: false,
+            require_capability_denial: true,
+            require_decision_receipt: false,
+        };
+
+        let result = run_dynamic_checks(&mut connector, suite).await;
+        assert!(result.passed, "{result:?}");
+
+        let cap_finding = result
+            .findings
+            .iter()
+            .find(|f| f.check == "invoke.capability_denial")
+            .expect("capability denial finding");
+        assert_eq!(cap_finding.status, CheckStatus::Pass);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn dynamic_unauthorized_error_does_not_satisfy_capability_denial() {
+        let mut connector = MockConnector::unauthorized_error();
+        let suite = DynamicSuite {
+            config: serde_json::json!({}),
+            handshake: make_handshake(),
+            invoke: Some(make_invoke("protected_op")),
+            expect_invoke_error: true,
+            simulate: None,
+            expect_simulate_would_succeed: None,
+            require_simulate_denial_details: false,
+            require_capability_denial: true,
+            require_decision_receipt: false,
+        };
+
+        let result = run_dynamic_checks(&mut connector, suite).await;
+        assert!(!result.passed, "{result:?}");
+
+        let invoke_finding = result
+            .findings
+            .iter()
+            .find(|f| f.check == "invoke")
+            .expect("invoke finding");
+        assert_eq!(invoke_finding.status, CheckStatus::Pass);
+
+        let cap_finding = result
+            .findings
+            .iter()
+            .find(|f| f.check == "invoke.capability_denial")
+            .expect("capability denial finding");
+        assert_eq!(cap_finding.status, CheckStatus::Fail);
     }
 
     // ── ComplianceFinding serde ──
@@ -1121,6 +1237,7 @@ mod tests {
             configure_ok: false,
             handshake_accepted: false,
             health_ok: false,
+            invoke_behavior: MockInvokeBehavior::Success,
         };
         let suite = DynamicSuite::minimal(make_handshake());
         let result = run_dynamic_checks(&mut connector, suite).await;

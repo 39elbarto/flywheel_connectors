@@ -1391,10 +1391,14 @@ mod tests {
         };
         let tracker = RateLimitTracker::from_declarations(&decls);
 
-        // Should still work for the real pool, ignoring the ghost
-        assert!(tracker.try_consume("op", 5).is_none());
+        // Missing pool references are configuration errors and must fail closed.
+        let err = tracker
+            .try_consume("op", 5)
+            .expect("missing pool should reject fail-closed");
+        assert_eq!(err.pool_id, "ghost");
+        assert!(err.message.contains("not registered"));
         let status = tracker.pool_status("real").unwrap();
-        assert_eq!(status.remaining, 5);
+        assert_eq!(status.remaining, 10);
         assert!(tracker.pool_status("ghost").is_none());
     }
 

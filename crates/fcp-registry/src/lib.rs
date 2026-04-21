@@ -187,6 +187,8 @@ pub enum RegistryCatalogError {
         /// The rejected binary name from the signature metadata.
         binary_name: String,
     },
+    #[error("signed package `{path}` binary `{binary_name}` must be a standalone regular file")]
+    LinkedBinary { path: PathBuf, binary_name: String },
 }
 
 /// Registry verification failures.
@@ -1611,6 +1613,24 @@ fn attestation_label(attestation: AttestationType) -> &'static str {
     }
 }
 
+fn file_has_multiple_links(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        metadata.nlink() > 1
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.number_of_links() > 1
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = metadata;
+        false
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct RegistryHealthResponse {
     status: &'static str,
@@ -1849,6 +1869,17 @@ impl LocalRegistryCatalog {
         })?;
         if !canonical_binary_path.starts_with(&canonical_package_dir) {
             return Err(RegistryCatalogError::PathTraversal {
+                binary_name: signature.binary_name.clone(),
+            });
+        }
+        let binary_metadata =
+            std::fs::metadata(&canonical_binary_path).map_err(|source| RegistryCatalogError::ReadFile {
+                path: canonical_binary_path.clone(),
+                source,
+            })?;
+        if !binary_metadata.is_file() || file_has_multiple_links(&binary_metadata) {
+            return Err(RegistryCatalogError::LinkedBinary {
+                path: package_dir.to_path_buf(),
                 binary_name: signature.binary_name.clone(),
             });
         }
@@ -2188,6 +2219,10 @@ mod tests {
     #[cfg(windows)]
     fn symlink_file(src: &Path, dst: &Path) {
         std::os::windows::fs::symlink_file(src, dst).expect("create file symlink");
+    }
+
+    fn hard_link_file(src: &Path, dst: &Path) {
+        std::fs::hard_link(src, dst).expect("create file hard link");
     }
 
     const PLACEHOLDER_HASH: &str = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
@@ -11829,6 +11864,39 @@ trusted_builders = ["trusted-ci"]
         assert!(
             msg.contains("path traversal"),
             "expected PathTraversal error, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn local_registry_catalog_rejects_hard_linked_binary_outside_package_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = ConnectorTarget {
+            os: "linux".to_string(),
+            arch: "amd64".to_string(),
+        };
+
+        let external_binary = temp.path().join("outside-hardlink-binary");
+        std::fs::write(&external_binary, b"outside-hardlink-binary")
+            .expect("write outside binary");
+
+        let package_dir = write_signed_package_dir(
+            temp.path(),
+            "fcp.hardlink-test",
+            "1.0.0",
+            target,
+            "connector-bin",
+            b"outside-hardlink-binary",
+        );
+        let package_binary = package_dir.join("connector-bin");
+        std::fs::remove_file(&package_binary).expect("remove package binary");
+        hard_link_file(&external_binary, &package_binary);
+
+        let err = LocalRegistryCatalog::from_signed_package_dirs(&[package_dir])
+            .expect_err("hard-link escape should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("standalone regular file"),
+            "expected LinkedBinary error, got: {msg}",
         );
     }
 

@@ -8,6 +8,17 @@ use sha2::Sha256;
 
 use crate::{WebhookError, WebhookResult};
 
+const HMAC_SHA256_SIGNATURE_HEX_LEN: usize = 64;
+const HMAC_SHA1_SIGNATURE_HEX_LEN: usize = 40;
+const ED25519_SIGNATURE_HEX_LEN: usize = 128;
+
+fn decode_fixed_hex(signature: &str, expected_hex_len: usize) -> WebhookResult<Vec<u8>> {
+    if signature.len() != expected_hex_len {
+        return Err(WebhookError::InvalidSignature);
+    }
+    hex::decode(signature).map_err(|_| WebhookError::InvalidSignature)
+}
+
 /// Signature algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignatureAlgorithm {
@@ -79,7 +90,7 @@ impl SignatureVerifier for HmacSha256Verifier {
             .or_else(|| signature.strip_prefix("v0="))
             .unwrap_or(signature);
 
-        let sig_bytes = hex::decode(sig_hex).map_err(|_| WebhookError::InvalidSignature)?;
+        let sig_bytes = decode_fixed_hex(sig_hex, HMAC_SHA256_SIGNATURE_HEX_LEN)?;
 
         let mut mac =
             Hmac::<Sha256>::new_from_slice(&self.secret).expect("HMAC can take key of any size");
@@ -133,7 +144,7 @@ impl HmacSha1Verifier {
 impl SignatureVerifier for HmacSha1Verifier {
     fn verify(&self, payload: &[u8], signature: &str) -> WebhookResult<()> {
         let sig_hex = signature.strip_prefix("sha1=").unwrap_or(signature);
-        let sig_bytes = hex::decode(sig_hex).map_err(|_| WebhookError::InvalidSignature)?;
+        let sig_bytes = decode_fixed_hex(sig_hex, HMAC_SHA1_SIGNATURE_HEX_LEN)?;
 
         let mut mac =
             Hmac::<Sha1>::new_from_slice(&self.secret).expect("HMAC can take key of any size");
@@ -196,7 +207,7 @@ impl SignatureVerifier for Ed25519Verifier {
     fn verify(&self, payload: &[u8], signature: &str) -> WebhookResult<()> {
         use ed25519_dalek::Verifier;
 
-        let sig_bytes = hex::decode(signature).map_err(|_| WebhookError::InvalidSignature)?;
+        let sig_bytes = decode_fixed_hex(signature, ED25519_SIGNATURE_HEX_LEN)?;
         let sig_array: [u8; 64] = sig_bytes
             .try_into()
             .map_err(|_| WebhookError::InvalidSignature)?;
@@ -1008,6 +1019,25 @@ mod tests {
         let verifier = HmacSha256Verifier::new("secret");
         // 65 hex chars (one byte too many) - valid hex but wrong length for HMAC
         let too_long = "a".repeat(66);
+        assert!(verifier.verify(b"test", &too_long).is_err());
+    }
+
+    #[test]
+    fn test_hmac_sha1_verify_extra_long_hex_signature() {
+        let verifier = HmacSha1Verifier::new("secret");
+        let too_long = "a".repeat(HMAC_SHA1_SIGNATURE_HEX_LEN + 2);
+        assert!(verifier.verify(b"test", &too_long).is_err());
+    }
+
+    #[test]
+    fn test_ed25519_verify_extra_long_hex_signature() {
+        let secret = [3u8; 32];
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret);
+        let verifying_key = signing_key.verifying_key().to_bytes();
+        let verifier = Ed25519Verifier::from_bytes(&verifying_key)
+            .expect("verifying key bytes should construct verifier");
+
+        let too_long = "a".repeat(ED25519_SIGNATURE_HEX_LEN + 2);
         assert!(verifier.verify(b"test", &too_long).is_err());
     }
 }

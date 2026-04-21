@@ -856,7 +856,7 @@ allowed_targets = ["z:project:test"]
 forbidden = ["z:public"]
 
 [capabilities]
-required = ["network.dns", "network.outbound"]
+required = ["network.dns", "network.outbound", "test.placeholder"]
 optional = []
 forbidden = ["system.exec"]
 

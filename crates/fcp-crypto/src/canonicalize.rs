@@ -97,7 +97,7 @@ pub fn to_deterministic_cbor_with_capacity<T: serde::Serialize>(
 ) -> CryptoResult<Vec<u8>> {
     let mut v = ciborium::value::Value::serialized(value)
         .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
-    canonicalize_value_in_place(&mut v)?;
+    canonicalize_value_in_place(&mut v, 0)?;
 
     let mut bytes = Vec::with_capacity(capacity);
     ciborium::into_writer(&v, &mut bytes)
@@ -105,15 +105,35 @@ pub fn to_deterministic_cbor_with_capacity<T: serde::Serialize>(
     Ok(bytes)
 }
 
-fn canonicalize_value_in_place(v: &mut ciborium::value::Value) -> CryptoResult<()> {
+const MAX_CANONICALIZATION_DEPTH: usize = 128;
+
+fn canonicalize_value_in_place(v: &mut ciborium::value::Value, depth: usize) -> CryptoResult<()> {
+    if depth > MAX_CANONICALIZATION_DEPTH {
+        return Err(CryptoError::SerializationError(format!(
+            "canonicalization depth {depth} exceeds limit {MAX_CANONICALIZATION_DEPTH}"
+        )));
+    }
+
+    if let ciborium::value::Value::Float(f) = v {
+        if f.is_nan() || f.is_infinite() {
+            return Err(CryptoError::SerializationError(
+                "non-finite float not allowed in canonical CBOR".into(),
+            ));
+        }
+        // Normalize -0.0 to 0.0 (RFC 8949 §4.2.2)
+        if f.to_bits() == (-0.0_f64).to_bits() {
+            *f = 0.0;
+        }
+    }
+
     match v {
         ciborium::value::Value::Array(items) => {
             for item in items {
-                canonicalize_value_in_place(item)?;
+                canonicalize_value_in_place(item, depth + 1)?;
             }
         }
-        ciborium::value::Value::Map(entries) => canonicalize_map(entries)?,
-        ciborium::value::Value::Tag(_, boxed) => canonicalize_value_in_place(boxed)?,
+        ciborium::value::Value::Map(entries) => canonicalize_map(entries, depth + 1)?,
+        ciborium::value::Value::Tag(_, boxed) => canonicalize_value_in_place(boxed, depth + 1)?,
         _ => {}
     }
     Ok(())
@@ -121,15 +141,14 @@ fn canonicalize_value_in_place(v: &mut ciborium::value::Value) -> CryptoResult<(
 
 fn canonicalize_map(
     entries: &mut Vec<(ciborium::value::Value, ciborium::value::Value)>,
+    depth: usize,
 ) -> CryptoResult<()> {
-    use std::cmp::Ordering;
-
     let mut with_keys = Vec::with_capacity(entries.len());
     // Reuse a single buffer for serializing map keys instead of allocating per key.
     let mut key_buf = Vec::with_capacity(64);
     for (mut key, mut value) in std::mem::take(entries) {
-        canonicalize_value_in_place(&mut key)?;
-        canonicalize_value_in_place(&mut value)?;
+        canonicalize_value_in_place(&mut key, depth)?;
+        canonicalize_value_in_place(&mut value, depth)?;
 
         key_buf.clear();
         ciborium::into_writer(&key, &mut key_buf)
@@ -138,12 +157,9 @@ fn canonicalize_map(
         with_keys.push((key_buf.clone(), key, value));
     }
 
-    with_keys.sort_by(
-        |(a_bytes, _, _), (b_bytes, _, _)| match a_bytes.len().cmp(&b_bytes.len()) {
-            Ordering::Equal => a_bytes.cmp(b_bytes),
-            other => other,
-        },
-    );
+    // RFC 8949 §4.2.1: Map keys MUST be sorted in bytewise lexicographic order
+    // of their deterministic encodings.
+    with_keys.sort_by(|(a_bytes, _, _), (b_bytes, _, _)| a_bytes.cmp(b_bytes));
 
     // Check for duplicates
     for window in with_keys.windows(2) {
@@ -664,5 +680,62 @@ mod tests {
         );
         assert!(bytes.starts_with(SIGNING_DOMAIN));
         assert!(bytes.ends_with(&large_cbor));
+    }
+
+    #[test]
+    fn deterministic_cbor_sort_order_rfc8949() {
+        use std::collections::HashMap;
+        // In RFC 7049 (length-first), "aa" (length 2) comes after "z" (length 1).
+        // In RFC 8949 (bytewise lexicographic), "aa" comes BEFORE "z".
+        // encoded "aa" is 0x62 0x61 0x61
+        // encoded "z"  is 0x61 0x7a
+        // 0x61 < 0x62, so "z" actually comes first in bytewise lexicographic too? 
+        // Wait. 
+        // "z" is 0x61 0x7a
+        // "aa" is 0x62 0x61 0x61
+        // Yes, 0x61 < 0x62.
+        
+        // Let's find keys where length-first and bytewise-lexicographic differ.
+        // RFC 7049: shorter keys first.
+        // RFC 8949: bytewise comparison of encoded bytes.
+        
+        // Key A: 100 (encoded: 0x18 0x64) - length 2
+        // Key B: -1 (encoded: 0x20) - length 1
+        
+        // RFC 7049: B then A (1 < 2)
+        // RFC 8949: A then B (0x18 < 0x20)
+        
+        let mut map = HashMap::new();
+        map.insert(100i32, "a");
+        map.insert(-1i32, "b");
+        
+        let cbor = to_deterministic_cbor(&map).unwrap();
+        // Expected order (RFC 8949): 100 then -1
+        // 100 encoded: 18 64
+        // -1 encoded: 20
+        // Total map: bf 18 64 ... 20 ... ff (if indefinite)
+        // Or definite: a2 18 64 ... 20 ...
+        
+        assert_eq!(cbor[0], 0xa2); // Map of 2
+        assert_eq!(cbor[1], 0x18); // First key 100
+        assert_eq!(cbor[2], 0x64);
+    }
+
+    #[test]
+    fn deterministic_cbor_depth_limit() {
+        use ciborium::value::Value;
+        let mut root = Value::Array(vec![]);
+        for _ in 0..150 {
+            root = Value::Array(vec![root]);
+        }
+        let err = to_deterministic_cbor(&root).unwrap_err();
+        assert!(err.to_string().contains("depth"));
+    }
+
+    #[test]
+    fn deterministic_cbor_rejects_nan() {
+        let val = f64::NAN;
+        let err = to_deterministic_cbor(&val).unwrap_err();
+        assert!(err.to_string().contains("non-finite float"));
     }
 }

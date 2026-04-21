@@ -419,9 +419,16 @@ impl ObjectStore for MemoryObjectStore {
         // Maintain zone index BEFORE releasing the objects lock so that
         // a concurrent delete() cannot create orphan zone_index entries.
         self.zone_index.write().entry(zone_id).or_default().push(id);
-        drop(objects);
 
+        // Commit the byte count BEFORE releasing the objects lock. If
+        // `fetch_add` runs after `drop(objects)`, a concurrent `put` can
+        // acquire `objects.write()`, observe the still-stale `used_bytes`
+        // load, and pass its quota check despite the in-flight commit —
+        // both inserts then succeed and `used_bytes` exceeds `max_bytes`.
+        // `delete` already keeps its `fetch_update` inside the critical
+        // section; mirror that here.
         self.used_bytes.fetch_add(size, Ordering::SeqCst);
+        drop(objects);
 
         Ok(())
     }

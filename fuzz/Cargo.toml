@@ -218,5 +218,19 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_crypto_hpke_open"
+path = "fuzz_targets/crypto_hpke_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_crypto_shamir_reconstruct"
+path = "fuzz_targets/crypto_shamir_reconstruct.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

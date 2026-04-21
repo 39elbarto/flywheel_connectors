@@ -1383,6 +1383,8 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]
@@ -1411,6 +1413,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "subtle",
  "thiserror 2.0.17",
  "tower",
  "tracing",
@@ -1452,6 +1455,7 @@ dependencies = [
  "blake3",
  "bytes",
  "chrono",
+ "ciborium",
  "constant_time_eq",
  "fcp-core",
  "fcp-crypto",

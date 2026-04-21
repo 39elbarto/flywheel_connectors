@@ -4705,6 +4705,114 @@ mod tests {
         ));
     }
 
+    // ---- Forged-signature rejection for DecodeStatus / SymbolAck ----
+    //
+    // These two handlers verify the inbound message against the
+    // *registered* peer key before touching symbol-request state. The
+    // existing positive-path and recipient-mismatch tests cover the
+    // happy path and the recipient-rebinding replay; neither exercises
+    // the case where a valid Ed25519 signature is produced by a key
+    // *other* than the one the local node registered for that peer.
+    // The memory-note audit that flagged these handlers as "unverified"
+    // was stale: verification is in place (node.rs:1640, node.rs:1664),
+    // but the forged-key path had no regression guard, so a
+    // `verify()` call accidentally downgraded to `Ok(())` (e.g. during
+    // a crypto refactor) would have gone undetected. These tests close
+    // that coverage gap.
+
+    #[test]
+    fn handle_decode_status_rejects_forged_signature() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let registered_key = Ed25519SigningKey::generate();
+        let attacker_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), registered_key.verifying_key());
+
+        let mut status = DecodeStatus {
+            header: test_object_header(),
+            object_id: ObjectId::from_bytes([0xAA; 32]),
+            zone_id: ZoneId::work(),
+            zone_key_id: ZoneKeyId::from_bytes([0xAB; 8]),
+            epoch_id: 1,
+            recipient_node_id: TailscaleNodeId::new("node-1"),
+            request_nonce: 606,
+            received_unique: 4,
+            needed: 1,
+            complete: false,
+            missing_hint: None,
+            signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
+        };
+        // Sign with a key that the local node NEVER registered for this
+        // peer — the attacker's freshly-generated key. The local
+        // `peer_signing_key(peer)` lookup resolves to `registered_key`,
+        // and `verify()` must reject the forged signature.
+        status.sign(&attacker_key);
+
+        let err = node
+            .handle_decode_status(&peer, &status, 1000)
+            .expect_err("decode status signed by a non-registered key must be rejected");
+        assert!(
+            matches!(
+                err,
+                MeshNodeError::PeerSignatureInvalid {
+                    message_kind: "decode status",
+                    ..
+                }
+            ),
+            "expected PeerSignatureInvalid for decode status, got {err:?}"
+        );
+        // Defensive: the handler must not have leaked the forged message
+        // into `symbol_requests` state. A successful process_decode_status
+        // would have observed `received_unique` on the request tracker;
+        // here there is no request tracker entry at all, so the metric
+        // we can safely assert on is that no decode-status-processed
+        // side-effect ran — verified by the absence of an ack bump.
+        assert_eq!(node.metrics().symbol_requests.acks_received, 0);
+    }
+
+    #[test]
+    fn handle_symbol_ack_rejects_forged_signature() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let registered_key = Ed25519SigningKey::generate();
+        let attacker_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), registered_key.verifying_key());
+
+        let mut ack = SymbolAck::new(
+            test_object_header(),
+            ObjectId::from_bytes([0xBB; 32]),
+            ZoneId::work(),
+            ZoneKeyId::from_bytes([0xBC; 8]),
+            1,
+            TailscaleNodeId::new("node-1"),
+            707,
+            SymbolAckReason::Complete,
+            6,
+        );
+        ack.sign(&attacker_key);
+
+        let err = node
+            .handle_symbol_ack(&peer, &ack, 1000)
+            .expect_err("symbol ack signed by a non-registered key must be rejected");
+        assert!(
+            matches!(
+                err,
+                MeshNodeError::PeerSignatureInvalid {
+                    message_kind: "symbol ack",
+                    ..
+                }
+            ),
+            "expected PeerSignatureInvalid for symbol ack, got {err:?}"
+        );
+        // The forged ack must not bump the ack metric nor clear
+        // sent_symbols — a successful `handle_symbol_ack` would do both.
+        assert_eq!(
+            node.metrics().symbol_requests.acks_received,
+            0,
+            "forged ack must not increment acks_received"
+        );
+    }
+
     // ---- Announce duplicate ----
 
     #[test]

@@ -119,6 +119,17 @@ pub enum CryptoError {
     /// COSE header placement or cross-field policy violation.
     #[error("header policy violation: {0}")]
     HeaderPolicyViolation(String),
+
+    /// A CBOR value carried a tag at a position where FCP canonical
+    /// encoding forbids tags. Aligns fcp-crypto's CWT claims decode
+    /// with `fcp_cbor::SerializationError::UnsupportedTag` so a token
+    /// accepted by fcp-crypto is also decodable by fcp-cbor
+    /// (flywheel_connectors-8azf9).
+    #[error("invalid CBOR tag {tag} in CWT claims (tags are not permitted)")]
+    InvalidCborTag {
+        /// CBOR tag number that was encountered.
+        tag: u64,
+    },
 }
 
 /// Result type alias for cryptographic operations.

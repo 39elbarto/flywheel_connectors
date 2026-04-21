@@ -422,6 +422,17 @@ impl CwtClaims {
                     ));
                 }
             };
+            // Align with fcp-cbor's strictness: reject any CBOR tag
+            // that appears at or under a claim value. fcp-cbor's
+            // `canonicalize_value_in_place` rejects `Value::Tag(_, _)`
+            // anywhere in the tree, so a token accepted here but
+            // handed to fcp-cbor-based downstream components (e.g.
+            // the canonical re-encoder used for signature
+            // verification, or schema validation) would fail. That
+            // interop split is what bead flywheel_connectors-8azf9
+            // documents: keep the two crates in lockstep so any
+            // non-canonical shape is refused at the earliest layer.
+            reject_cbor_tags(&v)?;
             if claims.insert(key, v).is_some() {
                 return Err(CryptoError::SerializationError(format!(
                     "duplicate claim key: {key}"
@@ -430,6 +441,33 @@ impl CwtClaims {
         }
 
         Ok(Self { claims })
+    }
+}
+
+/// Recursively reject any `Value::Tag(..)` node beneath `value`.
+///
+/// Mirrors `fcp_cbor::canonicalize_value_in_place`'s tag refusal so
+/// the two crates agree on what constitutes a canonical CBOR tree.
+/// Recurses through `Map` and `Array` so a tag buried several layers
+/// deep (e.g. inside a payload map whose outer shape is otherwise
+/// valid) is still surfaced.
+fn reject_cbor_tags(value: &ciborium::Value) -> CryptoResult<()> {
+    match value {
+        ciborium::Value::Tag(tag, _) => Err(CryptoError::InvalidCborTag { tag: *tag }),
+        ciborium::Value::Array(items) => {
+            for item in items {
+                reject_cbor_tags(item)?;
+            }
+            Ok(())
+        }
+        ciborium::Value::Map(entries) => {
+            for (k, v) in entries {
+                reject_cbor_tags(k)?;
+                reject_cbor_tags(v)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -940,6 +978,118 @@ mod tests {
             }
             other => panic!("expected SerializationError for oversized input, got {other:?}"),
         }
+    }
+
+    /// Regression for bead flywheel_connectors-8azf9: fcp-crypto's
+    /// CwtClaims decode used to accept a CBOR tag wrapping a claim
+    /// value, while fcp-cbor (the project-wide canonicalizer) rejects
+    /// any `Value::Tag(..)` anywhere in the tree. A token accepted
+    /// here but re-encoded through fcp-cbor for signature verification
+    /// or schema validation would fail downstream — an interop split.
+    /// Both the outer value and a tag buried inside a nested array or
+    /// map MUST be rejected at the earliest decode layer with the
+    /// canonical `InvalidCborTag` variant.
+    #[test]
+    fn test_cwt_claim_with_cbor_tag_rejected() {
+        // Case 1: claim value is *directly* a Tag.
+        let map = vec![(
+            ciborium::Value::Integer(1.into()),
+            ciborium::Value::Tag(24, Box::new(ciborium::Value::Text("iss".into()))),
+        )];
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&ciborium::Value::Map(map), &mut bytes)
+            .expect("serialize tagged claim");
+        let err = CwtClaims::from_cbor(&bytes)
+            .expect_err("direct tagged claim value must be rejected");
+        assert!(
+            matches!(err, CryptoError::InvalidCborTag { tag: 24 }),
+            "expected InvalidCborTag{{tag:24}}, got {err:?}"
+        );
+
+        // Case 2: tag buried inside a nested array under the claim
+        // value. The recursive walk must still catch it.
+        let nested_array = ciborium::Value::Array(vec![
+            ciborium::Value::Integer(1.into()),
+            ciborium::Value::Tag(1, Box::new(ciborium::Value::Integer(2.into()))),
+        ]);
+        let map = vec![(ciborium::Value::Integer(7.into()), nested_array)];
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&ciborium::Value::Map(map), &mut bytes)
+            .expect("serialize nested tagged claim");
+        let err = CwtClaims::from_cbor(&bytes)
+            .expect_err("nested tagged claim value must be rejected");
+        assert!(
+            matches!(err, CryptoError::InvalidCborTag { tag: 1 }),
+            "expected InvalidCborTag{{tag:1}} for nested tag, got {err:?}"
+        );
+
+        // Case 3: tag buried inside a nested map VALUE. Confirms the
+        // walker descends through both array and map branches.
+        let nested_map = ciborium::Value::Map(vec![(
+            ciborium::Value::Integer(99.into()),
+            ciborium::Value::Tag(42, Box::new(ciborium::Value::Text("x".into()))),
+        )]);
+        let map = vec![(ciborium::Value::Integer(7.into()), nested_map)];
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&ciborium::Value::Map(map), &mut bytes)
+            .expect("serialize nested-map tagged claim");
+        let err = CwtClaims::from_cbor(&bytes)
+            .expect_err("tag inside nested map must be rejected");
+        assert!(
+            matches!(err, CryptoError::InvalidCborTag { tag: 42 }),
+            "expected InvalidCborTag{{tag:42}} for map-nested tag, got {err:?}"
+        );
+    }
+
+    /// Regression guard: plain (untagged) CBOR values across all
+    /// leaf types MUST still decode cleanly after the tag-rejection
+    /// helper is added. Covers the full range of kinds fcp-crypto is
+    /// likely to carry (text, integer, bytes, bool, null, nested
+    /// map, nested array) so a future refactor of `reject_cbor_tags`
+    /// that accidentally widens the rejection set is caught here.
+    #[test]
+    fn test_cwt_claim_plain_value_accepted() {
+        let map = vec![
+            (
+                ciborium::Value::Integer(1.into()),
+                ciborium::Value::Text("issuer-x".into()),
+            ),
+            (
+                ciborium::Value::Integer(2.into()),
+                ciborium::Value::Integer(42.into()),
+            ),
+            (
+                ciborium::Value::Integer(3.into()),
+                ciborium::Value::Bytes(vec![0xAA, 0xBB]),
+            ),
+            (ciborium::Value::Integer(4.into()), ciborium::Value::Bool(true)),
+            (ciborium::Value::Integer(5.into()), ciborium::Value::Null),
+            (
+                ciborium::Value::Integer(6.into()),
+                ciborium::Value::Array(vec![
+                    ciborium::Value::Integer(7.into()),
+                    ciborium::Value::Text("item".into()),
+                ]),
+            ),
+            (
+                ciborium::Value::Integer(8.into()),
+                ciborium::Value::Map(vec![(
+                    ciborium::Value::Integer(9.into()),
+                    ciborium::Value::Text("nested".into()),
+                )]),
+            ),
+        ];
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&ciborium::Value::Map(map), &mut bytes)
+            .expect("serialize plain claim map");
+
+        let claims = CwtClaims::from_cbor(&bytes)
+            .expect("plain untagged claims must still decode after the tag-refusal change");
+        assert_eq!(
+            claims.get_issuer(),
+            Some("issuer-x"),
+            "text claim must round-trip through the post-refusal decode"
+        );
     }
 
     #[test]

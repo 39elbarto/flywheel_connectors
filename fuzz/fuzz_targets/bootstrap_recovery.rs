@@ -18,10 +18,10 @@
 //! - [`ColdRecovery::from_phrase`] — the recovery workflow that runs HKDF
 //!   key derivation, deterministic genesis recreation, and optional
 //!   fingerprint verification.
-//! - [`HardwareTokenPin`] equality — wraps `subtle::ConstantTimeEq` over a
-//!   redacted-string wrapper; the fuzzer drives pairs of arbitrary byte
-//!   strings through the comparator and confirms the result agrees with
-//!   a byte-exact equality check.
+//! - [`HardwareTokenPin`] equality — compares fixed-width digests on the
+//!   constant-time path; the fuzzer drives pairs of arbitrary byte strings
+//!   through the comparator and confirms the result agrees with a byte-exact
+//!   equality check.
 
 use fcp_bootstrap::hardware_token::{TokenError, TokenKeyType};
 use fcp_bootstrap::{
@@ -38,6 +38,7 @@ struct BootstrapRecoverySeed {
     pin_a: String,
     pin_b: String,
     mnemonic: String,
+    ambiguous_count: Option<u8>,
     key_name: String,
     incompatible_key_types: Vec<u32>,
 }
@@ -148,7 +149,11 @@ fn token_key_type_from_seed(raw: u32) -> TokenKeyType {
     }
 }
 
-fn fuzz_typed_hardware_token_errors(key_name: &str, incompatible_key_types: &[u32]) {
+fn fuzz_typed_hardware_token_errors(
+    key_name: &str,
+    incompatible_key_types: &[u32],
+    ambiguous_count: usize,
+) {
     let key_name = if key_name.is_empty() {
         "owner-key".to_string()
     } else {
@@ -159,39 +164,54 @@ fn fuzz_typed_hardware_token_errors(key_name: &str, incompatible_key_types: &[u3
         .copied()
         .map(token_key_type_from_seed)
         .collect();
-    let refusal = if found.is_empty() {
-        CertificateSelectionRefusal::NoCertificates
-    } else {
-        CertificateSelectionRefusal::NoCompatibleKeyType { found }
-    };
-
-    let token_errors = [
-        TokenError::KeyNotFound(key_name.clone()),
-        TokenError::CertificateSelectionFailed(refusal.clone()),
-    ];
-    for err in token_errors {
-        let rendered = err.to_string();
-        assert!(!rendered.is_empty(), "TokenError Display must never be empty");
-    }
-
-    let bootstrap_errors = [
-        BootstrapError::HardwareTokenKeyNotFound {
-            key: key_name.clone(),
+    let refusals = [
+        CertificateSelectionRefusal::NoCertificates,
+        CertificateSelectionRefusal::NoKeys,
+        CertificateSelectionRefusal::NoMatchingKeyPair,
+        CertificateSelectionRefusal::NoCompatibleKeyType {
+            found: found.clone(),
         },
-        BootstrapError::HardwareTokenCertificateSelectionFailed {
-            refusal: refusal.clone(),
+        CertificateSelectionRefusal::AmbiguousSelection {
+            count: ambiguous_count.max(1),
         },
     ];
-    for err in bootstrap_errors {
-        let rendered = err.to_string();
-        assert!(
-            !rendered.is_empty(),
-            "BootstrapError Display must never be empty"
-        );
-        assert!(
-            std::error::Error::source(&err).is_none(),
-            "typed bootstrap refusals must not carry a source chain"
-        );
+
+    for refusal in refusals {
+        let token_errors = [
+            TokenError::PinRequired,
+            TokenError::PinLocked,
+            TokenError::KeyNotFound(key_name.clone()),
+            TokenError::CertificateSelectionFailed(refusal.clone()),
+        ];
+        for err in token_errors {
+            let rendered = err.to_string();
+            assert!(
+                !rendered.is_empty(),
+                "TokenError Display must never be empty"
+            );
+        }
+
+        let bootstrap_errors = [
+            BootstrapError::HardwareTokenPinRequired,
+            BootstrapError::HardwareTokenPinLocked,
+            BootstrapError::HardwareTokenKeyNotFound {
+                key: key_name.clone(),
+            },
+            BootstrapError::HardwareTokenCertificateSelectionFailed {
+                refusal: refusal.clone(),
+            },
+        ];
+        for err in bootstrap_errors {
+            let rendered = err.to_string();
+            assert!(
+                !rendered.is_empty(),
+                "BootstrapError Display must never be empty"
+            );
+            assert!(
+                std::error::Error::source(&err).is_none(),
+                "typed bootstrap refusals must not carry a source chain"
+            );
+        }
     }
 }
 
@@ -205,7 +225,11 @@ fuzz_target!(|data: &[u8]| {
         fuzz_recovery_phrase_parser(&seed.mnemonic);
         let words: Vec<&str> = seed.mnemonic.split_whitespace().collect();
         fuzz_recovery_phrase_words(&words);
-        fuzz_typed_hardware_token_errors(&seed.key_name, &seed.incompatible_key_types);
+        fuzz_typed_hardware_token_errors(
+            &seed.key_name,
+            &seed.incompatible_key_types,
+            seed.ambiguous_count.map_or(1, usize::from),
+        );
         return;
     }
 
@@ -223,7 +247,7 @@ fuzz_target!(|data: &[u8]| {
     };
 
     fuzz_hardware_token_pin(pin_a, pin_b);
-    fuzz_typed_hardware_token_errors("", &[]);
+    fuzz_typed_hardware_token_errors("", &[], pin_b.len().max(1));
 
     if let Ok(mnemonic) = std::str::from_utf8(mnemonic_raw) {
         fuzz_recovery_phrase_parser(mnemonic);

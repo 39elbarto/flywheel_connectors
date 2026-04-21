@@ -190,12 +190,16 @@ impl TokenDetectionReport {
 
 /// Redacted PIN material for hardware-token login.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub struct HardwareTokenPin(String);
+pub struct HardwareTokenPin {
+    value: String,
+    // Compare on a fixed-width digest so length mismatches do not short-circuit.
+    digest: [u8; 32],
+}
 
 impl PartialEq for HardwareTokenPin {
     fn eq(&self, other: &Self) -> bool {
         use subtle::ConstantTimeEq;
-        self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
+        self.digest.ct_eq(&other.digest).into()
     }
 }
 
@@ -205,17 +209,19 @@ impl HardwareTokenPin {
     /// Create a new hardware-token PIN wrapper.
     #[must_use]
     pub fn new(pin: impl Into<String>) -> Self {
-        Self(pin.into())
+        let value = pin.into();
+        let digest = *blake3::hash(value.as_bytes()).as_bytes();
+        Self { value, digest }
     }
 
     /// Whether the provided PIN is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.value.is_empty()
     }
 
     fn to_auth_pin(&self) -> AuthPin {
-        AuthPin::new(self.0.clone().into())
+        AuthPin::new(self.value.clone().into())
     }
 }
 
@@ -1702,6 +1708,18 @@ mod tests {
     fn hardware_token_pin_debug_is_redacted() {
         let pin = HardwareTokenPin::new("123456");
         assert_eq!(format!("{pin:?}"), "<redacted>");
+    }
+
+    #[test]
+    fn hardware_token_pin_equality_uses_fixed_width_digest() {
+        let short = HardwareTokenPin::new("1");
+        let long = HardwareTokenPin::new("123456");
+        let long_again = HardwareTokenPin::new("123456");
+
+        assert_eq!(short.digest.len(), 32);
+        assert_eq!(long.digest.len(), 32);
+        assert_eq!(long, long_again);
+        assert_ne!(short, long);
     }
 
     #[test]

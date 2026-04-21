@@ -269,5 +269,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_protocol_frame_roundtrip"
+path = "fuzz_targets/protocol_frame_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

@@ -20,6 +20,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 sha2 = "0.10"
 tempfile = "3"
+toml = "1.0"
 
 fcp-async-core = { path = "../crates/fcp-async-core" }
 fcp-audit = { path = "../crates/fcp-audit" }
@@ -250,6 +251,20 @@ bench = false
 [[bin]]
 name = "fuzz_provenance_decode"
 path = "fuzz_targets/provenance_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_manifest_toml_roundtrip"
+path = "fuzz_targets/manifest_toml_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_canonicalize_map_deterministic"
+path = "fuzz_targets/canonicalize_map_deterministic.rs"
 test = false
 doc = false
 bench = false

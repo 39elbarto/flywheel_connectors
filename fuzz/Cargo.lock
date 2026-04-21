@@ -1240,6 +1240,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "fcp-cbor",
+ "fcp-crypto",
  "hex",
  "serde",
  "serde_json",
@@ -1385,6 +1386,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]

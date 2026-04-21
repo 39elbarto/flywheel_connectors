@@ -1,0 +1,16 @@
+---
+source: crates/fcp-mesh/tests/wire_format_goldens.rs
+assertion_line: 129
+expression: "dump(\"RevocationPushMessage::signing_bytes (populated fixture)\", &bytes)"
+---
+RevocationPushMessage::signing_bytes (populated fixture)
+len = 131
+0000  46 43 50 32 2d 52 45 56 4f 43 41 54 49 4f 4e 2d   FCP2-REVOCATION-
+0010  50 55 53 48 2d 56 31 0a 00 00 00 31 30 30 2e 36   PUSH-V1....100.6
+0020  34 2e 30 2e 31 06 00 00 00 7a 3a 77 6f 72 6b 02   4.0.1....z:work.
+0030  00 00 00 00 34 9a fe 19 a6 ff 9b 00 77 dd 4d f3   ....4.......w.M.
+0040  4a 68 65 4c b4 7d 3a e7 7f 37 68 c9 89 b2 8e c1   JheL.}:..7h.....
+0050  e5 d0 40 a5 37 fa 80 a9 aa 24 41 a5 1c 1c ba 84   ..@.7....$A.....
+0060  8d 39 45 16 a4 0d 2f 88 ad e2 24 cb 0e 0c 96 35   .9E.../...$....5
+0070  42 d3 f4 44 33 22 11 00 00 00 00 cc bb aa 99 88   B..D3"..........
+0080  77 66 55                                          wfU

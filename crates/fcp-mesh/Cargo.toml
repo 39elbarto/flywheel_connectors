@@ -41,6 +41,7 @@ zeroize.workspace = true
 criterion.workspace = true
 fcp-async-core = { path = "../fcp-async-core" }
 fcp-cbor = { path = "../fcp-cbor" }
+insta = { workspace = true, features = ["json"] }
 jsonschema.workspace = true
 proptest.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }

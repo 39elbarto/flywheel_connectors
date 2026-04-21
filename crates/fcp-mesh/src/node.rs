@@ -220,6 +220,10 @@ pub enum MeshNodeError {
     /// Trace export error.
     #[error("trace export error: {0}")]
     TraceExport(#[from] fcp_telemetry::trace_capture::TraceError),
+
+    /// Failed to decode a gossip payload received from the transport layer.
+    #[error("gossip payload decode error: {0}")]
+    GossipDecode(String),
 }
 
 /// Enforcement errors for control-plane requests.
@@ -1490,6 +1494,48 @@ impl MeshNode {
             | GossipMessage::ReconcileRequest(_)
             | GossipMessage::ReconcileResponse(_) => Ok(None),
         }
+    }
+
+    /// Decode a CBOR-encoded `GossipMessage` received from the mesh
+    /// transport layer and dispatch it through [`Self::handle_gossip_message`].
+    ///
+    /// This is the production entry point that closes the L3-02
+    /// "RevocationPush dispatch gap": mesh transports MUST call this
+    /// method whenever they receive an inbound gossip payload so that
+    /// the signature verification, zone authorization, replay check,
+    /// and revocation-registry update logic runs in a production code
+    /// path (not only in tests and fuzzers).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MeshNodeError::GossipDecode`] if the payload does not
+    /// deserialize to a [`GossipMessage`], or propagates any verification
+    /// error surfaced by the underlying gossip handlers.
+    pub fn dispatch_gossip_payload(
+        &mut self,
+        payload: &[u8],
+        now_secs: u64,
+    ) -> Result<Option<VerifiedRevocationPush>, MeshNodeError> {
+        let message: GossipMessage = ciborium::from_reader(payload)
+            .map_err(|e| MeshNodeError::GossipDecode(e.to_string()))?;
+        self.handle_gossip_message(message, now_secs)
+    }
+
+    /// Decode a CBOR-encoded `GossipMessage` payload carried inside a
+    /// [`ControlPlaneEnvelope`] and dispatch it through the gossip
+    /// handlers. Convenience wrapper over
+    /// [`Self::dispatch_gossip_payload`] for transports that surface
+    /// envelopes rather than raw bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::dispatch_gossip_payload`].
+    pub fn dispatch_gossip_envelope(
+        &mut self,
+        envelope: &ControlPlaneEnvelope,
+        now_secs: u64,
+    ) -> Result<Option<VerifiedRevocationPush>, MeshNodeError> {
+        self.dispatch_gossip_payload(&envelope.payload, now_secs)
     }
 
     /// Apply a decode status update (targeted repair feedback).

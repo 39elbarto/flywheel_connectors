@@ -503,17 +503,34 @@ impl RevocationRegistry {
 
     /// Add a revocation to the registry.
     ///
-    /// If an `object_id` is already revoked, the entry with the **earliest**
-    /// `effective_at` is kept. This prevents an attacker (with owner-key
-    /// access) from suppressing an active revocation by replaying one with a
-    /// far-future `effective_at`, which `is_revoked_at(now)` would otherwise
-    /// treat as not-yet-active.
+    /// An incoming revocation only replaces an existing one when it **strictly
+    /// dominates** it — i.e., it starts no later *and* ends no sooner. This
+    /// closes two symmetric suppression attacks by an owner-key holder or a
+    /// replay-window attacker:
+    ///
+    /// * **Far-future deferral:** a new revocation with `effective_at` pushed
+    ///   into the future cannot replace an already-active one, because its
+    ///   start is later.
+    /// * **Past-expiry suppression:** a new revocation with both
+    ///   `effective_at` *and* `expires_at` in the past cannot replace an
+    ///   open-ended (or later-expiring) revocation, because its end is sooner
+    ///   — which would otherwise let `is_revoked_at(now)` flip to `false`.
+    ///
+    /// `None` for `expires_at` represents +∞ for the "ends no sooner" check.
     pub fn add_revocation(&mut self, revocation: &RevocationObject) {
         for object_id in &revocation.revoked {
-            let should_replace = self
-                .revocations
-                .get(object_id)
-                .is_none_or(|existing| existing.effective_at > revocation.effective_at);
+            let should_replace = match self.revocations.get(object_id) {
+                None => true,
+                Some(existing) => {
+                    let starts_no_later = revocation.effective_at < existing.effective_at;
+                    let ends_no_sooner = match (revocation.expires_at, existing.expires_at) {
+                        (None, _) => true, // new never expires ⇒ dominates any finite expiry
+                        (Some(_), None) => false, // existing never expires ⇒ nothing dominates it
+                        (Some(new_exp), Some(old_exp)) => new_exp >= old_exp,
+                    };
+                    starts_no_later && ends_no_sooner
+                }
+            };
             if should_replace {
                 self.revocations.insert(*object_id, revocation.clone());
             }
@@ -2107,6 +2124,70 @@ mod tests {
         assert!(registry.is_revoked_at(&id, effective_at));
         assert!(registry.is_revoked_at(&id, effective_at + 1));
         assert!(!registry.is_revoked_at(&id, effective_at - 1));
+    }
+
+    // Past-expiry suppression: a new revocation whose active window has
+    // already closed MUST NOT replace an active open-ended revocation
+    // just because its effective_at is earlier. Before the
+    // "strictly dominates" rule this replay would flip is_revoked_at(now)
+    // back to false — equivalent to a revocation wipeout.
+    #[test]
+    fn registry_past_expiry_revocation_does_not_suppress_active_one() {
+        let mut registry = RevocationRegistry::new();
+        let id = ObjectId::from_bytes([46u8; 32]);
+
+        let mut active = test_revocation();
+        active.revoked = vec![id];
+        active.effective_at = 1_800_000_000;
+        active.expires_at = None; // permanent
+
+        let mut past_expiry = test_revocation();
+        past_expiry.revoked = vec![id];
+        past_expiry.effective_at = 1_000_000_000; // earlier than active
+        past_expiry.expires_at = Some(1_100_000_000); // already closed by now
+        past_expiry.reason = "replay-to-suppress".into();
+
+        registry.add_revocation(&active);
+        registry.add_revocation(&past_expiry);
+
+        // The open-ended active revocation must be retained; reading the
+        // registry at a "now" past the replay's expires_at must still
+        // observe the object as revoked.
+        let now = 2_000_000_000;
+        assert!(
+            registry.is_revoked_at(&id, now),
+            "past-expiry replay must not suppress the active revocation"
+        );
+        let stored = registry.get_revocation(&id).expect("entry exists");
+        assert_eq!(stored.effective_at, 1_800_000_000);
+        assert!(stored.expires_at.is_none());
+    }
+
+    // Symmetric positive case: a new revocation that strictly dominates the
+    // existing one (earlier start AND later/None end) is accepted.
+    #[test]
+    fn registry_strictly_dominating_revocation_replaces_existing() {
+        let mut registry = RevocationRegistry::new();
+        let id = ObjectId::from_bytes([47u8; 32]);
+
+        let mut bounded = test_revocation();
+        bounded.revoked = vec![id];
+        bounded.effective_at = 1_800_000_000;
+        bounded.expires_at = Some(1_900_000_000);
+
+        let mut dominating = test_revocation();
+        dominating.revoked = vec![id];
+        dominating.effective_at = 1_700_000_000; // earlier
+        dominating.expires_at = None; // never expires ⇒ dominates
+        dominating.reason = "upgrade-to-permanent".into();
+
+        registry.add_revocation(&bounded);
+        registry.add_revocation(&dominating);
+
+        let stored = registry.get_revocation(&id).expect("entry exists");
+        assert_eq!(stored.effective_at, 1_700_000_000);
+        assert!(stored.expires_at.is_none());
+        assert_eq!(stored.reason, "upgrade-to-permanent");
     }
 
     // Re-adding the same revocation must be idempotent: repeated deliveries

@@ -38,6 +38,7 @@ struct WebhookSignatureSeed {
     event_type: String,
     body: String,
     secret: String,
+    oversized_signature_len: Option<u16>,
     stripe_timestamp: Option<String>,
     stripe_signatures: Vec<String>,
 }
@@ -59,6 +60,23 @@ fn fuzz_stripe(signature_header: &str, body: &[u8]) {
     // not searching for key-recovery attacks.
     let stripe = StripeWebhook::new(b"fuzz-stripe-secret");
     let _ = stripe.verify_and_parse(&headers, body);
+}
+
+fn fuzz_stripe_oversized_signature(body: &[u8], requested_len: usize) {
+    let oversized_len = requested_len
+        .max(65)
+        .min(MAX_HEADER_BYTES.saturating_sub(16));
+    let signature = "a".repeat(oversized_len);
+    let header = format!("t=1700000000,v1={signature}");
+
+    let mut headers: HashMap<String, String> = HashMap::new();
+    headers.insert("stripe-signature".to_string(), header);
+
+    let stripe = StripeWebhook::new(b"fuzz-stripe-secret");
+    assert!(
+        stripe.verify_and_parse(&headers, body).is_err(),
+        "oversized Stripe signatures must be rejected"
+    );
 }
 
 fn fuzz_github(signature_header: &str, event_type: &str, body: &[u8]) {
@@ -143,6 +161,9 @@ fuzz_target!(|data: &[u8]| {
         if let Some(header) = structured_stripe_header(&seed) {
             fuzz_stripe(&header, seed.body.as_bytes());
         }
+        if let Some(oversized_len) = seed.oversized_signature_len {
+            fuzz_stripe_oversized_signature(seed.body.as_bytes(), usize::from(oversized_len));
+        }
         fuzz_github(&seed.header, event_type, seed.body.as_bytes());
         positive_hmac_round_trip(secret, seed.body.as_bytes());
         return;
@@ -167,6 +188,8 @@ fuzz_target!(|data: &[u8]| {
         // GitHub wants a hex-string signature; reuse the same bytes.
         fuzz_github(header_str, "push", body);
     }
+
+    fuzz_stripe_oversized_signature(body, header_raw.len().saturating_add(65));
 
     // Positive-signature round-trip is independent of the Stripe/GitHub
     // header parsing above: treat the header portion as a secret and

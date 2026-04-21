@@ -71,14 +71,15 @@ impl SendGridConfig {
         let base_url = params
             .get("base_url")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or(DEFAULT_BASE_URL)
-            .to_string();
+            .map(|value| validate_base_url_for_auth(value, &auth))
+            .transpose()?
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
 
         Ok(Self { auth, base_url })
     }
 
     fn provisioning_readiness(&self) -> ProvisioningReadiness {
-        let (network_ok, network_message) = base_url_policy(&self.base_url);
+        let (network_ok, network_message) = base_url_policy(&self.base_url, &self.auth);
 
         ProvisioningReadiness {
             auth_mode: match &self.auth {
@@ -959,34 +960,80 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
     )
 }
 
-fn base_url_policy(base_url: &str) -> (bool, String) {
-    let parsed = match Url::parse(base_url) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            return (false, format!("base_url could not be parsed: {error}"));
-        }
-    };
+fn validate_base_url_for_auth(base_url: &str, auth: &SendGridAuth) -> FcpResult<String> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not be empty".into(),
+        });
+    }
+
+    let parsed = Url::parse(trimmed).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("base_url could not be parsed: {error}"),
+    })?;
+
+    if !matches!(parsed.scheme(), "https" | "http") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must use http or https".into(),
+        });
+    }
 
     let Some(host) = parsed.host_str() else {
-        return (false, "base_url must include a host".into());
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must include a host".into(),
+        });
     };
 
-    let local = is_local_test_host(host);
-    let allowed_host = host.eq_ignore_ascii_case("api.sendgrid.com") || local;
-    let secure_or_local = parsed.scheme() == "https" || local;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
 
-    if allowed_host && secure_or_local {
-        (
-            true,
-            format!("Endpoint accepted by policy checks: {base_url}"),
-        )
-    } else {
-        (
-            false,
-            format!(
-                "Endpoint must use https and api.sendgrid.com (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
+
+    let local = is_local_test_host(host);
+    if parsed.scheme() == "http" && !local {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
+                .into(),
+        });
+    }
+
+    if matches!(auth, SendGridAuth::ApiKey(_))
+        && !local
+        && !host.eq_ignore_ascii_case("api.sendgrid.com")
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "base_url with direct api_key auth must target api.sendgrid.com (localhost/127.0.0.1/::1 allowed for tests): {trimmed}"
             ),
-        )
+        });
+    }
+
+    Ok(trimmed.trim_end_matches('/').to_string())
+}
+
+fn base_url_policy(base_url: &str, auth: &SendGridAuth) -> (bool, String) {
+    match validate_base_url_for_auth(base_url, auth) {
+        Ok(normalized) => (
+            true,
+            format!("Endpoint accepted by policy checks: {normalized}"),
+        ),
+        Err(FcpError::InvalidRequest { message, .. }) => (false, message),
+        Err(error) => (false, error.to_string()),
     }
 }
 
@@ -1106,11 +1153,39 @@ mod tests {
     #[test]
     fn config_custom_base_url() {
         let config = SendGridConfig::from_params(&json!({
-            "api_key": "SG.key",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": "https://sendgrid.example.com/v3",
         }))
         .unwrap();
         assert_eq!(config.base_url, "https://sendgrid.example.com/v3");
+    }
+
+    #[test]
+    fn config_rejects_untrusted_base_url_for_api_key_mode() {
+        let result = SendGridConfig::from_params(&json!({
+            "api_key": "SG.key",
+            "base_url": "https://evil.example.com/v3",
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("api.sendgrid.com"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_rejects_base_url_with_userinfo() {
+        let result = SendGridConfig::from_params(&json!({
+            "api_key": "SG.key",
+            "base_url": "https://user:pass@api.sendgrid.com/v3",
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("userinfo"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1637,13 +1712,13 @@ mod tests {
     #[allow(clippy::redundant_clone)]
     fn config_clone_preserves_fields() {
         let config = SendGridConfig::from_params(&json!({
-            "api_key": "SG.clone_test",
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
             "base_url": "https://custom.sg.com/v3",
         }))
         .unwrap();
         let cloned = config.clone();
         assert_eq!(config.base_url, cloned.base_url);
-        assert!(matches!(cloned.auth, SendGridAuth::ApiKey(_)));
+        assert!(matches!(cloned.auth, SendGridAuth::CredentialId(_)));
     }
 
     #[test]
@@ -1802,54 +1877,79 @@ mod tests {
 
     #[test]
     fn base_url_policy_accepts_sendgrid_https() {
-        let (ok, message) = base_url_policy("https://api.sendgrid.com/v3");
+        let (ok, message) = base_url_policy(
+            "https://api.sendgrid.com/v3",
+            &SendGridAuth::ApiKey("SG.tok".into()),
+        );
         assert!(ok);
         assert!(message.contains("accepted"));
     }
 
     #[test]
     fn base_url_policy_accepts_localhost() {
-        let (ok, _) = base_url_policy("http://localhost:8080");
+        let (ok, _) = base_url_policy(
+            "http://localhost:8080",
+            &SendGridAuth::ApiKey("SG.tok".into()),
+        );
         assert!(ok);
     }
 
     #[test]
     fn base_url_policy_accepts_127_0_0_1() {
-        let (ok, _) = base_url_policy("http://127.0.0.1:9090");
+        let (ok, _) = base_url_policy(
+            "http://127.0.0.1:9090",
+            &SendGridAuth::ApiKey("SG.tok".into()),
+        );
         assert!(ok);
     }
 
     #[test]
     fn base_url_policy_rejects_http_non_local() {
-        let (ok, message) = base_url_policy("http://api.sendgrid.com/v3");
+        let (ok, message) = base_url_policy(
+            "http://api.sendgrid.com/v3",
+            &SendGridAuth::ApiKey("SG.tok".into()),
+        );
         assert!(!ok);
         assert!(message.contains("must use https"));
     }
 
     #[test]
     fn base_url_policy_rejects_unknown_host() {
-        let (ok, message) = base_url_policy("https://evil.example.com");
+        let (ok, message) = base_url_policy(
+            "https://evil.example.com",
+            &SendGridAuth::ApiKey("SG.tok".into()),
+        );
         assert!(!ok);
         assert!(message.contains("api.sendgrid.com"));
     }
 
     #[test]
     fn base_url_policy_rejects_invalid_url() {
-        let (ok, message) = base_url_policy("not a url");
+        let (ok, message) = base_url_policy("not a url", &SendGridAuth::ApiKey("SG.tok".into()));
         assert!(!ok);
         assert!(message.contains("could not be parsed"));
     }
 
     #[test]
-    fn provisioning_readiness_custom_base_url_rejected() {
-        let config = SendGridConfig::from_params(&json!({
-            "api_key": "SG.tok",
-            "base_url": "https://evil.example.com",
-        }))
-        .unwrap();
-        let readiness = config.provisioning_readiness();
-        assert!(!readiness.network_ok);
-        assert!(readiness.network_message.contains("api.sendgrid.com"));
+    fn base_url_policy_rejects_query_string() {
+        let (ok, message) = base_url_policy(
+            "https://api.sendgrid.com/v3?trace=1",
+            &SendGridAuth::ApiKey("SG.tok".into()),
+        );
+        assert!(!ok);
+        assert!(message.contains("query string"), "got: {message}");
+    }
+
+    #[test]
+    fn base_url_policy_accepts_custom_https_for_credential_id_mode() {
+        let (ok, message) = base_url_policy(
+            "https://vault-proxy.internal/v3",
+            &SendGridAuth::CredentialId(
+                CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            ),
+        );
+        assert!(ok);
+        assert!(message.contains("accepted"), "got: {message}");
     }
 
     #[test]

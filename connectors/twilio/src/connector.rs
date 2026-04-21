@@ -9,6 +9,7 @@ use fcp_core::{
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -24,20 +25,26 @@ struct TwilioConfig {
 
 impl TwilioConfig {
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
-        let account_sid =
-            params
-                .get("account_sid")
-                .and_then(|v| v.as_str())
-                .ok_or(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: "Missing account_sid in configuration".into(),
-                })?;
+        let account_sid = params
+            .get("account_sid")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing account_sid in configuration".into(),
+            })?;
 
-        let auth_token = params.get("auth_token").and_then(|v| v.as_str());
+        let auth_token = params
+            .get("auth_token")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
         let credential_id = params.get("credential_id").and_then(|v| v.as_str());
         let base_url = params.get("base_url").and_then(|v| v.as_str());
 
-        let auth = match (auth_token, credential_id) {
+        let auth = match (auth_token.as_deref(), credential_id) {
             (Some(_), Some(_)) => {
                 return Err(FcpError::InvalidRequest {
                     code: 1003,
@@ -66,14 +73,86 @@ impl TwilioConfig {
             }
         };
 
-        let url =
-            base_url.map_or_else(|| format!("{DEFAULT_API_BASE}/{account_sid}"), String::from);
+        let url = validate_base_url_for_auth(
+            &base_url.map_or_else(|| format!("{DEFAULT_API_BASE}/{account_sid}"), String::from),
+            &auth,
+        )?;
 
         Ok(Self {
             auth,
             base_url: url,
         })
     }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+fn validate_base_url_for_auth(base_url: &str, auth: &TwilioAuth) -> FcpResult<String> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not be empty".into(),
+        });
+    }
+
+    let parsed = Url::parse(trimmed).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Invalid base_url: {error}"),
+    })?;
+
+    if !matches!(parsed.scheme(), "https" | "http") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must use http or https".into(),
+        });
+    }
+
+    let Some(host) = parsed.host_str() else {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must include a host".into(),
+        });
+    };
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
+
+    let local = is_local_test_host(host);
+    if parsed.scheme() == "http" && !local {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
+                .into(),
+        });
+    }
+
+    if matches!(auth, TwilioAuth::Token { .. })
+        && !local
+        && !host.eq_ignore_ascii_case("api.twilio.com")
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "base_url with direct auth_token mode must target api.twilio.com (localhost/127.0.0.1/::1 allowed for tests): {trimmed}"
+            ),
+        });
+    }
+
+    Ok(trimmed.trim_end_matches('/').to_string())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -281,7 +360,7 @@ impl TwilioConnector {
         checks.push(DoctorCheck {
             name: "network_constraints".into(),
             status: DoctorStatus::Pass,
-            message: format!("Egress target: api.twilio.com (via {base_url})"),
+            message: format!("Validated egress target: {base_url}"),
         });
 
         // 6. credential_injection
@@ -3222,6 +3301,43 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_empty_account_sid() {
+        let mut connector = TwilioConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "account_sid": "   ",
+                "auth_token": "test_token"
+            }))
+            .await;
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("account_sid"), "got: {message}");
+            }
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_empty_auth_token() {
+        let mut connector = TwilioConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "account_sid": "ACtest123",
+                "auth_token": "   "
+            }))
+            .await;
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(
+                    message.contains("auth_token") || message.contains("credential_id"),
+                    "got: {message}"
+                );
+            }
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_configure_with_custom_urls() {
         let mut connector = TwilioConnector::new();
         connector
@@ -3239,6 +3355,42 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_untrusted_remote_base_url_with_auth_token() {
+        let mut connector = TwilioConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "account_sid": "ACtest123",
+                "auth_token": "test_token",
+                "base_url": "https://evil.example.com"
+            }))
+            .await;
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("api.twilio.com"), "got: {message}");
+            }
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_base_url_with_userinfo() {
+        let mut connector = TwilioConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "account_sid": "ACtest123",
+                "auth_token": "test_token",
+                "base_url": "https://user:pass@api.twilio.com/2010-04-01/Accounts/ACtest123"
+            }))
+            .await;
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("userinfo"), "got: {message}");
+            }
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_health_includes_auth_info() {
         let cid = uuid::Uuid::new_v4().to_string();
         let mut connector = TwilioConnector::new();
@@ -3246,7 +3398,7 @@ mod tests {
             .handle_configure(json!({
                 "account_sid": "ACtest123",
                 "credential_id": cid,
-                "base_url": "http://proxy:9999"
+                "base_url": "https://proxy.example.internal"
             }))
             .await
             .unwrap();
@@ -3254,7 +3406,7 @@ mod tests {
         let health = connector.handle_health().await.unwrap();
         assert_eq!(health["status"], "healthy");
         assert_eq!(health["auth_mode"], "credential_id");
-        assert_eq!(health["api_url"], "http://proxy:9999");
+        assert_eq!(health["api_url"], "https://proxy.example.internal");
     }
 
     #[fcp_async_core::runtime::test]

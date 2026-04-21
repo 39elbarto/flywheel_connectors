@@ -466,6 +466,47 @@ async fn execute_query_rejects_invalid_variables() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn execute_batch_rejects_invalid_variables() {
+    let mut ctx = TestContext::new("execute_batch_rejects_invalid_variables");
+    let server = MockServer::start().await;
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(CountingResponder {
+            counter: counter.clone(),
+            body: serde_json::json!([{"data": {"viewer": {"id": "unused"}}}]),
+            delay: None,
+        })
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_validation_mode(SchemaValidationMode::VariablesAndResponse)
+        .build()
+        .expect("client");
+
+    let err = client
+        .execute_batch::<BadVarsQuery>(vec![BadVars { id: 123 }])
+        .await
+        .expect_err("should reject invalid batch variables");
+
+    ctx.assert_true(
+        matches!(err, GraphqlClientError::SchemaValidation { .. }),
+        "expected schema validation error",
+    );
+    ctx.assert_eq(
+        counter.load(Ordering::SeqCst),
+        0_usize,
+        "expected no request",
+    );
+    ctx.finalize(
+        "pass",
+        Some(serde_json::json!({"validation": "batch_variables"})),
+    );
+}
+
+#[fcp_async_core::runtime::test]
 async fn execute_batch_success() {
     let mut ctx = TestContext::new("execute_batch_success");
     let server = MockServer::start().await;
@@ -533,6 +574,89 @@ async fn execute_batch_success() {
     );
 
     ctx.finalize("pass", Some(serde_json::json!({"batch_size": 2})));
+}
+
+#[fcp_async_core::runtime::test]
+async fn execute_batch_rejects_response_count_mismatch() {
+    let mut ctx = TestContext::new("execute_batch_rejects_response_count_mismatch");
+    let server = MockServer::start().await;
+
+    let response_body = serde_json::json!([
+        {"data": {"viewer": {"id": "user-1"}}}
+    ]);
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_validation_mode(SchemaValidationMode::ResponseOnly)
+        .build()
+        .expect("client");
+
+    let err = client
+        .execute_batch::<ViewerByIdQuery>(vec![
+            IdVars {
+                id: "user-1".to_string(),
+            },
+            IdVars {
+                id: "user-2".to_string(),
+            },
+        ])
+        .await
+        .expect_err("short batch response should fail closed");
+
+    match err {
+        GraphqlClientError::Protocol { message } => {
+            ctx.assert_true(
+                message.contains("expected 2, got 1"),
+                "protocol error should mention batch count mismatch",
+            );
+        }
+        other => panic!("expected Protocol error, got {other:?}"),
+    }
+
+    ctx.finalize(
+        "pass",
+        Some(serde_json::json!({"validation": "batch_count_mismatch"})),
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn execute_batch_rejects_invalid_response_schema() {
+    let mut ctx = TestContext::new("execute_batch_rejects_invalid_response_schema");
+    let server = MockServer::start().await;
+
+    let response_body = serde_json::json!([
+        {"data": {"viewer": {"id": 123}}}
+    ]);
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_validation_mode(SchemaValidationMode::ResponseOnly)
+        .build()
+        .expect("client");
+
+    let err = client
+        .execute_batch::<ViewerSchemaQuery>(vec![EmptyVars {}])
+        .await
+        .expect_err("invalid batch response schema should fail");
+
+    ctx.assert_true(
+        matches!(err, GraphqlClientError::SchemaValidation { .. }),
+        "expected schema validation error",
+    );
+    ctx.finalize(
+        "pass",
+        Some(serde_json::json!({"validation": "batch_response"})),
+    );
 }
 
 #[fcp_async_core::runtime::test]

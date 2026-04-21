@@ -596,9 +596,18 @@ impl GraphqlClient {
             }
         }
 
+        let expected_responses = items.len();
         let body = serde_json::to_value(&items)?;
         let bytes = self.execute_bytes(body, idempotent).await?;
         let response: Vec<GraphqlResponse<R>> = serde_json::from_slice(&bytes)?;
+        if response.len() != expected_responses {
+            return Err(GraphqlClientError::Protocol {
+                message: format!(
+                    "GraphQL batch response count mismatch: expected {expected_responses}, got {}",
+                    response.len()
+                ),
+            });
+        }
 
         if let (
             SchemaValidationMode::VariablesAndResponse | SchemaValidationMode::ResponseOnly,

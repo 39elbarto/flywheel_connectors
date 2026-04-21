@@ -1872,11 +1872,12 @@ impl LocalRegistryCatalog {
                 binary_name: signature.binary_name.clone(),
             });
         }
-        let binary_metadata =
-            std::fs::metadata(&canonical_binary_path).map_err(|source| RegistryCatalogError::ReadFile {
+        let binary_metadata = std::fs::metadata(&canonical_binary_path).map_err(|source| {
+            RegistryCatalogError::ReadFile {
                 path: canonical_binary_path.clone(),
                 source,
-            })?;
+            }
+        })?;
         if !binary_metadata.is_file() || file_has_multiple_links(&binary_metadata) {
             return Err(RegistryCatalogError::LinkedBinary {
                 path: package_dir.to_path_buf(),
@@ -2204,7 +2205,9 @@ mod tests {
     use fcp_core::{DecisionReceiptPolicy, ZoneTransportPolicy};
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::PolicySection;
-    use fcp_store::{MemoryObjectStore, MemoryObjectStoreConfig};
+    use fcp_store::{
+        MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
+    };
     use semver::Version;
     use serde_json::json;
     use std::panic::{self, AssertUnwindSafe};
@@ -11876,8 +11879,7 @@ trusted_builders = ["trusted-ci"]
         };
 
         let external_binary = temp.path().join("outside-hardlink-binary");
-        std::fs::write(&external_binary, b"outside-hardlink-binary")
-            .expect("write outside binary");
+        std::fs::write(&external_binary, b"outside-hardlink-binary").expect("write outside binary");
 
         let package_dir = write_signed_package_dir(
             temp.path(),
@@ -12009,6 +12011,113 @@ trusted_builders = ["trusted-ci"]
             message.contains("manifest signature verification failed")
                 || message.contains("invalid signature bytes"),
             "expected detached signature rejection, got: {message}",
+        );
+    }
+
+    #[test]
+    fn metamorphic_install_verify_reinstall_round_trip_is_observationally_idempotent() {
+        run_registry_test(
+            "metamorphic_install_verify_reinstall_round_trip_is_observationally_idempotent",
+            "verify",
+            "metamorphic",
+            7,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let binary = b"registry-metamorphic-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml("");
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
+                let manifest_toml =
+                    with_signatures(&unsigned, &publisher_signature_section("pub1", &sig));
+
+                let bundle = ConnectorBundle {
+                    manifest_toml: manifest_toml.clone(),
+                    binary: binary.clone(),
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust);
+                let first_verified = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect("first verify");
+
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                let symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+                let zone_id = ZoneId::work();
+                let object_id_key = ObjectIdKey::from_bytes([9u8; 32]);
+                let symbol_config = RaptorQConfig::default();
+
+                let mirror = verifier
+                    .mirror_bundle(
+                        &first_verified,
+                        &bundle,
+                        zone_id.clone(),
+                        &object_id_key,
+                        &store,
+                    )
+                    .await
+                    .expect("mirror bundle");
+                let symbol_result = verifier
+                    .mirror_bundle_symbols(
+                        &first_verified,
+                        &bundle,
+                        &mirror,
+                        zone_id,
+                        &object_id_key,
+                        &store,
+                        &symbol_store,
+                        &symbol_config,
+                        None,
+                    )
+                    .await
+                    .expect("mirror bundle symbols");
+
+                let reconstructed = verifier
+                    .reconstruct_bundle_from_symbol_descriptor(
+                        &symbol_result.descriptor_object_id,
+                        &store,
+                        &symbol_store,
+                        &symbol_config,
+                    )
+                    .await
+                    .expect("reconstruct bundle");
+                let second_verified = verifier
+                    .verify_bundle(&reconstructed, None, None, None)
+                    .expect("second verify");
+                let second_mirror = verifier
+                    .mirror_bundle(
+                        &second_verified,
+                        &reconstructed,
+                        ZoneId::work(),
+                        &object_id_key,
+                        &store,
+                    )
+                    .await
+                    .expect("second mirror bundle");
+
+                assert_eq!(reconstructed.manifest_toml, bundle.manifest_toml);
+                assert_eq!(reconstructed.binary, bundle.binary);
+                assert_eq!(reconstructed.target, bundle.target);
+                assert_eq!(second_verified.manifest_hash, first_verified.manifest_hash);
+                assert_eq!(second_verified.binary_hash, first_verified.binary_hash);
+                assert_eq!(second_mirror.manifest_hash, mirror.manifest_hash);
+                assert_eq!(second_mirror.binary_hash, mirror.binary_hash);
+
+                RegistryLogData {
+                    manifest_hash: Some(first_verified.manifest_hash),
+                    binary_hash: Some(first_verified.binary_hash),
+                    target: Some(first_verified.target.as_string()),
+                    reason_code: Some("reinstall_idempotent".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
         );
     }
 

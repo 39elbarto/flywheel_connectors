@@ -161,6 +161,30 @@ fn snapshot_decision_receipt_deny_with_explanation() {
 }
 
 #[test]
+fn snapshot_decision_receipt_allow_minimal() {
+    // Allow with no evidence and no optional metadata — freezes the
+    // minimal fast-path allow wire shape independently of the richer
+    // allow-with-evidence snapshot above.
+    let receipt = DecisionReceipt {
+        id: "rcpt_allow_minimal".to_string(),
+        request_id: "req_allow_minimal".to_string(),
+        decision: Decision::Allow,
+        reason_code: "policy.capability.granted".to_string(),
+        evidence: Vec::new(),
+        audit_entry_id: None,
+        explanation: None,
+        decided_at: ANCHOR_TS + 120,
+        zone_id: "z:work".to_string(),
+        correlation_id: None,
+        trace_context: None,
+        connector_id: None,
+        operation_id: None,
+    };
+
+    insta::assert_json_snapshot!("decision_receipt_allow_minimal", receipt);
+}
+
+#[test]
 fn snapshot_decision_receipt_minimal_deny() {
     // Deny with no evidence and no explanation — the wire shape
     // any policy engine can produce in the fast-path (skip

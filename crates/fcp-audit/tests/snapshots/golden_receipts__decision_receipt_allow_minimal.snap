@@ -1,0 +1,12 @@
+---
+source: crates/fcp-audit/tests/golden_receipts.rs
+expression: receipt
+---
+{
+  "id": "rcpt_allow_minimal",
+  "request_id": "req_allow_minimal",
+  "decision": "allow",
+  "reason_code": "policy.capability.granted",
+  "decided_at": 1700000120,
+  "zone_id": "z:work"
+}

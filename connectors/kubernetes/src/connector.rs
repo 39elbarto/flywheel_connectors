@@ -1418,14 +1418,14 @@ fn join_namespaces(namespaces: &BTreeSet<String>) -> String {
     namespaces.iter().cloned().collect::<Vec<_>>().join(",")
 }
 
-const fn is_secret_mutation(operation: &str) -> bool {
+fn is_secret_mutation(operation: &str) -> bool {
     matches!(
         operation,
         "kubernetes.secret.create" | "kubernetes.secret.delete"
     )
 }
 
-const fn is_system_namespace(namespace: &str) -> bool {
+fn is_system_namespace(namespace: &str) -> bool {
     matches!(namespace, "kube-system" | "kube-public" | "kube-node-lease")
 }
 
@@ -1446,7 +1446,7 @@ fn command_binary_name(binary: &str) -> &str {
     binary.rsplit('/').next().unwrap_or(binary)
 }
 
-const fn is_shell_binary(binary: &str) -> bool {
+fn is_shell_binary(binary: &str) -> bool {
     matches!(
         binary,
         "sh" | "bash"
@@ -2950,7 +2950,7 @@ fn op_info(
     }
 }
 
-const fn approval_for_operation(operation_id: &str) -> Option<ApprovalMode> {
+fn approval_for_operation(operation_id: &str) -> Option<ApprovalMode> {
     match operation_id {
         "kubernetes.delete_pod"
         | "kubernetes.create_pod"

@@ -33,6 +33,16 @@ pub enum BootstrapError {
         phase: String,
     },
 
+    /// No partial state to resume — the data directory is fresh.
+    ///
+    /// Returned by `BootstrapWorkflow::resume` when the caller expected
+    /// to pick up a crashed bootstrap but nothing has started yet.
+    /// Caller should use `BootstrapWorkflow::new` instead.
+    #[error(
+        "no partial bootstrap state to resume: data directory is fresh — use BootstrapWorkflow::new"
+    )]
+    NotInitialized,
+
     /// Recovery phrase is invalid.
     #[error("invalid recovery phrase: {0}")]
     InvalidRecoveryPhrase(String),

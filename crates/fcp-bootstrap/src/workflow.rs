@@ -214,14 +214,80 @@ impl BootstrapWorkflow {
         }
     }
 
+    /// Resume a partially-complete bootstrap workflow from its phase lock.
+    ///
+    /// Unlike [`Self::new`], this method ACCEPTS partial state: it reads
+    /// `init.lock` via [`detect_partial_state`] and positions the
+    /// workflow at the phase recorded there. The subsequent [`Self::run`]
+    /// call then fast-forwards past any phase that had completed
+    /// before the crash and re-runs the phase that was in progress.
+    ///
+    /// Call this after a crashed bootstrap run in preference to deleting
+    /// the partial state and starting over — the genesis ceremony has
+    /// real side effects (key generation, user-entered recovery phrases)
+    /// that should not be regenerated unnecessarily.
+    ///
+    /// # Errors
+    ///
+    /// - [`BootstrapError::AlreadyExists`] if the data directory already
+    ///   contains a completed genesis (nothing to resume).
+    /// - [`BootstrapError::PartialState`] if the recorded phase is
+    ///   [`BootstrapPhase::Failed`] — the caller must decide to retry
+    ///   with `force_overwrite` or abort.
+    /// - [`BootstrapError::NotInitialized`] if there is no partial
+    ///   state to resume (caller should use [`Self::new`] instead).
+    pub fn resume(config: BootstrapConfig) -> BootstrapResult<Self> {
+        ensure_secure_data_dir(&config.data_dir)?;
+
+        let init_result = check_initialization_state(&config.data_dir, config.force_overwrite)?;
+
+        match init_result {
+            InitCheckResult::Fresh => Err(BootstrapError::NotInitialized),
+            InitCheckResult::AlreadyExists { fingerprint } => {
+                Err(BootstrapError::AlreadyExists { fingerprint })
+            }
+            InitCheckResult::PartialState { phase } => {
+                // A Failed lock is not resumable: the caller supplied the
+                // prior error; they decide whether to wipe with
+                // force_overwrite and retry.
+                if matches!(phase, BootstrapPhase::Failed { .. }) {
+                    return Err(BootstrapError::PartialState {
+                        phase: format!("{phase}"),
+                    });
+                }
+                Ok(Self {
+                    config,
+                    phase,
+                    time_validation: None,
+                    ceremony: None,
+                })
+            }
+        }
+    }
+
+    /// Return true if Phase 1 (time validation) still needs to run.
+    /// Phase 1 needs to run when the workflow has not progressed past
+    /// it in a prior attempt.
+    const fn needs_time_validation(&self) -> bool {
+        matches!(
+            self.phase,
+            BootstrapPhase::Uninitialized | BootstrapPhase::TimeValidation
+        )
+    }
+
     /// Run the bootstrap workflow to completion.
+    ///
+    /// If the workflow was constructed via [`Self::resume`], already-
+    /// completed phases are skipped so the ceremony does not re-run
+    /// phases whose artifacts are already on disk. The phase that was
+    /// in progress at crash time is re-run idempotently.
     ///
     /// # Errors
     ///
     /// Returns an error if any bootstrap phase fails.
     pub fn run(mut self) -> BootstrapResult<GenesisState> {
-        // Phase 1: Time validation
-        if !self.config.skip_time_validation {
+        // Phase 1: Time validation (skipped on resume if already past).
+        if self.needs_time_validation() && !self.config.skip_time_validation {
             self.run_time_validation()?;
         }
 
@@ -986,6 +1052,118 @@ mod tests {
 
         let result = BootstrapWorkflow::new(config);
         assert!(matches!(result, Err(BootstrapError::PartialState { .. })));
+    }
+
+    #[test]
+    fn resume_positions_workflow_at_recorded_phase() {
+        // L4-01 regression test: after a crash that left init.lock at
+        // KeyGeneration, resume() must construct a workflow at that
+        // phase (not error out like new() does).
+        let dir = tempdir().unwrap();
+        let phase = BootstrapPhase::KeyGeneration;
+        crate::phase::write_phase_lock(dir.path(), &phase).unwrap();
+
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .build()
+            .unwrap();
+
+        let workflow = BootstrapWorkflow::resume(config).expect("resume must accept partial state");
+        assert_eq!(workflow.phase, BootstrapPhase::KeyGeneration);
+        // Past time validation, so the skip predicate must return false.
+        assert!(
+            !workflow.needs_time_validation(),
+            "resume past KeyGeneration must skip time validation on run"
+        );
+    }
+
+    #[test]
+    fn resume_refuses_when_fresh() {
+        // If no init.lock exists, resume has nothing to pick up and
+        // must tell the caller to use new() instead.
+        let dir = tempdir().unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .build()
+            .unwrap();
+        match BootstrapWorkflow::resume(config) {
+            Err(BootstrapError::NotInitialized) => {}
+            Err(other) => panic!("expected NotInitialized, got {other}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn resume_refuses_on_failed_phase() {
+        // A Failed phase represents a prior terminal error. resume()
+        // must not silently retry — the caller has to decide whether
+        // to wipe state with force_overwrite or abort.
+        let dir = tempdir().unwrap();
+        let failed = BootstrapPhase::Failed {
+            reason: "synthetic test failure".to_string(),
+            at_phase: "KeyGeneration".to_string(),
+        };
+        crate::phase::write_phase_lock(dir.path(), &failed).unwrap();
+
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .build()
+            .unwrap();
+
+        match BootstrapWorkflow::resume(config) {
+            Err(BootstrapError::PartialState { .. }) => {}
+            Err(other) => panic!("expected PartialState, got {other}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
+
+    #[test]
+    fn resume_before_time_validation_still_runs_phase_1() {
+        // If the crash happened before or during TimeValidation, the
+        // resumed workflow should still run Phase 1 on the next run().
+        let dir = tempdir().unwrap();
+        let phase = BootstrapPhase::TimeValidation;
+        crate::phase::write_phase_lock(dir.path(), &phase).unwrap();
+
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .build()
+            .unwrap();
+        let workflow = BootstrapWorkflow::resume(config).expect("resume must accept partial state");
+        assert!(
+            workflow.needs_time_validation(),
+            "resume at TimeValidation must re-run phase 1"
+        );
+    }
+
+    #[test]
+    fn resume_rejects_already_completed_genesis() {
+        // If a completed genesis is present, there is nothing to
+        // resume — the caller should either use force_overwrite or
+        // accept the existing install.
+        let dir = tempdir().unwrap();
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+        let genesis = GenesisState::create(&signing_key.verifying_key());
+        let cbor = genesis.to_cbor().expect("serialize genesis");
+        std::fs::write(dir.path().join("genesis.cbor"), &cbor).unwrap();
+        // Write a stale partial marker to make sure resume still
+        // treats the durable genesis as authoritative.
+        crate::phase::write_phase_lock(dir.path(), &BootstrapPhase::KeyGeneration).unwrap();
+
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .build()
+            .unwrap();
+        match BootstrapWorkflow::resume(config) {
+            Err(BootstrapError::AlreadyExists { .. }) => {}
+            Err(other) => panic!("expected AlreadyExists, got {other}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
     }
 
     #[test]

@@ -1,0 +1,6 @@
+---
+source: crates/fcp-oauth/tests/golden_snapshots.rs
+expression: normalize_authorization_url(&url)
+---
+https://a.com/authorize
+  oauth_token = req-token-123

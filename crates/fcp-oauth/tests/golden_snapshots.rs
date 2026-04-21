@@ -25,7 +25,8 @@
 use std::collections::BTreeMap;
 
 use fcp_oauth::{
-    OAuthError, OAuthTokens, TokenResponse, ensure_allowlisted_redirect_uri,
+    OAuth1Client, OAuth1Config, OAuth2Client, OAuth2Config, OAuthError, OAuthTokens,
+    PkceMethod, RequestToken, TokenResponse, ensure_allowlisted_redirect_uri,
     ensure_callback_redirect_is_allowlisted, parse_registered_redirect_allowlist,
 };
 use serde_json::json;
@@ -335,4 +336,187 @@ fn snapshot_response_deserialization_unknown_fields_ignored() {
     .to_string();
     let debug_repr = deserialize_response_as_debug(&raw);
     insta::assert_snapshot!("response_unknown_fields_ignored", debug_repr);
+}
+
+/// Sort the query string of an OAuth authorization URL into a stable,
+/// snapshot-friendly shape: `scheme://host/path` then one
+/// `key=value` pair per line, alphabetical. `state` / `code_challenge`
+/// are cryptographically-random per-call so they are scrubbed to a
+/// sentinel string before snapshotting. This matches the `insta`
+/// `filters` convention used elsewhere in this file but is done
+/// in-code because the inputs are embedded in URL-encoded form and
+/// the `insta` filter APIs operate on post-render strings.
+fn normalize_authorization_url(raw: &str) -> String {
+    let url = url::Url::parse(raw).expect("authorization URL must parse");
+    let mut params: Vec<(String, String)> = url
+        .query_pairs()
+        .map(|(k, v)| {
+            let key = k.into_owned();
+            let value = match key.as_str() {
+                // Random per-call fields; scrub to keep the snapshot stable.
+                "state" | "code_challenge" | "code_verifier" => "<RANDOM>".to_string(),
+                _ => v.into_owned(),
+            };
+            (key, value)
+        })
+        .collect();
+    params.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut out = String::new();
+    out.push_str(url.scheme());
+    out.push_str("://");
+    if let Some(host) = url.host_str() {
+        out.push_str(host);
+    }
+    out.push_str(url.path());
+    out.push('\n');
+    for (key, value) in params {
+        out.push_str(&format!("  {key} = {value}\n"));
+    }
+    out
+}
+
+/// Sort the comma-separated `oauth_*` pairs inside an
+/// `Authorization: OAuth <...>` header into a snapshot-friendly
+/// shape. The random / time-dependent values (`oauth_nonce`,
+/// `oauth_timestamp`, `oauth_signature`) are scrubbed.
+fn normalize_oauth1_authorization_header(raw: &str) -> String {
+    let body = raw.strip_prefix("OAuth ").unwrap_or(raw);
+    let mut pairs: Vec<(String, String)> = body
+        .split(',')
+        .map(|piece| {
+            let piece = piece.trim();
+            let (key, value) = piece.split_once('=').unwrap_or((piece, ""));
+            let key = key.trim().to_string();
+            // Values are percent-encoded and double-quoted; strip the
+            // quotes but leave the URL encoding intact so the snapshot
+            // records the wire shape.
+            let value = value.trim().trim_matches('"').to_string();
+            let value = match key.as_str() {
+                "oauth_nonce" | "oauth_timestamp" | "oauth_signature" => "<RANDOM>".to_string(),
+                _ => value,
+            };
+            (key, value)
+        })
+        .collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut out = String::from("OAuth\n");
+    for (key, value) in pairs {
+        out.push_str(&format!("  {key} = {value}\n"));
+    }
+    out
+}
+
+#[test]
+fn snapshot_oauth2_authorization_url_basic_shape() {
+    // Converts the three `url.contains("...")` assertions at
+    // no_mock_integration.rs:129-134 into a single golden that freezes
+    // the full URL shape. Any change in parameter ordering, absence of
+    // a required field, or new side-effect params (e.g., an added
+    // `audience` default) would show up as a snapshot diff.
+    let config = OAuth2Config::new(
+        "my-client",
+        "secret",
+        "https://auth.ex.com/authorize",
+        "https://auth.ex.com/token",
+    )
+    .with_redirect_uri("https://localhost/cb")
+    .with_pkce(false);
+    let client = OAuth2Client::new(config).unwrap();
+    let (url, _state) = client.authorization_url(&["read", "write"]).unwrap();
+
+    insta::assert_snapshot!(
+        "oauth2_authorization_url_basic_shape",
+        normalize_authorization_url(&url)
+    );
+}
+
+#[test]
+fn snapshot_oauth2_authorization_url_with_pkce_s256() {
+    // Replaces the pair of `url.contains("code_challenge...")` asserts
+    // at no_mock_integration.rs:151-152 with a full golden. Scrubs
+    // `state` and `code_challenge` (both random per call) so the
+    // snapshot is stable.
+    let config = OAuth2Config::new(
+        "id",
+        "secret",
+        "https://auth.ex.com/authorize",
+        "https://auth.ex.com/token",
+    )
+    .with_redirect_uri("https://localhost/cb")
+    .with_pkce(true)
+    .with_pkce_method(PkceMethod::S256);
+    let client = OAuth2Client::new(config).unwrap();
+    let (url, _state, _pkce) = client.authorization_url_with_pkce(&["openid"]).unwrap();
+
+    insta::assert_snapshot!(
+        "oauth2_authorization_url_with_pkce_s256",
+        normalize_authorization_url(&url)
+    );
+}
+
+#[test]
+fn snapshot_oauth1_sign_request_header_shape() {
+    // Replaces the seven `header.contains("oauth_*")` asserts at
+    // no_mock_integration.rs:380-387 with a full golden over the
+    // Authorization header. `oauth_nonce` and `oauth_timestamp` are
+    // scrubbed; `oauth_signature` is scrubbed because it depends on
+    // both. The snapshot freezes the complete set of fields and their
+    // ordering-independent presence.
+    let config = OAuth1Config::new(
+        "consumer-key",
+        "consumer-secret",
+        "https://a.com/rt",
+        "https://a.com/auth",
+        "https://a.com/at",
+    );
+    let client = OAuth1Client::new(config);
+    let tokens = fcp_oauth::OAuth1Tokens {
+        token: "access-token".to_string(),
+        token_secret: "access-secret".to_string(),
+        user_id: None,
+        screen_name: None,
+    };
+
+    let header = client
+        .sign_request(
+            "GET",
+            "https://api.example.com/data",
+            &tokens,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+    insta::assert_snapshot!(
+        "oauth1_sign_request_header_shape",
+        normalize_oauth1_authorization_header(&header)
+    );
+}
+
+#[test]
+fn snapshot_oauth1_authorization_url_shape() {
+    // Replaces the two `url.contains(...)` asserts at
+    // no_mock_integration.rs:351-352. No scrubbing needed — the
+    // authorization URL for OAuth 1.0a carries only the request
+    // token, which is caller-supplied and stable.
+    let config = OAuth1Config::new(
+        "consumer-key",
+        "consumer-secret",
+        "https://a.com/rt",
+        "https://a.com/authorize",
+        "https://a.com/at",
+    );
+    let client = OAuth1Client::new(config);
+    let request_token = RequestToken {
+        token: "req-token-123".to_string(),
+        token_secret: "req-secret".to_string(),
+        callback_confirmed: true,
+    };
+    let url = client.authorization_url(&request_token);
+
+    insta::assert_snapshot!(
+        "oauth1_authorization_url_shape",
+        normalize_authorization_url(&url)
+    );
 }

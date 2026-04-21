@@ -1,0 +1,12 @@
+---
+source: crates/fcp-oauth/tests/golden_snapshots.rs
+expression: normalize_oauth1_authorization_header(&header)
+---
+OAuth
+  oauth_consumer_key = consumer-key
+  oauth_nonce = <RANDOM>
+  oauth_signature = <RANDOM>
+  oauth_signature_method = HMAC-SHA1
+  oauth_timestamp = <RANDOM>
+  oauth_token = access-token
+  oauth_version = 1.0

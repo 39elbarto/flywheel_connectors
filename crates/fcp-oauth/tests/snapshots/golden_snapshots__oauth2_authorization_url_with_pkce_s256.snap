@@ -1,0 +1,12 @@
+---
+source: crates/fcp-oauth/tests/golden_snapshots.rs
+expression: normalize_authorization_url(&url)
+---
+https://auth.ex.com/authorize
+  client_id = id
+  code_challenge = <RANDOM>
+  code_challenge_method = S256
+  redirect_uri = https://localhost/cb
+  response_type = code
+  scope = openid
+  state = <RANDOM>

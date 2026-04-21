@@ -74,6 +74,9 @@ impl MailchimpConfig {
             .get("base_url")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
+        if let Some(ref url) = base_url {
+            reject_base_url_qfu(url)?;
+        }
 
         Ok(Self { auth, base_url })
     }
@@ -741,6 +744,38 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
         )
         .depends_on(StepId::new("enter_api_key")),
     )
+}
+
+/// Reject base_url overrides with userinfo, query, or fragment. The
+/// MailchimpClient concatenates via format!("{}{path}", self.base_url)
+/// in every request method (client.rs:202/213/224). Without this
+/// check, a base_url like
+/// `https://us1.api.mailchimp.com/3.0?leak=x` would leak
+/// attacker-chosen query values on every request and put the endpoint
+/// path after the `?` boundary. Userinfo
+/// (`https://attacker:pw@us1.api.mailchimp.com/3.0`) would bake into
+/// every request URL and silently override the Authorization header.
+/// Matches the hygiene in airtable / asana / gmail / notion / hubspot
+/// / whatsapp / linear / clickup / monday / bitbucket / intercom /
+/// dropbox.
+fn reject_base_url_qfu(base_url: &str) -> FcpResult<()> {
+    let parsed = Url::parse(base_url).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("base_url could not be parsed: {error}"),
+    })?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
+    Ok(())
 }
 
 fn base_url_policy(base_url: &str) -> (bool, String) {
@@ -1676,5 +1711,68 @@ mod tests {
         assert_eq!(readiness.auth_mode, cloned.auth_mode);
         assert_eq!(readiness.network_ok, cloned.network_ok);
         assert_eq!(readiness.base_url, cloned.base_url);
+    }
+
+    #[test]
+    fn from_params_accepts_clean_base_url() {
+        let config = MailchimpConfig::from_params(&json!({
+            "api_key": "key-us1",
+            "base_url": "https://us1.api.mailchimp.com/3.0",
+        }))
+        .unwrap();
+        assert_eq!(
+            config.base_url.as_deref(),
+            Some("https://us1.api.mailchimp.com/3.0")
+        );
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_query_string() {
+        let err = MailchimpConfig::from_params(&json!({
+            "api_key": "key-us1",
+            "base_url": "https://us1.api.mailchimp.com/3.0?leak=x",
+        }))
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("query"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_fragment() {
+        let err = MailchimpConfig::from_params(&json!({
+            "api_key": "key-us1",
+            "base_url": "https://us1.api.mailchimp.com/3.0#frag",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_userinfo() {
+        let err = MailchimpConfig::from_params(&json!({
+            "api_key": "key-us1",
+            "base_url": "https://attacker:pw@us1.api.mailchimp.com/3.0",
+        }))
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("userinfo"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_unparseable() {
+        let err = MailchimpConfig::from_params(&json!({
+            "api_key": "key-us1",
+            "base_url": "not a url",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 }

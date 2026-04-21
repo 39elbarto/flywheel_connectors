@@ -8,6 +8,7 @@ use fcp_core::{
     IdempotencyClass, OAuthRecipe, OperationId, OperationInfo, ProvisioningRecipe,
     ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, StepId,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -73,8 +74,9 @@ impl SalesforceConfig {
         let base_url = params
             .get("base_url")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or(DEFAULT_BASE_URL)
-            .to_string();
+            .map(|value| validate_base_url_for_auth(value, &auth))
+            .transpose()?
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
 
         let api_version = match params.get("api_version") {
             Some(value) => {
@@ -96,6 +98,81 @@ impl SalesforceConfig {
             api_version,
         })
     }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+fn is_salesforce_host(host: &str) -> bool {
+    let lower = host.to_ascii_lowercase();
+    lower.ends_with(".salesforce.com")
+        || lower.ends_with(".force.com")
+        || lower == "salesforce.com"
+        || lower == "force.com"
+}
+
+fn validate_base_url_for_auth(base_url: &str, auth: &SalesforceAuth) -> FcpResult<String> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not be empty".into(),
+        });
+    }
+
+    let parsed = Url::parse(trimmed).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("base_url could not be parsed: {error}"),
+    })?;
+
+    if !matches!(parsed.scheme(), "https" | "http") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must use http or https".into(),
+        });
+    }
+
+    let Some(host) = parsed.host_str() else {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must include a host".into(),
+        });
+    };
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
+
+    let local = is_local_test_host(host);
+    if parsed.scheme() == "http" && !local {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
+                .into(),
+        });
+    }
+
+    if matches!(auth, SalesforceAuth::AccessToken(_)) && !local && !is_salesforce_host(host) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "base_url with direct access_token auth must target salesforce.com or force.com (localhost/127.0.0.1/::1 allowed for tests): {trimmed}"
+            ),
+        });
+    }
+
+    Ok(trimmed.trim_end_matches('/').to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -320,7 +397,10 @@ impl SalesforceConnector {
                 ),
             };
 
-        let network_ok = is_salesforce_domain(base_url);
+        let network_ok = match &self.config {
+            Some(cfg) => validate_base_url_for_auth(base_url, &cfg.auth).is_ok(),
+            None => is_salesforce_domain(base_url),
+        };
 
         json!({
             "auth_mode": auth_mode,
@@ -653,16 +733,10 @@ fn soql_to_output(data: &serde_json::Value) -> serde_json::Value {
 
 /// Check whether the given URL looks like a valid Salesforce domain.
 fn is_salesforce_domain(url: &str) -> bool {
-    let host = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .and_then(|rest| rest.split('/').next())
-        .unwrap_or(url);
-
-    host.ends_with(".salesforce.com")
-        || host.ends_with(".force.com")
-        || host == "salesforce.com"
-        || host == "force.com"
+    Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(is_salesforce_host))
+        .unwrap_or(false)
 }
 
 /// Build the provisioning recipe for the Salesforce connector.
@@ -1277,6 +1351,34 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(config.base_url, "https://myorg.my.salesforce.com");
+    }
+
+    #[test]
+    fn config_rejects_untrusted_base_url_for_access_token_mode() {
+        let result = SalesforceConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://evil.example.com"
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("salesforce.com"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_rejects_base_url_with_userinfo() {
+        let result = SalesforceConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://user:pass@login.salesforce.com"
+        }));
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("userinfo"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1896,13 +1998,14 @@ mod tests {
 
     #[test]
     fn config_clone_preserves_base_url() {
-        let config = SalesforceConfig::from_params(
-            &json!({ "access_token": "tok", "base_url": "https://custom.sf.com" }),
-        )
+        let config = SalesforceConfig::from_params(&json!({
+            "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+            "base_url": "https://proxy.internal"
+        }))
         .unwrap();
         let cloned = config.clone();
-        assert_eq!(config.base_url, "https://custom.sf.com");
-        assert_eq!(cloned.base_url, "https://custom.sf.com");
+        assert_eq!(config.base_url, "https://proxy.internal");
+        assert_eq!(cloned.base_url, "https://proxy.internal");
     }
 
     #[test]
@@ -2133,6 +2236,16 @@ mod tests {
         });
         let r = c.provisioning_readiness();
         assert_eq!(r["network_ok"], false);
+
+        c.config = Some(SalesforceConfig {
+            auth: SalesforceAuth::CredentialId(
+                CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap(),
+            ),
+            base_url: "https://proxy.internal".into(),
+            api_version: None,
+        });
+        let r = c.provisioning_readiness();
+        assert_eq!(r["network_ok"], true);
     }
 
     // -- self_check with provisioning --

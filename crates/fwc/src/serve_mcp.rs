@@ -798,7 +798,9 @@ fn prompt_matches_server_filters(state: &McpServerState, prompt: &McpPromptEntry
     }
 }
 
-fn capability_token_from_params(params: &Value) -> Result<Option<ToolCapabilityToken>, JsonRpcError> {
+fn capability_token_from_params(
+    params: &Value,
+) -> Result<Option<ToolCapabilityToken>, JsonRpcError> {
     let meta = params.get("meta").and_then(Value::as_object);
     let candidates = [
         params.get("capability_token"),

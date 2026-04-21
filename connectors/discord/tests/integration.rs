@@ -477,6 +477,73 @@ async fn send_message_content_too_long() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn send_message_rate_limit_preserves_retry_after() {
+    let fake_server = StructuredFakeHttpServer::spawn(2, |idx, request| match idx {
+        0 => {
+            assert_eq!(request.method, "GET");
+            assert_eq!(request.path, "/users/@me");
+            StructuredHttpResponse::json(
+                200,
+                json!({
+                    "id": "123456789",
+                    "username": "TestBot",
+                    "discriminator": "0",
+                    "bot": true
+                }),
+            )
+        }
+        1 => {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/channels/111/messages");
+            StructuredHttpResponse {
+                status: 429,
+                headers: vec![
+                    ("content-type".into(), "application/json".into()),
+                    ("retry-after".into(), "7".into()),
+                ],
+                body: json!({
+                    "message": "Too Many Requests",
+                    "retry_after": 7.0
+                })
+                .to_string()
+                .into_bytes(),
+            }
+        }
+        _ => panic!("unexpected request index {idx}"),
+    });
+    let mut connector = DiscordConnector::new();
+    setup_configure(&mut connector, fake_server.url()).await;
+    let signing_key = setup_handshake(&mut connector, &["discord.send"]).await;
+
+    let token = generate_valid_token(&signing_key, "discord.send_message");
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "111",
+                "content": "Hello Discord!"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("429 response must surface as an error");
+
+    match err {
+        fcp_core::FcpError::External {
+            service,
+            retryable,
+            retry_after,
+            ..
+        } => {
+            assert_eq!(service, "discord");
+            assert!(retryable, "429 must remain retryable");
+            assert_eq!(retry_after, Some(7.0));
+        }
+        other => panic!("expected External rate-limit error, got {other:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
 async fn send_message_missing_content_and_embeds() {
     let mock_server = MockServer::start().await;
     let mut connector = DiscordConnector::new();

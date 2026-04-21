@@ -169,6 +169,7 @@ pub struct ObjectPlacementPolicy {
 }
 
 /// Universal object header (NORMATIVE).
+// TODO(review): This and other core types (Provenance) should derive PartialEq to avoid brittle serialization-based comparisons in the SDK.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectHeader {
     pub schema: SchemaId,

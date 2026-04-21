@@ -49,6 +49,17 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 semver.workspace = true
 serde_json.workspace = true
 
+[features]
+# Forward `fcp-store`'s `deadlock-detection` feature through the mesh
+# dependency graph so runtime audits of mesh+store code paths can
+# activate parking_lot's cycle detector with a single feature flag.
+# Debug/test-only — see fcp-store/Cargo.toml and the workspace README
+# "Deadlock detection" section for usage.
+#
+# Usage:
+#   cargo test -p fcp-mesh --features deadlock-detection
+deadlock-detection = ["fcp-store/deadlock-detection"]
+
 [[bench]]
 name = "mesh_benchmarks"
 harness = false

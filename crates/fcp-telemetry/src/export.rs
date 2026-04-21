@@ -2,9 +2,14 @@
 //!
 //! Supports Prometheus exposition format and OTLP export.
 
-use std::net::SocketAddr;
+use std::{
+    io::{self, BufRead, BufReader, Write},
+    net::{SocketAddr, TcpListener, TcpStream},
+    sync::OnceLock,
+    thread,
+};
 
-use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use opentelemetry::KeyValue;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
@@ -13,6 +18,8 @@ use opentelemetry_sdk::{
 };
 
 use crate::TelemetryError;
+
+static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 
 /// Initialize the Prometheus metrics exporter.
 ///
@@ -23,11 +30,31 @@ use crate::TelemetryError;
 /// Returns `TelemetryError::MetricsInit` if the exporter cannot be started.
 pub fn init_prometheus_exporter(port: u16) -> Result<(), TelemetryError> {
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
-
-    PrometheusBuilder::new()
-        .with_http_listener(addr)
-        .install()
+    let listener =
+        TcpListener::bind(addr).map_err(|e| TelemetryError::MetricsInit(e.to_string()))?;
+    let handle = PrometheusBuilder::new()
+        .install_recorder()
         .map_err(|e| TelemetryError::MetricsInit(e.to_string()))?;
+    let server_handle = handle.clone();
+    thread::Builder::new()
+        .name(format!("fcp-telemetry-prometheus-{port}"))
+        .spawn(move || {
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(stream) => {
+                        if let Err(error) = serve_prometheus_connection(stream, &server_handle) {
+                            tracing::warn!(?error, "Prometheus scrape failed");
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(?error, "Prometheus listener accept failed");
+                    }
+                }
+            }
+        })
+        .map_err(|e| TelemetryError::MetricsInit(e.to_string()))?;
+
+    let _ = PROMETHEUS_HANDLE.set(handle);
 
     tracing::info!(port = port, "Prometheus metrics exporter started");
 
@@ -116,14 +143,54 @@ pub fn init_otlp_tracer_with_sample_rate(
     Ok(())
 }
 
+fn render_prometheus_handle(handle: &PrometheusHandle) -> String {
+    handle.run_upkeep();
+    handle.render()
+}
+
+fn serve_prometheus_connection(mut stream: TcpStream, handle: &PrometheusHandle) -> io::Result<()> {
+    let request_line = {
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        line
+    };
+
+    let (status_line, content_type, body) = if request_line.starts_with("GET /metrics ") {
+        (
+            "HTTP/1.1 200 OK",
+            "text/plain; version=0.0.4; charset=utf-8",
+            render_prometheus_handle(handle),
+        )
+    } else {
+        (
+            "HTTP/1.1 404 Not Found",
+            "text/plain; charset=utf-8",
+            "Not Found\n".to_string(),
+        )
+    };
+
+    write!(
+        stream,
+        "{status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )?;
+    stream.flush()
+}
+
 /// Generate Prometheus exposition format text from current metrics.
 ///
-/// This is useful for embedding metrics in custom HTTP handlers.
+/// This is useful for embedding metrics in custom HTTP handlers after
+/// [`init_prometheus_exporter`] has installed a recorder.
 #[must_use]
 pub fn prometheus_text_format() -> String {
-    // The PrometheusBuilder handles this internally via the HTTP server
-    // This function is provided for custom integrations
-    "# Metrics are exposed via HTTP endpoint\n".to_string()
+    PROMETHEUS_HANDLE.get().map_or_else(
+        || {
+            "# Prometheus exporter not initialized; call init_prometheus_exporter first\n"
+                .to_string()
+        },
+        render_prometheus_handle,
+    )
 }
 
 /// Health check endpoint response.
@@ -204,6 +271,16 @@ impl HealthResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        thread,
+    };
+
+    use metrics::{Key, Recorder};
+
+    static METADATA: metrics::Metadata =
+        metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
 
     #[test]
     fn test_health_response_healthy() {
@@ -418,6 +495,46 @@ mod tests {
     fn test_prometheus_text_format() {
         let text = prometheus_text_format();
         assert!(!text.is_empty());
+    }
+
+    #[test]
+    fn test_render_prometheus_handle_smoke() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let counter = recorder.register_counter(&Key::from_name("fcp_test_counter"), &METADATA);
+        counter.increment(3);
+
+        let rendered = render_prometheus_handle(&recorder.handle());
+        assert!(rendered.contains("# TYPE fcp_test_counter counter"));
+        assert!(rendered.contains("fcp_test_counter 3"));
+    }
+
+    #[test]
+    fn test_prometheus_http_scrape_smoke() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let counter = recorder.register_counter(&Key::from_name("fcp_http_counter"), &METADATA);
+        counter.increment(7);
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            serve_prometheus_connection(stream, &handle).unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        client
+            .write_all(b"GET /metrics HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        server.join().unwrap();
+
+        assert!(response.contains("HTTP/1.1 200 OK"));
+        assert!(response.contains("# TYPE fcp_http_counter counter"));
+        assert!(response.contains("fcp_http_counter 7"));
     }
 
     #[test]

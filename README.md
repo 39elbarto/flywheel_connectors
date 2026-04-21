@@ -952,6 +952,52 @@ Key testing patterns:
 - **RFC test vectors**: Ed25519 (RFC 8032), HKDF (RFC 5869), X25519 (RFC 7748)
 - **Golden vector snapshots**: canonical CBOR, manifest hashes, protocol frames
 
+### Deadlock detection (mesh + store runtime audits)
+
+Static lock-order audits catch most cycles, but a future gossip or
+repair pass that wraps `MeshNode` in an outer lock and re-enters the
+store through a handler is exactly the "fourth-instance" hazard that
+only a runtime backstop can expose. `parking_lot` ships a built-in
+cycle detector that we expose through an opt-in feature flag on both
+`fcp-store` (the primitive holder) and `fcp-mesh` (the forwarder).
+
+Enable the feature on any crate in the mesh+store dependency graph:
+
+```bash
+# Run the fcp-mesh suite under the detector
+CARGO_TARGET_DIR=/tmp/fcp-audit cargo test -p fcp-mesh --features deadlock-detection
+
+# Or scope it to fcp-store
+CARGO_TARGET_DIR=/tmp/fcp-audit cargo test -p fcp-store --features deadlock-detection
+```
+
+The feature flips `parking_lot`'s `Mutex` and `RwLock` implementations
+to track lock ownership globally, which has non-trivial overhead and
+MUST NOT be enabled in release builds. To surface cycles from a test
+binary or dev harness, spawn a background watchdog once at startup:
+
+```rust
+#[cfg(feature = "deadlock-detection")]
+fn spawn_deadlock_watchdog() {
+    use std::thread;
+    use std::time::Duration;
+    thread::spawn(|| loop {
+        thread::sleep(Duration::from_secs(10));
+        let deadlocks = parking_lot::deadlock::check_deadlock();
+        if !deadlocks.is_empty() {
+            eprintln!("DEADLOCK DETECTED: {} cycle(s)", deadlocks.len());
+            for (i, threads) in deadlocks.iter().enumerate() {
+                eprintln!("Cycle #{i}");
+                for t in threads {
+                    eprintln!("  Thread {:?}:\n{:?}", t.thread_id(), t.backtrace());
+                }
+            }
+            std::process::abort();
+        }
+    });
+}
+```
+
 ---
 
 ## End-to-End Request Flow

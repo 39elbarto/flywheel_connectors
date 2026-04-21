@@ -2372,8 +2372,15 @@ async fn async_main() -> HostResult<()> {
 
     let protected_routes = Router::new()
         .route(
+            // GET leaks supply-chain provenance (artifact hash, SLSA level,
+            // builder identity, SupplyChainSignature, trust-root id) — every
+            // field a downstream substitution attacker would want to
+            // enumerate before impersonating a signer. It is now
+            // co-routed with the POST register handler inside
+            // `protected_routes` so the admin bearer middleware gates both
+            // verbs. Closes bead flywheel_connectors-qeapt.
             "/rpc/connectors/{connector_id}/artifact",
-            post(connector_artifact_register_handler),
+            get(connector_artifact_metadata_handler).post(connector_artifact_register_handler),
         )
         .route(
             "/rpc/connectors/{connector_id}/config",
@@ -2457,10 +2464,11 @@ async fn async_main() -> HostResult<()> {
             "/rpc/connectors/{connector_id}/status",
             get(connector_status_handler),
         )
-        .route(
-            "/rpc/connectors/{connector_id}/artifact",
-            get(connector_artifact_metadata_handler),
-        )
+        // `/rpc/connectors/{id}/artifact` GET moved into `protected_routes`
+        // alongside the register/install/update/rollback POSTs so the admin
+        // bearer middleware gates supply-chain provenance reads. Prior
+        // TODO(review) marker and ungated GET: see bead
+        // flywheel_connectors-qeapt.
         .route("/rpc/introspect/{connector_id}", get(introspect_handler))
         .route("/rpc/invoke", post(invoke_handler))
         .route("/rpc/cancel", post(cancel_handler))

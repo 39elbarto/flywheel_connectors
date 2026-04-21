@@ -38,6 +38,18 @@ rand.workspace = true
 criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3"
 
+[features]
+# Opt-in runtime deadlock detection via parking_lot's built-in cycle
+# detector. Debug/test-only — enabling this changes parking_lot's Mutex
+# implementation to track lock ownership globally, which has overhead
+# unsuitable for release builds. Pair with a background thread that
+# calls `parking_lot::deadlock::check_deadlock()` on an interval (see
+# the workspace README "Deadlock detection" section for an example).
+#
+# Usage:
+#   cargo test -p fcp-store --features deadlock-detection
+deadlock-detection = ["parking_lot/deadlock_detection"]
+
 [[bench]]
 name = "symbol_store"
 harness = false

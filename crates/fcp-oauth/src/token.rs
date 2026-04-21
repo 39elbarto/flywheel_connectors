@@ -176,6 +176,11 @@ impl OAuthTokens {
         })
     }
 
+    #[must_use]
+    fn has_authorization_material(&self) -> bool {
+        !self.access_token.is_empty() && !self.token_type.is_empty()
+    }
+
     /// Get time until expiration.
     #[must_use]
     pub fn time_until_expiry(&self) -> Option<Duration> {
@@ -364,7 +369,8 @@ impl TokenStore {
     /// an access token that may expire in-flight.
     #[must_use]
     pub fn has_valid_token(&self, key: &str) -> bool {
-        self.get(key).is_some_and(|t| !t.needs_refresh())
+        self.get(key)
+            .is_some_and(|t| t.has_authorization_material() && !t.needs_refresh())
     }
 
     /// Remove tokens by key.
@@ -439,8 +445,14 @@ impl TokenStore {
             let snapshot = self
                 .get(key)
                 .ok_or_else(|| OAuthError::TokenNotFound(key.to_string()))?;
-            if !snapshot.needs_refresh() {
+            if snapshot.has_authorization_material() && !snapshot.needs_refresh() {
                 return Ok(snapshot);
+            }
+
+            if !snapshot.has_authorization_material() && snapshot.refresh_token().is_none() {
+                return Err(OAuthError::InvalidTokenResponse(
+                    "stored token is missing access_token or token_type".into(),
+                ));
             }
 
             let refresh_token = snapshot
@@ -1293,6 +1305,26 @@ mod tests {
         assert!(
             !store.has_valid_token("needs_refresh"),
             "tokens inside the proactive refresh window must not be treated as request-safe"
+        );
+    }
+
+    #[test]
+    fn test_token_store_has_valid_token_rejects_empty_access_token_material() {
+        let store = TokenStore::new();
+        store.store(
+            "invalid_material",
+            OAuthTokens::from_response(TokenResponse {
+                access_token: String::new(),
+                token_type: "Bearer".into(),
+                expires_in: Some(3600),
+                refresh_token: None,
+                scope: None,
+                id_token: None,
+            }),
+        );
+        assert!(
+            !store.has_valid_token("invalid_material"),
+            "empty access_token must not be treated as a valid stored token"
         );
     }
 

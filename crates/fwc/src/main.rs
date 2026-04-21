@@ -712,7 +712,7 @@ enum Commands {
     /// cryptographic operations, and cold-start latency with statistical analysis.
     Bench(bench_cmd::BenchArgs),
 
-    /// Scaffold a new FCP2-compliant connector crate.
+    /// Scaffold a new V3-native connector crate.
     ///
     /// Creates the directory structure, manifest, connector stub, and integration
     /// tests. Use `--check` to validate an existing connector instead.
@@ -29591,6 +29591,7 @@ deny_ptrace = true
                             config: None,
                             categories: vec!["code".to_string()],
                             version: Some("1.2.4".to_string()),
+                            allowed_zones: Vec::new(),
                         },
                         None,
                     ),
@@ -29693,6 +29694,7 @@ deny_ptrace = true
                             config: None,
                             categories: vec!["code".to_string()],
                             version: Some("1.2.4".to_string()),
+                            allowed_zones: Vec::new(),
                         },
                         None,
                     ),
@@ -29777,6 +29779,7 @@ deny_ptrace = true
                         config: None,
                         categories: vec!["code".to_string()],
                         version: Some("1.2.4".to_string()),
+                        allowed_zones: Vec::new(),
                     },
                     None,
                 ),
@@ -29866,6 +29869,7 @@ deny_ptrace = true
             config: Some(json!({ "profile": "work" })),
             categories: vec!["code".to_string(), "dev-tools".to_string()],
             version: Some("1.2.3".to_string()),
+            allowed_zones: Vec::new(),
         };
         let planned = ManagedConnectorConfig {
             id: "fcp.github:enterprise:v1".to_string(),
@@ -29877,6 +29881,7 @@ deny_ptrace = true
             config: previous.config.clone(),
             categories: previous.categories.clone(),
             version: Some("1.2.4".to_string()),
+            allowed_zones: previous.allowed_zones.clone(),
         };
         let (host, server) = spawn_mock_host(
             StdBTreeMap::from([
@@ -29945,6 +29950,7 @@ deny_ptrace = true
             config: Some(json!({ "profile": "work" })),
             categories: vec!["code".to_string(), "dev-tools".to_string()],
             version: Some("1.2.3".to_string()),
+            allowed_zones: Vec::new(),
         };
         let updated = ManagedConnectorConfig {
             id: "fcp.github:enterprise:v1".to_string(),
@@ -29956,6 +29962,7 @@ deny_ptrace = true
             config: previous.config.clone(),
             categories: previous.categories.clone(),
             version: Some("1.2.4".to_string()),
+            allowed_zones: previous.allowed_zones.clone(),
         };
         let (host, server) = spawn_mock_host(
             StdBTreeMap::from([
@@ -37457,6 +37464,7 @@ require_attestation_types = ["in-toto"]"#,
                             config: None,
                             categories: vec!["code".to_string()],
                             version: Some("1.2.5".to_string()),
+                            allowed_zones: Vec::new(),
                         },
                         None,
                     ),
@@ -37554,6 +37562,7 @@ require_attestation_types = ["in-toto"]"#,
             config: Some(json!({ "profile": "work" })),
             categories: vec!["code".to_string(), "dev-tools".to_string()],
             version: Some("1.2.3".to_string()),
+            allowed_zones: Vec::new(),
         };
         let updated = ManagedConnectorConfig {
             id: "fcp.github:enterprise:v1".to_string(),
@@ -37565,6 +37574,7 @@ require_attestation_types = ["in-toto"]"#,
             config: previous.config.clone(),
             categories: previous.categories.clone(),
             version: Some("1.2.5".to_string()),
+            allowed_zones: previous.allowed_zones.clone(),
         };
         let (host, host_server) = spawn_mock_host(
             StdBTreeMap::from([

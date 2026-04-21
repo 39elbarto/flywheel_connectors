@@ -138,5 +138,28 @@ I have reviewed the findings and fixes from Lane 1 (Crypto), Lane 3 (Revocation)
 - **Detail**: Implements a double-check pattern on the `draining` atomic to prevent a race where a connection is acquired exactly when shutdown begins.
 - **Verification**: Verified the logic `fetch_add` -> `load(draining)` -> `fetch_sub` is correct for strict atomic ordering.
 
+## Cross-Lane Review Notes
+
+I have reviewed the findings from Lane 1 (Crypto), Lane 3 (Revocation), and Lane 4 (Bootstrap).
+
+### 1. [L1-CL-01] Missing Zone Authorization in Gossip Handlers
+- **Status**: VERIFIED
+- **Detail**: Lane 1 correctly identified and FIXED the zone authorization bypass I had left in `crates/fcp-mesh/src/node.rs`. Gossip summaries and revocation pushes are now checked against the sender's authorized zones.
+- **Verification**: Reviewed commit `956f8010`. The fix is sound and includes comprehensive regression tests.
+
+### 2. [L3-02] RevocationPush Handler Dispatch Gap
+- **Status**: ADDRESSING
+- **Detail**: Lane 3 correctly identified that `handle_gossip_message` has no production callers. Gossip delivered over the wire is never dispatched to the mesh update handlers.
+- **Action**: I am implementing a production dispatch entry point in `MeshNode` to close this gap.
+
+### 3. [L4-03] Potential PIN Leak in Hardware Token Session
+- **Status**: VERIFIED
+- **Detail**: Lane 4 identified a potential PIN leak in `HardwareTokenPin::to_auth_pin()`.
+- **Verification**: Reviewed the fix in commit `61ad23aa`. The use of `AuthPin::new(&self.0)` avoids the transient heap clone, aligning with security best practices for sensitive material.
+
+### 4. Interactions with Lane 2 Mesh Code
+- **Storage Validation**: Lane 2's fix for storage structural validation (commit `ee4b524a`) correctly protects the `MeshNode` from oversized objects smuggled through WAL replay or snapshot recovery. This is a critical defense-in-depth measure for the mesh.
+- **IBLT Migration**: The IBLT migration (commits `6d0074b3`, `d69761b7`) correctly implements the precise set reconciliation protocol, unblocking the anti-entropy convergence issues noted in earlier audits.
+
 ---
-*Reviewer: Gemini CLI (Lane 2)*
+*Reviewer: Gemini CLI (Lane 11/Pane 11)*

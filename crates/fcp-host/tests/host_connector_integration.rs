@@ -4646,6 +4646,11 @@ async fn fcp_host_binary_protected_routes_require_admin_bearer()
         );
     }
 
+    // Supply-chain provenance GET is now part of the admin-gated surface
+    // (bead flywheel_connectors-qeapt). Unauthenticated callers MUST get
+    // 403 with the same "Authorization header" hint as every other
+    // protected route. With the admin bearer header, the same GET must
+    // return 200 and the existing JSON body.
     let (artifact_status, artifact_body) = request_status_text(
         host.client.clone(),
         reqwest::Method::GET,
@@ -4654,9 +4659,116 @@ async fn fcp_host_binary_protected_routes_require_admin_bearer()
         None,
     )
     .await?;
+    assert_eq!(
+        artifact_status,
+        reqwest::StatusCode::FORBIDDEN,
+        "artifact metadata GET must now require admin bearer (qeapt), \
+         got {artifact_status}: {artifact_body}"
+    );
+    assert!(
+        artifact_body.contains("Authorization header"),
+        "unauth artifact GET must mention Authorization header in error body: {artifact_body}"
+    );
+
+    let (artifact_status, artifact_body) = request_status_text(
+        host.client.clone(),
+        reqwest::Method::GET,
+        url(&format!("/rpc/connectors/{}/artifact", connector_id.as_str())),
+        None,
+        Some(admin_auth_headers()),
+    )
+    .await?;
     assert!(
         artifact_status.is_success(),
-        "artifact metadata GET should remain public, got {artifact_status}: {artifact_body}"
+        "artifact metadata GET with admin bearer must succeed, \
+         got {artifact_status}: {artifact_body}"
+    );
+
+    Ok(())
+}
+
+/// Regression for bead flywheel_connectors-qeapt: the artifact
+/// metadata GET route used to sit OUTSIDE the `protected_routes`
+/// group, so any reachable caller could enumerate every installed
+/// connector's binary hash, SLSA level, builder identity,
+/// `SupplyChainSignature` (algorithm + key_id + signature), trust
+/// root id, and source URI. That is a free reconnaissance channel
+/// against the zone's supply-chain trust anchors. The fix moves the
+/// GET into `protected_routes`, alongside the register/install/
+/// update/rollback POSTs; this test pins the two outcomes (401/403
+/// without auth, 200 with admin bearer) so a future route-table
+/// refactor cannot silently re-expose the provenance surface.
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn artifact_metadata_get_requires_admin_bearer_qeapt()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.qeapt:utility:1.0.0");
+    let host = HttpHostProcess::spawn_with_env(
+        vec![test_connector_config(
+            &connector_id,
+            "qeapt artifact GET",
+            &["test", "qeapt"],
+        )],
+        &[],
+    )
+    .await?;
+    let artifact_url = format!(
+        "{}/rpc/connectors/{}/artifact",
+        host.base_url,
+        connector_id.as_str()
+    );
+
+    // (a) Unauthenticated GET must be refused. The middleware surfaces
+    // a 403 with "Authorization header" in the body — matching the
+    // shape every other protected endpoint uses.
+    let (status, body) = request_status_text(
+        host.client.clone(),
+        reqwest::Method::GET,
+        artifact_url.clone(),
+        None,
+        None,
+    )
+    .await?;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::FORBIDDEN,
+        "unauthenticated artifact GET must return 403, got {status}: {body}"
+    );
+    assert!(
+        body.contains("Authorization header"),
+        "unauth response must name the Authorization header: {body}"
+    );
+
+    // Defensive: body MUST NOT leak provenance fields even though the
+    // handler was not invoked. If a future refactor accidentally
+    // routes the unauth error path through the handler, this catches
+    // it.
+    for field in [
+        "supply_chain_signature",
+        "trust_root",
+        "builder_identity",
+        "artifact_hash",
+        "slsa_level",
+    ] {
+        assert!(
+            !body.contains(field),
+            "unauth 403 body must not leak field `{field}`: {body}"
+        );
+    }
+
+    // (b) With the admin bearer header the same GET returns the full
+    // provenance body — proves the route is gated at the middleware,
+    // not broken outright.
+    let (status, body) = request_status_text(
+        host.client.clone(),
+        reqwest::Method::GET,
+        artifact_url,
+        None,
+        Some(admin_auth_headers()),
+    )
+    .await?;
+    assert!(
+        status.is_success(),
+        "admin-bearer artifact GET must return 2xx, got {status}: {body}"
     );
 
     Ok(())

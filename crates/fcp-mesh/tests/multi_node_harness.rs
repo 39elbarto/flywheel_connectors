@@ -187,6 +187,11 @@ enum NodeCommand {
         now_ms: u64,
         reply: oneshot::Sender<()>,
     },
+    RegisterZoneOwnerKey {
+        zone_id: ZoneId,
+        key: Ed25519VerifyingKey,
+        reply: oneshot::Sender<()>,
+    },
     AnnounceObject {
         zone_id: ZoneId,
         object_id: ObjectId,
@@ -255,6 +260,15 @@ pub struct MultiNodeMeshHarness {
     partitions: Vec<HashSet<String>>,
     outbound_rx: mpsc::Receiver<OutboundEnvelope>,
     tasks: TaskGroup,
+    /// Shared zone-owner signing key used to sign revocation-push
+    /// `owner_signature` fields (br-uxsnk). The matching verifying
+    /// key is registered on every node when
+    /// [`Self::send_revocation_push`] is invoked for a zone, so all
+    /// nodes accept owner-signed pushes for that zone.
+    zone_owner_signing_key: Ed25519SigningKey,
+    /// Zones for which the owner verifying key has already been
+    /// broadcast to every node, so we don't re-register on every push.
+    zone_owner_registered: HashSet<ZoneId>,
 }
 
 impl MultiNodeMeshHarness {
@@ -290,6 +304,8 @@ impl MultiNodeMeshHarness {
             partitions: Vec::new(),
             outbound_rx,
             tasks,
+            zone_owner_signing_key: Ed25519SigningKey::generate(),
+            zone_owner_registered: HashSet::new(),
         })
     }
 
@@ -560,6 +576,30 @@ impl MultiNodeMeshHarness {
         new_rev_seq: u64,
         sign: bool,
     ) -> Result<DeliveryDisposition, HarnessError> {
+        // Ensure every node has the zone-owner verifying key registered
+        // so owner_signature verification can succeed (br-uxsnk). Idempotent
+        // per zone — we only broadcast once per zone_id.
+        if !self.zone_owner_registered.contains(&zone_id) {
+            let owner_vk = self.zone_owner_signing_key.verifying_key();
+            let names: Vec<String> = self.nodes.keys().cloned().collect();
+            for name in names {
+                let (tx, rx) = oneshot::channel();
+                let event = NodeEvent::Command(NodeCommand::RegisterZoneOwnerKey {
+                    zone_id: zone_id.clone(),
+                    key: owner_vk.clone(),
+                    reply: tx,
+                });
+                let handle = self.nodes.get(&name).expect("node exists");
+                handle
+                    .event_tx
+                    .send(event)
+                    .await
+                    .map_err(|_| HarnessError::ControlChannelClosed("register-zone-owner"))?;
+                rx.await.map_err(|_| HarnessError::ReplyDropped)?;
+            }
+            self.zone_owner_registered.insert(zone_id.clone());
+        }
+
         let handle = self.node_handle(from)?;
         let mut push = RevocationPushMessage::new(
             TailscaleNodeId::new(from.as_str()),
@@ -573,6 +613,14 @@ impl MultiNodeMeshHarness {
             push.signature = Some(NodeSignature::new(
                 fcp_core::NodeId::new(from.as_str()),
                 signature.to_bytes(),
+                push.timestamp,
+            ));
+            let owner_sig = self
+                .zone_owner_signing_key
+                .sign(&push.owner_signing_bytes());
+            push.owner_signature = Some(NodeSignature::new(
+                fcp_core::NodeId::new("harness-zone-owner"),
+                owner_sig.to_bytes(),
                 push.timestamp,
             ));
         }
@@ -937,6 +985,10 @@ async fn run_node_task(
                         );
                         mesh.register_peer_signing_key(peer.node_id, peer.signing_public_key);
                     }
+                    let _ = reply.send(());
+                }
+                NodeCommand::RegisterZoneOwnerKey { zone_id, key, reply } => {
+                    mesh.register_zone_owner_key(zone_id, key);
                     let _ = reply.send(());
                 }
                 NodeCommand::AnnounceObject {

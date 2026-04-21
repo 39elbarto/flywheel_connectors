@@ -929,6 +929,28 @@ pub struct ReconcileResponse {
 /// Sent immediately to all known online peers when a revocation event occurs,
 /// bypassing the standard gossip interval. Bounded by
 /// [`GossipConfig::max_revocation_push_peers`] to prevent amplification.
+///
+/// # Two-layer signing (NORMATIVE, br-flywheel_connectors-uxsnk)
+///
+/// The push carries two independent signatures:
+///
+/// - `signature` (peer signature): produced by the `from` node over
+///   [`Self::signing_bytes`]. Authenticates the transport path and
+///   rate-limits who may originate/forward pushes. Sufficient to
+///   prevent off-mesh injection but NOT to authorize the revocation
+///   itself.
+/// - `owner_signature` (zone-owner signature): produced by the zone's
+///   owner key over [`Self::owner_signing_bytes`] (the subset of the
+///   push that carries revocation authority — zone, revoked ids,
+///   revocation head seq). This is the *only* field that grants a peer
+///   the right to revoke objects. A compromised peer can produce a
+///   valid `signature` but cannot forge an `owner_signature` without
+///   the zone owner's private key.
+///
+/// Pre-uxsnk, only `signature` was verified, so any peer holding a
+/// registered signing key could revoke arbitrary objects in zones it
+/// was a member of. The recipient now verifies BOTH before applying
+/// any revocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevocationPushMessage {
     /// Node that originated or forwarded the push.
@@ -941,8 +963,14 @@ pub struct RevocationPushMessage {
     pub new_rev_seq: u64,
     /// Push timestamp.
     pub timestamp: u64,
-    /// Signature authenticating the push (prevents injection).
+    /// Peer (transport) signature authenticating the push (prevents injection).
     pub signature: Option<NodeSignature>,
+    /// Zone-owner signature over [`Self::owner_signing_bytes`] authorizing
+    /// the revocation content itself. Required: if absent or invalid,
+    /// `MeshNode::handle_revocation_push` rejects the push regardless
+    /// of a valid peer signature (br-uxsnk).
+    #[serde(default)]
+    pub owner_signature: Option<NodeSignature>,
 }
 
 impl RevocationPushMessage {
@@ -962,7 +990,81 @@ impl RevocationPushMessage {
             new_rev_seq,
             timestamp: now,
             signature: None,
+            owner_signature: None,
         }
+    }
+
+    /// Attach a zone-owner signature authorizing the revocation payload.
+    #[must_use]
+    pub fn with_owner_signature(mut self, owner_signature: NodeSignature) -> Self {
+        self.owner_signature = Some(owner_signature);
+        self
+    }
+
+    /// Transcript bytes signed by the zone owner (br-uxsnk).
+    ///
+    /// Deliberately excludes `from` and `timestamp` so that a single
+    /// owner signature remains valid regardless of which peer forwards
+    /// the push and when — the owner signs the REVOCATION CONTENT, not
+    /// the delivery envelope. Includes `zone_id`, the sorted
+    /// `revoked_ids`, and `new_rev_seq`: the fields that together name
+    /// "what has been revoked, as of which head sequence, in which
+    /// zone."
+    ///
+    /// `revoked_ids` is iterated in the slice's declared order. Callers
+    /// producing signatures and verifying them MUST agree on that order
+    /// — the recommended convention is to sort by `ObjectId` bytes
+    /// before signing so two pushes carrying the same semantic set
+    /// produce the same transcript regardless of how the sender
+    /// happened to assemble the vector.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any encoded variable-length field exceeds `u32::MAX`.
+    #[must_use]
+    pub fn owner_signing_bytes(&self) -> Vec<u8> {
+        let estimated = 64usize.saturating_add(self.revoked_ids.len().saturating_mul(32));
+        let mut bytes = Vec::with_capacity(estimated);
+        bytes.extend_from_slice(b"FCP2-REVOCATION-OWNER-V1");
+
+        let zone_bytes = self.zone_id.as_bytes();
+        bytes.extend_from_slice(
+            &u32::try_from(zone_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(zone_bytes);
+
+        bytes.extend_from_slice(
+            &u32::try_from(self.revoked_ids.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        for object_id in &self.revoked_ids {
+            bytes.extend_from_slice(object_id.as_bytes());
+        }
+
+        bytes.extend_from_slice(&self.new_rev_seq.to_le_bytes());
+        bytes
+    }
+
+    /// Verify the attached zone-owner signature against
+    /// [`Self::owner_signing_bytes`] using `owner_verifying_key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `owner_signature` is absent or fails
+    /// Ed25519 verification against the provided key.
+    pub fn verify_owner_signature(
+        &self,
+        owner_verifying_key: &Ed25519VerifyingKey,
+    ) -> Result<(), CryptoError> {
+        let signature = self
+            .owner_signature
+            .as_ref()
+            .ok_or_else(|| CryptoError::MissingField("owner_signature".into()))?;
+        let signature = Ed25519Signature::from_bytes(&signature.signature);
+        owner_verifying_key.verify(&self.owner_signing_bytes(), &signature)
     }
 
     /// Get bytes for signing.

@@ -226,6 +226,25 @@ pub enum MeshNodeError {
         message_kind: &'static str,
     },
 
+    /// No zone-owner key is registered for the zone targeted by a
+    /// revocation push. Pushes must be authorized by the zone owner's
+    /// signature; a recipient that does not know the owner key cannot
+    /// verify authorization and MUST reject the push (br-uxsnk).
+    #[error("no zone-owner key registered for zone {zone_id} (revocation push)")]
+    UnknownZoneOwner { zone_id: String },
+
+    /// Revocation push is missing the zone-owner signature authorizing
+    /// the revocation payload. The peer signature alone is insufficient
+    /// — a compromised peer could forge arbitrary revocations without
+    /// this check (br-uxsnk).
+    #[error("revocation push from {peer} missing owner signature for zone {zone_id}")]
+    MissingOwnerSignature { peer: String, zone_id: String },
+
+    /// Revocation push owner-signature verification failed against the
+    /// registered zone-owner key (br-uxsnk).
+    #[error("revocation push from {peer} has invalid owner signature for zone {zone_id}")]
+    InvalidOwnerSignature { peer: String, zone_id: String },
+
     /// Trace capture not enabled.
     #[error("trace capture not enabled")]
     TraceNotEnabled,
@@ -344,6 +363,17 @@ pub struct MeshNode {
     quarantine_store: Arc<QuarantineStore>,
     sessions: HashMap<NodeId, MeshSession>,
     peer_signing_keys: HashMap<NodeId, Ed25519VerifyingKey>,
+    /// Registered zone-owner public keys, keyed by the zone they own.
+    ///
+    /// Used to verify `owner_signature` on priority revocation pushes
+    /// (br-flywheel_connectors-uxsnk). A peer is allowed to forward a
+    /// revocation push for a zone only if (a) the peer signature
+    /// validates and (b) the owner signature on the revocation payload
+    /// validates against the registered owner key for the zone. If no
+    /// owner key is registered for a zone, pushes targeting that zone
+    /// are rejected fail-closed rather than accepted on peer signature
+    /// alone.
+    zone_owner_keys: HashMap<ZoneId, Ed25519VerifyingKey>,
     peers: HashMap<NodeId, PeerState>,
     local_profile: Option<DeviceProfile>,
     /// Zones this node is authorized for, sourced from enrollment /
@@ -396,6 +426,7 @@ impl MeshNode {
             quarantine_store,
             sessions: HashMap::new(),
             peer_signing_keys: HashMap::new(),
+            zone_owner_keys: HashMap::new(),
             local_node,
             local_node_ts,
             peers: HashMap::new(),
@@ -765,6 +796,20 @@ impl MeshNode {
     /// Remove a peer's signing key.
     pub fn remove_peer_signing_key(&mut self, peer_id: &NodeId) {
         self.peer_signing_keys.remove(peer_id);
+    }
+
+    /// Register the zone-owner public key used to authorize priority
+    /// revocation pushes for `zone_id` (br-uxsnk). Pushes targeting a
+    /// zone with no registered owner key are rejected.
+    pub fn register_zone_owner_key(&mut self, zone_id: ZoneId, key: Ed25519VerifyingKey) {
+        self.zone_owner_keys.insert(zone_id, key);
+    }
+
+    /// Remove the zone-owner key for `zone_id`. After removal, all
+    /// priority revocation pushes for that zone will be rejected with
+    /// `MeshNodeError::UnknownZoneOwner` until a new key is registered.
+    pub fn remove_zone_owner_key(&mut self, zone_id: &ZoneId) {
+        self.zone_owner_keys.remove(zone_id);
     }
 
     /// Current peer count (excluding local).
@@ -1515,7 +1560,38 @@ impl MeshNode {
         push: RevocationPushMessage,
         now_secs: u64,
     ) -> Result<VerifiedRevocationPush, MeshNodeError> {
+        // Layer 1: peer/transport signature (who forwarded it + zone
+        // membership at the sender). Insufficient on its own.
         self.verify_revocation_push_signature(&push)?;
+
+        // Layer 2: zone-owner signature over the revocation payload
+        // itself. This is the ONLY authority that grants the right to
+        // revoke objects. A compromised peer holding a registered peer
+        // signing key can pass layer 1 but cannot forge layer 2 without
+        // the zone owner's private key (br-flywheel_connectors-uxsnk).
+        //
+        // Fail-closed: if we do not know an owner key for the target
+        // zone, we cannot verify authority and MUST reject — pre-uxsnk
+        // the absence of an owner key silently defaulted to "trust the
+        // peer signature," which is exactly the bypass uxsnk closes.
+        let owner_key = self.zone_owner_keys.get(&push.zone_id).ok_or_else(|| {
+            MeshNodeError::UnknownZoneOwner {
+                zone_id: push.zone_id.to_string(),
+            }
+        })?;
+        if push.owner_signature.is_none() {
+            return Err(MeshNodeError::MissingOwnerSignature {
+                peer: push.from.as_str().to_string(),
+                zone_id: push.zone_id.to_string(),
+            });
+        }
+        push.verify_owner_signature(owner_key).map_err(|_| {
+            MeshNodeError::InvalidOwnerSignature {
+                peer: push.from.as_str().to_string(),
+                zone_id: push.zone_id.to_string(),
+            }
+        })?;
+
         if now_secs.saturating_sub(push.timestamp) > self.gossip.summary_ttl_secs() {
             return Err(MeshNodeError::StaleGossipMessage {
                 peer: push.from.as_str().to_string(),
@@ -1998,6 +2074,30 @@ mod tests {
 
     fn test_device_profile(node_name: &str) -> DeviceProfile {
         DeviceProfileBuilder::new(NodeId::new(node_name)).build()
+    }
+
+    /// Attach a peer signature AND a zone-owner signature to `push`
+    /// (br-uxsnk). Tests that exercise the happy path must sign both
+    /// layers; tests that exercise forgery detection call only the
+    /// peer-sign half.
+    fn sign_push_with_owner(
+        push: &mut RevocationPushMessage,
+        peer_signing_key: &Ed25519SigningKey,
+        owner_signing_key: &Ed25519SigningKey,
+        now: u64,
+    ) {
+        push.signature = Some(fcp_core::NodeSignature::new(
+            fcp_core::NodeId::new(push.from.as_str()),
+            peer_signing_key.sign(&push.signing_bytes()).to_bytes(),
+            now,
+        ));
+        push.owner_signature = Some(fcp_core::NodeSignature::new(
+            fcp_core::NodeId::new("zone-owner"),
+            owner_signing_key
+                .sign(&push.owner_signing_bytes())
+                .to_bytes(),
+            now,
+        ));
     }
 
     fn test_session(peer_name: &str) -> MeshSession {
@@ -3082,7 +3182,9 @@ mod tests {
         let mut node = test_node("node-1");
         let peer = NodeId::new("peer-1");
         let signing_key = Ed25519SigningKey::generate();
+        let owner_key = Ed25519SigningKey::generate();
         node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.register_zone_owner_key(ZoneId::work(), owner_key.verifying_key());
         node.update_peer_state(
             peer.clone(),
             test_device_profile("peer-1"),
@@ -3099,11 +3201,7 @@ mod tests {
             42,
             1_000,
         );
-        push.signature = Some(fcp_core::NodeSignature::new(
-            fcp_core::NodeId::new(peer.as_str()),
-            signing_key.sign(&push.signing_bytes()).to_bytes(),
-            1_000,
-        ));
+        sign_push_with_owner(&mut push, &signing_key, &owner_key, 1_000);
 
         let verified = node
             .handle_revocation_push(push, 1_000)
@@ -3113,11 +3211,144 @@ mod tests {
     }
 
     #[test]
+    fn handle_revocation_push_rejects_missing_owner_signature() {
+        // Acceptance (br-flywheel_connectors-uxsnk): a peer holding a
+        // valid peer signing key AND authorized for the zone cannot
+        // revoke objects without a zone-owner signature. This is the
+        // forgery path uxsnk closes — pre-fix the push would have been
+        // accepted on the peer signature alone.
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        let owner_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.register_zone_owner_key(ZoneId::work(), owner_key.verifying_key());
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+
+        let mut push = RevocationPushMessage::new(
+            TailscaleNodeId::new("peer-1"),
+            ZoneId::work(),
+            vec![ObjectId::from_bytes([0x01; 32])],
+            9,
+            1_000,
+        );
+        // Only peer signature — no owner signature.
+        push.signature = Some(fcp_core::NodeSignature::new(
+            fcp_core::NodeId::new(peer.as_str()),
+            signing_key.sign(&push.signing_bytes()).to_bytes(),
+            1_000,
+        ));
+
+        let err = node
+            .handle_revocation_push(push, 1_000)
+            .expect_err("missing owner signature must be rejected");
+        match err {
+            MeshNodeError::MissingOwnerSignature {
+                peer: reported,
+                zone_id,
+            } => {
+                assert_eq!(reported, "peer-1");
+                assert_eq!(zone_id, ZoneId::work().as_str());
+            }
+            other => panic!("expected MissingOwnerSignature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_revocation_push_rejects_forged_owner_signature() {
+        // Acceptance (br-uxsnk): a peer that signs the owner-signing
+        // transcript itself (as if it were the owner) must still be
+        // rejected — only the real registered owner key verifies.
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        let real_owner_key = Ed25519SigningKey::generate();
+        let forger_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.register_zone_owner_key(ZoneId::work(), real_owner_key.verifying_key());
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+
+        let mut push = RevocationPushMessage::new(
+            TailscaleNodeId::new("peer-1"),
+            ZoneId::work(),
+            vec![ObjectId::from_bytes([0x02; 32])],
+            11,
+            1_000,
+        );
+        // Peer signature valid, but owner signature is by a different key.
+        sign_push_with_owner(&mut push, &signing_key, &forger_key, 1_000);
+
+        let err = node
+            .handle_revocation_push(push, 1_000)
+            .expect_err("forged owner signature must be rejected");
+        assert!(
+            matches!(err, MeshNodeError::InvalidOwnerSignature { .. }),
+            "expected InvalidOwnerSignature, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn handle_revocation_push_rejects_unregistered_zone_owner() {
+        // Acceptance (br-uxsnk): fail-closed when no owner key is
+        // registered for the target zone. Pre-fix there was no owner
+        // check at all, so this state was silently "accept"; the new
+        // contract is "if we don't know who the owner is, we cannot
+        // verify authority and must reject."
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        let owner_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        // Note: no register_zone_owner_key call.
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+
+        let mut push = RevocationPushMessage::new(
+            TailscaleNodeId::new("peer-1"),
+            ZoneId::work(),
+            vec![ObjectId::from_bytes([0x03; 32])],
+            13,
+            1_000,
+        );
+        sign_push_with_owner(&mut push, &signing_key, &owner_key, 1_000);
+
+        let err = node
+            .handle_revocation_push(push, 1_000)
+            .expect_err("unregistered owner must be rejected");
+        assert!(
+            matches!(err, MeshNodeError::UnknownZoneOwner { .. }),
+            "expected UnknownZoneOwner, got {err:?}"
+        );
+    }
+
+    #[test]
     fn handle_revocation_push_rejects_stale_message() {
         let mut node = test_node("node-1");
         let peer = NodeId::new("peer-1");
         let signing_key = Ed25519SigningKey::generate();
+        let owner_key = Ed25519SigningKey::generate();
         node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.register_zone_owner_key(ZoneId::work(), owner_key.verifying_key());
         node.update_peer_state(
             peer.clone(),
             test_device_profile("peer-1"),
@@ -3134,11 +3365,7 @@ mod tests {
             7,
             100,
         );
-        push.signature = Some(fcp_core::NodeSignature::new(
-            fcp_core::NodeId::new(peer.as_str()),
-            signing_key.sign(&push.signing_bytes()).to_bytes(),
-            100,
-        ));
+        sign_push_with_owner(&mut push, &signing_key, &owner_key, 100);
 
         let err = node
             .handle_revocation_push(push, 100 + GossipConfig::default().summary_ttl_secs + 1)
@@ -3162,7 +3389,9 @@ mod tests {
         let mut node = test_node("node-1");
         let peer = NodeId::new("peer-1");
         let signing_key = Ed25519SigningKey::generate();
+        let owner_key = Ed25519SigningKey::generate();
         node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.register_zone_owner_key(ZoneId::work(), owner_key.verifying_key());
         node.update_peer_state(
             peer.clone(),
             test_device_profile("peer-1"),
@@ -3179,11 +3408,7 @@ mod tests {
             99,
             1_000,
         );
-        push.signature = Some(fcp_core::NodeSignature::new(
-            fcp_core::NodeId::new(peer.as_str()),
-            signing_key.sign(&push.signing_bytes()).to_bytes(),
-            1_000,
-        ));
+        sign_push_with_owner(&mut push, &signing_key, &owner_key, 1_000);
         let message = GossipMessage::RevocationPush(push);
 
         let payload = serde_json::to_vec(&message).expect("JSON encode");
@@ -3204,7 +3429,9 @@ mod tests {
         let mut node = test_node("node-1");
         let peer = NodeId::new("peer-1");
         let signing_key = Ed25519SigningKey::generate();
+        let owner_key = Ed25519SigningKey::generate();
         node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.register_zone_owner_key(ZoneId::work(), owner_key.verifying_key());
         node.update_peer_state(
             peer.clone(),
             test_device_profile("peer-1"),
@@ -3221,11 +3448,7 @@ mod tests {
             123,
             1_000,
         );
-        push.signature = Some(fcp_core::NodeSignature::new(
-            fcp_core::NodeId::new(peer.as_str()),
-            signing_key.sign(&push.signing_bytes()).to_bytes(),
-            1_000,
-        ));
+        sign_push_with_owner(&mut push, &signing_key, &owner_key, 1_000);
 
         let verified = node
             .dispatch_gossip_message(GossipMessage::RevocationPush(push), 1_000)

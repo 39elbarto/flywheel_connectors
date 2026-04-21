@@ -2092,4 +2092,92 @@ mod tests {
             },
         );
     }
+
+    /// Regression test for `flywheel_connectors-sfunf`: the quota
+    /// check in `MemoryObjectStore::put` previously read
+    /// `used_bytes` inside the `objects.write()` critical section but
+    /// deferred the `fetch_add` commit to after `drop(objects)`.
+    /// Between the drop and the fetch_add, a concurrent `put` could
+    /// acquire `objects.write()`, re-observe the pre-commit
+    /// `used_bytes` value, and pass its own quota check despite the
+    /// in-flight commit. Both puts would then succeed and
+    /// `used_bytes` would end up above `max_bytes`.
+    ///
+    /// The fix (object_store.rs:430) moves the `fetch_add` inside
+    /// the critical section so the quota read and the commit are
+    /// serialized with the `objects.write()` lock. This test spins
+    /// up many concurrent `put` tasks, each attempting to insert an
+    /// object large enough that only a subset can fit under the
+    /// quota, then asserts the final `storage_used()` never exceeds
+    /// `max_bytes` regardless of scheduling.
+    #[test]
+    fn put_quota_holds_under_concurrent_inserts() {
+        run_store_test(
+            "put_quota_holds_under_concurrent_inserts",
+            "verify",
+            "write",
+            2,
+            || async {
+                use std::sync::Arc;
+                // `object_size` adds a 512-byte header estimate to the
+                // body length. With body=500, every object costs 1012
+                // bytes. max_bytes=5_000 admits at most 4 objects
+                // (4 * 1012 = 4048); a 5th would push to 5060 > 5000.
+                const BODY: usize = 500;
+                const MAX_BYTES: u64 = 5_000;
+                const TASKS: usize = 16;
+
+                let config = MemoryObjectStoreConfig {
+                    max_bytes: MAX_BYTES,
+                };
+                let store = Arc::new(MemoryObjectStore::new(config));
+
+                let mut handles = Vec::with_capacity(TASKS);
+                for i in 0..TASKS {
+                    let store = Arc::clone(&store);
+                    // Each task targets a distinct object_id so the
+                    // duplicate-key branch never short-circuits the
+                    // quota path.
+                    let obj = test_stored_object(i as u8 + 1, &vec![0_u8; BODY]);
+                    handles.push(fcp_async_core::task::spawn(async move {
+                        store.put(obj).await
+                    }));
+                }
+
+                let mut accepted = 0_u32;
+                let mut rejected = 0_u32;
+                for handle in handles {
+                    let put_result: Result<(), ObjectStoreError> =
+                        handle.await.expect("task did not panic or abort");
+                    match put_result {
+                        Ok(()) => accepted += 1,
+                        Err(ObjectStoreError::QuotaExceeded { .. }) => rejected += 1,
+                        Err(other) => panic!("unexpected error from put: {other:?}"),
+                    }
+                }
+
+                let used_after = store.storage_used().await;
+                assert!(
+                    used_after <= MAX_BYTES,
+                    "quota violated under concurrent puts: used={used_after} max={MAX_BYTES} accepted={accepted} rejected={rejected}"
+                );
+                assert_eq!(
+                    accepted + rejected,
+                    TASKS as u32,
+                    "every task should resolve to either accept or quota-exceeded"
+                );
+
+                StoreLogData {
+                    details: Some(json!({
+                        "tasks": TASKS,
+                        "accepted": accepted,
+                        "rejected": rejected,
+                        "used_after": used_after,
+                        "max_bytes": MAX_BYTES,
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
 }

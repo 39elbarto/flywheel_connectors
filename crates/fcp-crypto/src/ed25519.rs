@@ -866,6 +866,53 @@ mod tests {
         assert_ne!(plain_sig, ctx_sig);
     }
 
+    // Metamorphic: the context length prefix must defeat concatenation
+    // splits. (ctx="a", msg="bc") and (ctx="ab", msg="c") share the same
+    // concatenation "abc", so without a length prefix they would hash to
+    // the same digest and accept each other's signatures. Must produce
+    // distinct signatures AND must reject cross-verification.
+    #[test]
+    fn sign_with_context_defeats_concat_ambiguity() {
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+
+        let sig_a_bc = sk.sign_with_context(b"a", b"bc");
+        let sig_ab_c = sk.sign_with_context(b"ab", b"c");
+        assert_ne!(
+            sig_a_bc, sig_ab_c,
+            "length prefix must prevent concat-split signature collision"
+        );
+
+        // Cross-verification must fail in BOTH directions.
+        assert!(
+            pk.verify_with_context(b"ab", b"c", &sig_a_bc).is_err(),
+            "signature bound to (a, bc) must not verify under (ab, c)"
+        );
+        assert!(
+            pk.verify_with_context(b"a", b"bc", &sig_ab_c).is_err(),
+            "signature bound to (ab, c) must not verify under (a, bc)"
+        );
+    }
+
+    // Metamorphic: swapping context and message must yield a different
+    // signature. Without this property, a signature bound to (ctx=k, msg=v)
+    // could be replayed as a signature bound to (ctx=v, msg=k) if the two
+    // roles are ever confused at the call site.
+    #[test]
+    fn sign_with_context_not_symmetric_under_role_swap() {
+        let sk = Ed25519SigningKey::generate();
+        let pk = sk.verifying_key();
+
+        let alpha = b"alpha-role";
+        let beta = b"beta-role";
+        let sig_ab = sk.sign_with_context(alpha, beta);
+
+        assert!(
+            pk.verify_with_context(beta, alpha, &sig_ab).is_err(),
+            "context/message roles must not be interchangeable"
+        );
+    }
+
     // ---- Signature serde roundtrip ----
 
     #[test]

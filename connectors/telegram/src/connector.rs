@@ -1434,7 +1434,7 @@ impl TelegramConnector {
             .as_ref()
             .map(|p| client.file_download_url(p))
             .transpose()
-            .map_err(TelegramError::to_fcp_error)?;
+            .map_err(|e| e.to_fcp_error())?;
 
         let response = json!({
             "file_id": file.file_id,

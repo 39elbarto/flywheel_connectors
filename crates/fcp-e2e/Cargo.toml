@@ -27,6 +27,7 @@ notion = []
 youtube = []
 twitter = []
 google_calendar = []
+google_drive = []
 s3 = []
 browser = []
 jira = []
@@ -128,6 +129,7 @@ fcp-notion = { path = "../../connectors/notion" }
 fcp-youtube = { path = "../../connectors/youtube" }
 fcp-twitter = { path = "../../connectors/twitter" }
 fcp-google-calendar = { path = "../../connectors/google-calendar" }
+fcp-google-drive = { path = "../../connectors/google-drive" }
 fcp-s3 = { path = "../../connectors/s3" }
 fcp-browser = { path = "../../connectors/browser" }
 fcp-jira = { path = "../../connectors/jira" }

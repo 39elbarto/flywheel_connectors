@@ -1,40 +1,404 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:google_drive_v1"
+
 [connector]
-name = "google-drive"
+id = "fcp.google_drive"
+name = "Google Drive Connector"
 version = "0.1.0"
-description = "Google Drive API v3 connector for file management"
-archetype = "request-response"
+description = "FCP connector for Google Drive v3 (list, get, download, create folders, upload, trash, and share files)"
+archetypes = ["operational", "knowledge"]
+format = "wasi"
 
-[connector.zones]
-allowed = ["z:owner", "z:private", "z:work", "z:project:*"]
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
 
-[connector.capabilities]
-required = ["drive.read"]
-optional = ["drive.write"]
+[zones]
+home = "z:private"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:private", "z:work"]
+forbidden = ["z:public"]
 
-[provides.operations.drive.list_files]
-summary = "List files and folders in Google Drive"
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = ["drive.read", "drive.write", "media.download", "media.upload"]
+forbidden = ["system.exec", "network.listen"]
+
+# ── Operations ──────────────────────────────────────────────────
+
+[provides.operations."drive.list_files"]
+description = "List files and folders in Google Drive"
 capability = "drive.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
 
-[provides.operations.drive.get_file]
-summary = "Get file metadata by ID"
+[provides.operations."drive.list_files".input_schema]
+required = []
+type = "object"
+[provides.operations."drive.list_files".input_schema.properties.query]
+type = "string"
+[provides.operations."drive.list_files".input_schema.properties.max_results]
+type = "integer"
+[provides.operations."drive.list_files".input_schema.properties.page_token]
+type = "string"
+
+[provides.operations."drive.list_files".output_schema]
+required = ["files"]
+type = "object"
+[provides.operations."drive.list_files".output_schema.properties.files]
+type = "array"
+[provides.operations."drive.list_files".output_schema.properties.next_page_token]
+type = "string"
+
+[provides.operations."drive.list_files".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."drive.list_files".ai_hints]
+when_to_use = "List files in Google Drive, optionally filtered by a Drive query expression."
+common_mistakes = ["Drive query syntax uses operators like 'name contains' and 'mimeType =' — not plain substring matching", "Not handling pagination via next_page_token on large drives"]
+examples = ['''{"query": "name contains \'report\' and mimeType = \'application/pdf\'", "max_results": 50}''']
+related = ["drive.get_file"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."drive.get_file"]
+description = "Get file or folder metadata by ID"
 capability = "drive.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
 
-[provides.operations.drive.download_file]
-summary = "Download file content"
+[provides.operations."drive.get_file".input_schema]
+required = ["file_id"]
+type = "object"
+[provides.operations."drive.get_file".input_schema.properties.file_id]
+type = "string"
+
+[provides.operations."drive.get_file".output_schema]
+required = ["file"]
+type = "object"
+[provides.operations."drive.get_file".output_schema.properties.file]
+type = "object"
+
+[provides.operations."drive.get_file".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."drive.get_file".ai_hints]
+when_to_use = "Get metadata for a specific file or folder by its Drive file ID."
+common_mistakes = ["This returns metadata only — use drive.download_file to fetch binary content"]
+examples = ['''{"file_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2wtIs"}''']
+related = ["drive.list_files", "drive.download_file"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."drive.download_file"]
+description = "Download a file\'s content and return it as base64"
 capability = "drive.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
 
-[provides.operations.drive.create_folder]
-summary = "Create a new folder"
-capability = "drive.write"
+[provides.operations."drive.download_file".input_schema]
+required = ["file_id"]
+type = "object"
+[provides.operations."drive.download_file".input_schema.properties.file_id]
+type = "string"
 
-[provides.operations.drive.upload_file]
-summary = "Upload a file"
-capability = "drive.write"
+[provides.operations."drive.download_file".output_schema]
+required = ["file_id", "content_base64"]
+type = "object"
+[provides.operations."drive.download_file".output_schema.properties.file_id]
+type = "string"
+[provides.operations."drive.download_file".output_schema.properties.content_base64]
+type = "string"
 
-[provides.operations.drive.trash_file]
-summary = "Move a file to trash"
-capability = "drive.write"
+[provides.operations."drive.download_file".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 52428800
 
-[provides.operations.drive.share_file]
-summary = "Share a file with a user"
+[provides.operations."drive.download_file".ai_hints]
+when_to_use = "Download the binary content of a Drive file as base64."
+common_mistakes = ["Google Docs/Sheets/Slides cannot be downloaded directly — they must be exported via their own export APIs first"]
+examples = ['''{"file_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2wtIs"}''']
+related = ["drive.get_file"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."drive.create_folder"]
+description = "Create a new folder in Google Drive"
 capability = "drive.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."drive.create_folder".input_schema]
+required = ["name"]
+type = "object"
+[provides.operations."drive.create_folder".input_schema.properties.name]
+type = "string"
+[provides.operations."drive.create_folder".input_schema.properties.parent_id]
+type = "string"
+
+[provides.operations."drive.create_folder".output_schema]
+required = ["folder"]
+type = "object"
+[provides.operations."drive.create_folder".output_schema.properties.folder]
+type = "object"
+
+[provides.operations."drive.create_folder".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."drive.create_folder".ai_hints]
+when_to_use = "Create a new folder, optionally nested under a parent folder."
+common_mistakes = ["Each call creates a new folder — this operation is not idempotent, so repeated calls produce duplicates"]
+examples = ['''{"name": "Project Files", "parent_id": "root"}''']
+related = ["drive.upload_file"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."drive.upload_file"]
+description = "Upload a file to Google Drive"
+capability = "drive.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+revocation_freshness = "critical"
+
+[provides.operations."drive.upload_file".input_schema]
+required = ["name", "mime_type", "content_base64"]
+type = "object"
+[provides.operations."drive.upload_file".input_schema.properties.name]
+type = "string"
+[provides.operations."drive.upload_file".input_schema.properties.mime_type]
+type = "string"
+[provides.operations."drive.upload_file".input_schema.properties.content_base64]
+type = "string"
+[provides.operations."drive.upload_file".input_schema.properties.parent_id]
+type = "string"
+
+[provides.operations."drive.upload_file".output_schema]
+required = ["file"]
+type = "object"
+[provides.operations."drive.upload_file".output_schema.properties.file]
+type = "object"
+
+[provides.operations."drive.upload_file".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 15000
+total_timeout_ms = 600000
+max_response_bytes = 5242880
+
+[provides.operations."drive.upload_file".ai_hints]
+when_to_use = "Upload file bytes (base64-encoded) to Drive with an explicit MIME type and optional parent folder."
+common_mistakes = ["Large files should use resumable upload (not yet supported by this connector)", "Each call creates a new file — repeat calls produce duplicates"]
+examples = ['''{"name":"report.txt","mime_type":"text/plain","content_base64":"SGVsbG8="}''']
+related = ["drive.create_folder", "drive.get_file"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."drive.trash_file"]
+description = "Move a file to trash"
+capability = "drive.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "strict"
+revocation_freshness = "critical"
+
+[provides.operations."drive.trash_file".input_schema]
+required = ["file_id"]
+type = "object"
+[provides.operations."drive.trash_file".input_schema.properties.file_id]
+type = "string"
+
+[provides.operations."drive.trash_file".output_schema]
+required = ["file"]
+type = "object"
+[provides.operations."drive.trash_file".output_schema.properties.file]
+type = "object"
+
+[provides.operations."drive.trash_file".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."drive.trash_file".ai_hints]
+when_to_use = "Move a file or folder to the Drive trash. Trashed items are auto-deleted after 30 days."
+common_mistakes = ["Trashed items are permanently deleted after 30 days and cannot be recovered after that window", "This is NOT a hard delete — use the trash-empty operation for permanent deletion"]
+examples = ['''{"file_id": "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2wtIs"}''']
+related = ["drive.get_file"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."drive.share_file"]
+description = "Share a file with a user by email"
+capability = "drive.write"
+risk_level = "critical"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+revocation_freshness = "critical"
+
+[provides.operations."drive.share_file".input_schema]
+required = ["file_id", "email", "role"]
+type = "object"
+[provides.operations."drive.share_file".input_schema.properties.file_id]
+type = "string"
+[provides.operations."drive.share_file".input_schema.properties.email]
+type = "string"
+[provides.operations."drive.share_file".input_schema.properties.role]
+type = "string"
+
+[provides.operations."drive.share_file".output_schema]
+required = ["permission"]
+type = "object"
+[provides.operations."drive.share_file".output_schema.properties.permission]
+type = "object"
+
+[provides.operations."drive.share_file".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."drive.share_file".ai_hints]
+when_to_use = "Grant another user read/comment/write/organize access to a file or folder."
+common_mistakes = ["Sharing is highly sensitive — always confirm the target email with the user before invoking", "Granting organizer role on a shared drive is effectively admin — do not do this casually"]
+examples = ['''{"file_id":"1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2wtIs","email":"user@example.com","role":"reader"}''']
+related = ["drive.get_file"]
+
+# ── Events ──────────────────────────────────────────────────────
+
+[event_caps]
+streaming = false
+replay = false
+min_buffer_events = 100
+
+# ── Sandbox ─────────────────────────────────────────────────────
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 600000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+# ── Rate Limits ─────────────────────────────────────────────────
+
+[[rate_limits.pools]]
+id = "drive.read"
+requests = 1000
+window_ms = 100000
+burst = 100
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "drive.write"
+requests = 300
+window_ms = 100000
+burst = 30
+scope = "instance"
+
+[rate_limits.operation_pools]
+"drive.list_files" = ["drive.read"]
+"drive.get_file" = ["drive.read"]
+"drive.download_file" = ["drive.read"]
+"drive.create_folder" = ["drive.write"]
+"drive.upload_file" = ["drive.write"]
+"drive.trash_file" = ["drive.write"]
+"drive.share_file" = ["drive.write"]

@@ -213,6 +213,19 @@ pub enum MeshNodeError {
     #[error("peer {peer} is not authorized for zone {zone_id}")]
     UnauthorizedZone { peer: String, zone_id: String },
 
+    /// Peer has a registered signing key but no entry in `peers` — the
+    /// attested handshake / enrollment step that populates zone
+    /// membership hasn't completed yet. Control-plane messages cannot
+    /// be accepted from peers in this state because the zone-policy
+    /// gate has nothing to compare against.
+    #[error("peer {peer} has no registered peer state (handshake/enrollment incomplete)")]
+    UnknownPeer {
+        /// Peer node identifier.
+        peer: String,
+        /// Control-plane message kind ("gossip summary" / "revocation push").
+        message_kind: &'static str,
+    },
+
     /// Trace capture not enabled.
     #[error("trace capture not enabled")]
     TraceNotEnabled,
@@ -1336,14 +1349,30 @@ impl MeshNode {
                 message_kind: "gossip summary",
             })?;
 
-        // Enforce zone authorization (C2)
-        if let Some(state) = self.peers.get(&peer) {
-            if !state.zones.is_empty() && !state.zones.contains(&summary.zone_id) {
-                return Err(MeshNodeError::UnauthorizedZone {
-                    peer: peer.as_str().to_string(),
-                    zone_id: summary.zone_id.to_string(),
-                });
-            }
+        // Enforce zone authorization (C2). Pre-opoux this block was
+        // wrapped in `if let Some(state) = self.peers.get(&peer)` with
+        // an inner `if !state.zones.is_empty() && ...`, so BOTH an
+        // unknown peer AND a known peer with empty zone state would
+        // silently bypass the gate and let a signed summary claim any
+        // zone. Both fallthroughs are now hard refusals: an
+        // authenticated peer must be in the enrollment map AND must
+        // have the claimed zone in their attested set before the
+        // summary is accepted. The signing-key registration in
+        // `register_peer_signing_key` is independent of
+        // `update_peer_state` so an attacker holding a valid key can
+        // otherwise reach this path before enrollment lands.
+        let state = self
+            .peers
+            .get(&peer)
+            .ok_or_else(|| MeshNodeError::UnknownPeer {
+                peer: peer.as_str().to_string(),
+                message_kind: "gossip summary",
+            })?;
+        if !state.zones.contains(&summary.zone_id) {
+            return Err(MeshNodeError::UnauthorizedZone {
+                peer: peer.as_str().to_string(),
+                zone_id: summary.zone_id.to_string(),
+            });
         }
 
         Ok(peer)
@@ -1380,14 +1409,24 @@ impl MeshNode {
                 message_kind: "revocation push",
             })?;
 
-        // Enforce zone authorization (C2)
-        if let Some(state) = self.peers.get(&peer) {
-            if !state.zones.is_empty() && !state.zones.contains(&push.zone_id) {
-                return Err(MeshNodeError::UnauthorizedZone {
-                    peer: peer.as_str().to_string(),
-                    zone_id: push.zone_id.to_string(),
-                });
-            }
+        // Enforce zone authorization (C2). See verify_summary_signature
+        // above for the opoux rationale — same hard-refusal shape
+        // applied to the revocation-push path. Pre-opoux, a peer who
+        // held a signing key but whose enrollment hadn't completed
+        // could push a revocation into any zone; the bypass is closed
+        // here symmetrically.
+        let state = self
+            .peers
+            .get(&peer)
+            .ok_or_else(|| MeshNodeError::UnknownPeer {
+                peer: peer.as_str().to_string(),
+                message_kind: "revocation push",
+            })?;
+        if !state.zones.contains(&push.zone_id) {
+            return Err(MeshNodeError::UnauthorizedZone {
+                peer: peer.as_str().to_string(),
+                zone_id: push.zone_id.to_string(),
+            });
         }
 
         Ok(peer)
@@ -2628,6 +2667,16 @@ mod tests {
         let peer = NodeId::new("peer-1");
         let signing_key = Ed25519SigningKey::generate();
         node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        // Post-opoux: the zone gate requires the peer to be enrolled
+        // with the claimed zone before ANY signed summary is accepted.
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
 
         let summary = GossipSummary {
             from: TailscaleNodeId::new("peer-1"),
@@ -2668,6 +2717,204 @@ mod tests {
     }
 
     #[test]
+    fn handle_summary_rejects_unknown_peer_without_peer_state() {
+        // opoux regression: before the fix, `verify_summary_signature`
+        // wrapped the zone check in `if let Some(state) = self.peers.get(..)`
+        // so a peer whose signing key was registered but whose
+        // enrollment hadn't completed (no entry in self.peers) would
+        // silently bypass the zone gate. The attacker's signature is
+        // valid; their bootstrap just hadn't happened. A zone claim
+        // of any value would pass.
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-unknown");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        // Deliberately skip update_peer_state — this is the bypass the
+        // fix closes. Pre-fix, the summary below would verify and be
+        // accepted.
+
+        let template = GossipSummary {
+            from: TailscaleNodeId::new("peer-unknown"),
+            zone_id: ZoneId::work(),
+            epoch_id: EpochId::new("epoch-1"),
+            object_filter_digest: [0x11; 32],
+            symbol_filter_digest: [0x22; 32],
+            object_count: 0,
+            symbol_count: 0,
+            iblt: Vec::new(),
+            timestamp: 1_000,
+            signature: None,
+        };
+        let signature = fcp_core::NodeSignature::new(
+            fcp_core::NodeId::new(peer.as_str()),
+            signing_key.sign(&template.signing_bytes()).to_bytes(),
+            1_000,
+        );
+        let summary = GossipSummary {
+            signature: Some(signature),
+            ..template
+        };
+
+        let err = node
+            .handle_gossip_message(GossipMessage::Summary(summary), 1_000)
+            .expect_err("unknown peer must be rejected");
+        match err {
+            MeshNodeError::UnknownPeer { peer: reported, message_kind } => {
+                assert_eq!(reported, "peer-unknown");
+                assert_eq!(message_kind, "gossip summary");
+            }
+            other => panic!("expected UnknownPeer, got {other:?}"),
+        }
+        assert_eq!(
+            node.metrics().gossip_updates,
+            0,
+            "gossip update must not be recorded for a rejected summary"
+        );
+    }
+
+    #[test]
+    fn handle_revocation_push_rejects_unknown_peer_without_peer_state() {
+        // Symmetric opoux regression on the revocation-push path. A
+        // peer with a valid signing key but no enrolled zone state
+        // could previously push revocations into any zone.
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-unknown");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+
+        let mut push = RevocationPushMessage::new(
+            TailscaleNodeId::new("peer-unknown"),
+            ZoneId::work(),
+            vec![ObjectId::from_bytes([0xCD; 32])],
+            7,
+            1_000,
+        );
+        push.signature = Some(fcp_core::NodeSignature::new(
+            fcp_core::NodeId::new(peer.as_str()),
+            signing_key.sign(&push.signing_bytes()).to_bytes(),
+            1_000,
+        ));
+
+        let err = node
+            .handle_revocation_push(push, 1_000)
+            .expect_err("unknown peer must be rejected");
+        match err {
+            MeshNodeError::UnknownPeer { peer: reported, message_kind } => {
+                assert_eq!(reported, "peer-unknown");
+                assert_eq!(message_kind, "revocation push");
+            }
+            other => panic!("expected UnknownPeer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_summary_rejects_peer_with_empty_zone_state() {
+        // opoux regression variant: before the fix, the zone check was
+        // `if !state.zones.is_empty() && !state.zones.contains(..)` so
+        // a peer enrolled with an empty zone set would ALSO bypass the
+        // gate. Now an enrolled peer with zones = {} is treated as
+        // "authorized for nothing" and must be rejected.
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-empty");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-empty"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        // Deliberately do NOT call update_peer_zones — zone set stays empty.
+
+        let template = GossipSummary {
+            from: TailscaleNodeId::new("peer-empty"),
+            zone_id: ZoneId::work(),
+            epoch_id: EpochId::new("epoch-1"),
+            object_filter_digest: [0x11; 32],
+            symbol_filter_digest: [0x22; 32],
+            object_count: 0,
+            symbol_count: 0,
+            iblt: Vec::new(),
+            timestamp: 1_000,
+            signature: None,
+        };
+        let signature = fcp_core::NodeSignature::new(
+            fcp_core::NodeId::new(peer.as_str()),
+            signing_key.sign(&template.signing_bytes()).to_bytes(),
+            1_000,
+        );
+        let summary = GossipSummary {
+            signature: Some(signature),
+            ..template
+        };
+
+        let err = node
+            .handle_gossip_message(GossipMessage::Summary(summary), 1_000)
+            .expect_err("peer with empty zones must be rejected");
+        match err {
+            MeshNodeError::UnauthorizedZone { peer: reported, zone_id } => {
+                assert_eq!(reported, "peer-empty");
+                assert_eq!(zone_id, ZoneId::work().to_string());
+            }
+            other => panic!("expected UnauthorizedZone, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn handle_summary_rejects_peer_claiming_unauthorized_zone() {
+        // Positive-coverage test for the already-working branch: a
+        // peer enrolled for z:work must not be able to ship a summary
+        // tagged z:private.
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-scoped");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-scoped"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+
+        let unauthorized_zone = ZoneId::private();
+        let template = GossipSummary {
+            from: TailscaleNodeId::new("peer-scoped"),
+            zone_id: unauthorized_zone.clone(),
+            epoch_id: EpochId::new("epoch-1"),
+            object_filter_digest: [0x11; 32],
+            symbol_filter_digest: [0x22; 32],
+            object_count: 0,
+            symbol_count: 0,
+            iblt: Vec::new(),
+            timestamp: 1_000,
+            signature: None,
+        };
+        let signature = fcp_core::NodeSignature::new(
+            fcp_core::NodeId::new(peer.as_str()),
+            signing_key.sign(&template.signing_bytes()).to_bytes(),
+            1_000,
+        );
+        let summary = GossipSummary {
+            signature: Some(signature),
+            ..template
+        };
+
+        let err = node
+            .handle_gossip_message(GossipMessage::Summary(summary), 1_000)
+            .expect_err("summary must be rejected for unauthorized zone");
+        match err {
+            MeshNodeError::UnauthorizedZone { peer: reported, zone_id } => {
+                assert_eq!(reported, "peer-scoped");
+                assert_eq!(zone_id, unauthorized_zone.to_string());
+            }
+            other => panic!("expected UnauthorizedZone, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn handle_summary_rejects_missing_signature() {
         let mut node = test_node("node-1");
         let peer = NodeId::new("peer-1");
@@ -2705,6 +2952,14 @@ mod tests {
         let peer = NodeId::new("peer-1");
         let signing_key = Ed25519SigningKey::generate();
         node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
 
         let mut push = RevocationPushMessage::new(
             TailscaleNodeId::new("peer-1"),
@@ -2732,6 +2987,14 @@ mod tests {
         let peer = NodeId::new("peer-1");
         let signing_key = Ed25519SigningKey::generate();
         node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
 
         let mut push = RevocationPushMessage::new(
             TailscaleNodeId::new("peer-1"),

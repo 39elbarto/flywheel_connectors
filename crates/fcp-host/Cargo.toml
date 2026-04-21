@@ -33,6 +33,7 @@ blake3 = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
 ciborium = { workspace = true }
+subtle = { workspace = true }
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }

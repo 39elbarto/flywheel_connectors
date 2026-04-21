@@ -88,6 +88,7 @@ use hyper_util::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use subtle::ConstantTimeEq;
 use tower::ServiceExt;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -1057,7 +1058,12 @@ fn validate_admin_authorization(state: &AppState, headers: &HeaderMap) -> HostRe
             )
         })?;
 
-    if provided != expected {
+    // Constant-time compare so a network attacker cannot learn the admin
+    // bearer token byte-by-byte by measuring reject latency. `ct_eq` on
+    // length-mismatched inputs still runs in time proportional to the
+    // shorter input, which is acceptable here — the token length is not
+    // itself the secret.
+    if !bool::from(provided.as_bytes().ct_eq(expected.as_bytes())) {
         return Err(HostError::PreflightFailed(
             "admin bearer token rejected".to_string(),
         ));
@@ -6902,6 +6908,59 @@ mod tests {
         );
 
         validate_admin_authorization(&state, &headers).expect("matching token");
+    }
+
+    #[test]
+    fn validate_admin_authorization_rejects_mismatched_bearer_token() {
+        let registry = Arc::new(empty_registry(1));
+        let budget = Arc::new(BudgetPolicyEngine::new());
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = AppState {
+            registry: Arc::clone(&registry),
+            doctor: DoctorService::new(Arc::clone(&registry)),
+            budget: Arc::clone(&budget),
+            discovery: Arc::new(DiscoveryEndpoint::new(
+                Arc::clone(&registry),
+                Arc::clone(&budget),
+            )),
+            cancellation: Arc::new(CancellationController::new()),
+            lifecycle: Arc::clone(&lifecycle),
+            rollout: Arc::new(RolloutController::new(
+                Arc::clone(&registry),
+                Arc::clone(&lifecycle),
+            )),
+            supply_chain: Arc::new(SupplyChainGate::default()),
+            capability_verifying_key: None,
+            approval_verifying_key: None,
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            connectors_file: None,
+            zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            started_at: Instant::now(),
+        };
+
+        // Same length as the real token — exercises the constant-time
+        // branch rather than an early length-mismatch return.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer topsecrex"),
+        );
+
+        let error = validate_admin_authorization(&state, &headers)
+            .expect_err("mismatched token must be rejected");
+        assert!(
+            error.to_string().contains("rejected"),
+            "unexpected error: {error}"
+        );
+
+        // Differing-length token — also rejected.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer wrong"),
+        );
+        validate_admin_authorization(&state, &headers)
+            .expect_err("short mismatched token must be rejected");
     }
 
     #[test]

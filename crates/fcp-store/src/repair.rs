@@ -47,6 +47,49 @@ pub struct RepairResult {
     pub error: Option<String>,
 }
 
+/// Current power state of the host running the repair controller.
+///
+/// Threaded in from the runtime/mesh layer (typically from
+/// `DeviceProfile.battery_percent` in `fcp-mesh::device`). The
+/// controller reads this on every `next_repair()` call and defers
+/// non-critical repairs when the host is on battery and drops below
+/// `RepairControllerConfig::battery_defer_threshold_percent`.
+///
+/// Introduced by bead flywheel_connectors-qyv8n. The enum is
+/// deliberately narrow — just AC vs. Battery(percent) — because the
+/// controller does not need the full `DeviceProfile` surface, only
+/// the signal that gates deferral.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PowerState {
+    /// Running on wall power (or power state is unknown / not reported).
+    /// The controller behaves as before — no deferral.
+    Ac,
+    /// Running on battery. `percent` is 0..=100.
+    Battery {
+        /// Battery level as an integer percentage, 0..=100.
+        percent: u8,
+    },
+}
+
+impl PowerState {
+    /// Returns true when the state is `Battery { percent: p }` with
+    /// `p < threshold`. `AC` always returns false; an explicit
+    /// `Battery { percent: 100 }` returns false unless threshold > 100.
+    #[must_use]
+    pub const fn is_low_battery(self, threshold_percent: u8) -> bool {
+        match self {
+            Self::Ac => false,
+            Self::Battery { percent } => percent < threshold_percent,
+        }
+    }
+}
+
+impl Default for PowerState {
+    fn default() -> Self {
+        Self::Ac
+    }
+}
+
 /// Repair controller configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepairControllerConfig {
@@ -60,6 +103,17 @@ pub struct RepairControllerConfig {
     pub min_deficit_bps: u32,
     /// Maximum symbols to request per repair.
     pub max_symbols_per_repair: u32,
+    /// Battery-level threshold (%) below which non-critical repairs
+    /// are deferred when the controller is informed the host is on
+    /// battery (via [`RepairController::set_power_state`]). Defaults
+    /// to 20 — the same threshold `fcp_mesh::device::DeviceProfile::
+    /// is_low_battery` uses. Repairs already in-flight are NOT
+    /// interrupted; only newly-dequeued repairs are gated.
+    ///
+    /// Set to 0 to never defer on battery (battery and AC behave
+    /// identically). Set to 101 to defer on ANY battery state,
+    /// regardless of percent.
+    pub battery_defer_threshold_percent: u8,
 }
 
 impl Default for RepairControllerConfig {
@@ -70,6 +124,7 @@ impl Default for RepairControllerConfig {
             repair_interval: Duration::from_secs(60),
             min_deficit_bps: 500, // 5% deficit triggers repair
             max_symbols_per_repair: 100,
+            battery_defer_threshold_percent: 20,
         }
     }
 }
@@ -89,6 +144,10 @@ pub struct RepairStats {
     pub queue_depth: usize,
     /// Repairs blocked by rate limit.
     pub rate_limited: u64,
+    /// Repairs deferred because the host is on battery below the
+    /// configured threshold (bead flywheel_connectors-qyv8n).
+    #[serde(default)]
+    pub power_deferred: u64,
 }
 
 /// Stable reason code for why a repair action was planned or deferred.
@@ -592,6 +651,13 @@ pub struct RepairController {
     rate_limiter: RateLimiter,
     stats: RwLock<RepairStats>,
     queue: RwLock<Vec<QueuedRepair>>,
+    /// Latest observed host power state. Defaults to
+    /// [`PowerState::Ac`] — i.e. legacy behaviour (no deferral) until
+    /// a caller explicitly reports battery state via
+    /// [`RepairController::set_power_state`]. Wrapped in `RwLock` so
+    /// the runtime layer can update it without taking the repair
+    /// queue lock.
+    power_state: RwLock<PowerState>,
 }
 
 impl RepairController {
@@ -647,7 +713,29 @@ impl RepairController {
             rate_limiter,
             stats: RwLock::new(RepairStats::default()),
             queue: RwLock::new(Vec::new()),
+            power_state: RwLock::new(PowerState::default()),
         }
+    }
+
+    /// Report the host's current power state to the controller.
+    ///
+    /// Used by the runtime/mesh layer to plumb
+    /// `fcp_mesh::device::DeviceProfile.battery_percent` into the
+    /// repair path. Calling this does NOT cancel in-flight repairs;
+    /// it only gates subsequent `next_repair()` dequeues. Callers may
+    /// invoke it as often as their power subsystem emits events; the
+    /// cost is one `RwLock::write` and one enum copy.
+    ///
+    /// Introduced by bead flywheel_connectors-qyv8n.
+    pub fn set_power_state(&self, state: PowerState) {
+        *self.power_state.write() = state;
+    }
+
+    /// Returns the latest reported power state. Defaults to
+    /// [`PowerState::Ac`] if `set_power_state` was never called.
+    #[must_use]
+    pub fn power_state(&self) -> PowerState {
+        *self.power_state.read()
     }
 
     fn upsert_repair(&self, request: RepairRequest) -> RepairQueueAction {
@@ -689,12 +777,46 @@ impl RepairController {
     }
 
     /// Get the next repair request if rate limit allows.
+    ///
+    /// Power-aware (bead flywheel_connectors-qyv8n): if the host was
+    /// reported on battery below
+    /// [`RepairControllerConfig::battery_defer_threshold_percent`] via
+    /// [`Self::set_power_state`], the dequeue is skipped, the
+    /// `power_deferred` stat is incremented, and a `tracing::info!`
+    /// event is emitted naming the battery percent + threshold so
+    /// operators can see the deferral in logs. In-flight repairs are
+    /// unaffected; only newly-dequeued repairs are gated.
     pub fn next_repair(&self) -> Option<RepairRequest> {
         // Acquire write lock first, then check emptiness before consuming a
         // rate-limit token. This avoids a TOCTOU race where the queue is drained
         // between the emptiness check and token acquisition, wasting the token.
         let mut queue = self.queue.write();
         if queue.is_empty() {
+            return None;
+        }
+
+        // Power-state gate: if the host is on battery below the
+        // configured threshold, defer the dequeue. Checked BEFORE the
+        // rate-limit token so a deferred cycle does not consume one
+        // of the minute's tokens. Logged at info so operators can
+        // correlate repair starvation with power transitions.
+        let state = *self.power_state.read();
+        if state.is_low_battery(self.config.battery_defer_threshold_percent) {
+            let pending = queue.len();
+            drop(queue);
+            self.stats.write().power_deferred += 1;
+            let percent = match state {
+                PowerState::Battery { percent } => percent,
+                PowerState::Ac => 100,
+            };
+            tracing::info!(
+                component = "fcp_store.repair",
+                event = RepairReasonCode::DeferredPowerBudget.as_str(),
+                battery_percent = percent,
+                threshold_percent = self.config.battery_defer_threshold_percent,
+                pending_repairs = pending,
+                "deferring repair dequeue while host is on battery below threshold"
+            );
             return None;
         }
 
@@ -1982,6 +2104,7 @@ mod tests {
             symbols_added: 40,
             queue_depth: 3,
             rate_limited: 1,
+            power_deferred: 0,
         };
         let json = serde_json::to_string(&stats).unwrap();
         let deserialized: RepairStats = serde_json::from_str(&json).unwrap();
@@ -2556,6 +2679,7 @@ mod tests {
             symbols_added: 500,
             queue_depth: 3,
             rate_limited: 1,
+            power_deferred: 0,
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: RepairStats = serde_json::from_str(&json).unwrap();
@@ -2914,6 +3038,7 @@ mod tests {
             repair_interval: Duration::from_millis(500),
             min_deficit_bps: 1000,
             max_symbols_per_repair: 50,
+            battery_defer_threshold_percent: 20,
         };
         assert_eq!(config.max_concurrent_repairs, 3);
         assert_eq!(config.max_repairs_per_minute, 25);
@@ -2930,6 +3055,7 @@ mod tests {
             repair_interval: Duration::from_secs(1),
             min_deficit_bps: 1,
             max_symbols_per_repair: 1,
+            battery_defer_threshold_percent: 20,
         };
         let json = serde_json::to_string(&config).unwrap();
         let back: RepairControllerConfig = serde_json::from_str(&json).unwrap();
@@ -2973,6 +3099,7 @@ mod tests {
             symbols_added: 100,
             queue_depth: 1,
             rate_limited: 0,
+            power_deferred: 0,
         };
         let mut cloned = original.clone();
         cloned.repairs_attempted = 999;
@@ -2989,6 +3116,7 @@ mod tests {
             symbols_added: 300,
             queue_depth: 7,
             rate_limited: 5,
+            power_deferred: 0,
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: RepairStats = serde_json::from_str(&json).unwrap();
@@ -4291,6 +4419,7 @@ mod tests {
             repair_interval: Duration::from_secs(30),
             min_deficit_bps: 1000,
             max_symbols_per_repair: 200,
+            battery_defer_threshold_percent: 20,
         };
         let json = serde_json::to_string(&config).unwrap();
         let rt: RepairControllerConfig = serde_json::from_str(&json).unwrap();
@@ -4336,6 +4465,7 @@ mod tests {
             symbols_added: 100,
             queue_depth: 5,
             rate_limited: 1,
+            power_deferred: 0,
         };
         let json = serde_json::to_string(&stats).unwrap();
         let rt: RepairStats = serde_json::from_str(&json).unwrap();
@@ -4361,6 +4491,7 @@ mod tests {
             symbols_added: 50,
             queue_depth: 1,
             rate_limited: 0,
+            power_deferred: 0,
         };
         let cloned = stats.clone();
         assert_eq!(stats.repairs_attempted, cloned.repairs_attempted);
@@ -4966,6 +5097,7 @@ mod tests {
             symbols_added: 500,
             queue_depth: 5,
             rate_limited: 3,
+            power_deferred: 0,
         };
         let json = serde_json::to_string(&stats).unwrap();
         let rt: RepairStats = serde_json::from_str(&json).unwrap();
@@ -5601,5 +5733,120 @@ mod tests {
             "fresh high-priority arrival must win against fresh low-priority \
              sibling — priority still dominates when no aging has accumulated",
         );
+    }
+
+    // ── Power-aware deferral (bead flywheel_connectors-qyv8n) ───────────
+    //
+    // The repair controller MUST defer non-critical repair dequeues when
+    // the runtime has reported that the host is on battery below
+    // `RepairControllerConfig::battery_defer_threshold_percent`. The
+    // default threshold is 20%, matching `fcp_mesh::device::DeviceProfile::
+    // is_low_battery`. In-flight repairs are NOT interrupted — only
+    // newly-dequeued repairs are gated.
+    //
+    // These two tests pin both sides of the gate:
+    //   (a) AC power (or battery ≥ threshold) → dequeue proceeds as normal
+    //   (b) Battery below threshold → dequeue returns None, the
+    //       `power_deferred` stat increments, and the queue is NOT
+    //       drained (next AC transition resumes the backlog).
+
+    fn queue_one_repair(controller: &RepairController) -> ObjectId {
+        let object_id = ObjectId::from_bytes([0xA5; 32]);
+        controller.queue_repair(RepairRequest {
+            object_id,
+            zone_id: test_zone_id(),
+            coverage: test_coverage(5, 10),
+            policy: test_policy(),
+            priority: 100,
+        });
+        object_id
+    }
+
+    #[test]
+    fn next_repair_dequeues_normally_on_ac_power() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let queued = queue_one_repair(&controller);
+
+        // Default power state is AC — no deferral.
+        assert_eq!(controller.power_state(), PowerState::Ac);
+
+        let request = controller
+            .next_repair()
+            .expect("AC power must not defer the dequeue");
+        assert_eq!(request.object_id, queued);
+        let stats = controller.stats();
+        assert_eq!(
+            stats.power_deferred, 0,
+            "AC dequeue must not bump power_deferred"
+        );
+    }
+
+    #[test]
+    fn next_repair_accepts_battery_at_or_above_threshold() {
+        // battery_defer_threshold_percent defaults to 20. Battery at
+        // exactly 20% must NOT defer — the threshold is strict-less-than.
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let queued = queue_one_repair(&controller);
+        controller.set_power_state(PowerState::Battery { percent: 20 });
+
+        let request = controller
+            .next_repair()
+            .expect("battery at threshold must not defer");
+        assert_eq!(request.object_id, queued);
+        assert_eq!(controller.stats().power_deferred, 0);
+    }
+
+    #[test]
+    fn next_repair_defers_on_low_battery_and_keeps_queue_intact() {
+        let controller = RepairController::new(RepairControllerConfig::default());
+        let queued = queue_one_repair(&controller);
+
+        // Report a critically low battery — 5% is well below the 20%
+        // default threshold.
+        controller.set_power_state(PowerState::Battery { percent: 5 });
+
+        let result = controller.next_repair();
+        assert!(
+            result.is_none(),
+            "low-battery dequeue must return None (got {result:?})"
+        );
+
+        // Power-deferred stat must bump by exactly 1.
+        assert_eq!(
+            controller.stats().power_deferred,
+            1,
+            "low-battery deferral must increment the power_deferred stat"
+        );
+        // And the rate-limit stat must NOT bump — the battery gate
+        // runs BEFORE the rate-limit token is consumed so a deferred
+        // cycle does not burn rate-limit budget.
+        assert_eq!(
+            controller.stats().rate_limited,
+            0,
+            "battery deferral must not consume a rate-limit token"
+        );
+
+        // Queue must NOT have been drained. Transition back to AC
+        // and verify the same request is still dequeue-able.
+        controller.set_power_state(PowerState::Ac);
+        let request = controller
+            .next_repair()
+            .expect("after AC transition, deferred repair must be dequeued");
+        assert_eq!(
+            request.object_id, queued,
+            "AC-resumed dequeue must surface the previously-deferred repair"
+        );
+    }
+
+    #[test]
+    fn power_state_helpers_behave_as_expected() {
+        assert!(!PowerState::Ac.is_low_battery(20));
+        assert!(PowerState::Battery { percent: 5 }.is_low_battery(20));
+        assert!(!PowerState::Battery { percent: 20 }.is_low_battery(20));
+        assert!(!PowerState::Battery { percent: 95 }.is_low_battery(20));
+        // Threshold 0 → NEVER defer, even on battery.
+        assert!(!PowerState::Battery { percent: 1 }.is_low_battery(0));
+        // Threshold 101 → ALWAYS defer on any battery state.
+        assert!(PowerState::Battery { percent: 100 }.is_low_battery(101));
     }
 }

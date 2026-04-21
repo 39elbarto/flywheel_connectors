@@ -66,7 +66,7 @@ pub use quarantine::{
     QuarantinedObject,
 };
 pub use repair::{
-    RepairController, RepairControllerConfig, RepairCycleBudget, RepairCycleUsage,
+    PowerState, RepairController, RepairControllerConfig, RepairCycleBudget, RepairCycleUsage,
     RepairEvaluationDecision, RepairEvaluationReasonCode, RepairEvaluationReport, RepairPermit,
     RepairPlan, RepairPlanAction, RepairPlanningOptions, RepairPolicyTargets, RepairQueueAction,
     RepairReasonCode, RepairRequest, RepairResult, RepairSloMetrics, RepairStats,

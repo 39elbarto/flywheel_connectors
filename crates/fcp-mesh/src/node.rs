@@ -329,6 +329,11 @@ pub struct MeshNode {
     peer_signing_keys: HashMap<NodeId, Ed25519VerifyingKey>,
     peers: HashMap<NodeId, PeerState>,
     local_profile: Option<DeviceProfile>,
+    /// Zones this node is authorized for, sourced from enrollment /
+    /// MeshIdentity. Fed into `build_planner_input` so zone-policy
+    /// filtering at the planner actually applies. Empty = "not yet
+    /// populated".
+    local_zones: HashSet<ZoneId>,
     local_symbols: HashSet<ObjectId>,
     local_leases: Vec<HeldLease>,
     sent_symbols: HashMap<ObjectId, (u64, HashSet<u32>)>,
@@ -378,6 +383,7 @@ impl MeshNode {
             local_node_ts,
             peers: HashMap::new(),
             local_profile: None,
+            local_zones: HashSet::new(),
             local_symbols: HashSet::new(),
             local_leases: Vec::new(),
             sent_symbols: HashMap::new(),
@@ -702,6 +708,23 @@ impl MeshNode {
         }
     }
 
+    /// Replace the set of zones the local node is authorized for.
+    ///
+    /// Must be called by the enrollment / MeshIdentity layer after the
+    /// node joins a zone (or is re-enrolled). Empty is interpreted as
+    /// "zone membership not yet wired" — the planner's zone-policy
+    /// filter treats such a candidate conservatively (see
+    /// `planner::zone_policy_rejects_nodes_with_unknown_zones`).
+    pub fn update_local_zones(&mut self, zones: HashSet<ZoneId>) {
+        self.local_zones = zones;
+    }
+
+    /// Read-only view of the local node's authorized zones.
+    #[must_use]
+    pub fn local_zones(&self) -> &HashSet<ZoneId> {
+        &self.local_zones
+    }
+
     /// Remove a peer from tracking (also cleans up session and admission state).
     pub fn remove_peer(&mut self, node_id: &NodeId) {
         // Clean up session/admission state before removing peer data,
@@ -789,7 +812,7 @@ impl MeshNode {
                 profile: profile.clone(),
                 local_symbols: self.local_symbols.clone(),
                 held_leases: self.local_leases.clone(),
-                zones: Vec::new(), // TODO: populate from mesh enrollment data
+                zones: self.local_zones.iter().cloned().collect(),
             });
         }
 
@@ -798,7 +821,7 @@ impl MeshNode {
                 profile: state.profile.clone(),
                 local_symbols: state.local_symbols.clone(),
                 held_leases: state.held_leases.clone(),
-                zones: Vec::new(), // TODO: populate from peer zone advertisements
+                zones: state.zones.iter().cloned().collect(),
             });
         }
 
@@ -2780,6 +2803,72 @@ mod tests {
         let candidates = node.plan_execution(&context, 2000);
         // Node has the required connector installed, should be a candidate
         assert!(!candidates.is_empty());
+    }
+
+    // Regression for flywheel_connectors-fqzmp: build_planner_input used to
+    // hardcode zones: Vec::new() for both the local node and every peer, so
+    // the planner's zone-policy filter ran against universally-empty candidates
+    // and could not enforce zone-affinity placement. Now that local_zones and
+    // PeerState.zones flow through, a candidate's zones must match whatever
+    // enrollment / update_peer_zones populated.
+    #[test]
+    fn plan_execution_populates_zones_from_local_and_peer_state() {
+        use crate::device::{DeviceProfileBuilder, InstalledConnector};
+
+        let mut node = test_node("node-1");
+        let connector_id =
+            fcp_core::ConnectorId::new("fcp.test", "zoned", "v1").expect("valid connector id");
+        let installed = InstalledConnector::new(
+            connector_id.clone(),
+            "1.0.0",
+            ObjectId::from_bytes([0xCC; 32]),
+        );
+
+        // Local node: install the connector and enroll into z:work.
+        let local_profile = DeviceProfileBuilder::new(NodeId::new("node-1"))
+            .add_connector(installed.clone())
+            .build();
+        node.update_local_state(local_profile, HashSet::new(), vec![]);
+        let work_zone: ZoneId = "z:work".parse().expect("zone parse");
+        let mut local_zones = HashSet::new();
+        local_zones.insert(work_zone.clone());
+        node.update_local_zones(local_zones);
+
+        // Peer: install the connector, enroll into z:public via the
+        // attestation-layer setter.
+        let peer_id = NodeId::new("peer-1");
+        let peer_profile = DeviceProfileBuilder::new(peer_id.clone())
+            .add_connector(installed)
+            .build();
+        node.update_peer_state(peer_id.clone(), peer_profile, HashSet::new(), vec![], 1000);
+        let public_zone: ZoneId = "z:public".parse().expect("zone parse");
+        let mut peer_zones = HashSet::new();
+        peer_zones.insert(public_zone.clone());
+        node.update_peer_zones(&peer_id, peer_zones);
+
+        let context = PlannerContext::new(connector_id);
+        let candidates = node.plan_execution(&context, 2000);
+        assert_eq!(candidates.len(), 2, "both local and peer should be candidates");
+
+        let local_candidate = candidates
+            .iter()
+            .find(|c| c.node_id.as_str() == "node-1")
+            .expect("local candidate present");
+        assert!(
+            local_candidate.zones.contains(&work_zone),
+            "local candidate must carry its enrolled zone — got {:?}",
+            local_candidate.zones
+        );
+
+        let peer_candidate = candidates
+            .iter()
+            .find(|c| c.node_id.as_str() == "peer-1")
+            .expect("peer candidate present");
+        assert!(
+            peer_candidate.zones.contains(&public_zone),
+            "peer candidate must carry its attested zone — got {:?}",
+            peer_candidate.zones
+        );
     }
 
     // ---- Store accessor tests ----

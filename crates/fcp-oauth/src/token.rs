@@ -764,6 +764,44 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_refresh_use_refresh_keeps_observable_auth_state_stable() {
+        let mut tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        let refresh_response = TokenResponse {
+            access_token: "steady_access".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: Some("steady_refresh".into()),
+            scope: Some("read write".into()),
+            id_token: Some("steady_id".into()),
+        };
+
+        tokens
+            .update_from_response(refresh_response.clone())
+            .expect("first refresh must succeed");
+        let observed_after_first = (
+            tokens.authorization_header(),
+            tokens.scopes().to_vec(),
+            tokens.id_token().map(str::to_string),
+            tokens.needs_refresh(),
+        );
+
+        // "Use" the token through the same observable surface callers rely on.
+        assert_eq!(tokens.authorization_header(), "Bearer steady_access");
+
+        tokens
+            .update_from_response(refresh_response)
+            .expect("second identical refresh must succeed");
+        let observed_after_second = (
+            tokens.authorization_header(),
+            tokens.scopes().to_vec(),
+            tokens.id_token().map(str::to_string),
+            tokens.needs_refresh(),
+        );
+
+        assert_eq!(observed_after_second, observed_after_first);
+    }
+
+    #[test]
     fn test_expired_token_cannot_be_revived_by_empty_replacement() {
         // The canonical failure mode the fix closes: a token that has
         // already expired must stay expired when the refresh response is

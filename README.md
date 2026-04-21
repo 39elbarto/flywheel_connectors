@@ -1659,13 +1659,13 @@ FCP integrates with the broader Agent Flywheel ecosystem:
 - Rust nightly (2024 edition)
 - Cargo
 - Tailscale (for mesh features)
-- **Sibling repositories** (required for a fresh-clone build): this workspace depends on two external repos via relative `path = "../../../..."` entries in several `Cargo.toml` files, so they must be cloned as siblings at the same directory level as this repo:
+- **Sibling repositories** (required for a fresh-clone build): this workspace depends on two external repos via relative `path = "../../../<sibling>"` entries in several `Cargo.toml` files, so they must be cloned as siblings at the same directory level as this repo:
 
   ```bash
   # Expected layout — all three repos share a parent directory:
   #   parent/
   #   ├── asupersync/          ← native async runtime (required)
-  #   ├── toon_rust/           ← TOON serializer / `tru` binary (required)
+  #   ├── toon_rust/           ← TOON serializer library (required)
   #   └── flywheel_connectors/ ← this repo
 
   git clone https://github.com/Dicklesworthstone/asupersync.git
@@ -1673,7 +1673,7 @@ FCP integrates with the broader Agent Flywheel ecosystem:
   git clone https://github.com/Dicklesworthstone/flywheel_connectors.git
   ```
 
-  `asupersync` is consumed by `fcp-host`, `fcp-async-core`, `fcp-graphql`, `fcp-tailscale`, `fcp-telemetry`, and the Slack/Discord connectors. `toon_rust` is consumed by `crates/fwc`. If either sibling is missing, Cargo will fail early with `error: failed to load manifest for dependency 'asupersync'` (or `'toon'`) — that is the fingerprint of a missing sibling checkout rather than a code problem.
+  `asupersync` is consumed by `fcp-host`, `fcp-async-core`, `fcp-graphql`, `fcp-tailscale`, `fcp-telemetry`, and the Slack/Discord connectors. `toon_rust` is consumed by `crates/fwc` (imported as `toon`, though the underlying package is named `tru`). If either sibling is missing, `cargo build` fails at the dependency-resolution step with a `failed to get <name> as a dependency` error followed by a `failed to read .../Cargo.toml` cause pointing at the missing sibling directory — that shape is the fingerprint of a missing sibling checkout rather than a code problem. The error cites package names, so a missing `toon_rust` checkout will be reported against package `tru`, not the `toon` alias.
 
 ### Building
 

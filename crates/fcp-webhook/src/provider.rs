@@ -31,11 +31,18 @@ const MAX_STRIPE_SIGNATURE_LEN: usize = 128;
 fn header_value_case_insensitive<'a>(
     headers: &'a HashMap<String, String>,
     name: &str,
-) -> Option<&'a str> {
-    headers
+) -> WebhookResult<Option<&'a str>> {
+    let mut matches = headers
         .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.as_str())
+        .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str());
+    let first = matches.next();
+    if first.is_some() && matches.next().is_some() {
+        return Err(WebhookError::InvalidPayload(format!(
+            "duplicate {name} headers"
+        )));
+    }
+    Ok(first)
 }
 
 fn deterministic_event_id(provider: &str, event_type: &str, body: &[u8]) -> String {
@@ -156,7 +163,7 @@ impl GitHubWebhook {
         }
 
         // Get signature header
-        let signature = header_value_case_insensitive(headers, "x-hub-signature-256")
+        let signature = header_value_case_insensitive(headers, "x-hub-signature-256")?
             .ok_or_else(|| WebhookError::MissingSignature("X-Hub-Signature-256".into()))?;
 
         // Verify signature
@@ -166,10 +173,10 @@ impl GitHubWebhook {
         let payload: Value = serde_json::from_slice(body)?;
 
         // Extract event details
-        let event_type = header_value_case_insensitive(headers, "x-github-event")
+        let event_type = header_value_case_insensitive(headers, "x-github-event")?
             .map_or_else(|| "unknown".to_string(), str::to_string);
 
-        let delivery_id = header_value_case_insensitive(headers, "x-github-delivery")
+        let delivery_id = header_value_case_insensitive(headers, "x-github-delivery")?
             .filter(|id| !id.is_empty())
             .map_or_else(
                 || deterministic_event_id("github", &event_type, body),
@@ -241,7 +248,7 @@ impl StripeWebhook {
         }
 
         // Get Stripe-Signature header
-        let signature_header = header_value_case_insensitive(headers, "stripe-signature")
+        let signature_header = header_value_case_insensitive(headers, "stripe-signature")?
             .ok_or_else(|| WebhookError::MissingSignature("Stripe-Signature".into()))?;
 
         // Parse signature header (format: t=timestamp,v1=signature)
@@ -422,10 +429,10 @@ impl SlackWebhook {
         }
 
         // Get headers
-        let signature = header_value_case_insensitive(headers, "x-slack-signature")
+        let signature = header_value_case_insensitive(headers, "x-slack-signature")?
             .ok_or_else(|| WebhookError::MissingSignature("X-Slack-Signature".into()))?;
 
-        let timestamp_str = header_value_case_insensitive(headers, "x-slack-request-timestamp")
+        let timestamp_str = header_value_case_insensitive(headers, "x-slack-request-timestamp")?
             .ok_or_else(|| WebhookError::MissingSignature("X-Slack-Request-Timestamp".into()))?;
 
         let timestamp: i64 = timestamp_str
@@ -544,7 +551,7 @@ impl LinearWebhook {
         }
 
         // Get signature
-        let signature = header_value_case_insensitive(headers, "linear-signature")
+        let signature = header_value_case_insensitive(headers, "linear-signature")?
             .ok_or_else(|| WebhookError::MissingSignature("Linear-Signature".into()))?;
 
         // Verify signature
@@ -1404,6 +1411,29 @@ mod tests {
     }
 
     #[test]
+    fn test_github_duplicate_case_insensitive_signature_headers_rejected() {
+        let handler = GitHubWebhook::new("secret");
+        let body = br#"{"action": "opened"}"#;
+        let signature = format!("sha256={}", handler.verifier.compute(body));
+
+        let mut headers = HashMap::new();
+        headers.insert("X-HUB-SIGNATURE-256".to_string(), signature.clone());
+        headers.insert("x-hub-signature-256".to_string(), signature);
+        headers.insert("X-GITHUB-EVENT".to_string(), "issues".to_string());
+        headers.insert("X-GITHUB-DELIVERY".to_string(), "del_dup".to_string());
+
+        let err = handler
+            .verify_and_parse(&headers, body)
+            .expect_err("duplicate case-insensitive signature headers must be rejected");
+        assert!(matches!(err, WebhookError::InvalidPayload(_)));
+        assert!(
+            err.to_string()
+                .contains("duplicate x-hub-signature-256 headers"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn test_stripe_case_insensitive_header() {
         let handler = StripeWebhook::new("secret");
         let body = br#"{"id":"evt_1","type":"charge.created"}"#;
@@ -1421,6 +1451,31 @@ mod tests {
 
         let event = handler.verify_and_parse(&headers, body).unwrap();
         assert_eq!(event.id, "evt_1");
+    }
+
+    #[test]
+    fn test_stripe_duplicate_case_insensitive_signature_headers_rejected() {
+        let handler = StripeWebhook::new("secret");
+        let body = br#"{"id":"evt_dup","type":"charge.created"}"#;
+
+        let timestamp = Utc::now().timestamp();
+        let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(body));
+        let sig = HmacSha256Verifier::new("secret").compute(signed_payload.as_bytes());
+
+        let mut headers = HashMap::new();
+        let signature_header = format!("t={timestamp},v1={sig}");
+        headers.insert("STRIPE-SIGNATURE".to_string(), signature_header.clone());
+        headers.insert("stripe-signature".to_string(), signature_header);
+
+        let err = handler
+            .verify_and_parse(&headers, body)
+            .expect_err("duplicate case-insensitive stripe headers must be rejected");
+        assert!(matches!(err, WebhookError::InvalidPayload(_)));
+        assert!(
+            err.to_string()
+                .contains("duplicate stripe-signature headers"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

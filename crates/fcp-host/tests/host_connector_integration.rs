@@ -812,14 +812,17 @@ where
     Ok(http_get_json_response(client, url, None).await?.body)
 }
 
-fn protected_route_path(path: &str) -> bool {
+fn protected_route_request(method: &reqwest::Method, path: &str) -> bool {
+    let connector_admin_path = path.starts_with("/rpc/connectors/")
+        && (path.contains("/config")
+            || (*method == reqwest::Method::POST && path.ends_with("/artifact")));
+
     path.starts_with("/rpc/admin/")
         || path.starts_with("/rpc/rollout/")
         || path.starts_with("/rpc/lifecycle/")
-        || path.starts_with("/rpc/connectors/apply")
-        || path.starts_with("/rpc/connectors/")
-            && (path.contains("/config") || path.ends_with("/artifact"))
-        || path.starts_with("/rpc/supply-chain/verify")
+        || (*method == reqwest::Method::POST && path.starts_with("/rpc/connectors/apply"))
+        || connector_admin_path
+        || (*method == reqwest::Method::POST && path.starts_with("/rpc/supply-chain/verify"))
 }
 
 fn admin_auth_headers() -> HeaderMap {
@@ -832,11 +835,15 @@ fn admin_auth_headers() -> HeaderMap {
     headers
 }
 
-fn with_admin_auth_if_needed(url: &str, headers: Option<HeaderMap>) -> Option<HeaderMap> {
+fn with_admin_auth_if_needed(
+    method: &reqwest::Method,
+    url: &str,
+    headers: Option<HeaderMap>,
+) -> Option<HeaderMap> {
     let path = reqwest::Url::parse(url)
         .ok()
         .map(|parsed| parsed.path().to_string())?;
-    if !protected_route_path(&path) {
+    if !protected_route_request(method, &path) {
         return headers;
     }
 
@@ -869,7 +876,8 @@ where
     B: serde::Serialize + Send + 'static,
     T: DeserializeOwned + Send + 'static,
 {
-    let headers = with_admin_auth_if_needed(&url, None).unwrap_or_default();
+    let headers =
+        with_admin_auth_if_needed(&reqwest::Method::PUT, &url, None).unwrap_or_default();
     let response = client
         .put(url)
         .headers(headers)
@@ -888,7 +896,8 @@ async fn http_delete_json<T>(
 where
     T: DeserializeOwned + Send + 'static,
 {
-    let headers = with_admin_auth_if_needed(&url, None).unwrap_or_default();
+    let headers =
+        with_admin_auth_if_needed(&reqwest::Method::DELETE, &url, None).unwrap_or_default();
     let response = client
         .delete(url)
         .headers(headers)
@@ -913,7 +922,7 @@ async fn http_get_json_response<T>(
 where
     T: DeserializeOwned + Send + 'static,
 {
-    let auth_headers = with_admin_auth_if_needed(&url, headers);
+    let auth_headers = with_admin_auth_if_needed(&reqwest::Method::GET, &url, headers);
     let mut request = client.get(url);
     if let Some(hdrs) = auth_headers {
         request = request.headers(hdrs);
@@ -939,7 +948,7 @@ where
     B: serde::Serialize + Send + 'static,
     T: DeserializeOwned + Send + 'static,
 {
-    let auth_headers = with_admin_auth_if_needed(&url, headers);
+    let auth_headers = with_admin_auth_if_needed(&reqwest::Method::POST, &url, headers);
     let mut request = client.post(url).json(&body);
     if let Some(hdrs) = auth_headers {
         request = request.headers(hdrs);
@@ -953,6 +962,37 @@ where
         headers: resp_headers,
         body,
     })
+}
+
+async fn request_status_text(
+    client: reqwest::Client,
+    method: reqwest::Method,
+    url: String,
+    body: Option<serde_json::Value>,
+    headers: Option<HeaderMap>,
+) -> Result<(reqwest::StatusCode, String), Box<dyn std::error::Error>> {
+    let mut request = client.request(method, url);
+    if let Some(hdrs) = headers {
+        request = request.headers(hdrs);
+    }
+    if let Some(payload) = body {
+        request = request.json(&payload);
+    }
+    let response = request.send().await?;
+    let status = response.status();
+    let body = response.text().await?;
+    Ok((status, body))
+}
+
+#[test]
+fn protected_route_request_distinguishes_public_artifact_metadata() {
+    let artifact_path = "/rpc/connectors/fcp.test.echo:utility:1.0.0/artifact";
+    assert!(!protected_route_request(&reqwest::Method::GET, artifact_path));
+    assert!(protected_route_request(&reqwest::Method::POST, artifact_path));
+    assert!(protected_route_request(
+        &reqwest::Method::GET,
+        "/rpc/connectors/fcp.test.echo:utility:1.0.0/config"
+    ));
 }
 
 fn assert_cache_headers(
@@ -4427,70 +4467,197 @@ async fn fcp_host_binary_protected_routes_require_admin_bearer()
     let public_health = host.client.get(url("/rpc/health")).send().await?;
     assert!(public_health.status().is_success());
 
-    let rollout_without_auth = host
-        .client
-        .get(url(&format!("/rpc/rollout/pin/{}", connector_id.as_str())))
-        .send()
+    let policy = test_rollout_policy();
+    let protected_cases: Vec<(&str, reqwest::Method, String, Option<Value>)> = vec![
+        (
+            "config snapshot",
+            reqwest::Method::GET,
+            url(&format!("/rpc/connectors/{}/config", connector_id.as_str())),
+            None,
+        ),
+        (
+            "config validate",
+            reqwest::Method::POST,
+            url(&format!(
+                "/rpc/connectors/{}/config/validate",
+                connector_id.as_str()
+            )),
+            Some(json!({
+                "payload": {
+                    "profile": "work",
+                    "region": "us-east-1",
+                },
+                "expected_active_revision_id": null,
+            })),
+        ),
+        (
+            "lifecycle status",
+            reqwest::Method::GET,
+            url(&format!("/rpc/lifecycle/{}", connector_id.as_str())),
+            None,
+        ),
+        (
+            "lifecycle transition",
+            reqwest::Method::POST,
+            url(&format!("/rpc/lifecycle/{}", connector_id.as_str())),
+            Some(json!({
+                "action": "restart",
+                "reason": "admin auth matrix",
+                "dry_run": true,
+            })),
+        ),
+        (
+            "rollout pin",
+            reqwest::Method::GET,
+            url(&format!("/rpc/rollout/pin/{}", connector_id.as_str())),
+            None,
+        ),
+        (
+            "rollout status",
+            reqwest::Method::GET,
+            url(&format!("/rpc/rollout/{}", connector_id.as_str())),
+            None,
+        ),
+        (
+            "rollout schedule",
+            reqwest::Method::POST,
+            url("/rpc/rollout/schedule"),
+            Some(json!({
+                "connector_id": connector_id.as_str(),
+                "version": "1.0.1",
+                "previous_version": "1.0.0",
+                "policy": policy.clone(),
+                "observed_at": chrono::Utc::now(),
+            })),
+        ),
+        (
+            "rollout evaluate",
+            reqwest::Method::POST,
+            url("/rpc/rollout/evaluate"),
+            Some(json!({
+                "connector_id": connector_id.as_str(),
+                "invocation_succeeded": true,
+                "latency_ms": 20,
+                "uptime_secs": 120,
+                "pinned": false,
+                "crashed": false,
+                "policy": policy.clone(),
+                "observed_at": chrono::Utc::now(),
+            })),
+        ),
+        (
+            "admin journal query",
+            reqwest::Method::POST,
+            url("/rpc/admin/journal"),
+            Some(json!({
+                "connector_id": connector_id.as_str(),
+                "after_sequence": 0,
+                "limit": 10,
+            })),
+        ),
+        (
+            "admin journal by connector",
+            reqwest::Method::GET,
+            url(&format!("/rpc/admin/journal/{}", connector_id.as_str())),
+            None,
+        ),
+        (
+            "admin logs",
+            reqwest::Method::POST,
+            url("/rpc/admin/logs"),
+            Some(json!({
+                "connector_id": connector_id.as_str(),
+                "after_sequence": 0,
+                "limit": 10,
+            })),
+        ),
+        (
+            "admin receipts",
+            reqwest::Method::POST,
+            url("/rpc/admin/receipts"),
+            Some(json!({
+                "connector_id": connector_id.as_str(),
+                "operation": TEST_OPERATION,
+                "after": null,
+                "limit": 10,
+            })),
+        ),
+        (
+            "admin simulate receipts",
+            reqwest::Method::POST,
+            url("/rpc/admin/simulate-receipts"),
+            Some(json!({
+                "connector_id": connector_id.as_str(),
+                "operation": TEST_OPERATION,
+                "after": null,
+                "limit": 10,
+            })),
+        ),
+        (
+            "admin events",
+            reqwest::Method::POST,
+            url("/rpc/admin/events"),
+            Some(json!({
+                "connector_id": connector_id.as_str(),
+                "limit": 10,
+                "unacknowledged_only": false,
+            })),
+        ),
+        (
+            "admin events acknowledge",
+            reqwest::Method::POST,
+            url("/rpc/admin/events/acknowledge"),
+            Some(json!({
+                "event_ids": [],
+            })),
+        ),
+    ];
+
+    for (name, method, endpoint, body) in protected_cases {
+        let (status, body_text) = request_status_text(
+            host.client.clone(),
+            method.clone(),
+            endpoint.clone(),
+            body.clone(),
+            None,
+        )
         .await?;
-    assert_eq!(
-        rollout_without_auth.status(),
-        reqwest::StatusCode::FORBIDDEN
-    );
-    assert!(
-        rollout_without_auth
-            .text()
-            .await?
-            .contains("Authorization header")
-    );
+        assert_eq!(
+            status,
+            reqwest::StatusCode::FORBIDDEN,
+            "{name} should reject missing admin auth, got {status}: {body_text}"
+        );
+        assert!(
+            body_text.contains("Authorization header"),
+            "{name} missing-auth response should mention Authorization header: {body_text}"
+        );
 
-    let admin_receipts_without_auth = host
-        .client
-        .post(url("/rpc/admin/receipts"))
-        .json(&ReceiptQueryRequest {
-            connector_id: connector_id.to_string(),
-            operation: Some(TEST_OPERATION.to_string()),
-            after: None,
-            limit: 10,
-        })
-        .send()
+        let (status, body_text) = request_status_text(
+            host.client.clone(),
+            method,
+            endpoint,
+            body,
+            Some(admin_auth_headers()),
+        )
         .await?;
-    assert_eq!(
-        admin_receipts_without_auth.status(),
-        reqwest::StatusCode::FORBIDDEN
-    );
+        assert!(
+            status.is_success(),
+            "{name} should succeed with admin auth, got {status}: {body_text}"
+        );
+    }
+
+    let (artifact_status, artifact_body) = request_status_text(
+        host.client.clone(),
+        reqwest::Method::GET,
+        url(&format!("/rpc/connectors/{}/artifact", connector_id.as_str())),
+        None,
+        None,
+    )
+    .await?;
     assert!(
-        admin_receipts_without_auth
-            .text()
-            .await?
-            .contains("Authorization header")
+        artifact_status.is_success(),
+        "artifact metadata GET should remain public, got {artifact_status}: {artifact_body}"
     );
-
-    let rollout_with_auth: PinStateResponse = http_get_json_response(
-        host.client.clone(),
-        url(&format!("/rpc/rollout/pin/{}", connector_id.as_str())),
-        Some(admin_auth_headers()),
-    )
-    .await?
-    .body;
-    assert_eq!(rollout_with_auth.connector_id, connector_id.as_str());
-    assert!(!rollout_with_auth.pinned);
-    assert!(rollout_with_auth.version.is_none());
-
-    let receipts_with_auth: ReceiptQueryResponse = http_post_json_response(
-        host.client.clone(),
-        url("/rpc/admin/receipts"),
-        ReceiptQueryRequest {
-            connector_id: connector_id.to_string(),
-            operation: Some(TEST_OPERATION.to_string()),
-            after: None,
-            limit: 10,
-        },
-        Some(admin_auth_headers()),
-    )
-    .await?
-    .body;
-    assert_eq!(receipts_with_auth.total_receipts, 0);
-    assert!(receipts_with_auth.receipts.is_empty());
 
     Ok(())
 }

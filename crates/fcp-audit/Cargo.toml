@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 blake3.workspace = true
 fcp-cbor.workspace = true
+fcp-crypto = { path = "../fcp-crypto" }
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

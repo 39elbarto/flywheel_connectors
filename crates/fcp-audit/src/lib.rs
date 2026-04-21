@@ -3,14 +3,31 @@
 //! This crate provides protocol-level types for audit chains, decision receipts,
 //! event filtering, and chain verification. These are the building blocks used
 //! by higher-level crates (`fcp-core`, `fcp-cli`) to implement audit functionality.
+//!
+//! # Authenticity vs integrity
+//!
+//! `AuditEntry::computed_id` (a domain-separated BLAKE3 hash of the canonical
+//! payload) and `verify_chain` together guarantee **integrity against edits**:
+//! once a chain is published, no entry can be silently mutated without breaking
+//! the hash linkage. They do NOT, on their own, guarantee **authenticity
+//! against forgery**: anyone who can append to the store can produce an entry
+//! claiming any `actor`, and `verify_chain` will accept the chain as well-formed.
+//!
+//! For authenticity, populate the optional `issuer_kid` and `signature` fields
+//! on [`AuditEntry`] (see [`AuditEntry::sign`]) and verify with
+//! [`verify_chain_with_signers`]. The unsigned [`verify_chain`] remains
+//! available for callers that intentionally separate authenticity from chain
+//! integrity (e.g., when signatures live in a wrapping envelope).
 
 #![forbid(unsafe_code)]
 
+use fcp_crypto::{Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, KeyId};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
 const AUDIT_ENTRY_ID_DOMAIN: &[u8] = b"FCP2-AUDIT-ENTRY-V1";
+const AUDIT_ENTRY_SIG_DOMAIN: &[u8] = b"FCP2-AUDIT-ENTRY-SIG-V1";
 
 // ============================================================================
 // Event type constants
@@ -182,6 +199,22 @@ pub struct AuditEntry {
     /// Additional metadata as key-value pairs.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub metadata: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Key ID of the issuer that signed this entry, if any.
+    ///
+    /// Required when `signature` is `Some`. Lookup at verification time
+    /// resolves this to an [`Ed25519VerifyingKey`] via the caller-supplied
+    /// resolver passed to [`verify_chain_with_signers`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer_kid: Option<KeyId>,
+    /// Ed25519 signature over the entry's canonical signing transcript
+    /// (see [`AuditEntry::signing_bytes`]).
+    ///
+    /// `None` for entries written by callers that do not sign (the legacy
+    /// shape; integrity is still enforced by hash linkage but authenticity
+    /// is not). When present, [`verify_chain_with_signers`] verifies this
+    /// against the resolved verifying key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<Ed25519Signature>,
 }
 
 #[derive(Serialize)]
@@ -258,6 +291,99 @@ impl AuditEntry {
         hasher.update(AUDIT_ENTRY_ID_DOMAIN);
         hasher.update(&canonical);
         Ok(hex::encode(hasher.finalize().as_bytes()))
+    }
+
+    /// Canonical bytes that an issuer signs to bind their identity to
+    /// this entry.
+    ///
+    /// Format: `AUDIT_ENTRY_SIG_DOMAIN || u32(id_len, LE) || id ||
+    ///          u32(kid_len, LE) || kid_bytes`
+    ///
+    /// The signature commits to the recomputed `id` (a hash of the
+    /// canonical payload) rather than the producer-supplied `id` field,
+    /// so it transitively binds every other field that participates in
+    /// `computed_id`. The `issuer_kid` is included in the transcript so
+    /// a signature cannot be replayed under a different claimed issuer.
+    /// The `signature` field itself is excluded.
+    ///
+    /// # Errors
+    /// Returns [`AuditError::SerializationError`] if `computed_id` fails
+    /// to canonicalize the payload.
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, AuditError> {
+        let id = self.computed_id()?;
+        let id_bytes = id.as_bytes();
+        let kid_slice: &[u8] = self
+            .issuer_kid
+            .as_ref()
+            .map_or(&[][..], |kid| kid.as_slice());
+
+        let mut bytes = Vec::with_capacity(
+            AUDIT_ENTRY_SIG_DOMAIN.len() + 4 + id_bytes.len() + 4 + kid_slice.len(),
+        );
+        bytes.extend_from_slice(AUDIT_ENTRY_SIG_DOMAIN);
+        bytes.extend_from_slice(
+            &u32::try_from(id_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(id_bytes);
+        bytes.extend_from_slice(
+            &u32::try_from(kid_slice.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(kid_slice);
+        Ok(bytes)
+    }
+
+    /// Sign this entry with the supplied Ed25519 signing key, populating
+    /// `issuer_kid` and `signature` in place. Overwrites any prior
+    /// signature. After signing, callers should treat the entry as
+    /// immutable; mutating any field covered by `computed_id`
+    /// invalidates the signature.
+    ///
+    /// # Errors
+    /// Returns [`AuditError::SerializationError`] if the canonical
+    /// signing transcript cannot be built.
+    pub fn sign(&mut self, signing_key: &Ed25519SigningKey) -> Result<(), AuditError> {
+        // Set the kid first so it participates in the signed transcript.
+        self.issuer_kid = Some(signing_key.key_id());
+        let transcript = self.signing_bytes()?;
+        self.signature = Some(signing_key.sign(&transcript));
+        Ok(())
+    }
+
+    /// Verify the entry's signature against the supplied verifying key.
+    ///
+    /// Requires both `issuer_kid` and `signature` to be present and the
+    /// `verifying_key.key_id()` to match `issuer_kid`. Returns
+    /// [`AuditError::SignerMissing`] when either field is absent and
+    /// [`AuditError::SignatureInvalid`] when the signer/key do not match
+    /// or the signature does not verify against the canonical transcript.
+    ///
+    /// # Errors
+    /// See above for the typed error variants.
+    pub fn verify_signature(
+        &self,
+        verifying_key: &Ed25519VerifyingKey,
+    ) -> Result<(), AuditError> {
+        let kid = self
+            .issuer_kid
+            .as_ref()
+            .ok_or(AuditError::SignerMissing { seq: self.seq })?;
+        let signature = self
+            .signature
+            .as_ref()
+            .ok_or(AuditError::SignerMissing { seq: self.seq })?;
+
+        if verifying_key.key_id().as_slice() != kid.as_slice() {
+            return Err(AuditError::SignatureInvalid { seq: self.seq });
+        }
+
+        let transcript = self.signing_bytes()?;
+        verifying_key
+            .verify(&transcript, signature)
+            .map_err(|_| AuditError::SignatureInvalid { seq: self.seq })
     }
 }
 
@@ -434,6 +560,8 @@ impl AuditEntryBuilder {
             connector_id: self.connector_id,
             operation_id: self.operation_id,
             metadata: self.metadata,
+            issuer_kid: None,
+            signature: None,
         })
     }
 }
@@ -442,9 +570,61 @@ impl AuditEntryBuilder {
 // ChainHead
 // ============================================================================
 
+/// A quorum signature attached to a [`ChainHead`].
+///
+/// Carries an opaque signature byte string plus the issuer's key identifier.
+/// `fcp-audit` itself does not verify the signature (doing so would require a
+/// crypto dependency); callers are expected to use the issuer key registry of
+/// their choice (typically an Ed25519 verifying key looked up by `issuer_kid`).
+///
+/// The signatures are carried on `ChainHead` so consumers can make quorum
+/// decisions based on the ACTUAL signatures present, not on a producer-asserted
+/// count. See [`ChainHead::has_quorum`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeadSignature {
+    /// Issuer key identifier (e.g., a `KeyId` in string form).
+    pub issuer_kid: String,
+    /// Opaque signature bytes (typically Ed25519, 64 bytes), hex-encoded on the wire.
+    #[serde(with = "head_signature_bytes")]
+    pub signature: Vec<u8>,
+}
+
+mod head_signature_bytes {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&hex::encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        hex::decode(&s).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Checkpoint of the audit chain head.
 ///
 /// Enables fast sync without full chain traversal.
+///
+/// # Quorum semantics
+///
+/// A head's quorum status is determined by the [`signatures`](Self::signatures)
+/// list, NOT by the [`signature_count`](Self::signature_count) field in
+/// isolation. The count is retained for wire-format and snapshot
+/// backwards-compatibility but is cross-checked against the signatures list:
+/// any divergence is surfaced by [`verify_chain`] as an
+/// `audit.head_signature_count_inconsistent` issue, and
+/// [`ChainHead::has_quorum`] returns `false` when the two disagree.
+///
+/// Callers that need to authenticate a head MUST verify the
+/// [`HeadSignature`] entries against a trusted issuer key registry — this
+/// crate does not perform that verification itself (to remain crypto-free).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChainHead {
     /// Zone this head covers.
@@ -457,8 +637,15 @@ pub struct ChainHead {
     pub coverage: f64,
     /// Epoch identifier.
     pub epoch_id: String,
-    /// Number of quorum signatures.
+    /// Number of quorum signatures. MUST equal `signatures.len()`; divergence
+    /// is flagged by [`verify_chain`] as a critical issue.
     pub signature_count: u32,
+    /// Quorum signatures from issuers attesting to this head.
+    ///
+    /// Empty for legacy/unsigned heads. Wire format omits the field when
+    /// empty so pre-existing serialized heads remain decodable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signatures: Vec<HeadSignature>,
 }
 
 impl ChainHead {
@@ -468,10 +655,26 @@ impl ChainHead {
         self.coverage >= threshold
     }
 
-    /// Returns true if this head has quorum signatures.
+    /// Returns true iff this head carries at least one signature AND the
+    /// declared [`signature_count`](Self::signature_count) matches the actual
+    /// number of signatures present.
+    ///
+    /// This method intentionally does NOT verify signatures cryptographically
+    /// (that requires an issuer-key registry outside this crate's scope), but
+    /// it refuses to treat a producer-asserted numeric count as quorum when
+    /// no signatures are attached or when the count disagrees with the list.
     #[must_use]
-    pub const fn has_quorum(&self) -> bool {
-        self.signature_count > 0
+    pub fn has_quorum(&self) -> bool {
+        !self.signatures.is_empty()
+            && usize::try_from(self.signature_count).is_ok_and(|n| n == self.signatures.len())
+    }
+
+    /// Returns true iff the declared [`signature_count`](Self::signature_count)
+    /// matches `signatures.len()`. Used to catch producers that lie about the
+    /// count vs the attached signatures.
+    #[must_use]
+    pub fn signature_count_consistent(&self) -> bool {
+        usize::try_from(self.signature_count).is_ok_and(|n| n == self.signatures.len())
     }
 }
 
@@ -831,6 +1034,7 @@ impl VerifyIssue {
                 | "audit.genesis_invalid"
                 | "audit.head_mismatch"
                 | "audit.head_seq_mismatch"
+                | "audit.head_signature_count_inconsistent"
         )
     }
 }
@@ -905,13 +1109,22 @@ impl fmt::Display for VerifyReport {
 // Chain verification
 // ============================================================================
 
-/// Verify an audit chain for consistency.
+/// Verify an audit chain for **integrity** (hash linkage, monotonic
+/// sequence, head agreement) — NOT for **authenticity**.
 ///
 /// Checks:
 /// - Genesis entry has seq 0 and no prev
 /// - Sequence numbers are monotonically increasing without gaps
 /// - Each entry's `prev` points to the preceding entry's `id`
+/// - Each entry's `id` matches the canonical payload hash
 /// - If a head is provided, it matches the chain tip
+///
+/// **Authenticity gap (NORMATIVE):** This function does NOT verify
+/// `issuer_kid` or `signature` on entries. A chain composed entirely of
+/// forged entries (any actor / any zone) signed by no one will pass
+/// `verify_chain` cleanly as long as the hash linkage is internally
+/// consistent. To enforce authenticity, use
+/// [`verify_chain_with_signers`] and supply a key resolver.
 ///
 /// # Arguments
 ///
@@ -1135,6 +1348,23 @@ pub fn verify_chain(
                 ));
             }
         }
+
+        // Cross-check that the producer's asserted `signature_count` matches
+        // the actual number of signatures attached. Without this, a producer
+        // could claim quorum (signature_count=N) while attaching zero
+        // signatures, and downstream `has_quorum` checks elsewhere in the
+        // codebase would trust the bare count. See
+        // `ChainHead::has_quorum` for the read-side enforcement.
+        if !head.signature_count_consistent() {
+            issues.push(VerifyIssue::new(
+                "audit.head_signature_count_inconsistent",
+                format!(
+                    "head declares signature_count={} but {} signatures are attached",
+                    head.signature_count,
+                    head.signatures.len()
+                ),
+            ));
+        }
     }
 
     let is_fail = issues.iter().any(VerifyIssue::is_critical);
@@ -1155,6 +1385,60 @@ pub fn verify_chain(
         head_entry: head.map(|h| h.head_entry.clone()),
         issues,
     }
+}
+
+/// Verify an audit chain for **both integrity and authenticity**.
+///
+/// Runs [`verify_chain`] for integrity, then requires every entry to
+/// carry `issuer_kid` + `signature` and verify against the key returned
+/// by `key_lookup(&issuer_kid)`. Closes the authenticity gap that the
+/// unsigned [`verify_chain`] intentionally leaves open:
+///
+///   - Unsigned entries are rejected with
+///     [`AuditError::SignerMissing`]
+///   - Entries whose `issuer_kid` is unknown to the resolver are
+///     rejected with [`AuditError::UnknownIssuer`]
+///   - Entries whose signature does not verify against the canonical
+///     signing transcript (see [`AuditEntry::signing_bytes`]) are
+///     rejected with [`AuditError::SignatureInvalid`]
+///
+/// On success, returns the same [`VerifyReport`] as [`verify_chain`];
+/// on any signer-related failure, returns an `Err` with the first
+/// offending entry's seq. Integrity issues surfaced by [`verify_chain`]
+/// are reported via the returned `VerifyReport` as usual; this wrapper
+/// only fails fast on authenticity.
+///
+/// # Arguments
+///
+/// * `entries` - Sorted audit entries (by seq, ascending)
+/// * `head` - Optional chain head to verify against
+/// * `zone_id` - Optional zone ID to scope verification
+/// * `key_lookup` - Resolver from `issuer_kid` to verifying key. Return
+///   `None` to reject the entry as having an unknown issuer.
+///
+/// # Errors
+///
+/// Returns `AuditError::SignerMissing`, `AuditError::UnknownIssuer`, or
+/// `AuditError::SignatureInvalid` on the first offending entry.
+pub fn verify_chain_with_signers(
+    entries: &[AuditEntry],
+    head: Option<&ChainHead>,
+    zone_id: Option<&str>,
+    key_lookup: impl Fn(&KeyId) -> Option<Ed25519VerifyingKey>,
+) -> Result<VerifyReport, AuditError> {
+    for entry in entries {
+        let kid = entry
+            .issuer_kid
+            .as_ref()
+            .ok_or(AuditError::SignerMissing { seq: entry.seq })?;
+        if entry.signature.is_none() {
+            return Err(AuditError::SignerMissing { seq: entry.seq });
+        }
+        let verifying_key = key_lookup(kid).ok_or(AuditError::UnknownIssuer { seq: entry.seq })?;
+        entry.verify_signature(&verifying_key)?;
+    }
+
+    Ok(verify_chain(entries, head, zone_id))
 }
 
 // ============================================================================
@@ -1195,6 +1479,30 @@ pub enum AuditError {
     /// Fork detected in the chain.
     #[error("fork detected at seq {0}")]
     ForkDetected(u64),
+
+    /// Entry has no `issuer_kid` or `signature` but signature
+    /// verification was requested.
+    #[error("entry at seq {seq} is missing issuer_kid or signature")]
+    SignerMissing {
+        /// Sequence number of the entry that lacked signer binding.
+        seq: u64,
+    },
+
+    /// Signature verification failed (kid mismatch or signature did not
+    /// validate against the canonical signing transcript).
+    #[error("signature verification failed at seq {seq}")]
+    SignatureInvalid {
+        /// Sequence number of the entry whose signature failed.
+        seq: u64,
+    },
+
+    /// `verify_chain_with_signers` could not resolve the entry's
+    /// `issuer_kid` to a known verifying key.
+    #[error("unknown issuer_kid at seq {seq}")]
+    UnknownIssuer {
+        /// Sequence number of the entry whose issuer key was unknown.
+        seq: u64,
+    },
 }
 
 impl AuditError {
@@ -1210,6 +1518,9 @@ impl AuditError {
             Self::InvalidEntry(_) => "FCP-4002",
             Self::SerializationError(_) => "FCP-5013",
             Self::ForkDetected(_) => "FCP-5014",
+            Self::SignerMissing { .. } => "FCP-5015",
+            Self::SignatureInvalid { .. } => "FCP-5016",
+            Self::UnknownIssuer { .. } => "FCP-5017",
         }
     }
 }
@@ -1351,6 +1662,8 @@ mod tests {
             connector_id: Some("fcp.telegram:base:v1".to_string()),
             operation_id: Some("send_message".to_string()),
             metadata: BTreeMap::new(),
+            issuer_kid: None,
+            signature: None,
         }
     }
 
@@ -1369,6 +1682,8 @@ mod tests {
             connector_id: None,
             operation_id: None,
             metadata: BTreeMap::new(),
+            issuer_kid: None,
+            signature: None,
         }
     }
 
@@ -1405,6 +1720,15 @@ mod tests {
         with_computed_id(raw_chain_entry(seq, &canonicalize_prev_reference(prev_id)))
     }
 
+    fn sample_signatures(n: u8) -> Vec<HeadSignature> {
+        (0..n)
+            .map(|i| HeadSignature {
+                issuer_kid: format!("kid-{i}"),
+                signature: vec![i; 64],
+            })
+            .collect()
+    }
+
     fn sample_head(entry_id: &str, seq: u64) -> ChainHead {
         ChainHead {
             zone_id: "z:work".to_string(),
@@ -1413,6 +1737,7 @@ mod tests {
             coverage: 0.85,
             epoch_id: "epoch-1".to_string(),
             signature_count: 3,
+            signatures: sample_signatures(3),
         }
     }
 
@@ -1448,6 +1773,7 @@ mod tests {
             coverage: 0.85,
             epoch_id: "epoch-1".to_string(),
             signature_count: 3,
+            signatures: sample_signatures(3),
         }
     }
 
@@ -1937,10 +2263,169 @@ mod tests {
             connector_id: None,
             operation_id: None,
             metadata: BTreeMap::new(),
+            issuer_kid: None,
+            signature: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(entry, parsed);
+    }
+
+    // ── Signer binding (regression for la0l1) ─────────────────────────────
+
+    fn signed_test_entry(seq: u64, prev_id: Option<&str>) -> AuditEntry {
+        AuditEntry {
+            id: "placeholder".to_string(),
+            event_type: event_types::CAPABILITY_INVOKE.to_string(),
+            severity: Severity::Info,
+            actor: "agent:alice".to_string(),
+            zone_id: "z:work".to_string(),
+            seq,
+            occurred_at: 1_700_000_000 + seq * 60,
+            prev: prev_id.map(ToString::to_string),
+            correlation_id: format!("corr-{seq}"),
+            trace_context: None,
+            connector_id: None,
+            operation_id: None,
+            metadata: BTreeMap::new(),
+            issuer_kid: None,
+            signature: None,
+        }
+    }
+
+    #[test]
+    fn sign_and_verify_signature_roundtrip() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        let mut entry = signed_test_entry(0, None);
+        entry.id = entry.computed_id().unwrap();
+        entry.sign(&signing_key).expect("sign succeeds");
+
+        assert!(entry.issuer_kid.is_some(), "issuer_kid populated");
+        assert!(entry.signature.is_some(), "signature populated");
+        assert_eq!(
+            entry.issuer_kid.as_ref().unwrap().as_slice(),
+            signing_key.key_id().as_slice(),
+            "kid matches signing key"
+        );
+
+        entry
+            .verify_signature(&verifying_key)
+            .expect("self-issued signature must verify");
+    }
+
+    #[test]
+    fn verify_signature_rejects_wrong_key() {
+        let signing_key = Ed25519SigningKey::generate();
+        let other_key = Ed25519SigningKey::generate();
+
+        let mut entry = signed_test_entry(0, None);
+        entry.id = entry.computed_id().unwrap();
+        entry.sign(&signing_key).expect("sign succeeds");
+
+        match entry.verify_signature(&other_key.verifying_key()) {
+            Err(AuditError::SignatureInvalid { seq: 0 }) => {}
+            other => panic!("expected SignatureInvalid for kid mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_signature_rejects_tampered_actor() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        let mut entry = signed_test_entry(0, None);
+        entry.id = entry.computed_id().unwrap();
+        entry.sign(&signing_key).expect("sign succeeds");
+
+        // After signing, mutate the actor — `id` is no longer canonical
+        // so `computed_id` (and thus `signing_bytes`) recomputes a
+        // different transcript; the signature must fail verification.
+        entry.actor = "agent:eve".to_string();
+        match entry.verify_signature(&verifying_key) {
+            Err(AuditError::SignatureInvalid { seq: 0 }) => {}
+            other => panic!("expected SignatureInvalid after mutation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_signature_rejects_missing_fields() {
+        let entry = signed_test_entry(0, None);
+        let key = Ed25519SigningKey::generate().verifying_key();
+        match entry.verify_signature(&key) {
+            Err(AuditError::SignerMissing { seq: 0 }) => {}
+            other => panic!("expected SignerMissing for unsigned entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_chain_with_signers_accepts_fully_signed_chain() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let kid = signing_key.key_id();
+
+        // Build a 3-entry chain, sign each. Compute id BEFORE signing
+        // so `signing_bytes` covers a stable id.
+        let mut entries = Vec::new();
+        let mut prev_id: Option<String> = None;
+        for seq in 0..3 {
+            let mut entry = signed_test_entry(seq, prev_id.as_deref());
+            entry.id = entry.computed_id().unwrap();
+            entry.sign(&signing_key).expect("sign succeeds");
+            prev_id = Some(entry.id.clone());
+            entries.push(entry);
+        }
+
+        let resolver = |looking: &KeyId| -> Option<Ed25519VerifyingKey> {
+            if looking.as_slice() == kid.as_slice() {
+                Some(verifying_key.clone())
+            } else {
+                None
+            }
+        };
+        let report = verify_chain_with_signers(&entries, None, Some("z:work"), resolver)
+            .expect("signed chain must verify");
+        assert_eq!(report.chain_len, 3);
+    }
+
+    #[test]
+    fn verify_chain_with_signers_rejects_unsigned_entry() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        // Build a chain where seq 0 is signed but seq 1 is NOT — exactly
+        // the forgery scenario the bead describes.
+        let mut e0 = signed_test_entry(0, None);
+        e0.id = e0.computed_id().unwrap();
+        e0.sign(&signing_key).expect("sign genesis");
+
+        let mut e1 = signed_test_entry(1, Some(&e0.id));
+        e1.id = e1.computed_id().unwrap();
+        // intentionally do NOT sign e1
+
+        let entries = vec![e0, e1];
+        let resolver = |_kid: &KeyId| -> Option<Ed25519VerifyingKey> { Some(verifying_key.clone()) };
+        match verify_chain_with_signers(&entries, None, Some("z:work"), resolver) {
+            Err(AuditError::SignerMissing { seq: 1 }) => {}
+            other => panic!("expected SignerMissing at seq 1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_chain_with_signers_rejects_unknown_issuer() {
+        let signing_key = Ed25519SigningKey::generate();
+
+        let mut entry = signed_test_entry(0, None);
+        entry.id = entry.computed_id().unwrap();
+        entry.sign(&signing_key).expect("sign");
+
+        let entries = vec![entry];
+        let resolver = |_kid: &KeyId| -> Option<Ed25519VerifyingKey> { None };
+        match verify_chain_with_signers(&entries, None, Some("z:work"), resolver) {
+            Err(AuditError::UnknownIssuer { seq: 0 }) => {}
+            other => panic!("expected UnknownIssuer, got {other:?}"),
+        }
     }
 
     // ── AuditEntryBuilder ────────────────────────────────────────────────
@@ -2115,10 +2600,43 @@ mod tests {
     fn chain_head_has_quorum() {
         let head = sample_head("entry-5", 5);
         assert!(head.has_quorum());
+        assert!(head.signature_count_consistent());
 
+        // Count cleared but signatures still present → inconsistent → no quorum.
         let mut no_quorum = sample_head("entry-5", 5);
         no_quorum.signature_count = 0;
         assert!(!no_quorum.has_quorum());
+        assert!(!no_quorum.signature_count_consistent());
+
+        // Signatures cleared but count still 3 → inconsistent → no quorum.
+        let mut no_sigs = sample_head("entry-5", 5);
+        no_sigs.signatures.clear();
+        assert!(!no_sigs.has_quorum());
+        assert!(!no_sigs.signature_count_consistent());
+
+        // The original bug: numeric count > 0 with no signatures attached
+        // MUST NOT be treated as quorum. Before this fix,
+        // `has_quorum() == true` would be returned on a producer-asserted
+        // bare count.
+        let forged = ChainHead {
+            zone_id: "z:work".to_string(),
+            head_entry: "forged".to_string(),
+            head_seq: 5,
+            coverage: 1.0,
+            epoch_id: "epoch-forged".to_string(),
+            signature_count: 7,
+            signatures: vec![],
+        };
+        assert!(!forged.has_quorum(), "quorum cannot be asserted from a bare count");
+
+        // Legacy wire: omitted signatures default to empty; regardless of
+        // count, has_quorum returns false on decoded legacy heads.
+        let legacy_json =
+            r#"{"zone_id":"z:work","head_entry":"e","head_seq":0,"coverage":1.0,"epoch_id":"ep","signature_count":3}"#;
+        let legacy: ChainHead = serde_json::from_str(legacy_json).unwrap();
+        assert!(legacy.signatures.is_empty());
+        assert!(!legacy.has_quorum());
+        assert!(!legacy.signature_count_consistent());
     }
 
     #[test]
@@ -2794,6 +3312,44 @@ mod tests {
         assert_eq!(report.chain_len, 3);
     }
 
+    #[test]
+    fn verify_chain_flags_head_signature_count_inconsistent() {
+        // Producer claims signature_count=7 but attached zero signatures.
+        // verify_chain MUST flag this as critical so downstream trust
+        // decisions can't proceed on the bare numeric claim.
+        let entries = canonical_chain_in_zone(2, "z:work");
+        let last = entries.last().unwrap();
+        let forged_head = ChainHead {
+            zone_id: "z:work".to_string(),
+            head_entry: last.id.clone(),
+            head_seq: last.seq,
+            coverage: 1.0,
+            epoch_id: "epoch-forged".to_string(),
+            signature_count: 7,
+            signatures: vec![],
+        };
+        let report = verify_chain(&entries, Some(&forged_head), None);
+        assert!(
+            report.issues.iter().any(|i| i.code == "audit.head_signature_count_inconsistent"),
+            "expected head_signature_count_inconsistent, got {:?}",
+            report.issues
+        );
+        assert!(report.status.is_fail(), "inconsistent count must be a critical failure");
+    }
+
+    #[test]
+    fn verify_chain_accepts_consistent_signed_head() {
+        // Count matches signatures attached → no inconsistency issue.
+        let entries = canonical_chain_in_zone(2, "z:work");
+        let head = chain_head_for(&entries, "z:work");
+        assert_eq!(usize::try_from(head.signature_count).unwrap(), head.signatures.len());
+        let report = verify_chain(&entries, Some(&head), None);
+        assert!(
+            !report.issues.iter().any(|i| i.code == "audit.head_signature_count_inconsistent"),
+            "consistent head must not emit inconsistent-count issue"
+        );
+    }
+
     proptest! {
         #[test]
         fn verify_chain_mr_idempotent_on_repeated_verification(
@@ -3053,6 +3609,7 @@ mod tests {
             coverage: 1.0,
             epoch_id: "epoch-mixed-zone".to_string(),
             signature_count: 1,
+            signatures: sample_signatures(1),
         };
 
         let report = verify_chain(&[e0, e1], Some(&head), None);
@@ -3628,6 +4185,7 @@ mod tests {
             coverage: 0.123_456_789,
             epoch_id: "epoch-42".to_string(),
             signature_count: 7,
+            signatures: sample_signatures(7),
         };
         let json = serde_json::to_string(&head).unwrap();
         let parsed: ChainHead = serde_json::from_str(&json).unwrap();
@@ -4625,11 +5183,19 @@ mod tests {
 
     #[test]
     fn chain_head_has_quorum_boundary() {
+        // Quorum now requires BOTH signatures attached AND count == len.
         let mut head = sample_head("e", 0);
         head.signature_count = 1;
-        assert!(head.has_quorum()); // >0 means quorum
+        head.signatures = sample_signatures(1);
+        assert!(head.has_quorum());
 
+        // Clearing the count without clearing signatures → inconsistent.
         head.signature_count = 0;
+        assert!(!head.has_quorum());
+
+        // Clearing signatures with any count → no quorum.
+        head.signatures.clear();
+        head.signature_count = 5;
         assert!(!head.has_quorum());
     }
 
@@ -5123,6 +5689,7 @@ mod tests {
             coverage: 1.0,
             epoch_id: "epoch-attack".to_string(),
             signature_count: 1,
+            signatures: sample_signatures(1),
         };
 
         let report = verify_chain(&[e0, e1], Some(&head), None);

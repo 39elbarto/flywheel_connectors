@@ -13,7 +13,7 @@ use crate::{
     CapabilityToken, ConnectorId, EventAck, EventEnvelope, EventNack, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, InstanceId, Introspection, InvokeRequest, InvokeResponse,
     RateLimitDeclarations, SelfCheckReport, ShutdownRequest, SimulateRequest, SimulateResponse,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, Verified,
+    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, CryptographicallyVerified,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -205,20 +205,20 @@ pub trait Bidirectional: Streaming {
 pub trait Polling: FcpConnector {
     /// Start polling a target.
     ///
-    /// Requires a `CapabilityToken<Verified>` — the caller must verify the
+    /// Requires a `CapabilityToken<CryptographicallyVerified>` — the caller must verify the
     /// token via [`CapabilityVerifier::verify()`] before calling this method.
     async fn start_polling(
         &self,
         target: &str,
         interval: Option<std::time::Duration>,
-        token: &CapabilityToken<Verified>,
+        token: &CapabilityToken<CryptographicallyVerified>,
     ) -> FcpResult<()>;
 
     /// Stop polling a target.
-    async fn stop_polling(&self, target: &str, token: &CapabilityToken<Verified>) -> FcpResult<()>;
+    async fn stop_polling(&self, target: &str, token: &CapabilityToken<CryptographicallyVerified>) -> FcpResult<()>;
 
     /// Trigger immediate poll.
-    async fn poll_now(&self, target: &str, token: &CapabilityToken<Verified>) -> FcpResult<usize>;
+    async fn poll_now(&self, target: &str, token: &CapabilityToken<CryptographicallyVerified>) -> FcpResult<usize>;
 
     /// Get event stream.
     fn events(&self) -> EventStream;
@@ -229,12 +229,12 @@ pub trait Polling: FcpConnector {
 pub trait Webhook: FcpConnector {
     /// Register a webhook handler.
     ///
-    /// Requires a `CapabilityToken<Verified>` — the caller must verify the
+    /// Requires a `CapabilityToken<CryptographicallyVerified>` — the caller must verify the
     /// token via [`CapabilityVerifier::verify()`] before calling this method.
     async fn register_handler(
         &self,
         source: &str,
-        token: &CapabilityToken<Verified>,
+        token: &CapabilityToken<CryptographicallyVerified>,
     ) -> FcpResult<()>;
 
     /// Get the webhook URL.

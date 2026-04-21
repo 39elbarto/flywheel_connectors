@@ -2261,7 +2261,7 @@ pub enum PolicySimulationError {
 /// extract principal and capability metadata for the dry-run decision —
 /// no authorization is granted based on these claims.  Real enforcement
 /// uses [`CapabilityVerifier::verify()`] which returns
-/// `CapabilityToken<Verified>`.
+/// `CapabilityToken<CryptographicallyVerified>`.
 ///
 /// # Errors
 /// Returns [`PolicySimulationError`] if required inputs are missing or invalid.

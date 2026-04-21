@@ -896,25 +896,25 @@ pub struct RoleAssignment {
 /// A `CapabilityToken<Unverified>` can be created by deserialization or
 /// construction, but it carries NO proof that its signature, claims, or
 /// zone binding are valid. Code that requires authorization evidence must
-/// accept `CapabilityToken<Verified>` instead.
+/// accept `CapabilityToken<CryptographicallyVerified>` instead.
 #[derive(Debug, Clone, Copy)]
 pub struct Unverified;
 
 /// Marker type: token has been cryptographically verified by a
 /// [`CapabilityVerifier`].
 ///
-/// A `CapabilityToken<Verified>` can only be produced by
+/// A `CapabilityToken<CryptographicallyVerified>` can only be produced by
 /// [`CapabilityVerifier::verify()`], which validates the COSE signature,
 /// timing, zone binding, operation grant, and resource constraints.
 /// The verified claims are accessible via [`CapabilityToken::claims()`].
 #[derive(Debug, Clone, Copy)]
-pub struct Verified;
+pub struct CryptographicallyVerified;
 
 /// Convenience alias for an unverified capability token.
 pub type UnverifiedToken = CapabilityToken<Unverified>;
 
 /// Convenience alias for a verified capability token.
-pub type VerifiedToken = CapabilityToken<Verified>;
+pub type VerifiedToken = CapabilityToken<CryptographicallyVerified>;
 
 /// Flywheel Capability Token (FCT) - cryptographically signed authorization.
 ///
@@ -923,7 +923,7 @@ pub type VerifiedToken = CapabilityToken<Verified>;
 ///
 /// - `CapabilityToken<Unverified>` (the default): deserialized but not yet
 ///   verified. Cannot access claims.
-/// - `CapabilityToken<Verified>`: produced only by [`CapabilityVerifier::verify()`].
+/// - `CapabilityToken<CryptographicallyVerified>`: produced only by [`CapabilityVerifier::verify()`].
 ///   Carries the verified [`CwtClaims`] accessible via [`claims()`](CapabilityToken::claims).
 ///
 /// This type-level distinction prevents accidentally using an unverified token
@@ -932,7 +932,7 @@ pub type VerifiedToken = CapabilityToken<Verified>;
 pub struct CapabilityToken<S = Unverified> {
     /// The raw `COSE_Sign1` token
     raw: CoseToken,
-    /// Verified claims — populated only in `Verified` state.
+    /// CryptographicallyVerified claims — populated only in `CryptographicallyVerified` state.
     verified_claims: Option<CwtClaims>,
     /// Phantom data for compile-time state tracking.
     _state: std::marker::PhantomData<S>,
@@ -954,7 +954,7 @@ impl<S> CapabilityToken<S> {
 }
 
 // Methods available only on VERIFIED tokens
-impl CapabilityToken<Verified> {
+impl CapabilityToken<CryptographicallyVerified> {
     /// Access the cryptographically verified claims.
     ///
     /// These claims have been validated for signature, timing, zone binding,
@@ -964,13 +964,13 @@ impl CapabilityToken<Verified> {
     ///
     /// Panics if the token was constructed without verified claims. This
     /// cannot happen through the public API since only `CapabilityVerifier::verify`
-    /// produces `CapabilityToken<Verified>`.
+    /// produces `CapabilityToken<CryptographicallyVerified>`.
     #[must_use]
     #[allow(clippy::missing_const_for_fn)] // Cannot be const: calls Option::as_ref + expect
     pub fn claims(&self) -> &CwtClaims {
         self.verified_claims
             .as_ref()
-            .expect("Verified token always has claims")
+            .expect("CryptographicallyVerified token always has claims")
     }
 
     /// Downgrade a verified token back to unverified.
@@ -1000,7 +1000,7 @@ impl Serialize for CapabilityToken<Unverified> {
     }
 }
 
-impl Serialize for CapabilityToken<Verified> {
+impl Serialize for CapabilityToken<CryptographicallyVerified> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -1089,7 +1089,7 @@ impl CapabilityToken<Unverified> {
     ///
     /// This token has a valid signature from a throwaway key and should
     /// only be used in tests. It is **unverified** — call
-    /// `CapabilityVerifier::verify()` to produce a `CapabilityToken<Verified>`.
+    /// `CapabilityVerifier::verify()` to produce a `CapabilityToken<CryptographicallyVerified>`.
     ///
     /// # Panics
     ///
@@ -1437,13 +1437,13 @@ impl CapabilityVerifier {
         })
     }
 
-    /// Verify a capability token, producing a `CapabilityToken<Verified>`.
+    /// Verify a capability token, producing a `CapabilityToken<CryptographicallyVerified>`.
     ///
     /// This is a **consuming** method — the unverified token is moved into
     /// the verified token and can no longer be used. This prevents
     /// use-before-verify and double-verify patterns.
     ///
-    /// This is the ONLY way to obtain a `CapabilityToken<Verified>`.
+    /// This is the ONLY way to obtain a `CapabilityToken<CryptographicallyVerified>`.
     ///
     /// # Errors
     ///
@@ -1455,7 +1455,7 @@ impl CapabilityVerifier {
         required_capability: &CapabilityId,
         operation: &OperationId,
         resource_uris: &[String],
-    ) -> FcpResult<CapabilityToken<Verified>> {
+    ) -> FcpResult<CapabilityToken<CryptographicallyVerified>> {
         let claims =
             self.verify_claims_inner(&token, required_capability, operation, resource_uris)?;
 
@@ -1469,7 +1469,7 @@ impl CapabilityVerifier {
     /// Verify a capability token by reference, returning just the claims.
     ///
     /// This is the non-consuming variant — it validates the token and returns
-    /// the verified claims without producing a `CapabilityToken<Verified>`.
+    /// the verified claims without producing a `CapabilityToken<CryptographicallyVerified>`.
     /// Prefer [`verify()`](Self::verify) when you need compile-time proof
     /// that the token has been verified.
     ///
@@ -4558,11 +4558,11 @@ mod tests {
         let op = OperationId::new("op.test").unwrap();
         let cap = CapabilityId::new("cap.test").unwrap();
 
-        // verify() consumes the Unverified token and produces Verified
-        let result: CapabilityToken<Verified> =
+        // verify() consumes the Unverified token and produces CryptographicallyVerified
+        let result: CapabilityToken<CryptographicallyVerified> =
             verifier.verify(unverified, &cap, &op, &[]).unwrap();
 
-        // Verified token has claims
+        // CryptographicallyVerified token has claims
         assert!(result.claims().get_capability_id().is_some());
     }
 
@@ -4620,7 +4620,7 @@ mod tests {
         let op = OperationId::new("op.raw").unwrap();
         let cap = CapabilityId::new("cap.raw").unwrap();
 
-        // raw() also works on Verified (verify consumes the unverified token)
+        // raw() also works on CryptographicallyVerified (verify consumes the unverified token)
         let result = verifier.verify(unverified, &cap, &op, &[]).unwrap();
         let _raw_verified = result.raw().to_cbor().unwrap();
     }
@@ -4718,7 +4718,7 @@ mod tests {
 
         let result = verifier.verify(token, &cap, &op, &[]).unwrap();
 
-        // Clone a verified token - clone preserves Verified state
+        // Clone a verified token - clone preserves CryptographicallyVerified state
         let cloned = result;
         assert_eq!(cloned.claims().get_capability_id(), Some("cap.clone"));
     }
@@ -4781,7 +4781,7 @@ mod tests {
         let result = verifier.verify(token, &cap, &op, &[]).unwrap();
 
         // `token` cannot be used after this point (compiler enforces)
-        // Verified token works:
+        // CryptographicallyVerified token works:
         assert_eq!(result.claims().get_capability_id(), Some("cap.consume"));
     }
 
@@ -4848,7 +4848,7 @@ mod tests {
         let result = verifier.verify(token, &cap, &op, &[]).unwrap();
         let bytes = result.raw().to_cbor().unwrap();
 
-        // Deserialize produces Unverified, not Verified
+        // Deserialize produces Unverified, not CryptographicallyVerified
         let raw = CoseToken::from_cbor(&bytes).unwrap();
         let deserialized: CapabilityToken<Unverified> = CapabilityToken::from_raw(raw);
 
@@ -4947,7 +4947,7 @@ mod tests {
     #[test]
     fn phantom_type_verified_has_zero_runtime_overhead() {
         // PhantomData<S> is zero-sized — verify this at compile time.
-        assert_eq!(std::mem::size_of::<std::marker::PhantomData<Verified>>(), 0);
+        assert_eq!(std::mem::size_of::<std::marker::PhantomData<CryptographicallyVerified>>(), 0);
         assert_eq!(
             std::mem::size_of::<std::marker::PhantomData<Unverified>>(),
             0

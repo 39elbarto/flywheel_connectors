@@ -3623,4 +3623,155 @@ mod tests {
         flags.toggle(FrameFlags::ENCRYPTED);
         assert!(flags.contains(FrameFlags::ENCRYPTED));
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Cross-message transcript domain-separation invariants
+    //
+    // Each signed control-plane message embeds a unique domain-separator
+    // prefix ("FCP2-SYMBOL-ACK-V2", "FCP2-SYMBOL-REQ-V1",
+    // "FCP2-DECODE-STATUS-V2") in its transcript. That prefix is what
+    // prevents a signature produced for message type A from being replayed
+    // as a valid signature for message type B when all other fields happen
+    // to line up. These tests lock that invariant in so a refactor that
+    // drops or homogenizes the prefix will fail here before shipping.
+    // ─────────────────────────────────────────────────────────────────────────
+    #[test]
+    fn symbol_ack_signature_does_not_verify_as_decode_status() {
+        let signing_key = Ed25519SigningKey::generate();
+        let zone_id: ZoneId = "z:cross".parse().expect("zone parse");
+        let object_id = ObjectId::from_bytes([0x55; 32]);
+        let zone_key_id = ZoneKeyId::from_bytes([0x66; 8]);
+        let epoch_id: u64 = 4242;
+        let recipient = TailscaleNodeId::new("node-recipient");
+        let request_nonce: u64 = 7;
+
+        let mut ack = SymbolAck::new(
+            make_test_object_header(),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            epoch_id,
+            recipient.clone(),
+            request_nonce,
+            SymbolAckReason::Complete,
+            100,
+        );
+        ack.sign(&signing_key);
+
+        // Construct a DecodeStatus that shares every field covered by
+        // SymbolAck's transcript. If the two transcripts did not carry
+        // distinct domain separators, this signature would verify here —
+        // enabling cross-message-type signature replay.
+        let status = DecodeStatus {
+            header: make_test_object_header(),
+            object_id,
+            zone_id,
+            zone_key_id,
+            epoch_id,
+            recipient_node_id: recipient,
+            request_nonce,
+            received_unique: 0,
+            needed: 0,
+            complete: false,
+            missing_hint: None,
+            signature: ack.signature,
+        };
+
+        assert!(
+            status.verify(&signing_key.verifying_key()).is_err(),
+            "SymbolAck signature must not verify as a DecodeStatus — \
+             domain-separation invariant broken"
+        );
+    }
+
+    #[test]
+    fn symbol_request_signature_does_not_verify_as_decode_status() {
+        let signing_key = Ed25519SigningKey::generate();
+        let zone_id: ZoneId = "z:cross-req".parse().expect("zone parse");
+        let object_id = ObjectId::from_bytes([0x77; 32]);
+        let zone_key_id = ZoneKeyId::from_bytes([0x88; 8]);
+        let epoch_id: u64 = 9999;
+
+        let mut request = SymbolRequest::new(
+            make_test_object_header(),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            epoch_id,
+            1000,
+            0,
+        );
+        request.sign(&signing_key);
+
+        // DecodeStatus and SymbolRequest share object_id / zone / epoch /
+        // zone_key_id in their transcripts. The domain separator is the
+        // only structural difference preventing replay across message
+        // types that happen to use the same signing key.
+        let status = DecodeStatus {
+            header: make_test_object_header(),
+            object_id,
+            zone_id,
+            zone_key_id,
+            epoch_id,
+            recipient_node_id: TailscaleNodeId::new("node-r"),
+            request_nonce: 0,
+            received_unique: 0,
+            needed: 0,
+            complete: false,
+            missing_hint: None,
+            signature: request.signature,
+        };
+
+        assert!(
+            status.verify(&signing_key.verifying_key()).is_err(),
+            "SymbolRequest signature must not verify as a DecodeStatus — \
+             domain-separation invariant broken"
+        );
+    }
+
+    #[test]
+    fn decode_status_signature_does_not_verify_as_symbol_ack() {
+        let signing_key = Ed25519SigningKey::generate();
+        let zone_id: ZoneId = "z:cross-back".parse().expect("zone parse");
+        let object_id = ObjectId::from_bytes([0x99; 32]);
+        let zone_key_id = ZoneKeyId::from_bytes([0xAA; 8]);
+        let epoch_id: u64 = 555;
+        let recipient = TailscaleNodeId::new("node-b");
+        let request_nonce: u64 = 13;
+
+        let mut status = DecodeStatus {
+            header: make_test_object_header(),
+            object_id,
+            zone_id: zone_id.clone(),
+            zone_key_id,
+            epoch_id,
+            recipient_node_id: recipient.clone(),
+            request_nonce,
+            received_unique: 0,
+            needed: 0,
+            complete: false,
+            missing_hint: None,
+            signature: Ed25519Signature::from_bytes(&[0u8; 64]),
+        };
+        status.sign(&signing_key);
+
+        let ack = SymbolAck {
+            header: make_test_object_header(),
+            object_id,
+            zone_id,
+            zone_key_id,
+            epoch_id,
+            recipient_node_id: recipient,
+            request_nonce,
+            reason: SymbolAckReason::Complete,
+            final_symbol_count: 0,
+            signature: status.signature,
+        };
+
+        assert!(
+            ack.verify(&signing_key.verifying_key()).is_err(),
+            "DecodeStatus signature must not verify as a SymbolAck — \
+             domain-separation invariant broken"
+        );
+    }
 }

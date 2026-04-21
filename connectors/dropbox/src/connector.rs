@@ -74,12 +74,14 @@ impl DropboxConfig {
             .and_then(serde_json::Value::as_str)
             .unwrap_or(DEFAULT_BASE_URL)
             .to_string();
+        reject_base_url_qfu("base_url", &base_url)?;
 
         let content_url = params
             .get("content_url")
             .and_then(serde_json::Value::as_str)
             .unwrap_or(DEFAULT_CONTENT_URL)
             .to_string();
+        reject_base_url_qfu("content_url", &content_url)?;
 
         Ok(Self {
             auth,
@@ -577,6 +579,37 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
         )
         .depends_on(StepId::new("oauth_authorize")),
     )
+}
+
+/// Reject base_url / content_url overrides with userinfo, query, or
+/// fragment. The DropboxClient concatenates base_url via
+/// format!("{}{endpoint}", self.base_url) (client.rs:191) and similarly
+/// uses content_url for content endpoints. Without this check, a
+/// base_url like `https://api.dropboxapi.com/2?leak=x` would leak
+/// attacker-chosen query values on every request and put the endpoint
+/// path after the `?` boundary. Userinfo
+/// (`https://attacker:pw@api.dropboxapi.com/2`) would bake into every
+/// request URL and silently override the OAuth Authorization header.
+/// Matches the hygiene in airtable / asana / gmail / notion / hubspot
+/// / whatsapp / linear / clickup / monday / bitbucket / intercom.
+fn reject_base_url_qfu(field: &str, url: &str) -> FcpResult<()> {
+    let parsed = Url::parse(url).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} could not be parsed: {error}"),
+    })?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must not include userinfo"),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must not include a query string or fragment"),
+        });
+    }
+    Ok(())
 }
 
 fn base_url_policy(base_url: &str) -> (bool, String) {
@@ -1875,5 +1908,83 @@ mod tests {
     fn is_local_test_host_rejects_external() {
         assert!(!is_local_test_host("api.dropboxapi.com"));
         assert!(!is_local_test_host("example.com"));
+    }
+
+    #[test]
+    fn from_params_accepts_clean_urls() {
+        let config = DropboxConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://api.dropboxapi.com/2",
+            "content_url": "https://content.dropboxapi.com/2",
+        }))
+        .unwrap();
+        assert_eq!(config.base_url, "https://api.dropboxapi.com/2");
+        assert_eq!(config.content_url, "https://content.dropboxapi.com/2");
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_query_string() {
+        let err = DropboxConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://api.dropboxapi.com/2?leak=x",
+        }))
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("base_url"), "got: {message}");
+                assert!(message.contains("query"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_fragment() {
+        let err = DropboxConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://api.dropboxapi.com/2#frag",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_userinfo() {
+        let err = DropboxConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://attacker:pw@api.dropboxapi.com/2",
+        }))
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("userinfo"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_params_rejects_content_url_query_string() {
+        let err = DropboxConfig::from_params(&json!({
+            "access_token": "tok",
+            "content_url": "https://content.dropboxapi.com/2?leak=x",
+        }))
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("content_url"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_params_rejects_content_url_userinfo() {
+        let err = DropboxConfig::from_params(&json!({
+            "access_token": "tok",
+            "content_url": "https://attacker:pw@content.dropboxapi.com/2",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 }

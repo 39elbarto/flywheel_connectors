@@ -1336,9 +1336,7 @@ impl DiscordConnector {
             })?;
 
         let content = input.get("content").and_then(|v| v.as_str());
-        let embeds: Option<Vec<Embed>> = input
-            .get("embeds")
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let embeds: Option<Vec<Embed>> = parse_embeds(&input)?;
         let reply_to = input.get("reply_to").and_then(|v| v.as_str());
 
         // Validate that at least content or embeds is provided
@@ -1446,9 +1444,7 @@ impl DiscordConnector {
             })?;
 
         let content = input.get("content").and_then(|v| v.as_str());
-        let embeds: Option<Vec<Embed>> = input
-            .get("embeds")
-            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let embeds: Option<Vec<Embed>> = parse_embeds(&input)?;
 
         // Validate embed limits
         if let Some(ref embeds) = embeds {
@@ -1966,6 +1962,38 @@ impl Default for DiscordConnector {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Decode `input["embeds"]` into `Option<Vec<Embed>>`, treating a decode
+/// error as a typed `InvalidRequest` rather than silently dropping the
+/// payload as `None`.
+///
+/// Absent, `null`, or an empty array → `Ok(None)` / `Ok(Some(vec![]))` so
+/// callers keep their existing "no embeds" path. A structurally
+/// well-formed value that fails `Embed` deserialization (unexpected
+/// field types, malformed color integer, etc.) now surfaces as
+/// `InvalidRequest { code: 1003 }` naming the offending position — see
+/// flywheel_connectors-cmkuk. Previously the `.and_then(|v| …ok())`
+/// shape dropped the serde error on the floor, so invalid embeds either
+/// tripped the generic "content or embeds required" fallback on send,
+/// or were accepted by edit_message as if they had never been supplied.
+fn parse_embeds(input: &serde_json::Value) -> FcpResult<Option<Vec<Embed>>> {
+    let Some(raw) = input.get("embeds") else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value::<Vec<Embed>>(raw.clone())
+        .map(Some)
+        .map_err(|error| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "`embeds` payload is malformed: {error}. Discord embeds must \
+                 be an array of objects matching the Embed schema; see \
+                 introspect() for the exact shape."
+            ),
+        })
 }
 
 fn missing_required_intents(intents: u64) -> Vec<&'static str> {

@@ -494,6 +494,93 @@ async fn send_message_missing_content_and_embeds() {
     assert!(result.is_err(), "should reject empty message");
 }
 
+/// Regression (flywheel_connectors-cmkuk): a malformed `embeds` payload
+/// (wrong JSON shape — string instead of array, or wrong field types)
+/// must surface as `FcpError::InvalidRequest` that explicitly names the
+/// `embeds` field, not be silently discarded. Prior to the fix, the
+/// connector parsed with `serde_json::from_value(...).ok()` and treated
+/// the decode error as `None`, which on send_message fell through to
+/// the generic "content or embeds required" branch and on edit_message
+/// proceeded as if no embeds had been supplied at all.
+#[fcp_async_core::runtime::test]
+async fn send_message_malformed_embeds_returns_typed_error() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.send"]).await;
+
+    let token = generate_valid_token(&signing_key, "discord.send_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "111",
+                "content": "Hello",
+                // Wrong shape: string where an array-of-objects is expected.
+                "embeds": "not-an-array"
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    let err = result.expect_err("malformed embeds must be rejected, not silently dropped");
+    match err {
+        fcp_core::FcpError::InvalidRequest { code, message } => {
+            assert_eq!(code, 1003, "expected InvalidRequest code 1003");
+            assert!(
+                message.contains("embeds"),
+                "error must name the `embeds` field for agent debuggability, \
+                 got: {message}"
+            );
+            assert!(
+                message.contains("malformed"),
+                "error must explicitly mark the payload as malformed so it \
+                 cannot be mistaken for the `content or embeds required` \
+                 fallback branch, got: {message}"
+            );
+        }
+        other => panic!("Expected InvalidRequest for malformed embeds, got: {other:?}"),
+    }
+}
+
+/// Regression (flywheel_connectors-cmkuk): edit_message must also reject
+/// malformed embeds with a typed error. This is the more dangerous
+/// branch — previously a bad embeds payload bypassed validation
+/// entirely and the edit proceeded as though no embeds had been
+/// supplied, so agents could unknowingly clobber valid embed state.
+#[fcp_async_core::runtime::test]
+async fn edit_message_malformed_embeds_returns_typed_error() {
+    let mock_server = MockServer::start().await;
+    let mut connector = DiscordConnector::new();
+    let signing_key = setup_full(&mut connector, &mock_server, &["discord.edit"]).await;
+
+    let token = generate_valid_token(&signing_key, "discord.edit_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.edit_message",
+            "input": {
+                "channel_id": "111",
+                "message_id": "100000000000000001",
+                // Array-of-primitives instead of array-of-objects:
+                // structurally valid JSON, but not a Vec<Embed>.
+                "embeds": [1, 2, 3]
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    let err = result.expect_err("malformed embeds must be rejected, not silently dropped");
+    match err {
+        fcp_core::FcpError::InvalidRequest { code, message } => {
+            assert_eq!(code, 1003, "expected InvalidRequest code 1003");
+            assert!(
+                message.contains("embeds") && message.contains("malformed"),
+                "error must explicitly flag malformed embeds, got: {message}"
+            );
+        }
+        other => panic!("Expected InvalidRequest for malformed embeds, got: {other:?}"),
+    }
+}
+
 // ============================================================================
 // Edit Message Tests
 // ============================================================================

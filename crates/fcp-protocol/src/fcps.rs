@@ -120,6 +120,9 @@ pub enum FrameError {
 
     #[error("source_id too long (len {len}, max {max})")]
     InvalidSourceIdLength { len: usize, max: usize },
+
+    #[error("source_id must not be empty")]
+    SourceIdEmpty,
 }
 
 /// Parsed FCPS frame header (114 bytes).
@@ -1001,6 +1004,13 @@ impl SignedFcpsFrame {
 
     fn validate_source_id(source_id: &TailscaleNodeId) -> Result<(), FrameError> {
         let source_id_len = source_id.as_str().len();
+        if source_id_len == 0 {
+            // Decode rejects source_id_len == 0 with FrameError::TooShort;
+            // mirror that here so new/encode and decode agree — otherwise a
+            // SignedFcpsFrame built from an empty source_id encodes
+            // successfully but never roundtrips.
+            return Err(FrameError::SourceIdEmpty);
+        }
         if source_id_len > usize::from(u16::MAX) {
             return Err(FrameError::InvalidSourceIdLength {
                 len: source_id_len,
@@ -1425,6 +1435,44 @@ mod tests {
             FrameError::InvalidSourceIdLength { len, max }
                 if len == usize::from(u16::MAX) + 1 && max == usize::from(u16::MAX)
         ));
+    }
+
+    #[test]
+    fn signed_frame_new_rejects_empty_source_id() {
+        let signing_key = Ed25519SigningKey::generate();
+        let header = test_header();
+        let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
+        let frame = FcpsFrame { header, symbols };
+
+        let err = SignedFcpsFrame::new(frame, TailscaleNodeId::new(""), 1_704_067_200, &signing_key)
+            .expect_err("empty source_id must be rejected at new()");
+        assert!(
+            matches!(err, FrameError::SourceIdEmpty),
+            "expected SourceIdEmpty, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn signed_frame_encode_rejects_mutated_empty_source_id() {
+        let signing_key = Ed25519SigningKey::generate();
+        let header = test_header();
+        let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
+        let frame = FcpsFrame { header, symbols };
+        let mut signed = SignedFcpsFrame::new(
+            frame,
+            TailscaleNodeId::new("node-x"),
+            1_704_067_200,
+            &signing_key,
+        )
+        .expect("sign");
+
+        // Simulate a mutated struct that bypassed new()'s validator; encode
+        // and verify must both fail — not silently produce a frame that
+        // subsequently fails to decode on the wire.
+        signed.source_id = TailscaleNodeId::new("");
+
+        let err = signed.encode().expect_err("mutated empty source_id must fail to encode");
+        assert!(matches!(err, FrameError::SourceIdEmpty), "got {err:?}");
     }
 
     #[test]

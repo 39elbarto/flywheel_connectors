@@ -28,7 +28,10 @@
 //! so no scrubbing is needed — the fixtures use fixed anchor
 //! timestamps (`1_700_000_000` = `2023-11-14T22:13:20Z`).
 
-use fcp_audit::{AuditEntryBuilder, ChainHead, Decision, DecisionReceipt, Severity, TraceContext};
+use fcp_audit::{
+    AuditEntryBuilder, ChainHead, Decision, DecisionReceipt, HeadSignature, Severity,
+    TraceContext,
+};
 use serde_json::json;
 
 const ANCHOR_TS: u64 = 1_700_000_000;
@@ -185,6 +188,9 @@ fn snapshot_decision_receipt_minimal_deny() {
 fn snapshot_chain_head() {
     // Chain checkpoint with partial quorum coverage. Exercises
     // the `f64` serialization shape and the u32 signature count.
+    // `signatures` is empty here — the wire skips the field so
+    // legacy unsigned heads remain decodable and the snapshot
+    // remains byte-stable vs the pre-signatures release.
     let head = ChainHead {
         zone_id: "z:work".to_string(),
         head_entry: "entry-cafe-1234".to_string(),
@@ -192,6 +198,7 @@ fn snapshot_chain_head() {
         coverage: 0.875,
         epoch_id: "epoch-2026-04-20".to_string(),
         signature_count: 7,
+        signatures: vec![],
     };
 
     insta::assert_json_snapshot!("chain_head_partial_quorum", head);
@@ -208,9 +215,37 @@ fn snapshot_chain_head_full_quorum() {
         coverage: 1.0,
         epoch_id: "epoch-stable".to_string(),
         signature_count: u32::from(u16::MAX),
+        signatures: vec![],
     };
 
     insta::assert_json_snapshot!("chain_head_full_quorum", head);
+}
+
+#[test]
+fn snapshot_chain_head_with_signatures() {
+    // Exercises the HeadSignature wire shape: hex-encoded 64-byte
+    // opaque bytes plus `issuer_kid` string. Count MUST equal
+    // signatures.len() or verify_chain will flag as inconsistent.
+    let head = ChainHead {
+        zone_id: "z:work".to_string(),
+        head_entry: "entry-signed-0001".to_string(),
+        head_seq: 42,
+        coverage: 1.0,
+        epoch_id: "epoch-signed".to_string(),
+        signature_count: 2,
+        signatures: vec![
+            HeadSignature {
+                issuer_kid: "kid:alpha".to_string(),
+                signature: vec![0xAA; 64],
+            },
+            HeadSignature {
+                issuer_kid: "kid:beta".to_string(),
+                signature: vec![0xBB; 64],
+            },
+        ],
+    };
+
+    insta::assert_json_snapshot!("chain_head_with_signatures", head);
 }
 
 #[test]

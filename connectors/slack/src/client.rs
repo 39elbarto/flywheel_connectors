@@ -159,7 +159,7 @@ impl SlackClient {
         let api_resp: SlackApiResponse<AuthTestData> = resp.json().map_err(SlackError::Json)?;
         Self::check_response(&api_resp)?;
 
-        let data = api_resp.data.expect("ok response has data");
+        let data = Self::expect_data(api_resp.data, "auth.test")?;
         let info = AuthTestInfo {
             url: data.url,
             team: data.team,
@@ -206,7 +206,7 @@ impl SlackClient {
         let resp: SlackApiResponse<PostMessageData> =
             self.post_json("chat.postMessage", &body).await?;
         Self::check_response(&resp)?;
-        Ok(resp.data.expect("ok response has data").message)
+        Ok(Self::expect_data(resp.data, "chat.postMessage")?.message)
     }
 
     /// Get channel conversation history.
@@ -225,7 +225,7 @@ impl SlackClient {
             .get_with_params("conversations.history", &params)
             .await?;
         Self::check_response(&resp)?;
-        Ok(resp.data.expect("ok response has data").messages)
+        Ok(Self::expect_data(resp.data, "conversations.history")?.messages)
     }
 
     /// Search messages across the workspace.
@@ -235,7 +235,7 @@ impl SlackClient {
         let resp: SlackApiResponse<SearchData> =
             self.get_with_params("search.messages", &params).await?;
         Self::check_response(&resp)?;
-        Ok(resp.data.expect("ok response has data"))
+        Self::expect_data(resp.data, "search.messages")
     }
 
     // ── Channel operations ───────────────────────────────────────
@@ -254,7 +254,7 @@ impl SlackClient {
         let resp: SlackApiResponse<ChannelListData> =
             self.get_with_params("conversations.list", &params).await?;
         Self::check_response(&resp)?;
-        Ok(resp.data.expect("ok response has data").channels)
+        Ok(Self::expect_data(resp.data, "conversations.list")?.channels)
     }
 
     /// Set the topic for a channel.
@@ -267,7 +267,7 @@ impl SlackClient {
         let resp: SlackApiResponse<TopicSetData> =
             self.post_json("conversations.setTopic", &body).await?;
         Self::check_response(&resp)?;
-        Ok(resp.data.expect("ok response has data").topic)
+        Ok(Self::expect_data(resp.data, "conversations.setTopic")?.topic)
     }
 
     // ── User operations ──────────────────────────────────────────
@@ -279,7 +279,7 @@ impl SlackClient {
         let resp: SlackApiResponse<UserInfoData> =
             self.get_with_params("users.info", &params).await?;
         Self::check_response(&resp)?;
-        Ok(resp.data.expect("ok response has data").user)
+        Ok(Self::expect_data(resp.data, "users.info")?.user)
     }
 
     // ── File operations ──────────────────────────────────────────
@@ -299,7 +299,7 @@ impl SlackClient {
         });
         let resp: SlackApiResponse<FileUploadData> = self.post_json("files.upload", &body).await?;
         Self::check_response(&resp)?;
-        Ok(resp.data.expect("ok response has data").file)
+        Ok(Self::expect_data(resp.data, "files.upload")?.file)
     }
 
     /// Download a file by ID (returns the file info with download URL).
@@ -309,7 +309,7 @@ impl SlackClient {
         let resp: SlackApiResponse<FileUploadData> =
             self.get_with_params("files.info", &params).await?;
         Self::check_response(&resp)?;
-        Ok(resp.data.expect("ok response has data").file)
+        Ok(Self::expect_data(resp.data, "files.info")?.file)
     }
 
     // ── Reaction operations ──────────────────────────────────────
@@ -456,6 +456,33 @@ impl SlackClient {
                 ok: false,
             })
         }
+    }
+
+    /// Extract the flattened payload from a `SlackApiResponse` already
+    /// verified to carry `ok:true`.
+    ///
+    /// `SlackApiResponse<T>` stores the flattened payload as `Option<T>`
+    /// because serde's `#[serde(flatten)]` on an optional inner struct
+    /// cannot distinguish "field absent" from "field present but empty".
+    /// A malformed Slack response that returns `{"ok":true}` with no
+    /// channel/message/file body therefore deserializes into
+    /// `Some(ok=true)` with `data == None`. Previously the client called
+    /// `.expect("ok response has data")` on each path, turning a
+    /// partial-envelope response into a process panic. This helper
+    /// maps the `None` case to a terminal `SlackError::Api` instead so
+    /// the connector surfaces it as a normal FCP External error.
+    /// See flywheel_connectors-g37n0.
+    fn expect_data<T>(
+        data: Option<T>,
+        method: &'static str,
+    ) -> SlackResult<T> {
+        data.ok_or_else(|| SlackError::Api {
+            error: format!(
+                "Slack API method `{method}` returned ok=true with no payload"
+            ),
+            code: None,
+            ok: true,
+        })
     }
 
     async fn send_request(

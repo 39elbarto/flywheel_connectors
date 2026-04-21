@@ -2176,3 +2176,73 @@ async fn validate_upload_file_missing_channels() {
         e => panic!("Expected InvalidRequest about channels, got: {e:?}"),
     }
 }
+
+// ============================================================================
+// Regression: ok=true envelope with missing payload returns a terminal
+// `SlackError::Api` instead of panicking. See flywheel_connectors-g37n0.
+// ============================================================================
+
+/// A partial success envelope (`{"ok": true}` with no `message`/`channel`/…)
+/// must surface as a recoverable `SlackError::Api { ok: true, .. }` mapped
+/// through to `FcpError::External`, not a process abort.
+#[fcp_async_core::runtime::test]
+async fn ok_true_with_missing_payload_is_mapped_to_api_error_not_panic() {
+    let _ctx = AsyncTestContext::for_scenario("slack.ok_true_missing_payload");
+    let mock_server = MockServer::start().await;
+
+    // Server claims success but returns no `message` / `channel` /
+    // `ts` fields. Previously the client called
+    // `.expect("ok response has data")` on the flattened payload and
+    // panicked; after the fix we expect a terminal SlackError::Api.
+    Mock::given(method("POST"))
+        .and(path("/chat.postMessage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = SlackClient::new("xoxb-token")
+        .unwrap()
+        .with_base_url(mock_server.uri())
+        .with_retry_config(0, 10, 100);
+
+    let result = client.post_message("C01234567", "hello", None).await;
+    let err = result.expect_err("ok=true without payload must not succeed");
+
+    match &err {
+        fcp_slack::error::SlackError::Api {
+            error,
+            ok,
+            code: _,
+        } => {
+            assert!(
+                *ok,
+                "error must mark ok=true so callers can distinguish partial \
+                 success envelope from classic ok=false api errors"
+            );
+            assert!(
+                error.contains("chat.postMessage"),
+                "error message must name the Slack method for debuggability, \
+                 got: {error}"
+            );
+            assert!(
+                error.contains("ok=true"),
+                "error message must explicitly mention ok=true so operators \
+                 can grep for partial-envelope incidents, got: {error}"
+            );
+        }
+        other => panic!(
+            "Expected SlackError::Api for ok=true with missing payload, \
+             got: {other:?}"
+        ),
+    }
+
+    // Also confirm the SDK error mapping preserves the context.
+    let fcp_err = err.to_fcp_error();
+    assert!(
+        matches!(fcp_err, fcp_core::FcpError::External { .. }),
+        "ok=true partial envelope should map to External (non-panicking) \
+         FcpError, got: {fcp_err:?}"
+    );
+}

@@ -1653,6 +1653,28 @@ impl CapabilityVerifier {
     ) -> FcpResult<()> {
         // Check allow list
         if !constraints.resource_allow.is_empty() {
+            // Defense-in-depth: if the token declares specific
+            // (non-wildcard) resource patterns but the caller passed no
+            // resource URIs, the subsequent `for uri in resource_uris`
+            // loop iterates zero times and the allow-list silently
+            // passes — a resource-scoped token ends up usable for
+            // arbitrary resources. All ~76 connector call sites
+            // currently invoke `verifier.verify(.., &[])` regardless of
+            // whether the operation targets a specific resource, so a
+            // host that issues `resource_allow = ["notion://page/123"]`
+            // cannot rely on the scope being enforced downstream. A
+            // pure wildcard (`"*"`) is treated as "unrestricted" and is
+            // exempt from this check so existing fixtures that use
+            // `resource_allow: vec!["*".into()]` continue to work.
+            let has_non_wildcard = constraints
+                .resource_allow
+                .iter()
+                .any(|pattern| pattern != "*");
+            if has_non_wildcard && resource_uris.is_empty() {
+                return Err(FcpError::ResourceNotAllowed {
+                    resource: "<none>: token declares non-wildcard resource_allow but caller provided no resource URIs".into(),
+                });
+            }
             for uri in resource_uris {
                 let is_allowed = constraints
                     .resource_allow
@@ -2057,6 +2079,17 @@ mod tests {
         buf
     }
 
+    /// Helper: CBOR constraints with a specific (non-wildcard) resource pattern.
+    fn test_constraints_cbor_with_resource_allow(patterns: Vec<String>) -> Vec<u8> {
+        let constraints = CapabilityConstraints {
+            resource_allow: patterns,
+            ..Default::default()
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&constraints, &mut buf).unwrap();
+        buf
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Canonical ID Validation Tests (FCP Spec §3.4.2)
     // ─────────────────────────────────────────────────────────────────────────
@@ -2117,6 +2150,111 @@ mod tests {
             .expect("Verification failed");
 
         assert_eq!(result.claims().get_capability_id(), Some("cap.test"));
+    }
+
+    #[test]
+    fn verify_rejects_non_wildcard_resource_allow_with_empty_uris() {
+        // Defense-in-depth regression: a token with a specific
+        // resource_allow pattern must not silently pass when the caller
+        // provides no resource URIs. Historically the allow-list loop
+        // iterated zero times, so a scoped token was usable for arbitrary
+        // resources — the ~76 `verifier.verify(.., &[])` call sites in
+        // the connector tree would all benefit from this guard.
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let pub_bytes = verifying_key.to_bytes();
+
+        let now = Utc::now();
+        let cose_token = CapabilityTokenBuilder::new()
+            .capability_id("cap.test")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.test"])
+            .issuer("node:primary")
+            .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor_with_resource_allow(vec![
+                "notion://page/123".into(),
+            ]))
+            .sign(&signing_key)
+            .unwrap();
+        let token = CapabilityToken::from_raw(cose_token);
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+
+        let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
+        let result = verifier.verify(token, &cap, &op, &[]);
+        match result {
+            Err(FcpError::ResourceNotAllowed { resource }) => {
+                assert!(
+                    resource.contains("non-wildcard"),
+                    "expected error to mention non-wildcard intent, got: {resource}"
+                );
+            }
+            other => panic!(
+                "expected ResourceNotAllowed for non-wildcard+empty, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn verify_accepts_non_wildcard_resource_allow_with_matching_uri() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let pub_bytes = verifying_key.to_bytes();
+
+        let now = Utc::now();
+        let cose_token = CapabilityTokenBuilder::new()
+            .capability_id("cap.test")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.test"])
+            .issuer("node:primary")
+            .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor_with_resource_allow(vec![
+                "notion://page/*".into(),
+            ]))
+            .sign(&signing_key)
+            .unwrap();
+        let token = CapabilityToken::from_raw(cose_token);
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+
+        let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
+        verifier
+            .verify(token, &cap, &op, &["notion://page/123".into()])
+            .expect("matching resource URI should pass");
+    }
+
+    #[test]
+    fn verify_accepts_wildcard_resource_allow_with_empty_uris() {
+        // Backward-compatibility guard: the pure "*" wildcard is treated
+        // as "unrestricted" and does not trigger the non-wildcard check.
+        // Every existing connector integration test uses
+        // `resource_allow: vec!["*".into()]`; breaking those would force
+        // the entire connector tree to migrate URI plumbing in one shot.
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let pub_bytes = verifying_key.to_bytes();
+
+        let now = Utc::now();
+        let cose_token = CapabilityTokenBuilder::new()
+            .capability_id("cap.test")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.test"])
+            .issuer("node:primary")
+            .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
+            .sign(&signing_key)
+            .unwrap();
+        let token = CapabilityToken::from_raw(cose_token);
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+
+        let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
+        verifier
+            .verify(token, &cap, &op, &[])
+            .expect("pure wildcard resource_allow should still accept empty resource_uris");
     }
 
     #[test]

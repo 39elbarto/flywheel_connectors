@@ -515,34 +515,35 @@ impl Stream for SseStream {
             return Poll::Ready(Some(Ok(this.pending_events.remove(0))));
         }
 
-        // Poll for more data
-        match this.inner.as_mut().poll_next(cx) {
-            Poll::Ready(Some(Ok(data))) => {
-                // Check buffer size
-                let retained_bytes = this.parser.retained_bytes();
-                if retained_bytes.saturating_add(data.len()) > *this.max_buffer_size {
-                    return Poll::Ready(Some(Err(StreamError::BufferOverflow {
-                        size: retained_bytes.saturating_add(data.len()),
-                        limit: *this.max_buffer_size,
-                    })));
-                }
+        // Loop until we produce an event, hit a chunk-level error/EOF, or the
+        // inner stream actually parks us with a waker. Returning `Pending`
+        // after the inner stream returned `Ready` would strand the task,
+        // since `Ready` does not register a waker — a chunk that failed to
+        // close an event boundary (common with fragmented TCP segments or
+        // large multi-chunk events) would hang the consumer indefinitely.
+        loop {
+            match this.inner.as_mut().poll_next(cx) {
+                Poll::Ready(Some(Ok(data))) => {
+                    let retained_bytes = this.parser.retained_bytes();
+                    if retained_bytes.saturating_add(data.len()) > *this.max_buffer_size {
+                        return Poll::Ready(Some(Err(StreamError::BufferOverflow {
+                            size: retained_bytes.saturating_add(data.len()),
+                            limit: *this.max_buffer_size,
+                        })));
+                    }
 
-                // Parse events
-                let events = this.parser.parse(&data);
-                if events.is_empty() {
-                    // No complete events yet — data was consumed into the parser
-                    // buffer but no dispatch boundary found. Let the inner stream
-                    // wake us when more data arrives instead of spuriously re-polling.
-                    Poll::Pending
-                } else {
-                    // Store events and return the first one
-                    *this.pending_events = events;
-                    Poll::Ready(Some(Ok(this.pending_events.remove(0))))
+                    let events = this.parser.parse(&data);
+                    if !events.is_empty() {
+                        *this.pending_events = events;
+                        return Poll::Ready(Some(Ok(this.pending_events.remove(0))));
+                    }
+                    // No complete events yet; keep draining the inner stream
+                    // until it either yields more data or parks with a waker.
                 }
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
             }
-            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
         }
     }
 }

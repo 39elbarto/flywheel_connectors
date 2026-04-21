@@ -471,7 +471,20 @@ impl Default for ObjectAdmissionPolicy {
 
 /// Per-peer usage tracker.
 ///
-/// Tracks resource consumption per peer within a sliding time window.
+/// Tracks resource consumption per peer using a sliding-window counter
+/// with a weighted moving average over two adjacent windows. At any
+/// instant `t` within the current window, the "effective" usage is
+///
+/// ```text
+///   effective = prev_window * (WINDOW_MS - elapsed_in_current) / WINDOW_MS
+///             + current_window
+/// ```
+///
+/// so limits are enforced against a rolling 60-second window, not a
+/// fixed calendar window. This eliminates the window-boundary burst
+/// vulnerability where a peer could send up to 2× its per-minute
+/// budget by scheduling traffic at the tail of window N and the head
+/// of window N+1.
 #[derive(Debug, Clone)]
 pub struct PeerUsage {
     /// Bytes received in current window.
@@ -484,11 +497,24 @@ pub struct PeerUsage {
     pub inflight_decodes: u32,
     /// Decode CPU milliseconds in current window.
     pub decode_cpu_ms_in_window: u64,
-    /// Window start timestamp (ms since epoch).
+    /// Bytes received in the immediately-previous window (used for
+    /// sliding-window weighting).
+    pub prev_bytes_in_window: u64,
+    /// Symbols received in the immediately-previous window.
+    pub prev_symbols_in_window: u32,
+    /// Failed auth attempts in the immediately-previous window.
+    pub prev_failed_auth_in_window: u32,
+    /// Decode CPU milliseconds in the immediately-previous window.
+    pub prev_decode_cpu_ms_in_window: u64,
+    /// Current window start timestamp (ms since epoch). The previous
+    /// window occupies `[window_start_ms - WINDOW_MS, window_start_ms)`.
     pub window_start_ms: u64,
     /// Whether peer is currently authenticated.
     pub is_authenticated: bool,
 }
+
+/// Sliding-window duration (1 minute, matching per-minute budgets).
+const WINDOW_MS: u64 = 60_000;
 
 impl PeerUsage {
     /// Create a new usage tracker starting at the given timestamp.
@@ -500,27 +526,111 @@ impl PeerUsage {
             failed_auth_in_window: 0,
             inflight_decodes: 0,
             decode_cpu_ms_in_window: 0,
+            prev_bytes_in_window: 0,
+            prev_symbols_in_window: 0,
+            prev_failed_auth_in_window: 0,
+            prev_decode_cpu_ms_in_window: 0,
             window_start_ms: now_ms,
             is_authenticated: false,
         }
     }
 
-    /// Check if the window has expired and reset if needed.
+    /// Advance the sliding window if enough time has elapsed. Rolls
+    /// the current accumulators into `prev_*` when one window has
+    /// passed, or zeroes both halves if two or more windows have
+    /// passed (the previous window is then too old to contribute).
     const fn maybe_reset_window(&mut self, now_ms: u64) {
-        const WINDOW_MS: u64 = 60_000; // 1 minute window
-        if now_ms.saturating_sub(self.window_start_ms) >= WINDOW_MS {
+        let elapsed = now_ms.saturating_sub(self.window_start_ms);
+        if elapsed >= WINDOW_MS.saturating_mul(2) {
+            // Both the previous and current accumulators are stale.
             self.bytes_in_window = 0;
             self.symbols_in_window = 0;
             self.failed_auth_in_window = 0;
             self.decode_cpu_ms_in_window = 0;
+            self.prev_bytes_in_window = 0;
+            self.prev_symbols_in_window = 0;
+            self.prev_failed_auth_in_window = 0;
+            self.prev_decode_cpu_ms_in_window = 0;
             self.window_start_ms = now_ms;
+        } else if elapsed >= WINDOW_MS {
+            // Slide one window forward: current becomes previous.
+            self.prev_bytes_in_window = self.bytes_in_window;
+            self.prev_symbols_in_window = self.symbols_in_window;
+            self.prev_failed_auth_in_window = self.failed_auth_in_window;
+            self.prev_decode_cpu_ms_in_window = self.decode_cpu_ms_in_window;
+            self.bytes_in_window = 0;
+            self.symbols_in_window = 0;
+            self.failed_auth_in_window = 0;
+            self.decode_cpu_ms_in_window = 0;
+            self.window_start_ms = self.window_start_ms.saturating_add(WINDOW_MS);
         }
     }
 
-    /// Calculate time remaining in current window.
+    /// Return the weight (0..=WINDOW_MS) applied to the previous
+    /// window's counters when computing the effective sliding-window
+    /// usage.
+    const fn prev_window_weight(&self, now_ms: u64) -> u64 {
+        let elapsed = now_ms.saturating_sub(self.window_start_ms);
+        WINDOW_MS.saturating_sub(elapsed.min(WINDOW_MS))
+    }
+
+    /// Return the effective bytes used in the trailing sliding window.
+    #[must_use]
+    pub const fn effective_bytes_in_window(&self, now_ms: u64) -> u64 {
+        let weight = self.prev_window_weight(now_ms);
+        // prev * weight / WINDOW_MS + current
+        let weighted_prev = self
+            .prev_bytes_in_window
+            .saturating_mul(weight)
+            / WINDOW_MS;
+        weighted_prev.saturating_add(self.bytes_in_window)
+    }
+
+    /// Return the effective symbol count in the trailing sliding window.
+    #[must_use]
+    pub const fn effective_symbols_in_window(&self, now_ms: u64) -> u32 {
+        let weight = self.prev_window_weight(now_ms);
+        // Use u64 arithmetic to avoid u32 overflow, then clamp.
+        let weighted_prev =
+            (self.prev_symbols_in_window as u64).saturating_mul(weight) / WINDOW_MS;
+        let weighted_prev_u32 = if weighted_prev > u32::MAX as u64 {
+            u32::MAX
+        } else {
+            weighted_prev as u32
+        };
+        weighted_prev_u32.saturating_add(self.symbols_in_window)
+    }
+
+    /// Return the effective failed-auth count in the trailing sliding window.
+    #[must_use]
+    pub const fn effective_failed_auth_in_window(&self, now_ms: u64) -> u32 {
+        let weight = self.prev_window_weight(now_ms);
+        let weighted_prev =
+            (self.prev_failed_auth_in_window as u64).saturating_mul(weight) / WINDOW_MS;
+        let weighted_prev_u32 = if weighted_prev > u32::MAX as u64 {
+            u32::MAX
+        } else {
+            weighted_prev as u32
+        };
+        weighted_prev_u32.saturating_add(self.failed_auth_in_window)
+    }
+
+    /// Return the effective decode-CPU milliseconds in the trailing
+    /// sliding window.
+    #[must_use]
+    pub const fn effective_decode_cpu_ms_in_window(&self, now_ms: u64) -> u64 {
+        let weight = self.prev_window_weight(now_ms);
+        let weighted_prev = self
+            .prev_decode_cpu_ms_in_window
+            .saturating_mul(weight)
+            / WINDOW_MS;
+        weighted_prev.saturating_add(self.decode_cpu_ms_in_window)
+    }
+
+    /// Calculate time remaining until the sliding window drains enough
+    /// to make a budget decision stable.
     #[must_use]
     const fn time_until_window_reset(&self, now_ms: u64) -> Duration {
-        const WINDOW_MS: u64 = 60_000;
         let elapsed = now_ms.saturating_sub(self.window_start_ms);
         let remaining = WINDOW_MS.saturating_sub(elapsed);
         Duration::from_millis(remaining)

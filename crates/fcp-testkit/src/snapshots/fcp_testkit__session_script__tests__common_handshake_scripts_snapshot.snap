@@ -1,8 +1,45 @@
 ---
 source: crates/fcp-testkit/src/session_script.rs
-expression: "serde_json::json!({\n    \"websocket_hello_pong\": scenarios::websocket_hello_pong(\"/ws\"),\n    \"websocket_reconnect\": scenarios::websocket_reconnect(\"/ws\"),\n    \"sse_receive_events\": scenarios::sse_receive_events(\"/events\", 3),\n    \"webhook_deliver_and_ack\": scenarios::webhook_deliver_and_ack(\"push\"),\n    \"long_poll_cycle\": scenarios::long_poll_cycle(\"/poll\"),\n    \"nack_redelivery\":\n    scenarios::nack_redelivery(Transport::WebSocket, \"/ws\"),\n})"
+expression: "serde_json::json!({\n    \"websocket_hello_pong\": scenarios::websocket_hello_pong(\"/ws\"),\n    \"websocket_reconnect\": scenarios::websocket_reconnect(\"/ws\"),\n    \"sse_receive_events\": scenarios::sse_receive_events(\"/events\", 3),\n    \"webhook_deliver_and_ack\": scenarios::webhook_deliver_and_ack(\"push\"),\n    \"long_poll_cycle\": scenarios::long_poll_cycle(\"/poll\"),\n    \"graceful_shutdown\": scenarios::graceful_shutdown(Transport::WebSocket, \"/ws\"),\n    \"nack_redelivery\":\n    scenarios::nack_redelivery(Transport::WebSocket, \"/ws\"),\n})"
 ---
 {
+  "graceful_shutdown": {
+    "default_transport": "websocket",
+    "description": "Verify graceful shutdown drains pending work",
+    "scenario_id": "lifecycle.graceful_shutdown",
+    "steps": [
+      {
+        "action": "connect",
+        "path": "/ws",
+        "transport": "websocket"
+      },
+      {
+        "action": "assert_health",
+        "expected": "connected"
+      },
+      {
+        "action": "send_message",
+        "body": {
+          "type": "work"
+        }
+      },
+      {
+        "ack": "auto",
+        "action": "expect_message",
+        "matcher": {
+          "mode": "any"
+        },
+        "timeout": "5000ms"
+      },
+      {
+        "action": "annotate",
+        "message": "initiating graceful shutdown"
+      },
+      {
+        "action": "disconnect"
+      }
+    ]
+  },
   "long_poll_cycle": {
     "default_transport": "long_poll",
     "description": "Long-poll receive batch and reconnect cycle",

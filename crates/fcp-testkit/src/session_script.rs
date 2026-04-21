@@ -1004,6 +1004,7 @@ mod tests {
                 "sse_receive_events": scenarios::sse_receive_events("/events", 3),
                 "webhook_deliver_and_ack": scenarios::webhook_deliver_and_ack("push"),
                 "long_poll_cycle": scenarios::long_poll_cycle("/poll"),
+                "graceful_shutdown": scenarios::graceful_shutdown(Transport::WebSocket, "/ws"),
                 "nack_redelivery": scenarios::nack_redelivery(Transport::WebSocket, "/ws"),
             })
         );

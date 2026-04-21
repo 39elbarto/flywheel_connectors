@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:fd052561fb03cdaa6f589dcf32c69c74c2cd9eb5b471d88f1702bb7933e88ecc"
+interface_hash = "blake3-256:fcp.interface.v2:8fedf7f936e1997d7661a2cc93b1ab9ce8c55ae7776ffbc865ba5e5eeadaaf5b"
 
 [connector]
 id = "fcp.youtube"
@@ -28,7 +28,7 @@ forbidden = ["z:public"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
-optional = ["media.download"]
+optional = ["media.download", "media.upload", "youtube.read", "youtube.write"]
 forbidden = ["system.exec", "network.listen"]
 
 # ── Operations ──────────────────────────────────────────────────
@@ -541,6 +541,106 @@ related = ["youtube.get_caption_transcript", "youtube.get_captions"]
 
 # ────────────────────────────────────────────────────────────────
 
+[provides.operations."youtube.get_analytics"]
+description = "Fetch channel analytics summary (view counts, engagement) for the authenticated channel"
+capability = "youtube.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."youtube.get_analytics".input_schema]
+required = ["channel_id"]
+type = "object"
+[provides.operations."youtube.get_analytics".input_schema.properties.channel_id]
+type = "string"
+[provides.operations."youtube.get_analytics".input_schema.properties.max_videos]
+type = "integer"
+
+[provides.operations."youtube.get_analytics".output_schema]
+required = ["analytics"]
+type = "object"
+[provides.operations."youtube.get_analytics".output_schema.properties.analytics]
+type = "object"
+
+[provides.operations."youtube.get_analytics".network_constraints]
+host_allow = ["www.googleapis.com", "youtubeanalytics.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."youtube.get_analytics".ai_hints]
+when_to_use = "Summarize channel performance (views, engagement) across recent videos."
+common_mistakes = ["This aggregates per-video stats into a channel summary; it is not a substitute for the full YouTube Analytics API"]
+examples = ['{"channel_id": "UC_x5XG1OV2P6uZZ5FSM9Ttw", "max_videos": 25}']
+related = ["youtube.get_channel", "youtube.list_videos"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."youtube.upload_video"]
+description = "Upload a video to the authenticated channel with title, description, and optional metadata"
+capability = "youtube.write"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+
+[provides.operations."youtube.upload_video".input_schema]
+required = ["title", "description", "video_data_base64"]
+type = "object"
+[provides.operations."youtube.upload_video".input_schema.properties.title]
+type = "string"
+[provides.operations."youtube.upload_video".input_schema.properties.description]
+type = "string"
+[provides.operations."youtube.upload_video".input_schema.properties.video_data_base64]
+type = "string"
+[provides.operations."youtube.upload_video".input_schema.properties.privacy]
+type = "string"
+[provides.operations."youtube.upload_video".input_schema.properties.tags]
+type = "array"
+[provides.operations."youtube.upload_video".input_schema.properties.tags.items]
+type = "string"
+[provides.operations."youtube.upload_video".input_schema.properties.category_id]
+type = "string"
+
+[provides.operations."youtube.upload_video".output_schema]
+required = ["video"]
+type = "object"
+[provides.operations."youtube.upload_video".output_schema.properties.video]
+type = "object"
+
+[provides.operations."youtube.upload_video".network_constraints]
+host_allow = ["www.googleapis.com", "upload.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 600000
+max_response_bytes = 10485760
+
+[provides.operations."youtube.upload_video".ai_hints]
+when_to_use = "Publish a new video to the authenticated YouTube channel."
+common_mistakes = ["Video uploads are dangerous side effects and require interactive approval", "video_data_base64 is the raw video bytes base64-encoded; verify size against total_timeout_ms"]
+examples = ['{"title": "Launch demo", "description": "Demo video", "video_data_base64": "<base64 mp4>", "privacy": "private"}']
+related = ["youtube.get_video", "youtube.get_analytics"]
+
+# ────────────────────────────────────────────────────────────────
+
 # ── Sandbox ─────────────────────────────────────────────────────
 
 [sandbox]
@@ -581,3 +681,5 @@ scope = "instance"
 "youtube.get_captions" = ["youtube.read"]
 "youtube.get_caption_transcript" = ["youtube.read"]
 "youtube.upload_caption" = ["youtube.write"]
+"youtube.get_analytics" = ["youtube.read"]
+"youtube.upload_video" = ["youtube.write"]

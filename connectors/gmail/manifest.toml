@@ -171,28 +171,50 @@ related = ["gmail.get_message", "gmail.search_messages"]
 
 # ────────────────────────────────────────────────────────────────
 
-[provides.operations."gmail.search_messages"]
-description = "Search messages with Gmail query syntax"
-capability = "gmail.read"
+[provides.operations."gmail.sync_history"]
+description = "Incrementally fetch mailbox history changes using historyId cursor state"
+capability = "gmail.history.read"
 risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 revocation_freshness = "safe"
 
-[provides.operations."gmail.search_messages".input_schema]
-required = ["query"]
+[provides.operations."gmail.sync_history".input_schema]
+required = ["lease_seq"]
 type = "object"
-[provides.operations."gmail.search_messages".input_schema.properties.query]
+[provides.operations."gmail.sync_history".input_schema.properties.start_history_id]
+type = "string"
+[provides.operations."gmail.sync_history".input_schema.properties.max_results]
+type = "integer"
+[provides.operations."gmail.sync_history".input_schema.properties.history_types]
+type = "array"
+[provides.operations."gmail.sync_history".input_schema.properties.lease_seq]
+type = "integer"
+[provides.operations."gmail.sync_history".input_schema.properties.lease_object_id]
 type = "string"
 
-[provides.operations."gmail.search_messages".output_schema]
-required = ["messages"]
+[provides.operations."gmail.sync_history".output_schema]
+required = ["history", "latest_history_id", "effective_start_history_id", "lease_seq"]
 type = "object"
-[provides.operations."gmail.search_messages".output_schema.properties.messages]
+[provides.operations."gmail.sync_history".output_schema.properties.history]
 type = "array"
+[provides.operations."gmail.sync_history".output_schema.properties.history_count]
+type = "integer"
+[provides.operations."gmail.sync_history".output_schema.properties.latest_history_id]
+type = "string"
+[provides.operations."gmail.sync_history".output_schema.properties.effective_start_history_id]
+type = "string"
+[provides.operations."gmail.sync_history".output_schema.properties.dedup_applied]
+type = "boolean"
+[provides.operations."gmail.sync_history".output_schema.properties.used_persisted_cursor]
+type = "boolean"
+[provides.operations."gmail.sync_history".output_schema.properties.lease_seq]
+type = "integer"
+[provides.operations."gmail.sync_history".output_schema.properties.cursor_state_path]
+type = "string"
 
-[provides.operations."gmail.search_messages".network_constraints]
+[provides.operations."gmail.sync_history".network_constraints]
 host_allow = ["gmail.googleapis.com", "www.googleapis.com"]
 port_allow = [443]
 deny_localhost = true
@@ -207,40 +229,40 @@ connect_timeout_ms = 10000
 total_timeout_ms = 60000
 max_response_bytes = 10485760
 
-[provides.operations."gmail.search_messages".ai_hints]
-when_to_use = "Search emails with Gmail query syntax."
-common_mistakes = ["Using plain text instead of Gmail search operators like from:, to:, subject:, is:unread", "Results are paginated and only return message IDs — you must call get_message for full content"]
-examples = ['{"query": "from:boss@company.com is:unread"}']
+[provides.operations."gmail.sync_history".ai_hints]
+when_to_use = "Perform incremental mailbox sync with persisted historyId cursor and restart-safe dedup semantics."
+common_mistakes = ["Not persisting or reusing historyId between runs, causing duplicate processing", "Sending stale lease_seq from an old writer after failover"]
+examples = ['{"start_history_id":"1000","lease_seq":1,"lease_object_id":"lease-a"}', '{"history_types":["messageAdded","labelRemoved"],"lease_seq":2}']
 related = ["gmail.get_message", "gmail.list_messages"]
 
 # ────────────────────────────────────────────────────────────────
 
-[provides.operations."gmail.create_draft"]
-description = "Create a draft email"
+[provides.operations."gmail.modify_message"]
+description = "Modify message labels (add or remove)"
 capability = "gmail.write"
 risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
-idempotency = "none"
-revocation_freshness = "risky"
+idempotency = "best_effort"
+revocation_freshness = "safe"
 
-[provides.operations."gmail.create_draft".input_schema]
-required = ["to", "subject", "body"]
+[provides.operations."gmail.modify_message".input_schema]
+required = ["message_id"]
 type = "object"
-[provides.operations."gmail.create_draft".input_schema.properties.to]
+[provides.operations."gmail.modify_message".input_schema.properties.message_id]
 type = "string"
-[provides.operations."gmail.create_draft".input_schema.properties.subject]
-type = "string"
-[provides.operations."gmail.create_draft".input_schema.properties.body]
-type = "string"
+[provides.operations."gmail.modify_message".input_schema.properties.add_label_ids]
+type = "array"
+[provides.operations."gmail.modify_message".input_schema.properties.remove_label_ids]
+type = "array"
 
-[provides.operations."gmail.create_draft".output_schema]
-required = ["draft"]
+[provides.operations."gmail.modify_message".output_schema]
+required = ["message"]
 type = "object"
-[provides.operations."gmail.create_draft".output_schema.properties.draft]
+[provides.operations."gmail.modify_message".output_schema.properties.message]
 type = "object"
 
-[provides.operations."gmail.create_draft".network_constraints]
+[provides.operations."gmail.modify_message".network_constraints]
 host_allow = ["gmail.googleapis.com", "www.googleapis.com"]
 port_allow = [443]
 deny_localhost = true
@@ -255,40 +277,80 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
 
-[provides.operations."gmail.create_draft".ai_hints]
-when_to_use = "Create a draft email without sending it."
-common_mistakes = ["Draft body must be plain text or base64url-encoded MIME — raw HTML will not render correctly", "Each call creates a new draft; to update an existing draft, use a different API endpoint"]
-examples = ['{"to": "user@example.com", "subject": "Draft", "body": "..."}']
-related = ["gmail.send_message"]
+[provides.operations."gmail.modify_message".ai_hints]
+when_to_use = "Add or remove labels from a message (e.g., mark as read, archive)."
+common_mistakes = ["Using label names instead of label IDs — custom labels require the label ID from list_labels", "Removing the INBOX label effectively archives the message, which may not be intended"]
+examples = ['{"message_id": "abc123", "add_label_ids": ["STARRED"], "remove_label_ids": ["UNREAD"]}']
+related = ["gmail.list_labels"]
 
 # ────────────────────────────────────────────────────────────────
 
-[provides.operations."gmail.modify_labels"]
-description = "Add or remove labels from a message"
-capability = "gmail.write"
+[provides.operations."gmail.get_thread"]
+description = "Get an email thread with all messages"
+capability = "gmail.read"
 risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 revocation_freshness = "safe"
 
-[provides.operations."gmail.modify_labels".input_schema]
-required = ["message_id"]
+[provides.operations."gmail.get_thread".input_schema]
+required = ["thread_id"]
 type = "object"
-[provides.operations."gmail.modify_labels".input_schema.properties.message_id]
+[provides.operations."gmail.get_thread".input_schema.properties.thread_id]
 type = "string"
-[provides.operations."gmail.modify_labels".input_schema.properties.add_labels]
-type = "array"
-[provides.operations."gmail.modify_labels".input_schema.properties.remove_labels]
-type = "array"
 
-[provides.operations."gmail.modify_labels".output_schema]
-required = ["message"]
+[provides.operations."gmail.get_thread".output_schema]
+required = ["thread"]
 type = "object"
-[provides.operations."gmail.modify_labels".output_schema.properties.message]
+[provides.operations."gmail.get_thread".output_schema.properties.thread]
 type = "object"
 
-[provides.operations."gmail.modify_labels".network_constraints]
+[provides.operations."gmail.get_thread".network_constraints]
+host_allow = ["gmail.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 5242880
+
+[provides.operations."gmail.get_thread".ai_hints]
+when_to_use = "Retrieve all messages in an email thread/conversation."
+common_mistakes = ["Using a message ID instead of a thread ID"]
+examples = ['{"thread_id": "18d1234abc567890"}']
+related = ["gmail.get_message", "gmail.list_messages"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gmail.get_draft"]
+description = "Get a draft by ID"
+capability = "gmail.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."gmail.get_draft".input_schema]
+required = ["draft_id"]
+type = "object"
+[provides.operations."gmail.get_draft".input_schema.properties.draft_id]
+type = "string"
+
+[provides.operations."gmail.get_draft".output_schema]
+required = ["draft"]
+type = "object"
+[provides.operations."gmail.get_draft".output_schema.properties.draft]
+type = "object"
+
+[provides.operations."gmail.get_draft".network_constraints]
 host_allow = ["gmail.googleapis.com", "www.googleapis.com"]
 port_allow = [443]
 deny_localhost = true
@@ -303,11 +365,55 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
 
-[provides.operations."gmail.modify_labels".ai_hints]
-when_to_use = "Add or remove labels (like INBOX, STARRED, custom labels)."
-common_mistakes = ["Using label names instead of label IDs — custom labels require the label ID from list_labels", "Removing the INBOX label effectively archives the message, which may not be intended"]
-examples = ['{"message_id": "abc123", "add_labels": ["STARRED"], "remove_labels": ["UNREAD"]}']
-related = ["gmail.list_labels"]
+[provides.operations."gmail.get_draft".ai_hints]
+when_to_use = "Retrieve a saved email draft."
+common_mistakes = []
+examples = ['{"draft_id": "r1234567890"}']
+related = ["gmail.send_draft"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gmail.send_draft"]
+description = "Send a previously saved draft"
+capability = "gmail.send"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "none"
+revocation_freshness = "critical"
+
+[provides.operations."gmail.send_draft".input_schema]
+required = ["draft_id"]
+type = "object"
+[provides.operations."gmail.send_draft".input_schema.properties.draft_id]
+type = "string"
+
+[provides.operations."gmail.send_draft".output_schema]
+required = ["message"]
+type = "object"
+[provides.operations."gmail.send_draft".output_schema.properties.message]
+type = "object"
+
+[provides.operations."gmail.send_draft".network_constraints]
+host_allow = ["gmail.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmail.send_draft".ai_hints]
+when_to_use = "Send a draft that was previously created and saved."
+common_mistakes = ["The draft is deleted after sending"]
+examples = ['{"draft_id": "r1234567890"}']
+related = ["gmail.get_draft", "gmail.send_message"]
 
 # ────────────────────────────────────────────────────────────────
 
@@ -448,8 +554,10 @@ scope = "instance"
 "gmail.send_message" = ["gmail.send"]
 "gmail.get_message" = ["gmail.read"]
 "gmail.list_messages" = ["gmail.read"]
-"gmail.search_messages" = ["gmail.read"]
-"gmail.create_draft" = ["gmail.write"]
-"gmail.modify_labels" = ["gmail.write"]
+"gmail.sync_history" = ["gmail.read"]
+"gmail.modify_message" = ["gmail.write"]
 "gmail.list_labels" = ["gmail.read"]
 "gmail.trash_message" = ["gmail.delete"]
+"gmail.get_thread" = ["gmail.read"]
+"gmail.get_draft" = ["gmail.write"]
+"gmail.send_draft" = ["gmail.send"]

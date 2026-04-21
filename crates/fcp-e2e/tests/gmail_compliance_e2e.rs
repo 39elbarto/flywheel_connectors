@@ -424,27 +424,38 @@ async fn gmail_allow_valid_token_connector_suite_passes() {
 /// Network guard: Gmail manifest restricts all operations to
 /// `gmail.googleapis.com` and `www.googleapis.com`.
 /// Verify that allowed hosts pass and non-matching hosts are denied.
+///
+/// This test scans every operation declared in `connectors/gmail/manifest.toml`
+/// (rather than a hardcoded list) so that newly-added operations are
+/// automatically covered. See also
+/// `gmail_manifest_matches_connector_dispatch_surface` below, which enforces
+/// that the manifest set matches the connector's introspect surface — without
+/// that second test, adding a new dispatch branch in `connector.rs` without
+/// a matching `[provides.operations]` block would silently pass this scan.
 #[test]
 fn gmail_manifest_network_guard_allows_and_denies() {
     let manifest = gmail_manifest_toml();
+    let operations_table = manifest
+        .get("provides")
+        .and_then(toml::Value::as_table)
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("provides.operations table");
 
-    let operations = [
-        "gmail.send_message",
-        "gmail.get_message",
-        "gmail.list_messages",
-        "gmail.search_messages",
-        "gmail.create_draft",
-        "gmail.modify_labels",
-        "gmail.list_labels",
-        "gmail.trash_message",
-    ];
+    assert_eq!(
+        operations_table.len(),
+        10,
+        "Gmail manifest should declare 10 operations (matching the connector's \
+         dispatch surface in connectors/gmail/src/connector.rs); see \
+         gmail_manifest_matches_connector_dispatch_surface for the drift check"
+    );
 
     let expected_hosts = vec![
         "gmail.googleapis.com".to_string(),
         "www.googleapis.com".to_string(),
     ];
 
-    for operation_name in operations {
+    for operation_name in operations_table.keys() {
         let host_allow = operation_host_allow_list(&manifest, operation_name);
         assert_eq!(
             host_allow, expected_hosts,
@@ -483,4 +494,56 @@ fn gmail_manifest_network_guard_allows_and_denies() {
             "accounts.google.com should be denied for {operation_name}"
         );
     }
+}
+
+/// Drift guard: the Gmail manifest's declared operation set must match the
+/// connector's introspect surface (which is the authoritative source for
+/// what `handle_invoke` will actually dispatch).
+///
+/// This catches the class of bug reported in flywheel_connectors-aoqb2,
+/// where the manifest declared 8 operations but the connector dispatched
+/// 10 — a mismatch that let the compliance suite pass while the shipped
+/// contract was stale. Any future divergence (either direction) will
+/// fail this test with a clear message identifying the drifted ids.
+#[fcp_async_core::runtime::test]
+async fn gmail_manifest_matches_connector_dispatch_surface() {
+    use std::collections::BTreeSet;
+
+    let manifest = gmail_manifest_toml();
+    let manifest_ops: BTreeSet<String> = manifest
+        .get("provides")
+        .and_then(toml::Value::as_table)
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("provides.operations table")
+        .keys()
+        .cloned()
+        .collect();
+
+    let connector = fcp_gmail::connector::GmailConnector::new();
+    let introspection = connector
+        .handle_introspect()
+        .await
+        .expect("handle_introspect should succeed on unconfigured connector");
+    let connector_ops: BTreeSet<String> = introspection["operations"]
+        .as_array()
+        .expect("introspection.operations array")
+        .iter()
+        .map(|op| {
+            op["id"]
+                .as_str()
+                .expect("operation.id is a string")
+                .to_string()
+        })
+        .collect();
+
+    let missing_from_manifest: Vec<&String> = connector_ops.difference(&manifest_ops).collect();
+    let missing_from_connector: Vec<&String> = manifest_ops.difference(&connector_ops).collect();
+
+    assert!(
+        missing_from_manifest.is_empty() && missing_from_connector.is_empty(),
+        "gmail manifest/connector drift detected:\n  \
+         connector dispatches but manifest omits: {missing_from_manifest:?}\n  \
+         manifest declares but connector omits: {missing_from_connector:?}"
+    );
 }

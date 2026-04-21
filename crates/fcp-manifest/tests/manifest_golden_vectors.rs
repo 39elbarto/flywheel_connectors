@@ -2436,11 +2436,13 @@ fn gmail_full_manifest_parses_with_all_operations() {
         "gmail.send_message",
         "gmail.get_message",
         "gmail.list_messages",
-        "gmail.search_messages",
-        "gmail.create_draft",
-        "gmail.modify_labels",
+        "gmail.sync_history",
+        "gmail.modify_message",
         "gmail.list_labels",
         "gmail.trash_message",
+        "gmail.get_thread",
+        "gmail.get_draft",
+        "gmail.send_draft",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");

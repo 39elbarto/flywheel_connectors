@@ -3647,6 +3647,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
  "thiserror 2.0.18",
  "tower",

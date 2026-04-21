@@ -546,6 +546,28 @@ pub fn reconstruct_chunked_payload(
         }
     })?;
 
+    // Validate the manifest's claimed total against the actual chunk data
+    // BEFORE pre-allocating. Without this, a manifest can advertise an
+    // arbitrarily large total_bytes and force the runtime into a
+    // Vec::with_capacity(huge) reservation before any integrity check
+    // runs — on strict allocators (e.g. macOS) that panics outright, and
+    // on overcommit allocators it reserves address space that the
+    // subsequent PayloadLengthMismatch error will never justify.
+    let actual_total_bytes: usize = chunked
+        .chunks
+        .iter()
+        .try_fold(0usize, |acc, chunk| acc.checked_add(chunk.len()))
+        .ok_or(CheckpointChunkError::PayloadLengthMismatch {
+            expected: expected_total_bytes,
+            got: usize::MAX,
+        })?;
+    if actual_total_bytes != expected_total_bytes {
+        return Err(CheckpointChunkError::PayloadLengthMismatch {
+            expected: expected_total_bytes,
+            got: actual_total_bytes,
+        });
+    }
+
     let mut payload = Vec::with_capacity(expected_total_bytes);
     for (index, (chunk, expected_object_id)) in chunked
         .chunks
@@ -2208,6 +2230,37 @@ mod tests {
         assert!(matches!(
             err,
             CheckpointChunkError::PayloadIntegrityMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn reconstruct_chunked_payload_rejects_oversized_manifest_before_allocation() {
+        // An attacker-controlled manifest that claims a huge total_bytes
+        // (here 1 GiB) with tiny actual chunks must be rejected by the
+        // pre-allocation size check, NOT by triggering a huge
+        // Vec::with_capacity followed by PayloadLengthMismatch after a
+        // multi-gigabyte reservation.
+        let chunks = vec![vec![1u8, 2, 3]];
+        let chunked = ChunkedCheckpoint {
+            manifest: ChunkedObjectManifest {
+                payload_object_id: test_object_id("payload"),
+                total_bytes: 1_000_000_000, // 1 GiB claim
+                chunk_size_bytes: 3,
+                chunk_object_ids: chunks
+                    .iter()
+                    .map(|chunk| ObjectId::from_unscoped_bytes(chunk))
+                    .collect(),
+            },
+            chunks,
+        };
+
+        let err = reconstruct_chunked_payload(&chunked).unwrap_err();
+        assert!(matches!(
+            err,
+            CheckpointChunkError::PayloadLengthMismatch {
+                expected: 1_000_000_000,
+                got: 3,
+            }
         ));
     }
 

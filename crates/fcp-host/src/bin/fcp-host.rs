@@ -35,8 +35,9 @@ use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_async_core::task::{self, JoinHandle};
 use fcp_core::{
     ApprovalToken, CapabilityVerifier, CostEstimateConfidence, Decision, DecisionReceiptPolicy,
-    ObjectHeader, PolicySimulationInput, Provenance, ResourceAvailability, RolloutPolicy,
-    SafetyTier, TransportMode, ZoneId, ZonePolicyObject, ZoneTransportPolicy,
+    ObjectHeader, PolicyPattern, PolicySimulationInput, Provenance, ResourceAvailability,
+    RolloutPolicy, SafetyTier, TransportMode, UsageMetric, UsageMetricKind, ZoneId,
+    ZonePolicyObject, ZoneTransportPolicy,
     simulate_policy_decision,
 };
 use fcp_crypto::{
@@ -1041,8 +1042,15 @@ fn validate_admin_authorization(state: &AppState, headers: &HeaderMap) -> HostRe
     let provided = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|value| !value.is_empty())
+        .and_then(|value| {
+            let mut parts = value.split_ascii_whitespace();
+            let scheme = parts.next()?;
+            let token = parts.next()?;
+            if parts.next().is_some() || !scheme.eq_ignore_ascii_case("Bearer") {
+                return None;
+            }
+            Some(token)
+        })
         .ok_or_else(|| {
             HostError::PreflightFailed(
                 "missing or invalid Authorization header for admin API".to_string(),
@@ -2023,6 +2031,11 @@ fn merge_connector_update(
             existing.env.clone()
         } else {
             incoming.env.clone()
+        },
+        allowed_zones: if incoming.allowed_zones.is_empty() {
+            existing.allowed_zones.clone()
+        } else {
+            incoming.allowed_zones.clone()
         },
         config: incoming.config.clone().or_else(|| existing.config.clone()),
         categories: if incoming.categories.is_empty() {
@@ -5509,7 +5522,9 @@ mod tests {
         .await;
 
         let mut deny_policy = host_runtime_policy(ZoneId::work());
-        deny_policy.principal_deny = vec!["user:test".to_string()];
+        deny_policy.principal_deny = vec![PolicyPattern {
+            pattern: "user:test".to_string(),
+        }];
         let mut policies: HashMap<ZoneId, ZonePolicyObject> = HashMap::new();
         policies.insert(ZoneId::work(), deny_policy);
 
@@ -5736,7 +5751,7 @@ mod tests {
             approval_tokens: Vec::new(),
         };
 
-        let (status, message) = invoke_handler(State(state), Json(request))
+        let (status, message) = invoke_handler(State(state), HeaderMap::new(), Json(request))
             .await
             .expect_err("invoke handler should surface preflight failure");
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -6847,6 +6862,43 @@ mod tests {
         headers.insert(
             axum::http::header::AUTHORIZATION,
             HeaderValue::from_static("Bearer topsecret"),
+        );
+
+        validate_admin_authorization(&state, &headers).expect("matching token");
+    }
+
+    #[test]
+    fn validate_admin_authorization_accepts_lowercase_bearer_scheme() {
+        let registry = Arc::new(empty_registry(1));
+        let budget = Arc::new(BudgetPolicyEngine::new());
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = AppState {
+            registry: Arc::clone(&registry),
+            doctor: DoctorService::new(Arc::clone(&registry)),
+            budget: Arc::clone(&budget),
+            discovery: Arc::new(DiscoveryEndpoint::new(
+                Arc::clone(&registry),
+                Arc::clone(&budget),
+            )),
+            cancellation: Arc::new(CancellationController::new()),
+            lifecycle: Arc::clone(&lifecycle),
+            rollout: Arc::new(RolloutController::new(
+                Arc::clone(&registry),
+                Arc::clone(&lifecycle),
+            )),
+            supply_chain: Arc::new(SupplyChainGate::default()),
+            capability_verifying_key: None,
+            approval_verifying_key: None,
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            connectors_file: None,
+            zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            started_at: Instant::now(),
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("bearer topsecret"),
         );
 
         validate_admin_authorization(&state, &headers).expect("matching token");

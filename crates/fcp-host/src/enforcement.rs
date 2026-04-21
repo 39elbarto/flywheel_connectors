@@ -20,9 +20,10 @@
 //! 11. Rate limit — validates request is within rate quota
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Instant;
 
-use fcp_core::{IdValidationError, ZoneIdError};
+use fcp_core::{IdValidationError, ObjectId, RevocationRegistry, ZoneIdError};
 use fcp_kernel::{ConnectorId, OperationId};
 use fcp_policy::ZoneId;
 

@@ -34,5 +34,21 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+# Integration-testcontainer deps — only pulled in when the
+# `integration-testcontainer` feature is enabled. Kept in
+# `[dependencies]` (not `[dev-dependencies]`) because Cargo disallows
+# `optional = true` on dev-dependencies; they are feature-gated so
+# default builds stay offline-friendly and docker-less.
+testcontainers = { version = "0.23", optional = true }
+tokio = { workspace = true, optional = true }
+tokio-postgres = { version = "0.7", optional = true }
+axum = { version = "0.7", optional = true }
+
 [dev-dependencies]
 wiremock.workspace = true
+
+[features]
+default = []
+# Enable real-Postgres testcontainer integration tests. Requires a
+# running Docker daemon. See tests/transaction_integration.rs.
+integration-testcontainer = ["dep:testcontainers", "dep:tokio", "dep:tokio-postgres", "dep:axum"]

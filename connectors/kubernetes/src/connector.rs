@@ -1418,6 +1418,14 @@ fn join_namespaces(namespaces: &BTreeSet<String>) -> String {
     namespaces.iter().cloned().collect::<Vec<_>>().join(",")
 }
 
+// NOTE: the four helpers below match on `&str` literals via `matches!`.
+// They MUST remain non-const on the current nightly toolchain —
+// `str` equality inside `const fn` still requires unstable const-trait
+// support and breaks `fcp-e2e` builds (bead flywheel_connectors-q0y8h,
+// prior fix in f8712801). If a future rustfmt sweep or "make everything
+// const" refactor adds `const` back, the compiler surfaces
+// `E0658: cannot match on 'str' in constant functions` and the entire
+// `fcp-e2e` dev-dependency graph fails to build. Leave these as `fn`.
 fn is_secret_mutation(operation: &str) -> bool {
     matches!(
         operation,
@@ -2950,6 +2958,9 @@ fn op_info(
     }
 }
 
+// MUST remain non-const: matches on `&str` literals via a string
+// switch. See the block comment above `is_secret_mutation` for the
+// full toolchain rationale (bead flywheel_connectors-q0y8h).
 fn approval_for_operation(operation_id: &str) -> Option<ApprovalMode> {
     match operation_id {
         "kubernetes.delete_pod"

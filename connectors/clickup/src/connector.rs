@@ -99,6 +99,27 @@ fn validate_base_url_for_auth(base_url: &str, auth: &ClickUpAuth) -> FcpResult<S
         code: 1003,
         message: format!("base_url could not be parsed: {error}"),
     })?;
+    // Strip query/fragment/userinfo before scheme/host enforcement. The
+    // ClickUpClient concatenates via format!("{}{path}", self.base_url)
+    // in every request method; without these checks, a base_url like
+    // `https://api.clickup.com/api/v2?leak=x` would leak attacker-chosen
+    // query values on every request and put the endpoint path after the
+    // `?` boundary. Userinfo would bake into every request URL and
+    // silently override the api-token / credential-id header the
+    // connector sets. Matches the hygiene in airtable / asana / gmail /
+    // notion / hubspot / whatsapp / linear.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
     let canonical = parsed.to_string().trim_end_matches('/').to_string();
 
     match auth {
@@ -1544,5 +1565,71 @@ mod tests {
         assert_eq!(cloned.auth_mode, readiness.auth_mode);
         let dbg = format!("{readiness:?}");
         assert!(dbg.contains("ProvisioningReadiness"));
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_accepts_api_clickup_com_with_token() {
+        let auth = ClickUpAuth::ApiToken("pk_test".into());
+        let out = validate_base_url_for_auth("https://api.clickup.com/api/v2", &auth).unwrap();
+        assert_eq!(out, "https://api.clickup.com/api/v2");
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_query_string_with_token() {
+        let auth = ClickUpAuth::ApiToken("pk_test".into());
+        let err =
+            validate_base_url_for_auth("https://api.clickup.com/api/v2?leak=x", &auth)
+                .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("query"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_fragment_with_token() {
+        let auth = ClickUpAuth::ApiToken("pk_test".into());
+        let err =
+            validate_base_url_for_auth("https://api.clickup.com/api/v2#frag", &auth)
+                .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_userinfo_with_token() {
+        let auth = ClickUpAuth::ApiToken("pk_test".into());
+        let err = validate_base_url_for_auth(
+            "https://attacker:pw@api.clickup.com/api/v2",
+            &auth,
+        )
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("userinfo"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_query_string_with_credential_id() {
+        let auth = ClickUpAuth::CredentialId(CredentialId::new());
+        let err =
+            validate_base_url_for_auth("https://vault-proxy.example/v2?leak=x", &auth)
+                .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_substring_smuggle_with_token() {
+        let auth = ClickUpAuth::ApiToken("pk_test".into());
+        let err = validate_base_url_for_auth(
+            "https://evil.com/api.clickup.com/api/v2",
+            &auth,
+        )
+        .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 }

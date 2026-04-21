@@ -504,8 +504,11 @@ impl RevocationRegistry {
     /// Add a revocation to the registry.
     ///
     /// An incoming revocation only replaces an existing one when it **strictly
-    /// dominates** it — i.e., it starts no later *and* ends no sooner. This
-    /// closes two symmetric suppression attacks by an owner-key holder or a
+    /// dominates** it in the 2-D (effective_at ↓, expires_at ↑) poset: the new
+    /// window must be weakly wider on both axes (starts no later *and* ends no
+    /// sooner) AND strictly wider on at least one axis. Identical windows are
+    /// ties — first-writer wins, so replays cannot churn metadata. This closes
+    /// two symmetric suppression attacks by an owner-key holder or a
     /// replay-window attacker:
     ///
     /// * **Far-future deferral:** a new revocation with `effective_at` pushed
@@ -516,19 +519,33 @@ impl RevocationRegistry {
     ///   open-ended (or later-expiring) revocation, because its end is sooner
     ///   — which would otherwise let `is_revoked_at(now)` flip to `false`.
     ///
+    /// A same-start upgrade whose `expires_at` is strictly later (e.g.
+    /// tightening a bounded revocation into a permanent one) is also accepted,
+    /// because it strictly widens the active window on the expiry axis without
+    /// regressing on the effective-at axis.
+    ///
     /// `None` for `expires_at` represents +∞ for the "ends no sooner" check.
     pub fn add_revocation(&mut self, revocation: &RevocationObject) {
         for object_id in &revocation.revoked {
             let should_replace = match self.revocations.get(object_id) {
                 None => true,
                 Some(existing) => {
-                    let starts_no_later = revocation.effective_at < existing.effective_at;
+                    let starts_no_later = revocation.effective_at <= existing.effective_at;
                     let ends_no_sooner = match (revocation.expires_at, existing.expires_at) {
                         (None, _) => true, // new never expires ⇒ dominates any finite expiry
                         (Some(_), None) => false, // existing never expires ⇒ nothing dominates it
                         (Some(new_exp), Some(old_exp)) => new_exp >= old_exp,
                     };
-                    starts_no_later && ends_no_sooner
+                    let ends_strictly_later = match (revocation.expires_at, existing.expires_at) {
+                        (None, Some(_)) => true, // +∞ > finite
+                        (Some(new_exp), Some(old_exp)) => new_exp > old_exp,
+                        _ => false,
+                    };
+                    let starts_strictly_earlier =
+                        revocation.effective_at < existing.effective_at;
+                    starts_no_later
+                        && ends_no_sooner
+                        && (starts_strictly_earlier || ends_strictly_later)
                 }
             };
             if should_replace {
@@ -2188,6 +2205,102 @@ mod tests {
         assert_eq!(stored.effective_at, 1_700_000_000);
         assert!(stored.expires_at.is_none());
         assert_eq!(stored.reason, "upgrade-to-permanent");
+    }
+
+    // Same effective_at, strictly later expires_at: an issuer upgrading a
+    // bounded revocation into a permanent one (or simply extending the expiry)
+    // MUST replace the existing entry. Before the poset-domination fix this
+    // case was rejected because `starts_no_later` used `<` instead of `<=`,
+    // so a legitimate expiry extension on a same-start window was silently
+    // dropped and the revocation still expired at the earlier bound.
+    #[test]
+    fn registry_same_start_later_expiry_replaces_existing() {
+        let mut registry = RevocationRegistry::new();
+        let id = ObjectId::from_bytes([48u8; 32]);
+        let shared_effective_at = 1_800_000_000;
+
+        let mut bounded = test_revocation();
+        bounded.revoked = vec![id];
+        bounded.effective_at = shared_effective_at;
+        bounded.expires_at = Some(1_900_000_000);
+        bounded.reason = "initial-bounded".into();
+
+        let mut extended = test_revocation();
+        extended.revoked = vec![id];
+        extended.effective_at = shared_effective_at; // same start
+        extended.expires_at = None; // strictly wider on expiry axis
+        extended.reason = "upgrade-to-permanent".into();
+
+        registry.add_revocation(&bounded);
+        registry.add_revocation(&extended);
+
+        let stored = registry.get_revocation(&id).expect("entry exists");
+        assert!(
+            stored.expires_at.is_none(),
+            "same-start permanent upgrade must replace bounded predecessor"
+        );
+        assert_eq!(stored.reason, "upgrade-to-permanent");
+        // Past the original bound, the object must still be observed revoked.
+        assert!(registry.is_revoked_at(&id, 2_000_000_000));
+    }
+
+    // Same effective_at, strictly later finite expires_at: analog of the
+    // above but both expiries are finite. The longer finite window still
+    // strictly dominates the shorter, so the replacement must occur.
+    #[test]
+    fn registry_same_start_longer_finite_expiry_replaces_existing() {
+        let mut registry = RevocationRegistry::new();
+        let id = ObjectId::from_bytes([49u8; 32]);
+        let shared_effective_at = 1_800_000_000;
+
+        let mut short = test_revocation();
+        short.revoked = vec![id];
+        short.effective_at = shared_effective_at;
+        short.expires_at = Some(1_900_000_000);
+        short.reason = "short-window".into();
+
+        let mut long = test_revocation();
+        long.revoked = vec![id];
+        long.effective_at = shared_effective_at;
+        long.expires_at = Some(2_000_000_000);
+        long.reason = "extended-window".into();
+
+        registry.add_revocation(&short);
+        registry.add_revocation(&long);
+
+        let stored = registry.get_revocation(&id).expect("entry exists");
+        assert_eq!(stored.expires_at, Some(2_000_000_000));
+        assert_eq!(stored.reason, "extended-window");
+    }
+
+    // Converse: a shorter expiry at the same effective_at MUST NOT replace a
+    // longer one. This is the symmetric half of the past-expiry suppression
+    // guard — it protects against an attacker narrowing an active window while
+    // keeping its start intact.
+    #[test]
+    fn registry_same_start_shorter_expiry_does_not_replace() {
+        let mut registry = RevocationRegistry::new();
+        let id = ObjectId::from_bytes([50u8; 32]);
+        let shared_effective_at = 1_800_000_000;
+
+        let mut long = test_revocation();
+        long.revoked = vec![id];
+        long.effective_at = shared_effective_at;
+        long.expires_at = None;
+        long.reason = "permanent".into();
+
+        let mut short = test_revocation();
+        short.revoked = vec![id];
+        short.effective_at = shared_effective_at;
+        short.expires_at = Some(1_900_000_000);
+        short.reason = "narrowing-attempt".into();
+
+        registry.add_revocation(&long);
+        registry.add_revocation(&short);
+
+        let stored = registry.get_revocation(&id).expect("entry exists");
+        assert!(stored.expires_at.is_none());
+        assert_eq!(stored.reason, "permanent");
     }
 
     // Re-adding the same revocation must be idempotent: repeated deliveries

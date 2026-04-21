@@ -977,8 +977,12 @@ pub fn verify_chain(
         }
     }
 
-    // Check zone filter
-    if let Some(zone) = zone_id {
+    let effective_zone = zone_id.or_else(|| entries.first().map(|entry| entry.zone_id.as_str()));
+
+    // Check chain zone consistency. Even without an explicit filter, a chain is
+    // zone-bound, so the first entry's zone is the authoritative baseline for
+    // the rest of the entries and the optional head.
+    if let Some(zone) = effective_zone {
         for entry in entries {
             if entry.zone_id != zone {
                 issues.push(
@@ -1123,8 +1127,7 @@ pub fn verify_chain(
             }
         }
 
-        if let Some(zone) = zone_id.or_else(|| entries.first().map(|entry| entry.zone_id.as_str()))
-        {
+        if let Some(zone) = effective_zone {
             if head.zone_id != zone {
                 issues.push(VerifyIssue::new(
                     "audit.head_zone_mismatch",
@@ -3033,6 +3036,41 @@ mod tests {
                 .issues
                 .iter()
                 .any(|i| i.code == "audit.head_zone_mismatch")
+        );
+    }
+
+    #[test]
+    fn verify_chain_without_filter_rejects_mixed_zone_entries() {
+        let e0 = genesis_entry();
+        let mut e1 = chain_entry(1, "entry-0");
+        e1.zone_id = "z:other".to_string();
+        e1.id = e1.computed_id().unwrap();
+
+        let head = ChainHead {
+            zone_id: e0.zone_id.clone(),
+            head_entry: e1.id.clone(),
+            head_seq: e1.seq,
+            coverage: 1.0,
+            epoch_id: "epoch-mixed-zone".to_string(),
+            signature_count: 1,
+        };
+
+        let report = verify_chain(&[e0, e1], Some(&head), None);
+        assert_eq!(report.status, VerifyStatus::Warn);
+        assert!(!report.is_clean());
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "audit.zone_mismatch"),
+            "mixed-zone chain should emit zone mismatch without an explicit filter"
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .all(|issue| issue.code != "audit.head_zone_mismatch"),
+            "head matching the baseline zone should not add a separate head mismatch"
         );
     }
 

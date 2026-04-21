@@ -42,7 +42,7 @@ A secure connector protocol and Rust platform for AI agent operations across zon
 
 The table below starts with the current operational surface (what works today), then lists the security and protocol features, and finally the target architecture features that are designed but not yet operational.
 
-Status legend: `PROVEN` = backed by direct proof in the current repo, `IMPLEMENTED` = code and tests exist but wider end-to-end proof or production hardening is incomplete, `DESIGNED` = architectural target or type-level/runtime scaffolding exists but the operational story is not yet complete, `PLANNED` = intended direction with little or no built surface yet.
+Status legend: `PROVEN` = backed by direct proof in the current repo, `IMPLEMENTED` = code and tests exist but wider end-to-end proof or production hardening is incomplete, `LIMITED` = functional at the stated scope but narrower than the mature target (e.g. threshold-gated rather than adaptive), `DESIGNED` = architectural target or type-level/runtime scaffolding exists but the operational story is not yet complete, `PLANNED` = intended direction with little or no built surface yet.
 
 | Feature | Status | What It Does | Evidence |
 |---------|--------|--------------|----------|
@@ -925,11 +925,18 @@ Capability tokens use CBOR Object Signing and Encryption (RFC 9052) with CWT cla
 - Per-object placement policies with coverage, diversity, and concentration targets
 - Deterministic repair prioritization: SLO deficit x object hotness x cost estimate
 - Bounded repair plans: max repairs, max bytes, max decode budget per cycle
-- Power-aware deferral (`PLANNED`): the repair controller does **not** currently
-  consult `DeviceProfile.battery_percent`; battery-state wiring is tracked in
-  bead `flywheel_connectors-qyv8n`. `DeviceProfile::is_low_battery` already
-  exists in `fcp-mesh/src/device.rs` and surfaces the signal the controller
-  will eventually gate on.
+- Power-aware deferral (`LIMITED`): `RepairController::set_power_state`
+  accepts a `PowerState::Battery { percent }` signal from the runtime
+  layer. When the reported percent falls below
+  `RepairControllerConfig::battery_defer_threshold_percent` (default 20%,
+  matching `fcp_mesh::device::DeviceProfile::is_low_battery`),
+  `next_repair()` returns `None`, increments `RepairStats::power_deferred`,
+  and emits a `tracing::info!` event with the
+  `repair.deferred_power_budget` reason code. In-flight repairs are not
+  interrupted; only newly-dequeued repairs are gated. Gate is
+  threshold-based (not ML-driven); callers that never invoke
+  `set_power_state` default to `PowerState::Ac` and see the legacy
+  no-deferral behaviour. Landed under bead `flywheel_connectors-qyv8n`.
 
 ---
 

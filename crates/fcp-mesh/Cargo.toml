@@ -27,6 +27,7 @@ fcp-tailscale = { path = "../fcp-tailscale" }
 hex.workspace = true
 hkdf = "0.12"
 hmac = "0.12"
+ciborium.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -37,7 +38,6 @@ xorf.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-ciborium.workspace = true
 criterion.workspace = true
 fcp-async-core = { path = "../fcp-async-core" }
 fcp-cbor = { path = "../fcp-cbor" }

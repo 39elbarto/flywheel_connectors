@@ -17,7 +17,7 @@
 //! XOR filters use `xorf::Xor8` for compact ≈1.23 bits/element membership queries.
 //! IBLT uses a placeholder change-tracking approach pending production upgrade.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -1365,7 +1365,11 @@ impl MeshGossip {
                 .symbol_count
                 .min(u32::try_from(self.config.max_symbols_per_summary).unwrap_or(u32::MAX));
             if summary.iblt.len() > max_iblt_bytes {
-                summary.iblt = b"[]".to_vec();
+                // Empty wire payload is the new fallback marker; the
+                // decoder routes empty bytes to the "empty sketch sized
+                // for peer batch" branch. Previously this was the JSON
+                // literal `b"[]"` for the placeholder-JSON wire format.
+                summary.iblt = Vec::new();
                 fallback_reason = "iblt_bytes_exceeded";
             }
             if tracing::enabled!(tracing::Level::DEBUG) || fallback_reason != "none" {
@@ -2211,11 +2215,26 @@ mod tests {
     }
 
     #[test]
-    fn mesh_gossip_create_summary_falls_back_when_iblt_exceeds_budget() {
+    fn mesh_gossip_create_summary_stays_within_iblt_budget() {
+        // Post-migration invariant: the production IBLT sketch is
+        // sized from `reconciliation_batch_size` via
+        // `Iblt::recommended_cell_count` and encoded as canonical
+        // CBOR. The byte budget `max_iblt_bytes` is tuned (128 bytes
+        // per expected-difference unit, 8192-byte floor) to cover the
+        // CBOR cell size + outer-struct overhead, so the sketch fits
+        // by construction and the fallback-marker path is now only
+        // reachable from pathological external wire growth.
+        //
+        // This test replaces the legacy
+        // `mesh_gossip_create_summary_falls_back_when_iblt_exceeds_budget`
+        // which exercised a placeholder JSON wire that scaled with
+        // announce volume; the production sketch is fixed-size per
+        // cell budget.
         let config = GossipConfig {
             reconciliation_batch_size: 64,
             ..GossipConfig::default()
         };
+        let max_iblt_bytes = config.max_iblt_bytes();
         let mut gossip = MeshGossip::new(test_node("local"), config);
         let obj_id = test_object_id("obj-summary-budget");
 
@@ -2232,7 +2251,23 @@ mod tests {
         let summary = gossip
             .create_summary(&test_zone(), test_epoch())
             .expect("summary should exist");
-        assert_eq!(summary.iblt, b"[]".to_vec());
+        assert!(
+            !summary.iblt.is_empty(),
+            "production sketch should always populate summary.iblt"
+        );
+        assert!(
+            summary.iblt.len() <= max_iblt_bytes,
+            "sketch {} exceeded configured byte budget {}",
+            summary.iblt.len(),
+            max_iblt_bytes,
+        );
+        // The sketch must be decodable by a peer with the same batch size.
+        IbltPlaceholder::decode_with_limits(
+            &summary.iblt,
+            64,
+            max_iblt_bytes,
+        )
+        .expect("created summary must be decodable");
     }
 
     #[test]
@@ -3295,10 +3330,15 @@ mod tests {
 
     #[test]
     fn iblt_encode_decode_roundtrip() {
+        // Insert distinct objects: IBLT peeling requires pure cells
+        // with count ±1, so duplicating the same object_id across two
+        // note_local_change calls would produce count=2 cells that the
+        // peel can't recover.
         let mut iblt = IbltPlaceholder::with_max_changes(64);
-        let obj = test_object_id("rt");
-        iblt.note_local_change(&obj, None);
-        iblt.note_local_change(&obj, Some(42));
+        let obj_a = test_object_id("rt-a");
+        let obj_b = test_object_id("rt-b");
+        iblt.note_local_change(&obj_a, None);
+        iblt.note_local_change(&obj_b, Some(42));
         let encoded = iblt.encode();
         let decoded = IbltPlaceholder::decode_with_limits(
             &encoded,
@@ -3306,14 +3346,14 @@ mod tests {
             encoded.len().max(MIN_IBLT_BYTES_BUDGET),
         )
         .unwrap();
-        // Subtract the decoded peer sketch from an empty sketch of the
-        // same cell count; peeling the diff recovers the inserted
-        // object, proving the sketch survived the wire roundtrip.
         let empty = Iblt::with_cell_count(decoded.as_iblt().cell_count()).unwrap();
         let diff = decoded.as_iblt().subtract(&empty).unwrap();
         let result = diff.decode();
         assert!(result.is_complete());
-        assert_eq!(result.only_left, [obj].into_iter().collect());
+        assert_eq!(
+            result.only_left,
+            [obj_a, obj_b].into_iter().collect()
+        );
     }
 
     #[test]
@@ -4264,7 +4304,10 @@ mod tests {
             symbol_filter_digest: [0; 32],
             object_count: 0,
             symbol_count: 0,
-            iblt: b"[]".to_vec(),
+            // Empty payload is accepted by decode_with_limits as "peer
+            // sketch sized for local batch, empty items" — matches the
+            // wire-format fallback marker used by create_summary.
+            iblt: Vec::new(),
             timestamp: ts,
             signature: None,
         };

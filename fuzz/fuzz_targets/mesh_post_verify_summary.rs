@@ -49,8 +49,13 @@ fn test_node(config: GossipConfig) -> MeshNode {
 
 fn summary_iblt(mode: u8, raw: &[u8], max_iblt_bytes: usize) -> Vec<u8> {
     match mode % 4 {
-        0 => b"[]".to_vec(),
-        1 => b"not-json".to_vec(),
+        // Empty payload: decode_with_limits routes to the "empty
+        // sketch sized for batch" branch (matches create_summary's
+        // over-budget fallback marker).
+        0 => Vec::new(),
+        // Malformed CBOR: decode_with_limits rejects with InvalidEncoding.
+        1 => b"not-cbor".to_vec(),
+        // Oversized payload: rejected before parse.
         2 => vec![0u8; max_iblt_bytes.saturating_add(1)],
         _ => raw
             .iter()

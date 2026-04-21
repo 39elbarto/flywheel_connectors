@@ -100,6 +100,26 @@ fn validate_base_url_for_auth(base_url: &str, auth: &MondayAuth) -> FcpResult<St
         code: 1003,
         message: format!("base_url could not be parsed: {error}"),
     })?;
+    // Strip query/fragment/userinfo before scheme/host enforcement. The
+    // MondayClient POSTs directly to self.base_url (client.rs:124) so
+    // anything in the query string is sent on every GraphQL request.
+    // A base_url like `https://api.monday.com/v2?leak=x` would leak
+    // attacker-chosen query values on every call; userinfo would bake
+    // into the request URL and silently override the Authorization
+    // header. Matches the hygiene in airtable / asana / gmail / notion
+    // / hubspot / whatsapp / linear / clickup.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
     let canonical = parsed.to_string().trim_end_matches('/').to_string();
 
     match auth {
@@ -1692,5 +1712,66 @@ mod tests {
         assert!(!is_local_test_host("api.monday.com"));
         assert!(!is_local_test_host("evil.com"));
         assert!(!is_local_test_host("192.168.1.1"));
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_accepts_api_monday_com_with_token() {
+        let auth = MondayAuth::ApiToken("mtok".into());
+        let out = validate_base_url_for_auth("https://api.monday.com/v2", &auth).unwrap();
+        assert_eq!(out, "https://api.monday.com/v2");
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_query_string_with_token() {
+        let auth = MondayAuth::ApiToken("mtok".into());
+        let err =
+            validate_base_url_for_auth("https://api.monday.com/v2?leak=x", &auth).unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("query"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_fragment_with_token() {
+        let auth = MondayAuth::ApiToken("mtok".into());
+        let err =
+            validate_base_url_for_auth("https://api.monday.com/v2#frag", &auth).unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_userinfo_with_token() {
+        let auth = MondayAuth::ApiToken("mtok".into());
+        let err = validate_base_url_for_auth(
+            "https://attacker:pw@api.monday.com/v2",
+            &auth,
+        )
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("userinfo"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_query_string_with_credential_id() {
+        let auth = MondayAuth::CredentialId(CredentialId::new());
+        let err =
+            validate_base_url_for_auth("https://vault-proxy.example/v2?leak=x", &auth)
+                .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_base_url_for_auth_rejects_substring_smuggle_with_token() {
+        let auth = MondayAuth::ApiToken("mtok".into());
+        let err =
+            validate_base_url_for_auth("https://evil.com/api.monday.com/v2", &auth).unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 }

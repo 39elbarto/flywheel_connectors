@@ -24,7 +24,7 @@ fcp-crypto = { path = "../fcp-crypto" }
 # Async runtime
 async-trait = "0.1"
 futures-util = { workspace = true }
-asupersync = { path = "../../../asupersync" }
+asupersync = { version = "0.3.0" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

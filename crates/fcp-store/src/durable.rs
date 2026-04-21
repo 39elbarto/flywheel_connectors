@@ -207,12 +207,24 @@ impl DurableObjectState {
         size
     }
 
-    fn from_snapshot(snapshot: ObjectSnapshot) -> Self {
+    fn from_snapshot(snapshot: ObjectSnapshot) -> Result<Self, ObjectStoreError> {
         let mut state = Self::default();
         for object in snapshot.objects {
+            // Defense-in-depth: reject snapshot entries whose header is
+            // not canonically encodable or whose total size exceeds
+            // `MAX_CANONICAL_OBJECT_BYTES`. A snapshot file is on-disk
+            // attacker-reachable (compromised host, restored backup,
+            // imported from another node), so the recovery path must
+            // not implicitly trust per-object structure.
+            object.validate_structure().map_err(|err| {
+                ObjectStoreError::Io(format!(
+                    "invalid object structure in snapshot for {}: {err}",
+                    object.object_id
+                ))
+            })?;
             state.insert_loaded(object);
         }
-        state
+        Ok(state)
     }
 
     fn to_snapshot(&self) -> ObjectSnapshot {
@@ -232,6 +244,18 @@ impl DurableObjectState {
     fn validate_mutation(&self, op: &ObjectWalOp, max_bytes: u64) -> Result<(), ObjectStoreError> {
         match op {
             ObjectWalOp::Put(object) => {
+                // Reject malformed or oversized objects before they reach
+                // either the WAL or the in-memory map. Closes the gap that
+                // bead flywheel_connectors-4g0qr documented: a peer (or
+                // any process with WAL write access) could previously
+                // smuggle in a `Put` whose `body` exceeds
+                // `MAX_CANONICAL_OBJECT_BYTES` or whose `header` is not
+                // canonically encodable. Full content-ID verification
+                // requires the zone's `ObjectIdKey` and is the runtime
+                // caller's responsibility.
+                object.validate_structure().map_err(|err| {
+                    ObjectStoreError::Io(format!("invalid object structure: {err}"))
+                })?;
                 if self.objects.contains_key(&object.object_id) {
                     return Err(ObjectStoreError::AlreadyExists(object.object_id));
                 }
@@ -973,7 +997,7 @@ fn load_durable_object_state(
 ) -> Result<(DurableObjectState, u64), ObjectStoreError> {
     let (mut state, last_snapshot_seq) =
         match read_snapshot::<ObjectSnapshot>(snapshot_path).map_err(object_io)? {
-            Some((snapshot, seq)) => (DurableObjectState::from_snapshot(snapshot), seq),
+            Some((snapshot, seq)) => (DurableObjectState::from_snapshot(snapshot)?, seq),
             None => (DurableObjectState::default(), 0),
         };
 
@@ -982,6 +1006,13 @@ fn load_durable_object_state(
     let mut last_seq = last_snapshot_seq;
     for record in records {
         last_seq = record.seq;
+        // Mirror the runtime mutation path: validate the record's
+        // structure (size cap + canonical-CBOR-encodable header) before
+        // applying. Closes the WAL replay trust gap documented in bead
+        // flywheel_connectors-4g0qr — `apply_loaded_mutation` alone
+        // skips the structural check that `record_mutation` enforces
+        // on the live write path.
+        state.validate_mutation(&record.op, u64::MAX)?;
         state.apply_loaded_mutation(record.op)?;
     }
 
@@ -1432,6 +1463,78 @@ mod tests {
             reopened.get(&test_object_id(2)).await,
             Err(ObjectStoreError::NotFound(_))
         ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn wal_replay_rejects_oversized_object_body() {
+        // Regression for flywheel_connectors-4g0qr: WAL replay used to call
+        // `apply_loaded_mutation` directly without `validate_mutation`, so
+        // a forged WAL record with `body.len() > MAX_CANONICAL_OBJECT_BYTES`
+        // would be admitted into the in-memory map. After the fix,
+        // recovery must reject the forged record (the WAL is then truncated
+        // by the surrounding torn-WAL handling).
+        use std::io::Write;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut config = DurableObjectStoreConfig::new(temp_dir.path());
+        config.max_bytes = u64::MAX;
+
+        // 1) Open + put a legitimate object so we have a valid WAL prefix.
+        let store = DurableObjectStore::open(config.clone()).expect("open store");
+        store.put(test_object(1)).await.expect("put legit object");
+        drop(store);
+
+        // 2) Construct a forged StoredObject whose body exceeds the
+        //    canonical-bytes cap. `validate_structure` must reject this.
+        let mut forged = test_object(2);
+        forged.body = vec![0u8; fcp_cbor::MAX_CANONICAL_OBJECT_BYTES + 1];
+        assert!(
+            forged.validate_structure().is_err(),
+            "structural check must reject oversized body"
+        );
+
+        // 3) Append the forged record to the object WAL with the correct
+        //    checksum so the bytes-on-disk look authentic.
+        let wal_path = temp_dir.path().join("objects.wal.jsonl");
+        let op = ObjectWalOp::Put(forged);
+        let checksum =
+            checksum_json(&(WAL_VERSION, 2u64, &op)).expect("compute forged checksum");
+        let envelope = WalEnvelope {
+            version: WAL_VERSION,
+            seq: 2u64,
+            checksum,
+            op: &op,
+        };
+        let mut bytes = serde_json::to_vec(&envelope).expect("serialize forged envelope");
+        bytes.push(b'\n');
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&wal_path)
+            .expect("open wal");
+        file.write_all(&bytes).expect("append forged record");
+        drop(file);
+
+        // 4) Reopen. The fix must reject the forged record at recovery.
+        match DurableObjectStore::open(config) {
+            Ok(store) => {
+                // If recovery succeeded (e.g. WAL truncation discarded the
+                // bad tail), the forged object MUST NOT be present.
+                assert!(
+                    matches!(
+                        store.get(&test_object_id(2)).await,
+                        Err(ObjectStoreError::NotFound(_))
+                    ),
+                    "forged oversized object must not be recovered"
+                );
+            }
+            Err(ObjectStoreError::Io(msg)) => {
+                assert!(
+                    msg.contains("invalid object structure"),
+                    "expected structural-validation error, got: {msg}"
+                );
+            }
+            Err(other) => panic!("unexpected error during recovery: {other:?}"),
+        }
     }
 
     #[test]

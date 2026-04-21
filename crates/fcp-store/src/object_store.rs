@@ -397,6 +397,16 @@ impl MemoryObjectStore {
 #[async_trait]
 impl ObjectStore for MemoryObjectStore {
     async fn put(&self, object: StoredObject) -> Result<(), ObjectStoreError> {
+        // Defense-in-depth: reject objects whose header cannot be
+        // canonically encoded or whose total size exceeds
+        // `fcp_cbor::MAX_CANONICAL_OBJECT_BYTES`. Prevents a malformed or
+        // oversized object from being persisted at the runtime boundary,
+        // mirroring the WAL/snapshot replay checks. Full content-ID
+        // verification is the caller's responsibility (needs zone keys).
+        object
+            .validate_structure()
+            .map_err(|err| ObjectStoreError::Io(format!("invalid object structure: {err}")))?;
+
         let mut objects = self.objects.write();
 
         if objects.contains_key(&object.object_id) {

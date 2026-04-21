@@ -4,6 +4,25 @@
 //! invoke tools they are authorized to use in their current zone. Provides
 //! zone-aware tool filtering, capability token validation, and structured
 //! error responses for zone violations.
+//!
+//! # Relationship to `fcp_core` primitives
+//!
+//! This module historically defined its own `ZoneId` and `CapabilityToken`
+//! types alongside the canonical ones in `fcp_core`. The types in this module
+//! are intentionally scoped to MCP-server-side tool filtering and are NOT a
+//! substitute for the cryptographically-verified capability surface in
+//! `fcp_core::CapabilityToken` / `fcp_core::CapabilityVerifier`. To prevent
+//! accidental use of the MCP-only access-control token where a
+//! cryptographically-verified capability is required, the MCP token is named
+//! [`ToolCapabilityToken`] (not `CapabilityToken`) and the zone identifier
+//! here is convertible to `fcp_core::ZoneId` via the `From`/`Into` trait so
+//! callers can hand off to the core enforcement path.
+//!
+//! Rule of thumb: if your code is enforcing access control at the MCP-tool
+//! boundary only, use the types in this module. If your code is invoking a
+//! connector, minting a revocable authority, or participating in mesh
+//! enforcement, use `fcp_core` types. See `GEMINI_LANE3_REVOCATION.md`
+//! finding L3-04 for the rationale.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -50,9 +69,29 @@ impl From<&str> for ZoneId {
     }
 }
 
+impl From<fcp_core::ZoneId> for ZoneId {
+    fn from(z: fcp_core::ZoneId) -> Self {
+        Self::new(z.as_str().to_owned())
+    }
+}
+
+impl From<&fcp_core::ZoneId> for ZoneId {
+    fn from(z: &fcp_core::ZoneId) -> Self {
+        Self::new(z.as_str().to_owned())
+    }
+}
+
+impl TryFrom<ZoneId> for fcp_core::ZoneId {
+    type Error = fcp_core::ZoneIdError;
+
+    fn try_from(z: ZoneId) -> Result<Self, Self::Error> {
+        fcp_core::ZoneId::try_from(z.0)
+    }
+}
+
 /// A capability token that grants access to operations within a zone.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct CapabilityToken {
+pub struct ToolCapabilityToken {
     /// Zone this token grants access to.
     pub zone: ZoneId,
     /// Agent or principal this token is for.
@@ -67,7 +106,7 @@ pub struct CapabilityToken {
     pub expires_at: u64,
 }
 
-impl CapabilityToken {
+impl ToolCapabilityToken {
     /// Create a new token for a zone and principal.
     pub fn new(zone: ZoneId, principal: impl Into<String>) -> Self {
         Self {
@@ -336,7 +375,7 @@ pub fn validate_tool_call(
     registry: &ZoneRegistry,
     tool_name: &str,
     zone: &ZoneId,
-    token: Option<&CapabilityToken>,
+    token: Option<&ToolCapabilityToken>,
 ) -> Result<(), ZoneViolation> {
     // Must have a token
     let Some(token) = token else {
@@ -415,7 +454,7 @@ pub fn validate_tool_call(
 pub fn filter_tools_for_zone<'a>(
     tools: &'a [ZoneScopedTool],
     zone: &ZoneId,
-    token: &CapabilityToken,
+    token: &ToolCapabilityToken,
 ) -> Vec<&'a ZoneScopedTool> {
     tools
         .iter()
@@ -1317,8 +1356,8 @@ mod tests {
         ZoneId::new("z:private")
     }
 
-    fn sample_token(zone: ZoneId) -> CapabilityToken {
-        CapabilityToken::new(zone, "agent-1")
+    fn sample_token(zone: ZoneId) -> ToolCapabilityToken {
+        ToolCapabilityToken::new(zone, "agent-1")
     }
 
     fn sample_registry() -> ZoneRegistry {
@@ -1393,11 +1432,11 @@ mod tests {
         assert_eq!(json, "z:work");
     }
 
-    // ── CapabilityToken ───────────────────────────────────────────
+    // ── ToolCapabilityToken ───────────────────────────────────────────
 
     #[test]
     fn token_basic() {
-        let t = CapabilityToken::new(zone_work(), "agent-1");
+        let t = ToolCapabilityToken::new(zone_work(), "agent-1");
         assert_eq!(t.zone, zone_work());
         assert_eq!(t.principal, "agent-1");
         assert!(t.allowed_connectors.is_empty());
@@ -1808,25 +1847,25 @@ mod tests {
         assert_eq!(z, z2);
     }
 
-    // ── CapabilityToken edge cases ───────────────────────────────
+    // ── ToolCapabilityToken edge cases ───────────────────────────────
 
     #[test]
     fn token_expiry_exact_boundary() {
-        let t = CapabilityToken::new(zone_work(), "agent").with_expiry(100);
+        let t = ToolCapabilityToken::new(zone_work(), "agent").with_expiry(100);
         assert!(!t.is_expired(100)); // now == expires_at → NOT expired
         assert!(t.is_expired(101)); // now > expires_at → expired
     }
 
     #[test]
     fn token_expiry_zero_means_no_expiry() {
-        let t = CapabilityToken::new(zone_work(), "agent").with_expiry(0);
+        let t = ToolCapabilityToken::new(zone_work(), "agent").with_expiry(0);
         assert!(!t.is_expired(0));
         assert!(!t.is_expired(u64::MAX));
     }
 
     #[test]
     fn token_multiple_connectors() {
-        let t = CapabilityToken::new(zone_work(), "agent")
+        let t = ToolCapabilityToken::new(zone_work(), "agent")
             .with_connector("github")
             .with_connector("slack")
             .with_connector("jira");
@@ -1838,7 +1877,7 @@ mod tests {
 
     #[test]
     fn token_multiple_denied_operations() {
-        let t = CapabilityToken::new(zone_work(), "agent")
+        let t = ToolCapabilityToken::new(zone_work(), "agent")
             .with_denied_operation("delete_repo")
             .with_denied_operation("delete_org");
         assert!(t.is_operation_denied("delete_repo"));
@@ -1848,12 +1887,12 @@ mod tests {
 
     #[test]
     fn token_serde_roundtrip_full() {
-        let t = CapabilityToken::new(zone_work(), "agent-42")
+        let t = ToolCapabilityToken::new(zone_work(), "agent-42")
             .with_connector("github")
             .with_denied_operation("delete")
             .with_expiry(99999);
         let json = serde_json::to_string(&t).unwrap();
-        let t2: CapabilityToken = serde_json::from_str(&json).unwrap();
+        let t2: ToolCapabilityToken = serde_json::from_str(&json).unwrap();
         assert_eq!(t2.zone, zone_work());
         assert_eq!(t2.principal, "agent-42");
         assert!(t2.allows_connector("github"));
@@ -1864,7 +1903,7 @@ mod tests {
 
     #[test]
     fn token_clone() {
-        let t = CapabilityToken::new(zone_work(), "agent").with_connector("github");
+        let t = ToolCapabilityToken::new(zone_work(), "agent").with_connector("github");
         let t2 = t.clone();
         assert_eq!(t.zone, t2.zone);
         assert!(t2.allows_connector("github"));
@@ -2021,7 +2060,7 @@ mod tests {
     #[test]
     fn validate_expired_token() {
         let reg = sample_registry();
-        let token = CapabilityToken::new(zone_work(), "agent").with_expiry(1); // expired
+        let token = ToolCapabilityToken::new(zone_work(), "agent").with_expiry(1); // expired
         let result = validate_tool_call(&reg, "github.create_issue", &zone_work(), Some(&token));
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().reason, ViolationReason::TokenExpired);
@@ -2248,24 +2287,24 @@ mod tests {
         assert_eq!(format!("zone={z}"), "zone=z:formatted");
     }
 
-    // ── CapabilityToken extended ─────────────────────────────────────
+    // ── ToolCapabilityToken extended ─────────────────────────────────────
 
     #[test]
     fn token_default_timestamps() {
-        let t = CapabilityToken::new(zone_work(), "agent");
+        let t = ToolCapabilityToken::new(zone_work(), "agent");
         assert_eq!(t.issued_at, 0);
         assert_eq!(t.expires_at, 0);
     }
 
     #[test]
     fn token_empty_principal() {
-        let t = CapabilityToken::new(zone_work(), "");
+        let t = ToolCapabilityToken::new(zone_work(), "");
         assert_eq!(t.principal, "");
     }
 
     #[test]
     fn token_with_connector_chaining() {
-        let t = CapabilityToken::new(zone_work(), "agent")
+        let t = ToolCapabilityToken::new(zone_work(), "agent")
             .with_connector("a")
             .with_connector("b")
             .with_connector("c")
@@ -2278,7 +2317,7 @@ mod tests {
 
     #[test]
     fn token_denied_ops_chaining() {
-        let t = CapabilityToken::new(zone_work(), "agent")
+        let t = ToolCapabilityToken::new(zone_work(), "agent")
             .with_denied_operation("delete")
             .with_denied_operation("destroy")
             .with_denied_operation("delete"); // duplicate
@@ -2287,7 +2326,7 @@ mod tests {
 
     #[test]
     fn token_expiry_boundary_exact_equals() {
-        let t = CapabilityToken::new(zone_work(), "agent").with_expiry(100);
+        let t = ToolCapabilityToken::new(zone_work(), "agent").with_expiry(100);
         // now == expires_at is NOT expired (now > expires_at is the condition)
         assert!(!t.is_expired(99));
         assert!(!t.is_expired(100));
@@ -2296,7 +2335,7 @@ mod tests {
 
     #[test]
     fn token_expiry_max_u64() {
-        let t = CapabilityToken::new(zone_work(), "agent").with_expiry(u64::MAX);
+        let t = ToolCapabilityToken::new(zone_work(), "agent").with_expiry(u64::MAX);
         assert!(!t.is_expired(0));
         assert!(!t.is_expired(u64::MAX - 1));
         assert!(!t.is_expired(u64::MAX));
@@ -2304,7 +2343,7 @@ mod tests {
 
     #[test]
     fn token_allows_all_when_empty_set() {
-        let t = CapabilityToken::new(zone_work(), "agent");
+        let t = ToolCapabilityToken::new(zone_work(), "agent");
         // Empty allowed_connectors means ALL connectors are allowed
         assert!(t.allows_connector("anything"));
         assert!(t.allows_connector(""));
@@ -2313,7 +2352,7 @@ mod tests {
 
     #[test]
     fn token_denies_when_not_in_allowed_set() {
-        let t = CapabilityToken::new(zone_work(), "agent").with_connector("only_this");
+        let t = ToolCapabilityToken::new(zone_work(), "agent").with_connector("only_this");
         assert!(t.allows_connector("only_this"));
         assert!(!t.allows_connector("not_this"));
         assert!(!t.allows_connector(""));
@@ -2321,16 +2360,16 @@ mod tests {
 
     #[test]
     fn token_denied_op_empty_string() {
-        let t = CapabilityToken::new(zone_work(), "agent").with_denied_operation("");
+        let t = ToolCapabilityToken::new(zone_work(), "agent").with_denied_operation("");
         assert!(t.is_operation_denied(""));
         assert!(!t.is_operation_denied("something"));
     }
 
     #[test]
     fn token_serde_empty_sets() {
-        let t = CapabilityToken::new(zone_work(), "agent");
+        let t = ToolCapabilityToken::new(zone_work(), "agent");
         let json = serde_json::to_string(&t).unwrap();
-        let t2: CapabilityToken = serde_json::from_str(&json).unwrap();
+        let t2: ToolCapabilityToken = serde_json::from_str(&json).unwrap();
         assert!(t2.allowed_connectors.is_empty());
         assert!(t2.denied_operations.is_empty());
         assert_eq!(t2.expires_at, 0);
@@ -2339,14 +2378,14 @@ mod tests {
 
     #[test]
     fn token_serde_with_all_fields() {
-        let t = CapabilityToken::new(zone_private(), "admin-agent")
+        let t = ToolCapabilityToken::new(zone_private(), "admin-agent")
             .with_connector("vault")
             .with_connector("1password")
             .with_denied_operation("delete_all")
             .with_denied_operation("purge")
             .with_expiry(9_999_999);
         let json = serde_json::to_string(&t).unwrap();
-        let t2: CapabilityToken = serde_json::from_str(&json).unwrap();
+        let t2: ToolCapabilityToken = serde_json::from_str(&json).unwrap();
         assert_eq!(t2.zone, zone_private());
         assert_eq!(t2.principal, "admin-agent");
         assert_eq!(t2.allowed_connectors.len(), 2);
@@ -2356,7 +2395,7 @@ mod tests {
 
     #[test]
     fn token_clone_independence() {
-        let t = CapabilityToken::new(zone_work(), "agent").with_connector("github");
+        let t = ToolCapabilityToken::new(zone_work(), "agent").with_connector("github");
         let mut t2 = t.clone();
         t2.allowed_connectors.insert("slack".into());
         // Original should not be affected

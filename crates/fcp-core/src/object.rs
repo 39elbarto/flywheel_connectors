@@ -254,6 +254,39 @@ impl StoredObject {
             key,
         ))
     }
+
+    /// Structural validation that does not require an `ObjectIdKey`.
+    ///
+    /// `ObjectId` is a *keyed* derivation (HMAC-style with the zone's
+    /// `ObjectIdKey`), so the storage layer cannot independently verify
+    /// `self.object_id == derive_id(self.header, self.body, key)` without
+    /// access to the zone keys (which live in `ZoneKeyMaterial`, outside
+    /// the store). Full content-ID verification is the runtime-API layer's
+    /// responsibility (e.g., MeshNode at the put boundary).
+    ///
+    /// This method provides the strongest *key-free* check available:
+    /// run the canonical encoding pipeline that `derive_id` would run, so
+    /// that any object which could not have been produced by a legitimate
+    /// `derive_id` call is rejected. It catches:
+    ///
+    ///   - Headers that fail canonical-CBOR encoding (NaN/Infinity floats,
+    ///     duplicate map keys, non-canonical structure, `serde` errors).
+    ///   - `body` lengths that, combined with the canonical header, exceed
+    ///     [`fcp_cbor::MAX_CANONICAL_OBJECT_BYTES`] (64 MiB) — protects
+    ///     downstream allocators from oversized objects smuggled through a
+    ///     deserialized envelope (e.g., a 500 MiB `Put` in the WAL).
+    ///
+    /// This is a NECESSARY but not SUFFICIENT check for content-addressing
+    /// integrity. Storage backends should call this on every write
+    /// (runtime API + WAL replay + snapshot recovery) for defense in depth.
+    ///
+    /// # Errors
+    /// Returns the same `SerializationError` that `canonical_bytes` would
+    /// return for a malformed or oversized object.
+    pub fn validate_structure(&self) -> Result<(), SerializationError> {
+        Self::canonical_bytes(&self.header, &self.body)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

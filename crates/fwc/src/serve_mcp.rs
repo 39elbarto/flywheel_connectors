@@ -19,7 +19,7 @@ use crate::mcp_resources::{
 };
 use crate::readiness::DiscoveredConnector;
 use crate::zone_scope::{
-    CapabilityToken, ViolationReason, ZoneId, ZoneRegistry, ZoneScopedTool, ZoneViolation,
+    ToolCapabilityToken, ViolationReason, ZoneId, ZoneRegistry, ZoneScopedTool, ZoneViolation,
     validate_tool_call,
 };
 use crate::{catalog, export_tools};
@@ -798,7 +798,7 @@ fn prompt_matches_server_filters(state: &McpServerState, prompt: &McpPromptEntry
     }
 }
 
-fn capability_token_from_params(params: &Value) -> Result<Option<CapabilityToken>, JsonRpcError> {
+fn capability_token_from_params(params: &Value) -> Result<Option<ToolCapabilityToken>, JsonRpcError> {
     let meta = params.get("meta").and_then(Value::as_object);
     let candidates = [
         params.get("capability_token"),
@@ -837,7 +837,7 @@ fn zone_registry_for_tools(tools: &[McpToolDefinition], default_zone: &str) -> Z
 fn zone_violation_error(
     tool: &McpToolDefinition,
     violation: ZoneViolation,
-    token: Option<&CapabilityToken>,
+    token: Option<&ToolCapabilityToken>,
 ) -> JsonRpcError {
     let required_capability = tool
         .annotations
@@ -2025,7 +2025,7 @@ mod tests {
 
     fn sample_token(zone: &str) -> Value {
         serde_json::to_value(
-            CapabilityToken::new(ZoneId::new(zone.to_owned()), "agent:test")
+            ToolCapabilityToken::new(ZoneId::new(zone.to_owned()), "agent:test")
                 .with_connector("github"),
         )
         .expect("sample capability token")

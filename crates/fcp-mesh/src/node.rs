@@ -1535,7 +1535,7 @@ impl MeshNode {
         }
     }
 
-    /// Decode a CBOR-encoded `GossipMessage` received from the mesh
+    /// Decode a JSON-encoded `GossipMessage` received from the mesh
     /// transport layer and dispatch it through [`Self::handle_gossip_message`].
     ///
     /// This is the production entry point that closes the L3-02
@@ -1544,6 +1544,14 @@ impl MeshNode {
     /// the signature verification, zone authorization, replay check,
     /// and revocation-registry update logic runs in a production code
     /// path (not only in tests and fuzzers).
+    ///
+    /// The current wire format is JSON because `GossipMessage` uses
+    /// `#[serde(tag = "type")]` internal tagging, which has documented
+    /// interop issues with deterministic CBOR implementations. A
+    /// follow-up migration to canonical CBOR (tracked alongside L3-02)
+    /// should move this to `fcp_cbor::serialize`/`deserialize` once the
+    /// enum is refactored to an externally tagged or non-tagged layout
+    /// that CBOR handles cleanly.
     ///
     /// # Errors
     ///
@@ -1555,12 +1563,28 @@ impl MeshNode {
         payload: &[u8],
         now_secs: u64,
     ) -> Result<Option<VerifiedRevocationPush>, MeshNodeError> {
-        let message: GossipMessage = ciborium::from_reader(payload)
+        let message: GossipMessage = serde_json::from_slice(payload)
             .map_err(|e| MeshNodeError::GossipDecode(e.to_string()))?;
         self.handle_gossip_message(message, now_secs)
     }
 
-    /// Decode a CBOR-encoded `GossipMessage` payload carried inside a
+    /// Dispatch an already-parsed `GossipMessage` that was delivered
+    /// through the mesh transport. Use this variant when the
+    /// transport layer has already deserialized the wire payload.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any verification error from the underlying gossip
+    /// handlers (signature, replay, zone authorization, staleness).
+    pub fn dispatch_gossip_message(
+        &mut self,
+        message: GossipMessage,
+        now_secs: u64,
+    ) -> Result<Option<VerifiedRevocationPush>, MeshNodeError> {
+        self.handle_gossip_message(message, now_secs)
+    }
+
+    /// Decode a JSON-encoded `GossipMessage` payload carried inside a
     /// [`ControlPlaneEnvelope`] and dispatch it through the gossip
     /// handlers. Convenience wrapper over
     /// [`Self::dispatch_gossip_payload`] for transports that surface
@@ -3019,6 +3043,97 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn dispatch_gossip_payload_routes_revocation_push_to_registry() {
+        // Regression test for L3-02 (gossip dispatch gap). Simulate
+        // a transport delivery of a JSON-encoded RevocationPush and
+        // verify MeshNode::dispatch_gossip_payload runs signature
+        // verification and surfaces the verified descriptor, proving
+        // the production dispatch path is wired.
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+
+        let mut push = RevocationPushMessage::new(
+            TailscaleNodeId::new("peer-1"),
+            ZoneId::work(),
+            vec![ObjectId::from_bytes([0xEF; 32])],
+            99,
+            1_000,
+        );
+        push.signature = Some(fcp_core::NodeSignature::new(
+            fcp_core::NodeId::new(peer.as_str()),
+            signing_key.sign(&push.signing_bytes()).to_bytes(),
+            1_000,
+        ));
+        let message = GossipMessage::RevocationPush(push);
+
+        let payload = serde_json::to_vec(&message).expect("JSON encode");
+
+        let verified = node
+            .dispatch_gossip_payload(&payload, 1_000)
+            .expect("dispatch should succeed")
+            .expect("revocation push must produce a verified descriptor");
+        assert_eq!(verified.new_rev_seq, 99);
+        assert_eq!(verified.revoked_ids.len(), 1);
+    }
+
+    #[test]
+    fn dispatch_gossip_message_routes_summary_to_handler() {
+        // Covers the pre-parsed dispatch variant: a transport layer
+        // that has already decoded bytes into a GossipMessage should
+        // be able to hand it off via dispatch_gossip_message.
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+
+        let mut push = RevocationPushMessage::new(
+            TailscaleNodeId::new("peer-1"),
+            ZoneId::work(),
+            vec![ObjectId::from_bytes([0xAA; 32])],
+            123,
+            1_000,
+        );
+        push.signature = Some(fcp_core::NodeSignature::new(
+            fcp_core::NodeId::new(peer.as_str()),
+            signing_key.sign(&push.signing_bytes()).to_bytes(),
+            1_000,
+        ));
+
+        let verified = node
+            .dispatch_gossip_message(GossipMessage::RevocationPush(push), 1_000)
+            .expect("dispatch should succeed")
+            .expect("revocation push must produce a verified descriptor");
+        assert_eq!(verified.new_rev_seq, 123);
+    }
+
+    #[test]
+    fn dispatch_gossip_payload_rejects_malformed_bytes() {
+        let mut node = test_node("node-1");
+        let err = node
+            .dispatch_gossip_payload(b"not a gossip message", 0)
+            .expect_err("garbage bytes must not decode as a gossip message");
+        assert!(matches!(err, MeshNodeError::GossipDecode(_)));
     }
 
     // ---- Metrics tests ----

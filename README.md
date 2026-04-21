@@ -667,7 +667,7 @@ Nodes enforce per-peer resource budgets to prevent DoS:
 |-----------|---------|
 | **PeerBudget** | Per-peer limits on bytes/sec, frames/sec, pending requests |
 | **Anti-amplification** | Response size ≤ N × request size until peer authenticated |
-| **Rate limiting** | Sliding window enforcement with configurable burst |
+| **Rate limiting** | Token bucket, sliding-window, and leaky-bucket enforcement; burst applies to token buckets |
 | **Backpressure** | Reject new requests when budget exhausted |
 
 ### Audit Chain
@@ -925,7 +925,11 @@ Capability tokens use CBOR Object Signing and Encryption (RFC 9052) with CWT cla
 - Per-object placement policies with coverage, diversity, and concentration targets
 - Deterministic repair prioritization: SLO deficit x object hotness x cost estimate
 - Bounded repair plans: max repairs, max bytes, max decode budget per cycle
-- Power-aware behavior: defers non-critical repairs on battery
+- Power-aware deferral (`PLANNED`): the repair controller does **not** currently
+  consult `DeviceProfile.battery_percent`; battery-state wiring is tracked in
+  bead `flywheel_connectors-qyv8n`. `DeviceProfile::is_low_battery` already
+  exists in `fcp-mesh/src/device.rs` and surfaces the signal the controller
+  will eventually gate on.
 
 ---
 
@@ -1868,7 +1872,7 @@ apr integrate 5 -c  # Copy integration prompt to clipboard
 | **Sliding Window** | Precise request counting over a time window | Mutex-guarded VecDeque of timestamps | Single Mutex, cleanup on access |
 | **Leaky Bucket** | Smooth output rate with configurable drain | Mutex-guarded f64 level + leak rate | Leak on every access |
 
-Token bucket refill uses a phase-preserving algorithm: `last_refill = now - (elapsed % refill_interval)`. This avoids both drift accumulation and burst-after-idle issues. Clock jumps (backward or forward) are handled via `saturating_duration_since`, which returns zero for backward jumps, so no tokens are erroneously added.
+Operational FCP rate limits flow through `config_from_core` into `TokenBucket::from_config`, which uses a phase-preserving refill anchor: `last_refill = now - (elapsed % refill_interval)`. This avoids drift accumulation on the smooth-refill path used for manifest-backed limits. The convenience `TokenBucket::new` / `with_burst` constructors remain available for simpler whole-window buckets in tests and direct callers.
 
 Jitter in retry backoff uses the range `[0.5x, 1.5x)` of the base delay via `random_float().mul_add(1.0, 0.5)`, preventing thundering herds when many connectors retry simultaneously.
 
@@ -2010,7 +2014,7 @@ fwc recipe export github-pr-review-notify > .fwc/pipelines/custom.toml
 **Batch operations** execute heterogeneous operations from a JSONL file with dependency ordering:
 ```bash
 fwc batch-file operations.jsonl --dry-run
-fwc batch-file operations.jsonl --approve
+fwc batch-file operations.jsonl
 ```
 
 ---

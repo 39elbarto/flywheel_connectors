@@ -94,6 +94,33 @@ fn collection_body() -> serde_json::Value {
     })
 }
 
+/// Poll the exact count of a collection until it reaches `expected`,
+/// or the budget runs out. Qdrant's upsert endpoint returns as soon
+/// as the write is accepted; the point becomes queryable after the
+/// next segment flush. Without this poll, a follow-up `count`/`scroll`
+/// /`search` can race the indexer and see zero rows. Budget is
+/// intentionally generous (~5 s) so CI flakes don't get blamed on the
+/// test harness.
+async fn wait_for_exact_count(client: &QdrantClient, name: &str, expected: u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let count = client
+            .count(name, &json!({ "exact": true }))
+            .await
+            .expect("count while waiting for upsert visibility");
+        if count.count == expected {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "timed out waiting for exact count to reach {expected}; last observed {}",
+                count.count
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 /// Create a collection and wait for Qdrant to settle it before the
 /// first write. Qdrant's `PUT /collections/{name}` returns 200 only
 /// after the new segment is ready for writes, so no extra wait is
@@ -172,16 +199,9 @@ async fn upsert_points_persist_and_count_reflects_inventory() {
         .await
         .expect("upsert points");
 
-    // Exact count must match the upsert cardinality.
-    let count = client
-        .count(name, &json!({ "exact": true }))
-        .await
-        .expect("count after upsert");
-    assert_eq!(
-        count.count, 3,
-        "count must match upserted cardinality; got {}",
-        count.count
-    );
+    // Qdrant's upsert is async w.r.t. query visibility — poll until
+    // the indexer has flushed, then assert exact inventory.
+    wait_for_exact_count(&client, name, 3).await;
 
     // Scroll must return the same points with payloads preserved.
     let scroll = client
@@ -215,15 +235,7 @@ async fn upsert_points_persist_and_count_reflects_inventory() {
         .delete_points(name, &json!({ "points": [2] }))
         .await
         .expect("delete one point");
-    let count = client
-        .count(name, &json!({ "exact": true }))
-        .await
-        .expect("count after delete");
-    assert_eq!(
-        count.count, 2,
-        "count must drop by 1 after delete_points; got {}",
-        count.count
-    );
+    wait_for_exact_count(&client, name, 2).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -249,6 +261,7 @@ async fn search_ranks_points_by_true_cosine_similarity() {
         )
         .await
         .expect("upsert search fixtures");
+    wait_for_exact_count(&client, name, 2).await;
 
     // Query closely aligned with the x-axis point.
     let results = client
@@ -302,6 +315,7 @@ async fn scroll_paginates_with_advancing_offset() {
         .upsert_points(name, &json!({ "points": points }))
         .await
         .expect("upsert scroll fixtures");
+    wait_for_exact_count(&client, name, 5).await;
 
     let first = client
         .scroll(

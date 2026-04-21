@@ -654,7 +654,9 @@ mod tests {
         #[default]
         Success,
         CapabilityDeniedError,
+        CapabilityDeniedResponse,
         UnauthorizedError,
+        UnauthorizedResponse,
     }
 
     struct MockConnector {
@@ -702,9 +704,23 @@ mod tests {
             }
         }
 
+        fn capability_denied_response() -> Self {
+            Self {
+                invoke_behavior: MockInvokeBehavior::CapabilityDeniedResponse,
+                ..Self::healthy()
+            }
+        }
+
         fn unauthorized_error() -> Self {
             Self {
                 invoke_behavior: MockInvokeBehavior::UnauthorizedError,
+                ..Self::healthy()
+            }
+        }
+
+        fn unauthorized_response() -> Self {
+            Self {
+                invoke_behavior: MockInvokeBehavior::UnauthorizedResponse,
                 ..Self::healthy()
             }
         }
@@ -788,10 +804,29 @@ mod tests {
                     capability: "cap.read".into(),
                     reason: "missing capability".into(),
                 }),
+                MockInvokeBehavior::CapabilityDeniedResponse => Ok(
+                    InvokeResponse::error(
+                        req.id,
+                        FcpError::CapabilityDenied {
+                            capability: "cap.read".into(),
+                            reason: "missing capability".into(),
+                        },
+                    )
+                    .with_decision_receipt_id(fcp_core::ObjectId::from_unscoped_bytes(
+                        b"dr_lib_capability_deny_001",
+                    )),
+                ),
                 MockInvokeBehavior::UnauthorizedError => Err(FcpError::Unauthorized {
                     code: 401,
                     message: "invalid bearer".into(),
                 }),
+                MockInvokeBehavior::UnauthorizedResponse => Ok(InvokeResponse::error(
+                    req.id,
+                    FcpError::Unauthorized {
+                        code: 401,
+                        message: "invalid bearer".into(),
+                    },
+                )),
             }
         }
 
@@ -963,8 +998,81 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn dynamic_capability_denied_response_counts_as_capability_denial_and_receipt() {
+        let mut connector = MockConnector::capability_denied_response();
+        let suite = DynamicSuite {
+            config: serde_json::json!({}),
+            handshake: make_handshake(),
+            invoke: Some(make_invoke("protected_op")),
+            expect_invoke_error: true,
+            simulate: None,
+            expect_simulate_would_succeed: None,
+            require_simulate_denial_details: false,
+            require_capability_denial: true,
+            require_decision_receipt: true,
+        };
+
+        let result = run_dynamic_checks(&mut connector, suite).await;
+        assert!(result.passed, "{result:?}");
+
+        let invoke_finding = result
+            .findings
+            .iter()
+            .find(|f| f.check == "invoke")
+            .expect("invoke finding");
+        assert_eq!(invoke_finding.status, CheckStatus::Pass);
+
+        let receipt_finding = result
+            .findings
+            .iter()
+            .find(|f| f.check == "invoke.decision_receipt")
+            .expect("decision receipt finding");
+        assert_eq!(receipt_finding.status, CheckStatus::Pass);
+
+        let cap_finding = result
+            .findings
+            .iter()
+            .find(|f| f.check == "invoke.capability_denial")
+            .expect("capability denial finding");
+        assert_eq!(cap_finding.status, CheckStatus::Pass);
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn dynamic_unauthorized_error_does_not_satisfy_capability_denial() {
         let mut connector = MockConnector::unauthorized_error();
+        let suite = DynamicSuite {
+            config: serde_json::json!({}),
+            handshake: make_handshake(),
+            invoke: Some(make_invoke("protected_op")),
+            expect_invoke_error: true,
+            simulate: None,
+            expect_simulate_would_succeed: None,
+            require_simulate_denial_details: false,
+            require_capability_denial: true,
+            require_decision_receipt: false,
+        };
+
+        let result = run_dynamic_checks(&mut connector, suite).await;
+        assert!(!result.passed, "{result:?}");
+
+        let invoke_finding = result
+            .findings
+            .iter()
+            .find(|f| f.check == "invoke")
+            .expect("invoke finding");
+        assert_eq!(invoke_finding.status, CheckStatus::Pass);
+
+        let cap_finding = result
+            .findings
+            .iter()
+            .find(|f| f.check == "invoke.capability_denial")
+            .expect("capability denial finding");
+        assert_eq!(cap_finding.status, CheckStatus::Fail);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn dynamic_unauthorized_response_does_not_satisfy_capability_denial() {
+        let mut connector = MockConnector::unauthorized_response();
         let suite = DynamicSuite {
             config: serde_json::json!({}),
             handshake: make_handshake(),

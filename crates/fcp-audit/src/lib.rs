@@ -27,6 +27,14 @@ use std::fmt;
 use thiserror::Error;
 
 const AUDIT_ENTRY_ID_DOMAIN: &[u8] = b"FCP2-AUDIT-ENTRY-V1";
+
+/// Default grace window (seconds) for entries whose `occurred_at` is ahead of
+/// the verifier's wall clock. Entries timestamped more than this far in the
+/// future are treated as clock skew beyond tolerance or deliberate poisoning
+/// of freshness/SLA signals, and are flagged as critical by
+/// [`verify_chain_with_clock`]. 300 seconds (5 minutes) matches the skew
+/// tolerance used by Kerberos and most IAM systems.
+pub const MAX_FUTURE_TIMESTAMP_SKEW_SECS: u64 = 300;
 const AUDIT_ENTRY_SIG_DOMAIN: &[u8] = b"FCP2-AUDIT-ENTRY-SIG-V1";
 
 // ============================================================================
@@ -1035,6 +1043,7 @@ impl VerifyIssue {
                 | "audit.head_mismatch"
                 | "audit.head_seq_mismatch"
                 | "audit.head_signature_count_inconsistent"
+                | "audit.timestamp_future"
         )
     }
 }
@@ -1439,6 +1448,59 @@ pub fn verify_chain_with_signers(
     }
 
     Ok(verify_chain(entries, head, zone_id))
+}
+
+/// Verify an audit chain AND reject entries timestamped implausibly far in
+/// the future relative to `now_unix_secs` (a grace of
+/// [`MAX_FUTURE_TIMESTAMP_SKEW_SECS`] is allowed for clock skew).
+///
+/// This closes the gap where [`verify_chain`] detects backward timestamp
+/// regressions but accepts arbitrarily-future `occurred_at` values. A
+/// single forged future-dated entry is otherwise sufficient to poison
+/// freshness SLAs permanently, since subsequent entries only need to be
+/// non-decreasing from that point.
+///
+/// Callers that have no wall-clock reference (offline audit replays)
+/// should keep using [`verify_chain`].
+#[must_use]
+pub fn verify_chain_with_clock(
+    entries: &[AuditEntry],
+    head: Option<&ChainHead>,
+    zone_id: Option<&str>,
+    now_unix_secs: u64,
+) -> VerifyReport {
+    let mut report = verify_chain(entries, head, zone_id);
+    let ceiling = now_unix_secs.saturating_add(MAX_FUTURE_TIMESTAMP_SKEW_SECS);
+
+    for entry in entries {
+        if entry.occurred_at > ceiling {
+            report.issues.push(
+                VerifyIssue::new(
+                    "audit.timestamp_future",
+                    format!(
+                        "entry timestamp {} exceeds now+skew ceiling {} by {} seconds",
+                        entry.occurred_at,
+                        ceiling,
+                        entry.occurred_at.saturating_sub(ceiling),
+                    ),
+                )
+                .with_seq(entry.seq)
+                .with_entry_id(&entry.id),
+            );
+        }
+    }
+
+    // Re-classify status if we added critical future-timestamp issues.
+    let is_fail = report.issues.iter().any(VerifyIssue::is_critical);
+    report.status = if report.issues.is_empty() {
+        VerifyStatus::Ok
+    } else if is_fail {
+        VerifyStatus::Fail
+    } else {
+        VerifyStatus::Warn
+    };
+
+    report
 }
 
 // ============================================================================
@@ -3348,6 +3410,81 @@ mod tests {
             !report.issues.iter().any(|i| i.code == "audit.head_signature_count_inconsistent"),
             "consistent head must not emit inconsistent-count issue"
         );
+    }
+
+    #[test]
+    fn verify_chain_with_clock_flags_far_future_entry() {
+        // Entry stamped 1 hour ahead of now+skew ceiling → critical issue.
+        let now: u64 = 1_700_000_000;
+        let future_ts = now + MAX_FUTURE_TIMESTAMP_SKEW_SECS + 3600;
+
+        let mut entries = canonical_chain_in_zone(2, "z:work");
+        entries[1].occurred_at = future_ts;
+        // Recompute id because occurred_at is inside the hash.
+        entries[1].id = entries[1].computed_id().unwrap();
+
+        let report = verify_chain_with_clock(&entries, None, None, now);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.code == "audit.timestamp_future"),
+            "expected audit.timestamp_future, got {:?}",
+            report.issues
+        );
+        assert!(report.status.is_fail(), "far-future entry must be critical");
+    }
+
+    #[test]
+    fn verify_chain_with_clock_accepts_within_skew() {
+        // Entry stamped exactly at now+skew ceiling → NOT flagged.
+        let now: u64 = 1_700_000_000;
+        let within_skew = now + MAX_FUTURE_TIMESTAMP_SKEW_SECS;
+
+        let mut entries = canonical_chain_in_zone(2, "z:work");
+        entries[1].occurred_at = within_skew;
+        entries[1].id = entries[1].computed_id().unwrap();
+
+        let report = verify_chain_with_clock(&entries, None, None, now);
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|i| i.code == "audit.timestamp_future"),
+            "entry at ceiling must not be flagged, got {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn verify_chain_with_clock_flags_u64_max_timestamp() {
+        // Maximum adversarial case: u64::MAX timestamp. saturating_add
+        // on the ceiling means we don't panic, and the entry is flagged.
+        let now: u64 = 1_700_000_000;
+        let mut entries = canonical_chain_in_zone(2, "z:work");
+        entries[1].occurred_at = u64::MAX;
+        entries[1].id = entries[1].computed_id().unwrap();
+
+        let report = verify_chain_with_clock(&entries, None, None, now);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.code == "audit.timestamp_future"),
+            "u64::MAX timestamp must be flagged"
+        );
+        assert!(report.status.is_fail());
+    }
+
+    #[test]
+    fn verify_chain_with_clock_matches_verify_chain_when_clean() {
+        // No future entries → the two APIs agree on outcome.
+        let entries = canonical_chain_in_zone(3, "z:work");
+        let now: u64 = 1_900_000_000;
+        let plain = verify_chain(&entries, None, None);
+        let clocked = verify_chain_with_clock(&entries, None, None, now);
+        assert_eq!(plain.status, clocked.status);
+        assert_eq!(plain.issues.len(), clocked.issues.len());
     }
 
     proptest! {

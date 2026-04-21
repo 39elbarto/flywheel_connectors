@@ -714,13 +714,18 @@ impl AdmissionController {
         now_ms: u64,
         limit: u64,
     ) -> Result<(), AdmissionError> {
+        // L2-09 fix: use the sliding-window effective count (prev
+        // window weighted by time remaining in current window) so a
+        // peer cannot burst up to 2× its budget by scheduling traffic
+        // at the seam between two fixed 60-second windows.
         let usage = self.get_or_create_usage(peer, now_ms);
         usage.maybe_reset_window(now_ms);
 
-        let new_total = usage.bytes_in_window.saturating_add(bytes);
+        let effective = usage.effective_bytes_in_window(now_ms);
+        let new_total = effective.saturating_add(bytes);
         if new_total > limit {
             return Err(AdmissionError::ByteBudgetExceeded {
-                current: usage.bytes_in_window,
+                current: effective,
                 limit,
                 retry_after: usage.time_until_window_reset(now_ms),
             });
@@ -736,13 +741,16 @@ impl AdmissionController {
         now_ms: u64,
         limit: u32,
     ) -> Result<(), AdmissionError> {
+        // L2-09 fix: sliding-window effective count, see
+        // check_bytes_with_limit for rationale.
         let usage = self.get_or_create_usage(peer, now_ms);
         usage.maybe_reset_window(now_ms);
 
-        let new_total = usage.symbols_in_window.saturating_add(symbols);
+        let effective = usage.effective_symbols_in_window(now_ms);
+        let new_total = effective.saturating_add(symbols);
         if new_total > limit {
             return Err(AdmissionError::SymbolBudgetExceeded {
-                current: usage.symbols_in_window,
+                current: effective,
                 limit,
                 retry_after: usage.time_until_window_reset(now_ms),
             });
@@ -815,9 +823,10 @@ impl AdmissionController {
 
         usage.failed_auth_in_window = usage.failed_auth_in_window.saturating_add(1);
 
-        if usage.failed_auth_in_window > limit {
+        let effective = usage.effective_failed_auth_in_window(now_ms);
+        if effective > limit {
             return Err(AdmissionError::AuthFailureBudgetExceeded {
-                current: usage.failed_auth_in_window,
+                current: effective,
                 limit,
                 retry_after: usage.time_until_window_reset(now_ms),
             });
@@ -873,9 +882,10 @@ impl AdmissionController {
 
         usage.decode_cpu_ms_in_window = usage.decode_cpu_ms_in_window.saturating_add(cpu_ms);
 
-        if usage.decode_cpu_ms_in_window > limit_ms {
+        let effective_ms = usage.effective_decode_cpu_ms_in_window(now_ms);
+        if effective_ms > limit_ms {
             return Err(AdmissionError::DecodeCpuBudgetExceeded {
-                current_ms: usage.decode_cpu_ms_in_window,
+                current_ms: effective_ms,
                 limit_ms,
                 retry_after: usage.time_until_window_reset(now_ms),
             });
@@ -1151,8 +1161,55 @@ mod tests {
         controller.record_bytes(&peer, 1000, 0);
         assert!(controller.check_bytes(&peer, 100, 0).is_err());
 
-        // After window reset (60s later), should succeed again
-        assert!(controller.check_bytes(&peer, 100, 60_001).is_ok());
+        // Sliding window: two full windows after the peer exhausted
+        // its budget, the previous window has drained completely and
+        // fresh traffic succeeds again.
+        assert!(controller.check_bytes(&peer, 100, 120_001).is_ok());
+
+        // Immediately after the slide (t=60_001), the previous
+        // window still weighs in heavily so the limit is still
+        // enforced against the rolling 60-second total. This is the
+        // regression-proof end of the L2-09 fix: fixed-window reset
+        // would have accepted 100 bytes here.
+        let mut controller2 = AdmissionController::new(AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_bytes_per_min: 1000,
+                ..PeerBudget::default()
+            },
+            ..AdmissionPolicy::default()
+        });
+        controller2.record_bytes(&peer, 1000, 0);
+        assert!(controller2.check_bytes(&peer, 100, 60_001).is_err());
+    }
+
+    #[test]
+    fn sliding_window_rejects_window_boundary_burst() {
+        // Regression test for the L2-09 burst vulnerability: a peer
+        // that pushes the full per-minute budget at the END of window
+        // N and then attempts to immediately push it again at the
+        // START of window N+1 must not succeed, because the trailing
+        // 60-second window would exceed 2× the budget.
+        let policy = AdmissionPolicy {
+            per_peer: PeerBudget {
+                max_bytes_per_min: 1000,
+                ..PeerBudget::default()
+            },
+            ..AdmissionPolicy::default()
+        };
+        let mut controller = AdmissionController::new(policy);
+        let peer = test_peer();
+
+        // Near the end of window N, the peer records its full budget.
+        controller.record_bytes(&peer, 1000, 59_000);
+
+        // One and a half seconds later (now in window N+1 after
+        // slide), the trailing 60-second window still contains most
+        // of that traffic. A full second budget must be rejected.
+        assert!(controller.check_bytes(&peer, 1000, 60_500).is_err());
+
+        // Even a small request that pushes the effective total past
+        // the limit must be rejected.
+        assert!(controller.check_bytes(&peer, 10, 60_500).is_err());
     }
 
     #[test]
@@ -1952,10 +2009,16 @@ mod tests {
         let peer = test_peer();
 
         controller.record_bytes(&peer, 999, 0);
-        // At 59_999ms, window is NOT reset
+        // At 59_999ms, the current window still holds 999 bytes.
         assert!(controller.check_bytes(&peer, 100, 59_999).is_err());
-        // At 60_000ms, window IS reset
-        assert!(controller.check_bytes(&peer, 100, 60_000).is_ok());
+        // Sliding-window: 60_000ms slides the current window into
+        // the previous slot, but the previous slot still weighs in
+        // fully at t=60_000 (weight=1.0), so the effective count is
+        // ~999 and 100 more bytes still exceed the 1000 limit.
+        assert!(controller.check_bytes(&peer, 100, 60_000).is_err());
+        // Two full windows after recording, the previous slot has
+        // drained and traffic succeeds again.
+        assert!(controller.check_bytes(&peer, 100, 120_001).is_ok());
     }
 
     // ── Combined admission edge cases ──────────────────────────
@@ -2074,8 +2137,9 @@ mod tests {
 
         controller.record_decode_cpu(&peer, 99, 0).unwrap();
         assert!(controller.record_decode_cpu(&peer, 10, 0).is_err());
-        // After window reset
-        assert!(controller.record_decode_cpu(&peer, 10, 60_001).is_ok());
+        // Sliding-window: after two full windows the previous slot
+        // has drained completely and a fresh allocation succeeds.
+        assert!(controller.record_decode_cpu(&peer, 10, 120_001).is_ok());
     }
 
     // ── Auth failure window reset ──────────────────────────────
@@ -2095,8 +2159,9 @@ mod tests {
         controller.record_auth_failure(&peer, 0).unwrap();
         controller.record_auth_failure(&peer, 0).unwrap();
         assert!(controller.record_auth_failure(&peer, 0).is_err());
-        // After window reset
-        assert!(controller.record_auth_failure(&peer, 60_001).is_ok());
+        // Sliding-window: after two full windows the previous slot
+        // has drained and a fresh failure is within budget again.
+        assert!(controller.record_auth_failure(&peer, 120_001).is_ok());
     }
 
     // ── Strict vs non-strict unauthenticated limits ────────────

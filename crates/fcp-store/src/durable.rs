@@ -615,8 +615,12 @@ impl DurableObjectStore {
         {
             let mut state = self.state.write();
             state.validate_mutation(&op, self.config.max_bytes)?;
-            let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
+            // Reserve the seq but do not publish until the WAL append succeeds.
+            // Advancing next_seq on a failed append leaves an irrecoverable gap
+            // in the WAL sequence (load_wal_records rejects the gap at startup).
+            let seq = self.next_seq.load(Ordering::SeqCst);
             append_wal_record(&self.wal_path, seq, &op).map_err(object_io)?;
+            self.next_seq.store(seq.saturating_add(1), Ordering::SeqCst);
             state.apply_loaded_mutation(op)?;
 
             if self.config.checkpoint_after_ops > 0 {
@@ -756,8 +760,12 @@ impl DurableSymbolStore {
         {
             let mut state = self.state.write();
             state.validate_mutation(&op, self.config.max_bytes)?;
-            let seq = self.next_seq.fetch_add(1, Ordering::SeqCst);
+            // Reserve the seq but do not publish until the WAL append succeeds.
+            // Advancing next_seq on a failed append leaves an irrecoverable gap
+            // in the WAL sequence (load_wal_records rejects the gap at startup).
+            let seq = self.next_seq.load(Ordering::SeqCst);
             append_wal_record(&self.wal_path, seq, &op).map_err(symbol_io)?;
+            self.next_seq.store(seq.saturating_add(1), Ordering::SeqCst);
             state.apply_loaded_mutation(op)?;
 
             if self.config.checkpoint_after_ops > 0 {

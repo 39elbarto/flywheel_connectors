@@ -904,6 +904,26 @@ mod tests {
     }
 
     #[test]
+    fn with_timeout_overrides_all_expect_variants() {
+        let count_step =
+            ScriptStep::expect_count(2, MessageMatcher::Any).with_timeout(Duration::from_secs(45));
+        match &count_step {
+            ScriptStep::ExpectCount { timeout, .. } => {
+                assert_eq!(*timeout, Duration::from_secs(45));
+            }
+            other => panic!("expected ExpectCount variant, got {other:?}"),
+        }
+
+        let webhook_step = ScriptStep::webhook_expect_ack().with_timeout(Duration::from_secs(12));
+        match &webhook_step {
+            ScriptStep::WebhookExpectAck { timeout } => {
+                assert_eq!(*timeout, Duration::from_secs(12));
+            }
+            other => panic!("expected WebhookExpectAck variant, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn with_ack_overrides_expect_steps() {
         let step = ScriptStep::expect_any_message().with_ack(AckMode::Suppress);
         if let ScriptStep::ExpectMessage { ack, .. } = &step {
@@ -1007,6 +1027,37 @@ mod tests {
     fn canonical_scenario_nack_redelivery() {
         let script = scenarios::nack_redelivery(Transport::WebSocket, "/ws");
         assert_eq!(script.scenario_id, "delivery.nack_redelivery");
+    }
+
+    #[test]
+    fn canonical_scenario_nack_redelivery_preserves_ack_and_timeout_contract() {
+        let script = scenarios::nack_redelivery(Transport::WebSocket, "/ws");
+
+        match &script.steps[1] {
+            ScriptStep::ExpectMessage {
+                matcher,
+                timeout,
+                ack,
+            } => {
+                assert_eq!(matcher, &MessageMatcher::Any);
+                assert_eq!(*timeout, Duration::from_secs(5));
+                assert_eq!(*ack, AckMode::Suppress);
+            }
+            other => panic!("expected suppressed-ack ExpectMessage, got {other:?}"),
+        }
+
+        match &script.steps[3] {
+            ScriptStep::ExpectMessage {
+                matcher,
+                timeout,
+                ack,
+            } => {
+                assert_eq!(matcher, &MessageMatcher::Any);
+                assert_eq!(*timeout, Duration::from_secs(10));
+                assert_eq!(*ack, AckMode::Auto);
+            }
+            other => panic!("expected redelivery ExpectMessage, got {other:?}"),
+        }
     }
 
     #[test]

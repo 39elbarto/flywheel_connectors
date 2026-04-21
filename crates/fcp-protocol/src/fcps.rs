@@ -653,9 +653,22 @@ impl DecodeStatus {
 
     /// Verify the decode status signature.
     ///
+    /// Rejects oversized `missing_hint` payloads *before* allocating the
+    /// transcript so an unauthenticated sender cannot force a receiver to
+    /// materialize a multi-megabyte transcript on every verify(). The hint
+    /// cap is already part of the NORMATIVE contract (see the struct-level
+    /// "Anti-Amplification Rule") — so a legitimate signer would never emit
+    /// a hint above `MAX_MISSING_HINT_ENTRIES`, and there is no interop
+    /// fallout from collapsing an over-long hint into
+    /// `SignatureVerificationFailed`.
+    ///
     /// # Errors
-    /// Returns `CryptoError` if signature verification fails.
+    /// Returns `CryptoError::SignatureVerificationFailed` if the hint is
+    /// oversized or the Ed25519 signature does not validate.
     pub fn verify(&self, verifying_key: &Ed25519VerifyingKey) -> Result<(), CryptoError> {
+        if self.validate_hint_bounds().is_err() {
+            return Err(CryptoError::SignatureVerificationFailed);
+        }
         let transcript = self.transcript_bytes();
         verifying_key.verify(&transcript, &self.signature)
     }
@@ -928,9 +941,20 @@ impl SymbolRequest {
 
     /// Verify the symbol request signature.
     ///
+    /// Rejects oversized `missing_hint` payloads *before* allocating the
+    /// transcript so an unauthenticated sender cannot force a receiver to
+    /// materialize a multi-megabyte transcript on every verify(). The
+    /// legitimate upper bound is already declared NORMATIVE via
+    /// `validate_bounds`/`validate_hint_bounds`, so no honest signer will
+    /// ever produce a request above the cap.
+    ///
     /// # Errors
-    /// Returns `CryptoError` if signature verification fails.
+    /// Returns `CryptoError::SignatureVerificationFailed` if the hint is
+    /// oversized or the Ed25519 signature does not validate.
     pub fn verify(&self, verifying_key: &Ed25519VerifyingKey) -> Result<(), CryptoError> {
+        if self.validate_hint_bounds().is_err() {
+            return Err(CryptoError::SignatureVerificationFailed);
+        }
         let transcript = self.transcript_bytes();
         verifying_key.verify(&transcript, &self.signature)
     }
@@ -1655,6 +1679,77 @@ mod tests {
             signature: Ed25519Signature::from_bytes(&[0; 64]),
         };
         assert!(status.validate_hint_bounds().is_err());
+    }
+
+    #[test]
+    fn decode_status_verify_rejects_oversized_hint_cheaply() {
+        // Regression: DecodeStatus::verify() used to build transcript_bytes()
+        // (allocating 4 × hint.len() bytes) before signature verification, so
+        // a peer could amplify each sent message into O(hint.len()) work on
+        // every receiver. verify() now short-circuits over the hint cap.
+        let signing_key = Ed25519SigningKey::generate();
+        let zone_id: ZoneId = "z:amplify".parse().expect("zone parse");
+        let mut status = DecodeStatus {
+            header: make_test_object_header(),
+            object_id: ObjectId::from_bytes([0xAB; 32]),
+            zone_id,
+            zone_key_id: ZoneKeyId::from_bytes([0xCD; 8]),
+            epoch_id: 7,
+            recipient_node_id: TailscaleNodeId::new("node-recipient"),
+            request_nonce: 9,
+            received_unique: 0,
+            needed: 1,
+            complete: false,
+            // A legitimate signer would never exceed MAX_MISSING_HINT_ENTRIES;
+            // signing one anyway proves verify() rejects it *before* building
+            // the multi-entry transcript.
+            missing_hint: Some(vec![0; MAX_MISSING_HINT_ENTRIES + 1]),
+            signature: Ed25519Signature::from_bytes(&[0u8; 64]),
+        };
+        status.sign(&signing_key);
+
+        let err = status
+            .verify(&signing_key.verifying_key())
+            .expect_err("oversized hint must not verify even with valid signature");
+        assert!(matches!(err, CryptoError::SignatureVerificationFailed));
+    }
+
+    #[test]
+    fn symbol_request_verify_rejects_oversized_hint_cheaply() {
+        use fcp_cbor::SchemaId;
+        use fcp_core::Provenance;
+        use semver::Version;
+
+        let signing_key = Ed25519SigningKey::generate();
+        let zone_id: ZoneId = "z:amplify-req".parse().expect("zone parse");
+
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.protocol", "SymbolRequest", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 1_704_067_200,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let mut request = SymbolRequest {
+            header,
+            object_id: ObjectId::from_bytes([0xEF; 32]),
+            zone_id,
+            zone_key_id: ZoneKeyId::from_bytes([0x77; 8]),
+            epoch_id: 3,
+            max_symbols: u32::try_from(MAX_MISSING_HINT_ENTRIES + 1).unwrap_or(u32::MAX),
+            missing_hint: Some(vec![0; MAX_MISSING_HINT_ENTRIES + 1]),
+            current_symbols: 0,
+            signature: Ed25519Signature::from_bytes(&[0u8; 64]),
+        };
+        request.sign(&signing_key);
+
+        let err = request
+            .verify(&signing_key.verifying_key())
+            .expect_err("oversized hint must not verify even with valid signature");
+        assert!(matches!(err, CryptoError::SignatureVerificationFailed));
     }
 
     // ─────────────────────────────────────────────────────────────────────────

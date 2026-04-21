@@ -1191,6 +1191,33 @@ fn normalize_base_url(base_url: &str) -> FcpResult<String> {
         });
     }
 
+    // Strip query/fragment/userinfo before returning the normalized
+    // value. normalize_base_url returns `trimmed` verbatim (minus a
+    // trailing slash) and PlaidClient then concatenates via
+    // format!("{}/link/token/create", self.base_url) etc. in every
+    // request method (client.rs:99/117/133/157/183/…). A base_url
+    // like `https://sandbox.plaid.com?leak=x` would otherwise leak
+    // attacker-chosen query values on every Plaid API request with
+    // the endpoint path parsed as part of the query. Userinfo
+    // (`https://attacker:pw@sandbox.plaid.com`) would bake into every
+    // request URL and silently override the client_id / secret
+    // credentials the connector sends in the JSON body. Matches the
+    // hygiene in airtable / asana / gmail / notion / hubspot /
+    // whatsapp / linear / clickup / monday / bitbucket / intercom /
+    // dropbox / mailchimp / algolia.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
+
     let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
         code: 1003,
         message: "base_url must include a host".into(),
@@ -1589,5 +1616,52 @@ mod tests {
             .compute_interface_hash()
             .expect("compute interface hash");
         assert_eq!(computed, computed2);
+    }
+
+    #[test]
+    fn normalize_base_url_accepts_clean_sandbox() {
+        let out = normalize_base_url("https://sandbox.plaid.com").unwrap();
+        assert_eq!(out, "https://sandbox.plaid.com");
+    }
+
+    #[test]
+    fn normalize_base_url_rejects_query_string() {
+        let err = normalize_base_url("https://sandbox.plaid.com?leak=x").unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("query"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalize_base_url_rejects_fragment() {
+        let err = normalize_base_url("https://sandbox.plaid.com#frag").unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn normalize_base_url_rejects_userinfo() {
+        let err = normalize_base_url("https://attacker:pw@sandbox.plaid.com").unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("userinfo"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalize_base_url_rejects_substring_smuggle() {
+        // Path-based smuggle: host is evil.com, not sandbox.plaid.com,
+        // even though the full string contains "sandbox.plaid.com".
+        // is_plaid_host(host) downstream confirms evil.com is not
+        // trusted, but normalize_base_url itself should still accept
+        // the URL shape (it passes q/f/u + scheme + IP checks) and
+        // rely on the host allow-list at doctor time. Documenting the
+        // existing boundary here.
+        let out = normalize_base_url("https://evil.com/sandbox.plaid.com").unwrap();
+        assert_eq!(out, "https://evil.com/sandbox.plaid.com");
     }
 }

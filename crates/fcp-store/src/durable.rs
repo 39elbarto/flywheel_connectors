@@ -34,6 +34,29 @@ const SNAPSHOT_VERSION: u32 = 1;
 const WAL_VERSION: u32 = 1;
 const DEFAULT_CHECKPOINT_AFTER_OPS: u64 = 64;
 
+/// Maximum bytes the WAL recovery loop will buffer for a single record.
+///
+/// The serialized envelope contains a `StoredObject` whose body is a raw
+/// `Vec<u8>` (capped at `fcp_cbor::MAX_CANONICAL_OBJECT_BYTES` = 64 MiB).
+/// `serde_json` emits `Vec<u8>` as a JSON array of integers (~3-5×
+/// inflation), so a worst-case legitimate envelope can reach ~320 MiB
+/// before encoding overhead. 512 MiB leaves headroom for envelope
+/// metadata and future field additions while still bounding recovery
+/// memory: a torn write or adversarial single-line WAL cannot exhaust
+/// memory by withholding the trailing newline.
+///
+/// Records exceeding this cap are treated as torn (truncated and
+/// discarded), matching the existing behavior for unparseable records.
+const MAX_WAL_RECORD_BYTES: usize = 512 * 1024 * 1024;
+
+/// Maximum bytes the snapshot recovery loop will load.
+///
+/// Same reasoning as `MAX_WAL_RECORD_BYTES` applied to a full
+/// `ObjectSnapshot` / `SymbolSnapshot` payload, scaled for the typical
+/// number of objects per checkpoint. Larger snapshots are rejected with
+/// a clear error rather than OOM-killing the recovery process.
+const MAX_SNAPSHOT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct DurableObjectStoreConfig {
     /// Directory containing the store snapshot and WAL files.
@@ -990,12 +1013,71 @@ fn load_durable_symbol_state(
     Ok((state, last_seq))
 }
 
+/// Bounded analogue of `BufRead::read_until` for the WAL recovery loop.
+///
+/// Reads bytes from `reader` into `buf` until `delim` is encountered
+/// OR `max_bytes` would be exceeded. Returns `(bytes_read, hit_cap)`:
+/// - `(n, false)` — record terminated naturally with `delim` (or EOF
+///   before `delim` for `n > 0` — caller still treats as torn via the
+///   parse step, since the envelope will not deserialize)
+/// - `(n, true)` — `max_bytes` was reached without seeing `delim`;
+///   caller should treat the record as torn and stop scanning
+/// - `(0, false)` — clean EOF, no more records
+fn read_until_bounded<R: BufRead>(
+    reader: &mut R,
+    delim: u8,
+    buf: &mut Vec<u8>,
+    max_bytes: usize,
+) -> std::io::Result<(usize, bool)> {
+    let mut total = 0usize;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok((total, false));
+        }
+        let available_len = available.len();
+        let remaining = max_bytes.saturating_sub(total);
+        if remaining == 0 {
+            return Ok((total, true));
+        }
+        let scan_len = available_len.min(remaining);
+        if let Some(pos) = available[..scan_len].iter().position(|&b| b == delim) {
+            let take = pos + 1;
+            buf.extend_from_slice(&available[..take]);
+            reader.consume(take);
+            total = total.saturating_add(take);
+            return Ok((total, false));
+        }
+        buf.extend_from_slice(&available[..scan_len]);
+        reader.consume(scan_len);
+        total = total.saturating_add(scan_len);
+        if scan_len < available_len {
+            // We exhausted the cap before the buffered window, but the
+            // delimiter wasn't found in the inspected prefix. Signal cap.
+            return Ok((total, true));
+        }
+    }
+}
+
 fn read_snapshot<T>(path: &Path) -> Result<Option<(T, u64)>, String>
 where
     T: Serialize + DeserializeOwned,
 {
     if !path.exists() {
         return Ok(None);
+    }
+
+    // Reject snapshot files larger than `MAX_SNAPSHOT_BYTES` before
+    // allocating to avoid OOM on a corrupted or adversarial file.
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("stat snapshot {}: {error}", path.display()))?;
+    if metadata.len() > MAX_SNAPSHOT_BYTES {
+        return Err(format!(
+            "snapshot {} exceeds {} bytes (got {})",
+            path.display(),
+            MAX_SNAPSHOT_BYTES,
+            metadata.len()
+        ));
     }
 
     let bytes =
@@ -1037,10 +1119,18 @@ where
 
     loop {
         raw.clear();
-        let bytes_read = reader
-            .read_until(b'\n', &mut raw)
+        let (bytes_read, hit_cap) = read_until_bounded(&mut reader, b'\n', &mut raw, MAX_WAL_RECORD_BYTES)
             .map_err(|error| format!("read wal {}: {error}", path.display()))?;
         if bytes_read == 0 {
+            break;
+        }
+        if hit_cap {
+            // Adversarial or torn record larger than `MAX_WAL_RECORD_BYTES`
+            // — treat as a truncation point so recovery cannot be made to
+            // OOM by a single oversized line. The on-disk file is then
+            // truncated to the prior valid prefix, mirroring the behavior
+            // for unparseable records.
+            truncated = true;
             break;
         }
 
@@ -1342,6 +1432,68 @@ mod tests {
             reopened.get(&test_object_id(2)).await,
             Err(ObjectStoreError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn read_until_bounded_caps_oversized_record_without_oom() {
+        // Regression for flywheel_connectors-yhmwv: WAL recovery used
+        // `BufRead::read_until` which has no upper bound on buffer growth.
+        // A torn write or adversarial WAL containing a single line larger
+        // than `MAX_WAL_RECORD_BYTES` would allocate the entire line into
+        // memory before the parse step rejected it. The bounded reader
+        // must signal `hit_cap = true` and stop without growing past the
+        // cap.
+        use std::io::Cursor;
+
+        let cap = 64usize;
+
+        // Case 1: input has a newline within the cap → returns the record
+        // and `hit_cap = false`.
+        let normal = b"hello\nworld\n".to_vec();
+        let mut reader = Cursor::new(normal);
+        let mut buf = Vec::new();
+        let (n, capped) =
+            read_until_bounded(&mut reader, b'\n', &mut buf, cap).expect("read normal");
+        assert_eq!(n, 6);
+        assert!(!capped);
+        assert_eq!(buf, b"hello\n");
+
+        // Case 2: single record larger than cap, no newline within first
+        // `cap` bytes → returns `hit_cap = true` and `buf.len() <= cap`.
+        let oversized: Vec<u8> = std::iter::repeat(b'A').take(cap * 4).collect();
+        let mut reader = Cursor::new(oversized);
+        let mut buf = Vec::new();
+        let (n, capped) =
+            read_until_bounded(&mut reader, b'\n', &mut buf, cap).expect("read oversized");
+        assert!(capped, "oversized record must signal hit_cap");
+        assert!(
+            buf.len() <= cap,
+            "buffer must not grow past cap (got {})",
+            buf.len()
+        );
+        assert_eq!(n, buf.len());
+
+        // Case 3: empty input → clean EOF, no cap signal.
+        let mut reader = Cursor::new(Vec::<u8>::new());
+        let mut buf = Vec::new();
+        let (n, capped) =
+            read_until_bounded(&mut reader, b'\n', &mut buf, cap).expect("read empty");
+        assert_eq!(n, 0);
+        assert!(!capped);
+        assert!(buf.is_empty());
+
+        // Case 4: record EXACTLY at the cap including the delimiter is
+        // accepted as a normal record, not capped.
+        let mut exact = vec![b'X'; cap - 1];
+        exact.push(b'\n');
+        let mut reader = Cursor::new(exact);
+        let mut buf = Vec::new();
+        let (n, capped) =
+            read_until_bounded(&mut reader, b'\n', &mut buf, cap).expect("read exact-cap");
+        assert!(!capped, "record exactly at cap must not be flagged");
+        assert_eq!(n, cap);
+        assert_eq!(buf.len(), cap);
+        assert_eq!(buf.last(), Some(&b'\n'));
     }
 
     #[fcp_async_core::runtime::test]

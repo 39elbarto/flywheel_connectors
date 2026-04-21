@@ -1022,17 +1022,31 @@ impl MeshNode {
 
     /// Handle a symbol request using admission control and targeted repair.
     ///
+    /// The `_is_authenticated` parameter is retained for ABI continuity
+    /// but is **ignored**. Earlier revisions OR'd the caller's bool
+    /// with `self.is_peer_authenticated(peer)` inside
+    /// `validate_symbol_request`, which meant a caller passing `true`
+    /// could elevate any peer past the unauthenticated tier without
+    /// holding a real session — and the elevated state then stuck via
+    /// `admission.set_authenticated(peer, true, ..)`. Authentication is
+    /// a property of the cryptographic session only; callers that need
+    /// the authenticated tier in tests should pre-mark the peer via
+    /// [`MeshNode::admission_mut`]`.set_authenticated(peer, true, now_ms)`
+    /// or establish a real `MeshSession` via [`MeshNode::register_session`].
+    /// Follow-up work (bead `flywheel_connectors-q92i7`) can delete the
+    /// parameter once every call site has migrated.
+    ///
     /// # Errors
     /// Returns `SymbolRequestError` on validation or store failures.
     pub async fn handle_symbol_request(
         &mut self,
         request: SymbolRequest,
         peer: &NodeId,
-        is_authenticated: bool,
+        _is_authenticated: bool,
         now_ms: u64,
     ) -> Result<SymbolResponse, SymbolRequestError> {
         let (validated, meta) = self
-            .validate_symbol_request(&request, peer, is_authenticated, now_ms)
+            .validate_symbol_request(&request, peer, now_ms)
             .await?;
 
         let response = match self
@@ -1116,10 +1130,16 @@ impl MeshNode {
         &mut self,
         request: &SymbolRequest,
         peer: &NodeId,
-        is_authenticated: bool,
         now_ms: u64,
     ) -> Result<(ValidatedRequest, fcp_store::ObjectSymbolMeta), SymbolRequestError> {
-        let mut authenticated = is_authenticated || self.is_peer_authenticated(peer);
+        // Server-authoritative authentication only. See
+        // `MeshNode::handle_symbol_request` docs for the q92i7 rationale
+        // — the pre-fix `authenticated = caller_bool || local_state`
+        // shape let any caller elevate an unsessioned peer past the
+        // unauthenticated tier, and the resulting
+        // `admission.set_authenticated(.., true, ..)` call made the
+        // elevation stick for every subsequent request.
+        let mut authenticated = self.is_peer_authenticated(peer);
 
         // Check if peer is authorized for the requested zone. An empty
         // `zones` set means the transport layer has not yet populated
@@ -2158,6 +2178,14 @@ mod tests {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([9u8; 8]);
         let object_id = test_object_id("meshnode-prune-state");
+        // q92i7 migration: pre-mark the peer as authenticated via the
+        // admission controller rather than passing `true` as the ignored
+        // `_is_authenticated` arg to `handle_symbol_request`. The OR
+        // bypass that let tests rely on the caller-supplied bool is
+        // closed; the explicit pre-auth step documents that the peer
+        // is intended to be in the authenticated tier for this test.
+        node.admission_mut()
+            .set_authenticated(&NodeId::new("peer-1"), true, 0);
 
         let oti = ObjectTransmissionInformation::new(256, 64, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -2258,6 +2286,85 @@ mod tests {
             err,
             SymbolRequestError::AdmissionRejected(AdmissionError::ObjectQuarantined { .. })
         ));
+    }
+
+    /// q92i7 regression: `handle_symbol_request` previously OR'd its
+    /// caller-supplied `is_authenticated` bool with
+    /// `self.is_peer_authenticated(peer)`, so a caller passing `true`
+    /// could elevate an unsessioned peer past the unauthenticated
+    /// tier — and the resulting
+    /// `admission.set_authenticated(peer, true, ..)` made the bypass
+    /// stick for every subsequent request. The parameter is now
+    /// ignored; authentication is decided exclusively by server-side
+    /// state (`self.is_peer_authenticated`, which consults
+    /// `self.sessions` + `self.admission`). This test proves the bit
+    /// is ignored: a peer without any admission or session setup that
+    /// passes `true` and sends an unsigned request must be rejected
+    /// with `AuthenticationRequired`.
+    #[test]
+    fn handle_symbol_request_ignores_caller_authenticated_flag() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([42u8; 8]);
+        let object_id = test_object_id("q92i7-bypass-regression");
+        let peer = NodeId::new("peer-attacker");
+
+        assert!(
+            !node.is_peer_authenticated(&peer),
+            "precondition: peer must start unauthenticated"
+        );
+
+        let oti = ObjectTransmissionInformation::new(256, 64, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 2,
+            first_symbol_at: 0,
+        };
+
+        // Unsigned request — the signature fallback path at
+        // `verify_symbol_request_signature` cannot rescue the peer.
+        let request = SymbolRequest::new(
+            test_object_header(),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            2,
+            1,
+        );
+
+        let err = fcp_async_core::runtime::block_on_sync(async {
+            node.symbol_store
+                .put_object_meta(meta)
+                .await
+                .expect("store meta");
+            node.handle_symbol_request(request, &peer, true, 0)
+                .await
+                .expect_err(
+                    "caller-supplied is_authenticated=true MUST be ignored \
+                     for an unsessioned, admission-unconfirmed peer",
+                )
+        })
+        .expect("runtime");
+
+        assert!(
+            matches!(
+                err,
+                SymbolRequestError::AdmissionRejected(AdmissionError::AuthenticationRequired { .. })
+                    | SymbolRequestError::SignatureInvalid
+            ),
+            "expected an auth-required / signature-invalid refusal, got {err:?}"
+        );
+        // Crucially, the bypass also must NOT have persisted via
+        // `admission.set_authenticated(peer, true, ..)`. After the
+        // rejected call the peer must still look unauthenticated so
+        // future requests cannot inherit the forged state.
+        assert!(
+            !node.is_peer_authenticated(&peer),
+            "rejected bypass call must not leave the peer in the authenticated tier"
+        );
     }
 
     #[test]

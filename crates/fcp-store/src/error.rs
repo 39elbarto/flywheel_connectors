@@ -1,6 +1,6 @@
 //! Error types for FCP2 stores.
 
-use fcp_core::ObjectId;
+use fcp_core::{ObjectId, ZoneId};
 use thiserror::Error;
 
 /// Errors for object store operations.
@@ -23,6 +23,25 @@ pub enum ObjectStoreError {
 
     #[error("I/O error: {0}")]
     Io(String),
+
+    /// Claimed `object_id` does not match the id derived from `(header, body)`
+    /// under the zone's `ObjectIdKey`. Surfaced by an installed
+    /// [`crate::ObjectIdVerifier`] at put / WAL replay / snapshot load.
+    /// This is the concrete defense against the attacker-chosen-id
+    /// injection vector called out in bead flywheel_connectors-4g0qr.
+    #[error("content-id mismatch: claimed {claimed}, computed {computed}")]
+    ContentIdMismatch {
+        claimed: ObjectId,
+        computed: ObjectId,
+    },
+
+    /// The installed verifier has no `ObjectIdKey` registered for the
+    /// zone carried in `object.header.zone_id`. A replay or put whose
+    /// zone is unknown to the verifier MUST fail closed rather than
+    /// silently accept — otherwise an attacker can pick any
+    /// zone-id for which no key is registered and bypass verification.
+    #[error("verifier has no ObjectIdKey for zone `{zone}`")]
+    VerifierKeyMissing { zone: ZoneId },
 }
 
 /// Errors for symbol store operations.

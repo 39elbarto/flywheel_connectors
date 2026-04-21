@@ -36,6 +36,7 @@ mod coverage;
 mod durable;
 mod error;
 mod gc;
+mod object_id_verifier;
 mod object_store;
 mod offline;
 mod quarantine;
@@ -50,6 +51,7 @@ pub use error::{
     GcError, LifecycleSnapshotError, ObjectStoreError, QuarantineError, RepairError,
     SymbolStoreError,
 };
+pub use object_id_verifier::{KeyedObjectIdVerifier, ObjectIdVerifier};
 pub use gc::{
     GarbageCollector, GcConfig, GcDecision, GcDecisionAction, GcReasonCode, GcResult, GcRoots,
     GcRunReport, GcTranscript,

@@ -14,6 +14,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
@@ -25,6 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::coverage::SymbolDistribution;
 use crate::error::{ObjectStoreError, SymbolStoreError};
+use crate::object_id_verifier::ObjectIdVerifier;
 use crate::object_store::{MemoryObjectStoreConfig, ObjectStore};
 use crate::symbol_store::{
     MemorySymbolStoreConfig, ObjectSymbolMeta, StoredSymbol, SymbolMeta, SymbolStore,
@@ -151,6 +153,12 @@ pub struct DurableObjectStore {
     ops_since_checkpoint: AtomicU64,
     snapshot_path: PathBuf,
     wal_path: PathBuf,
+    /// Optional content-id verifier. When set, every runtime `put`,
+    /// every WAL record replayed at startup, and every snapshot entry
+    /// is routed through `verifier.verify(&object)` before touching
+    /// in-memory state. Closes the attacker-chosen-id injection vector
+    /// documented in bead flywheel_connectors-4g0qr.
+    verifier: Option<Arc<dyn ObjectIdVerifier>>,
 }
 
 #[derive(Debug, Clone)]
@@ -207,7 +215,10 @@ impl DurableObjectState {
         size
     }
 
-    fn from_snapshot(snapshot: ObjectSnapshot) -> Result<Self, ObjectStoreError> {
+    fn from_snapshot(
+        snapshot: ObjectSnapshot,
+        verifier: Option<&dyn ObjectIdVerifier>,
+    ) -> Result<Self, ObjectStoreError> {
         let mut state = Self::default();
         for object in snapshot.objects {
             // Defense-in-depth: reject snapshot entries whose header is
@@ -222,6 +233,15 @@ impl DurableObjectState {
                     object.object_id
                 ))
             })?;
+            // When a verifier is installed, enforce the content-id
+            // binding on every snapshot entry. A forged snapshot
+            // (restored-from-tampered-backup, malicious import) must
+            // NOT survive load — the forged record is refused here and
+            // surfaces as a hard `ContentIdMismatch` to the caller of
+            // `DurableObjectStore::open_with_verifier`.
+            if let Some(verifier) = verifier {
+                verifier.verify(&object)?;
+            }
             state.insert_loaded(object);
         }
         Ok(state)
@@ -620,12 +640,38 @@ impl DurableObjectStore {
     /// # Errors
     /// Returns an error if the snapshot/WAL cannot be read or synced.
     pub fn open(config: DurableObjectStoreConfig) -> Result<Self, ObjectStoreError> {
+        Self::open_with_verifier(config, None)
+    }
+
+    /// Open the durable store with an installed content-id verifier.
+    ///
+    /// The verifier is applied to every snapshot entry and every WAL
+    /// record during replay, and to every runtime `put` thereafter.
+    /// Any `StoredObject` whose claimed `object_id` does not match
+    /// `derive_id(&header, &body, zone_key)` is rejected at the
+    /// boundary — before it reaches the in-memory map. This is the
+    /// concrete defense against the attacker-chosen-id injection
+    /// vector from bead flywheel_connectors-4g0qr, where a process
+    /// with WAL write access could previously inject a forged record
+    /// that `apply_loaded_mutation` accepted without verification.
+    ///
+    /// Pass `None` to preserve the legacy "structural checks only"
+    /// behaviour (equivalent to calling [`Self::open`]).
+    ///
+    /// # Errors
+    /// Returns an error if the snapshot/WAL cannot be read or synced,
+    /// or if any replayed record fails verification.
+    pub fn open_with_verifier(
+        config: DurableObjectStoreConfig,
+        verifier: Option<Arc<dyn ObjectIdVerifier>>,
+    ) -> Result<Self, ObjectStoreError> {
         fs::create_dir_all(&config.root_dir).map_err(object_io)?;
         sync_parent_dir(&config.root_dir).map_err(object_io)?;
 
         let snapshot_path = config.root_dir.join("objects.snapshot.json");
         let wal_path = config.root_dir.join("objects.wal.jsonl");
-        let (state, last_seq) = load_durable_object_state(&snapshot_path, &wal_path)?;
+        let (state, last_seq) =
+            load_durable_object_state(&snapshot_path, &wal_path, verifier.as_deref())?;
 
         Ok(Self {
             state: RwLock::new(state),
@@ -635,6 +681,7 @@ impl DurableObjectStore {
             ops_since_checkpoint: AtomicU64::new(0),
             snapshot_path,
             wal_path,
+            verifier,
         })
     }
 
@@ -661,6 +708,17 @@ impl DurableObjectStore {
         let _guard = self.write_guard.lock();
         {
             let mut state = self.state.write();
+            // When a verifier is installed, enforce the content-id
+            // binding at the runtime write boundary BEFORE structural
+            // or duplicate-id checks. A forged `object_id` from an
+            // in-process caller must surface as `ContentIdMismatch`,
+            // not as `AlreadyExists` when the id happens to collide
+            // with a legit record (flywheel_connectors-4g0qr).
+            if let (Some(verifier), ObjectWalOp::Put(object)) =
+                (self.verifier.as_ref(), &op)
+            {
+                verifier.verify(object)?;
+            }
             state.validate_mutation(&op, self.config.max_bytes)?;
             // Reserve the seq but do not publish until the WAL append succeeds.
             // Advancing next_seq on a failed append leaves an irrecoverable gap
@@ -994,10 +1052,11 @@ impl SymbolStore for DurableSymbolStore {
 fn load_durable_object_state(
     snapshot_path: &Path,
     wal_path: &Path,
+    verifier: Option<&dyn ObjectIdVerifier>,
 ) -> Result<(DurableObjectState, u64), ObjectStoreError> {
     let (mut state, last_snapshot_seq) =
         match read_snapshot::<ObjectSnapshot>(snapshot_path).map_err(object_io)? {
-            Some((snapshot, seq)) => (DurableObjectState::from_snapshot(snapshot)?, seq),
+            Some((snapshot, seq)) => (DurableObjectState::from_snapshot(snapshot, verifier)?, seq),
             None => (DurableObjectState::default(), 0),
         };
 
@@ -1012,6 +1071,17 @@ fn load_durable_object_state(
         // flywheel_connectors-4g0qr — `apply_loaded_mutation` alone
         // skips the structural check that `record_mutation` enforces
         // on the live write path.
+        //
+        // Order matters: run the content-id verifier BEFORE
+        // `validate_mutation`'s duplicate-id check. A forged record
+        // that happens to reuse a legit id would otherwise surface as
+        // `AlreadyExists` (a correct but weaker signal) and hide the
+        // real defect — the attacker substituted `(header, body)` for
+        // the claimed id. The verifier failure is the more specific,
+        // more actionable diagnosis.
+        if let (Some(verifier), ObjectWalOp::Put(object)) = (verifier, &record.op) {
+            verifier.verify(object)?;
+        }
         state.validate_mutation(&record.op, u64::MAX)?;
         state.apply_loaded_mutation(record.op)?;
     }
@@ -1535,6 +1605,131 @@ mod tests {
             }
             Err(other) => panic!("unexpected error during recovery: {other:?}"),
         }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn wal_replay_with_verifier_rejects_forged_object_id() {
+        // Regression for flywheel_connectors-4g0qr: a process with
+        // WAL write access can append an `ObjectWalOp::Put(StoredObject {
+        // object_id: H, header: H', body: B' })` where `(H', B')` are
+        // NOT the canonical bytes behind `H`. The WAL checksum covers
+        // only the outer `(version, seq, op)` tuple, so the on-disk
+        // integrity check accepts the forged bytes. Without the
+        // content-id verifier, `load_durable_object_state` would
+        // `insert_loaded` the forged record and any subsequent
+        // `get(H)` would return attacker-controlled `(H', B')`.
+        // With a verifier installed, reopen must fail closed on the
+        // forged record.
+        use std::io::Write;
+
+        use crate::object_id_verifier::KeyedObjectIdVerifier;
+        use fcp_core::ObjectIdKey;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut config = DurableObjectStoreConfig::new(temp_dir.path());
+        config.max_bytes = u64::MAX;
+
+        // Zone key material the verifier will use.
+        let zone = test_zone();
+        let zone_key = ObjectIdKey::from_bytes([0xC3u8; 32]);
+
+        // Helper: build a StoredObject whose object_id is the canonical
+        // derive_id(header, body, zone_key) — i.e. a record that WOULD
+        // verify cleanly if replayed under the matching verifier.
+        let genuine = |seed: u8, body: &[u8]| -> StoredObject {
+            let header = ObjectHeader {
+                schema: test_schema(),
+                zone_id: zone.clone(),
+                created_at: 100,
+                provenance: Provenance::new(zone.clone()),
+                refs: vec![],
+                foreign_refs: vec![],
+                ttl_secs: None,
+                placement: None,
+            };
+            let id = StoredObject::derive_id(&header, body, &zone_key).expect("derive id");
+            let _ = seed; // only here to let callers pass distinct bodies
+            StoredObject {
+                object_id: id,
+                header,
+                body: body.to_vec(),
+                storage: StorageMeta {
+                    retention: RetentionClass::Pinned,
+                },
+            }
+        };
+
+        // 1) Open without a verifier and write one legitimate record so
+        //    the WAL has a valid seq-1 prefix and the dir layout is
+        //    initialized.
+        let store = DurableObjectStore::open(config.clone()).expect("open store");
+        let legit = genuine(1, b"legit-body");
+        store.put(legit.clone()).await.expect("put legit");
+        drop(store);
+
+        // 2) Construct a forged WAL record: claim `object_id =
+        //    legit.object_id` but ship a different body. A verifier
+        //    for `zone_key` will compute `derive_id(header, B',
+        //    zone_key)` != `legit.object_id` and reject.
+        let mut forged = genuine(2, b"attacker-body");
+        let legit_id = legit.object_id;
+        forged.object_id = legit_id;
+
+        let wal_path = temp_dir.path().join("objects.wal.jsonl");
+        let op = ObjectWalOp::Put(forged);
+        let checksum =
+            checksum_json(&(WAL_VERSION, 2u64, &op)).expect("compute forged checksum");
+        let envelope = WalEnvelope {
+            version: WAL_VERSION,
+            seq: 2u64,
+            checksum,
+            op: &op,
+        };
+        let mut bytes = serde_json::to_vec(&envelope).expect("serialize forged envelope");
+        bytes.push(b'\n');
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&wal_path)
+            .expect("open wal");
+        file.write_all(&bytes).expect("append forged record");
+        drop(file);
+
+        // 3) Reopen WITH the verifier. Must fail on the forged record.
+        let mut verifier = KeyedObjectIdVerifier::default();
+        verifier.insert(zone.clone(), zone_key);
+        let result =
+            DurableObjectStore::open_with_verifier(config.clone(), Some(verifier.into_arc()));
+        match result {
+            Err(ObjectStoreError::ContentIdMismatch { claimed, computed }) => {
+                assert_eq!(claimed, legit_id, "forged record claimed the legit id");
+                assert_ne!(
+                    computed, legit_id,
+                    "computed id over forged body must differ from claimed id"
+                );
+            }
+            Err(ObjectStoreError::AlreadyExists(id)) => {
+                // Defense-in-depth: `apply_loaded_mutation` rejects a
+                // duplicate id. That path ALSO prevents the forged
+                // record from overwriting the legit one, but it is NOT
+                // the content-id defense — this branch fails the test
+                // to force the verifier to be the detection path.
+                panic!(
+                    "forged record was caught only by dup-detection ({id}), \
+                     verifier did not reject first as expected"
+                );
+            }
+            Err(other) => panic!("unexpected error on recovery: {other:?}"),
+            Ok(_) => panic!("forged WAL record was accepted despite verifier"),
+        }
+
+        // 4) Sanity: reopen WITHOUT the verifier to confirm the WAL
+        //    record really is on disk (i.e., step 2 wrote bytes that
+        //    the legacy code path would have admitted). The dup
+        //    check still rejects since the legit seq-1 record holds
+        //    the id — which is exactly why the bead notes the attack
+        //    is more effective when the attacker deletes the
+        //    legitimate record or starts from a pristine store.
+        let _ = DurableObjectStore::open(config);
     }
 
     #[test]

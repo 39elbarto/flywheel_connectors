@@ -3,6 +3,7 @@
 //! Provides content-addressed storage for complete mesh objects.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
@@ -11,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::coverage::CoverageEvaluation;
 use crate::error::LifecycleSnapshotError;
 use crate::gc::GcRoots;
+use crate::object_id_verifier::ObjectIdVerifier;
 use crate::symbol_store::SymbolStore;
 use fcp_core::{ObjectHeader, ObjectId, RetentionClass, StorageMeta, StoredObject, ZoneId};
 use parking_lot::RwLock;
@@ -372,6 +374,12 @@ pub struct MemoryObjectStore {
     zone_index: RwLock<HashMap<ZoneId, Vec<ObjectId>>>,
     config: MemoryObjectStoreConfig,
     used_bytes: AtomicU64,
+    /// Optional verifier invoked on every put. When present, enforces
+    /// `object.object_id == derive_id(&object.header, &object.body, zone_key)`
+    /// before the object reaches the in-memory map. Closes the
+    /// attacker-chosen-id injection vector documented in
+    /// bead flywheel_connectors-4g0qr.
+    verifier: Option<Arc<dyn ObjectIdVerifier>>,
 }
 
 impl MemoryObjectStore {
@@ -383,7 +391,22 @@ impl MemoryObjectStore {
             zone_index: RwLock::new(HashMap::new()),
             config,
             used_bytes: AtomicU64::new(0),
+            verifier: None,
         }
+    }
+
+    /// Install a content-id verifier. When set, every `put` call
+    /// recomputes `derive_id(header, body, zone_key)` and rejects
+    /// mismatches with [`ObjectStoreError::ContentIdMismatch`].
+    ///
+    /// Callers that hold live zone-key material (the runtime layer —
+    /// typically `MeshNode` or the bootstrap shim) should install a
+    /// verifier in any store that's reachable from an untrusted write
+    /// path.
+    #[must_use]
+    pub fn with_verifier(mut self, verifier: Arc<dyn ObjectIdVerifier>) -> Self {
+        self.verifier = Some(verifier);
+        self
     }
 
     fn object_size(obj: &StoredObject) -> u64 {
@@ -402,10 +425,20 @@ impl ObjectStore for MemoryObjectStore {
         // `fcp_cbor::MAX_CANONICAL_OBJECT_BYTES`. Prevents a malformed or
         // oversized object from being persisted at the runtime boundary,
         // mirroring the WAL/snapshot replay checks. Full content-ID
-        // verification is the caller's responsibility (needs zone keys).
+        // verification happens below via `self.verifier` when installed.
         object
             .validate_structure()
             .map_err(|err| ObjectStoreError::Io(format!("invalid object structure: {err}")))?;
+
+        // When a verifier is installed, enforce the content-id binding
+        // before the object reaches state. Closes the
+        // attacker-chosen-id injection vector from bead
+        // flywheel_connectors-4g0qr: a caller can no longer persist a
+        // `StoredObject { object_id: H, header: H', body: B' }` where
+        // `(H', B')` are not the canonical bytes behind `H`.
+        if let Some(verifier) = self.verifier.as_ref() {
+            verifier.verify(&object)?;
+        }
 
         let mut objects = self.objects.write();
 
@@ -2184,6 +2217,70 @@ mod tests {
                         "rejected": rejected,
                         "used_after": used_after,
                         "max_bytes": MAX_BYTES,
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    /// Regression for bead flywheel_connectors-4g0qr: when a
+    /// content-id verifier is installed, `put` MUST reject a
+    /// `StoredObject` whose `object_id` field does not match
+    /// `derive_id(&header, &body, zone_key)`, before the forged
+    /// record reaches the in-memory map. Without the verifier, the
+    /// existing `validate_structure` call would let the forged id
+    /// through — so the test also asserts the explicit
+    /// `ContentIdMismatch` variant to lock down the detection path.
+    #[test]
+    fn put_with_verifier_rejects_forged_object_id() {
+        run_store_test(
+            "put_with_verifier_rejects_forged_object_id",
+            "verify",
+            "write",
+            2,
+            || async {
+                use crate::object_id_verifier::KeyedObjectIdVerifier;
+                use fcp_core::ObjectIdKey;
+
+                let zone = test_zone();
+                let key = ObjectIdKey::from_bytes([0x5Au8; 32]);
+                let mut verifier = KeyedObjectIdVerifier::default();
+                verifier.insert(zone.clone(), key);
+
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default())
+                    .with_verifier(verifier.into_arc());
+
+                // Build a canonically-shaped object with a *wrong*
+                // object_id. The header + body are legitimate; only
+                // the claimed id is forged.
+                let mut obj = test_stored_object(7, b"forged-body");
+                let forged_id = ObjectId::from_bytes([0xABu8; 32]);
+                obj.object_id = forged_id;
+
+                let err = store
+                    .put(obj)
+                    .await
+                    .expect_err("forged object_id must be rejected at put");
+                assert!(
+                    matches!(err, ObjectStoreError::ContentIdMismatch { claimed, .. } if claimed == forged_id),
+                    "expected ContentIdMismatch with claimed={forged_id:?}, got {err:?}"
+                );
+
+                // The forged object must NOT have landed in the map.
+                // `get` surfaces `NotFound`, and `storage_used` is 0.
+                let get_result = store.get(&forged_id).await;
+                assert!(
+                    matches!(get_result, Err(ObjectStoreError::NotFound(_))),
+                    "forged id must not be retrievable; got {get_result:?}"
+                );
+                let used = store.storage_used().await;
+                assert_eq!(used, 0, "rejected put must not advance storage_used");
+
+                StoreLogData {
+                    details: Some(json!({
+                        "forged_id": forged_id.to_string(),
+                        "storage_used_after_reject": used,
                     })),
                     ..StoreLogData::default()
                 }

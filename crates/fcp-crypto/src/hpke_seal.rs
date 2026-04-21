@@ -333,6 +333,56 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // Metamorphic: sealing the SAME plaintext under two different AADs
+    // produces two boxes. Swapping the ciphertexts between them must
+    // fail decryption in both directions — i.e. AAD binds ciphertext to
+    // context, and no "compatible" ciphertext substitution exists.
+    // Subsumes wrong_aad_fails with an additional cross-swap leg that a
+    // regression in the AAD encoding could expose.
+    #[test]
+    fn hpke_cross_swap_of_ciphertexts_between_aads_fails() {
+        let recipient_secret_key = X25519SecretKey::generate();
+        let recipient_public_key = recipient_secret_key.public_key();
+
+        let aad_a = Fcp2Aad::for_zone_key(b"z:work", b"node-A", 1_234_567_890);
+        let aad_b = Fcp2Aad::for_zone_key(b"z:work", b"node-B", 1_234_567_890);
+        let plaintext = b"the same secret under two contexts";
+
+        let sealed_a = hpke_seal(&recipient_public_key, plaintext, &aad_a).unwrap();
+        let sealed_b = hpke_seal(&recipient_public_key, plaintext, &aad_b).unwrap();
+
+        // Sanity: each box opens under its own AAD.
+        assert_eq!(
+            hpke_open(&recipient_secret_key, &sealed_a, &aad_a).unwrap(),
+            plaintext
+        );
+        assert_eq!(
+            hpke_open(&recipient_secret_key, &sealed_b, &aad_b).unwrap(),
+            plaintext
+        );
+
+        // Swap ciphertexts while keeping the `enc` header consistent with
+        // the original AAD — models an attacker that captures both sealed
+        // boxes and tries to substitute ciphertext.
+        let swapped_a = HpkeSealedBox {
+            enc: sealed_a.enc.clone(),
+            ciphertext: sealed_b.ciphertext.clone(),
+        };
+        let swapped_b = HpkeSealedBox {
+            enc: sealed_b.enc.clone(),
+            ciphertext: sealed_a.ciphertext.clone(),
+        };
+
+        assert!(
+            hpke_open(&recipient_secret_key, &swapped_a, &aad_a).is_err(),
+            "ciphertext from box_b must not open under box_a's enc + aad_a"
+        );
+        assert!(
+            hpke_open(&recipient_secret_key, &swapped_b, &aad_b).is_err(),
+            "ciphertext from box_a must not open under box_b's enc + aad_b"
+        );
+    }
+
     #[test]
     fn hpke_tampered_ciphertext_fails() {
         let recipient_secret_key = X25519SecretKey::generate();

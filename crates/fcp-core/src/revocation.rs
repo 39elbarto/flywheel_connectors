@@ -2295,6 +2295,22 @@ mod tests {
     }
 
     #[test]
+    fn registry_update_head_rejects_rollback() {
+        let mut registry = RevocationRegistry::new();
+        let head1 = ObjectId::from_bytes([1u8; 32]);
+        let head2 = ObjectId::from_bytes([2u8; 32]);
+
+        registry.update_head(head1, 20, 200);
+        assert_eq!(registry.head_seq, 20);
+
+        // Attempt rollback to seq 10
+        registry.update_head(head2, 10, 100);
+        assert_eq!(registry.head, Some(head1));
+        assert_eq!(registry.head_seq, 20);
+        assert_eq!(registry.last_updated, 200);
+    }
+
+    #[test]
     fn registry_clone() {
         let mut registry = RevocationRegistry::new();
         registry.add_revocation(&test_revocation());

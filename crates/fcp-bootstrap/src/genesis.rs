@@ -155,10 +155,19 @@ impl GenesisState {
     /// `BLAKE3:base64(blake3(owner_public_key || schema_version))`
     #[must_use]
     pub fn fingerprint(&self) -> String {
-        // Compute fingerprint from owner key and schema version
+        // Compute fingerprint from owner key, schema version, creation time, and zones
         let mut hasher = blake3::Hasher::new();
         hasher.update(&self.owner_public_key);
         hasher.update(&self.schema_version.to_le_bytes());
+        hasher.update(&self.created_at.timestamp().to_le_bytes());
+
+        // Canonicalize zones by sorting by ID before hashing
+        let mut zones = self.initial_zones.clone();
+        zones.sort_by(|a, b| a.zone_id.cmp(&b.zone_id));
+        for zone in zones {
+            hasher.update(zone.zone_id.as_bytes());
+            hasher.update(&[zone.integrity_level, zone.confidentiality_level]);
+        }
 
         let hash = hasher.finalize();
         let hash_bytes = hash.as_bytes();
@@ -1118,12 +1127,23 @@ mod tests {
     // ---- Fingerprint stability: same key always same fingerprint ----
 
     #[test]
-    fn fingerprint_stable_across_non_deterministic_genesis() {
+    fn fingerprint_differs_across_non_deterministic_genesis() {
         let signing_key = Ed25519SigningKey::generate();
         let vk = signing_key.verifying_key();
-        // Non-deterministic genesis uses Utc::now() but fingerprint is key-based
+        // Non-deterministic genesis uses Utc::now() so fingerprints should differ
         let g1 = GenesisState::create(&vk);
+        // Ensure some time passes or at least the timestamp would likely differ
+        std::thread::sleep(std::time::Duration::from_millis(10));
         let g2 = GenesisState::create(&vk);
+        assert_ne!(g1.fingerprint(), g2.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_stable_for_deterministic_genesis() {
+        let signing_key = Ed25519SigningKey::generate();
+        let vk = signing_key.verifying_key();
+        let g1 = GenesisState::create_deterministic(&vk);
+        let g2 = GenesisState::create_deterministic(&vk);
         assert_eq!(g1.fingerprint(), g2.fingerprint());
     }
 

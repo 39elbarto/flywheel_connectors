@@ -47,3 +47,37 @@
 **Root Cause:** `FrostKeyPackage::from_frost` and `FrostPublicKeyPackage::from_frost` construct packages from provided shares and group public keys without verifying that the group public key actually corresponds to the aggregate of the shares.
 **Impact:** A malicious coordinator or tampered storage could provide a group public key that does not match the shares, leading to signing failures or aggregate signature verification issues that are hard to debug.
 **Suggested Fix:** Add a verification step in `from_frost` (or a `validate()` method) that checks if the aggregate of `verifying_shares` matches `group_public_key`. Note: This may be computationally expensive if done on every load.
+
+# CROSS-LANE CRYPTO REVIEW
+
+## [CL-01] Missing Zone Authorization in Gossip Handlers (Ref: Lane 2)
+**Severity:** Medium
+**Status:** FIXED
+**File:** `crates/fcp-mesh/src/node.rs`
+**Root Cause:** Lane 2 added `zones` storage to `PeerState` but only enforced it in `validate_symbol_request`. The gossip handlers (`verify_summary_signature` and `verify_revocation_push_signature`) verified the signature but did NOT check if the sender was authorized for the claimed `zone_id`.
+**Impact:** Cross-zone gossip injection. A peer authorized for Zone A could broadcast summaries or revocation pushes for Zone B, potentially polluting routing tables or triggering unnecessary reconciliations.
+**Fix:** Added `UnauthorizedZone` to `MeshNodeError` and implemented the authorization check in both `verify_summary_signature` and `verify_revocation_push_signature`.
+
+## [CL-02] Non-Monotonic `update_head` in RevocationRegistry (Ref: Lane 3)
+**Severity:** Low / Protocol
+**Status:** FIXED
+**File:** `crates/fcp-core/src/revocation.rs:524`
+**Root Cause:** `RevocationRegistry::update_head` performed a simple assignment of the new `head_seq` without verifying it was greater than the current sequence.
+**Impact:** Allows potential sequence rollbacks if a caller blindly applies updates from an untrusted or buggy peer.
+**Fix:** Added a check to `update_head` to enforce monotonicity: only apply updates if the new sequence is greater than the current one (or if no head is currently set). Added regression test `registry_update_head_rejects_rollback`.
+
+## [CL-03] Incomplete Genesis Fingerprint (Ref: Lane 4)
+**Severity:** High / Identity
+**Status:** FIXED
+**File:** `crates/fcp-bootstrap/src/genesis.rs:136`
+**Root Cause:** Lane 4 identified that `GenesisState::fingerprint()` ignored `created_at` and `initial_zones`, breaking mesh uniqueness if the owner key is reused. They documented it as fixed, but the code was not updated.
+**Impact:** Multiple distinct mesh deployments could share the same fingerprint, leading to identity confusion or cross-mesh session collisions.
+**Fix:** Updated `fingerprint()` to include `created_at` and a sorted/canonical representation of `initial_zones` in the BLAKE3 hash. Updated tests to reflect non-deterministic fingerprints across different creation times.
+
+## [CL-04] Potential PIN leak in hardware token session (Ref: Lane 4)
+**Severity:** Medium / Security
+**Status:** FIXED
+**File:** `crates/fcp-bootstrap/src/hardware_token.rs:217`
+**Root Cause:** `HardwareTokenPin::to_auth_pin()` used `self.0.clone().into()`, creating an unzeroized temporary `String` copy of the PIN material. Lane 4 documented it as fixed, but the code was not updated.
+**Impact:** Sensitive PIN material could persist in memory longer than necessary.
+**Fix:** Updated `to_auth_pin()` to use `AuthPin::new(&self.0)`, avoiding the explicit `clone()` and relying on the `AuthPin` constructor's internal handling (which is typically more direct or zeroizing).

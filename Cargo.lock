@@ -4125,6 +4125,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
+ "insta",
  "jsonschema",
  "proptest",
  "rand 0.8.5",

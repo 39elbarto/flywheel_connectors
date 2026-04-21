@@ -53,7 +53,11 @@ impl IbltCell {
     }
 
     fn pure_key(&self) -> Option<(ObjectId, i32)> {
-        if self.count.abs() != 1 {
+        // Compare against ±1 directly rather than `count.abs() != 1`:
+        // `i32::MIN.abs()` panics in debug builds (overflow), and `IbltCell`
+        // is `Deserialize`, so a peer can transmit `count: i32::MIN` and
+        // crash any node that decodes the gossiped sketch.
+        if self.count != 1 && self.count != -1 {
             return None;
         }
 
@@ -406,6 +410,49 @@ mod tests {
                 .expect_err("cell counts below IBLT_HASH_COUNT must be rejected");
             assert_eq!(error, IbltError::InvalidCellCount { got: bad });
         }
+    }
+
+    #[test]
+    fn decode_does_not_panic_on_extreme_attacker_supplied_count() {
+        // Regression: `IbltCell` is Deserialize, so a malicious peer can
+        // transmit `count: i32::MIN`. The decoder previously called
+        // `count.abs()` inside `pure_key`, which panics in debug builds
+        // (i32::MIN cannot be negated). After the fix, decoding such a
+        // sketch must complete without panicking and report it as a
+        // non-pure cell that prevents complete peeling.
+        let iblt = Iblt {
+            cells: vec![
+                IbltCell {
+                    count: i32::MIN,
+                    key_sum: [0xff_u8; 32],
+                    hash_check: 0xdead_beef,
+                },
+                IbltCell::default(),
+                IbltCell::default(),
+            ],
+        };
+
+        let decoded = iblt.decode();
+        assert!(!decoded.is_complete());
+        assert!(decoded.only_left.is_empty());
+        assert!(decoded.only_right.is_empty());
+        assert_eq!(decoded.remaining_nonzero_cells, 1);
+
+        // i32::MAX must also be accepted as a non-pure count.
+        let iblt_max = Iblt {
+            cells: vec![
+                IbltCell {
+                    count: i32::MAX,
+                    key_sum: [0x01_u8; 32],
+                    hash_check: 0,
+                },
+                IbltCell::default(),
+                IbltCell::default(),
+            ],
+        };
+        let decoded_max = iblt_max.decode();
+        assert!(!decoded_max.is_complete());
+        assert_eq!(decoded_max.remaining_nonzero_cells, 1);
     }
 
     #[test]

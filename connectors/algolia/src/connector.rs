@@ -53,6 +53,9 @@ impl AlgoliaConfig {
             .get("base_url")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
+        if let Some(ref url) = base_url {
+            reject_base_url_qfu(url)?;
+        }
 
         Ok(Self {
             auth: AlgoliaAuth {
@@ -655,6 +658,37 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
         )
         .depends_on(StepId::new("enter_api_key")),
     )
+}
+
+/// Reject base_url overrides with userinfo, query, or fragment. The
+/// AlgoliaClient concatenates via format!("{}{path}", self.base_url)
+/// in every request method (client.rs:143/154/166). Without this
+/// check, a base_url like
+/// `https://{app_id}-dsn.algolia.net?leak=x` would leak
+/// attacker-chosen query values on every request and put the endpoint
+/// path after the `?` boundary. Userinfo would bake into every
+/// request URL and silently override the X-Algolia-API-Key header.
+/// Matches the hygiene in airtable / asana / gmail / notion / hubspot
+/// / whatsapp / linear / clickup / monday / bitbucket / intercom /
+/// dropbox / mailchimp.
+fn reject_base_url_qfu(base_url: &str) -> FcpResult<()> {
+    let parsed = Url::parse(base_url).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("base_url could not be parsed: {error}"),
+    })?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
+    Ok(())
 }
 
 fn base_url_policy(base_url: &str) -> (bool, String) {
@@ -1436,5 +1470,70 @@ mod tests {
         .unwrap();
         let readiness = config.provisioning_readiness();
         assert!(readiness.network_ok);
+    }
+
+    #[test]
+    fn from_params_accepts_clean_base_url() {
+        let config = AlgoliaConfig::from_params(&json!({
+            "application_id": "APP",
+            "api_key": "KEY",
+            "base_url": "https://app-dsn.algolia.net",
+        }))
+        .unwrap();
+        assert_eq!(config.base_url.as_deref(), Some("https://app-dsn.algolia.net"));
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_query_string() {
+        let err = AlgoliaConfig::from_params(&json!({
+            "application_id": "APP",
+            "api_key": "KEY",
+            "base_url": "https://app-dsn.algolia.net?leak=x",
+        }))
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("query"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_fragment() {
+        let err = AlgoliaConfig::from_params(&json!({
+            "application_id": "APP",
+            "api_key": "KEY",
+            "base_url": "https://app-dsn.algolia.net#frag",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_userinfo() {
+        let err = AlgoliaConfig::from_params(&json!({
+            "application_id": "APP",
+            "api_key": "KEY",
+            "base_url": "https://attacker:pw@app-dsn.algolia.net",
+        }))
+        .unwrap_err();
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("userinfo"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_params_rejects_base_url_unparseable() {
+        let err = AlgoliaConfig::from_params(&json!({
+            "application_id": "APP",
+            "api_key": "KEY",
+            "base_url": "not a url",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 }

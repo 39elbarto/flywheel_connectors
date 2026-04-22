@@ -39,6 +39,7 @@ criterion.workspace = true
 jsonschema.workspace = true
 semver.workspace = true
 rand = "0.9"
+trybuild = "1"
 
 [[bench]]
 name = "pcs_benchmarks"

@@ -195,9 +195,24 @@ impl OAuthTokens {
     }
 
     /// Get the authorization header value.
-    #[must_use]
-    pub fn authorization_header(&self) -> String {
-        format!("{} {}", self.token_type, self.access_token)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OAuthError::InvalidTokenResponse`] when the stored token
+    /// is missing `access_token` or `token_type` material.
+    pub fn authorization_header(&self) -> OAuthResult<String> {
+        if self.access_token.is_empty() {
+            return Err(OAuthError::InvalidTokenResponse(
+                "stored token is missing access_token".into(),
+            ));
+        }
+        if self.token_type.is_empty() {
+            return Err(OAuthError::InvalidTokenResponse(
+                "stored token is missing token_type".into(),
+            ));
+        }
+
+        Ok(format!("{} {}", self.token_type, self.access_token))
     }
 
     /// Update tokens from a refresh response.
@@ -791,20 +806,29 @@ mod tests {
             .update_from_response(refresh_response.clone())
             .expect("first refresh must succeed");
         let observed_after_first = (
-            tokens.authorization_header(),
+            tokens
+                .authorization_header()
+                .expect("steady token must format an authorization header"),
             tokens.scopes().to_vec(),
             tokens.id_token().map(str::to_string),
             tokens.needs_refresh(),
         );
 
         // "Use" the token through the same observable surface callers rely on.
-        assert_eq!(tokens.authorization_header(), "Bearer steady_access");
+        assert_eq!(
+            tokens
+                .authorization_header()
+                .expect("steady token must format an authorization header"),
+            "Bearer steady_access"
+        );
 
         tokens
             .update_from_response(refresh_response)
             .expect("second identical refresh must succeed");
         let observed_after_second = (
-            tokens.authorization_header(),
+            tokens
+                .authorization_header()
+                .expect("steady token must format an authorization header"),
             tokens.scopes().to_vec(),
             tokens.id_token().map(str::to_string),
             tokens.needs_refresh(),
@@ -887,7 +911,12 @@ mod tests {
     fn test_authorization_header() {
         let response = mock_token_response(Some(3600));
         let tokens = OAuthTokens::from_response(response);
-        assert_eq!(tokens.authorization_header(), "Bearer test_access_token");
+        assert_eq!(
+            tokens
+                .authorization_header()
+                .expect("token must format an authorization header"),
+            "Bearer test_access_token"
+        );
     }
 
     #[test]
@@ -1424,7 +1453,12 @@ mod tests {
             id_token: None,
         };
         let tokens = OAuthTokens::from_response(resp);
-        assert_eq!(tokens.authorization_header(), "MAC my_token");
+        assert_eq!(
+            tokens
+                .authorization_header()
+                .expect("token must format an authorization header"),
+            "MAC my_token"
+        );
     }
 
     #[test]
@@ -1662,7 +1696,23 @@ mod tests {
             id_token: None,
         };
         let tokens = OAuthTokens::from_response(resp);
-        assert_eq!(tokens.authorization_header(), " tok");
+        let err = tokens.authorization_header().unwrap_err();
+        assert!(matches!(err, OAuthError::InvalidTokenResponse(_)));
+    }
+
+    #[test]
+    fn test_token_authorization_header_empty_access_token_errors() {
+        let resp = TokenResponse {
+            access_token: String::new(),
+            token_type: "Bearer".into(),
+            expires_in: None,
+            refresh_token: None,
+            scope: None,
+            id_token: None,
+        };
+        let tokens = OAuthTokens::from_response(resp);
+        let err = tokens.authorization_header().unwrap_err();
+        assert!(matches!(err, OAuthError::InvalidTokenResponse(_)));
     }
 
     #[test]
@@ -2027,7 +2077,14 @@ mod tests {
         assert_eq!(tokens.refresh_token(), cloned.refresh_token());
         assert_eq!(tokens.scopes(), cloned.scopes());
         assert_eq!(tokens.id_token(), cloned.id_token());
-        assert_eq!(tokens.authorization_header(), cloned.authorization_header());
+        assert_eq!(
+            tokens
+                .authorization_header()
+                .expect("token must format an authorization header"),
+            cloned
+                .authorization_header()
+                .expect("cloned token must format an authorization header")
+        );
     }
 
     #[test]

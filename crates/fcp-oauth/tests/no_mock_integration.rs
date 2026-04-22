@@ -510,7 +510,12 @@ fn oauth_tokens_authorization_header() {
         id_token: None,
     };
     let tokens = OAuthTokens::from_response(resp);
-    assert_eq!(tokens.authorization_header(), "Bearer my-token");
+    assert_eq!(
+        tokens
+            .authorization_header()
+            .expect("token must format an authorization header"),
+        "Bearer my-token"
+    );
 }
 
 #[test]
@@ -898,7 +903,11 @@ fn token_store_with_provider_workflow() {
     assert!(store.has_valid_token("slack"));
 
     let (gh, gh_m) = store.get_with_metadata("github").unwrap();
-    assert_eq!(gh.authorization_header(), "Bearer gh-access-token");
+    assert_eq!(
+        gh.authorization_header()
+            .expect("token must format an authorization header"),
+        "Bearer gh-access-token"
+    );
     assert_eq!(gh_m["provider"], "github");
 }
 

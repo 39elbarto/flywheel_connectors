@@ -26,13 +26,16 @@ use futures_util::stream::Stream;
 use crate::reconnect::ReconnectHandler;
 use crate::{StreamError, StreamResult};
 
+/// Hard ceiling for inbound WebSocket payloads, regardless of caller config.
+pub const MAX_WEBSOCKET_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+
 fn websocket_cx() -> fcp_async_core::Cx {
     fcp_async_core::compatibility_cx()
 }
 
 fn websocket_config(config: &WsConfig) -> WebSocketConfig {
     let mut websocket_config = WebSocketConfig::new()
-        .max_message_size(config.max_message_size)
+        .max_message_size(config.max_message_size.min(MAX_WEBSOCKET_MESSAGE_SIZE))
         .ping_interval(config.ping_interval)
         .connect_timeout(Some(config.connect_timeout));
     websocket_config.close_config = CloseConfig::new().with_timeout(config.pong_timeout);
@@ -404,7 +407,7 @@ impl Default for WsConfig {
             connect_timeout: Duration::from_secs(30),
             ping_interval: Some(Duration::from_secs(30)),
             pong_timeout: Duration::from_secs(10),
-            max_message_size: 64 * 1024 * 1024,
+            max_message_size: MAX_WEBSOCKET_MESSAGE_SIZE,
             headers: HashMap::new(),
             auto_reconnect: true,
             max_reconnect_attempts: Some(10),
@@ -437,7 +440,11 @@ impl WsConfig {
     /// Set maximum message size.
     #[must_use]
     pub const fn with_max_message_size(mut self, size: usize) -> Self {
-        self.max_message_size = size;
+        self.max_message_size = if size > MAX_WEBSOCKET_MESSAGE_SIZE {
+            MAX_WEBSOCKET_MESSAGE_SIZE
+        } else {
+            size
+        };
         self
     }
 
@@ -1125,7 +1132,7 @@ mod tests {
         assert_eq!(config.connect_timeout, Duration::from_secs(30));
         assert_eq!(config.ping_interval, Some(Duration::from_secs(30)));
         assert_eq!(config.pong_timeout, Duration::from_secs(10));
-        assert_eq!(config.max_message_size, 64 * 1024 * 1024);
+        assert_eq!(config.max_message_size, MAX_WEBSOCKET_MESSAGE_SIZE);
         assert!(config.headers.is_empty());
         assert!(config.auto_reconnect);
         assert_eq!(config.max_reconnect_attempts, Some(10));
@@ -1473,7 +1480,33 @@ mod tests {
     #[test]
     fn ws_config_max_message_size_large() {
         let config = WsConfig::new().with_max_message_size(usize::MAX);
-        assert_eq!(config.max_message_size, usize::MAX);
+        assert_eq!(config.max_message_size, MAX_WEBSOCKET_MESSAGE_SIZE);
+    }
+
+    #[test]
+    fn websocket_config_enforces_hard_max_when_builder_tries_to_disable_cap() {
+        let config = WsConfig::new().with_max_message_size(usize::MAX);
+        let websocket_config = websocket_config(&config);
+
+        assert_eq!(websocket_config.max_message_size, MAX_WEBSOCKET_MESSAGE_SIZE);
+    }
+
+    #[test]
+    fn huge_payload_frame_rejected_even_when_config_requests_unbounded_size() {
+        let config = WsConfig::new().with_max_message_size(usize::MAX);
+        let websocket_config = websocket_config(&config);
+        let oversized = websocket_config.max_message_size as u64 + 1;
+        let stream_err = websocket_error(WsError::PayloadTooLarge {
+            size: oversized,
+            max: websocket_config.max_message_size,
+        });
+
+        assert!(matches!(
+            stream_err,
+            StreamError::BufferOverflow { size, limit }
+                if size == MAX_WEBSOCKET_MESSAGE_SIZE + 1
+                    && limit == MAX_WEBSOCKET_MESSAGE_SIZE
+        ));
     }
 
     #[test]

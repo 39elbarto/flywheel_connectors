@@ -1,0 +1,25 @@
+---
+source: crates/fcp-registry/tests/registry_golden.rs
+expression: pretty_json(&config)
+---
+{
+  "tuf_pinned_root": {
+    "version": 7,
+    "root_hash": "sha256:root-golden",
+    "expires": 1750000000,
+    "key_ids": [
+      "root-a",
+      "root-b"
+    ],
+    "threshold": 2
+  },
+  "trusted_sigstore_identities": [
+    "https://github.com/flywheel/build/.github/workflows/release.yml@refs/tags/v1.2.3"
+  ],
+  "trusted_sigstore_issuers": [
+    "https://token.actions.githubusercontent.com"
+  ],
+  "require_transparency": true,
+  "require_tuf": true,
+  "require_sigstore": true
+}

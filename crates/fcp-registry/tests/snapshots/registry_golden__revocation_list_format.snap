@@ -1,0 +1,99 @@
+---
+source: crates/fcp-registry/tests/registry_golden.rs
+expression: pretty_json(&list)
+---
+{
+  "head": {
+    "header": {
+      "schema": {
+        "namespace": "fcp.core",
+        "name": "RevocationHead",
+        "version": "1.0.0"
+      },
+      "zone_id": "z:work",
+      "created_at": 1730000600,
+      "provenance": {
+        "origin_zone": "z:work",
+        "chain": [],
+        "taint": "Untainted",
+        "elevated": false
+      },
+      "refs": [],
+      "foreign_refs": []
+    },
+    "zone_id": "z:work",
+    "head_event": "4444444444444444444444444444444444444444444444444444444444444444",
+    "head_seq": 99,
+    "epoch_id": "epoch-registry-golden",
+    "quorum_signatures": {
+      "signatures": [
+        {
+          "node_id": "node-a",
+          "signature": "01010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101",
+          "signed_at": 1730000500
+        },
+        {
+          "node_id": "node-b",
+          "signature": "02020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202",
+          "signed_at": 1730000501
+        }
+      ]
+    }
+  },
+  "revocations": [
+    {
+      "header": {
+        "schema": {
+          "namespace": "fcp.core",
+          "name": "RevocationObject",
+          "version": "1.0.0"
+        },
+        "zone_id": "z:work",
+        "created_at": 1730000000,
+        "provenance": {
+          "origin_zone": "z:work",
+          "chain": [],
+          "taint": "Untainted",
+          "elevated": false
+        },
+        "refs": [],
+        "foreign_refs": []
+      },
+      "revoked": [
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222222222222222222222222222"
+      ],
+      "scope": "ConnectorBinary",
+      "reason": "registry bundle superseded by security release",
+      "effective_at": 1730000120,
+      "signature": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "header": {
+        "schema": {
+          "namespace": "fcp.core",
+          "name": "RevocationObject",
+          "version": "1.0.0"
+        },
+        "zone_id": "z:work",
+        "created_at": 1730000300,
+        "provenance": {
+          "origin_zone": "z:work",
+          "chain": [],
+          "taint": "Untainted",
+          "elevated": false
+        },
+        "refs": [],
+        "foreign_refs": []
+      },
+      "revoked": [
+        "3333333333333333333333333333333333333333333333333333333333333333"
+      ],
+      "scope": "IssuerKey",
+      "reason": "publisher key rotated after incident response",
+      "effective_at": 1730000360,
+      "expires_at": 1830000360,
+      "signature": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ]
+}

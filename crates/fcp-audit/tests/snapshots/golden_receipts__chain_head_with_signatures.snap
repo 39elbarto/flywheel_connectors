@@ -1,0 +1,23 @@
+---
+source: crates/fcp-audit/tests/golden_receipts.rs
+assertion_line: 280
+expression: head
+---
+{
+  "zone_id": "z:work",
+  "head_entry": "entry-signed-0001",
+  "head_seq": 42,
+  "coverage": 1.0,
+  "epoch_id": "epoch-signed",
+  "signature_count": 2,
+  "signatures": [
+    {
+      "issuer_kid": "kid:alpha",
+      "signature": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "issuer_kid": "kid:beta",
+      "signature": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ]
+}

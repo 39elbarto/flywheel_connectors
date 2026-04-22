@@ -1,0 +1,40 @@
+---
+source: crates/fcp-registry/tests/registry_golden.rs
+expression: pretty_json(&descriptor)
+---
+{
+  "connector_id": "fcp.minimal",
+  "latest_version": "0.1.0",
+  "versions": [
+    {
+      "version": "0.1.0",
+      "is_latest": true,
+      "targets": [
+        {
+          "os": "linux",
+          "arch": "amd64",
+          "target": "linux-amd64",
+          "manifest_sha256": "sha256:0d9db6b3d66a92e74a6f1f5f4d9687df7a85ceef0f3d8d2b7183762c508d57f9",
+          "binary_sha256": "sha256:46fbcf3f0f0d3e6f8c0c8060c0b881f3d25b235fc31dd8206dfa81857232ece2",
+          "manifest_url": "/v1/connectors/fcp.minimal/versions/0.1.0/targets/linux/amd64/manifest",
+          "binary_url": "/v1/connectors/fcp.minimal/versions/0.1.0/targets/linux/amd64/binary",
+          "signature_url": "/v1/connectors/fcp.minimal/versions/0.1.0/targets/linux/amd64/signature",
+          "attestation_url": "/v1/connectors/fcp.minimal/versions/0.1.0/targets/linux/amd64/attestation",
+          "signature": {
+            "key_id": "pub1",
+            "verifying_key": "6ee7c3c7f4bb5752ef4994a82d3af7e0d4ce99f64f8d1d8f8f6cf0b28b3d7d4f",
+            "context": "fcp.registry.manifest.v1",
+            "manifest_signing_hash": "sha256:9b4b2e6bb4c26f6d7466f4b9ce43d1d9d6f4a0d1fc88d5c1b5cdb9f11ecf7a21",
+            "binary_hash": "sha256:46fbcf3f0f0d3e6f8c0c8060c0b881f3d25b235fc31dd8206dfa81857232ece2",
+            "signature": "base64:Z29sZGVuLXJlZ2lzdHJ5LXNpZ25hdHVyZS1wYXlsb2FkLWRlbW8=",
+            "target": {
+              "os": "linux",
+              "arch": "amd64"
+            },
+            "binary_name": "registry-golden"
+          }
+        }
+      ]
+    }
+  ]
+}

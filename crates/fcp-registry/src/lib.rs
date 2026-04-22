@@ -515,7 +515,7 @@ pub trait SigstoreVerifier: Send + Sync {
 }
 
 /// Configuration for supply-chain verification.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SupplyChainVerificationConfig {
     /// Pinned TUF root for anti-rollback.
     pub tuf_pinned_root: Option<TufRootMetadata>,

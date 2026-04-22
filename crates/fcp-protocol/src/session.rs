@@ -3072,6 +3072,69 @@ mod tests {
         assert_eq!(result, Some(SessionCryptoSuite::Suite1));
     }
 
+    // ── crkft.3: responder-picks regression tests ────────────────────────
+    // These tests lock in the responder-picks invariant. Do NOT rewrite
+    // them to match a future change without first updating
+    // docs/protocol/session-handshake.md.
+
+    #[test]
+    fn negotiate_suite_responder_wins_on_multi_suite_overlap() {
+        // Both peers support both suites; responder lists Suite2 first.
+        // Responder-picks semantics → Suite2 wins.
+        let initiator = [SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2];
+        let responder = [SessionCryptoSuite::Suite2, SessionCryptoSuite::Suite1];
+        assert_eq!(
+            negotiate_suite(&initiator, &responder),
+            Some(SessionCryptoSuite::Suite2),
+            "responder's first-preferred mutual suite must win"
+        );
+    }
+
+    #[test]
+    fn negotiate_suite_no_overlap_returns_none() {
+        let initiator = [SessionCryptoSuite::Suite1];
+        let responder = [SessionCryptoSuite::Suite2];
+        assert_eq!(negotiate_suite(&initiator, &responder), None);
+    }
+
+    #[test]
+    fn negotiate_suite_ignores_initiator_order_preference() {
+        // Initiator lists Suite2 first; responder prefers Suite1.
+        // Responder-picks → Suite1 wins.
+        let initiator = [SessionCryptoSuite::Suite2, SessionCryptoSuite::Suite1];
+        let responder = [SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2];
+        assert_eq!(
+            negotiate_suite(&initiator, &responder),
+            Some(SessionCryptoSuite::Suite1),
+        );
+    }
+
+    #[test]
+    fn negotiate_suite_malicious_initiator_cannot_downgrade() {
+        // Threat model: initiator is attacker-positioned and orders its
+        // own list worst-first. Responder-picks semantics prevents the
+        // initiator from dictating the outcome.
+        //
+        // Today both Suite1 and Suite2 are cryptographically sound so
+        // "weaker" is fictional — this test documents INTENT, not an
+        // exploitable condition. When a future suite deprecates one of
+        // these, this test is what catches a regression that would make
+        // the downgrade exploitable again.
+        let initiator_ordered_worst_first = [
+            SessionCryptoSuite::Suite1, // pretend this is "weaker"
+            SessionCryptoSuite::Suite2,
+        ];
+        let responder_prefers_strong = [
+            SessionCryptoSuite::Suite2, // strong
+            SessionCryptoSuite::Suite1,
+        ];
+        assert_eq!(
+            negotiate_suite(&initiator_ordered_worst_first, &responder_prefers_strong),
+            Some(SessionCryptoSuite::Suite2),
+            "initiator ordering must not dictate outcome"
+        );
+    }
+
     #[test]
     fn session_mac_empty_frame_bytes() {
         let session_id = MeshSessionId([0x11; 16]);

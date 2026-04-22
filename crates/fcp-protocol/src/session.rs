@@ -805,20 +805,54 @@ pub fn derive_session_keys(
     })
 }
 
-/// Negotiate the session crypto suite using **responder** preference ordering.
+/// The minimum crypto suite FCP will negotiate. Any suite weaker than
+/// this floor is refused at negotiation time even if the responder's
+/// preference list still contains it.
+///
+/// Versioning rule: bumping `MINIMUM_SUITE` is a deployment-breaking
+/// change. Stage it by (a) adding support for the replacement suite in
+/// every peer's offered+supported lists, (b) waiting one full release
+/// cycle, (c) bumping the floor. See
+/// `docs/protocol/session-handshake.md` for the full suite-deprecation
+/// policy.
+pub const MINIMUM_SUITE: SessionCryptoSuite = SessionCryptoSuite::Suite1;
+
+/// Internal strength ordering of suites. Higher rank = stronger suite.
+/// Used ONLY for [`MINIMUM_SUITE`] enforcement in [`negotiate_suite`];
+/// not part of the public API.
+///
+/// When adding a new variant to [`SessionCryptoSuite`], assign a rank
+/// that reflects its cryptographic strength relative to existing
+/// suites. This is the single site that knows the strength ordering.
+#[must_use]
+const fn suite_rank(s: SessionCryptoSuite) -> u8 {
+    match s {
+        SessionCryptoSuite::Suite1 => 1,
+        SessionCryptoSuite::Suite2 => 2,
+    }
+}
+
+/// Negotiate the session crypto suite using **responder** preference ordering,
+/// with a [`MINIMUM_SUITE`] floor.
 ///
 /// The responder picks the first suite in its own preference list that the
-/// initiator also supports. This is the modern-crypto default (TLS 1.3,
-/// Noise, WireGuard) and defends against downgrade via a malicious or
-/// coerced initiator that deliberately orders its offers worst-first.
+/// initiator also supports AND that is at or above [`MINIMUM_SUITE`] in
+/// strength. Suites weaker than the floor are refused even if both peers
+/// still list them.
+///
+/// This is the modern-crypto default (TLS 1.3, Noise, WireGuard) and
+/// defends against downgrade via a malicious or coerced initiator that
+/// deliberately orders its offers worst-first. The `MINIMUM_SUITE` floor
+/// is the belt-and-braces defense against a responder with a stale or
+/// misconfigured preference list.
 ///
 /// Transcript binding at [`MeshSessionHello::transcript_bytes`] protects
 /// against in-transit rewriting of the offered-suites list; this function
-/// protects against an initiator that honestly offers a bad list. The two
+/// protects against an initiator that honestly offers a bad list. The
 /// defenses are complementary and address different threat models.
 ///
-/// Returns `None` if there is no intersection between initiator and
-/// responder suite sets.
+/// Returns `None` if there is no intersection at or above
+/// [`MINIMUM_SUITE`] between initiator and responder suite sets.
 ///
 /// See `docs/protocol/session-handshake.md` for the responder-picks
 /// invariant and suite-deprecation policy.
@@ -827,10 +861,11 @@ pub fn negotiate_suite(
     initiator_suites: &[SessionCryptoSuite],
     responder_suites: &[SessionCryptoSuite],
 ) -> Option<SessionCryptoSuite> {
+    let floor = suite_rank(MINIMUM_SUITE);
     responder_suites
         .iter()
         .copied()
-        .find(|suite| initiator_suites.contains(suite))
+        .find(|suite| initiator_suites.contains(suite) && suite_rank(*suite) >= floor)
 }
 
 /// Compute the stateless cookie for a hello message.
@@ -3107,6 +3142,40 @@ mod tests {
             negotiate_suite(&initiator, &responder),
             Some(SessionCryptoSuite::Suite1),
         );
+    }
+
+    // ── crkft.4: MINIMUM_SUITE floor regression tests ────────────────────
+
+    #[test]
+    fn negotiate_suite_accepts_at_or_above_floor() {
+        // MINIMUM_SUITE is itself the floor; negotiating it must succeed
+        // when both peers offer/support it.
+        assert_eq!(
+            negotiate_suite(&[MINIMUM_SUITE], &[MINIMUM_SUITE]),
+            Some(MINIMUM_SUITE),
+        );
+    }
+
+    #[test]
+    fn minimum_suite_equals_current_weakest() {
+        // When a new stronger suite lands and Suite1 is deprecated,
+        // update MINIMUM_SUITE to the new weakest and delete this
+        // assertion (or bump it to the new floor). This test is the
+        // mechanical checkpoint enforcing the versioning policy in
+        // docs/protocol/session-handshake.md.
+        assert_eq!(
+            suite_rank(MINIMUM_SUITE),
+            suite_rank(SessionCryptoSuite::Suite1),
+            "MINIMUM_SUITE must track the weakest currently-supported suite"
+        );
+    }
+
+    #[test]
+    fn suite_rank_is_monotonic() {
+        // Ranks must be strictly ordered by strength. If this fails,
+        // the ordering logic in `suite_rank` is broken and the floor
+        // check cannot be trusted.
+        assert!(suite_rank(SessionCryptoSuite::Suite2) > suite_rank(SessionCryptoSuite::Suite1));
     }
 
     #[test]

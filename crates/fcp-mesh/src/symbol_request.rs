@@ -307,18 +307,48 @@ impl SymbolRequestHandler {
             now_ms,
         )?;
 
-        // Check anti-amplification for large requests
+        // Route all request classes through the shared anti-amplification helper.
+        // Without proof-of-need we synthesize the largest request window that
+        // still permits responses up to `require_proof_of_need_above`, so helper
+        // enforcement stays aligned with the symbol-request threshold semantics.
         let has_proof_of_need = request.has_proof_of_need();
-        if max_response_symbols > self.policy.require_proof_of_need_above && !has_proof_of_need {
-            warn!(
-                peer = %peer,
-                requested = max_response_symbols,
-                authenticated = is_authenticated,
-                "large request without proof-of-need"
-            );
-            return Err(SymbolRequestError::AdmissionRejected(
-                AdmissionError::ProofOfNeedRequired,
-            ));
+        let amplification_request_symbols = if has_proof_of_need {
+            request
+                .missing_hint
+                .as_ref()
+                .map(|hints| u32::try_from(hints.len()).unwrap_or(u32::MAX).max(1))
+                .unwrap_or(1)
+        } else {
+            let max_factor = admission.policy().max_amplification_factor;
+            if max_factor == 0 {
+                0
+            } else {
+                self.policy.require_proof_of_need_above.div_ceil(max_factor)
+            }
+        };
+        match admission.check_amplification(
+            peer,
+            amplification_request_symbols,
+            max_response_symbols,
+            is_authenticated,
+            has_proof_of_need,
+        ) {
+            Err(AdmissionError::AmplificationViolation { .. })
+                if !has_proof_of_need
+                    && max_response_symbols > self.policy.require_proof_of_need_above =>
+            {
+                warn!(
+                    peer = %peer,
+                    requested = max_response_symbols,
+                    authenticated = is_authenticated,
+                    "large request without proof-of-need"
+                );
+                return Err(SymbolRequestError::AdmissionRejected(
+                    AdmissionError::ProofOfNeedRequired,
+                ));
+            }
+            Err(err) => return Err(SymbolRequestError::AdmissionRejected(err)),
+            Ok(()) => {}
         }
 
         // Debit the budget only after all post-check_admission policy gates
@@ -927,6 +957,28 @@ mod tests {
         let peer = NodeId::new("peer-auth-no-proof");
 
         let request = test_symbol_request(handler.policy().require_proof_of_need_above + 1, None);
+        let result = handler.validate_request(&request, true, &mut admission, &peer, 0, 64);
+
+        assert!(matches!(
+            result,
+            Err(SymbolRequestError::AdmissionRejected(
+                AdmissionError::ProofOfNeedRequired
+            ))
+        ));
+    }
+
+    #[test]
+    fn reject_authenticated_request_above_custom_proof_threshold_without_hint() {
+        let policy = SymbolRequestPolicy {
+            max_authenticated_response: 500,
+            require_proof_of_need_above: 200,
+            ..SymbolRequestPolicy::default()
+        };
+        let handler = SymbolRequestHandler::new(policy);
+        let mut admission = AdmissionController::with_default_policy();
+        let peer = NodeId::new("peer-auth-custom-threshold");
+
+        let request = test_symbol_request(201, None);
         let result = handler.validate_request(&request, true, &mut admission, &peer, 0, 64);
 
         assert!(matches!(

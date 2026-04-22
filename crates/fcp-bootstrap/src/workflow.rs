@@ -13,7 +13,10 @@ use crate::hardware_token::{
     TokenDetectionReport, TokenDetector, TokenError, select_and_authenticate,
     select_certificate_for_provisioning,
 };
-use crate::phase::{BootstrapPhase, detect_partial_state, remove_phase_lock, write_phase_lock};
+use crate::phase::{
+    BootstrapPhase, detect_partial_state, detect_partial_state_even_with_genesis,
+    remove_phase_lock, write_phase_lock,
+};
 use crate::recovery_phrase::RecoveryPhrase;
 use crate::time_validation::{TimeValidation, TimeValidationResult};
 
@@ -563,7 +566,8 @@ impl BootstrapWorkflow {
         // Provisioning handoff: the next bead (24llg.4.2.3) will consume the
         // provisioning material to complete key provisioning and enrollment.
         Err(BootstrapError::HardwareToken(format!(
-            "certificate selected for {token_display}, but provisioning enrollment is not implemented yet"
+            "certificate selected for {token_display} using {} key material, but provisioning enrollment is not implemented yet",
+            provisioning_material.pair.key.key_type
         )))
     }
 
@@ -698,7 +702,7 @@ fn check_initialization_state(
     data_dir: &Path,
     force_overwrite: bool,
 ) -> BootstrapResult<InitCheckResult> {
-    let partial_state = detect_partial_state(data_dir);
+    let partial_state = detect_partial_state_even_with_genesis(data_dir);
 
     // Check for existing genesis
     let genesis_path = data_dir.join("genesis.cbor");

@@ -12,9 +12,10 @@ use zeroize::ZeroizeOnDrop;
 
 /// A genesis state representing the initial state of an FCP2 mesh.
 ///
-/// The genesis state is deterministically derived from the owner's public key,
-/// ensuring that the same owner key will always produce the same genesis
-/// fingerprint.
+/// Regular bootstrap genesis records its creation time, so repeated creation
+/// with the same owner key still yields distinct fingerprints. Use
+/// [`Self::create_deterministic`] when cold recovery needs a stable
+/// recreation fingerprint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenesisState {
     /// Schema version for the genesis format.
@@ -141,9 +142,8 @@ impl GenesisState {
     /// Panics if the Unix epoch timestamp cannot be constructed (should never happen).
     #[must_use]
     pub fn create_deterministic(owner_public_key: &Ed25519VerifyingKey) -> Self {
-        // For deterministic recreation, use epoch as the timestamp.
-        // The fingerprint is based on the owner key, so this ensures
-        // the same owner key always produces the same fingerprint.
+        // For deterministic recreation, use epoch as the timestamp so the
+        // fingerprint is stable across repeated recovery/import runs.
         let mut genesis = Self::create(owner_public_key);
         genesis.created_at = DateTime::from_timestamp(0, 0).expect("epoch is valid");
         genesis
@@ -151,15 +151,20 @@ impl GenesisState {
 
     /// Compute the fingerprint of this genesis state.
     ///
-    /// The fingerprint is a stable identifier for the mesh, computed as:
-    /// `BLAKE3:base64(blake3(owner_public_key || schema_version))`
+    /// The fingerprint is a stable identifier for this genesis instance,
+    /// derived from the owner key, schema version, creation timestamp, and
+    /// canonicalized zone definitions.
     #[must_use]
     pub fn fingerprint(&self) -> String {
         // Compute fingerprint from owner key, schema version, creation time, and zones
         let mut hasher = blake3::Hasher::new();
         hasher.update(&self.owner_public_key);
         hasher.update(&self.schema_version.to_le_bytes());
-        hasher.update(&self.created_at.timestamp().to_le_bytes());
+        let created_at_nanos = self
+            .created_at
+            .timestamp_nanos_opt()
+            .unwrap_or_else(|| self.created_at.timestamp_micros() * 1_000);
+        hasher.update(&created_at_nanos.to_le_bytes());
 
         // Canonicalize zones by sorting by ID before hashing
         let mut zones = self.initial_zones.clone();
@@ -1130,11 +1135,9 @@ mod tests {
     fn fingerprint_differs_across_non_deterministic_genesis() {
         let signing_key = Ed25519SigningKey::generate();
         let vk = signing_key.verifying_key();
-        // Non-deterministic genesis uses Utc::now() so fingerprints should differ
         let g1 = GenesisState::create(&vk);
-        // Ensure some time passes or at least the timestamp would likely differ
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        let g2 = GenesisState::create(&vk);
+        let mut g2 = g1.clone();
+        g2.created_at += chrono::Duration::milliseconds(1);
         assert_ne!(g1.fingerprint(), g2.fingerprint());
     }
 
@@ -1253,8 +1256,7 @@ mod tests {
         let det = GenesisState::create_deterministic(&vk);
         let reg = GenesisState::create(&vk);
         assert_ne!(det.created_at, reg.created_at);
-        // But same fingerprint (fingerprint ignores time)
-        assert_eq!(det.fingerprint(), reg.fingerprint());
+        assert_ne!(det.fingerprint(), reg.fingerprint());
     }
 
     // ---- Validation error Debug ----

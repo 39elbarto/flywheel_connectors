@@ -206,16 +206,7 @@ impl std::fmt::Display for PartialStateSuggestion {
     }
 }
 
-/// Detects partial state from a crashed initialization.
-#[must_use]
-pub fn detect_partial_state(data_dir: &Path) -> Option<BootstrapPhase> {
-    // A durable genesis artifact means bootstrap completed far enough that any
-    // surviving partial-state markers are stale leftovers, not an active
-    // in-progress bootstrap.
-    if data_dir.join("genesis.cbor").exists() {
-        return None;
-    }
-
+fn detect_partial_state_markers(data_dir: &Path) -> Option<BootstrapPhase> {
     // Check for lock file
     let lock_file = data_dir.join("init.lock");
     if lock_file.exists() {
@@ -242,6 +233,24 @@ pub fn detect_partial_state(data_dir: &Path) -> Option<BootstrapPhase> {
     }
 
     None
+}
+
+/// Detects partial state from a crashed initialization.
+#[must_use]
+pub fn detect_partial_state(data_dir: &Path) -> Option<BootstrapPhase> {
+    // A durable genesis file means bootstrap completed far enough that any
+    // surviving partial-state markers are stale leftovers, not an active
+    // in-progress bootstrap. Non-files still count as incomplete state.
+    if data_dir.join("genesis.cbor").is_file() {
+        return None;
+    }
+
+    detect_partial_state_markers(data_dir)
+}
+
+#[must_use]
+pub(crate) fn detect_partial_state_even_with_genesis(data_dir: &Path) -> Option<BootstrapPhase> {
+    detect_partial_state_markers(data_dir)
 }
 
 /// Write the current phase to the lock file.

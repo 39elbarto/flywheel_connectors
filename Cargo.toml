@@ -4,6 +4,7 @@ members = [
     "crates/fcp-async-core",
     "crates/fcp-async-core-macros",
     "crates/fcp-audit",
+    "crates/fcp-auth-schema",
     "crates/fcp-bootstrap",
     "crates/fcp-cbor",
     "crates/fwc",

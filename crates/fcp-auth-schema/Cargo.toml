@@ -1,0 +1,18 @@
+[package]
+name = "fcp-auth-schema"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "FCP typed capability-token claim schema shared between fcp-crypto (builder) and fcp-core (verifier)"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+ciborium.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# (none yet; tests use only std)

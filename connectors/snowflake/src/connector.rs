@@ -599,6 +599,18 @@ impl SnowflakeConnector {
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         self.base.check_ready()?;
 
+        if self
+            .config
+            .as_ref()
+            .is_some_and(|config| config.auth.is_secretless())
+        {
+            return Err(FcpError::Internal {
+                message:
+                    "credential_id mode requires egress proxy injection; invoke is disabled until that path is wired"
+                        .into(),
+            });
+        }
+
         let operation = params
             .get("operation_id")
             .and_then(serde_json::Value::as_str)
@@ -1829,5 +1841,32 @@ mod tests {
         });
         let cloned = SnowflakeAuthMode::clone(&token_mode);
         assert_eq!(cloned.account_identifier(), "acc");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_rejects_secretless_placeholder_auth() {
+        let mut connector = SnowflakeConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000",
+                "account_identifier": "myaccount",
+            }))
+            .await
+            .expect("configure");
+        connector.base.set_handshaken(true);
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation_id": "snowflake.databases.list",
+                "input": {},
+            }))
+            .await;
+
+        match result {
+            Err(FcpError::Internal { message }) => {
+                assert!(message.contains("credential_id mode requires egress proxy injection"));
+            }
+            other => panic!("expected credential injection error, got {other:?}"),
+        }
     }
 }

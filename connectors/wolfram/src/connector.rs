@@ -438,11 +438,15 @@ impl WolframConnector {
             });
         }
 
-        // Use a placeholder app_id — in production, the egress proxy injects credentials
         let app_id = input
             .get("app_id")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or("CREDENTIAL_INJECTED");
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing 'app_id'; credential injection is not wired for this connector"
+                    .into(),
+            })?;
 
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
@@ -865,7 +869,7 @@ mod tests {
         let result = connector
             .handle_invoke(json!({
                 "operation": "wolfram.query",
-                "input": {"input": "2+2"},
+                "input": {"input": "2+2", "app_id": "test-app-id"},
                 "capability_token": token
             }))
             .await
@@ -888,7 +892,7 @@ mod tests {
         let result = connector
             .handle_invoke(json!({
                 "operation": "wolfram.short_answer",
-                "input": {"input": "meaning of life"},
+                "input": {"input": "meaning of life", "app_id": "test-app-id"},
                 "capability_token": token
             }))
             .await
@@ -911,7 +915,7 @@ mod tests {
         let result = connector
             .handle_invoke(json!({
                 "operation": "wolfram.spoken_result",
-                "input": {"input": "2+2"},
+                "input": {"input": "2+2", "app_id": "test-app-id"},
                 "capability_token": token
             }))
             .await
@@ -929,6 +933,26 @@ mod tests {
             }))
             .await;
         assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_requires_app_id() {
+        let (connector, signing_key) =
+            setup_connector("api.wolframalpha.com", &["wolfram.query"]).await;
+        let token = generate_token(&signing_key, "wolfram.query", &["wolfram.query"]);
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "wolfram.query",
+                "input": {"input": "2+2"},
+                "capability_token": token
+            }))
+            .await;
+        match result {
+            Err(FcpError::InvalidRequest { message, .. }) => {
+                assert!(message.contains("Missing 'app_id'"));
+            }
+            other => panic!("expected missing app_id error, got {other:?}"),
+        }
     }
 
     #[fcp_async_core::runtime::test]
@@ -954,7 +978,7 @@ mod tests {
         let result = connector
             .handle_invoke(json!({
                 "operation": "wolfram.nonexistent",
-                "input": {"input": "test"},
+                "input": {"input": "test", "app_id": "test-app-id"},
                 "capability_token": token
             }))
             .await;

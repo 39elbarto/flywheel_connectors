@@ -31,56 +31,12 @@ pub const COSE_ALG_EDDSA: i64 = iana::Algorithm::EdDSA as i64;
 pub const MAX_COSE_TOKEN_BYTES: usize = 64 * 1024;
 
 /// CWT claim keys (registered claims from RFC 8392).
-pub mod cwt_claims {
-    /// Issuer claim key.
-    pub const ISS: i64 = 1;
-    /// Subject claim key.
-    pub const SUB: i64 = 2;
-    /// Audience claim key.
-    pub const AUD: i64 = 3;
-    /// Expiration time claim key.
-    pub const EXP: i64 = 4;
-    /// Not before claim key.
-    pub const NBF: i64 = 5;
-    /// Issued at claim key.
-    pub const IAT: i64 = 6;
-    /// CWT ID (token identifier) claim key.
-    pub const CTI: i64 = 7;
-}
-
-/// FCP2 private claim keys (negative numbers per CWT spec).
-pub mod fcp2_claims {
-    /// Capability ID claim.
-    pub const CAPABILITY_ID: i64 = -65537;
-    /// Zone ID claim.
-    pub const ZONE_ID: i64 = -65538;
-    /// Allowed operations claim (array of operation IDs).
-    pub const OPERATIONS: i64 = -65539;
-    /// Principal ID claim.
-    pub const PRINCIPAL_ID: i64 = -65540;
-    /// Delegation depth claim.
-    pub const DELEGATION_DEPTH: i64 = -65541;
-    /// Parent token ID claim (for delegated tokens).
-    pub const PARENT_TOKEN: i64 = -65542;
-    /// Issuing node ID claim.
-    pub const ISS_NODE: i64 = -65543;
-    /// Binary audience (`ObjectId`) claim.
-    pub const AUD_BINARY: i64 = -65544;
-    /// Grant Object IDs claim.
-    pub const GRANT_OBJECT_IDS: i64 = -65545;
-    /// Holder node ID claim.
-    pub const HOLDER_NODE: i64 = -65546;
-    /// Checkpoint ID claim.
-    pub const CHK_ID: i64 = -65547;
-    /// Checkpoint sequence claim.
-    pub const CHK_SEQ: i64 = -65548;
-    /// Capability constraints claim.
-    pub const CONSTRAINTS: i64 = -65549;
-    /// Granted capabilities (array of `CapabilityGrant`).
-    pub const GRANTS: i64 = -65550;
-    /// Instance ID claim.
-    pub const INSTANCE_ID: i64 = -65551;
-}
+// CBOR claim labels are now owned by `fcp-auth-schema`. Re-export here
+// so existing call sites (fcp-crypto::cose::fcp2_claims::*,
+// fcp-crypto::cose::cwt_claims::*) keep working while the workspace
+// migrates. After 8n0rm.4 migration is complete, external callers
+// should prefer importing directly from `fcp_auth_schema::labels`.
+pub use fcp_auth_schema::labels::{cwt_claims, fcp2_claims};
 
 /// CWT (CBOR Web Token) claims map.
 ///
@@ -783,6 +739,42 @@ impl CapabilityTokenBuilder {
         }
     }
 
+    /// Create a new builder from a typed [`fcp_auth_schema::AuthClaims`].
+    ///
+    /// This is the **preferred** constructor — it takes the shared
+    /// typed schema and bypasses the per-field chain API that leaked
+    /// FCP-specific label knowledge into this crate (br-8n0rm).
+    ///
+    /// The builder stores the claims as canonical CBOR, so
+    /// downstream `.build(...)` / signing produces byte-for-byte
+    /// identical output to a chain-built token with equivalent
+    /// values.
+    ///
+    /// # Errors
+    /// Returns the underlying CBOR error if encoding fails.
+    pub fn with_claims(
+        claims: &fcp_auth_schema::AuthClaims,
+    ) -> Result<Self, fcp_auth_schema::SchemaError> {
+        // AuthClaims emits a CBOR Map with ascending-label ordering.
+        // Re-parse it into a CwtClaims BTreeMap so the existing build
+        // path (sign, COSE_Sign1 wrap) continues to work unchanged.
+        let bytes = claims.to_canonical_cbor()?;
+        let value: ciborium::Value = ciborium::from_reader(&bytes[..])
+            .map_err(|e| fcp_auth_schema::SchemaError::Decode(e.to_string()))?;
+        let mut cwt = CwtClaims::new();
+        if let ciborium::Value::Map(entries) = value {
+            for (k, v) in entries {
+                if let ciborium::Value::Integer(i) = k {
+                    let as_i128: i128 = i.into();
+                    if let Ok(label) = i64::try_from(as_i128) {
+                        cwt = cwt.custom(label, v);
+                    }
+                }
+            }
+        }
+        Ok(Self { claims: cwt })
+    }
+
     /// Set the capability ID.
     #[must_use]
     pub fn capability_id(mut self, id: &str) -> Self {
@@ -904,6 +896,48 @@ mod tests {
     use super::*;
     use chrono::Duration;
     use std::cell::Cell;
+
+    // ── 8n0rm.4: typed AuthClaims ↔ CapabilityTokenBuilder interop ────────
+
+    #[test]
+    fn with_claims_constructs_builder_from_auth_claims() {
+        let claims = fcp_auth_schema::AuthClaims {
+            schema_version: fcp_auth_schema::claims::CURRENT_SCHEMA_VERSION,
+            capability_id: Some("cap:test".into()),
+            zone_id: Some("z:work".into()),
+            principal_id: Some("user@example".into()),
+            ..fcp_auth_schema::AuthClaims::default()
+        };
+        let builder = CapabilityTokenBuilder::with_claims(&claims).expect("build");
+        // Must expose the same labels
+        assert_eq!(
+            builder.claims.get_capability_id(),
+            Some("cap:test")
+        );
+        assert_eq!(builder.claims.get_zone_id(), Some("z:work"));
+    }
+
+    #[test]
+    fn with_claims_re_exports_labels_match_auth_schema() {
+        // The fcp2_claims + cwt_claims re-exports preserve the integer
+        // values that all existing callers depend on.
+        assert_eq!(
+            fcp2_claims::CAPABILITY_ID,
+            fcp_auth_schema::labels::fcp2_claims::CAPABILITY_ID
+        );
+        assert_eq!(
+            fcp2_claims::GRANTS,
+            fcp_auth_schema::labels::fcp2_claims::GRANTS
+        );
+        assert_eq!(
+            fcp2_claims::INSTANCE_ID,
+            fcp_auth_schema::labels::fcp2_claims::INSTANCE_ID
+        );
+        assert_eq!(
+            cwt_claims::EXP,
+            fcp_auth_schema::labels::cwt_claims::EXP
+        );
+    }
 
     #[test]
     fn cwt_claims_cbor_roundtrip() {

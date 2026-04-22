@@ -12,6 +12,9 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+# Shared auth-claim schema (single source of truth for label layout)
+fcp-auth-schema = { path = "../fcp-auth-schema" }
+
 # Signatures
 ed25519-dalek.workspace = true
 curve25519-dalek = { version = "4.1", features = ["group"] }

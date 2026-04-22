@@ -28,6 +28,7 @@ rand_chacha = "0.3"
 fcp-core = { path = "../fcp-core" }
 fcp-protocol = { path = "../fcp-protocol" }
 fcp-crypto = { path = "../fcp-crypto" }
+fcp-auth-schema = { path = "../fcp-auth-schema" }
 fcp-cbor = { path = "../fcp-cbor" }
 fcp-manifest = { path = "../fcp-manifest" }
 fcp-mesh = { path = "../fcp-mesh" }

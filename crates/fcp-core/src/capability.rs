@@ -3,6 +3,34 @@
 //! Capabilities are cryptographically-scoped permissions that grant specific
 //! actions to principals within zones. Capability tokens (FCT) carry the
 //! cryptographic proof of authorization.
+//!
+//! # Verification typestate
+//!
+//! Token verification is tracked at the type level. Five checks run during
+//! verification (signature, timing, zone, operation, instance-binding) and
+//! the marker on a verified token reflects which have passed:
+//!
+//! - [`CapabilityToken<Unverified>`] — deserialized but not yet verified.
+//!   Cannot access claims.
+//! - [`CapabilityToken<UnboundVerified>`] — signature / timing / zone /
+//!   operation checks passed, but instance-binding was deliberately skipped
+//!   (typical gateway vantage, where the connector's `InstanceId` is not
+//!   yet known). Produced by [`CapabilityVerifier::verify_unbound`].
+//! - [`CapabilityToken<BoundVerified>`] — all five checks passed. Produced
+//!   by [`CapabilityVerifier::verify_bound`] or by calling
+//!   [`CapabilityToken::promote_with_instance`] on an unbound token with
+//!   a matching `InstanceId`.
+//! - [`CapabilityToken<CryptographicallyVerified>`] — legacy marker, still
+//!   returned by the older [`CapabilityVerifier::verify`]. New code should
+//!   pick `verify_bound` / `verify_unbound` and demand the appropriate
+//!   marker in downstream function signatures.
+//!
+//! The gateway produces `UnboundVerified`. The connector runtime receives
+//! it, calls `promote_with_instance` with its own `InstanceId`, and passes
+//! the resulting `BoundVerified` to any operation executor. Executors that
+//! require full enforcement declare `fn(_: CapabilityToken<BoundVerified>)`
+//! and the compiler refuses to pass them an unbound token. See
+//! `docs/architecture/adr/jkcka-typestate-split.md`.
 
 use std::fmt;
 use std::time::Duration;

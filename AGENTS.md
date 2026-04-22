@@ -358,7 +358,10 @@ flywheel_connectors/
 ### Key Principles
 
 1. **Secure by Default**: Connectors start with zero capabilities; everything must be explicitly declared
-2. **Mechanical Enforcement**: Security via type system and binary boundaries, NOT prompts
+2. **Mechanical Enforcement**: Security via type system and binary boundaries, NOT prompts.
+   - *Worked example — capability-token typestate:* `CapabilityToken<UnboundVerified>` and `CapabilityToken<BoundVerified>` are distinct types. An operation executor that requires full instance-binding declares `fn execute(_: CapabilityToken<BoundVerified>, ...)`. An `UnboundVerified` token (produced by the gateway, which does not yet know the connector's real `InstanceId`) does NOT compile against that signature. The connector runtime must call `promote_with_instance` to obtain the bound variant. Enforced mechanically by the compiler + `trybuild` tests in `crates/fcp-core/tests/typestate_compile_fail.rs`. Design docs: `docs/architecture/adr/jkcka-typestate-split.md` and `docs/architecture/adr/jkcka-call-sites.md`.
+   - *Worked example — responder-picks suite negotiation:* `negotiate_suite` in `fcp_protocol::session` returns the responder's first-preferred suite that the initiator also offers, with a `MINIMUM_SUITE` floor. See `docs/protocol/session-handshake.md`.
+   - *Worked example — typed auth-claim schema:* Capability-token claim layout lives in `fcp-auth-schema::AuthClaims` (single source of truth consumed by both `fcp-crypto` builder and `fcp-core` verifier). Schema changes are deployment-gated by `schema_version`; see `docs/architecture/adr/8n0rm-claim-schema-versioning.md`.
 3. **Zone-First Isolation**: Every request/event is attached to a Zone; cross-zone access requires explicit policy
 4. **Capability-Based Auth**: Cryptographically scoped tokens for every operation
 

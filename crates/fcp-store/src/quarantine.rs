@@ -159,10 +159,15 @@ impl QuarantineStore {
     /// Add an object to quarantine.
     ///
     /// If quotas are exceeded, evicts objects according to policy.
+    /// Also performs an in-band TTL sweep using the incoming object's
+    /// receipt time so expired entries do not persist indefinitely without
+    /// a dedicated background sweeper.
     ///
     /// # Errors
     /// Returns error if the object cannot be quarantined even after eviction.
     pub fn quarantine(&self, obj: QuarantinedObject) -> Result<(), QuarantineError> {
+        self.evict_expired(obj.received_at);
+
         #[allow(clippy::cast_possible_truncation)]
         let obj_size = obj.data.len() as u64;
 
@@ -217,11 +222,48 @@ impl QuarantineStore {
         Ok(())
     }
 
-    /// Get a quarantined object.
+    /// Get a quarantined object (unfiltered).
+    ///
+    /// Returns the entry regardless of its [`QuarantinePolicy::quarantine_ttl_secs`]
+    /// freshness. Intended for internal admin/eviction paths that need to
+    /// inspect stale records. **Callers consulting quarantine state for
+    /// liveness MUST use [`Self::get_fresh`] instead** — otherwise an object
+    /// whose TTL has expired but that `evict_expired` has not yet swept will
+    /// continue to appear "in quarantine," leaking stale admission state.
+    /// See bead flywheel_connectors-dzhhq for the drift this closes.
     pub fn get(&self, object_id: &ObjectId) -> Option<QuarantinedObject> {
         let zones = self.zones.read();
         for zone in zones.values() {
             if let Some(obj) = zone.objects.get(object_id) {
+                return Some(obj.clone());
+            }
+        }
+        None
+    }
+
+    /// Get a quarantined object, filtering out TTL-expired entries.
+    ///
+    /// Returns `None` for any record whose `received_at` is older than the
+    /// policy's `quarantine_ttl_secs` relative to `current_time`, even if
+    /// [`Self::evict_expired`] has not yet swept it. Uses the same
+    /// `current_time.saturating_sub(received_at) > ttl` rule as
+    /// `evict_expired` so read-path freshness and sweep-path eviction
+    /// agree on which entries are live.
+    ///
+    /// This is the canonical liveness check — any caller that wants to
+    /// answer "is this object currently quarantined?" MUST use this
+    /// variant, not [`Self::get`]. Closes bead flywheel_connectors-dzhhq
+    /// (TTL enforcement used to be sweep-only, letting stale entries
+    /// survive indefinitely if the sweep never ran).
+    #[must_use]
+    pub fn get_fresh(&self, object_id: &ObjectId, current_time: u64) -> Option<QuarantinedObject> {
+        let ttl = self.policy.quarantine_ttl_secs;
+        let zones = self.zones.read();
+        for zone in zones.values() {
+            if let Some(obj) = zone.objects.get(object_id) {
+                if current_time.saturating_sub(obj.received_at) > ttl {
+                    return None;
+                }
                 return Some(obj.clone());
             }
         }
@@ -351,11 +393,36 @@ impl QuarantineStore {
         }
     }
 
-    /// Check if an object is in quarantine.
+    /// Check if an object is in quarantine (unfiltered).
+    ///
+    /// Returns `true` for any entry regardless of freshness. Intended for
+    /// internal admin/eviction paths. **Callers consulting quarantine
+    /// state for liveness MUST use [`Self::contains_fresh`]** — see
+    /// [`Self::get`] for the drift rationale.
     #[must_use]
     pub fn contains(&self, object_id: &ObjectId) -> bool {
         let zones = self.zones.read();
         zones.values().any(|z| z.objects.contains_key(object_id))
+    }
+
+    /// Check if an object is in quarantine, filtering out TTL-expired
+    /// entries by `current_time`.
+    ///
+    /// Returns `false` for any record whose `received_at` is older than
+    /// the policy's `quarantine_ttl_secs` relative to `current_time`,
+    /// even if [`Self::evict_expired`] has not yet swept it. This is the
+    /// canonical liveness check — any caller that wants to answer "is
+    /// this object currently quarantined?" MUST use this variant, not
+    /// [`Self::contains`]. Closes bead flywheel_connectors-dzhhq.
+    #[must_use]
+    pub fn contains_fresh(&self, object_id: &ObjectId, current_time: u64) -> bool {
+        let ttl = self.policy.quarantine_ttl_secs;
+        let zones = self.zones.read();
+        zones.values().any(|z| {
+            z.objects
+                .get(object_id)
+                .is_some_and(|obj| current_time.saturating_sub(obj.received_at) <= ttl)
+        })
     }
 
     /// Evict objects older than TTL.
@@ -677,6 +744,79 @@ mod tests {
                 ..StoreLogData::default()
             }
         });
+    }
+
+    #[test]
+    fn quarantine_admission_sweeps_expired_entries_in_band() {
+        run_store_test(
+            "quarantine_admission_sweeps_expired_entries_in_band",
+            "verify",
+            "quarantine",
+            2,
+            || {
+                let policy = ObjectAdmissionPolicy {
+                    quarantine_ttl_secs: 1,
+                    ..Default::default()
+                };
+                let store = QuarantineStore::new(policy);
+                let expired_id = ObjectId::from_bytes([1; 32]);
+                let fresh_id = ObjectId::from_bytes([2; 32]);
+
+                store.quarantine(test_object(1, 100, 1000)).unwrap();
+                store.quarantine(test_object(2, 100, 1002)).unwrap();
+
+                assert!(!store.contains(&expired_id));
+                assert!(store.contains(&fresh_id));
+
+                StoreLogData {
+                    details: Some(json!({"expired_removed": expired_id, "fresh_kept": fresh_id})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn evict_expired_wall_clock_ttl() {
+        run_store_test(
+            "evict_expired_wall_clock_ttl",
+            "verify",
+            "quarantine",
+            2,
+            || {
+                let policy = ObjectAdmissionPolicy {
+                    quarantine_ttl_secs: 1,
+                    ..Default::default()
+                };
+                let store = QuarantineStore::new(policy);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let obj = test_object(1, 100, now);
+                let object_id = obj.object_id;
+
+                store.quarantine(obj).unwrap();
+                std::thread::sleep(std::time::Duration::from_secs(2));
+
+                let evicted = store.evict_expired(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                );
+
+                assert_eq!(evicted, 1);
+                assert!(store.get(&object_id).is_none());
+                assert!(!store.contains(&object_id));
+
+                StoreLogData {
+                    object_id: Some(object_id),
+                    details: Some(json!({"evicted": evicted, "ttl_secs": 1})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
     #[test]
@@ -2542,6 +2682,122 @@ mod tests {
                 details: Some(json!({
                     "unknown_zone": true,
                     "empty_list": true
+                })),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    /// Regression for bead flywheel_connectors-dzhhq.
+    ///
+    /// `QuarantineStore::get` / `::contains` used to return expired
+    /// entries indefinitely if `evict_expired` was never called — which
+    /// in practice was always, because no production caller invoked it.
+    /// The new `get_fresh` / `contains_fresh` helpers close that drift
+    /// by filtering TTL-expired entries at read time using the same
+    /// `current_time.saturating_sub(received_at) > ttl` rule as the
+    /// sweep path.
+    #[test]
+    fn get_fresh_and_contains_fresh_filter_ttl_expired_entries() {
+        run_store_test("get_fresh_ttl_filter", "verify", "quarantine", 6, || {
+            // 10-second TTL makes the test cheap to reason about.
+            let policy = ObjectAdmissionPolicy {
+                quarantine_ttl_secs: 10,
+                ..ObjectAdmissionPolicy::default()
+            };
+            let store = QuarantineStore::new(policy);
+            // Object received at t=1000; TTL expires at t=1010.
+            let obj = test_object(1, 64, 1000);
+            let id = obj.object_id;
+            store.quarantine(obj).unwrap();
+
+            // Within TTL window (same second): fresh helpers see it.
+            assert!(
+                store.get_fresh(&id, 1000).is_some(),
+                "get_fresh must return the object at received_at exactly"
+            );
+            assert!(
+                store.contains_fresh(&id, 1005),
+                "contains_fresh must return true inside TTL window"
+            );
+
+            // Exactly at the TTL boundary (current - received == ttl):
+            // NOT expired, because the rule is strictly greater-than.
+            assert!(
+                store.get_fresh(&id, 1010).is_some(),
+                "get_fresh MUST NOT expire at the TTL boundary (rule is >, not >=)"
+            );
+
+            // Past the TTL: fresh helpers refuse the entry even though
+            // the sweep has not run. The unfiltered `get`/`contains`
+            // still return it — that's the intentional split that the
+            // admin/eviction paths rely on.
+            assert!(
+                store.get_fresh(&id, 1011).is_none(),
+                "get_fresh MUST treat an entry past TTL as absent"
+            );
+            assert!(
+                !store.contains_fresh(&id, 1011),
+                "contains_fresh MUST treat an entry past TTL as absent"
+            );
+            assert!(
+                store.contains(&id),
+                "unfiltered contains() MUST still return true until evict_expired runs"
+            );
+
+            StoreLogData {
+                object_id: Some(id),
+                details: Some(json!({
+                    "ttl_secs": 10,
+                    "received_at": 1000,
+                    "fresh_cutoff": 1010
+                })),
+                ..StoreLogData::default()
+            }
+        });
+    }
+
+    /// Paired invariant: after `evict_expired` runs, *both* the fresh
+    /// helpers AND the unfiltered ones MUST agree that the entry is
+    /// gone. Prevents a future regression where `evict_expired` only
+    /// tears down half of the state (e.g. removes from `objects` but
+    /// not from `eviction_queue`).
+    #[test]
+    fn evict_expired_aligns_with_fresh_helpers() {
+        run_store_test("evict_expired_aligns", "verify", "quarantine", 4, || {
+            let policy = ObjectAdmissionPolicy {
+                quarantine_ttl_secs: 5,
+                ..ObjectAdmissionPolicy::default()
+            };
+            let store = QuarantineStore::new(policy);
+            let obj = test_object(2, 64, 100);
+            let id = obj.object_id;
+            store.quarantine(obj).unwrap();
+
+            // Past TTL, pre-sweep: fresh helpers already say "gone".
+            assert!(
+                store.get_fresh(&id, 200).is_none(),
+                "get_fresh must reject expired entry before sweep"
+            );
+
+            // Sweep must agree — at least one eviction and no lingering
+            // entries under either helper afterwards.
+            let evicted = store.evict_expired(200);
+            assert_eq!(evicted, 1, "evict_expired must sweep exactly 1 entry");
+            assert!(
+                store.get_fresh(&id, 200).is_none(),
+                "get_fresh still absent after sweep"
+            );
+            assert!(
+                !store.contains(&id),
+                "unfiltered contains() must agree after sweep"
+            );
+
+            StoreLogData {
+                object_id: Some(id),
+                details: Some(json!({
+                    "evicted": evicted,
+                    "ttl_secs": 5,
                 })),
                 ..StoreLogData::default()
             }

@@ -48,12 +48,14 @@ Status legend: `PROVEN` = backed by direct proof in the current repo, `IMPLEMENT
 |---------|--------|--------------|----------|
 | **Host-First Control Plane** | `IMPLEMENTED` | **Current transitional operator path.** `fwc` + `fcp-host` is the proven provisioning boundary. Operators use this path today while mesh-backed truth converges to steady state. | `fcp-host/src/{supervisor,enforcement,health}.rs` (240+ tests) |
 | **Truthful Runtime Resolution** | `IMPLEMENTED` | `fwc` resolves runtime mode explicitly and classifies answers as mesh-backed, host-backed, node-local, or offline instead of fabricating a single "live" answer. | `fwc/src/{truth,catalog}.rs` (980+ tests) |
-| **Zone Isolation** | `PROVEN` | Cryptographic namespaces with integrity/confidentiality axes and Tailscale ACL enforcement. | `fcp-core/src/{zone_keys,pcs,policy}.rs` (420+ tests, E2E enforcement) |
+| **Zone Isolation** | `LIMITED` | Core cryptographic namespaces are proven; host-side connector zone binding is enforced when operators configure `allowed_zones`. | `fcp-core/src/{zone_keys,pcs,policy}.rs`, `fcp-host/src/bin/fcp-host.rs` (420+ tests, E2E enforcement) |
 | **Capability Tokens (CWT/COSE)** | `PROVEN` | Provable authority with `grant_object_ids`; tokens are canonically CBOR-encoded and COSE-signed for interoperability. | `fcp-crypto/src/cose.rs`, `fcp-core/src/capability.rs` (249+ tests) |
 | **Tamper-Evident Audit** | `PROVEN` | Hash-linked audit chain with monotonic sequence numbers and quorum-signed checkpoints. | `fcp-audit/`, `fcp-core/src/audit.rs` (473+ tests, golden vectors) |
 | **Revocation** | `IMPLEMENTED` | First-class revocation objects and O(1)-style freshness checks exist in the current evidence/core surfaces. | `fcp-core/src/revocation.rs` (104 tests) |
 | **Egress Proxy** | `IMPLEMENTED` | Connector network access is routed through manifest-aware guardrails with CIDR deny defaults; some end-to-end proof beads are still open. | `fcp-host/src/egress.rs`, `fcp-sandbox/` (270+ tests) |
 | **Secretless Connectors** | `IMPLEMENTED` | Egress proxy and `credential_id` flows exist so connectors can rely on host-side credential injection; broader proof work is still open. | `fcp-host/src/egress.rs` (credential_id injection path) |
+
+_Audit note:_ In the current host-backed path, `allowed_zones` is opt-in. An empty set preserves a back-compat permissive branch in `crates/fcp-host/src/bin/fcp-host.rs` (`allowed_zones()` and `verify_live_request()`).
 | **Threshold Owner Key** | `IMPLEMENTED` | FROST ceremony/signing support exists in `fcp-bootstrap`, but it is not yet the universal operational default. | `fcp-bootstrap/src/ceremony.rs` (93 tests) |
 | **Threshold Secrets** | `IMPLEMENTED` | Shamir secret sharing exists for device-distributed recovery so raw secret material need not live on one machine. | `fcp-core/src/secret.rs` (123 tests, GF(2^8) Shamir) |
 | **Supply Chain Attestations** | `IMPLEMENTED` | Registry-side attestation schemas and verification policy exist; packaging/release proof is still incomplete. | `fcp-registry/src/lib.rs` (347 tests) |

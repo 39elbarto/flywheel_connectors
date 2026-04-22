@@ -1,0 +1,178 @@
+---
+source: crates/fcp-manifest/tests/manifest_golden.rs
+expression: manifest
+---
+{
+  "manifest": {
+    "format": "fcp-connector-manifest",
+    "schema_version": "2.1",
+    "min_mesh_version": "2.0.0",
+    "min_protocol": "fcp2-sym/2.0",
+    "protocol_features": [],
+    "max_datagram_bytes": 1200,
+    "interface_hash": "blake3-256:fcp.interface.v2:1d487464e498b3b052d965ee47ae817c6b801a3d20cd408f60a0b7b1fc573dec"
+  },
+  "connector": {
+    "id": "fcp.golden.full",
+    "name": "Full Golden",
+    "version": "1.2.3",
+    "description": "Multi-capability, multi-zone fixture with every optional section populated.",
+    "archetypes": [
+      "operational",
+      "streaming"
+    ],
+    "format": "native",
+    "status": "ready",
+    "singleton_writer": null,
+    "state": {
+      "model": "crdt",
+      "state_schema_version": "1",
+      "migration_hint": null,
+      "crdt_type": "or_set",
+      "snapshot_every_updates": 1000,
+      "snapshot_every_bytes": 10485760
+    }
+  },
+  "zones": {
+    "home": "z:work",
+    "allowed_sources": [
+      "z:work",
+      "z:private",
+      "z:public"
+    ],
+    "allowed_targets": [
+      "z:work",
+      "z:private"
+    ],
+    "forbidden": [
+      "z:owner"
+    ]
+  },
+  "capabilities": {
+    "required": [
+      "network.dns",
+      "golden.read",
+      "golden.write"
+    ],
+    "optional": [
+      "golden.admin"
+    ],
+    "forbidden": [
+      "system.exec"
+    ]
+  },
+  "provides": {
+    "operations": {
+      "read": {
+        "description": "Read operation",
+        "capability": "golden.read",
+        "risk_level": "low",
+        "safety_tier": "safe",
+        "requires_approval": "none",
+        "rate_limit": null,
+        "idempotency": "strict",
+        "revocation_freshness": "safe",
+        "input_schema": {
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object"
+        },
+        "network_constraints": null,
+        "ai_hints": {
+          "when_to_use": "",
+          "common_mistakes": [],
+          "examples": [],
+          "related": []
+        }
+      },
+      "write": {
+        "description": "Write operation",
+        "capability": "golden.write",
+        "risk_level": "medium",
+        "safety_tier": "risky",
+        "requires_approval": "policy",
+        "rate_limit": null,
+        "idempotency": "best_effort",
+        "revocation_freshness": "safe",
+        "input_schema": {
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object"
+        },
+        "network_constraints": null,
+        "ai_hints": {
+          "when_to_use": "",
+          "common_mistakes": [],
+          "examples": [],
+          "related": []
+        }
+      }
+    }
+  },
+  "event_caps": null,
+  "timeouts": null,
+  "sandbox": {
+    "profile": "strict",
+    "memory_mb": 128,
+    "cpu_percent": 25,
+    "wall_clock_timeout_ms": 2000,
+    "fs_readonly_paths": [
+      "/usr",
+      "/etc"
+    ],
+    "fs_writable_paths": [
+      "$CONNECTOR_STATE"
+    ],
+    "deny_exec": true,
+    "deny_ptrace": true
+  },
+  "rate_limits": {
+    "pools": [
+      {
+        "id": "read_pool",
+        "description": null,
+        "requests": 600,
+        "window_ms": 60000,
+        "burst": 20,
+        "unit": "requests",
+        "enforcement": "hard",
+        "scope": "instance"
+      },
+      {
+        "id": "write_pool",
+        "description": null,
+        "requests": 120,
+        "window_ms": 60000,
+        "burst": 5,
+        "unit": "requests",
+        "enforcement": "hard",
+        "scope": "credential"
+      }
+    ],
+    "operation_pools": {}
+  },
+  "signatures": null,
+  "supply_chain": null,
+  "policy": {
+    "require_transparency_log": true,
+    "require_attestation_types": [
+      "in-toto",
+      "reproducible-build"
+    ],
+    "min_slsa_level": 3,
+    "trusted_builders": [
+      "https://github.com/actions/runner"
+    ],
+    "require_attestation_expiry": false
+  }
+}

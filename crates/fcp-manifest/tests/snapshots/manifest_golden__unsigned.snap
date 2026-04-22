@@ -1,0 +1,95 @@
+---
+source: crates/fcp-manifest/tests/manifest_golden.rs
+expression: manifest
+---
+{
+  "manifest": {
+    "format": "fcp-connector-manifest",
+    "schema_version": "2.1",
+    "min_mesh_version": "2.0.0",
+    "min_protocol": "fcp2-sym/2.0",
+    "protocol_features": [],
+    "max_datagram_bytes": 1200,
+    "interface_hash": "blake3-256:fcp.interface.v2:c0c0dc6cecaf0bb9afdbde18bc6ed24594bf18c5150cfc23b30d92e92d92bfcc"
+  },
+  "connector": {
+    "id": "fcp.golden.unsigned",
+    "name": "Unsigned Golden",
+    "version": "0.1.0",
+    "description": "Single-capability, single-zone fixture for byte-exact goldens.",
+    "archetypes": [
+      "operational"
+    ],
+    "format": "native",
+    "status": "ready",
+    "singleton_writer": null,
+    "state": null
+  },
+  "zones": {
+    "home": "z:work",
+    "allowed_sources": [
+      "z:work"
+    ],
+    "allowed_targets": [
+      "z:work"
+    ],
+    "forbidden": []
+  },
+  "capabilities": {
+    "required": [
+      "network.dns",
+      "golden.ping"
+    ],
+    "optional": [],
+    "forbidden": [
+      "system.exec"
+    ]
+  },
+  "provides": {
+    "operations": {
+      "ping": {
+        "description": "Ping operation",
+        "capability": "golden.ping",
+        "risk_level": "low",
+        "safety_tier": "safe",
+        "requires_approval": "none",
+        "rate_limit": null,
+        "idempotency": "strict",
+        "revocation_freshness": "safe",
+        "input_schema": {
+          "type": "object"
+        },
+        "output_schema": {
+          "type": "object"
+        },
+        "network_constraints": null,
+        "ai_hints": {
+          "when_to_use": "",
+          "common_mistakes": [],
+          "examples": [],
+          "related": []
+        }
+      }
+    }
+  },
+  "event_caps": null,
+  "timeouts": null,
+  "sandbox": {
+    "profile": "strict",
+    "memory_mb": 64,
+    "cpu_percent": 20,
+    "wall_clock_timeout_ms": 1000,
+    "fs_readonly_paths": [
+      "/usr"
+    ],
+    "fs_writable_paths": [
+      "$CONNECTOR_STATE"
+    ],
+    "deny_exec": true,
+    "deny_ptrace": true
+  },
+  "rate_limits": null,
+  "signatures": null,
+  "supply_chain": null,
+  "policy": null
+}

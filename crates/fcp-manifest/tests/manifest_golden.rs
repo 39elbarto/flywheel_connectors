@@ -138,15 +138,23 @@ idempotency = "best_effort"
 input_schema = {{ type = "object" }}
 output_schema = {{ type = "object" }}
 
-[rate_limits.pools.read_pool]
-refill_rate_per_sec = 10.0
+[[rate_limits.pools]]
+id = "read_pool"
+requests = 600
+window_ms = 60000
 burst = 20
-scope = "zone"
+unit = "requests"
+enforcement = "hard"
+scope = "instance"
 
-[rate_limits.pools.write_pool]
-refill_rate_per_sec = 2.0
+[[rate_limits.pools]]
+id = "write_pool"
+requests = 120
+window_ms = 60000
 burst = 5
-scope = "connector"
+unit = "requests"
+enforcement = "hard"
+scope = "credential"
 
 [policy]
 require_transparency_log = true
@@ -182,15 +190,15 @@ publisher_threshold = "1-of-2"
 
 [[signatures.publisher_signatures]]
 kid = "kid:publisher-alpha"
-sig = "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQQ=="
+sig = "base64:QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQQ=="
 
 [[signatures.publisher_signatures]]
 kid = "kid:publisher-beta"
-sig = "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
+sig = "base64:QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC"
 
 [signatures.registry_signature]
 kid = "kid:registry-root"
-sig = "UlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJS"
+sig = "base64:UlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJSUlJS"
 "#
     )
 }

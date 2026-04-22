@@ -13,6 +13,10 @@ use fcp_oauth::{
     PkceMethod, ProviderEndpoints, ResponseMode, TokenResponse, TokenStore,
 };
 
+fn valid_tokens(response: TokenResponse) -> OAuthTokens {
+    OAuthTokens::from_response(response).expect("valid token fixture must construct")
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Constants & Enums
 // ═══════════════════════════════════════════════════════════════════════════
@@ -460,7 +464,7 @@ fn oauth_tokens_from_response_with_expiry() {
         scope: Some("read write".to_string()),
         id_token: None,
     };
-    let tokens = OAuthTokens::from_response(resp);
+    let tokens = valid_tokens(resp);
     assert_eq!(tokens.access_token(), "at");
     assert_eq!(tokens.token_type(), "Bearer");
     assert_eq!(tokens.refresh_token(), Some("rt"));
@@ -479,7 +483,7 @@ fn oauth_tokens_expired_immediately() {
         scope: None,
         id_token: None,
     };
-    let tokens = OAuthTokens::from_response(resp);
+    let tokens = valid_tokens(resp);
     assert!(tokens.is_expired());
     assert!(tokens.needs_refresh());
 }
@@ -494,7 +498,7 @@ fn oauth_tokens_no_expiry_never_expires() {
         scope: None,
         id_token: None,
     };
-    let tokens = OAuthTokens::from_response(resp);
+    let tokens = valid_tokens(resp);
     assert!(!tokens.is_expired());
     assert!(!tokens.needs_refresh());
 }
@@ -509,7 +513,7 @@ fn oauth_tokens_authorization_header() {
         scope: None,
         id_token: None,
     };
-    let tokens = OAuthTokens::from_response(resp);
+    let tokens = valid_tokens(resp);
     assert_eq!(
         tokens
             .authorization_header()
@@ -528,7 +532,7 @@ fn oauth_tokens_update_preserves_refresh_token() {
         scope: Some("read".to_string()),
         id_token: None,
     };
-    let mut tokens = OAuthTokens::from_response(initial);
+    let mut tokens = valid_tokens(initial);
 
     // Refresh response without refresh_token
     let refresh = TokenResponse {
@@ -557,7 +561,7 @@ fn oauth_tokens_update_replaces_refresh_token_when_provided() {
         scope: None,
         id_token: None,
     };
-    let mut tokens = OAuthTokens::from_response(initial);
+    let mut tokens = valid_tokens(initial);
 
     let refresh = TokenResponse {
         access_token: "new-at".to_string(),
@@ -584,7 +588,7 @@ fn oauth_tokens_debug_redacts_secrets() {
         scope: None,
         id_token: Some("secret-jwt".to_string()),
     };
-    let tokens = OAuthTokens::from_response(resp);
+    let tokens = valid_tokens(resp);
     let debug = format!("{tokens:?}");
     assert!(!debug.contains("super-secret-token"));
     assert!(!debug.contains("secret-refresh"));
@@ -601,7 +605,7 @@ fn oauth_tokens_needs_refresh_within_custom_threshold() {
         scope: None,
         id_token: None,
     };
-    let tokens = OAuthTokens::from_response(resp);
+    let tokens = valid_tokens(resp);
     assert!(tokens.needs_refresh_within(Duration::from_secs(180))); // 3 min threshold > 2 min remaining
     assert!(!tokens.needs_refresh_within(Duration::from_secs(60))); // 1 min threshold < 2 min remaining
 }
@@ -619,6 +623,7 @@ fn make_tokens(access_token: &str, expires_in: Option<u64>) -> OAuthTokens {
         scope: None,
         id_token: None,
     })
+    .expect("valid token fixture must construct")
 }
 
 #[test]

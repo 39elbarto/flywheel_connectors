@@ -60,6 +60,10 @@ pub enum OAuthError {
     #[error("Invalid token response: {0}")]
     InvalidTokenResponse(String),
 
+    /// OAuth token field was present but empty.
+    #[error("OAuth token field cannot be empty: {0}")]
+    EmptyTokenField(&'static str),
+
     /// HTTP request failed.
     #[error("HTTP request failed: {0}")]
     HttpError(String),

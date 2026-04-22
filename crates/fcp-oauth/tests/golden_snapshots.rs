@@ -137,7 +137,7 @@ fn deserialize_response_as_debug(raw: &str) -> String {
 fn deserialize_response_into_tokens(raw: &str) -> String {
     let parsed: TokenResponse =
         serde_json::from_str(raw).expect("test fixture must parse as TokenResponse");
-    let tokens = OAuthTokens::from_response(parsed);
+    let tokens = OAuthTokens::from_response(parsed).expect("snapshot token fixture must be valid");
     format!("{tokens:#?}")
 }
 

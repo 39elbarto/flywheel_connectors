@@ -53,6 +53,23 @@ impl std::fmt::Debug for TokenResponse {
     }
 }
 
+impl TokenResponse {
+    /// Validate response invariants that must hold before token promotion.
+    ///
+    /// # Errors
+    ///
+    /// Returns a dedicated error when `access_token` or `token_type` is empty.
+    pub fn validate(self) -> OAuthResult<Self> {
+        if self.access_token.is_empty() {
+            return Err(OAuthError::EmptyTokenField("access_token"));
+        }
+        if self.token_type.is_empty() {
+            return Err(OAuthError::EmptyTokenField("token_type"));
+        }
+        Ok(self)
+    }
+}
+
 /// Stored OAuth tokens with metadata.
 #[derive(Clone, Serialize)]
 pub struct OAuthTokens {
@@ -97,8 +114,13 @@ impl std::fmt::Debug for OAuthTokens {
 
 impl OAuthTokens {
     /// Create tokens from a token response.
-    #[must_use]
-    pub fn from_response(response: TokenResponse) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns a dedicated error when the response contains an empty
+    /// `access_token` or `token_type`.
+    pub fn from_response(response: TokenResponse) -> OAuthResult<Self> {
+        let response = response.validate()?;
         let now = Utc::now();
         let expires_at = response.expires_in.map(|secs| {
             now + chrono::Duration::seconds(
@@ -111,7 +133,7 @@ impl OAuthTokens {
             .map(|s| s.split_whitespace().map(String::from).collect())
             .unwrap_or_default();
 
-        Self {
+        Ok(Self {
             access_token: response.access_token,
             token_type: response.token_type,
             expires_at,
@@ -119,7 +141,7 @@ impl OAuthTokens {
             scopes,
             id_token: response.id_token.filter(|id| !id.is_empty()),
             issued_at: now,
-        }
+        })
     }
 
     /// Get the access token.
@@ -198,18 +220,14 @@ impl OAuthTokens {
     ///
     /// # Errors
     ///
-    /// Returns [`OAuthError::InvalidTokenResponse`] when the stored token
+    /// Returns [`OAuthError::EmptyTokenField`] when the stored token
     /// is missing `access_token` or `token_type` material.
     pub fn authorization_header(&self) -> OAuthResult<String> {
         if self.access_token.is_empty() {
-            return Err(OAuthError::InvalidTokenResponse(
-                "stored token is missing access_token".into(),
-            ));
+            return Err(OAuthError::EmptyTokenField("access_token"));
         }
         if self.token_type.is_empty() {
-            return Err(OAuthError::InvalidTokenResponse(
-                "stored token is missing token_type".into(),
-            ));
+            return Err(OAuthError::EmptyTokenField("token_type"));
         }
 
         Ok(format!("{} {}", self.token_type, self.access_token))
@@ -228,7 +246,7 @@ impl OAuthTokens {
     ///
     /// # Errors
     ///
-    /// Returns [`OAuthError::InvalidTokenResponse`] when the refresh
+    /// Returns [`OAuthError::EmptyTokenField`] when the refresh
     /// response carries an empty `access_token` or an empty `token_type`.
     pub fn update_from_response(&mut self, response: TokenResponse) -> OAuthResult<()> {
         // Validate response-level invariants before any mutation so the
@@ -237,14 +255,10 @@ impl OAuthTokens {
         // self.access_token stale — see the Frankenstein hazard in the
         // doc comment above.
         if response.access_token.is_empty() {
-            return Err(OAuthError::InvalidTokenResponse(
-                "refresh response contained empty access_token".into(),
-            ));
+            return Err(OAuthError::EmptyTokenField("access_token"));
         }
         if response.token_type.is_empty() {
-            return Err(OAuthError::InvalidTokenResponse(
-                "refresh response contained empty token_type".into(),
-            ));
+            return Err(OAuthError::EmptyTokenField("token_type"));
         }
 
         let now = Utc::now();
@@ -575,6 +589,67 @@ impl TokenStore {
 mod tests {
     use super::*;
 
+    trait TestOAuthTokensExt {
+        fn expect_tokens(&self) -> &OAuthTokens;
+        fn expect_tokens_mut(&mut self) -> &mut OAuthTokens;
+
+        fn access_token(&self) -> &str {
+            self.expect_tokens().access_token()
+        }
+
+        fn token_type(&self) -> &str {
+            self.expect_tokens().token_type()
+        }
+
+        fn refresh_token(&self) -> Option<&str> {
+            self.expect_tokens().refresh_token()
+        }
+
+        fn scopes(&self) -> &[String] {
+            self.expect_tokens().scopes()
+        }
+
+        fn id_token(&self) -> Option<&str> {
+            self.expect_tokens().id_token()
+        }
+
+        fn is_expired(&self) -> bool {
+            self.expect_tokens().is_expired()
+        }
+
+        fn needs_refresh(&self) -> bool {
+            self.expect_tokens().needs_refresh()
+        }
+
+        fn needs_refresh_within(&self, threshold: Duration) -> bool {
+            self.expect_tokens().needs_refresh_within(threshold)
+        }
+
+        fn time_until_expiry(&self) -> Option<Duration> {
+            self.expect_tokens().time_until_expiry()
+        }
+
+        fn authorization_header(&self) -> OAuthResult<String> {
+            self.expect_tokens().authorization_header()
+        }
+
+        fn update_from_response(&mut self, response: TokenResponse) -> OAuthResult<()> {
+            self.expect_tokens_mut().update_from_response(response)
+        }
+    }
+
+    impl TestOAuthTokensExt for OAuthResult<OAuthTokens> {
+        fn expect_tokens(&self) -> &OAuthTokens {
+            self.as_ref()
+                .expect("valid token fixture must construct before assertion")
+        }
+
+        fn expect_tokens_mut(&mut self) -> &mut OAuthTokens {
+            self.as_mut()
+                .expect("valid token fixture must construct before mutation")
+        }
+    }
+
     fn mock_token_response(expires_in: Option<u64>) -> TokenResponse {
         TokenResponse {
             access_token: "test_access_token".to_string(),
@@ -586,10 +661,44 @@ mod tests {
         }
     }
 
+    fn valid_tokens(response: TokenResponse) -> OAuthTokens {
+        OAuthTokens::from_response(response).expect("valid token fixture must construct")
+    }
+
+    #[test]
+    fn test_token_response_validate_rejects_empty_access_token() {
+        let response = TokenResponse {
+            access_token: String::new(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: Some("test_refresh_token".into()),
+            scope: None,
+            id_token: None,
+        };
+
+        let err = response.validate().unwrap_err();
+        assert!(matches!(err, OAuthError::EmptyTokenField("access_token")));
+    }
+
+    #[test]
+    fn test_token_response_validate_rejects_empty_token_type() {
+        let response = TokenResponse {
+            access_token: "test_access_token".into(),
+            token_type: String::new(),
+            expires_in: Some(3600),
+            refresh_token: Some("test_refresh_token".into()),
+            scope: None,
+            id_token: None,
+        };
+
+        let err = response.validate().unwrap_err();
+        assert!(matches!(err, OAuthError::EmptyTokenField("token_type")));
+    }
+
     #[test]
     fn test_token_from_response() {
         let response = mock_token_response(Some(3600));
-        let tokens = OAuthTokens::from_response(response);
+        let tokens = valid_tokens(response);
 
         assert_eq!(tokens.access_token(), "test_access_token");
         assert_eq!(tokens.token_type(), "Bearer");
@@ -612,7 +721,7 @@ mod tests {
             scope: None,
             id_token: Some(String::new()),
         };
-        let tokens = OAuthTokens::from_response(response);
+        let tokens = valid_tokens(response);
         assert_eq!(tokens.refresh_token(), None);
         assert_eq!(tokens.id_token(), None);
     }
@@ -624,7 +733,7 @@ mod tests {
         // Without this guard, a compromised OAuth server could permanently
         // break the client's refresh loop by returning an empty refresh token.
         let initial = mock_token_response(Some(3600));
-        let mut tokens = OAuthTokens::from_response(initial);
+        let mut tokens = valid_tokens(initial);
         assert_eq!(tokens.refresh_token(), Some("test_refresh_token"));
 
         let refresh_response = TokenResponse {
@@ -654,7 +763,7 @@ mod tests {
         // The existing expiry must be preserved, not silently cleared to None
         // (which would make the token appear never-expiring).
         let initial = mock_token_response(Some(3600));
-        let mut tokens = OAuthTokens::from_response(initial);
+        let mut tokens = valid_tokens(initial);
         assert!(tokens.expires_at.is_some(), "initial expiry must be set");
 
         let refresh_response = TokenResponse {
@@ -685,7 +794,7 @@ mod tests {
         // were advanced, hiding token staleness from is_expired() and
         // needs_refresh() for up to the full expiry window.
         let initial = mock_token_response(Some(3600));
-        let mut tokens = OAuthTokens::from_response(initial);
+        let mut tokens = valid_tokens(initial);
         let original_access = tokens.access_token().to_string();
         let original_expires_at = tokens.expires_at;
         let original_issued_at = tokens.issued_at;
@@ -703,8 +812,8 @@ mod tests {
         let result = tokens.update_from_response(malformed);
 
         assert!(
-            matches!(result, Err(OAuthError::InvalidTokenResponse(_))),
-            "empty access_token must be rejected with InvalidTokenResponse, got {result:?}"
+            matches!(result, Err(OAuthError::EmptyTokenField("access_token"))),
+            "empty access_token must be rejected with EmptyTokenField(access_token), got {result:?}"
         );
         assert_eq!(
             tokens.access_token(),
@@ -728,7 +837,7 @@ mod tests {
         // Symmetric guard: an empty token_type would produce a malformed
         // Authorization header.  The whole response must be rejected
         // atomically — no field on self changes.
-        let mut tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        let mut tokens = valid_tokens(mock_token_response(Some(3600)));
         let original_token_type = tokens.token_type().to_string();
         let original_expires_at = tokens.expires_at;
 
@@ -744,7 +853,7 @@ mod tests {
         let result = tokens.update_from_response(malformed);
 
         assert!(
-            matches!(result, Err(OAuthError::InvalidTokenResponse(_))),
+            matches!(result, Err(OAuthError::EmptyTokenField("token_type"))),
             "empty token_type must be rejected, got {result:?}"
         );
         assert_eq!(tokens.token_type(), original_token_type);
@@ -753,7 +862,7 @@ mod tests {
 
     #[test]
     fn metamorphic_repeated_identical_refresh_is_observationally_idempotent() {
-        let mut tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        let mut tokens = valid_tokens(mock_token_response(Some(3600)));
         let refresh_response = TokenResponse {
             access_token: "steady_access".into(),
             token_type: "Bearer".into(),
@@ -792,7 +901,7 @@ mod tests {
 
     #[test]
     fn metamorphic_refresh_use_refresh_keeps_observable_auth_state_stable() {
-        let mut tokens = OAuthTokens::from_response(mock_token_response(Some(3600)));
+        let mut tokens = valid_tokens(mock_token_response(Some(3600)));
         let refresh_response = TokenResponse {
             access_token: "steady_access".into(),
             token_type: "Bearer".into(),
@@ -853,7 +962,7 @@ mod tests {
             scope: None,
             id_token: None,
         };
-        let mut tokens = OAuthTokens::from_response(expired_resp);
+        let mut tokens = valid_tokens(expired_resp);
         std::thread::sleep(std::time::Duration::from_millis(5));
         assert!(tokens.is_expired(), "precondition: token must be expired");
 
@@ -869,7 +978,7 @@ mod tests {
         let result = tokens.update_from_response(malformed_refresh);
 
         assert!(
-            matches!(result, Err(OAuthError::InvalidTokenResponse(_))),
+            matches!(result, Err(OAuthError::EmptyTokenField("access_token"))),
             "expired token must not be revived by empty replacement, got {result:?}"
         );
         assert!(
@@ -890,7 +999,7 @@ mod tests {
             scope: None,
             id_token: None,
         };
-        let tokens = OAuthTokens::from_response(response);
+        let tokens = valid_tokens(response);
         assert!(tokens.is_expired());
     }
 
@@ -898,7 +1007,7 @@ mod tests {
     fn test_token_needs_refresh() {
         // Token that expires in 2 minutes (below default 5 minute threshold)
         let response = mock_token_response(Some(120));
-        let tokens = OAuthTokens::from_response(response);
+        let tokens = valid_tokens(response);
         assert!(tokens.needs_refresh());
 
         // Token that expires in 10 minutes (above threshold)

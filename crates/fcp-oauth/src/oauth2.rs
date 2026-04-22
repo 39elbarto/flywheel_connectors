@@ -657,17 +657,13 @@ impl OAuth2Client {
         // resource server will reject, burning a refresh cycle for no
         // reason. Fail fast here instead.
         if token_response.access_token.is_empty() {
-            return Err(OAuthError::InvalidTokenResponse(
-                "server returned empty access_token".into(),
-            ));
+            return Err(OAuthError::EmptyTokenField("access_token"));
         }
         if token_response.token_type.is_empty() {
-            return Err(OAuthError::InvalidTokenResponse(
-                "server returned empty token_type".into(),
-            ));
+            return Err(OAuthError::EmptyTokenField("token_type"));
         }
 
-        Ok(OAuthTokens::from_response(token_response))
+        OAuthTokens::from_response(token_response)
     }
 
     /// Get the configuration.
@@ -1234,7 +1230,8 @@ mod tests {
                     refresh_token: Some("refresh-old".into()),
                     scope: None,
                     id_token: None,
-                }),
+                })
+                .expect("valid token fixture must construct"),
             );
 
             let refreshed = store.get_or_refresh("user", &client).await.unwrap();
@@ -1289,7 +1286,8 @@ mod tests {
                     refresh_token: Some("shared-refresh".into()),
                     scope: None,
                     id_token: None,
-                }),
+                })
+                .expect("valid token fixture must construct"),
             );
 
             let store_a = store.clone();

@@ -128,6 +128,8 @@ fn snapshot_decision_receipt_allow_with_evidence() {
         ),
         connector_id: Some("stripe".to_string()),
         operation_id: Some("charges.create".to_string()),
+        issuer_kid: None,
+        signature: None,
     };
 
     insta::assert_json_snapshot!("decision_receipt_allow_with_evidence", receipt);
@@ -155,6 +157,8 @@ fn snapshot_decision_receipt_deny_with_explanation() {
         trace_context: None,
         connector_id: Some("stripe".to_string()),
         operation_id: Some("refunds.create".to_string()),
+        issuer_kid: None,
+        signature: None,
     };
 
     insta::assert_json_snapshot!("decision_receipt_deny_with_explanation", receipt);
@@ -179,6 +183,8 @@ fn snapshot_decision_receipt_allow_minimal() {
         trace_context: None,
         connector_id: None,
         operation_id: None,
+        issuer_kid: None,
+        signature: None,
     };
 
     insta::assert_json_snapshot!("decision_receipt_allow_minimal", receipt);
@@ -203,6 +209,8 @@ fn snapshot_decision_receipt_minimal_deny() {
         trace_context: None,
         connector_id: None,
         operation_id: None,
+        issuer_kid: None,
+        signature: None,
     };
 
     insta::assert_json_snapshot!("decision_receipt_minimal_deny", receipt);

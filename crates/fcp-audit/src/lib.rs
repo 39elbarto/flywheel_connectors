@@ -27,6 +27,8 @@ use std::fmt;
 use thiserror::Error;
 
 const AUDIT_ENTRY_ID_DOMAIN: &[u8] = b"FCP2-AUDIT-ENTRY-V1";
+const DECISION_RECEIPT_ID_DOMAIN: &[u8] = b"FCP2-DECISION-RECEIPT-V1";
+const DECISION_RECEIPT_SIG_DOMAIN: &[u8] = b"FCP2-DECISION-RECEIPT-SIG-V1";
 
 /// Default grace window (seconds) for entries whose `occurred_at` is ahead of
 /// the verifier's wall clock. Entries timestamped more than this far in the
@@ -774,6 +776,39 @@ pub struct DecisionReceipt {
     /// Connector operation associated with the decision.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<String>,
+    /// Ed25519 key ID of the receipt's signer, when the emitting host
+    /// has a configured audit signing key. Present iff [`Self::signature`]
+    /// is present. Bead `flywheel_connectors-17l4c`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issuer_kid: Option<KeyId>,
+    /// Ed25519 signature over the canonical transcript produced by
+    /// [`Self::signing_bytes`]. Present iff the emitting host signed
+    /// the receipt. Absence means the receipt was emitted by a legacy
+    /// path that predates signing; verifiers MUST distinguish
+    /// "unsigned receipt" from "signature invalid" so an operator
+    /// upgrading a fleet can observe the two cohorts separately.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<Ed25519Signature>,
+}
+
+#[derive(Serialize)]
+struct DecisionReceiptIdMaterial<'a> {
+    // Everything except `id`, `issuer_kid`, `signature`: the former is
+    // producer-supplied and must not be trusted; the latter two are
+    // what the signature binds so they cannot appear inside the bound
+    // transcript.
+    request_id: &'a str,
+    decision: Decision,
+    reason_code: &'a str,
+    evidence: &'a [String],
+    audit_entry_id: Option<&'a str>,
+    explanation: Option<&'a str>,
+    decided_at: u64,
+    zone_id: &'a str,
+    correlation_id: Option<&'a str>,
+    trace_context: Option<&'a TraceContext>,
+    connector_id: Option<&'a str>,
+    operation_id: Option<&'a str>,
 }
 
 impl DecisionReceipt {
@@ -799,6 +834,145 @@ impl DecisionReceipt {
     #[must_use]
     pub fn evidence_count(&self) -> usize {
         self.evidence.len()
+    }
+
+    /// Recompute the canonical receipt ID from the payload itself.
+    ///
+    /// Domain-separated BLAKE3 over the canonical CBOR of every field
+    /// except `id`, `issuer_kid`, and `signature`. Mirrors
+    /// [`AuditEntry::computed_id`] — `id` is excluded because
+    /// producer-supplied identifiers must not be trusted; the other
+    /// two are what the signature binds, so they cannot appear inside
+    /// the bound transcript.
+    ///
+    /// # Errors
+    /// Returns [`AuditError::SerializationError`] when canonical CBOR
+    /// encoding of the payload fails.
+    pub fn computed_id(&self) -> Result<String, AuditError> {
+        let material = DecisionReceiptIdMaterial {
+            request_id: &self.request_id,
+            decision: self.decision,
+            reason_code: &self.reason_code,
+            evidence: &self.evidence,
+            audit_entry_id: self.audit_entry_id.as_deref(),
+            explanation: self.explanation.as_deref(),
+            decided_at: self.decided_at,
+            zone_id: &self.zone_id,
+            correlation_id: self.correlation_id.as_deref(),
+            trace_context: self.trace_context.as_ref(),
+            connector_id: self.connector_id.as_deref(),
+            operation_id: self.operation_id.as_deref(),
+        };
+
+        let canonical = fcp_cbor::to_canonical_cbor(&material).map_err(|err| {
+            AuditError::SerializationError(format!(
+                "failed to canonicalize decision receipt {}: {err}",
+                self.id
+            ))
+        })?;
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(DECISION_RECEIPT_ID_DOMAIN);
+        hasher.update(&canonical);
+        Ok(hex::encode(hasher.finalize().as_bytes()))
+    }
+
+    /// Canonical bytes that an issuer signs to bind their identity to
+    /// this receipt.
+    ///
+    /// Format: `DECISION_RECEIPT_SIG_DOMAIN || u32(id_len, LE) || id ||
+    ///          u32(kid_len, LE) || kid_bytes`
+    ///
+    /// The signature commits to the recomputed `id` (a hash of the
+    /// canonical payload) rather than the producer-supplied `id`
+    /// field, so it transitively binds every other field that
+    /// participates in [`Self::computed_id`]. The `issuer_kid` is
+    /// included in the transcript so a signature cannot be replayed
+    /// under a different claimed issuer. The `signature` field itself
+    /// is excluded.
+    ///
+    /// # Errors
+    /// Returns [`AuditError::SerializationError`] if [`Self::computed_id`]
+    /// fails to canonicalize the payload.
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, AuditError> {
+        let id = self.computed_id()?;
+        let id_bytes = id.as_bytes();
+        let kid_slice: &[u8] = self
+            .issuer_kid
+            .as_ref()
+            .map_or(&[][..], |kid| kid.as_slice());
+
+        let mut bytes = Vec::with_capacity(
+            DECISION_RECEIPT_SIG_DOMAIN.len() + 4 + id_bytes.len() + 4 + kid_slice.len(),
+        );
+        bytes.extend_from_slice(DECISION_RECEIPT_SIG_DOMAIN);
+        bytes.extend_from_slice(
+            &u32::try_from(id_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(id_bytes);
+        bytes.extend_from_slice(
+            &u32::try_from(kid_slice.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(kid_slice);
+        Ok(bytes)
+    }
+
+    /// Sign this receipt with the supplied Ed25519 signing key,
+    /// populating [`Self::issuer_kid`] and [`Self::signature`] in
+    /// place. Overwrites any prior signature. After signing, callers
+    /// should treat the receipt as immutable; mutating any field
+    /// covered by [`Self::computed_id`] invalidates the signature.
+    ///
+    /// # Errors
+    /// Returns [`AuditError::SerializationError`] if the canonical
+    /// signing transcript cannot be built.
+    pub fn sign(&mut self, signing_key: &Ed25519SigningKey) -> Result<(), AuditError> {
+        // Set the kid first so it participates in the signed transcript.
+        self.issuer_kid = Some(signing_key.key_id());
+        let transcript = self.signing_bytes()?;
+        self.signature = Some(signing_key.sign(&transcript));
+        Ok(())
+    }
+
+    /// Verify the receipt's signature against the supplied verifying
+    /// key. Mirrors [`AuditEntry::verify_signature`].
+    ///
+    /// Requires both [`Self::issuer_kid`] and [`Self::signature`] to
+    /// be present and the `verifying_key.key_id()` to match
+    /// `issuer_kid`. Returns [`AuditError::SignerMissing`] when either
+    /// field is absent (so callers can distinguish unsigned-receipt
+    /// from invalid-signature cohorts during a rollout) and
+    /// [`AuditError::SignatureInvalid`] when the signer/key do not
+    /// match or the signature does not verify against the canonical
+    /// transcript.
+    ///
+    /// # Errors
+    /// See above for the typed error variants.
+    pub fn verify_signature(
+        &self,
+        verifying_key: &Ed25519VerifyingKey,
+    ) -> Result<(), AuditError> {
+        let kid = self
+            .issuer_kid
+            .as_ref()
+            .ok_or(AuditError::SignerMissing { seq: 0 })?;
+        let signature = self
+            .signature
+            .as_ref()
+            .ok_or(AuditError::SignerMissing { seq: 0 })?;
+
+        if verifying_key.key_id().as_slice() != kid.as_slice() {
+            return Err(AuditError::SignatureInvalid { seq: 0 });
+        }
+
+        let transcript = self.signing_bytes()?;
+        verifying_key
+            .verify(&transcript, signature)
+            .map_err(|_| AuditError::SignatureInvalid { seq: 0 })
     }
 }
 
@@ -1860,6 +2034,8 @@ mod tests {
             trace_context: None,
             connector_id: None,
             operation_id: None,
+            issuer_kid: None,
+            signature: None,
         }
     }
 
@@ -4398,6 +4574,8 @@ mod tests {
             trace_context: None,
             connector_id: None,
             operation_id: None,
+            issuer_kid: None,
+            signature: None,
         };
         assert_eq!(receipt.evidence_count(), 0);
         assert!(!receipt.has_explanation());
@@ -4425,6 +4603,8 @@ mod tests {
             trace_context: Some(TraceContext::new("trace-2", "span-2").with_flags(0x01)),
             connector_id: Some("stripe".to_string()),
             operation_id: Some("charges.create".to_string()),
+            issuer_kid: None,
+            signature: None,
         };
 
         let json = serde_json::to_string(&receipt).unwrap();
@@ -5779,6 +5959,8 @@ mod tests {
             trace_context: entry.trace_context.clone(),
             connector_id: entry.connector_id.clone(),
             operation_id: entry.operation_id.clone(),
+            issuer_kid: None,
+            signature: None,
         };
 
         assert!(receipt.is_allow());
@@ -5808,6 +5990,144 @@ mod tests {
             ..Default::default()
         };
         assert!(filter.matches(&e1));
+    }
+
+    // ── DecisionReceipt signing / tamper-detection (br-17l4c) ────────────
+
+    #[test]
+    fn decision_receipt_sign_then_verify_roundtrip() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let mut receipt = sample_receipt();
+
+        receipt.sign(&signing_key).expect("sign must succeed");
+        assert!(
+            receipt.issuer_kid.is_some(),
+            "sign must populate issuer_kid"
+        );
+        assert!(receipt.signature.is_some(), "sign must populate signature");
+        assert_eq!(
+            receipt.issuer_kid.as_ref().unwrap().as_slice(),
+            signing_key.key_id().as_slice(),
+        );
+
+        receipt
+            .verify_signature(&verifying_key)
+            .expect("self-issued signature must verify");
+    }
+
+    #[test]
+    fn decision_receipt_unsigned_verify_reports_signer_missing() {
+        // The empty-path rollout cohort: a receipt with no signature
+        // must surface as SignerMissing, distinguishable from
+        // SignatureInvalid so operators can count "legacy unsigned
+        // receipts still in flight" separately from "tampered".
+        let verifying_key = Ed25519SigningKey::generate().verifying_key();
+        let receipt = sample_receipt();
+
+        let err = receipt
+            .verify_signature(&verifying_key)
+            .expect_err("unsigned receipt must not verify");
+        assert!(
+            matches!(err, AuditError::SignerMissing { .. }),
+            "expected SignerMissing, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn decision_receipt_tamper_decision_field_is_detected() {
+        // The canonical tamper-detection regression for bead
+        // flywheel_connectors-17l4c: a receipt with a valid signature
+        // whose `decision` is mutated after signing MUST fail
+        // verify_signature. Pre-patch this was undetectable because
+        // DecisionReceipt had no signature at all; post-patch the
+        // signature transcript binds every field that participates
+        // in computed_id, so any mutation breaks verification.
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let mut receipt = sample_receipt();
+
+        receipt.sign(&signing_key).expect("sign must succeed");
+
+        // Flip Allow → Deny. Signature bytes are untouched.
+        receipt.decision = Decision::Deny;
+
+        let err = receipt
+            .verify_signature(&verifying_key)
+            .expect_err("tampered receipt must not verify");
+        assert!(
+            matches!(err, AuditError::SignatureInvalid { .. }),
+            "expected SignatureInvalid, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn decision_receipt_tamper_reason_code_is_detected() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let mut receipt = sample_receipt();
+
+        receipt.sign(&signing_key).expect("sign must succeed");
+        // `reason_code` is the single field most likely to drift in
+        // an attacker's favour (e.g. "policy.denied" → "policy.match").
+        receipt.reason_code = "policy.override".to_string();
+
+        let err = receipt
+            .verify_signature(&verifying_key)
+            .expect_err("reason_code mutation must break the signature");
+        assert!(matches!(err, AuditError::SignatureInvalid { .. }));
+    }
+
+    #[test]
+    fn decision_receipt_tamper_explanation_is_detected() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let mut receipt = sample_receipt();
+
+        receipt.sign(&signing_key).expect("sign must succeed");
+        receipt.explanation = Some("mutated explanation after signing".into());
+
+        let err = receipt
+            .verify_signature(&verifying_key)
+            .expect_err("explanation mutation must break the signature");
+        assert!(matches!(err, AuditError::SignatureInvalid { .. }));
+    }
+
+    #[test]
+    fn decision_receipt_verify_rejects_key_id_mismatch() {
+        // Signed with key A, verified with key B whose kid differs.
+        // Must fail with SignatureInvalid before even reaching the
+        // Ed25519 verify call, since the kid-binding step returns
+        // first — the id field is not trusted for this check.
+        let signer_a = Ed25519SigningKey::generate();
+        let verifier_b = Ed25519SigningKey::generate().verifying_key();
+        // Distinct keys imply distinct kids with overwhelming probability.
+        assert_ne!(
+            signer_a.verifying_key().key_id().as_slice(),
+            verifier_b.key_id().as_slice()
+        );
+
+        let mut receipt = sample_receipt();
+        receipt.sign(&signer_a).expect("sign must succeed");
+
+        let err = receipt
+            .verify_signature(&verifier_b)
+            .expect_err("cross-key verification must not succeed");
+        assert!(matches!(err, AuditError::SignatureInvalid { .. }));
+    }
+
+    #[test]
+    fn decision_receipt_computed_id_is_deterministic() {
+        // The id-recompute path is stable under repeated calls and
+        // across clones — a regression that accidentally mixed in an
+        // RNG / timestamp / thread-id would surface here before the
+        // signature round-trip obscures it.
+        let receipt = sample_receipt();
+        let a = receipt.computed_id().expect("computed_id 1");
+        let b = receipt.computed_id().expect("computed_id 2");
+        let c = receipt.clone().computed_id().expect("computed_id cloned");
+        assert_eq!(a, b);
+        assert_eq!(a, c);
     }
 
     #[test]

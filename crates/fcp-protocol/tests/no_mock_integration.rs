@@ -536,11 +536,13 @@ fn suite_as_str() {
 // ── negotiate_suite ──
 
 #[test]
-fn negotiate_suite_prefers_initiator_order() {
+fn negotiate_suite_prefers_responder_order() {
+    // Initiator offers [Suite2, Suite1]; responder prefers Suite1 (listed first).
+    // Responder-picks semantics (see docs/protocol/session-handshake.md) → Suite1 wins.
     let initiator = &[SessionCryptoSuite::Suite2, SessionCryptoSuite::Suite1];
     let responder = &[SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2];
     let result = fcp_protocol::negotiate_suite(initiator, responder);
-    assert_eq!(result, Some(SessionCryptoSuite::Suite2));
+    assert_eq!(result, Some(SessionCryptoSuite::Suite1));
 }
 
 #[test]

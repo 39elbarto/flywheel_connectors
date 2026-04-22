@@ -701,6 +701,9 @@ mod suite_negotiation {
     fn negotiation_deterministic() {
         let mut log = TestLogEntry::new("negotiation_deterministic", "suite_negotiate", None);
 
+        // Under responder-picks semantics (crkft epic):
+        // initiator [Suite1, Suite2] ∩ responder [Suite2, Suite1] → Suite2
+        // (responder's first-preferred mutual suite wins).
         let initiator = [SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2];
         let responder = [SessionCryptoSuite::Suite2, SessionCryptoSuite::Suite1];
 
@@ -710,26 +713,29 @@ mod suite_negotiation {
 
         assert_eq!(result1, result2);
         assert_eq!(result2, result3);
-        assert_eq!(result1.unwrap(), SessionCryptoSuite::Suite1);
+        assert_eq!(result1.unwrap(), SessionCryptoSuite::Suite2);
 
         log = log.pass();
         log.log();
     }
 
     #[test]
-    fn negotiation_prefers_initiator_order() {
+    fn negotiation_prefers_responder_order() {
         let mut log = TestLogEntry::new(
-            "negotiation_prefers_initiator_order",
+            "negotiation_prefers_responder_order",
             "suite_negotiate",
             None,
         );
 
-        // Initiator prefers Suite2
+        // Responder-picks semantics (crkft epic):
+        // initiator [Suite2, Suite1] ∩ responder [Suite1, Suite2] → Suite1
+        // (responder prefers Suite1 even though initiator listed Suite2 first).
+        // See docs/protocol/session-handshake.md for the invariant.
         let initiator = [SessionCryptoSuite::Suite2, SessionCryptoSuite::Suite1];
         let responder = [SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2];
 
         let chosen = negotiate_suite(&initiator, &responder).unwrap();
-        assert_eq!(chosen, SessionCryptoSuite::Suite2);
+        assert_eq!(chosen, SessionCryptoSuite::Suite1);
 
         log = log.pass();
         log.log();

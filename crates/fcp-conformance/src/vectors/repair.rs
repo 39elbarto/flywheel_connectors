@@ -169,6 +169,7 @@ mod tests {
             repair_interval: Duration::from_secs(60),
             min_deficit_bps: 500,
             max_symbols_per_repair: 100,
+            battery_defer_threshold_percent: 20,
         };
 
         assert!(config.max_concurrent_repairs > 0);

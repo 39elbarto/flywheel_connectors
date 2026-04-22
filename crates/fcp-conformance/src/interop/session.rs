@@ -184,14 +184,17 @@ fn test_transcript_determinism() -> Result<(), String> {
 
 /// Test: Suite negotiation must be deterministic.
 ///
-/// Given the same offered suites, implementations must select the same suite.
+/// Given the same offered + supported suites, implementations must select
+/// the same suite. Negotiation uses responder-picks semantics (see
+/// `docs/protocol/session-handshake.md`): the responder's first-preferred
+/// suite that the initiator also offers wins.
 fn test_suite_negotiation() -> Result<(), String> {
-    // Suite priority order (NORMATIVE):
+    // Suite priority order (NORMATIVE, responder-preference):
     // 1. Suite2 (ChaCha20-Poly1305 + BLAKE3)
     // 2. Suite1 (AES-256-GCM + SHA-256)
     //
     // Initiator offers [Suite1, Suite2], responder supports [Suite2]
-    // Result: Suite2
+    // Result: Suite2 (only mutually-supported suite)
 
     let offered = ["Suite1", "Suite2"];
     let supported = ["Suite2"];
@@ -222,12 +225,16 @@ fn test_suite_negotiation() -> Result<(), String> {
 }
 
 /// Negotiate a suite from offered and supported lists.
-fn negotiate_suite<'a>(offered: &[&'a str], supported: &[&str]) -> Option<&'a str> {
-    // Find first offered suite that is also supported
-    offered
+///
+/// Uses **responder-picks** semantics: the responder's (supported) first-
+/// preferred suite that the initiator (offered) also supports is chosen.
+/// Mirrors `fcp_protocol::session::negotiate_suite`. See
+/// `docs/protocol/session-handshake.md` for the invariant.
+fn negotiate_suite<'a>(offered: &[&str], supported: &[&'a str]) -> Option<&'a str> {
+    supported
         .iter()
-        .find(|&suite| supported.contains(suite))
-        .map(|v| v as _)
+        .copied()
+        .find(|suite| offered.contains(suite))
 }
 
 /// Test: `HelloRetry` cookie flow.
@@ -560,10 +567,12 @@ mod tests {
     }
 
     #[test]
-    fn negotiate_suite_first_offered_preferred() {
+    fn negotiate_suite_responder_first_preference_wins() {
+        // Responder-picks: supported list's first-preferred mutual suite wins.
+        // Initiator offers [Suite1, Suite2]; responder prefers Suite2 (first in supported).
         assert_eq!(
             negotiate_suite(&["Suite1", "Suite2"], &["Suite2", "Suite1"]),
-            Some("Suite1")
+            Some("Suite2")
         );
     }
 
@@ -717,14 +726,16 @@ mod tests {
     // ── negotiate_suite: additional tests ──
 
     #[test]
-    fn negotiate_suite_preserves_offered_order() {
-        // First match wins
-        assert_eq!(negotiate_suite(&["C", "A", "B"], &["B", "A"]), Some("A"));
+    fn negotiate_suite_preserves_supported_order() {
+        // Responder-picks: first suite in `supported` that is in `offered` wins.
+        // Offered: [C, A, B]; supported: [B, A] → B (first mutual in supported order).
+        assert_eq!(negotiate_suite(&["C", "A", "B"], &["B", "A"]), Some("B"));
     }
 
     #[test]
     fn negotiate_suite_duplicate_in_offered() {
-        assert_eq!(negotiate_suite(&["X", "X", "Y"], &["Y", "X"]), Some("X"));
+        // Supported first: [Y, X]; Y is in offered → Y wins.
+        assert_eq!(negotiate_suite(&["X", "X", "Y"], &["Y", "X"]), Some("Y"));
     }
 
     // ── negotiate_limits: additional tests ──

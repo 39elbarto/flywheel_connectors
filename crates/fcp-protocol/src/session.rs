@@ -805,16 +805,32 @@ pub fn derive_session_keys(
     })
 }
 
-/// Negotiate the session crypto suite using initiator preference ordering.
+/// Negotiate the session crypto suite using **responder** preference ordering.
+///
+/// The responder picks the first suite in its own preference list that the
+/// initiator also supports. This is the modern-crypto default (TLS 1.3,
+/// Noise, WireGuard) and defends against downgrade via a malicious or
+/// coerced initiator that deliberately orders its offers worst-first.
+///
+/// Transcript binding at [`MeshSessionHello::transcript_bytes`] protects
+/// against in-transit rewriting of the offered-suites list; this function
+/// protects against an initiator that honestly offers a bad list. The two
+/// defenses are complementary and address different threat models.
+///
+/// Returns `None` if there is no intersection between initiator and
+/// responder suite sets.
+///
+/// See `docs/protocol/session-handshake.md` for the responder-picks
+/// invariant and suite-deprecation policy.
 #[must_use]
 pub fn negotiate_suite(
     initiator_suites: &[SessionCryptoSuite],
     responder_suites: &[SessionCryptoSuite],
 ) -> Option<SessionCryptoSuite> {
-    initiator_suites
+    responder_suites
         .iter()
         .copied()
-        .find(|suite| responder_suites.contains(suite))
+        .find(|suite| initiator_suites.contains(suite))
 }
 
 /// Compute the stateless cookie for a hello message.
@@ -2274,13 +2290,14 @@ mod tests {
     }
 
     #[test]
-    fn test_negotiate_suite_initiator_preference() {
-        // Initiator prefers Suite2, responder supports both
+    fn test_negotiate_suite_responder_preference() {
+        // Initiator offers [Suite2, Suite1]; responder prefers Suite1 (listed first).
+        // Responder-picks semantics → Suite1 wins even though initiator listed Suite2 first.
         let result = negotiate_suite(
             &[SessionCryptoSuite::Suite2, SessionCryptoSuite::Suite1],
             &[SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2],
         );
-        assert_eq!(result, Some(SessionCryptoSuite::Suite2));
+        assert_eq!(result, Some(SessionCryptoSuite::Suite1));
     }
 
     // ── compute_cookie determinism ─────────────────────────────────────

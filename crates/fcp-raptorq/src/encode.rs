@@ -126,8 +126,15 @@ impl RaptorQEncoder {
     /// (K' is the RFC 6330 extended source block size, always >= K).
     #[must_use]
     pub fn encode_all(&self) -> Vec<(u32, Vec<u8>)> {
-        let repair_count = self.repair_symbols();
         let k_prime = self.inner.params().k_prime as u32;
+        // Cap repair_count so `k_prime + i` stays within u32 for every i
+        // in `0..repair_count`. Config bounds keep the sum well under
+        // u32::MAX in practice, but the rest of the crate uses
+        // saturating/checked arithmetic on symbol counts, so mirror that
+        // discipline here instead of relying on a raw `u32 + u32` add
+        // that would wrap in release and panic in debug. Bead
+        // flywheel_connectors-gh7gt.
+        let repair_count = self.repair_symbols().min(u32::MAX - k_prime);
 
         let mut result = Vec::with_capacity(self.source_data.len() + repair_count as usize);
 
@@ -151,10 +158,13 @@ impl RaptorQEncoder {
     /// cloning source data.
     #[must_use]
     pub fn into_encode_all(self) -> Vec<(u32, Vec<u8>)> {
+        let k_prime = self.inner.params().k_prime as u32;
+        // Cap repair_count so `k_prime + i` stays within u32. Mirrors
+        // the guard in `encode_all` — see bead flywheel_connectors-gh7gt.
         let repair_count = self
             .config
-            .repair_symbols(self.config.source_symbols(self.payload_len));
-        let k_prime = self.inner.params().k_prime as u32;
+            .repair_symbols(self.config.source_symbols(self.payload_len))
+            .min(u32::MAX - k_prime);
 
         let mut result = Vec::with_capacity(self.source_data.len() + repair_count as usize);
 

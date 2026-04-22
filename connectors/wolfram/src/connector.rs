@@ -621,8 +621,9 @@ fn required_capability_for_operation(operation: &str) -> Option<CapabilityId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ciborium::into_writer;
     use chrono::{Duration, Utc};
-    use fcp_core::{InstanceId, ZoneId};
+    use fcp_core::{CapabilityConstraints, InstanceId, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use wiremock::matchers::{method, path};
@@ -630,12 +631,19 @@ mod tests {
 
     fn generate_token(signing_key: &Ed25519SigningKey, cap: &str, ops: &[&str]) -> CapabilityToken {
         let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut constraints_cbor = Vec::new();
+        into_writer(&constraints, &mut constraints_cbor).expect("serialize constraints");
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
             .operations(ops)
             .issuer("node:test")
+            .constraints_cbor(&constraints_cbor)
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)
             .expect("token sign");

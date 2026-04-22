@@ -137,6 +137,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_manifest_parse"
+path = "fuzz_targets/fuzz_manifest_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_mesh_gossip_summary"
 path = "fuzz_targets/mesh_gossip_summary.rs"
 test = false

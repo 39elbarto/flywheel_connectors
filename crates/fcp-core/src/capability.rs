@@ -907,8 +907,67 @@ pub struct Unverified;
 /// [`CapabilityVerifier::verify()`], which validates the COSE signature,
 /// timing, zone binding, operation grant, and resource constraints.
 /// The verified claims are accessible via [`CapabilityToken::claims()`].
+///
+/// **Note (br-jkcka):** this marker is retained for backwards compatibility.
+/// New code should demand [`BoundVerified`] (full 5/5 checks including
+/// instance binding) or accept [`UnboundVerified`] explicitly and
+/// promote with [`CapabilityToken::promote_with_instance`] before
+/// executing any operation. See
+/// `docs/architecture/adr/jkcka-typestate-split.md`.
 #[derive(Debug, Clone, Copy)]
 pub struct CryptographicallyVerified;
+
+/// Marker type: token passed **all five** verification checks, including
+/// instance-binding (br-jkcka.3).
+///
+/// A `CapabilityToken<BoundVerified>` can be produced by:
+/// - [`CapabilityVerifier::verify_bound`] when the verifier was constructed
+///   with [`CapabilityVerifier::new`] (i.e. with a known `InstanceId`).
+/// - [`CapabilityToken::promote_with_instance`] on an `UnboundVerified`
+///   token (typical gateway → connector handoff).
+///
+/// Hold this type to prove at compile time that every capability-token
+/// check ran before the token reached the current scope. Downstream
+/// enforcement points (operation executors, sandbox-spawners) should
+/// demand this variant in their signatures.
+#[derive(Debug, Clone, Copy)]
+pub struct BoundVerified;
+
+/// Marker type: token passed **four of five** verification checks
+/// (signature, timing, zone, operation) but NOT instance-binding
+/// (br-jkcka.3).
+///
+/// A `CapabilityToken<UnboundVerified>` can be produced by
+/// [`CapabilityVerifier::verify_unbound`] when the verifier was
+/// constructed with [`CapabilityVerifier::without_instance_binding`]
+/// (typical gateway vantage point, where the `InstanceId` is not yet
+/// known).
+///
+/// A downstream enforcement point (the connector runtime, which DOES
+/// know its instance id) must call
+/// [`CapabilityToken::promote_with_instance`] before executing any
+/// operation. Functions that execute operations should refuse this
+/// variant by typing their signature to `CapabilityToken<BoundVerified>`.
+#[derive(Debug, Clone, Copy)]
+pub struct UnboundVerified;
+
+mod verified_sealed {
+    /// Sealed marker trait: prevents external crates from inventing new
+    /// "verified" markers. Only `BoundVerified` and `UnboundVerified`
+    /// implement it.
+    pub trait Sealed {}
+    impl Sealed for super::BoundVerified {}
+    impl Sealed for super::UnboundVerified {}
+    impl Sealed for super::CryptographicallyVerified {}
+}
+
+/// Marker bound for state-agnostic helpers that accept either
+/// `BoundVerified` or `UnboundVerified`. Sealed: cannot be implemented
+/// outside of `fcp-core`.
+pub trait AnyVerified: verified_sealed::Sealed {}
+impl AnyVerified for BoundVerified {}
+impl AnyVerified for UnboundVerified {}
+impl AnyVerified for CryptographicallyVerified {}
 
 /// Convenience alias for an unverified capability token.
 pub type UnverifiedToken = CapabilityToken<Unverified>;
@@ -1074,6 +1133,87 @@ impl<'de> Deserialize<'de> for CapabilityToken<Unverified> {
 }
 
 // Methods available only on UNVERIFIED tokens
+impl CapabilityToken<UnboundVerified> {
+    /// Perform the deferred instance-binding check and promote to
+    /// [`BoundVerified`] (br-jkcka.3).
+    ///
+    /// This is the explicit gateway → connector handoff. The gateway
+    /// produces an `UnboundVerified` token via
+    /// [`CapabilityVerifier::verify_unbound`] (because it doesn't know
+    /// the connector's real `InstanceId` at preflight time). The
+    /// connector runtime receives the token, calls
+    /// `promote_with_instance` with its own `InstanceId`, and — iff
+    /// the token's `instance_id` claim matches — gets back a
+    /// `BoundVerified` token suitable for passing to an operation
+    /// executor that demands full enforcement.
+    ///
+    /// # Errors
+    /// Returns [`FcpError::ZoneViolation`] (mirroring the existing
+    /// mismatch error path in `verify_claims_inner`) if the token's
+    /// `instance_id` claim does not match `expected`. Returns
+    /// [`FcpError::MissingField`] if the token has no `instance_id`
+    /// claim at all and non-matching is desired behavior.
+    pub fn promote_with_instance(
+        self,
+        expected: &InstanceId,
+    ) -> FcpResult<CapabilityToken<BoundVerified>> {
+        let claims = self.verified_claims.as_ref().ok_or_else(|| FcpError::Internal {
+            message: "UnboundVerified token missing claims (invariant violation)".into(),
+        })?;
+        // The underlying instance_id claim comes through fcp2_claims::INSTANCE_ID
+        // as a Value::Text. Extract + compare.
+        let Some(inst_val) = claims.get(fcp_crypto::cose::fcp2_claims::INSTANCE_ID) else {
+            return Err(FcpError::MissingField {
+                field: "instance_id".into(),
+            });
+        };
+        let ciborium::Value::Text(inst_str) = inst_val else {
+            return Err(FcpError::ZoneViolation {
+                source_zone: String::new(),
+                target_zone: String::new(),
+                message: "instance_id claim must be Text".into(),
+            });
+        };
+        if inst_str != expected.as_str() {
+            return Err(FcpError::ZoneViolation {
+                source_zone: String::new(),
+                target_zone: String::new(),
+                message: format!(
+                    "Token instance mismatch: expected {}, got {inst_str}",
+                    expected.as_str()
+                ),
+            });
+        }
+        Ok(CapabilityToken {
+            raw: self.raw,
+            verified_claims: self.verified_claims,
+            _state: std::marker::PhantomData,
+        })
+    }
+}
+
+impl CapabilityToken<BoundVerified> {
+    /// Access the verified claims.
+    #[must_use]
+    pub fn claims(&self) -> &CwtClaims {
+        self.verified_claims
+            .as_ref()
+            .expect("BoundVerified token must carry claims (invariant)")
+    }
+}
+
+impl CapabilityToken<UnboundVerified> {
+    /// Access the verified claims (bypassing the bound/unbound
+    /// distinction, which is enforced at the type level by the
+    /// verifier and `promote_with_instance`).
+    #[must_use]
+    pub fn claims_unbound(&self) -> &CwtClaims {
+        self.verified_claims
+            .as_ref()
+            .expect("UnboundVerified token must carry claims (invariant)")
+    }
+}
+
 impl CapabilityToken<Unverified> {
     /// Create a new unverified token from a raw COSE token.
     #[must_use]
@@ -1459,6 +1599,86 @@ impl CapabilityVerifier {
         let claims =
             self.verify_claims_inner(&token, required_capability, operation, resource_uris)?;
 
+        Ok(CapabilityToken {
+            raw: token.raw,
+            verified_claims: Some(claims),
+            _state: std::marker::PhantomData,
+        })
+    }
+
+    /// Verify a capability token and produce a **bound**-verified token
+    /// (all five checks passed, including instance binding).
+    ///
+    /// Requires the verifier to have been constructed with
+    /// [`Self::new`] (non-`None` `instance_id`). If `instance_id` is
+    /// `None`, returns `Err(FcpError::Internal)` — use
+    /// [`Self::verify_unbound`] from gateway-vantage code instead.
+    ///
+    /// This is a **consuming** method — the unverified token is moved.
+    ///
+    /// # Errors
+    /// Returns an error if the signature is invalid, claims are
+    /// missing/expired, zone binding fails, the operation is not
+    /// granted, or the token's `instance_id` claim does not match the
+    /// verifier's `instance_id`.
+    pub fn verify_bound(
+        &self,
+        token: CapabilityToken,
+        required_capability: &CapabilityId,
+        operation: &OperationId,
+        resource_uris: &[String],
+    ) -> FcpResult<CapabilityToken<BoundVerified>> {
+        if self.instance_id.is_none() {
+            return Err(FcpError::Internal {
+                message: "verify_bound requires verifier constructed with ::new (instance_id), \
+                          not ::without_instance_binding — use verify_unbound instead"
+                    .into(),
+            });
+        }
+        let claims =
+            self.verify_claims_inner(&token, required_capability, operation, resource_uris)?;
+        Ok(CapabilityToken {
+            raw: token.raw,
+            verified_claims: Some(claims),
+            _state: std::marker::PhantomData,
+        })
+    }
+
+    /// Verify a capability token and produce an **unbound**-verified
+    /// token (four of five checks: signature, timing, zone, operation).
+    ///
+    /// Requires the verifier to have been constructed with
+    /// [`Self::without_instance_binding`]. The returned token has NOT
+    /// had its `instance_id` check performed — a downstream enforcement
+    /// point must call
+    /// [`CapabilityToken::promote_with_instance`] before executing any
+    /// operation. This is the gateway → connector handoff boundary
+    /// spelled out in types.
+    ///
+    /// This is a **consuming** method.
+    ///
+    /// # Errors
+    /// Returns an error if the signature is invalid, claims are
+    /// missing/expired, zone binding fails, or the operation is not
+    /// granted. Also returns `Err(FcpError::Internal)` if the verifier
+    /// was constructed with a bound `instance_id` — use
+    /// [`Self::verify_bound`] in that case.
+    pub fn verify_unbound(
+        &self,
+        token: CapabilityToken,
+        required_capability: &CapabilityId,
+        operation: &OperationId,
+        resource_uris: &[String],
+    ) -> FcpResult<CapabilityToken<UnboundVerified>> {
+        if self.instance_id.is_some() {
+            return Err(FcpError::Internal {
+                message: "verify_unbound requires verifier constructed with \
+                          ::without_instance_binding, not ::new — use verify_bound instead"
+                    .into(),
+            });
+        }
+        let claims =
+            self.verify_claims_inner(&token, required_capability, operation, resource_uris)?;
         Ok(CapabilityToken {
             raw: token.raw,
             verified_claims: Some(claims),
@@ -2531,6 +2751,115 @@ mod tests {
         verifier
             .verify(token, &cap, &op, &[])
             .expect("unbound mode + no instance claim = no check");
+    }
+
+    // ── br-jkcka.3: typestate split regression tests ─────────────────────
+
+    /// Build a token + signing key pair with a known instance_id.
+    /// Returns (token, pub_bytes, instance, capability, operation).
+    fn mk_token_with_instance() -> (
+        CapabilityToken,
+        [u8; 32],
+        InstanceId,
+        CapabilityId,
+        OperationId,
+    ) {
+        let signing_key = Ed25519SigningKey::generate();
+        let pub_bytes = signing_key.verifying_key().to_bytes();
+        let instance = InstanceId::new();
+        let now = Utc::now();
+        let cose = CapabilityTokenBuilder::new()
+            .capability_id("cap.test")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.test"])
+            .issuer("node:primary")
+            .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
+            .target_instance(instance.as_str())
+            .sign(&signing_key)
+            .unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
+        let op = OperationId::new("op.test").unwrap();
+        (CapabilityToken::from_raw(cose), pub_bytes, instance, cap, op)
+    }
+
+    #[test]
+    fn verify_bound_requires_instance_binding_verifier() {
+        let (token, pub_bytes, _instance, cap, op) = mk_token_with_instance();
+        // Unbound verifier — verify_bound must refuse with a clear error.
+        let verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
+        let err = verifier.verify_bound(token, &cap, &op, &[]).unwrap_err();
+        match err {
+            FcpError::Internal { message } => {
+                assert!(
+                    message.contains("verify_bound"),
+                    "error message must point at the misuse: {message}"
+                );
+            }
+            other => panic!("expected Internal error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_unbound_requires_unbinding_verifier() {
+        let (token, pub_bytes, instance, cap, op) = mk_token_with_instance();
+        // Bound verifier — verify_unbound must refuse with a clear error.
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), instance);
+        let err = verifier.verify_unbound(token, &cap, &op, &[]).unwrap_err();
+        match err {
+            FcpError::Internal { message } => {
+                assert!(
+                    message.contains("verify_unbound"),
+                    "error message must point at the misuse: {message}"
+                );
+            }
+            other => panic!("expected Internal error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_bound_with_matching_instance_produces_bound_token() {
+        let (token, pub_bytes, instance, cap, op) = mk_token_with_instance();
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), instance);
+        let bound = verifier.verify_bound(token, &cap, &op, &[]).unwrap();
+        // Type-level: `bound` is CapabilityToken<BoundVerified>.
+        // Runtime: claims accessor works on the bound variant.
+        let _claims = bound.claims();
+    }
+
+    #[test]
+    fn verify_unbound_produces_unbound_token() {
+        let (token, pub_bytes, _instance, cap, op) = mk_token_with_instance();
+        let verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
+        let unbound = verifier.verify_unbound(token, &cap, &op, &[]).unwrap();
+        // Runtime: claims still accessible but via the unbound-specific accessor.
+        let _claims = unbound.claims_unbound();
+    }
+
+    #[test]
+    fn promote_with_instance_correct_id_returns_bound() {
+        let (token, pub_bytes, instance, cap, op) = mk_token_with_instance();
+        let verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
+        let unbound = verifier.verify_unbound(token, &cap, &op, &[]).unwrap();
+        // Promote with the correct instance id — succeeds.
+        let bound = unbound
+            .promote_with_instance(&instance)
+            .expect("matching instance id must promote");
+        let _claims = bound.claims();
+    }
+
+    #[test]
+    fn promote_with_instance_wrong_id_returns_error() {
+        let (token, pub_bytes, _instance, cap, op) = mk_token_with_instance();
+        let wrong_instance = InstanceId::new();
+        let verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
+        let unbound = verifier.verify_unbound(token, &cap, &op, &[]).unwrap();
+        let err = unbound.promote_with_instance(&wrong_instance).unwrap_err();
+        assert!(
+            matches!(err, FcpError::ZoneViolation { .. }),
+            "wrong instance must yield ZoneViolation; got {err:?}"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────

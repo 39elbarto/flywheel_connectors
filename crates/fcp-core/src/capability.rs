@@ -1822,56 +1822,36 @@ impl CapabilityVerifier {
         }
 
         // 4. Check operation grant
-        // Extract 'caps' claim and check if operation is allowed
-        // 'caps' is array of CapabilityGrant
-        if let Some(caps_val) = claims.get(fcp2_claims::GRANTS) {
-            // Deserialize CapabilityGrant array
-            let grants: Vec<CapabilityGrant> = Self::deserialize_cbor(caps_val)?;
-
-            let op_allowed = grants.iter().any(|g| {
-                // Must match the required capability
-                if g.capability != *required_capability {
-                    return false;
-                }
-                // Must match the operation (or be a wildcard)
-                g.operation.as_ref().is_none_or(|op| op == operation)
+        //
+        // br-8n0rm.6: `fcp2_claims::GRANTS` is the CANONICAL shape. The
+        // legacy `OPERATIONS` fallback branch was removed once 8n0rm.8
+        // made every signed token emit GRANTS automatically (see
+        // `fcp_crypto::cose::synthesize_grants_from_legacy_operations`).
+        //
+        // A token that reaches this point without a GRANTS claim is
+        // malformed — either hand-crafted with `.custom(...)` in a way
+        // that bypassed the builder, OR from a pre-8n0rm.8 issuer that
+        // needs upgrading. Reject it clearly.
+        let Some(caps_val) = claims.get(fcp2_claims::GRANTS) else {
+            return Err(FcpError::MissingField {
+                field: "caps".into(),
             });
+        };
+        let grants: Vec<CapabilityGrant> = Self::deserialize_cbor(caps_val)?;
 
-            if !op_allowed {
-                return Err(FcpError::OperationNotGranted {
-                    operation: operation.0.to_string(),
-                });
+        let op_allowed = grants.iter().any(|g| {
+            // Must match the required capability
+            if g.capability != *required_capability {
+                return false;
             }
-        } else {
-            // Fallback to checking fcp2_claims::OPERATIONS if legacy/simplified?
-            // The builder uses fcp2_claims::OPERATIONS for string list.
-            // Let's check that too.
-            if let Some(ops_val) = claims.get(fcp2_claims::OPERATIONS) {
-                // Check if the token is for the required capability
-                if let Some(cap_id) = claims.get_capability_id() {
-                    if cap_id != required_capability.as_str() {
-                        return Err(FcpError::OperationNotGranted {
-                            operation: operation.0.to_string(),
-                        });
-                    }
-                } else {
-                    return Err(FcpError::MissingField {
-                        field: "cap_id".into(),
-                    });
-                }
+            // Must match the operation (or be a wildcard)
+            g.operation.as_ref().is_none_or(|op| op == operation)
+        });
 
-                // Array of strings
-                let ops: Vec<String> = Self::deserialize_cbor(ops_val)?;
-                if !ops.iter().any(|o| o == operation.as_str()) {
-                    return Err(FcpError::OperationNotGranted {
-                        operation: operation.0.to_string(),
-                    });
-                }
-            } else {
-                return Err(FcpError::MissingField {
-                    field: "caps/operations".into(),
-                });
-            }
+        if !op_allowed {
+            return Err(FcpError::OperationNotGranted {
+                operation: operation.0.to_string(),
+            });
         }
 
         // 5. Enforce constraints (NORMATIVE — C3.4: mandatory, default-deny)
@@ -2779,6 +2759,43 @@ mod tests {
         verifier
             .verify(token, &cap, &op, &[])
             .expect("unbound mode + no instance claim = no check");
+    }
+
+    // ── br-8n0rm.6: legacy OPERATIONS fallback removed ───────────────────
+
+    #[test]
+    fn verifier_rejects_legacy_operations_only_token() {
+        // Regression: hand-craft a CwtClaims with the legacy OPERATIONS
+        // shape but NO canonical GRANTS, then sign + verify. After 8n0rm.6
+        // the verifier must reject with MissingField("caps") rather than
+        // falling through to the legacy OPERATIONS branch.
+        let signing_key = Ed25519SigningKey::generate();
+        let pub_bytes = signing_key.verifying_key().to_bytes();
+        let now = Utc::now();
+
+        // Build raw CwtClaims WITHOUT going through CapabilityTokenBuilder
+        // (which would auto-synthesize GRANTS via br-8n0rm.8). We set the
+        // legacy-only fields directly.
+        let claims = fcp_crypto::cose::CwtClaims::new()
+            .issuer("z:work")
+            .capability_id("cap.test")
+            .zone_id("z:work")
+            .operations(&["op.test"]) // legacy-only shape
+            .issued_at(now)
+            .expiration(now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor());
+        let cose_token =
+            fcp_crypto::cose::CoseToken::sign(&signing_key, &claims).unwrap();
+        let token = CapabilityToken::from_raw(cose_token);
+
+        let verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
+        let cap = CapabilityId::new("cap.test").unwrap();
+        let op = OperationId::new("op.test").unwrap();
+        let err = verifier.verify(token, &cap, &op, &[]).unwrap_err();
+        assert!(
+            matches!(&err, FcpError::MissingField { field, .. } if field == "caps"),
+            "legacy OPERATIONS-only token must be rejected with MissingField(caps); got {err:?}"
+        );
     }
 
     // ── br-jkcka.3: typestate split regression tests ─────────────────────

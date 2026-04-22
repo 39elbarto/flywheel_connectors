@@ -11,6 +11,9 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+test-mocks = []
+
 [dependencies]
 fcp-core.workspace = true
 fcp-crypto.workspace = true
@@ -28,3 +31,7 @@ tracing.workspace = true
 semver = "1.0"
 fcp-cbor = { path = "../fcp-cbor" }
 insta.workspace = true
+
+[[test]]
+name = "no_mock_integration"
+required-features = ["test-mocks"]

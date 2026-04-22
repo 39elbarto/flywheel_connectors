@@ -333,11 +333,16 @@ impl TailscaleClient for LocalApiClient {
 ///
 /// This implementation stores peers in memory and allows tests to
 /// configure the tailnet state without a real Tailscale connection.
+///
+/// The type is gated behind `test`/`test-mocks` so production builds do not
+/// expose an in-memory fake tailnet client on the default public API.
+#[cfg(any(test, feature = "test-mocks"))]
 #[derive(Debug, Clone, Default)]
 pub struct MockTailscaleClient {
     inner: Arc<RwLock<MockState>>,
 }
 
+#[cfg(any(test, feature = "test-mocks"))]
 #[derive(Debug, Default)]
 struct MockState {
     backend_state: String,
@@ -346,6 +351,7 @@ struct MockState {
     connected: bool,
 }
 
+#[cfg(any(test, feature = "test-mocks"))]
 impl MockTailscaleClient {
     /// Create a new mock client.
     #[must_use]
@@ -432,6 +438,7 @@ impl MockTailscaleClient {
     }
 }
 
+#[cfg(any(test, feature = "test-mocks"))]
 impl TailscaleClient for MockTailscaleClient {
     async fn status(&self) -> TailscaleResult<TailscaleStatus> {
         let inner = self.inner.read().await;

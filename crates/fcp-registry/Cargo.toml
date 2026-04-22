@@ -11,6 +11,15 @@ authors.workspace = true
 default = []
 # Enable live supply-chain verification using tough/sigstore crates
 supply-chain-live = []
+# Expose the in-memory Mock*Verifier types (MockTransparencyVerifier,
+# MockTufVerifier, MockSigstoreVerifier) through the public API.
+#
+# These verifiers short-circuit supply-chain trust by returning
+# `verified: true` for any allow-listed input. They are intended purely for
+# controlled tests and MUST NOT be linked into a production binary. The
+# feature is OFF by default so that a downstream `use fcp_registry::Mock...`
+# fails to compile unless the consumer explicitly opts in.
+test-mocks = []
 
 [dependencies]
 axum = { version = "0.8", features = ["json"] }
@@ -43,3 +52,11 @@ fcp-async-core = { path = "../fcp-async-core" }
 tempfile = "3"
 tower = { version = "0.5.3", features = ["util"] }
 uuid = { workspace = true }
+
+# Integration test that exercises the Mock*Verifier fixtures only runs when
+# the `test-mocks` feature is enabled (`cargo test -p fcp-registry --features
+# test-mocks` or `--all-features`). See the `test-mocks` feature note above.
+[[test]]
+name = "no_mock_integration"
+path = "tests/no_mock_integration.rs"
+required-features = ["test-mocks"]

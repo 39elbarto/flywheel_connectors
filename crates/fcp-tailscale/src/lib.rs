@@ -34,8 +34,10 @@ mod identity;
 mod tag;
 
 pub use client::{
-    LocalApiClient, MockTailscaleClient, PeerInfo, SelfNode, TailscaleClient, TailscaleStatus,
+    LocalApiClient, PeerInfo, SelfNode, TailscaleClient, TailscaleStatus,
 };
+#[cfg(any(test, feature = "test-mocks"))]
+pub use client::MockTailscaleClient;
 pub use error::{TailscaleError, TailscaleResult};
 pub use identity::{MeshIdentity, NodeId, NodeKeyAttestation, NodeKeys};
 pub use tag::{TailscaleTag, ZoneAclGenerator, ZoneAclRule, ZoneTagMapping};

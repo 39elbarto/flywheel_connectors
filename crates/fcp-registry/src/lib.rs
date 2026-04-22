@@ -579,12 +579,21 @@ impl SigstoreVerifier for NoOpSigstoreVerifier {
 }
 
 /// Mock transparency log verifier for controlled testing.
+///
+/// # Safety
+///
+/// TEST-ONLY — MUST NOT reach production. This verifier accepts any entry
+/// inserted via [`Self::add_valid_entry`], which short-circuits supply-chain
+/// trust. The type is gated on `cfg(test)` or the `test-mocks` Cargo
+/// feature so it does not leak into downstream binaries by default.
+#[cfg(any(test, feature = "test-mocks"))]
 #[derive(Debug, Default)]
 pub struct MockTransparencyVerifier {
     /// Entries to accept as valid.
     pub valid_entries: std::sync::Mutex<HashMap<String, TransparencyLogEntry>>,
 }
 
+#[cfg(any(test, feature = "test-mocks"))]
 impl MockTransparencyVerifier {
     pub fn new() -> Self {
         Self::default()
@@ -595,6 +604,7 @@ impl MockTransparencyVerifier {
     }
 }
 
+#[cfg(any(test, feature = "test-mocks"))]
 #[async_trait]
 impl TransparencyLogVerifier for MockTransparencyVerifier {
     async fn verify_entry(
@@ -621,6 +631,14 @@ impl TransparencyLogVerifier for MockTransparencyVerifier {
 }
 
 /// Mock TUF verifier for controlled testing.
+///
+/// # Safety
+///
+/// TEST-ONLY — MUST NOT reach production. This verifier accepts any target
+/// allow-listed via [`Self::add_valid_target`] and performs no real TUF
+/// signature or metadata validation. Gated on `cfg(test)` or the
+/// `test-mocks` Cargo feature so it does not leak into downstream binaries.
+#[cfg(any(test, feature = "test-mocks"))]
 #[derive(Debug)]
 pub struct MockTufVerifier {
     /// Root metadata to return.
@@ -629,6 +647,7 @@ pub struct MockTufVerifier {
     pub valid_targets: std::sync::Mutex<HashMap<String, TufTargetInfo>>,
 }
 
+#[cfg(any(test, feature = "test-mocks"))]
 impl MockTufVerifier {
     pub fn new(root: TufRootMetadata) -> Self {
         Self {
@@ -642,6 +661,7 @@ impl MockTufVerifier {
     }
 }
 
+#[cfg(any(test, feature = "test-mocks"))]
 #[async_trait]
 impl TufVerifier for MockTufVerifier {
     async fn verify_target(
@@ -689,12 +709,22 @@ impl TufVerifier for MockTufVerifier {
 }
 
 /// Mock Sigstore verifier for controlled testing.
+///
+/// # Safety
+///
+/// TEST-ONLY — MUST NOT reach production. This verifier accepts any bundle
+/// allow-listed via [`Self::add_valid_bundle`] and performs no real Sigstore
+/// signature, certificate, or transparency-log verification. Gated on
+/// `cfg(test)` or the `test-mocks` Cargo feature so it does not leak into
+/// downstream binaries.
+#[cfg(any(test, feature = "test-mocks"))]
 #[derive(Debug, Default)]
 pub struct MockSigstoreVerifier {
     /// Bundles to accept as valid (keyed by artifact hash).
     pub valid_bundles: std::sync::Mutex<HashMap<String, SigstoreVerificationResult>>,
 }
 
+#[cfg(any(test, feature = "test-mocks"))]
 impl MockSigstoreVerifier {
     pub fn new() -> Self {
         Self::default()
@@ -708,6 +738,7 @@ impl MockSigstoreVerifier {
     }
 }
 
+#[cfg(any(test, feature = "test-mocks"))]
 #[async_trait]
 impl SigstoreVerifier for MockSigstoreVerifier {
     async fn verify_bundle(

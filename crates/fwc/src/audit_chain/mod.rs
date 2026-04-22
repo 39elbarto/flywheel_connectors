@@ -26,11 +26,13 @@ pub mod types;
 
 use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
-use clap::{Args, Subcommand};
+use clap::{ArgAction, Args, Subcommand};
 use fcp_cbor::to_canonical_cbor;
+use fcp_crypto::{Ed25519VerifyingKey, KeyId, ed25519::PUBLIC_KEY_SIZE};
 use fcp_kernel::{AuditEvent, AuditHead, ObjectId, ZoneId};
 use hex::encode as hex_encode;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -130,6 +132,12 @@ pub struct VerifyArgs {
     /// Audit head input (JSON). Use "-" for stdin.
     #[arg(long)]
     pub head: Option<PathBuf>,
+
+    /// Issuer key binding in the form `<kid>=<ed25519-public-key-hex>`.
+    ///
+    /// Repeat this flag to verify signer-aware `fcp-audit` chains.
+    #[arg(long = "issuer-key", value_name = "KID=PUBKEY_HEX", action = ArgAction::Append)]
+    pub issuer_keys: Vec<String>,
 
     /// Output JSON instead of human-readable format.
     #[arg(long, default_value_t = false)]
@@ -356,46 +364,18 @@ struct AuditVerifyReport {
 }
 
 fn run_verify(args: &VerifyArgs) -> Result<()> {
-    let zone_filter = match args.zone.as_deref() {
-        Some(zone) => Some(zone.parse::<ZoneId>().context("invalid zone id")?),
-        None => None,
-    };
-
     let events_input = read_input(&args.events)?;
-    let mut records = parse_event_records(&events_input)?;
-    if records.is_empty() {
-        let report = AuditVerifyReport {
-            status: AuditVerifyStatus::Warn,
-            zone_id: args.zone.clone(),
-            chain_len: 0,
-            head_seq: None,
-            head_event: None,
-            issues: vec![AuditVerifyIssue {
-                code: "audit.chain.empty".to_string(),
-                message: "no audit events provided".to_string(),
-                seq: None,
-                object_id: None,
-            }],
-        };
-        return output_verify_report(&report, args.json);
-    }
-
-    // Sort by seq for deterministic verification.
-    records.sort_by(|a, b| {
-        a.event
-            .seq
-            .cmp(&b.event.seq)
-            .then_with(|| a.object_id.to_string().cmp(&b.object_id.to_string()))
-    });
-
-    let head = if let Some(ref path) = args.head {
-        let head_input = read_input(path)?;
-        Some(parse_audit_head(&head_input)?)
+    let head_input = if let Some(ref path) = args.head {
+        Some(read_input(path)?)
     } else {
         None
     };
-
-    let report = verify_chain(&records, head.as_ref(), zone_filter.as_ref());
+    let report = build_verify_report_from_inputs(
+        &events_input,
+        head_input.as_deref(),
+        args.zone.as_deref(),
+        &args.issuer_keys,
+    )?;
     output_verify_report(&report, args.json)
 }
 
@@ -473,6 +453,214 @@ fn parse_audit_head(input: &str) -> Result<AuditHead> {
         anyhow::bail!("audit head input must be a single JSON object, not an array");
     }
     serde_json::from_str(trimmed).context("failed to parse audit head")
+}
+
+fn build_verify_report_from_inputs(
+    events_input: &str,
+    head_input: Option<&str>,
+    zone_filter: Option<&str>,
+    issuer_keys: &[String],
+) -> Result<AuditVerifyReport> {
+    if let Ok(mut entries) = parse_signed_entries(events_input) {
+        if entries.is_empty() {
+            return Ok(empty_verify_report(zone_filter));
+        }
+
+        entries.sort_by(|a, b| a.seq.cmp(&b.seq).then_with(|| a.id.cmp(&b.id)));
+        let head = head_input.map(parse_signed_head).transpose()?;
+        return verify_signed_chain(&entries, head.as_ref(), zone_filter, issuer_keys);
+    }
+
+    let zone_filter = match zone_filter {
+        Some(zone) => Some(zone.parse::<ZoneId>().context("invalid zone id")?),
+        None => None,
+    };
+
+    let mut records = parse_event_records(events_input)?;
+    if records.is_empty() {
+        return Ok(empty_verify_report(
+            zone_filter.as_ref().map(ZoneId::as_str),
+        ));
+    }
+
+    records.sort_by(|a, b| {
+        a.event
+            .seq
+            .cmp(&b.event.seq)
+            .then_with(|| a.object_id.to_string().cmp(&b.object_id.to_string()))
+    });
+
+    let head = head_input.map(parse_audit_head).transpose()?;
+    Ok(verify_chain(&records, head.as_ref(), zone_filter.as_ref()))
+}
+
+fn empty_verify_report(zone_filter: Option<&str>) -> AuditVerifyReport {
+    AuditVerifyReport {
+        status: AuditVerifyStatus::Warn,
+        zone_id: zone_filter.map(ToOwned::to_owned),
+        chain_len: 0,
+        head_seq: None,
+        head_event: None,
+        issues: vec![AuditVerifyIssue {
+            code: "audit.chain.empty".to_string(),
+            message: "no audit events provided".to_string(),
+            seq: None,
+            object_id: None,
+        }],
+    }
+}
+
+fn parse_signed_entries(input: &str) -> Result<Vec<fcp_audit::AuditEntry>> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if trimmed.starts_with('[') {
+        return serde_json::from_str(trimmed)
+            .context("failed to parse signer-aware audit entry array");
+    }
+
+    let mut entries = Vec::new();
+    for (idx, line) in input.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let entry: fcp_audit::AuditEntry = serde_json::from_str(line).with_context(|| {
+            format!(
+                "failed to parse signer-aware audit entry on line {}",
+                idx + 1
+            )
+        })?;
+        entries.push(entry);
+    }
+
+    Ok(entries)
+}
+
+fn parse_signed_head(input: &str) -> Result<fcp_audit::ChainHead> {
+    let trimmed = input.trim();
+    if trimmed.starts_with('[') {
+        anyhow::bail!("audit head input must be a single JSON object, not an array");
+    }
+    serde_json::from_str(trimmed).context("failed to parse signer-aware audit head")
+}
+
+fn verify_signed_chain(
+    entries: &[fcp_audit::AuditEntry],
+    head: Option<&fcp_audit::ChainHead>,
+    zone_filter: Option<&str>,
+    issuer_keys: &[String],
+) -> Result<AuditVerifyReport> {
+    let now_unix_secs = u64::try_from(Utc::now().timestamp()).unwrap_or_default();
+    let registry = parse_issuer_key_bindings(issuer_keys)?;
+    let signer_required = !registry.is_empty()
+        || entries
+            .iter()
+            .any(|entry| entry.issuer_kid.is_some() || entry.signature.is_some());
+
+    let mut report = map_signed_verify_report(&fcp_audit::verify_chain_with_clock(
+        entries,
+        head,
+        zone_filter,
+        now_unix_secs,
+    ));
+
+    if signer_required {
+        let result = fcp_audit::verify_chain_with_signers(entries, head, zone_filter, |kid| {
+            registry.get(&kid.to_hex()).cloned()
+        });
+        if let Err(error) = result {
+            report.status = AuditVerifyStatus::Fail;
+            report.issues.push(signer_error_to_issue(&error, entries));
+        }
+    }
+
+    Ok(report)
+}
+
+fn map_signed_verify_report(report: &fcp_audit::VerifyReport) -> AuditVerifyReport {
+    AuditVerifyReport {
+        status: match report.status {
+            fcp_audit::VerifyStatus::Ok => AuditVerifyStatus::Ok,
+            fcp_audit::VerifyStatus::Warn => AuditVerifyStatus::Warn,
+            fcp_audit::VerifyStatus::Fail => AuditVerifyStatus::Fail,
+        },
+        zone_id: report.zone_id.clone(),
+        chain_len: report.chain_len,
+        head_seq: report.head_seq,
+        head_event: report.head_entry.clone(),
+        issues: report
+            .issues
+            .iter()
+            .map(|issue| AuditVerifyIssue {
+                code: issue.code.clone(),
+                message: issue.message.clone(),
+                seq: issue.seq,
+                object_id: issue.entry_id.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn parse_issuer_key_bindings(bindings: &[String]) -> Result<HashMap<String, Ed25519VerifyingKey>> {
+    let mut registry = HashMap::new();
+    for binding in bindings {
+        let (kid, key) = parse_issuer_key_binding(binding)?;
+        registry.insert(kid, key);
+    }
+    Ok(registry)
+}
+
+fn parse_issuer_key_binding(binding: &str) -> Result<(String, Ed25519VerifyingKey)> {
+    let (kid_hex_raw, verifying_key_hex_raw) = binding.split_once('=').with_context(|| {
+        format!("issuer key `{binding}` must be in the form <kid>=<pubkey-hex>")
+    })?;
+    let kid_hex = kid_hex_raw.trim();
+    let verifying_key_hex = verifying_key_hex_raw.trim();
+    let expected_kid = KeyId::from_hex(kid_hex)
+        .with_context(|| format!("issuer key `{binding}` has an invalid key id"))?;
+    let verifying_key_bytes = hex::decode(verifying_key_hex)
+        .with_context(|| format!("issuer key `{binding}` has a non-hex Ed25519 public key"))?;
+    let key_bytes: [u8; PUBLIC_KEY_SIZE] = verifying_key_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Ed25519 public key must decode to 32 bytes"))?;
+    let verifying_key = Ed25519VerifyingKey::from_bytes(&key_bytes)
+        .with_context(|| format!("issuer key `{binding}` is not a valid Ed25519 public key"))?;
+    if verifying_key.key_id().as_slice() != expected_kid.as_slice() {
+        anyhow::bail!(
+            "issuer key `{binding}` maps kid {} to a public key with derived kid {}",
+            expected_kid,
+            verifying_key.key_id()
+        );
+    }
+    Ok((expected_kid.to_hex(), verifying_key))
+}
+
+fn signer_error_to_issue(
+    error: &fcp_audit::AuditError,
+    entries: &[fcp_audit::AuditEntry],
+) -> AuditVerifyIssue {
+    let (code, seq) = match error {
+        fcp_audit::AuditError::SignerMissing { seq } => ("audit.signer_missing", Some(*seq)),
+        fcp_audit::AuditError::SignatureInvalid { seq } => ("audit.signature_invalid", Some(*seq)),
+        fcp_audit::AuditError::UnknownIssuer { seq } => ("audit.unknown_issuer", Some(*seq)),
+        _ => ("audit.signature_verification_error", None),
+    };
+    let object_id = seq.and_then(|seq| {
+        entries
+            .iter()
+            .find(|entry| entry.seq == seq)
+            .map(|entry| entry.id.clone())
+    });
+
+    AuditVerifyIssue {
+        code: code.to_string(),
+        message: error.to_string(),
+        seq,
+        object_id,
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1178,6 +1366,39 @@ fn truncate(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_audit::{AuditEntry as SignedAuditEntry, Severity};
+    use fcp_crypto::{Ed25519Signature, Ed25519SigningKey};
+    use std::collections::BTreeMap;
+
+    fn signed_test_entry(seq: u64, prev: Option<&str>) -> SignedAuditEntry {
+        let mut entry = SignedAuditEntry {
+            id: String::new(),
+            event_type: "capability.invoke".to_string(),
+            severity: Severity::Info,
+            actor: "user:alice".to_string(),
+            zone_id: "z:work".to_string(),
+            seq,
+            occurred_at: 1_700_000_000 + seq,
+            prev: prev.map(ToOwned::to_owned),
+            correlation_id: format!("corr-{seq}"),
+            trace_context: None,
+            connector_id: Some("fcp.test:base:v1".to_string()),
+            operation_id: Some("send_message".to_string()),
+            metadata: BTreeMap::new(),
+            issuer_kid: None,
+            signature: None,
+        };
+        entry.id = entry.computed_id().expect("entry id");
+        entry
+    }
+
+    fn issuer_key_binding(signing_key: &Ed25519SigningKey) -> String {
+        format!(
+            "{}={}",
+            signing_key.key_id().to_hex(),
+            hex::encode(signing_key.verifying_key().to_bytes())
+        )
+    }
 
     #[test]
     fn format_timestamp_valid() {
@@ -1387,6 +1608,40 @@ mod tests {
         assert!(matches!(report.status, AuditVerifyStatus::Ok));
         assert_eq!(report.chain_len, 0);
         assert!(report.issues.is_empty());
+    }
+
+    #[test]
+    fn signer_aware_verify_rejects_tampered_chain() {
+        let signing_key =
+            Ed25519SigningKey::from_bytes(&[7u8; 32]).expect("deterministic signing key");
+        let mut e0 = signed_test_entry(0, None);
+        e0.sign(&signing_key).expect("sign genesis");
+
+        let mut e1 = signed_test_entry(1, Some(&e0.id));
+        e1.sign(&signing_key).expect("sign successor");
+        let mut tampered_sig = e1.signature.as_ref().expect("signature present").to_bytes();
+        tampered_sig[0] ^= 0x01;
+        e1.signature = Some(Ed25519Signature::from_bytes(&tampered_sig));
+
+        let events_input = format!(
+            "{}\n{}",
+            serde_json::to_string(&e0).expect("serialize e0"),
+            serde_json::to_string(&e1).expect("serialize e1"),
+        );
+        let issuer_keys = vec![issuer_key_binding(&signing_key)];
+        let report =
+            build_verify_report_from_inputs(&events_input, None, Some("z:work"), &issuer_keys)
+                .expect("verify report");
+
+        assert!(matches!(report.status, AuditVerifyStatus::Fail));
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "audit.signature_invalid" && issue.seq == Some(1)),
+            "expected signature_invalid issue, got {:?}",
+            report.issues
+        );
     }
 
     // ---- AuditVerifyStatus serde ----

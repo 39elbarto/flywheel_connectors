@@ -144,9 +144,15 @@ impl RaptorQEncoder {
         }
 
         // Repair symbols (ESI K'..K'+repair): RFC 6330 requires repair ISIs
-        // start at K' (after the virtual padding range K..K').
+        // start at K' (after the virtual padding range K..K'). The cap
+        // above guarantees `k_prime + i` never overflows; use checked_add
+        // here anyway so the invariant is expressed at the use site and
+        // the rest of the crate's saturating/checked discipline stays
+        // uniform (bead flywheel_connectors-gh7gt).
         for i in 0..repair_count {
-            let esi = k_prime + i;
+            let esi = k_prime
+                .checked_add(i)
+                .expect("repair_count cap ensures k_prime + i stays within u32");
             let data = self.inner.repair_symbol(esi);
             result.push((esi, data));
         }
@@ -168,10 +174,15 @@ impl RaptorQEncoder {
 
         let mut result = Vec::with_capacity(self.source_data.len() + repair_count as usize);
 
-        // Repair symbols must be generated before consuming source_data
+        // Repair symbols must be generated before consuming source_data.
+        // Uses checked_add so an unexpected cap regression surfaces as a
+        // panic during construction instead of a silent wrap producing
+        // duplicate ESIs that collide with the source range (bead gh7gt).
         let repairs: Vec<(u32, Vec<u8>)> = (0..repair_count)
             .map(|i| {
-                let esi = k_prime + i;
+                let esi = k_prime
+                    .checked_add(i)
+                    .expect("repair_count cap ensures k_prime + i stays within u32");
                 (esi, self.inner.repair_symbol(esi))
             })
             .collect();
@@ -405,6 +416,73 @@ mod tests {
         // Check that symbols have correct structure
         for (esi, data) in &symbols {
             assert!(!data.is_empty(), "Symbol {esi} should have data");
+        }
+    }
+
+    /// Regression for bead flywheel_connectors-gh7gt.
+    ///
+    /// `encode_all` / `into_encode_all` previously computed each repair
+    /// symbol ESI as `k_prime + i` with raw `u32 + u32`. In debug builds
+    /// that panics on overflow, and in release builds it silently wraps
+    /// into the source-symbol ESI range [0, k_prime), producing duplicate
+    /// ESIs that collide with the systematic source symbols. The fix caps
+    /// `repair_count` at `u32::MAX - k_prime` and uses `checked_add`
+    /// inline so the invariant is enforced at the use site rather than
+    /// only at the cap. This test pins both halves of that contract on a
+    /// realistic payload: every emitted ESI must be unique AND every
+    /// repair ESI must sit strictly above `k_prime`, never colliding
+    /// with a source-symbol ESI even under wrap-around semantics.
+    #[test]
+    fn encode_all_repair_esis_never_collide_with_source_range() {
+        use std::collections::HashSet;
+
+        let config = test_config();
+        // 100 source symbols → 5 repair symbols (5% ratio).
+        let payload = vec![0x5au8; 6400];
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        let k_prime = encoder.inner.params().k_prime as u32;
+        assert!(k_prime > 0, "k_prime must be non-zero for a valid encoder");
+
+        let symbols = encoder.encode_all();
+        assert!(!symbols.is_empty(), "encode_all produced zero symbols");
+
+        let mut seen: HashSet<u32> = HashSet::with_capacity(symbols.len());
+        for (esi, _) in &symbols {
+            assert!(
+                seen.insert(*esi),
+                "duplicate ESI {esi} emitted — repair/source collision"
+            );
+        }
+
+        // Every repair symbol ESI must be >= k_prime. A wrap regression
+        // would push repair ESIs back into [0, k_prime), tripping this
+        // assertion for at least one symbol.
+        let source_count = payload.len().div_ceil(usize::from(config.symbol_size));
+        let repair_esis: Vec<u32> = symbols
+            .iter()
+            .skip(source_count)
+            .map(|(esi, _)| *esi)
+            .collect();
+        for esi in &repair_esis {
+            assert!(
+                *esi >= k_prime,
+                "repair ESI {esi} landed below k_prime={k_prime} — wrap regression"
+            );
+        }
+
+        // Same contract for the consuming variant so both paths are
+        // covered by this regression.
+        let encoder2 = RaptorQEncoder::new(&payload, &config).unwrap();
+        let consumed = encoder2.into_encode_all();
+        let mut seen2: HashSet<u32> = HashSet::with_capacity(consumed.len());
+        for (esi, _) in &consumed {
+            assert!(seen2.insert(*esi), "into_encode_all emitted duplicate ESI {esi}");
+        }
+        for (esi, _) in consumed.iter().skip(source_count) {
+            assert!(
+                *esi >= k_prime,
+                "into_encode_all repair ESI {esi} wrapped below k_prime={k_prime}"
+            );
         }
     }
 

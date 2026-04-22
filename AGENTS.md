@@ -424,6 +424,7 @@ Achieve this through:
 - **Zone-first security model** — every operation scoped to exactly one zone
 - **Capability tokens** — cryptographically scoped, time-bounded permissions
 - **Structured tracing** throughout — every connector operation emits spans with latency and context
+- **Responder-picks suite negotiation** — session crypto-suite selection is controlled by the responder's preference order, with a `MINIMUM_SUITE` floor. See `docs/protocol/session-handshake.md` before adding or deprecating suites.
 
 ---
 

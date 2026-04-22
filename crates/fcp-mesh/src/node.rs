@@ -931,6 +931,10 @@ impl MeshNode {
     {
         request.validate_idempotency_key()?;
 
+        // br-jkcka.8 TODO: migrate to verifier.verify_bound / verify_unbound
+        // once callers pass the intended typestate. Today this callsite
+        // accepts whichever mode the supplied verifier was constructed in.
+        #[allow(deprecated)]
         let verified_token = verifier.verify(
             request.capability_token.clone(),
             required_capability,

@@ -931,17 +931,16 @@ pub struct Unverified;
 /// Marker type: token has been cryptographically verified by a
 /// [`CapabilityVerifier`].
 ///
-/// A `CapabilityToken<CryptographicallyVerified>` can only be produced by
-/// [`CapabilityVerifier::verify()`], which validates the COSE signature,
-/// timing, zone binding, operation grant, and resource constraints.
-/// The verified claims are accessible via [`CapabilityToken::claims()`].
-///
-/// **Note (br-jkcka):** this marker is retained for backwards compatibility.
-/// New code should demand [`BoundVerified`] (full 5/5 checks including
-/// instance binding) or accept [`UnboundVerified`] explicitly and
-/// promote with [`CapabilityToken::promote_with_instance`] before
-/// executing any operation. See
+/// **Deprecated (br-jkcka.8):** this marker is ambiguous — it does not
+/// record whether the instance-binding check actually ran. New code
+/// should demand [`BoundVerified`] (full 5/5 checks) or accept
+/// [`UnboundVerified`] explicitly and promote via
+/// [`CapabilityToken::promote_with_instance`]. See
 /// `docs/architecture/adr/jkcka-typestate-split.md`.
+#[deprecated(
+    since = "0.1.1",
+    note = "use BoundVerified (full 5/5 verification) or UnboundVerified + promote_with_instance; this marker is ambiguous (jkcka epic)"
+)]
 #[derive(Debug, Clone, Copy)]
 pub struct CryptographicallyVerified;
 
@@ -986,6 +985,7 @@ mod verified_sealed {
     pub trait Sealed {}
     impl Sealed for super::BoundVerified {}
     impl Sealed for super::UnboundVerified {}
+    #[allow(deprecated)]
     impl Sealed for super::CryptographicallyVerified {}
 }
 
@@ -995,12 +995,18 @@ mod verified_sealed {
 pub trait AnyVerified: verified_sealed::Sealed {}
 impl AnyVerified for BoundVerified {}
 impl AnyVerified for UnboundVerified {}
+#[allow(deprecated)]
 impl AnyVerified for CryptographicallyVerified {}
 
 /// Convenience alias for an unverified capability token.
 pub type UnverifiedToken = CapabilityToken<Unverified>;
 
 /// Convenience alias for a verified capability token.
+///
+/// **Deprecated (br-jkcka.8):** ambiguous — prefer the typed variants
+/// `CapabilityToken<BoundVerified>` or `CapabilityToken<UnboundVerified>`.
+#[allow(deprecated)]
+#[deprecated(since = "0.1.1", note = "ambiguous; prefer BoundVerified / UnboundVerified")]
 pub type VerifiedToken = CapabilityToken<CryptographicallyVerified>;
 
 /// Flywheel Capability Token (FCT) - cryptographically signed authorization.
@@ -1040,7 +1046,10 @@ impl<S> CapabilityToken<S> {
     }
 }
 
-// Methods available only on VERIFIED tokens
+// Methods available only on (legacy) VERIFIED tokens.
+// br-jkcka.8: see impls on CapabilityToken<BoundVerified> /
+// CapabilityToken<UnboundVerified> for the non-deprecated path.
+#[allow(deprecated)]
 impl CapabilityToken<CryptographicallyVerified> {
     /// Access the cryptographically verified claims.
     ///
@@ -1087,6 +1096,7 @@ impl Serialize for CapabilityToken<Unverified> {
     }
 }
 
+#[allow(deprecated)]
 impl Serialize for CapabilityToken<CryptographicallyVerified> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -1607,16 +1617,22 @@ impl CapabilityVerifier {
 
     /// Verify a capability token, producing a `CapabilityToken<CryptographicallyVerified>`.
     ///
-    /// This is a **consuming** method — the unverified token is moved into
-    /// the verified token and can no longer be used. This prevents
-    /// use-before-verify and double-verify patterns.
+    /// **Deprecated (br-jkcka.8):** the returned marker is ambiguous
+    /// (does not record whether instance-binding ran). Call
+    /// [`Self::verify_bound`] or [`Self::verify_unbound`] explicitly.
     ///
-    /// This is the ONLY way to obtain a `CapabilityToken<CryptographicallyVerified>`.
+    /// This is a **consuming** method — the unverified token is moved into
+    /// the verified token and can no longer be used.
     ///
     /// # Errors
     ///
     /// Returns an error if the signature is invalid, claims are missing/expired,
     /// zone binding fails, or the operation is not granted.
+    #[deprecated(
+        since = "0.1.1",
+        note = "ambiguous return type; use verify_bound (full enforcement) or verify_unbound (gateway vantage)"
+    )]
+    #[allow(deprecated)]
     pub fn verify(
         &self,
         token: CapabilityToken,

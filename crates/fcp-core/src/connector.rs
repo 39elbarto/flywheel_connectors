@@ -10,10 +10,10 @@ use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CapabilityToken, ConnectorId, EventAck, EventEnvelope, EventNack, FcpResult, HandshakeRequest,
-    HandshakeResponse, HealthSnapshot, InstanceId, Introspection, InvokeRequest, InvokeResponse,
-    RateLimitDeclarations, SelfCheckReport, ShutdownRequest, SimulateRequest, SimulateResponse,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, CryptographicallyVerified,
+    BoundVerified, CapabilityToken, ConnectorId, EventAck, EventEnvelope, EventNack, FcpResult,
+    HandshakeRequest, HandshakeResponse, HealthSnapshot, InstanceId, Introspection, InvokeRequest,
+    InvokeResponse, RateLimitDeclarations, SelfCheckReport, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -205,20 +205,25 @@ pub trait Bidirectional: Streaming {
 pub trait Polling: FcpConnector {
     /// Start polling a target.
     ///
-    /// Requires a `CapabilityToken<CryptographicallyVerified>` — the caller must verify the
-    /// token via [`CapabilityVerifier::verify()`] before calling this method.
+    /// Requires a `CapabilityToken<BoundVerified>` (full 5/5 verification
+    /// including instance binding). The connector runtime — the
+    /// enforcement point — is expected to call
+    /// [`CapabilityVerifier::verify_bound`] or promote an
+    /// [`UnboundVerified`] token via
+    /// [`CapabilityToken::promote_with_instance`] before calling
+    /// these methods (br-jkcka.8).
     async fn start_polling(
         &self,
         target: &str,
         interval: Option<std::time::Duration>,
-        token: &CapabilityToken<CryptographicallyVerified>,
+        token: &CapabilityToken<BoundVerified>,
     ) -> FcpResult<()>;
 
     /// Stop polling a target.
-    async fn stop_polling(&self, target: &str, token: &CapabilityToken<CryptographicallyVerified>) -> FcpResult<()>;
+    async fn stop_polling(&self, target: &str, token: &CapabilityToken<BoundVerified>) -> FcpResult<()>;
 
     /// Trigger immediate poll.
-    async fn poll_now(&self, target: &str, token: &CapabilityToken<CryptographicallyVerified>) -> FcpResult<usize>;
+    async fn poll_now(&self, target: &str, token: &CapabilityToken<BoundVerified>) -> FcpResult<usize>;
 
     /// Get event stream.
     fn events(&self) -> EventStream;
@@ -229,12 +234,14 @@ pub trait Polling: FcpConnector {
 pub trait Webhook: FcpConnector {
     /// Register a webhook handler.
     ///
-    /// Requires a `CapabilityToken<CryptographicallyVerified>` — the caller must verify the
-    /// token via [`CapabilityVerifier::verify()`] before calling this method.
+    /// Requires a `CapabilityToken<BoundVerified>` (full 5/5 verification)
+    /// — the connector runtime must call
+    /// [`CapabilityVerifier::verify_bound`] or promote an unbound token
+    /// before calling this method (br-jkcka.8).
     async fn register_handler(
         &self,
         source: &str,
-        token: &CapabilityToken<CryptographicallyVerified>,
+        token: &CapabilityToken<BoundVerified>,
     ) -> FcpResult<()>;
 
     /// Get the webhook URL.

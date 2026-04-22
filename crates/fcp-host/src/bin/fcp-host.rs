@@ -1495,8 +1495,12 @@ async fn verify_live_request(
         capability_key.to_bytes(),
         request.zone_id.clone(),
     );
+    // br-jkcka.8: gateway vantage produces UnboundVerified. The connector
+    // process (which knows its real InstanceId) is expected to re-verify
+    // with CapabilityVerifier::new or promote_with_instance before
+    // executing the operation. See docs/architecture/adr/jkcka-typestate-split.md.
     let verified_token = verifier
-        .verify(
+        .verify_unbound(
             request.capability_token.clone(),
             &tool.capability,
             &request.operation,
@@ -1530,7 +1534,7 @@ async fn verify_live_request(
         )));
     }
 
-    let principal = claims_principal(verified_token.claims()).ok_or_else(|| {
+    let principal = claims_principal(verified_token.claims_unbound()).ok_or_else(|| {
         HostError::PreflightFailed(
             "capability token is missing the subject or principal_id claim required for live execution".to_string(),
         )

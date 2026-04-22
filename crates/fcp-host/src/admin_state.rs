@@ -661,6 +661,7 @@ pub struct CapabilityIssuanceRequest {
     #[serde(default = "default_token_ttl_secs")]
     pub ttl_secs: u64,
     /// Optional not-before delay in seconds (deferred activation).
+    /// Must not exceed [`MAX_NOT_BEFORE_DELAY_SECS`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_before_delay_secs: Option<u64>,
     /// If set, the token requires a holder proof from this node for replay resistance.
@@ -692,6 +693,24 @@ pub struct CapabilityIssuanceRequest {
 
 const fn default_token_ttl_secs() -> u64 {
     3600
+}
+
+const MAX_NOT_BEFORE_DELAY_SECS: u64 = 10 * 365 * 24 * 60 * 60;
+
+fn validated_not_before_delay_secs(delay_secs: u64) -> Result<i64, LifecycleError> {
+    if delay_secs > MAX_NOT_BEFORE_DELAY_SECS {
+        return Err(LifecycleError::Persistence {
+            reason: format!(
+                "invalid capability issuance request: not_before_delay_secs {delay_secs} exceeds max {MAX_NOT_BEFORE_DELAY_SECS}"
+            ),
+        });
+    }
+
+    i64::try_from(delay_secs).map_err(|_| LifecycleError::Persistence {
+        reason: format!(
+            "invalid capability issuance request: not_before_delay_secs {delay_secs} overflows i64 seconds"
+        ),
+    })
 }
 
 fn capability_constraints_from_request(
@@ -2413,6 +2432,8 @@ pub struct HostAdminStateSnapshot {
     issued_tokens: Vec<IssuedTokenRecord>,
     #[serde(default)]
     next_token_sequence: u64,
+    #[serde(default)]
+    last_observed_time_ms: i64,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     issuer_verifying_keys: HashMap<String, fcp_crypto::ed25519::Ed25519VerifyingKey>,
     #[serde(default)]
@@ -2435,6 +2456,7 @@ impl Default for HostAdminStateSnapshot {
             next_log_sequence: 1,
             issued_tokens: Vec::new(),
             next_token_sequence: 1,
+            last_observed_time_ms: 0,
             issuer_verifying_keys: HashMap::new(),
             receipts: Vec::new(),
             simulate_receipts: Vec::new(),
@@ -3718,7 +3740,9 @@ impl HostAdminStateStore {
         let expires = now + chrono::Duration::seconds(ttl);
         let not_before = request
             .not_before_delay_secs
-            .map(|delay| now + chrono::Duration::seconds(i64::try_from(delay).unwrap_or(0)));
+            .map(validated_not_before_delay_secs)
+            .transpose()?
+            .map(|delay| now + chrono::Duration::seconds(delay));
 
         // Generate token ID from timestamp + hash of request fields.
         let token_id_bytes: [u8; 16] = {
@@ -3870,6 +3894,13 @@ impl HostAdminStateStore {
     pub fn inspect_capability_token(
         token_cbor_b64: &str,
     ) -> Result<CapabilityTokenInspection, LifecycleError> {
+        Self::inspect_capability_token_at(token_cbor_b64, Utc::now())
+    }
+
+    fn inspect_capability_token_at(
+        token_cbor_b64: &str,
+        now: DateTime<Utc>,
+    ) -> Result<CapabilityTokenInspection, LifecycleError> {
         let cbor_bytes =
             base64::Engine::decode(&base64::engine::general_purpose::STANDARD, token_cbor_b64)
                 .map_err(|e| LifecycleError::Persistence {
@@ -3888,7 +3919,6 @@ impl HostAdminStateStore {
                 reason: format!("failed to parse token claims: {e}"),
             })?;
 
-        let now = Utc::now();
         let iat_ts = claims
             .get(fcp_crypto::cose::cwt_claims::IAT)
             .and_then(|v| match v {
@@ -3993,7 +4023,16 @@ impl HostAdminStateStore {
         &self,
         request: &CapabilityTokenVerifyRequest,
     ) -> Result<CapabilityTokenVerifyResponse, LifecycleError> {
-        let inspection = Self::inspect_capability_token(&request.token_cbor_b64)?;
+        self.verify_capability_token_at(request, Utc::now()).await
+    }
+
+    async fn verify_capability_token_at(
+        &self,
+        request: &CapabilityTokenVerifyRequest,
+        observed_now: DateTime<Utc>,
+    ) -> Result<CapabilityTokenVerifyResponse, LifecycleError> {
+        let effective_now = self.effective_verification_time(observed_now).await?;
+        let inspection = Self::inspect_capability_token_at(&request.token_cbor_b64, effective_now)?;
         let mut rejection_reasons = Vec::new();
 
         // 1. Cryptographic signature validity against the host issuer key ring.
@@ -4045,8 +4084,7 @@ impl HostAdminStateStore {
                 rejection_reasons.push(format!("Token expired at {}", inspection.expires_at));
             }
             if let Some(nbf) = inspection.not_before {
-                let now = Utc::now();
-                if now < nbf {
+                if effective_now < nbf {
                     rejection_reasons.push(format!("Token not yet valid (not-before: {nbf})"));
                 }
             }
@@ -4076,6 +4114,27 @@ impl HostAdminStateStore {
             inspection,
             rejection_reasons,
         })
+    }
+
+    async fn effective_verification_time(
+        &self,
+        observed_now: DateTime<Utc>,
+    ) -> Result<DateTime<Utc>, LifecycleError> {
+        let observed_now_ms = observed_now.timestamp_millis();
+        let last_observed_time_ms = self.state.read().await.last_observed_time_ms;
+        if observed_now_ms <= last_observed_time_ms {
+            return Ok(
+                DateTime::from_timestamp_millis(last_observed_time_ms).unwrap_or(observed_now),
+            );
+        }
+
+        let effective_now_ms = self
+            .apply_mutation(|snapshot| {
+                snapshot.last_observed_time_ms = observed_now_ms;
+                Ok(snapshot.last_observed_time_ms)
+            })
+            .await?;
+        Ok(DateTime::from_timestamp_millis(effective_now_ms).unwrap_or(observed_now))
     }
 
     /// Check whether a token's scope covers the requested operation and connector.
@@ -6665,6 +6724,44 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn issue_capability_token_rejects_overflowing_not_before_delay() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+        let mut request = basic_issuance_request();
+        request.not_before_delay_secs = Some(u64::MAX);
+
+        let err = store
+            .issue_capability_token(&request, &key)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LifecycleError::Persistence { .. }));
+        let LifecycleError::Persistence { reason } = err else {
+            unreachable!()
+        };
+        assert!(reason.contains("not_before_delay_secs"));
+        assert!(reason.contains("exceeds max"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn issue_capability_token_rejects_not_before_delay_above_cap() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+        let mut request = basic_issuance_request();
+        request.not_before_delay_secs = Some(MAX_NOT_BEFORE_DELAY_SECS + 1);
+
+        let err = store
+            .issue_capability_token(&request, &key)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LifecycleError::Persistence { .. }));
+        let LifecycleError::Persistence { reason } = err else {
+            unreachable!()
+        };
+        assert!(reason.contains("not_before_delay_secs"));
+        assert!(reason.contains("exceeds max"));
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn issue_capability_token_with_constraints() {
         let store = HostAdminStateStore::new();
         let key = test_signing_key();
@@ -8040,6 +8137,65 @@ mod tests {
             .expect("verify token");
 
         assert!(result.valid);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn verify_token_stays_expired_after_clock_moves_backward() {
+        let store = HostAdminStateStore::new();
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+
+        let request = CapabilityIssuanceRequest {
+            connector_id: "test:saas:1.0.0".to_owned(),
+            zone_id: "zone-test".to_owned(),
+            principal_id: "agent-1".to_owned(),
+            operations: vec!["read".to_owned()],
+            ttl_secs: 60,
+            not_before_delay_secs: None,
+            holder_node: None,
+            max_delegation_depth: 0,
+            resource_allow: vec![],
+            resource_deny: vec![],
+            max_calls: None,
+            max_bytes: None,
+            credential_allow: vec![],
+            dry_run: false,
+        };
+
+        let issued = store
+            .issue_capability_token(&request, &signing_key)
+            .await
+            .expect("issue token");
+        let token_cbor_b64 = issued.token_cbor_b64.clone().expect("non-dry-run token");
+        let verify_request = CapabilityTokenVerifyRequest {
+            token_cbor_b64,
+            operation_id: Some("read".to_owned()),
+            connector_id: None,
+        };
+
+        let forward_time = issued.issued_at + chrono::Duration::minutes(2);
+        let expired = store
+            .verify_capability_token_at(&verify_request, forward_time)
+            .await
+            .expect("verify token after expiry");
+        assert!(!expired.temporally_valid);
+        assert!(!expired.valid);
+        assert!(
+            expired
+                .rejection_reasons
+                .iter()
+                .any(|reason| reason.contains("expired"))
+        );
+
+        let rewound = store
+            .verify_capability_token_at(&verify_request, issued.issued_at)
+            .await
+            .expect("verify token after clock rewind");
+        assert!(!rewound.temporally_valid);
+        assert!(!rewound.valid);
+        assert_eq!(
+            store.state.read().await.last_observed_time_ms,
+            forward_time.timestamp_millis()
+        );
     }
 
     #[fcp_async_core::runtime::test]

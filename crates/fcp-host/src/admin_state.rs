@@ -4124,13 +4124,14 @@ impl HostAdminStateStore {
         let last_observed_time_ms = self.state.read().await.last_observed_time_ms;
         if observed_now_ms <= last_observed_time_ms {
             return Ok(
-                DateTime::from_timestamp_millis(last_observed_time_ms).unwrap_or(observed_now),
+                DateTime::from_timestamp_millis(last_observed_time_ms).unwrap_or(observed_now)
             );
         }
 
         let effective_now_ms = self
             .apply_mutation(|snapshot| {
-                snapshot.last_observed_time_ms = observed_now_ms;
+                snapshot.last_observed_time_ms =
+                    snapshot.last_observed_time_ms.max(observed_now_ms);
                 Ok(snapshot.last_observed_time_ms)
             })
             .await?;
@@ -6734,10 +6735,11 @@ mod tests {
             .issue_capability_token(&request, &key)
             .await
             .unwrap_err();
-        assert!(matches!(err, LifecycleError::Persistence { .. }));
-        let LifecycleError::Persistence { reason } = err else {
-            unreachable!()
+        let reason = match err {
+            LifecycleError::Persistence { reason } => reason,
+            _ => String::new(),
         };
+        assert!(!reason.is_empty());
         assert!(reason.contains("not_before_delay_secs"));
         assert!(reason.contains("exceeds max"));
     }
@@ -6753,10 +6755,11 @@ mod tests {
             .issue_capability_token(&request, &key)
             .await
             .unwrap_err();
-        assert!(matches!(err, LifecycleError::Persistence { .. }));
-        let LifecycleError::Persistence { reason } = err else {
-            unreachable!()
+        let reason = match err {
+            LifecycleError::Persistence { reason } => reason,
+            _ => String::new(),
         };
+        assert!(!reason.is_empty());
         assert!(reason.contains("not_before_delay_secs"));
         assert!(reason.contains("exceeds max"));
     }

@@ -14,7 +14,7 @@ workspace = true
 [dependencies]
 fcp-core = { path = "../fcp-core" }
 fcp-async-core = { path = "../fcp-async-core" }
-asupersync = { version = "0.3.0", default-features = false }
+asupersync = { version = "0.3.1", default-features = false }
 
 # Tracing
 tracing.workspace = true

@@ -148,6 +148,36 @@ impl AuthClaims {
         }
     }
 
+    /// Reject claims whose `schema_version` is not in the caller's
+    /// accepted set.
+    ///
+    /// Verifiers call this early in their pipeline so unsupported
+    /// schema versions produce a clear error rather than a confusing
+    /// field-level decode failure downstream.
+    ///
+    /// Passing a single-element `expected` slice (e.g.
+    /// `&[CURRENT_SCHEMA_VERSION]`) is the normal case. During a
+    /// deployment-wide version bump, pass both the old and the new
+    /// (e.g. `&[1, 2]`) for one release cycle; drop the old once all
+    /// issuers have rolled forward.
+    ///
+    /// # Errors
+    /// Returns [`SchemaError::UnsupportedSchemaVersion`] when the
+    /// claim set's `schema_version` is not in `expected`. The
+    /// returned error's `expected` field carries the FIRST entry of
+    /// the accepted set (for diagnostics; the verifier's decision
+    /// was made against the full set).
+    pub fn check_schema_version(&self, expected: &[u16]) -> Result<(), SchemaError> {
+        if expected.contains(&self.schema_version) {
+            Ok(())
+        } else {
+            Err(SchemaError::UnsupportedSchemaVersion {
+                got: self.schema_version,
+                expected: expected.first().copied().unwrap_or(CURRENT_SCHEMA_VERSION),
+            })
+        }
+    }
+
     /// Serialize to canonical CBOR.
     ///
     /// Determinism: entries are sorted by CBOR integer label
@@ -632,6 +662,56 @@ mod tests {
         let parsed = AuthClaims::from_canonical_cbor(&bytes).unwrap();
         assert_eq!(parsed.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(parsed.capability_id.as_deref(), Some("cap"));
+    }
+
+    // ── 8n0rm.5: schema_version policy regression tests ─────────────────
+
+    #[test]
+    fn check_schema_version_accepts_current() {
+        let c = AuthClaims::empty();
+        assert!(c.check_schema_version(&[CURRENT_SCHEMA_VERSION]).is_ok());
+    }
+
+    #[test]
+    fn check_schema_version_rejects_unsupported() {
+        let c = AuthClaims {
+            schema_version: 999,
+            ..AuthClaims::default()
+        };
+        let err = c.check_schema_version(&[CURRENT_SCHEMA_VERSION]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SchemaError::UnsupportedSchemaVersion {
+                    got: 999,
+                    expected: CURRENT_SCHEMA_VERSION,
+                }
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn check_schema_version_accepts_multi_version_window() {
+        // During a deployment-wide bump, verifiers accept old + new.
+        let c = AuthClaims {
+            schema_version: 1,
+            ..AuthClaims::default()
+        };
+        assert!(c.check_schema_version(&[1, 2]).is_ok());
+        let c2 = AuthClaims {
+            schema_version: 2,
+            ..AuthClaims::default()
+        };
+        assert!(c2.check_schema_version(&[1, 2]).is_ok());
+    }
+
+    #[test]
+    fn schema_version_zero_is_not_valid_as_current() {
+        // Sanity: CURRENT_SCHEMA_VERSION must be > 0 so that a
+        // claim-set constructed with ::default() (which leaves
+        // schema_version=0) cannot pass verification by accident.
+        assert!(CURRENT_SCHEMA_VERSION > 0);
     }
 
     #[test]

@@ -8,7 +8,9 @@ use std::time::Duration;
 use fcp_async_core::time::sleep;
 use tracing::{debug, warn};
 
-use crate::{DEFAULT_RECONNECT_DELAY, MAX_RECONNECT_DELAY, StreamError, StreamResult};
+use crate::{
+    DEFAULT_RECONNECT_DELAY, MAX_RECONNECT_DELAY, MIN_RECONNECT_DELAY, StreamError, StreamResult,
+};
 
 /// Reconnection configuration.
 #[derive(Debug, Clone)]
@@ -87,6 +89,16 @@ impl ReconnectConfig {
     }
 
     /// Calculate delay for a given attempt.
+    ///
+    /// Enforces three invariants (bead `flywheel_connectors-y54mi`):
+    ///   1. **Floor:** the returned `Duration` is never below
+    ///      `MIN_RECONNECT_DELAY` (100 ms) unless the caller pinned
+    ///      `max_delay` even lower — a zero or sub-millisecond
+    ///      `initial_delay` must not collapse the wait to a hot loop.
+    ///   2. **Ceiling:** capped at `max_delay`.
+    ///   3. **Bounded jitter:** when `jitter` is enabled, the final
+    ///      delay is base × ±20 % (uniform in `[0.8, 1.2]`) instead
+    ///      of the looser ±50 % the implementation used to apply.
     #[must_use]
     pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
         let exponent = i32::try_from(attempt).unwrap_or(i32::MAX);
@@ -95,8 +107,12 @@ impl ReconnectConfig {
             .as_secs_f64()
             .mul_add(self.backoff_multiplier.powi(exponent), 0.0);
         let jittered = if self.jitter {
-            // Add jitter (0.5x to 1.5x)
-            let jitter = random_float().mul_add(1.0, 0.5);
+            // ±20% jitter: uniform in [0.8, 1.2]. Tighter than the
+            // previous ±50% so two clients reconnecting to the same
+            // upstream don't drift apart fast enough to lose useful
+            // batching at low attempt counts, but still wide enough
+            // to thundering-herd-bust a synchronised reconnect storm.
+            let jitter = random_float().mul_add(0.4, 0.8);
             base * jitter
         } else {
             base
@@ -128,7 +144,14 @@ impl ReconnectConfig {
         } else {
             jittered.min(MAX_SAFE_SECS_F64)
         };
-        Duration::from_secs_f64(clamped).min(self.max_delay)
+        // Apply the MIN floor BEFORE the max cap. If a caller pinned
+        // `max_delay` below MIN_RECONNECT_DELAY, the ceiling wins —
+        // we respect explicit user caps rather than violating them
+        // to satisfy the floor. Otherwise every wait is at least 100 ms.
+        let floor = MIN_RECONNECT_DELAY.min(self.max_delay);
+        Duration::from_secs_f64(clamped)
+            .max(floor)
+            .min(self.max_delay)
     }
 }
 
@@ -383,10 +406,10 @@ mod tests {
             .with_backoff_multiplier(2.0)
             .with_jitter(true);
 
-        // With jitter (0.5x to 1.5x), attempt 0 base is 1s
+        // ±20% jitter (0.8x..1.2x), attempt 0 base is 1s → [800ms, 1200ms].
         let delay = config.delay_for_attempt(0);
-        assert!(delay >= Duration::from_millis(500));
-        assert!(delay <= Duration::from_millis(1500));
+        assert!(delay >= Duration::from_millis(800));
+        assert!(delay <= Duration::from_millis(1200));
     }
 
     #[test]
@@ -460,9 +483,12 @@ mod tests {
             .with_backoff_multiplier(0.0)
             .with_jitter(false);
 
-        // 0^n = 0 for n>0, so delay is 1 * 0 = 0 for attempt > 0
-        // attempt 0: 1 * 0^0 = 1 * 1 = 1s
+        // 0^n = 0 for n>0, so the base goes to zero at attempt > 0; the
+        // MIN_RECONNECT_DELAY floor then applies.
+        // attempt 0: 1 * 0^0 = 1 * 1 = 1s (unchanged, above floor).
         assert_eq!(config.delay_for_attempt(0), Duration::from_secs(1));
+        // attempt 1+: base collapses to 0 → floored to MIN_RECONNECT_DELAY.
+        assert_eq!(config.delay_for_attempt(1), MIN_RECONNECT_DELAY);
     }
 
     #[test]
@@ -510,16 +536,18 @@ mod tests {
         // A negative backoff_multiplier alternates the sign of the computed
         // base delay. Without clamping, Duration::from_secs_f64 panics on
         // negative input — turning a recoverable misconfig into a process
-        // abort. The clamp must coerce negative to zero.
+        // abort. The clamp must coerce negative to zero AND the MIN floor
+        // must then round up to MIN_RECONNECT_DELAY.
         let config = ReconnectConfig::new()
             .with_initial_delay(Duration::from_secs(1))
             .with_max_delay(Duration::from_secs(60))
             .with_backoff_multiplier(-2.0)
             .with_jitter(false);
 
-        // attempt 1 yields base = 1 * (-2)^1 = -2.0; must clamp to 0.
+        // attempt 1 yields base = 1 * (-2)^1 = -2.0 → clamp to 0 →
+        // floor to MIN_RECONNECT_DELAY.
         let delay = config.delay_for_attempt(1);
-        assert_eq!(delay, Duration::from_secs(0));
+        assert_eq!(delay, MIN_RECONNECT_DELAY);
     }
 
     #[test]
@@ -573,7 +601,8 @@ mod tests {
     #[test]
     fn test_delay_nan_multiplier_does_not_panic() {
         // A NaN multiplier propagates through powi/mul_add to a NaN delay.
-        // Duration::from_secs_f64 panics on NaN; clamp must coerce to zero.
+        // Duration::from_secs_f64 panics on NaN; clamp must coerce to zero
+        // and MIN_RECONNECT_DELAY must then round up to the floor.
         let config = ReconnectConfig::new()
             .with_initial_delay(Duration::from_secs(1))
             .with_max_delay(Duration::from_secs(60))
@@ -581,7 +610,7 @@ mod tests {
             .with_jitter(false);
 
         let delay = config.delay_for_attempt(3);
-        assert_eq!(delay, Duration::from_secs(0));
+        assert_eq!(delay, MIN_RECONNECT_DELAY);
     }
 
     // ── Metamorphic relations ─────────────────────────────────────
@@ -814,8 +843,11 @@ mod tests {
             .with_backoff_multiplier(2.0)
             .with_jitter(false);
 
-        assert_eq!(config.delay_for_attempt(0), Duration::from_millis(1));
-        assert_eq!(config.delay_for_attempt(1), Duration::from_millis(2));
+        // Anything below MIN_RECONNECT_DELAY is rounded up to the floor;
+        // once the exponential climb crosses the floor, the raw math wins.
+        assert_eq!(config.delay_for_attempt(0), MIN_RECONNECT_DELAY); // 1ms → 100ms
+        assert_eq!(config.delay_for_attempt(1), MIN_RECONNECT_DELAY); // 2ms → 100ms
+        assert_eq!(config.delay_for_attempt(6), MIN_RECONNECT_DELAY); // 64ms → 100ms
         assert_eq!(config.delay_for_attempt(10), Duration::from_millis(1024));
     }
 
@@ -827,15 +859,15 @@ mod tests {
             .with_backoff_multiplier(1.0)
             .with_jitter(true);
 
-        // With jitter (0.5x to 1.5x), base is 10s → range [5s, 15s]
+        // ±20% jitter (0.8x..1.2x), base 10s → range [8s, 12s].
         for _ in 0..50 {
             let delay = config.delay_for_attempt(0);
             assert!(
-                delay >= Duration::from_secs(5),
+                delay >= Duration::from_secs(8),
                 "delay {delay:?} below lower jitter bound"
             );
             assert!(
-                delay <= Duration::from_secs(15),
+                delay <= Duration::from_secs(12),
                 "delay {delay:?} above upper jitter bound"
             );
         }
@@ -997,16 +1029,20 @@ mod tests {
     // ── Delay: initial_delay zero ───────────────────────────────────────
 
     #[test]
-    fn test_delay_zero_initial_delay() {
+    fn test_delay_zero_initial_delay_is_floored() {
+        // br-y54mi regression: a zero initial_delay used to propagate
+        // through to Duration::ZERO, which collapsed wait_for_reconnect
+        // into a hot retry storm. The MIN_RECONNECT_DELAY floor now
+        // guarantees every returned delay is at least 100ms even when
+        // the caller pins initial_delay to zero.
         let config = ReconnectConfig::new()
             .with_initial_delay(Duration::ZERO)
             .with_max_delay(Duration::from_secs(10))
             .with_backoff_multiplier(2.0)
             .with_jitter(false);
 
-        // 0 * 2^n = 0 for all n
-        assert_eq!(config.delay_for_attempt(0), Duration::ZERO);
-        assert_eq!(config.delay_for_attempt(5), Duration::ZERO);
+        assert_eq!(config.delay_for_attempt(0), MIN_RECONNECT_DELAY);
+        assert_eq!(config.delay_for_attempt(5), MIN_RECONNECT_DELAY);
     }
 
     // ── Delay: max_delay zero clamps everything ─────────────────────────
@@ -1227,6 +1263,98 @@ mod tests {
         handler.record_failure();
         let debug = format!("{handler:?}");
         assert!(debug.contains("attempts"));
+    }
+
+    // ── y54mi regression guards ────────────────────────────────────────
+
+    /// br-y54mi: a zero `initial_delay` at the websocket boundary
+    /// previously collapsed `delay_for_attempt` to `Duration::ZERO` and
+    /// turned `wait_for_reconnect` into a hot retry storm. Drive the
+    /// real handler through several consecutive waits with a zero
+    /// `initial_delay` and assert every wall-clock duration honours the
+    /// MIN_RECONNECT_DELAY floor.
+    #[fcp_async_core::runtime::test]
+    async fn test_rapid_reconnect_waits_are_floored_by_min_delay() {
+        let config = ReconnectConfig::new()
+            .with_max_attempts(4)
+            .with_initial_delay(Duration::ZERO) // ADVERSARIAL
+            .with_max_delay(Duration::from_secs(1))
+            .with_backoff_multiplier(2.0)
+            .with_jitter(false);
+        let mut handler = ReconnectHandler::new(config);
+
+        // Scheduler-jitter tolerance: tokio timer granularity + test
+        // runtime contention can shave a few ms off a `sleep(100ms)`.
+        let tolerance = Duration::from_millis(15);
+        let floor_observed = MIN_RECONNECT_DELAY.saturating_sub(tolerance);
+
+        for attempt in 0..4 {
+            let start = std::time::Instant::now();
+            handler.wait_for_reconnect().await.unwrap();
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed >= floor_observed,
+                "attempt {attempt} waited {elapsed:?}, expected >= {floor_observed:?} \
+                 (MIN_RECONNECT_DELAY floor — zero initial_delay must NOT collapse to a hot loop)"
+            );
+        }
+    }
+
+    /// br-y54mi: with a small-but-growable `initial_delay`, consecutive
+    /// `wait_for_reconnect` calls must take monotonically non-decreasing
+    /// wall-clock time until the `max_delay` cap is reached. Wide slop
+    /// accounts for scheduler-timer granularity; the qualitative
+    /// property (waits grow, never shrink back to zero) is the guard.
+    #[fcp_async_core::runtime::test]
+    async fn test_rapid_reconnect_waits_are_monotonically_increasing() {
+        let config = ReconnectConfig::new()
+            .with_max_attempts(5)
+            .with_initial_delay(Duration::from_millis(60)) // below floor to exercise the clamp
+            .with_max_delay(Duration::from_millis(600))
+            .with_backoff_multiplier(2.0)
+            .with_jitter(false);
+        let mut handler = ReconnectHandler::new(config);
+
+        // Expected schedule (no jitter, floor = 100ms, cap = 600ms):
+        //   attempt 0: 60ms  → floor 100ms
+        //   attempt 1: 120ms
+        //   attempt 2: 240ms
+        //   attempt 3: 480ms
+        //   attempt 4: 960ms → cap 600ms
+        let mut durations = Vec::with_capacity(5);
+        for _ in 0..5 {
+            let start = std::time::Instant::now();
+            handler.wait_for_reconnect().await.unwrap();
+            durations.push(start.elapsed());
+        }
+
+        // Each wait respects the MIN floor.
+        let floor_observed = MIN_RECONNECT_DELAY.saturating_sub(Duration::from_millis(15));
+        for (i, d) in durations.iter().enumerate() {
+            assert!(
+                *d >= floor_observed,
+                "attempt {i} waited {d:?}, below MIN_RECONNECT_DELAY floor"
+            );
+        }
+
+        // Monotonic non-decreasing with scheduler-noise slop. The slop
+        // is intentionally generous so the test survives loaded CI
+        // hosts; the qualitative invariant (no regression to zero) is
+        // what matters, and tighter bounds are covered by the pure
+        // `delay_for_attempt` tests above.
+        let slop = Duration::from_millis(30);
+        for i in 1..durations.len() {
+            assert!(
+                durations[i] + slop >= durations[i - 1],
+                "wait times non-monotonic at attempt {i}: {durations:?}"
+            );
+        }
+
+        // And the total wall time is bounded above by max_delay × N + slop —
+        // a sanity check that the cap really kicks in.
+        let total: Duration = durations.iter().sum();
+        let upper = Duration::from_millis(600) * 5 + Duration::from_millis(200);
+        assert!(total <= upper, "reconnect storm exceeded cap: {total:?}");
     }
 
     // ── Async: reconnect preserves error type ──

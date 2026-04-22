@@ -47,8 +47,24 @@ use std::time::Duration;
 /// Default reconnection delay.
 pub const DEFAULT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
+/// Minimum reconnection delay floor (NORMATIVE).
+///
+/// `ReconnectConfig::delay_for_attempt` refuses to return a value below
+/// this floor regardless of caller-supplied `initial_delay` (including
+/// zero or sub-millisecond values propagated from `websocket.rs`).
+/// Bead flywheel_connectors-y54mi: a zero `initial_delay` at the
+/// `ReconnectingWsStream` boundary previously collapsed the wait into
+/// a hot retry storm; this floor makes the storm impossible at the
+/// delay-calculation layer.
+pub const MIN_RECONNECT_DELAY: Duration = Duration::from_millis(100);
+
 /// Maximum reconnection delay.
-pub const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(60);
+///
+/// Tightened from 60s to 30s as part of the y54mi backoff hardening:
+/// reconnect-storm defenses want a ceiling low enough that a repeatedly-
+/// failing upstream can't park a client in a one-attempt-per-minute
+/// pattern that masks outage observability.
+pub const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 
 /// Default buffer size for streams.
 pub const DEFAULT_BUFFER_SIZE: usize = 8192;
@@ -64,7 +80,26 @@ mod tests {
 
     #[test]
     fn max_reconnect_delay_value() {
-        assert_eq!(MAX_RECONNECT_DELAY, std::time::Duration::from_secs(60));
+        // Tightened from 60s → 30s by bead flywheel_connectors-y54mi.
+        assert_eq!(MAX_RECONNECT_DELAY, std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn min_reconnect_delay_value() {
+        assert_eq!(MIN_RECONNECT_DELAY, std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn min_reconnect_delay_is_below_default() {
+        // The MIN floor is strictly below the default so a caller that
+        // never touches initial_delay gets the default (1s), not the
+        // floor.
+        assert!(MIN_RECONNECT_DELAY < DEFAULT_RECONNECT_DELAY);
+    }
+
+    #[test]
+    fn min_reconnect_delay_below_max() {
+        assert!(MIN_RECONNECT_DELAY < MAX_RECONNECT_DELAY);
     }
 
     #[test]
@@ -118,8 +153,9 @@ mod tests {
     }
 
     #[test]
-    fn max_reconnect_delay_is_one_minute() {
-        assert_eq!(MAX_RECONNECT_DELAY.as_secs(), 60);
+    fn max_reconnect_delay_is_thirty_seconds() {
+        // Tightened from 60s → 30s by bead flywheel_connectors-y54mi.
+        assert_eq!(MAX_RECONNECT_DELAY.as_secs(), 30);
     }
 
     #[test]

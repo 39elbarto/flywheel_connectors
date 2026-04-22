@@ -30,7 +30,8 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 #[test]
 fn constants_are_reasonable() {
     assert_eq!(DEFAULT_RECONNECT_DELAY, Duration::from_secs(1));
-    assert_eq!(MAX_RECONNECT_DELAY, Duration::from_secs(60));
+    // Tightened from 60s → 30s by bead flywheel_connectors-y54mi.
+    assert_eq!(MAX_RECONNECT_DELAY, Duration::from_secs(30));
     assert_eq!(DEFAULT_BUFFER_SIZE, 8192);
     assert!(MAX_RECONNECT_DELAY > DEFAULT_RECONNECT_DELAY);
 }
@@ -1014,7 +1015,8 @@ fn reconnect_config_unlimited_attempts() {
 fn reconnect_config_default_values() {
     let config = ReconnectConfig::default();
     assert_eq!(config.initial_delay, Duration::from_secs(1));
-    assert_eq!(config.max_delay, Duration::from_secs(60));
+    // Tightened from 60s → 30s by bead flywheel_connectors-y54mi.
+    assert_eq!(config.max_delay, Duration::from_secs(30));
     assert!((config.backoff_multiplier - 2.0).abs() < f64::EPSILON);
     assert!(config.jitter);
     assert_eq!(config.max_attempts, Some(10));

@@ -1,0 +1,46 @@
+---
+source: crates/fcp-audit/tests/golden_receipts.rs
+assertion_line: 398
+expression: "json!({ \"head\": head, \"report\": report, })"
+---
+{
+  "head": {
+    "coverage": 0.75,
+    "epoch_id": "epoch-2026-04-22",
+    "head_entry": "entry-nested-9999",
+    "head_seq": 9999,
+    "signature_count": 2,
+    "signatures": [
+      {
+        "issuer_kid": "kid:primary",
+        "signature": "11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+      },
+      {
+        "issuer_kid": "kid:witness",
+        "signature": "22222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222222"
+      }
+    ],
+    "zone_id": "z:prod"
+  },
+  "report": {
+    "chain_len": 10000,
+    "head_entry": "entry-nested-9999",
+    "head_seq": 9999,
+    "issues": [
+      {
+        "code": "audit.timestamp_drift",
+        "entry_id": "entry-drift-4200",
+        "message": "entry timestamp skewed 3s",
+        "seq": 4200
+      },
+      {
+        "code": "audit.metadata_size_warn",
+        "entry_id": "entry-meta-7500",
+        "message": "metadata exceeds soft cap",
+        "seq": 7500
+      }
+    ],
+    "status": "warn",
+    "zone_id": "z:prod"
+  }
+}

@@ -29,8 +29,8 @@
 //! timestamps (`1_700_000_000` = `2023-11-14T22:13:20Z`).
 
 use fcp_audit::{
-    AuditEntryBuilder, ChainHead, Decision, DecisionReceipt, HeadSignature, Severity,
-    TraceContext,
+    AuditEntryBuilder, AuditStatus, ChainHead, Decision, DecisionReceipt, FreshnessLevel,
+    HeadSignature, Severity, TraceContext, VerifyIssue, VerifyReport, VerifyStatus,
 };
 use serde_json::json;
 
@@ -315,4 +315,169 @@ fn snapshot_decision_enum_lowercase_serde() {
             "deny": Decision::Deny,
         })
     );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// VerifyReport / AuditStatus / FreshnessLevel — operator-visible surfaces
+// ────────────────────────────────────────────────────────────────────────
+// Goldens below round out the previously-uncovered half of the fcp-audit
+// public wire surface. Every one of these types is serialized into output
+// an operator reads (`fcp verify`, `fcp audit status`); freezing their
+// JSON shape prevents a casual serde attribute change from silently
+// breaking downstream CLI / dashboard parsers.
+
+#[test]
+fn snapshot_verify_report_empty_chain_ok() {
+    // EMPTY CASE. A fresh zone with zero entries and no head must produce
+    // a clean, minimal OK report. Every `skip_serializing_if` branch on
+    // `VerifyReport` MUST be exercised here (zone_id, head_seq, head_entry
+    // all None; issues empty). A change that starts serializing absent
+    // optionals as `null` instead of omitting them flips this snapshot
+    // and fails CI.
+    let report = VerifyReport::ok(0);
+    insta::assert_json_snapshot!("verify_report_empty_chain_ok", report);
+}
+
+#[test]
+fn snapshot_audit_status_missing_single_field() {
+    // SINGLE-FIELD CASE. `AuditStatus::missing()` populates only
+    // `freshness`; head_seq, coverage, and reason are all None. The
+    // resulting JSON is `{"freshness": "missing"}` — the smallest valid
+    // AuditStatus an operator can see. Freezing this guards against a
+    // serde attribute change that would suddenly start emitting
+    // `"head_seq": null` or similar.
+    let status = AuditStatus::missing();
+    insta::assert_json_snapshot!("audit_status_missing_single_field", status);
+}
+
+#[test]
+fn snapshot_verify_report_deeply_nested_with_chain_head() {
+    // DEEPLY-NESTED CASE. A failing verify report bundled with the
+    // ChainHead it was computed against and the signatures the head
+    // carries — three levels of nested objects plus embedded arrays.
+    // This is exactly what the `fcp verify --with-head` envelope looks
+    // like on the wire and it exercises nested Option handling
+    // (head_seq, head_entry, zone_id all populated; each VerifyIssue
+    // carries both seq and entry_id; HeadSignatures carry 64-byte
+    // payloads rendered as JSON arrays of integers).
+    let head = ChainHead {
+        zone_id: "z:prod".to_string(),
+        head_entry: "entry-nested-9999".to_string(),
+        head_seq: 9_999,
+        coverage: 0.75,
+        epoch_id: "epoch-2026-04-22".to_string(),
+        signature_count: 2,
+        signatures: vec![
+            HeadSignature {
+                issuer_kid: "kid:primary".to_string(),
+                signature: vec![0x11; 64],
+            },
+            HeadSignature {
+                issuer_kid: "kid:witness".to_string(),
+                signature: vec![0x22; 64],
+            },
+        ],
+    };
+
+    let report = VerifyReport {
+        status: VerifyStatus::Warn,
+        zone_id: Some("z:prod".to_string()),
+        chain_len: 10_000,
+        head_seq: Some(9_999),
+        head_entry: Some("entry-nested-9999".to_string()),
+        issues: vec![
+            VerifyIssue::new("audit.timestamp_drift", "entry timestamp skewed 3s")
+                .with_seq(4_200)
+                .with_entry_id("entry-drift-4200"),
+            VerifyIssue::new("audit.metadata_size_warn", "metadata exceeds soft cap")
+                .with_seq(7_500)
+                .with_entry_id("entry-meta-7500"),
+        ],
+    };
+
+    insta::assert_json_snapshot!(
+        "verify_report_deeply_nested_with_chain_head",
+        json!({
+            "head": head,
+            "report": report,
+        })
+    );
+}
+
+#[test]
+fn snapshot_chain_head_max_signature_quorum() {
+    // MAX-SIZE CASE. A quorum-signed ChainHead at the upper realistic
+    // signature-count range (16 signers), with each signature taking the
+    // full 64-byte Ed25519 shape. This is the `head.json` that a large
+    // multi-node mesh publishes at steady state. Freezing it pins the
+    // JSON-array encoding of the signature bytes; a serde attribute
+    // change to base64/hex/etc. would flip this snapshot.
+    let signatures = (0..16u8)
+        .map(|i| HeadSignature {
+            issuer_kid: format!("kid:signer-{i:02}"),
+            // 64 bytes filled with the signer index so the snapshot is
+            // legible when diffed.
+            signature: vec![i; 64],
+        })
+        .collect::<Vec<_>>();
+
+    let head = ChainHead {
+        zone_id: "z:mesh-prod".to_string(),
+        head_entry: "entry-max-quorum-0001".to_string(),
+        head_seq: 1_000_000,
+        coverage: 1.0,
+        epoch_id: "epoch-max-quorum".to_string(),
+        signature_count: u32::try_from(signatures.len()).expect("fits in u32"),
+        signatures,
+    };
+
+    insta::assert_json_snapshot!("chain_head_max_signature_quorum", head);
+}
+
+#[test]
+fn snapshot_verify_report_fail_with_critical_issues() {
+    // ERROR CASE. A VerifyReport in its terminal Fail state, carrying
+    // the three critical codes that `is_critical()` gates on. Freezing
+    // this is what lets a downstream alerting pipeline grep the JSON
+    // for `"code": "audit.fork_detected"` without reading the code. A
+    // future rename of any critical code MUST either update this
+    // snapshot or the consumers will silently stop alerting.
+    let report = VerifyReport {
+        status: VerifyStatus::Fail,
+        zone_id: Some("z:prod".to_string()),
+        chain_len: 500,
+        head_seq: Some(499),
+        head_entry: Some("entry-fail-499".to_string()),
+        issues: vec![
+            VerifyIssue::new("audit.fork_detected", "two entries share the same prev")
+                .with_seq(200)
+                .with_entry_id("entry-fork-200"),
+            VerifyIssue::new("audit.seq_gap", "sequence jumped from 300 to 305")
+                .with_seq(305)
+                .with_entry_id("entry-gap-305"),
+            VerifyIssue::new("audit.prev_mismatch", "entry.prev does not match prior id")
+                .with_seq(450)
+                .with_entry_id("entry-pm-450"),
+        ],
+    };
+
+    // Sanity: the report is recognised as Fail and every issue is critical.
+    assert!(matches!(report.status, VerifyStatus::Fail));
+    assert_eq!(report.critical_count(), 3);
+
+    insta::assert_json_snapshot!("verify_report_fail_with_critical_issues", report);
+}
+
+#[test]
+fn snapshot_freshness_level_all_variants() {
+    // Bonus: freeze the FreshnessLevel lowercase rename for all four
+    // variants. A rename regression here would break any dashboard
+    // that groups by `"freshness": "fresh"` etc.
+    let all: Vec<FreshnessLevel> = vec![
+        FreshnessLevel::Fresh,
+        FreshnessLevel::Stale,
+        FreshnessLevel::Degraded,
+        FreshnessLevel::Missing,
+    ];
+    insta::assert_json_snapshot!("freshness_level_all_variants", all);
 }

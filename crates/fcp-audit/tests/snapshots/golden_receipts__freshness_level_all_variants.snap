@@ -1,0 +1,11 @@
+---
+source: crates/fcp-audit/tests/golden_receipts.rs
+assertion_line: 482
+expression: all
+---
+[
+  "fresh",
+  "stale",
+  "degraded",
+  "missing"
+]

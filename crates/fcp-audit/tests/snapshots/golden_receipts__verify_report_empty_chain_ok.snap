@@ -1,0 +1,10 @@
+---
+source: crates/fcp-audit/tests/golden_receipts.rs
+assertion_line: 338
+expression: report
+---
+{
+  "status": "ok",
+  "chain_len": 0,
+  "issues": []
+}

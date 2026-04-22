@@ -1,0 +1,8 @@
+---
+source: crates/fcp-audit/tests/golden_receipts.rs
+assertion_line: 350
+expression: status
+---
+{
+  "freshness": "missing"
+}

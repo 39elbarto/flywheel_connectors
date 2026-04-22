@@ -1,0 +1,32 @@
+---
+source: crates/fcp-audit/tests/golden_receipts.rs
+assertion_line: 468
+expression: report
+---
+{
+  "status": "fail",
+  "zone_id": "z:prod",
+  "chain_len": 500,
+  "head_seq": 499,
+  "head_entry": "entry-fail-499",
+  "issues": [
+    {
+      "code": "audit.fork_detected",
+      "message": "two entries share the same prev",
+      "seq": 200,
+      "entry_id": "entry-fork-200"
+    },
+    {
+      "code": "audit.seq_gap",
+      "message": "sequence jumped from 300 to 305",
+      "seq": 305,
+      "entry_id": "entry-gap-305"
+    },
+    {
+      "code": "audit.prev_mismatch",
+      "message": "entry.prev does not match prior id",
+      "seq": 450,
+      "entry_id": "entry-pm-450"
+    }
+  ]
+}

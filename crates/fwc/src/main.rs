@@ -20758,7 +20758,6 @@ fn pipe_dispatch(args: &PipeArgs) -> Result<DispatchOutcome> {
     })
 }
 
-#[allow(dead_code)] // Wired when host integration lands.
 fn pipeline_dispatch(args: &PipelineArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
     let cwd = std::env::current_dir()?;
     let roots = pipe::default_pipeline_roots(&cwd);

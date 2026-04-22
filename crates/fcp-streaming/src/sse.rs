@@ -82,6 +82,29 @@ impl SseEvent {
 
 #[cfg(test)]
 const DEFAULT_MAX_DATA_BYTES: usize = 10 * 1024 * 1024;
+const MAX_SSE_BUFFER_SIZE: usize = 64 * 1024 * 1024;
+
+const fn clamp_sse_buffer_size(size: usize) -> usize {
+    if size > MAX_SSE_BUFFER_SIZE {
+        MAX_SSE_BUFFER_SIZE
+    } else {
+        size
+    }
+}
+
+fn retained_buffer_overflow(
+    retained_bytes: usize,
+    next_chunk_len: usize,
+    max_buffer_size: usize,
+) -> Option<StreamError> {
+    let limit = clamp_sse_buffer_size(max_buffer_size);
+    let size = retained_bytes.saturating_add(next_chunk_len);
+    if size > limit {
+        Some(StreamError::BufferOverflow { size, limit })
+    } else {
+        None
+    }
+}
 
 /// SSE parser state.
 #[derive(Debug)]
@@ -283,7 +306,7 @@ impl SseConfig {
     /// Set maximum buffer size.
     #[must_use]
     pub const fn with_max_buffer_size(mut self, size: usize) -> Self {
-        self.max_buffer_size = size;
+        self.max_buffer_size = clamp_sse_buffer_size(size);
         self
     }
 
@@ -489,6 +512,7 @@ pin_project! {
 impl SseStream {
     /// Create a new SSE stream.
     fn new(body: ClientIncomingBody<ClientIo>, max_buffer_size: usize) -> Self {
+        let max_buffer_size = clamp_sse_buffer_size(max_buffer_size);
         Self {
             inner: SseChunkStream::new(body),
             parser: SseParser::with_max_data_bytes(max_buffer_size),
@@ -525,11 +549,10 @@ impl Stream for SseStream {
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(data))) => {
                     let retained_bytes = this.parser.retained_bytes();
-                    if retained_bytes.saturating_add(data.len()) > *this.max_buffer_size {
-                        return Poll::Ready(Some(Err(StreamError::BufferOverflow {
-                            size: retained_bytes.saturating_add(data.len()),
-                            limit: *this.max_buffer_size,
-                        })));
+                    if let Some(error) =
+                        retained_buffer_overflow(retained_bytes, data.len(), *this.max_buffer_size)
+                    {
+                        return Poll::Ready(Some(Err(error)));
                     }
 
                     let events = this.parser.parse(&data);
@@ -1257,7 +1280,18 @@ mod tests {
     #[test]
     fn test_sse_config_large_buffer() {
         let config = SseConfig::new().with_max_buffer_size(usize::MAX);
-        assert_eq!(config.max_buffer_size, usize::MAX);
+        assert_eq!(config.max_buffer_size, MAX_SSE_BUFFER_SIZE);
+    }
+
+    #[test]
+    fn test_retained_buffer_overflow_clamps_unbounded_config() {
+        let stream_err =
+            retained_buffer_overflow(MAX_SSE_BUFFER_SIZE, 1, usize::MAX).expect("overflow");
+        assert!(matches!(
+            stream_err,
+            StreamError::BufferOverflow { size, limit }
+                if size == MAX_SSE_BUFFER_SIZE + 1 && limit == MAX_SSE_BUFFER_SIZE
+        ));
     }
 
     #[test]

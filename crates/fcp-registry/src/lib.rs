@@ -216,6 +216,10 @@ pub enum RegistryError {
     TransparencyLogMissing,
     #[error("transparency log evidence missing")]
     TransparencyEvidenceMissing,
+    #[error("TUF verification required by operator config")]
+    TufVerificationRequired,
+    #[error("Sigstore verification required by operator config")]
+    SigstoreVerificationRequired,
     #[error("required attestation `{attestation}` not present")]
     RequiredAttestationMissing { attestation: String },
     #[error("attestation evidence missing")]
@@ -527,6 +531,20 @@ pub struct SupplyChainVerificationConfig {
     pub require_sigstore: bool,
 }
 
+impl SupplyChainVerificationConfig {
+    #[must_use]
+    pub fn tuf_verification_required(&self) -> bool {
+        self.require_tuf || self.tuf_pinned_root.is_some()
+    }
+
+    #[must_use]
+    pub fn sigstore_verification_required(&self) -> bool {
+        self.require_sigstore
+            || !self.trusted_sigstore_identities.is_empty()
+            || !self.trusted_sigstore_issuers.is_empty()
+    }
+}
+
 /// No-op transparency log verifier for testing without external dependencies.
 #[derive(Debug, Default)]
 pub struct NoOpTransparencyVerifier;
@@ -834,6 +852,7 @@ pub struct ReconstructedConnectorBinary {
 #[derive(Debug, Clone)]
 pub struct RegistryVerifier {
     trust_policy: RegistryTrustPolicy,
+    supply_chain_config: SupplyChainVerificationConfig,
 }
 
 #[derive(Debug)]
@@ -862,7 +881,26 @@ struct RegistryVerificationSummary {
 impl RegistryVerifier {
     #[must_use]
     pub const fn new(trust_policy: RegistryTrustPolicy) -> Self {
-        Self { trust_policy }
+        Self {
+            trust_policy,
+            supply_chain_config: SupplyChainVerificationConfig {
+                tuf_pinned_root: None,
+                trusted_sigstore_identities: Vec::new(),
+                trusted_sigstore_issuers: Vec::new(),
+                require_transparency: false,
+                require_tuf: false,
+                require_sigstore: false,
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn with_supply_chain_verification_config(
+        mut self,
+        supply_chain_config: SupplyChainVerificationConfig,
+    ) -> Self {
+        self.supply_chain_config = supply_chain_config;
+        self
     }
 
     /// Verify a registry bundle against trust roots, policy, and target.
@@ -932,6 +970,11 @@ impl RegistryVerifier {
 
         enforce_capability_ceiling(zone_policy, &manifest)?;
         enforce_supply_chain_policy(&manifest, supply_chain)?;
+        enforce_supply_chain_verification_config(
+            &self.supply_chain_config,
+            &manifest,
+            supply_chain,
+        )?;
 
         Ok(VerifiedConnectorBundle {
             manifest,
@@ -1631,6 +1674,37 @@ fn enforce_supply_chain_policy(
                 }
             }
         }
+    }
+
+    Ok(())
+}
+
+fn enforce_supply_chain_verification_config(
+    config: &SupplyChainVerificationConfig,
+    manifest: &ConnectorManifest,
+    evidence: Option<&SupplyChainEvidence>,
+) -> Result<(), RegistryError> {
+    if config.require_transparency {
+        let entry_present = manifest
+            .signatures
+            .as_ref()
+            .and_then(|sig| sig.transparency_log_entry.as_ref())
+            .is_some();
+        if !entry_present {
+            return Err(RegistryError::TransparencyLogMissing);
+        }
+        let evidence = evidence.ok_or(RegistryError::TransparencyEvidenceMissing)?;
+        if !evidence.transparency_log_present {
+            return Err(RegistryError::TransparencyEvidenceMissing);
+        }
+    }
+
+    if config.tuf_verification_required() && evidence.is_none() {
+        return Err(RegistryError::TufVerificationRequired);
+    }
+
+    if config.sigstore_verification_required() && evidence.is_none() {
+        return Err(RegistryError::SigstoreVerificationRequired);
     }
 
     Ok(())
@@ -2971,6 +3045,54 @@ sig = "{sig}"
 
                 RegistryLogData {
                     reason_code: Some("capability_ceiling_violation".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn verify_bundle_rejects_missing_tuf_when_operator_requires_it() {
+        run_registry_test(
+            "verify_bundle_rejects_missing_tuf_when_operator_requires_it",
+            "verify",
+            "supply-chain",
+            1,
+            || async {
+                let signing_key = Ed25519SigningKey::generate();
+                let verifying_key = signing_key.verifying_key();
+
+                let binary = b"registry-binary".to_vec();
+                let binary_hash = hash_bytes(&binary);
+                let unsigned = unsigned_manifest_toml("");
+                let sig = sign_manifest_toml(&unsigned, &signing_key, &binary_hash);
+                let manifest_toml =
+                    with_signatures(&unsigned, &publisher_signature_section("pub1", &sig));
+
+                let bundle = ConnectorBundle {
+                    manifest_toml,
+                    binary,
+                    target: test_target(),
+                };
+
+                let mut trust = RegistryTrustPolicy::default();
+                trust
+                    .publisher_keys
+                    .insert("pub1".to_string(), verifying_key);
+
+                let verifier = RegistryVerifier::new(trust).with_supply_chain_verification_config(
+                    SupplyChainVerificationConfig {
+                        require_tuf: true,
+                        ..SupplyChainVerificationConfig::default()
+                    },
+                );
+                let err = verifier
+                    .verify_bundle(&bundle, None, None, None)
+                    .expect_err("missing tuf evidence");
+                assert!(matches!(err, RegistryError::TufVerificationRequired));
+
+                RegistryLogData {
+                    reason_code: Some("tuf_verification_required".to_string()),
                     ..RegistryLogData::default()
                 }
             },
@@ -4972,6 +5094,12 @@ sig = "base64:{sig_b64}"
                 let err = RegistryError::TransparencyEvidenceMissing;
                 assert!(err.to_string().contains("evidence"));
 
+                let err = RegistryError::TufVerificationRequired;
+                assert!(err.to_string().contains("TUF"));
+
+                let err = RegistryError::SigstoreVerificationRequired;
+                assert!(err.to_string().contains("Sigstore"));
+
                 let err = RegistryError::RequiredAttestationMissing {
                     attestation: "slsa".to_string(),
                 };
@@ -6324,6 +6452,14 @@ sig = "{reg_sig}"
                     (
                         "TransparencyEvidenceMissing",
                         RegistryError::TransparencyEvidenceMissing,
+                    ),
+                    (
+                        "TufVerificationRequired",
+                        RegistryError::TufVerificationRequired,
+                    ),
+                    (
+                        "SigstoreVerificationRequired",
+                        RegistryError::SigstoreVerificationRequired,
                     ),
                     (
                         "RequiredAttestationMissing",
@@ -8161,6 +8297,8 @@ sig = "{reg_sig}"
             ),
             ("transparency log", RegistryError::TransparencyLogMissing),
             ("transparency", RegistryError::TransparencyEvidenceMissing),
+            ("tuf", RegistryError::TufVerificationRequired),
+            ("sigstore", RegistryError::SigstoreVerificationRequired),
             (
                 "attestation",
                 RegistryError::RequiredAttestationMissing {
@@ -11183,6 +11321,8 @@ trusted_builders = ["trusted-ci"]
             },
             RegistryError::TransparencyLogMissing,
             RegistryError::TransparencyEvidenceMissing,
+            RegistryError::TufVerificationRequired,
+            RegistryError::SigstoreVerificationRequired,
             RegistryError::RequiredAttestationMissing {
                 attestation: "a".into(),
             },

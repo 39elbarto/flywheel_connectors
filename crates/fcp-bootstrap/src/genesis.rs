@@ -160,11 +160,8 @@ impl GenesisState {
         let mut hasher = blake3::Hasher::new();
         hasher.update(&self.owner_public_key);
         hasher.update(&self.schema_version.to_le_bytes());
-        let created_at_nanos = self
-            .created_at
-            .timestamp_nanos_opt()
-            .unwrap_or_else(|| self.created_at.timestamp_micros() * 1_000);
-        hasher.update(&created_at_nanos.to_le_bytes());
+        hasher.update(&self.created_at.timestamp().to_le_bytes());
+        hasher.update(&self.created_at.timestamp_subsec_nanos().to_le_bytes());
 
         // Canonicalize zones by sorting by ID before hashing
         let mut zones = self.initial_zones.clone();
@@ -1257,6 +1254,46 @@ mod tests {
         let reg = GenesisState::create(&vk);
         assert_ne!(det.created_at, reg.created_at);
         assert_ne!(det.fingerprint(), reg.fingerprint());
+    }
+
+    #[test]
+    fn genesis_fingerprint_supports_post_2262_timestamps() {
+        let signing_key = Ed25519SigningKey::generate();
+        let vk = signing_key.verifying_key();
+        let mut genesis = GenesisState::create(&vk);
+        genesis.created_at =
+            DateTime::from_timestamp(10_000_000_000, 123_456_789).expect("timestamp is valid");
+
+        let fingerprint = genesis.fingerprint();
+
+        assert!(fingerprint.starts_with("BLAKE3:"));
+    }
+
+    #[test]
+    fn genesis_fingerprint_preserves_subsecond_entropy_beyond_nanos_horizon() {
+        let signing_key = Ed25519SigningKey::generate();
+        let vk = signing_key.verifying_key();
+        let mut first = GenesisState::create(&vk);
+        let mut second = first.clone();
+
+        first.created_at =
+            DateTime::from_timestamp(9_223_372_037, 123).expect("timestamp is valid");
+        second.created_at =
+            DateTime::from_timestamp(9_223_372_037, 987).expect("timestamp is valid");
+
+        assert!(
+            first.created_at.timestamp_nanos_opt().is_none(),
+            "test must stay beyond the i64 nanosecond horizon"
+        );
+        assert!(
+            second.created_at.timestamp_nanos_opt().is_none(),
+            "test must stay beyond the i64 nanosecond horizon"
+        );
+        assert_ne!(
+            first.fingerprint(),
+            second.fingerprint(),
+            "post-horizon timestamps must keep subsecond fingerprint entropy"
+        );
     }
 
     // ---- Validation error Debug ----

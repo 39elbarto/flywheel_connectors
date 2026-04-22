@@ -880,9 +880,63 @@ impl CapabilityTokenBuilder {
     /// # Errors
     ///
     /// Returns an error if signing fails.
-    pub fn sign(self, signing_key: &Ed25519SigningKey) -> CryptoResult<CoseToken> {
+    pub fn sign(mut self, signing_key: &Ed25519SigningKey) -> CryptoResult<CoseToken> {
+        // br-8n0rm.8: synthesize canonical GRANTS from legacy (capability_id + operations)
+        // so every token this builder emits carries the canonical shape the verifier prefers.
+        // Unblocks 8n0rm.6 removal of the verifier's legacy OPERATIONS fallback.
+        synthesize_grants_from_legacy_operations(&mut self.claims);
         CoseToken::sign(signing_key, &self.claims)
     }
+}
+
+/// Synthesize the canonical `fcp2_claims::GRANTS` claim from the legacy
+/// (capability_id + operations) shape if GRANTS is absent.
+///
+/// The canonical GRANTS shape is an array of
+/// `{capability: <id>, operation: <op>}` maps — matching the serde
+/// derive on `fcp_core::capability::CapabilityGrant`. This function
+/// builds that shape via raw ciborium without depending on fcp-core,
+/// preserving the fcp-auth-schema → fcp-crypto → fcp-core layering.
+///
+/// No-op if GRANTS is already set OR if capability_id/operations are
+/// missing (the verifier will surface an appropriate MissingField error
+/// in those cases).
+fn synthesize_grants_from_legacy_operations(claims: &mut CwtClaims) {
+    if claims.get(fcp2_claims::GRANTS).is_some() {
+        return; // canonical GRANTS already present; respect it.
+    }
+    let Some(cap_id) = claims.get(fcp2_claims::CAPABILITY_ID).cloned() else {
+        return;
+    };
+    let Some(ops_val) = claims.get(fcp2_claims::OPERATIONS).cloned() else {
+        return;
+    };
+    let ciborium::Value::Text(cap_text) = cap_id else {
+        return; // malformed capability_id — let verifier reject it later
+    };
+    let ciborium::Value::Array(ops_array) = ops_val else {
+        return;
+    };
+    let mut grants: Vec<ciborium::Value> = Vec::with_capacity(ops_array.len());
+    for op in ops_array {
+        let ciborium::Value::Text(op_text) = op else {
+            continue; // skip non-Text entries; verifier's typed check will fire
+        };
+        grants.push(ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("capability".into()),
+                ciborium::Value::Text(cap_text.clone()),
+            ),
+            (
+                ciborium::Value::Text("operation".into()),
+                ciborium::Value::Text(op_text),
+            ),
+        ]));
+    }
+    if grants.is_empty() {
+        return;
+    }
+    *claims = claims.clone().custom(fcp2_claims::GRANTS, ciborium::Value::Array(grants));
 }
 
 impl Default for CapabilityTokenBuilder {
@@ -896,6 +950,87 @@ mod tests {
     use super::*;
     use chrono::Duration;
     use std::cell::Cell;
+
+    // ── 8n0rm.8: legacy OPERATIONS → canonical GRANTS synthesis ──────────
+
+    #[test]
+    fn sign_synthesizes_grants_from_legacy_operations() {
+        let signing_key = Ed25519SigningKey::generate();
+        let now = Utc::now();
+        let cose = CapabilityTokenBuilder::new()
+            .capability_id("cap:test")
+            .zone_id("z:work")
+            .operations(&["op:read", "op:write"])
+            .validity(now, now + Duration::hours(1))
+            .sign(&signing_key)
+            .expect("sign");
+
+        let verifying_key = signing_key.verifying_key();
+        let claims = cose.verify(&verifying_key).expect("verify");
+        // The signed token MUST carry canonical GRANTS now.
+        let grants = claims
+            .get(fcp2_claims::GRANTS)
+            .expect("synthesize must emit GRANTS");
+        let ciborium::Value::Array(arr) = grants else {
+            panic!("GRANTS must be an Array");
+        };
+        assert_eq!(arr.len(), 2);
+        // Each entry must be {capability: "cap:test", operation: "op:..."}
+        for entry in arr {
+            let ciborium::Value::Map(map) = entry else {
+                panic!("grant entry must be a Map");
+            };
+            let cap_field = map
+                .iter()
+                .find(|(k, _)| matches!(k, ciborium::Value::Text(s) if s == "capability"))
+                .expect("capability field");
+            let ciborium::Value::Text(cap_text) = &cap_field.1 else {
+                panic!("capability must be Text");
+            };
+            assert_eq!(cap_text, "cap:test");
+            let op_field = map
+                .iter()
+                .find(|(k, _)| matches!(k, ciborium::Value::Text(s) if s == "operation"))
+                .expect("operation field");
+            let ciborium::Value::Text(op_text) = &op_field.1 else {
+                panic!("operation must be Text");
+            };
+            assert!(op_text == "op:read" || op_text == "op:write");
+        }
+    }
+
+    #[test]
+    fn sign_preserves_existing_grants_claim() {
+        // If the builder already has GRANTS set via .custom(...), the
+        // synthesizer MUST NOT overwrite it.
+        let signing_key = Ed25519SigningKey::generate();
+        let now = Utc::now();
+        let custom_grant = ciborium::Value::Array(vec![ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("capability".into()),
+                ciborium::Value::Text("cap:prewritten".into()),
+            ),
+            (
+                ciborium::Value::Text("operation".into()),
+                ciborium::Value::Text("op:prewritten".into()),
+            ),
+        ])]);
+        let mut builder = CapabilityTokenBuilder::new()
+            .capability_id("cap:test") // NOT "cap:prewritten" - must be ignored
+            .zone_id("z:work")
+            .operations(&["op:test"]) // same — must be ignored in favor of custom GRANTS
+            .validity(now, now + Duration::hours(1));
+        builder.claims = builder.claims.custom(fcp2_claims::GRANTS, custom_grant);
+        let cose = builder.sign(&signing_key).expect("sign");
+
+        let claims = cose.verify(&signing_key.verifying_key()).expect("verify");
+        let grants = claims.get(fcp2_claims::GRANTS).expect("grants");
+        let ciborium::Value::Array(arr) = grants else { panic!() };
+        assert_eq!(arr.len(), 1, "must not overwrite pre-set GRANTS");
+        let ciborium::Value::Map(map) = &arr[0] else { panic!() };
+        let (_, cap) = map.iter().find(|(k, _)| matches!(k, ciborium::Value::Text(s) if s == "capability")).unwrap();
+        assert!(matches!(cap, ciborium::Value::Text(s) if s == "cap:prewritten"));
+    }
 
     // ── 8n0rm.4: typed AuthClaims ↔ CapabilityTokenBuilder interop ────────
 

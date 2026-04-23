@@ -512,7 +512,21 @@ async fn send_message_rate_limit_preserves_retry_after() {
         _ => panic!("unexpected request index {idx}"),
     });
     let mut connector = DiscordConnector::new();
-    setup_configure(&mut connector, fake_server.url()).await;
+    connector
+        .handle_configure(json!({
+            "bot_credential": "test_token",
+            "api_url": fake_server.url(),
+            "gateway_url": "ws://127.0.0.1:1/",
+            "intents": ALL_REQUIRED_INTENTS,
+            "retry": {
+                "max_attempts": 0,
+                "initial_delay_ms": 10,
+                "max_delay_ms": 100,
+                "jitter": 0.0
+            }
+        }))
+        .await
+        .expect("configure should succeed");
     let signing_key = setup_handshake(&mut connector, &["discord.send"]).await;
 
     let token = generate_valid_token(&signing_key, "discord.send_message");
@@ -529,17 +543,81 @@ async fn send_message_rate_limit_preserves_retry_after() {
         .expect_err("429 response must surface as an error");
 
     match err {
-        fcp_core::FcpError::External {
-            service,
-            retryable,
-            retry_after,
-            ..
-        } => {
-            assert_eq!(service, "discord");
-            assert!(retryable, "429 must remain retryable");
-            assert_eq!(retry_after, Some(7.0));
+        fcp_core::FcpError::RateLimited { retry_after_ms, .. } => {
+            assert_eq!(retry_after_ms, 7_000);
         }
-        other => panic!("expected External rate-limit error, got {other:?}"),
+        other => panic!("expected RateLimited, got {other:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_message_rate_limit_uses_body_retry_after_without_header() {
+    let fake_server = StructuredFakeHttpServer::spawn(2, |idx, request| match idx {
+        0 => {
+            assert_eq!(request.method, "GET");
+            assert_eq!(request.path, "/users/@me");
+            StructuredHttpResponse::json(
+                200,
+                json!({
+                    "id": "123456789",
+                    "username": "TestBot",
+                    "discriminator": "0",
+                    "bot": true
+                }),
+            )
+        }
+        1 => {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/channels/111/messages");
+            StructuredHttpResponse {
+                status: 429,
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: json!({
+                    "message": "Too Many Requests",
+                    "retry_after": 1.5
+                })
+                .to_string()
+                .into_bytes(),
+            }
+        }
+        _ => panic!("unexpected request index {idx}"),
+    });
+    let mut connector = DiscordConnector::new();
+    connector
+        .handle_configure(json!({
+            "bot_credential": "test_token",
+            "api_url": fake_server.url(),
+            "gateway_url": "ws://127.0.0.1:1/",
+            "intents": ALL_REQUIRED_INTENTS,
+            "retry": {
+                "max_attempts": 0,
+                "initial_delay_ms": 10,
+                "max_delay_ms": 100,
+                "jitter": 0.0
+            }
+        }))
+        .await
+        .expect("configure should succeed");
+    let signing_key = setup_handshake(&mut connector, &["discord.send"]).await;
+
+    let token = generate_valid_token(&signing_key, "discord.send_message");
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "111",
+                "content": "Hello Discord!"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("body-only 429 response must surface as an error");
+
+    match err {
+        fcp_core::FcpError::RateLimited { retry_after_ms, .. } => {
+            assert_eq!(retry_after_ms, 1_500);
+        }
+        other => panic!("expected RateLimited, got {other:?}"),
     }
 }
 

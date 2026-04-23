@@ -258,7 +258,7 @@ impl DiscordApiClient {
     fn handle_no_response(response: &HttpResponse) -> DiscordResult<()> {
         if response.status == STATUS_TOO_MANY_REQUESTS {
             return Err(DiscordError::RateLimited {
-                retry_after: Self::retry_after_seconds(response),
+                retry_after: Self::rate_limit_retry_after_seconds(response),
             });
         }
 
@@ -272,7 +272,7 @@ impl DiscordApiClient {
     fn handle_response<T: DeserializeOwned>(response: &HttpResponse) -> DiscordResult<T> {
         if response.status == STATUS_TOO_MANY_REQUESTS {
             return Err(DiscordError::RateLimited {
-                retry_after: Self::retry_after_seconds(response),
+                retry_after: Self::rate_limit_retry_after_seconds(response),
             });
         }
 
@@ -306,10 +306,20 @@ impl DiscordApiClient {
         }
     }
 
-    fn retry_after_seconds(response: &HttpResponse) -> f64 {
+    fn rate_limit_retry_after_seconds(response: &HttpResponse) -> f64 {
+        #[derive(Deserialize)]
+        struct DiscordRateLimitBody {
+            retry_after: Option<f64>,
+        }
+
         response
             .header_value("retry-after")
             .and_then(|value| value.parse::<f64>().ok())
+            .or_else(|| {
+                serde_json::from_slice::<DiscordRateLimitBody>(response.bytes())
+                    .ok()
+                    .and_then(|body| body.retry_after)
+            })
             .unwrap_or(30.0)
     }
 
@@ -807,6 +817,33 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, DiscordError::RateLimited { retry_after } if retry_after == 5.0));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_rate_limited_uses_body_retry_after_without_header() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/users/@me"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(serde_json::json!({
+                "message": "You are being rate limited.",
+                "retry_after": 1.5,
+                "global": false
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let config = test_config(&mock_server);
+        let client = DiscordApiClient::new(&config).unwrap();
+
+        let result = client.get_current_user().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(
+            err,
+            DiscordError::RateLimited { retry_after }
+            if (retry_after - 1.5).abs() < f64::EPSILON
+        ));
     }
 
     #[fcp_async_core::runtime::test]

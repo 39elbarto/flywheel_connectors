@@ -59,6 +59,8 @@ pub enum DenyReason {
     PortNotAllowed,
     /// IP literal used when denied.
     IpLiteralDenied,
+    /// Resolved IP is outside the configured `ip_allow` set (br-45tjy).
+    IpNotAllowed,
     /// Localhost access denied.
     LocalhostDenied,
     /// Private range (RFC1918) access denied.
@@ -729,6 +731,11 @@ impl EgressGuard {
     /// Validate resolved IPs from DNS resolution.
     ///
     /// Checks all resolved IPs against constraints and enforces `dns_max_ips`.
+    /// When `constraints.ip_allow` is non-empty, EVERY resolved IP must
+    /// be a member of the allow-list (br-45tjy). Previously only the
+    /// CIDR deny rules + tailnet/private/loopback flags were enforced
+    /// post-DNS, which let a hostname that happened to resolve to a
+    /// public IP outside `ip_allow` bypass the explicit pin.
     ///
     /// # Errors
     ///
@@ -752,11 +759,39 @@ impl EgressGuard {
         let mut allowed_ips = Vec::with_capacity(ips.len());
         for ip in ips {
             self.check_ip_constraints(*ip, constraints)?;
+            if !constraints.ip_allow.is_empty() && !ip_allow_contains(&constraints.ip_allow, *ip) {
+                return Err(EgressError::Denied {
+                    reason: format!(
+                        "resolved IP {ip} not in ip_allow (size {})",
+                        constraints.ip_allow.len()
+                    ),
+                    code: DenyReason::IpNotAllowed,
+                });
+            }
             allowed_ips.push(*ip);
         }
 
         Ok(allowed_ips)
     }
+}
+
+/// Check whether `ip` is a member of the configured `ip_allow` list.
+///
+/// Normalizes IPv4-mapped IPv6 (`::ffff:x.x.x.x`) to pure IPv4 before
+/// comparison so an attacker-controlled resolver cannot bypass an
+/// IPv4-only allow-list by returning an IPv4-mapped AAAA record.
+fn ip_allow_contains(ip_allow: &[IpAddr], ip: IpAddr) -> bool {
+    let normalized = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        IpAddr::V4(_) => ip,
+    };
+    ip_allow.iter().any(|entry| {
+        let entry_normalized = match *entry {
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(*entry, IpAddr::V4),
+            IpAddr::V4(_) => *entry,
+        };
+        entry_normalized == normalized
+    })
 }
 
 // ============================================================================
@@ -4792,5 +4827,104 @@ mod tests {
     #[test]
     fn test_is_hostname_canonical_single_word() {
         assert!(is_hostname_canonical("localhost"));
+    }
+
+    // === br-45tjy: ip_allow enforced against every DNS-resolved IP ===
+
+    #[test]
+    fn validate_dns_resolution_rejects_public_ip_outside_ip_allow() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        // Pin the allow-list to a single public IP — DNS returning any
+        // other public address MUST be rejected pre-45tjy this slipped
+        // through because only CIDR deny rules were checked post-DNS.
+        constraints.ip_allow = vec!["93.184.216.34".parse().unwrap()];
+
+        let ips = vec!["93.184.216.34".parse().unwrap(), "8.8.8.8".parse().unwrap()];
+        let err = guard
+            .validate_dns_resolution(&ips, &constraints)
+            .expect_err("DNS answer outside ip_allow must fail closed");
+        match err {
+            EgressError::Denied { reason, code } => {
+                assert_eq!(code, DenyReason::IpNotAllowed);
+                assert!(reason.contains("8.8.8.8"), "reason must name offending IP: {reason}");
+            }
+            other => panic!("expected Denied{{IpNotAllowed}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_dns_resolution_accepts_every_ip_when_ip_allow_is_empty() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        assert!(constraints.ip_allow.is_empty(), "baseline: allow-list empty");
+        // Any public IPv4 that is not localhost / private / tailnet
+        // must pass when ip_allow is unset — no regression on the open
+        // default.
+        constraints.deny_localhost = false;
+        constraints.deny_private_ranges = false;
+        constraints.deny_tailnet_ranges = false;
+        let ips = vec!["8.8.8.8".parse().unwrap(), "1.1.1.1".parse().unwrap()];
+        let ok = guard
+            .validate_dns_resolution(&ips, &constraints)
+            .expect("empty ip_allow => open default");
+        assert_eq!(ok.len(), 2);
+    }
+
+    #[test]
+    fn validate_dns_resolution_accepts_only_listed_ips() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.ip_allow = vec![
+            "93.184.216.34".parse().unwrap(),
+            "2606:2800:220:1:248:1893:25c8:1946".parse().unwrap(),
+        ];
+        let ips = vec![
+            "93.184.216.34".parse().unwrap(),
+            "2606:2800:220:1:248:1893:25c8:1946".parse().unwrap(),
+        ];
+        let ok = guard
+            .validate_dns_resolution(&ips, &constraints)
+            .expect("all resolved IPs on the allow-list must be accepted");
+        assert_eq!(ok.len(), 2);
+    }
+
+    #[test]
+    fn validate_dns_resolution_rejects_ipv4_mapped_ipv6_outside_ip_allow() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        // ip_allow pinned to a pure IPv4; an IPv4-mapped IPv6 for a
+        // DIFFERENT address must be rejected (mapping must not become
+        // an escape hatch).
+        constraints.ip_allow = vec!["93.184.216.34".parse().unwrap()];
+        let ips = vec!["::ffff:8.8.8.8".parse().unwrap()];
+        let err = guard
+            .validate_dns_resolution(&ips, &constraints)
+            .expect_err("IPv4-mapped IPv6 for an unlisted address must fail closed");
+        assert!(matches!(err, EgressError::Denied { code: DenyReason::IpNotAllowed, .. }));
+    }
+
+    #[test]
+    fn validate_dns_resolution_accepts_ipv4_mapped_ipv6_of_listed_ipv4() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.ip_allow = vec!["93.184.216.34".parse().unwrap()];
+        // The resolver returned the IPv4-mapped IPv6 form of the listed
+        // IPv4 address — the normalization path must accept it.
+        let ips = vec!["::ffff:93.184.216.34".parse().unwrap()];
+        let ok = guard
+            .validate_dns_resolution(&ips, &constraints)
+            .expect("IPv4-mapped IPv6 of an allow-listed IPv4 must be accepted");
+        assert_eq!(ok.len(), 1);
+    }
+
+    #[test]
+    fn ip_allow_contains_normalizes_ipv4_mapped_v6_in_allow_list() {
+        let allow: Vec<IpAddr> = vec!["::ffff:93.184.216.34".parse().unwrap()];
+        let pure_v4: IpAddr = "93.184.216.34".parse().unwrap();
+        assert!(
+            ip_allow_contains(&allow, pure_v4),
+            "mapped v6 in allow-list must match pure v4 resolution"
+        );
     }
 }

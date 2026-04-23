@@ -14757,8 +14757,13 @@ fn verify_registry_attestation(
         .verify(&signing_bytes, &signature)
         .context("registry attestation signature verification failed")?;
 
+    // SECURITY: tuf_verified / sigstore_verified stay false — this path
+    // only validates the publisher signature, not TUF or Sigstore
+    // attestations (br-pcmm8).
     Ok(RegistrySupplyChainEvidence {
         transparency_log_present: false,
+        tuf_verified: false,
+        sigstore_verified: false,
         attestations: vec![RegistryAttestationEvidence {
             attestation_type: fcp_manifest::AttestationType::InToto,
             slsa_level: Some(attestation.slsa_level),

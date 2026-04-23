@@ -649,8 +649,16 @@ fn build_attestation(
 fn build_registry_supply_chain_evidence(
     attestation: &SupplyChainAttestation,
 ) -> SupplyChainEvidence {
+    // SECURITY: tuf_verified / sigstore_verified stay false here — this
+    // function synthesizes evidence from a SupplyChainAttestation parsed
+    // from CLI input, not from real TUF or Sigstore verifier adapters.
+    // Deployments that set require_tuf / require_sigstore will correctly
+    // fail until an adapter wires those booleans to real attestations
+    // (br-pcmm8).
     SupplyChainEvidence {
         transparency_log_present: false,
+        tuf_verified: false,
+        sigstore_verified: false,
         attestations: vec![AttestationEvidence {
             attestation_type: AttestationType::InToto,
             slsa_level: Some(attestation.slsa_level),

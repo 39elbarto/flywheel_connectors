@@ -549,6 +549,8 @@ min_slsa_level = 3
     // Evidence with SLSA level 1 (below required 3)
     let evidence = SupplyChainEvidence {
         transparency_log_present: false,
+        tuf_verified: false,
+        sigstore_verified: false,
         attestations: vec![AttestationEvidence {
             attestation_type: AttestationType::InToto,
             slsa_level: Some(1),
@@ -599,6 +601,8 @@ trusted_builders = ["github-actions"]
 
     let evidence = SupplyChainEvidence {
         transparency_log_present: false,
+        tuf_verified: false,
+        sigstore_verified: false,
         attestations: vec![AttestationEvidence {
             attestation_type: AttestationType::InToto,
             slsa_level: None,
@@ -648,6 +652,8 @@ require_attestation_types = ["in-toto"]
 
     let evidence = SupplyChainEvidence {
         transparency_log_present: false,
+        tuf_verified: false,
+        sigstore_verified: false,
         attestations: vec![AttestationEvidence {
             attestation_type: AttestationType::InToto,
             slsa_level: Some(3),
@@ -2222,6 +2228,8 @@ require_attestation_types = ["in-toto"]
     let verifier = RegistryVerifier::new(policy);
     let evidence = SupplyChainEvidence {
         transparency_log_present: false,
+        tuf_verified: false,
+        sigstore_verified: false,
         attestations: vec![AttestationEvidence {
             attestation_type: AttestationType::InToto,
             slsa_level: Some(2),

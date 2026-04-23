@@ -286,9 +286,31 @@ pub struct RegistryTrustPolicy {
 }
 
 /// Evidence from external supply-chain verification.
+///
+/// Populated ONLY by real verifier adapters (see
+/// [`TransparencyLogVerifier`], [`TufClient`], [`SigstoreVerifier`]).
+/// The `*_verified` booleans are load-bearing: when the corresponding
+/// [`SupplyChainVerificationConfig`] flag (`require_tuf`,
+/// `require_sigstore`, `require_transparency`) is set, enforcement
+/// requires the matching evidence bool to be `true`. A default-constructed
+/// `SupplyChainEvidence` carries no verification claims and MUST NOT pass
+/// a `require_*` gate. See the `enforce_supply_chain_verification_config`
+/// checks below.
+///
+/// Historical note (br-pcmm8): these fields were added after a review
+/// found the pre-existing presence-only checks (evidence.is_some()) were
+/// trivially bypassable — any default evidence satisfied the config.
 #[derive(Debug, Clone, Default)]
 pub struct SupplyChainEvidence {
     pub transparency_log_present: bool,
+    /// True iff a TUF verifier adapter has validated the bundle against
+    /// pinned trust roots. Required when `config.require_tuf` or
+    /// `config.tuf_pinned_root` is set.
+    pub tuf_verified: bool,
+    /// True iff a Sigstore verifier adapter has validated the bundle's
+    /// certificate + Rekor inclusion proof. Required when
+    /// `config.require_sigstore` is set.
+    pub sigstore_verified: bool,
     pub attestations: Vec<AttestationEvidence>,
 }
 
@@ -1699,12 +1721,23 @@ fn enforce_supply_chain_verification_config(
         }
     }
 
-    if config.tuf_verification_required() && evidence.is_none() {
-        return Err(RegistryError::TufVerificationRequired);
+    if config.tuf_verification_required() {
+        // A TUF verifier adapter MUST have attested the bundle. Presence
+        // of a default SupplyChainEvidence is not enough — the bool must
+        // be true, meaning the adapter succeeded (br-pcmm8).
+        let evidence = evidence.ok_or(RegistryError::TufVerificationRequired)?;
+        if !evidence.tuf_verified {
+            return Err(RegistryError::TufVerificationRequired);
+        }
     }
 
-    if config.sigstore_verification_required() && evidence.is_none() {
-        return Err(RegistryError::SigstoreVerificationRequired);
+    if config.sigstore_verification_required() {
+        // Same for Sigstore: the bundle must carry a verified Sigstore
+        // attestation, not merely some SupplyChainEvidence struct.
+        let evidence = evidence.ok_or(RegistryError::SigstoreVerificationRequired)?;
+        if !evidence.sigstore_verified {
+            return Err(RegistryError::SigstoreVerificationRequired);
+        }
     }
 
     Ok(())
@@ -2659,6 +2692,8 @@ sig = "{sig}"
 
                 let evidence = SupplyChainEvidence {
                     transparency_log_present: false,
+                    tuf_verified: false,
+                    sigstore_verified: false,
                     attestations: vec![AttestationEvidence {
                         attestation_type: AttestationType::InToto,
                         slsa_level: None,
@@ -2706,6 +2741,8 @@ sig = "{sig}"
 
                 let evidence = SupplyChainEvidence {
                     transparency_log_present: false,
+                    tuf_verified: false,
+                    sigstore_verified: false,
                     attestations: vec![AttestationEvidence {
                         attestation_type: AttestationType::InToto,
                         slsa_level: None,
@@ -3099,6 +3136,73 @@ sig = "{sig}"
         );
     }
 
+    /// Regression for br-pcmm8: a default-constructed SupplyChainEvidence
+    /// (tuf_verified=false) MUST NOT satisfy `require_tuf`. Before the fix,
+    /// the enforcement was presence-only (evidence.is_some()), so any
+    /// passed-in evidence bypassed the gate.
+    #[test]
+    fn verify_bundle_rejects_unverified_tuf_evidence() {
+        let config = SupplyChainVerificationConfig {
+            require_tuf: true,
+            ..SupplyChainVerificationConfig::default()
+        };
+        let manifest = ConnectorManifest::parse_str(&unsigned_manifest_toml("")).unwrap();
+
+        // Evidence carrying NO verified claims (the bypass payload).
+        let evidence = SupplyChainEvidence {
+            transparency_log_present: false,
+            tuf_verified: false,
+            sigstore_verified: false,
+            attestations: vec![],
+        };
+
+        let err = enforce_supply_chain_verification_config(&config, &manifest, Some(&evidence))
+            .expect_err("unverified evidence must be rejected");
+        assert!(
+            matches!(err, RegistryError::TufVerificationRequired),
+            "expected TufVerificationRequired, got {err:?}"
+        );
+
+        // Positive control: flipping tuf_verified to true satisfies the gate.
+        let verified_evidence = SupplyChainEvidence {
+            tuf_verified: true,
+            ..evidence
+        };
+        enforce_supply_chain_verification_config(&config, &manifest, Some(&verified_evidence))
+            .expect("tuf_verified=true must satisfy require_tuf");
+    }
+
+    /// Regression for br-pcmm8 (sigstore side).
+    #[test]
+    fn verify_bundle_rejects_unverified_sigstore_evidence() {
+        let config = SupplyChainVerificationConfig {
+            require_sigstore: true,
+            ..SupplyChainVerificationConfig::default()
+        };
+        let manifest = ConnectorManifest::parse_str(&unsigned_manifest_toml("")).unwrap();
+
+        let evidence = SupplyChainEvidence {
+            transparency_log_present: false,
+            tuf_verified: false,
+            sigstore_verified: false,
+            attestations: vec![],
+        };
+
+        let err = enforce_supply_chain_verification_config(&config, &manifest, Some(&evidence))
+            .expect_err("unverified sigstore evidence must be rejected");
+        assert!(
+            matches!(err, RegistryError::SigstoreVerificationRequired),
+            "expected SigstoreVerificationRequired, got {err:?}"
+        );
+
+        let verified_evidence = SupplyChainEvidence {
+            sigstore_verified: true,
+            ..evidence
+        };
+        enforce_supply_chain_verification_config(&config, &manifest, Some(&verified_evidence))
+            .expect("sigstore_verified=true must satisfy require_sigstore");
+    }
+
     #[test]
     fn verify_bundle_rejects_transparency_log_missing() {
         run_registry_test(
@@ -3234,6 +3338,8 @@ require_attestation_types = ["in-toto"]
 
                 let evidence = SupplyChainEvidence {
                     transparency_log_present: false,
+                    tuf_verified: false,
+                    sigstore_verified: false,
                     attestations: vec![AttestationEvidence {
                         attestation_type: AttestationType::CodeReview,
                         slsa_level: Some(2),
@@ -3293,6 +3399,8 @@ min_slsa_level = 3
 
                 let evidence = SupplyChainEvidence {
                     transparency_log_present: false,
+                    tuf_verified: false,
+                    sigstore_verified: false,
                     attestations: vec![AttestationEvidence {
                         attestation_type: AttestationType::InToto,
                         slsa_level: Some(2),
@@ -3352,6 +3460,8 @@ trusted_builders = ["trusted-builder"]
 
                 let evidence = SupplyChainEvidence {
                     transparency_log_present: false,
+                    tuf_verified: false,
+                    sigstore_verified: false,
                     attestations: vec![AttestationEvidence {
                         attestation_type: AttestationType::InToto,
                         slsa_level: Some(3),
@@ -4005,6 +4115,8 @@ trusted_builders = ["trusted-builder"]
 
                 let evidence = SupplyChainEvidence {
                     transparency_log_present: false,
+                    tuf_verified: false,
+                    sigstore_verified: false,
                     attestations: vec![AttestationEvidence {
                         attestation_type: AttestationType::InToto,
                         slsa_level: Some(3),
@@ -4074,6 +4186,8 @@ sig = "{}"
 
                 let evidence = SupplyChainEvidence {
                     transparency_log_present: true,
+                    tuf_verified: false,
+                    sigstore_verified: false,
                     attestations: vec![],
                 };
 
@@ -4239,6 +4353,8 @@ require_attestation_types = ["in-toto", "code-review"]
 
                 let evidence = SupplyChainEvidence {
                     transparency_log_present: false,
+                    tuf_verified: false,
+                    sigstore_verified: false,
                     attestations: vec![
                         AttestationEvidence {
                             attestation_type: AttestationType::InToto,
@@ -5545,6 +5661,8 @@ sig = "base64:{sig_b64}"
 
                 let evidence = SupplyChainEvidence {
                     transparency_log_present: false,
+                    tuf_verified: false,
+                    sigstore_verified: false,
                     attestations: vec![],
                 };
 
@@ -5579,6 +5697,8 @@ sig = "base64:{sig_b64}"
 
                 let evidence = SupplyChainEvidence {
                     transparency_log_present: false,
+                    tuf_verified: false,
+                    sigstore_verified: false,
                     attestations: vec![AttestationEvidence {
                         attestation_type: AttestationType::InToto,
                         slsa_level: None, // no level provided
@@ -5621,6 +5741,8 @@ sig = "base64:{sig_b64}"
 
                 let evidence = SupplyChainEvidence {
                     transparency_log_present: false,
+                    tuf_verified: false,
+                    sigstore_verified: false,
                     attestations: vec![AttestationEvidence {
                         attestation_type: AttestationType::InToto,
                         slsa_level: None,
@@ -6923,6 +7045,8 @@ sig = "{reg_sig}"
 
                 let evidence = SupplyChainEvidence {
                     transparency_log_present: false,
+                    tuf_verified: false,
+                    sigstore_verified: false,
                     attestations: vec![
                         AttestationEvidence {
                             attestation_type: AttestationType::InToto,
@@ -6972,6 +7096,8 @@ sig = "{reg_sig}"
 
                 let evidence = SupplyChainEvidence {
                     transparency_log_present: false,
+                    tuf_verified: false,
+                    sigstore_verified: false,
                     attestations: vec![AttestationEvidence {
                         attestation_type: AttestationType::InToto,
                         slsa_level: Some(3),
@@ -7681,6 +7807,8 @@ sig = "{reg_sig}"
     fn supply_chain_evidence_with_attestations() {
         let evidence = SupplyChainEvidence {
             transparency_log_present: true,
+            tuf_verified: false,
+            sigstore_verified: false,
             attestations: vec![
                 AttestationEvidence {
                     attestation_type: AttestationType::InToto,
@@ -8643,6 +8771,8 @@ sig = "{}"
 
                 let evidence = SupplyChainEvidence {
                     transparency_log_present: true,
+                    tuf_verified: false,
+                    sigstore_verified: false,
                     attestations: vec![
                         AttestationEvidence {
                             attestation_type: AttestationType::InToto,
@@ -8710,6 +8840,8 @@ trusted_builders = ["trusted-ci"]
                 // Only provide in-toto, not code-review
                 let evidence = SupplyChainEvidence {
                     transparency_log_present: false,
+                    tuf_verified: false,
+                    sigstore_verified: false,
                     attestations: vec![AttestationEvidence {
                         attestation_type: AttestationType::InToto,
                         slsa_level: Some(3),
@@ -9143,6 +9275,8 @@ trusted_builders = ["trusted-ci"]
     fn supply_chain_evidence_clone_independence() {
         let evidence = SupplyChainEvidence {
             transparency_log_present: true,
+            tuf_verified: false,
+            sigstore_verified: false,
             attestations: vec![AttestationEvidence {
                 attestation_type: AttestationType::InToto,
                 slsa_level: Some(3),
@@ -9160,6 +9294,8 @@ trusted_builders = ["trusted-ci"]
     fn supply_chain_evidence_debug_format() {
         let evidence = SupplyChainEvidence {
             transparency_log_present: true,
+            tuf_verified: false,
+            sigstore_verified: false,
             attestations: vec![],
         };
         let debug = format!("{evidence:?}");
@@ -9179,6 +9315,8 @@ trusted_builders = ["trusted-ci"]
             .collect();
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,
+            tuf_verified: false,
+            sigstore_verified: false,
             attestations,
         };
         assert_eq!(evidence.attestations.len(), 50);
@@ -10350,6 +10488,8 @@ trusted_builders = ["trusted-ci"]
         });
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,
+            tuf_verified: false,
+            sigstore_verified: false,
             attestations: vec![AttestationEvidence {
                 attestation_type: AttestationType::InToto,
                 slsa_level: Some(3), // exact match
@@ -10373,6 +10513,8 @@ trusted_builders = ["trusted-ci"]
         });
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,
+            tuf_verified: false,
+            sigstore_verified: false,
             attestations: vec![AttestationEvidence {
                 attestation_type: AttestationType::InToto,
                 slsa_level: Some(3),
@@ -10403,6 +10545,8 @@ trusted_builders = ["trusted-ci"]
         });
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,
+            tuf_verified: false,
+            sigstore_verified: false,
             attestations: vec![AttestationEvidence {
                 attestation_type: AttestationType::InToto,
                 slsa_level: Some(2), // one below
@@ -10430,6 +10574,8 @@ trusted_builders = ["trusted-ci"]
         });
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,
+            tuf_verified: false,
+            sigstore_verified: false,
             attestations: vec![AttestationEvidence {
                 attestation_type: AttestationType::InToto,
                 slsa_level: Some(4), // well above minimum
@@ -10452,6 +10598,8 @@ trusted_builders = ["trusted-ci"]
         });
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,
+            tuf_verified: false,
+            sigstore_verified: false,
             attestations: vec![AttestationEvidence {
                 attestation_type: AttestationType::InToto,
                 slsa_level: Some(0),
@@ -10476,6 +10624,8 @@ trusted_builders = ["trusted-ci"]
         });
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,
+            tuf_verified: false,
+            sigstore_verified: false,
             attestations: vec![AttestationEvidence {
                 attestation_type: AttestationType::InToto,
                 slsa_level: None,
@@ -10499,6 +10649,8 @@ trusted_builders = ["trusted-ci"]
         });
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,
+            tuf_verified: false,
+            sigstore_verified: false,
             attestations: vec![AttestationEvidence {
                 attestation_type: AttestationType::InToto,
                 slsa_level: None,
@@ -10523,6 +10675,8 @@ trusted_builders = ["trusted-ci"]
         });
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,
+            tuf_verified: false,
+            sigstore_verified: false,
             attestations: vec![AttestationEvidence {
                 attestation_type: AttestationType::InToto,
                 slsa_level: None,
@@ -10546,6 +10700,8 @@ trusted_builders = ["trusted-ci"]
         });
         let evidence = SupplyChainEvidence {
             transparency_log_present: false,
+            tuf_verified: false,
+            sigstore_verified: false,
             attestations: vec![
                 AttestationEvidence {
                     attestation_type: AttestationType::InToto,
@@ -11597,6 +11753,8 @@ trusted_builders = ["trusted-ci"]
     fn supply_chain_evidence_transparency_true_no_attestations() {
         let evidence = SupplyChainEvidence {
             transparency_log_present: true,
+            tuf_verified: false,
+            sigstore_verified: false,
             attestations: vec![],
         };
         assert!(evidence.transparency_log_present);

@@ -206,6 +206,13 @@ fn build_token(
     operations: &[&str],
 ) -> CapabilityToken {
     let now = Utc::now();
+    let constraints = fcp_core::CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut constraints_cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut constraints_cbor)
+        .expect("serialize constraints to CBOR");
     let cose = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -213,6 +220,7 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
+        .constraints_cbor(&constraints_cbor)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -418,6 +426,18 @@ async fn slack_allow_valid_token_connector_suite_passes() {
     assert_eq!(
         invoke_entry.context.get("invoke_status"),
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
+    );
+    mock.assert_request_count(1).await;
+    let received = mock.received_requests().await;
+    let history_request = received
+        .iter()
+        .find(|request| request.method.as_str() == "GET")
+        .expect("expected GET request");
+    assert_eq!(history_request.url.path(), "/conversations.history");
+    let query = history_request.url.query().expect("channel query");
+    assert!(
+        query.contains("channel=C0123456789"),
+        "expected channel query fingerprint, got {query}"
     );
 }
 

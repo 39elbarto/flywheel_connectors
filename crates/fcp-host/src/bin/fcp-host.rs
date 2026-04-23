@@ -112,7 +112,8 @@ struct SubprocessConnector {
 
 #[derive(Debug)]
 struct ConnectorRpcRequest {
-    request: serde_json::Value,
+    method: String,
+    params: serde_json::Value,
     response_tx: oneshot::Sender<std::io::Result<serde_json::Value>>,
 }
 
@@ -160,7 +161,7 @@ impl SubprocessConnector {
         let runner_task = task::spawn(async move {
             let mut runner = runner;
             while let Some(request) = runner_rx.recv().await {
-                let response = runner.request(&request.request).await;
+                let response = runner.request(&request.method, request.params).await;
                 let _ = request.response_tx.send(response);
             }
         });
@@ -191,17 +192,12 @@ impl SubprocessConnector {
         let connector_id = self.summary.id.clone();
         self.resilience
             .execute(&connector_id, operation_priority(method), method, async {
-                let request = json!({
-                    "jsonrpc": "2.0",
-                    "id": RequestId::random().0,
-                    "method": method,
-                    "params": params,
-                });
                 let (response_tx, response_rx) = oneshot::channel();
                 fcp_async_core::time::timeout(
                     CONNECTOR_RPC_IO_TIMEOUT,
                     self.runner_tx.send(ConnectorRpcRequest {
-                        request,
+                        method: method.to_string(),
+                        params,
                         response_tx,
                     }),
                 )
@@ -730,18 +726,38 @@ struct ConnectorProcessRunner {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     _stderr_task: JoinHandle<()>,
+    poisoned: bool,
+    epoch: u64,
+    next_request_seq: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseIdDisposition {
+    Matched,
+    StaleEpoch,
 }
 
 const CONNECTOR_RPC_QUEUE_CAPACITY: usize = 64;
 const CONNECTOR_RPC_IO_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn connector_io_timeout_error(phase: &'static str) -> std::io::Error {
+fn connector_io_timeout_error(phase: &'static str, timeout: Duration) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::TimedOut,
-        format!(
-            "connector {phase} timed out after {}s",
-            CONNECTOR_RPC_IO_TIMEOUT.as_secs()
-        ),
+        format!("connector {phase} timed out after {}s", timeout.as_secs()),
+    )
+}
+
+fn connector_transport_desynchronized_error(reason: impl Into<String>) -> std::io::Error {
+    std::io::Error::other(format!(
+        "connector transport desynchronized: {}; restart connector before issuing another RPC",
+        reason.into()
+    ))
+}
+
+fn connector_transport_poisoned_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::BrokenPipe,
+        "connector transport is desynchronized after a previous failed RPC; restart connector before issuing another RPC",
     )
 }
 
@@ -795,30 +811,40 @@ impl ConnectorProcessRunner {
             stdin,
             stdout: BufReader::new(stdout),
             _stderr_task: stderr_task,
+            poisoned: false,
+            epoch: 0,
+            next_request_seq: 0,
         })
     }
 
-    async fn send_json(&mut self, value: &serde_json::Value) -> std::io::Result<()> {
+    fn next_request_id(&mut self) -> String {
+        let request_id = format!("{}:{}", self.epoch, self.next_request_seq);
+        self.next_request_seq = self.next_request_seq.saturating_add(1);
+        request_id
+    }
+
+    async fn send_json(
+        &mut self,
+        value: &serde_json::Value,
+        io_timeout: Duration,
+    ) -> std::io::Result<()> {
         let line = serde_json::to_string(value)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-        fcp_async_core::time::timeout(CONNECTOR_RPC_IO_TIMEOUT, async {
+        fcp_async_core::time::timeout(io_timeout, async {
             self.stdin.write_all(line.as_bytes()).await?;
             self.stdin.write_all(b"\n").await?;
             self.stdin.flush().await
         })
         .await
-        .map_err(|_| connector_io_timeout_error("stdin write"))??;
+        .map_err(|_| connector_io_timeout_error("stdin write", io_timeout))??;
         Ok(())
     }
 
-    async fn read_json(&mut self) -> std::io::Result<serde_json::Value> {
+    async fn read_json(&mut self, io_timeout: Duration) -> std::io::Result<serde_json::Value> {
         let mut line = String::new();
-        let bytes = fcp_async_core::time::timeout(
-            CONNECTOR_RPC_IO_TIMEOUT,
-            self.stdout.read_line(&mut line),
-        )
-        .await
-        .map_err(|_| connector_io_timeout_error("stdout read"))??;
+        let bytes = fcp_async_core::time::timeout(io_timeout, self.stdout.read_line(&mut line))
+            .await
+            .map_err(|_| connector_io_timeout_error("stdout read", io_timeout))??;
         if bytes == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
@@ -829,9 +855,102 @@ impl ConnectorProcessRunner {
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
     }
 
-    async fn request(&mut self, value: &serde_json::Value) -> std::io::Result<serde_json::Value> {
-        self.send_json(value).await?;
-        self.read_json().await
+    fn validate_response_id(
+        expected_id: &str,
+        epoch: u64,
+        response: &serde_json::Value,
+    ) -> std::io::Result<ResponseIdDisposition> {
+        let actual_id = response.get("id").ok_or_else(|| {
+            connector_transport_desynchronized_error(format!(
+                "response missing id for request id {expected_id}"
+            ))
+        })?;
+        if actual_id == expected_id {
+            Ok(ResponseIdDisposition::Matched)
+        } else if response
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|id| id.split_once(':'))
+            .and_then(|(response_epoch, _)| response_epoch.parse::<u64>().ok())
+            .is_some_and(|response_epoch| response_epoch < epoch)
+        {
+            Ok(ResponseIdDisposition::StaleEpoch)
+        } else {
+            Err(connector_transport_desynchronized_error(format!(
+                "response id {actual_id} did not match request id \"{expected_id}\""
+            )))
+        }
+    }
+
+    async fn request(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> std::io::Result<serde_json::Value> {
+        self.request_with_timeout(method, params, CONNECTOR_RPC_IO_TIMEOUT)
+            .await
+    }
+
+    async fn request_with_timeout(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        io_timeout: Duration,
+    ) -> std::io::Result<serde_json::Value> {
+        if self.poisoned {
+            return Err(connector_transport_poisoned_error());
+        }
+
+        let request_epoch = self.epoch;
+        let expected_id = self.next_request_id();
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": expected_id,
+            "method": method,
+            "params": params,
+        });
+
+        if let Err(err) = self.send_json(&request, io_timeout).await {
+            self.poisoned = true;
+            return Err(err);
+        }
+
+        let started_at = std::time::Instant::now();
+        loop {
+            let remaining = io_timeout.saturating_sub(started_at.elapsed());
+            if remaining.is_zero() {
+                self.epoch = self.epoch.saturating_add(1);
+                return Err(connector_io_timeout_error("stdout read", io_timeout));
+            }
+
+            let response = match self.read_json(remaining).await {
+                Ok(response) => response,
+                Err(err) if err.kind() == std::io::ErrorKind::TimedOut => {
+                    self.epoch = self.epoch.saturating_add(1);
+                    return Err(connector_io_timeout_error("stdout read", io_timeout));
+                }
+                Err(err) => {
+                    self.poisoned = true;
+                    return Err(err);
+                }
+            };
+
+            match Self::validate_response_id(&expected_id, request_epoch, &response) {
+                Ok(ResponseIdDisposition::Matched) => return Ok(response),
+                Ok(ResponseIdDisposition::StaleEpoch) => {
+                    tracing::warn!(
+                        expected_request_id = %expected_id,
+                        actual_response_id = ?response.get("id"),
+                        request_epoch,
+                        "discarding late connector RPC response from an earlier timed-out epoch"
+                    );
+                }
+                Err(err) => {
+                    self.poisoned = true;
+                    return Err(err);
+                }
+            }
+        }
     }
 }
 async fn handle_accept_error(err: std::io::Error) {
@@ -6312,32 +6431,57 @@ mod tests {
         .await
         .expect("spawn test connector");
 
-        let configure = json!({
-            "jsonrpc": "2.0",
-            "id": RequestId::random().0,
-            "method": "configure",
-            "params": {},
-        });
-        let configured =
-            fcp_async_core::time::timeout(Duration::from_secs(2), runner.request(&configure))
-                .await
-                .expect("configure should not hang")
-                .expect("configure should succeed");
+        let configured = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            runner.request("configure", json!({})),
+        )
+        .await
+        .expect("configure should not hang")
+        .expect("configure should succeed");
         assert_eq!(configured["result"]["status"], "ok");
 
-        let health = json!({
-            "jsonrpc": "2.0",
-            "id": RequestId::random().0,
-            "method": "health",
-            "params": {},
-        });
-        let health_response =
-            fcp_async_core::time::timeout(Duration::from_secs(2), runner.request(&health))
-                .await
-                .expect("health should not hang")
-                .expect("health should succeed");
+        let health_response = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            runner.request("health", json!({})),
+        )
+        .await
+        .expect("health should not hang")
+        .expect("health should succeed");
         assert_eq!(health_response["result"]["status"]["state"], "ready");
         assert!(health_response["result"]["status"]["error"].is_null());
+    }
+
+    #[cfg(unix)]
+    #[fcp_async_core::runtime::test]
+    async fn connector_process_runner_rejects_mismatched_response_id_and_poisoned_transport() {
+        let script = r#"while IFS= read -r _line; do printf '%s\n' '{"jsonrpc":"2.0","id":"stale","result":{"status":"wrong"}}'; done"#;
+        let args = vec!["-c".to_string(), script.to_string()];
+        let mut runner = ConnectorProcessRunner::spawn("sh", &args, &BTreeMap::new())
+            .await
+            .expect("spawn mismatched-id connector");
+
+        let error = runner
+            .request("health", json!({}))
+            .await
+            .expect_err("mismatched response id must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("response id \"stale\" did not match request id"),
+            "unexpected error: {error}"
+        );
+
+        let retry_error = runner
+            .request("health", json!({}))
+            .await
+            .expect_err("desynchronized transport must stay poisoned");
+        assert_eq!(retry_error.kind(), std::io::ErrorKind::BrokenPipe);
+        assert!(
+            retry_error
+                .to_string()
+                .contains("transport is desynchronized"),
+            "unexpected retry error: {retry_error}"
+        );
     }
 
     #[cfg(unix)]
@@ -6451,7 +6595,8 @@ mod tests {
         let (response_tx, _response_rx) = oneshot::channel();
         runner_tx
             .send(ConnectorRpcRequest {
-                request: json!({}),
+                method: "health".to_string(),
+                params: json!({}),
                 response_tx,
             })
             .await
@@ -6484,6 +6629,38 @@ mod tests {
                 .contains("connector dispatcher queue timed out"),
             "unexpected error: {error}"
         );
+    }
+
+    #[cfg(unix)]
+    #[fcp_async_core::runtime::test]
+    async fn connector_process_runner_discards_late_timeout_reply_from_earlier_epoch() {
+        let script = r#"first=1
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  if [ "$first" -eq 1 ]; then
+    first=0
+    sleep 0.2
+    printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"stale"}}\n' "$id"
+  else
+    printf '{"jsonrpc":"2.0","id":"%s","result":{"status":"fresh"}}\n' "$id"
+  fi
+done"#;
+        let args = vec!["-c".to_string(), script.to_string()];
+        let mut runner = ConnectorProcessRunner::spawn("sh", &args, &BTreeMap::new())
+            .await
+            .expect("spawn timeout connector");
+
+        let timeout_error = runner
+            .request_with_timeout("health", json!({}), Duration::from_millis(50))
+            .await
+            .expect_err("first request should time out");
+        assert_eq!(timeout_error.kind(), std::io::ErrorKind::TimedOut);
+
+        let response = runner
+            .request_with_timeout("health", json!({}), Duration::from_secs(1))
+            .await
+            .expect("late stale reply should be discarded and second request should succeed");
+        assert_eq!(response["result"]["status"], "fresh");
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

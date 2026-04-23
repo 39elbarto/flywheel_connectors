@@ -406,6 +406,12 @@ async fn pandadoc_allow_valid_token_connector_suite_passes() {
         .expect("connector suite run");
 
     assert!(report.passed, "allow suite should pass");
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|request| request.url.path() == "/documents")
+        .count();
+    assert_eq!(hits, 1, "expected exactly one GET to /documents");
     let invoke_entry = report
         .logs
         .iter()

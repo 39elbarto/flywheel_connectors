@@ -480,6 +480,12 @@ async fn onepassword_happy_path_compliance_suite_passes() {
         report.passed,
         "happy path compliance should pass: {report:#?}"
     );
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|request| request.url.path() == "/v1/vaults")
+        .count();
+    assert_eq!(hits, 1, "expected exactly one GET to /v1/vaults");
 }
 
 #[test]

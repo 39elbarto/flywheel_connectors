@@ -358,7 +358,7 @@ impl OAuth2Client {
         })
     }
 
-    /// Generate authorization URL without PKCE.
+    /// Generate authorization URL.
     ///
     /// Returns (`authorization_url`, `state`).
     ///
@@ -393,17 +393,21 @@ impl OAuth2Client {
         ))
     }
 
-    /// Build a one-time authorization session without PKCE.
+    /// Build a one-time authorization session.
     ///
     /// # Errors
     /// Returns an error when the configured authorization endpoint is invalid.
     pub fn authorization_session(&self, scopes: &[&str]) -> OAuthResult<AuthorizationSession> {
         let state = generate_state();
-        let authorization_url = self.build_auth_url(scopes, &state, None)?;
+        let pkce = self
+            .config
+            .use_pkce
+            .then(|| Pkce::with_method(self.config.pkce_method));
+        let authorization_url = self.build_auth_url(scopes, &state, pkce.as_ref())?;
         Ok(AuthorizationSession {
             authorization_url,
             state,
-            pkce: None,
+            pkce,
             consumed: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -491,6 +495,12 @@ impl OAuth2Client {
     /// # Errors
     /// Returns an error when token exchange fails or the response is invalid.
     pub async fn exchange_code(&self, code: &str) -> OAuthResult<OAuthTokens> {
+        if self.config.use_pkce && !self.config.extra_token_params.contains_key("code_verifier") {
+            return Err(OAuthError::InvalidConfig(
+                "authorization_code flow requires PKCE; use exchange_code_with_pkce or supply code_verifier explicitly"
+                    .into(),
+            ));
+        }
         self.exchange_code_internal(code, None).await
     }
 
@@ -512,6 +522,14 @@ impl OAuth2Client {
         code: &str,
         pkce: Option<&Pkce>,
     ) -> OAuthResult<OAuthTokens> {
+        if self.config.use_pkce
+            && pkce.is_none()
+            && !self.config.extra_token_params.contains_key("code_verifier")
+        {
+            return Err(OAuthError::InvalidConfig(
+                "authorization_code flow requires PKCE code_verifier".into(),
+            ));
+        }
         let mut params = HashMap::new();
         params.insert("grant_type", GrantType::AuthorizationCode.to_string());
         params.insert("code", code.to_string());
@@ -1086,7 +1104,8 @@ mod tests {
                 format!("{}/authorize", server.uri()),
                 format!("{}/token", server.uri()),
             )
-            .with_redirect_uri("https://localhost:3000/callback");
+            .with_redirect_uri("https://localhost:3000/callback")
+            .with_pkce(false);
             let client = OAuth2Client::new(config).unwrap();
 
             let tokens = client.exchange_code("auth-code-123").await.unwrap();
@@ -1120,7 +1139,8 @@ mod tests {
                 format!("{}/authorize", server.uri()),
                 format!("{}/token", server.uri()),
             )
-            .with_redirect_uri("https://localhost:3000/callback");
+            .with_redirect_uri("https://localhost:3000/callback")
+            .with_pkce(false);
             let client = OAuth2Client::new(config).unwrap();
 
             let err = client
@@ -1161,7 +1181,8 @@ mod tests {
                 format!("{}/authorize", server.uri()),
                 format!("{}/token", server.uri()),
             )
-            .with_redirect_uri("https://localhost:3000/callback");
+            .with_redirect_uri("https://localhost:3000/callback")
+            .with_pkce(false);
             let client = OAuth2Client::new(config).unwrap();
 
             let err = client
@@ -1568,7 +1589,8 @@ mod tests {
                 format!("{}/authorize", server.uri()),
                 format!("{}/token", server.uri()),
             )
-            .with_redirect_uri("https://localhost:3000/callback");
+            .with_redirect_uri("https://localhost:3000/callback")
+            .with_pkce(false);
             let client = OAuth2Client::new(config).unwrap();
 
             let error = client.exchange_code("expired-code").await.unwrap_err();
@@ -2070,7 +2092,8 @@ mod tests {
                 "secret",
                 format!("{}/authorize", server.uri()),
                 format!("{}/token", server.uri()),
-            );
+            )
+            .with_pkce(false);
             let client = OAuth2Client::new(config).unwrap();
             let result = client.exchange_code("code").await;
             // Should get a TokenExchangeFailed with fallback error parsing
@@ -2101,7 +2124,8 @@ mod tests {
                 format!("{}/authorize", server.uri()),
                 format!("{}/token", server.uri()),
             )
-            .with_token_param("audience", "https://api.example.com");
+            .with_token_param("audience", "https://api.example.com")
+            .with_pkce(false);
             let client = OAuth2Client::new(config).unwrap();
             let tokens = client.exchange_code("code").await.unwrap();
             assert_eq!(tokens.access_token(), "tok-extra");
@@ -2158,7 +2182,8 @@ mod tests {
                 "secret",
                 format!("{}/authorize", server.uri()),
                 format!("{}/token", server.uri()),
-            );
+            )
+            .with_pkce(false);
             let client = OAuth2Client::new(config).unwrap();
             let tokens = client.exchange_code("code").await.unwrap();
             assert!(tokens.refresh_token().is_none());
@@ -2185,7 +2210,8 @@ mod tests {
                 "secret",
                 format!("{}/authorize", server.uri()),
                 format!("{}/token", server.uri()),
-            );
+            )
+            .with_pkce(false);
             let client = OAuth2Client::new(config).unwrap();
             let tokens = client.exchange_code("code").await.unwrap();
             assert_eq!(tokens.scopes(), &["openid", "email", "profile"]);
@@ -2214,7 +2240,8 @@ mod tests {
                 format!("{}/authorize", server.uri()),
                 format!("{}/token", server.uri()),
             )
-            .with_auth_style(AuthStyle::Basic);
+            .with_auth_style(AuthStyle::Basic)
+            .with_pkce(false);
             let client = OAuth2Client::new(config).unwrap();
             let tokens = client.exchange_code("code").await.unwrap();
             assert_eq!(tokens.access_token(), "basic-tok");
@@ -2257,7 +2284,8 @@ mod tests {
                 format!("{}/authorize", server.uri()),
                 format!("{}/token", server.uri()),
             )
-            .with_auth_style(AuthStyle::Basic);
+            .with_auth_style(AuthStyle::Basic)
+            .with_pkce(false);
             let client = OAuth2Client::new(config).unwrap();
             let tokens = client.exchange_code("code").await.unwrap();
             assert_eq!(tokens.access_token(), "basic-tok");
@@ -2534,6 +2562,7 @@ mod tests {
     fn test_authorization_session_is_single_use() {
         let client = OAuth2Client::new(test_config()).unwrap();
         let session = client.authorization_session(&["openid"]).unwrap();
+        assert!(session.pkce().is_some());
         let callback = AuthorizationCallback {
             code: Some("auth-code".into()),
             state: Some(session.state().to_string()),
@@ -2570,6 +2599,31 @@ mod tests {
             .expect("callback should validate");
         assert_eq!(grant.code(), "auth-code");
         assert_eq!(grant.pkce(), session.pkce());
+    }
+
+    #[test]
+    fn test_exchange_code_requires_pkce_when_enabled() {
+        run_with_test_runtime(async {
+            let server = MockServer::start().await;
+            let config = OAuth2Config::new(
+                "id",
+                "secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_redirect_uri("https://localhost:3000/callback");
+            let client = OAuth2Client::new(config).unwrap();
+
+            let err = client
+                .exchange_code("code-without-verifier")
+                .await
+                .expect_err("PKCE-enabled exchange must fail without code_verifier");
+            assert!(matches!(err, OAuthError::InvalidConfig(_)));
+            assert!(
+                err.to_string().contains("requires PKCE"),
+                "unexpected error: {err}"
+            );
+        });
     }
 
     #[test]

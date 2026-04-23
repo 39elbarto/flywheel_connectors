@@ -1147,15 +1147,7 @@ mod tests {
                 .exchange_code("auth-code-empty")
                 .await
                 .expect_err("empty access_token must be rejected");
-            match err {
-                OAuthError::InvalidTokenResponse(msg) => {
-                    assert!(
-                        msg.contains("empty access_token"),
-                        "expected empty access_token message, got: {msg}"
-                    );
-                }
-                other => panic!("expected InvalidTokenResponse, got {other:?}"),
-            }
+            assert!(matches!(err, OAuthError::EmptyTokenField("access_token")));
         });
     }
 
@@ -1189,7 +1181,7 @@ mod tests {
                 .exchange_code("auth-code-no-type")
                 .await
                 .expect_err("empty token_type must be rejected");
-            assert!(matches!(err, OAuthError::InvalidTokenResponse(_)));
+            assert!(matches!(err, OAuthError::EmptyTokenField("token_type")));
         });
     }
 

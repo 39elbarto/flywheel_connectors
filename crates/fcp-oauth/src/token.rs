@@ -75,6 +75,9 @@ fn parse_scope_list(scope: &str) -> Vec<String> {
 }
 
 fn refreshed_scopes_are_subset(original: &[String], refreshed: &[String]) -> bool {
+    if original.is_empty() {
+        return true;
+    }
     let original_scopes: HashSet<&str> = original.iter().map(String::as_str).collect();
     refreshed
         .iter()
@@ -1155,7 +1158,7 @@ mod tests {
             .expect("non-empty access_token and token_type must succeed");
         assert_eq!(tokens.access_token(), "new_access");
         assert_eq!(tokens.refresh_token(), Some("new_refresh"));
-        assert_eq!(tokens.scopes(), &["read", "write", "admin"]);
+        assert_eq!(tokens.scopes(), &["read", "write"]);
         assert_eq!(tokens.id_token(), Some("new_id"));
     }
 
@@ -1682,6 +1685,33 @@ mod tests {
     }
 
     #[test]
+    fn test_token_update_accepts_scope_when_original_response_omitted_it() {
+        let mut tokens = valid_tokens(TokenResponse {
+            access_token: "t".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: Some("rt".into()),
+            scope: None,
+            id_token: None,
+        });
+        assert!(tokens.scopes().is_empty());
+
+        tokens
+            .update_from_response(TokenResponse {
+                access_token: "new_t".into(),
+                token_type: "Bearer".into(),
+                expires_in: Some(3600),
+                refresh_token: None,
+                scope: Some("read write".into()),
+                id_token: None,
+            })
+            .expect("refresh scope should be accepted when original scope was omitted");
+
+        assert_eq!(tokens.access_token(), "new_t");
+        assert_eq!(tokens.scopes(), &["read", "write"]);
+    }
+
+    #[test]
     fn test_token_update_does_not_overwrite_id_token_if_none() {
         let mut tokens = valid_tokens(TokenResponse {
             access_token: "t".into(),
@@ -2082,8 +2112,8 @@ mod tests {
         let json = r#"{"access_token":"","token_type":"Bearer"}"#;
         let resp: TokenResponse = serde_json::from_str(json).unwrap();
         assert!(resp.access_token.is_empty());
-        let tokens = valid_tokens(resp);
-        assert!(tokens.access_token().is_empty());
+        let err = OAuthTokens::from_response(resp).unwrap_err();
+        assert!(matches!(err, OAuthError::EmptyTokenField("access_token")));
     }
 
     #[test]

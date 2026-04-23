@@ -15,3 +15,4 @@ callback_with_oauth_response_params: OK (https://example.com/oauth/callback)
 callback_host_mismatch: ERR Invalid OAuth configuration: callback_url resolved to a redirect URI outside allowed_redirect_uris
 callback_plain_http_non_loopback: ERR Invalid OAuth configuration: callback_url must use https or loopback http
 callback_loopback_ok: OK (http://localhost:3000/dev-cb)
+callback_unexpected_query_rejected: ERR Invalid OAuth configuration: callback_url contains unexpected query parameter `next`

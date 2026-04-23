@@ -23,8 +23,9 @@
 //! - [`normalize_registered_redirect_uri`] — parse-and-validate for
 //!   URIs the operator pre-registers (no query allowed).
 //! - [`normalize_callback_redirect_uri`] — parse-and-validate for the
-//!   provider callback URL (query is allowed but stripped from the
-//!   normalized form so equality against the allowlist matches).
+//!   provider callback URL (only standard OAuth response parameters are
+//!   permitted in the query, and they are stripped from the normalized
+//!   form so equality against the allowlist matches).
 //! - [`ensure_allowlisted_redirect_uri`] — full enforcement: parse,
 //!   validate shape, confirm membership in the allowlist.
 //! - [`ensure_callback_redirect_is_allowlisted`] — the callback
@@ -38,6 +39,15 @@
 
 use crate::error::{OAuthError, OAuthResult};
 use url::Url;
+
+const CALLBACK_OAUTH_RESPONSE_PARAMS: &[&str] = &[
+    "code",
+    "state",
+    "error",
+    "error_description",
+    "error_uri",
+    "iss",
+];
 
 /// Whether a parsed URL is permitted as an OAuth redirect target by scheme.
 ///
@@ -153,9 +163,21 @@ pub fn normalize_callback_redirect_uri(callback_url: &str) -> OAuthResult<Url> {
         OAuthError::InvalidConfig(format!("callback_url must be a valid absolute URL: {e}"))
     })?;
     validate_redirect_uri_shape(&url, "callback_url", true)?;
+    validate_callback_query_params(&url)?;
     url.set_query(None);
     url.set_fragment(None);
     Ok(url)
+}
+
+fn validate_callback_query_params(url: &Url) -> OAuthResult<()> {
+    for (key, _) in url.query_pairs() {
+        if !CALLBACK_OAUTH_RESPONSE_PARAMS.contains(&key.as_ref()) {
+            return Err(OAuthError::InvalidConfig(format!(
+                "callback_url contains unexpected query parameter `{key}`"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Confirm a caller-supplied `redirect_uri` is byte-equal (modulo
@@ -347,7 +369,7 @@ mod tests {
     // ── normalize_callback_redirect_uri ────────────────────────────────────
 
     #[test]
-    fn normalize_callback_strips_query_for_allowlist_comparison() {
+    fn normalize_callback_strips_oauth_response_query_for_allowlist_comparison() {
         let url =
             normalize_callback_redirect_uri("https://example.com/cb?code=abc&state=def").unwrap();
         // The OAuth callback carries query params, but the normalized
@@ -371,6 +393,15 @@ mod tests {
     fn normalize_callback_rejects_credentials() {
         let err = normalize_callback_redirect_uri("https://u:p@example.com/cb?code=x").unwrap_err();
         assert!(matches!(err, OAuthError::InvalidConfig(ref m) if m.contains("credentials")));
+    }
+
+    #[test]
+    fn normalize_callback_rejects_non_oauth_query_parameters() {
+        let err = normalize_callback_redirect_uri("https://example.com/cb?code=abc&next=/admin")
+            .unwrap_err();
+        assert!(
+            matches!(err, OAuthError::InvalidConfig(ref m) if m.contains("unexpected query parameter"))
+        );
     }
 
     // ── ensure_allowlisted_redirect_uri ────────────────────────────────────
@@ -431,6 +462,19 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, OAuthError::InvalidConfig(ref m) if m.contains("outside")));
+    }
+
+    #[test]
+    fn callback_rejects_attacker_added_query_even_when_base_uri_matches() {
+        let allowed = allowlist(&["https://example.com/cb"]);
+        let err = ensure_callback_redirect_is_allowlisted(
+            "https://example.com/cb?code=abc&next=https://evil.example",
+            &allowed,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, OAuthError::InvalidConfig(ref m) if m.contains("unexpected query parameter"))
+        );
     }
 
     // ── parse_registered_redirect_allowlist ────────────────────────────────

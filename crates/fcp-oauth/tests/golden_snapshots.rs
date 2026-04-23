@@ -25,8 +25,8 @@
 use std::collections::BTreeMap;
 
 use fcp_oauth::{
-    OAuth1Client, OAuth1Config, OAuth2Client, OAuth2Config, OAuthError, OAuthTokens,
-    PkceMethod, RequestToken, TokenResponse, ensure_allowlisted_redirect_uri,
+    OAuth1Client, OAuth1Config, OAuth2Client, OAuth2Config, OAuthError, OAuthTokens, PkceMethod,
+    RequestToken, TokenResponse, ensure_allowlisted_redirect_uri,
     ensure_callback_redirect_is_allowlisted, parse_registered_redirect_allowlist,
 };
 use serde_json::json;
@@ -287,6 +287,13 @@ fn snapshot_redirect_allowlist_enforcement() {
         "callback_loopback_ok",
         ensure_callback_redirect_is_allowlisted(
             "http://localhost:3000/dev-cb?code=auth123",
+            &allowlist,
+        ),
+    ));
+    report.push_str(&run(
+        "callback_unexpected_query_rejected",
+        ensure_callback_redirect_is_allowlisted(
+            "https://example.com/oauth/callback?code=auth123&next=%2Fadmin",
             &allowlist,
         ),
     ));

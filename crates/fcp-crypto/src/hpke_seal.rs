@@ -28,6 +28,12 @@ pub const HPKE_ENC_SIZE: usize = 32;
 /// HPKE authentication tag size.
 pub const HPKE_TAG_SIZE: usize = 16;
 
+/// Maximum accepted serialized HPKE sealed-box size.
+///
+/// This caps `HpkeSealedBox::from_bytes` before it clones attacker-controlled
+/// ciphertext into memory or hands it to the HPKE open path.
+pub const HPKE_MAX_CIPHERTEXT: usize = 64 * 1024;
+
 /// FCP2 purpose strings for AAD binding.
 pub mod purpose {
     /// Purpose string for zone encryption keys.
@@ -65,10 +71,17 @@ impl HpkeSealedBox {
     ///
     /// # Errors
     ///
-    /// Returns an error if the input is too short.
+    /// Returns an error if the input is too short or too large.
     pub fn from_bytes(bytes: &[u8]) -> CryptoResult<Self> {
         if bytes.len() < HPKE_ENC_SIZE + HPKE_TAG_SIZE {
             return Err(CryptoError::HpkeFailed("sealed box too short".into()));
+        }
+        if bytes.len() > HPKE_MAX_CIPHERTEXT {
+            return Err(CryptoError::HpkeFailed(format!(
+                "sealed box too large: {} bytes exceeds {} byte limit",
+                bytes.len(),
+                HPKE_MAX_CIPHERTEXT
+            )));
         }
         // enc must be exactly HPKE_ENC_SIZE, remainder is ciphertext
         let (enc_bytes, ciphertext_bytes) = bytes.split_at(HPKE_ENC_SIZE);
@@ -508,6 +521,26 @@ mod tests {
     }
 
     #[test]
+    fn hpke_sealed_box_from_bytes_accepts_max_sized_input() {
+        let max_input = vec![0u8; HPKE_MAX_CIPHERTEXT];
+        let result = HpkeSealedBox::from_bytes(&max_input).unwrap();
+
+        assert_eq!(result.enc.len(), HPKE_ENC_SIZE);
+        assert_eq!(result.ciphertext.len(), HPKE_MAX_CIPHERTEXT - HPKE_ENC_SIZE);
+    }
+
+    #[test]
+    fn hpke_sealed_box_from_bytes_rejects_oversized_input() {
+        let oversized_input = vec![0u8; HPKE_MAX_CIPHERTEXT + 1];
+        let error = HpkeSealedBox::from_bytes(&oversized_input).unwrap_err();
+
+        assert!(
+            error.to_string().contains("sealed box too large"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn hpke_ciphertext_length() {
         // Verify ciphertext length is plaintext + tag
         let recipient_secret_key = X25519SecretKey::generate();
@@ -767,6 +800,7 @@ mod tests {
     fn hpke_constants() {
         assert_eq!(HPKE_ENC_SIZE, 32);
         assert_eq!(HPKE_TAG_SIZE, 16);
+        assert_eq!(HPKE_MAX_CIPHERTEXT, 64 * 1024);
     }
 
     // ---- Sealed box from_bytes then open ----

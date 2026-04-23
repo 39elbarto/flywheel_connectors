@@ -540,6 +540,12 @@ async fn algolia_happy_path_compliance_suite_passes() {
         invoke_entry.context.get("invoke_status"),
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
     );
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|request| request.url.path() == "/indexes")
+        .count();
+    assert_eq!(hits, 1, "expected exactly one GET to /indexes");
 }
 
 #[fcp_async_core::runtime::test]

@@ -397,6 +397,12 @@ async fn airtable_allow_valid_token_connector_suite_passes() {
         invoke_entry.context.get("invoke_status"),
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
     );
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|request| request.url.path() == "/meta/bases")
+        .count();
+    assert_eq!(hits, 1, "expected exactly one GET to /meta/bases");
 }
 
 // ============================================================================

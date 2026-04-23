@@ -28,8 +28,8 @@ use fcp_core::{
     DeviceSelector, ObjectHeader, ObjectIdKey, ObjectPlacementPolicy, Provenance, StoredObject,
     TaintLevel, ZoneId,
 };
-use fcp_crypto::cose::CoseToken;
-use fcp_crypto::ed25519::Ed25519VerifyingKey;
+use fcp_crypto::cose::{CapabilityTokenBuilder, CoseToken};
+use fcp_crypto::ed25519::{Ed25519SigningKey, Ed25519VerifyingKey};
 use fcp_protocol::{
     MeshSessionId, SessionCryptoSuite, SessionDirection, compute_session_mac, verify_session_mac,
 };
@@ -380,6 +380,126 @@ fn datagram_mac_every_byte_is_load_bearing() {
         outcome: "all_byte_flips_rejected",
         vectors_exercised: vectors.len(),
         mutations_checked: total_mutations,
+        all_rejected: true,
+    });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cross-key replay rejection (freshly-minted tokens, not golden vectors)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The golden-vector tests above cover single-byte mutation. The two
+// tests in this section cover a different adversarial axis: a token
+// that is byte-perfect (no bit-flips) but presented to the wrong
+// verifier, or re-signed by a different issuer. A correct CoseToken
+// verifier MUST reject both — the first by KID pre-check (defense in
+// depth), the second by the signature check (the primary defense).
+//
+// Both tests use freshly-generated Ed25519 keypairs so they're
+// independent of the golden vectors' fixed keys; this also makes them
+// more obviously forgery-shaped than the tamper-by-bit-flip style.
+
+/// Construct a minimal signed capability token for use as baseline in
+/// the cross-key adversarial tests below.
+fn sign_minimal_token(signing_key: &Ed25519SigningKey) -> CoseToken {
+    let claims = fcp_auth_schema::AuthClaims {
+        schema_version: fcp_auth_schema::claims::CURRENT_SCHEMA_VERSION,
+        capability_id: Some("cap:adversarial".into()),
+        zone_id: Some("z:work".into()),
+        principal_id: Some("alice@example".into()),
+        ..fcp_auth_schema::AuthClaims::default()
+    };
+    CapabilityTokenBuilder::with_claims(&claims)
+        .expect("build from AuthClaims")
+        .sign(signing_key)
+        .expect("sign")
+}
+
+/// Contract (NORMATIVE): a capability token that is byte-perfect but
+/// presented to a verifier holding a different Ed25519 public key MUST
+/// be rejected. The implementation rejects at the KID step — a
+/// defense-in-depth check that happens BEFORE signature verification,
+/// so we never spend Ed25519 verify cycles on obviously-wrong keys.
+///
+/// This closes the "wrong-key replay" gap: a token signed by issuer A
+/// and handed to a verifier that only trusts issuer B must not verify
+/// just because its bytes are internally valid.
+#[test]
+fn capability_token_cross_key_replay_is_rejected() {
+    let issuer = Ed25519SigningKey::generate();
+    let innocent_bystander = Ed25519SigningKey::generate();
+
+    // Baseline: the issuer's own verifying key accepts the token.
+    let token = sign_minimal_token(&issuer);
+    token
+        .verify(&issuer.verifying_key())
+        .expect("self-verify must succeed");
+
+    // Adversarial: a DIFFERENT verifying key must reject. Two keys
+    // generated independently have distinct KIDs with overwhelming
+    // probability, so this exercises the KID-mismatch path.
+    assert_ne!(
+        issuer.verifying_key().key_id().as_bytes(),
+        innocent_bystander.verifying_key().key_id().as_bytes(),
+        "fresh keys must have distinct KIDs"
+    );
+    let verdict = token.verify(&innocent_bystander.verifying_key());
+    assert!(
+        verdict.is_err(),
+        "cross-key verification MUST fail — got Ok, which means a verifier \
+         would accept a token it has no cryptographic basis to trust"
+    );
+    let err_debug = format!("{:?}", verdict.unwrap_err());
+    assert!(
+        err_debug.contains("KeyIdMismatch"),
+        "cross-key rejection MUST surface KeyIdMismatch (defense-in-depth \
+         pre-signature check), got: {err_debug}"
+    );
+
+    emit_evidence(&VerificationEvidence {
+        bundle: "fcp-verification-bundle/v1",
+        scenario: "capability_token_cross_key_replay_rejected",
+        outcome: "kid_mismatch_enforced",
+        vectors_exercised: 1,
+        mutations_checked: 0,
+        all_rejected: true,
+    });
+}
+
+/// Contract (NORMATIVE): serializing a token to CBOR bytes and
+/// deserializing it back must preserve the signature. This pins the
+/// wire-format round-trip: a token that stops verifying after a pure
+/// serde round-trip would be a silent interop break for any caller
+/// that stores or forwards tokens as bytes.
+#[test]
+fn capability_token_cbor_roundtrip_preserves_signature() {
+    let issuer = Ed25519SigningKey::generate();
+    let token = sign_minimal_token(&issuer);
+
+    let bytes = token.to_cbor().expect("serialize");
+    let parsed = CoseToken::from_cbor(&bytes).expect("deserialize");
+    parsed
+        .verify(&issuer.verifying_key())
+        .expect("round-tripped token MUST still verify");
+
+    // And the inverse: a truncated token must not decode, and if it
+    // does, it must not verify. Strip the last byte of the signature.
+    let mut truncated = bytes.clone();
+    truncated.pop();
+    let verdict = CoseToken::from_cbor(&truncated)
+        .and_then(|t| t.verify(&issuer.verifying_key()));
+    assert!(
+        verdict.is_err(),
+        "truncated token MUST fail either decode or verify (cannot silently \
+         succeed), got Ok"
+    );
+
+    emit_evidence(&VerificationEvidence {
+        bundle: "fcp-verification-bundle/v1",
+        scenario: "capability_token_cbor_roundtrip_preserves_signature",
+        outcome: "roundtrip_verified_truncated_rejected",
+        vectors_exercised: 1,
+        mutations_checked: 1,
         all_rejected: true,
     });
 }

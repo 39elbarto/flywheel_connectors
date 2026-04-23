@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -512,13 +512,16 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
             return Err(TokenError::PinRequired);
         }
 
-        let session = open_enumeration_session(token, pin)?;
+        let enumeration = open_enumeration_session(token, pin)?;
         let template = [Attribute::Class(ObjectClass::CERTIFICATE)];
-        let handles = session.find_objects(&template).map_err(map_pkcs11_error)?;
+        let handles = enumeration
+            .session()
+            .find_objects(&template)
+            .map_err(map_pkcs11_error)?;
 
         let mut certs = Vec::new();
         for handle in handles {
-            match read_certificate_object(&session, handle) {
+            match read_certificate_object(enumeration.session(), handle) {
                 Ok(cert) => certs.push(cert),
                 Err(err) => {
                     tracing::warn!(
@@ -530,7 +533,7 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
             }
         }
 
-        let _ = session.close();
+        let _ = enumeration.close();
         Ok(certs)
     }
 
@@ -543,13 +546,16 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
             return Err(TokenError::PinRequired);
         }
 
-        let session = open_enumeration_session(token, pin)?;
+        let enumeration = open_enumeration_session(token, pin)?;
         let template = [Attribute::Class(ObjectClass::PRIVATE_KEY)];
-        let handles = session.find_objects(&template).map_err(map_pkcs11_error)?;
+        let handles = enumeration
+            .session()
+            .find_objects(&template)
+            .map_err(map_pkcs11_error)?;
 
         let mut keys = Vec::new();
         for handle in handles {
-            match read_key_object(&session, handle) {
+            match read_key_object(enumeration.session(), handle) {
                 Ok(key) => keys.push(key),
                 Err(err) => {
                     tracing::warn!(
@@ -561,43 +567,143 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
             }
         }
 
-        let _ = session.close();
+        let _ = enumeration.close();
         Ok(keys)
     }
 }
 
+/// RAII wrapper for a PIN-authenticated enumeration session (br-tcp0f).
+///
+/// Pre-tcp0f the enumeration path opened a read-write user session via
+/// PKCS#11 `C_Login`, returned the bare `Session`, and the callers invoked
+/// only `session.close()` afterwards — never `C_Logout` and never
+/// `C_Finalize`. The token was therefore left in an authenticated state
+/// and the provider context initialized after the temporary PIN-authenticated
+/// browse step, extending the lifetime of authenticated hardware-token
+/// access without re-prompting for the PIN.
+///
+/// This wrapper owns the PKCS#11 context + session + provider-probe lock
+/// and routes teardown through [`close_pkcs11_session`] (logout + close)
+/// and [`finalize_pkcs11_context`]. An [`EnumerationSession::close`]
+/// consuming method is the preferred exit path; [`Drop`] runs the same
+/// cleanup on panic or early return as a defense-in-depth backstop.
+struct EnumerationSession {
+    pkcs11: Option<Pkcs11>,
+    session: Option<Session>,
+    owns_initialization: bool,
+    // Provider-probe lock is held for the full lifetime of the
+    // enumeration session so concurrent pkcs11 init/finalize from other
+    // call sites cannot race with our teardown.
+    _provider_guard: MutexGuard<'static, ()>,
+}
+
+impl EnumerationSession {
+    fn session(&self) -> &Session {
+        self.session
+            .as_ref()
+            .expect("enumeration session is still open")
+    }
+
+    fn close(mut self) -> Result<(), TokenError> {
+        self.run_cleanup()
+    }
+
+    fn run_cleanup(&mut self) -> Result<(), TokenError> {
+        let session = self.session.take();
+        let pkcs11 = self.pkcs11.take();
+        match (session, pkcs11) {
+            (Some(session), Some(pkcs11)) => {
+                // Login was performed as UserType::User on a read-write
+                // session (see `open_enumeration_session`), so the state
+                // at close time is always ReadWriteUser.
+                let close_result =
+                    close_pkcs11_session(session, AuthenticatedSessionState::ReadWriteUser);
+                let finalize_result = finalize_pkcs11_context(pkcs11, self.owns_initialization);
+                close_result.and(finalize_result)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+impl Drop for EnumerationSession {
+    fn drop(&mut self) {
+        if self.session.is_none() && self.pkcs11.is_none() {
+            return;
+        }
+        if let Err(err) = self.run_cleanup() {
+            tracing::warn!(
+                component = "fcp_bootstrap.hardware_token",
+                error = %err,
+                "EnumerationSession dropped without close(); best-effort cleanup failed"
+            );
+        } else {
+            tracing::warn!(
+                component = "fcp_bootstrap.hardware_token",
+                "EnumerationSession dropped without close(); fell back to best-effort cleanup"
+            );
+        }
+    }
+}
+
 /// Open a temporary authenticated session for object enumeration.
+///
+/// The returned [`EnumerationSession`] carries the PKCS#11 context,
+/// read-write user session, and provider-probe lock so that teardown
+/// (logout + close + finalize) always runs, whether via
+/// [`EnumerationSession::close`] or [`Drop`]. See br-tcp0f.
 fn open_enumeration_session(
     token: &DetectedToken,
     pin: &HardwareTokenPin,
-) -> Result<Session, TokenError> {
+) -> Result<EnumerationSession, TokenError> {
     if pin.is_empty() {
         return Err(TokenError::PinRequired);
     }
 
-    let _guard = provider_probe_lock()
+    let provider_guard = provider_probe_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let pkcs11 = Pkcs11::new(&token.provider).map_err(map_pkcs11_error)?;
-    match pkcs11.initialize(CInitializeArgs::new(
+    let owns_initialization = match pkcs11.initialize(CInitializeArgs::new(
         cryptoki::context::CInitializeFlags::OS_LOCKING_OK,
     )) {
-        Ok(()) | Err(Pkcs11Error::Pkcs11(RvError::CryptokiAlreadyInitialized, _)) => {}
+        Ok(()) => true,
+        Err(Pkcs11Error::Pkcs11(RvError::CryptokiAlreadyInitialized, _)) => false,
         Err(err) => return Err(map_pkcs11_error(err)),
-    }
+    };
 
-    let slot =
-        Slot::try_from(u64::from(token.slot)).map_err(|err| TokenError::Pkcs11(err.to_string()))?;
-    let session = pkcs11.open_rw_session(slot).map_err(map_pkcs11_error)?;
+    let slot = match Slot::try_from(u64::from(token.slot)) {
+        Ok(slot) => slot,
+        Err(err) => {
+            let _ = finalize_pkcs11_context(pkcs11, owns_initialization);
+            return Err(TokenError::Pkcs11(err.to_string()));
+        }
+    };
+
+    let session = match pkcs11.open_rw_session(slot) {
+        Ok(session) => session,
+        Err(err) => {
+            let _ = finalize_pkcs11_context(pkcs11, owns_initialization);
+            return Err(map_pkcs11_error(err));
+        }
+    };
 
     let auth_pin = pin.to_auth_pin();
     match session.login(UserType::User, Some(&auth_pin)) {
         Ok(()) | Err(Pkcs11Error::Pkcs11(RvError::UserAlreadyLoggedIn, _)) => {}
-        Err(err) => return Err(map_pkcs11_error(err)),
+        Err(err) => {
+            cleanup_failed_session(session, pkcs11, owns_initialization);
+            return Err(map_pkcs11_error(err));
+        }
     }
 
-    Ok(session)
+    Ok(EnumerationSession {
+        pkcs11: Some(pkcs11),
+        session: Some(session),
+        owns_initialization,
+        _provider_guard: provider_guard,
+    })
 }
 
 /// Read a certificate object's attributes from its handle.

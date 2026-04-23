@@ -172,27 +172,39 @@ impl RaptorQEncoder {
             .repair_symbols(self.config.source_symbols(self.payload_len))
             .min(u32::MAX - k_prime);
 
-        let mut result = Vec::with_capacity(self.source_data.len() + repair_count as usize);
+        // Destructure self up front so we can (a) move source_data into
+        // result with zero clones, and (b) keep inner around to stream
+        // repair symbols DIRECTLY into result without the intermediate
+        // `repairs` Vec that previously double-allocated the repair
+        // tuple slots (br-gg88l). Source symbols go first; repair
+        // symbols are generated and pushed one at a time, so peak
+        // memory is source_bytes + (one repair symbol in flight) +
+        // result-so-far, rather than source_bytes + all-repairs-buffer +
+        // result-so-far.
+        let Self {
+            inner,
+            source_data,
+            ..
+        } = self;
 
-        // Repair symbols must be generated before consuming source_data.
-        // Uses checked_add so an unexpected cap regression surfaces as a
-        // panic during construction instead of a silent wrap producing
-        // duplicate ESIs that collide with the source range (bead gh7gt).
-        let repairs: Vec<(u32, Vec<u8>)> = (0..repair_count)
-            .map(|i| {
-                let esi = k_prime
-                    .checked_add(i)
-                    .expect("repair_count cap ensures k_prime + i stays within u32");
-                (esi, self.inner.repair_symbol(esi))
-            })
-            .collect();
+        let mut result = Vec::with_capacity(source_data.len() + repair_count as usize);
 
-        // Source symbols (ESI 0..K): move data directly, zero clones
-        for (esi, data) in self.source_data.into_iter().enumerate() {
+        // Source symbols (ESI 0..K): move data directly, zero clones.
+        for (esi, data) in source_data.into_iter().enumerate() {
             result.push((esi as u32, data));
         }
 
-        result.extend(repairs);
+        // Repair symbols (ESI K'..K'+repair_count). checked_add so an
+        // unexpected cap regression surfaces as a panic during
+        // construction instead of a silent wrap producing duplicate
+        // ESIs that collide with the source range (bead gh7gt).
+        for i in 0..repair_count {
+            let esi = k_prime
+                .checked_add(i)
+                .expect("repair_count cap ensures k_prime + i stays within u32");
+            result.push((esi, inner.repair_symbol(esi)));
+        }
+
         result
     }
 
@@ -1250,5 +1262,69 @@ mod tests {
             decision.is_chunked(),
             "payload over threshold should be chunked"
         );
+    }
+
+    // ── br-gg88l: into_encode_all single-buffer parity ───────────────
+
+    #[test]
+    fn into_encode_all_matches_encode_all_esi_stream() {
+        // The single-buffered into_encode_all must emit the same
+        // (ESI, data) stream (identical ESIs + identical bytes per
+        // ESI) as the clone-based encode_all. This pins the
+        // br-gg88l refactor: dropping the intermediate `repairs` Vec
+        // and streaming symbols straight into `result` must not
+        // change the output.
+        let config = test_config();
+        let payload: Vec<u8> = (0..1024_u32).map(|i| (i & 0xFF) as u8).collect();
+
+        let reference = RaptorQEncoder::new(&payload, &config).unwrap().encode_all();
+        let streamed = RaptorQEncoder::new(&payload, &config).unwrap().into_encode_all();
+
+        assert_eq!(
+            reference.len(),
+            streamed.len(),
+            "into_encode_all must emit the same number of symbols"
+        );
+
+        // ESIs in both outputs must match position-for-position. The
+        // encoder emits source in ESI order 0..K then repair in ESI
+        // order K'..K'+R, so the sequences should be identical.
+        for (idx, (r, s)) in reference.iter().zip(streamed.iter()).enumerate() {
+            assert_eq!(r.0, s.0, "ESI mismatch at index {idx}");
+            assert_eq!(
+                r.1, s.1,
+                "symbol data mismatch at index {idx} (ESI {})",
+                r.0
+            );
+        }
+    }
+
+    #[test]
+    fn into_encode_all_single_buffered_round_trip() {
+        // Correctness backstop: encode via into_encode_all, decode with
+        // a fresh decoder. If the single-buffer rewrite dropped or
+        // reordered any symbol, decode fails.
+        use crate::RaptorQDecoder;
+
+        let config = test_config();
+        let payload: Vec<u8> = (0..640_u32).map(|i| (i & 0xFF) as u8).collect();
+
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        let oti = encoder.transmission_info();
+        let symbols = encoder.into_encode_all();
+
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let mut decoded: Option<Vec<u8>> = None;
+        for (esi, data) in symbols {
+            match decoder.add_symbol(esi, data) {
+                Ok(Some(p)) => {
+                    decoded = Some(p);
+                    break;
+                }
+                Ok(None) => continue,
+                Err(e) => panic!("into_encode_all round trip decode error: {e:?}"),
+            }
+        }
+        assert_eq!(decoded.expect("decode must complete"), payload);
     }
 }

@@ -9,6 +9,7 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration as ChronoDuration, Utc};
+use fcp_async_core::sync::Mutex;
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics, FcpConnector,
@@ -30,14 +31,14 @@ use wiremock::{
 use fcp_google_sheets::connector::SheetsConnector;
 
 struct GoogleSheetsConnectorAdapter {
-    connector: SheetsConnector,
+    connector: Mutex<SheetsConnector>,
     id: ConnectorId,
 }
 
 impl GoogleSheetsConnectorAdapter {
     fn new() -> Self {
         Self {
-            connector: SheetsConnector::new(),
+            connector: Mutex::new(SheetsConnector::new()),
             id: ConnectorId::from_static("google-sheets"),
         }
     }
@@ -52,21 +53,26 @@ impl FcpConnector for GoogleSheetsConnectorAdapter {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> fcp_core::FcpResult<()> {
-        self.connector.handle_configure(config).await.map(|_| ())
+        self.connector
+            .lock()
+            .await
+            .handle_configure(config)
+            .await
+            .map(|_| ())
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
         let request = serde_json::to_value(req).map_err(|err| FcpError::Internal {
             message: format!("failed to serialize handshake request: {err}"),
         })?;
-        let response = self.connector.handle_handshake(request).await?;
+        let response = self.connector.lock().await.handle_handshake(request).await?;
         serde_json::from_value(response).map_err(|err| FcpError::Internal {
             message: format!("failed to deserialize handshake response: {err}"),
         })
     }
 
     async fn health(&self) -> HealthSnapshot {
-        match self.connector.handle_health().await {
+        match self.connector.lock().await.handle_health().await {
             Ok(payload) => {
                 let status = payload
                     .get("status")
@@ -87,7 +93,12 @@ impl FcpConnector for GoogleSheetsConnectorAdapter {
     }
 
     async fn shutdown(&mut self, _req: ShutdownRequest) -> fcp_core::FcpResult<()> {
-        self.connector.handle_shutdown(json!({})).await.map(|_| ())
+        self.connector
+            .lock()
+            .await
+            .handle_shutdown(json!({}))
+            .await
+            .map(|_| ())
     }
 
     fn introspect(&self) -> Introspection {
@@ -136,7 +147,7 @@ impl FcpConnector for GoogleSheetsConnectorAdapter {
             "input": req.input,
             "capability_token": req.capability_token,
         });
-        let value = self.connector.handle_invoke(params).await?;
+        let value = self.connector.lock().await.handle_invoke(params).await?;
         Ok(InvokeResponse::ok(request_id, value))
     }
 
@@ -144,7 +155,7 @@ impl FcpConnector for GoogleSheetsConnectorAdapter {
         let request = serde_json::to_value(req).map_err(|err| FcpError::Internal {
             message: format!("failed to serialize simulate request: {err}"),
         })?;
-        let value = self.connector.handle_simulate(request).await?;
+        let value = self.connector.lock().await.handle_simulate(request).await?;
         serde_json::from_value(value).map_err(|err| FcpError::Internal {
             message: format!("failed to deserialize simulate response: {err}"),
         })

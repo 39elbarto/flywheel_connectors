@@ -12,6 +12,7 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration as ChronoDuration, Utc};
+use fcp_async_core::sync::Mutex;
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
     AgentHint, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics, FcpConnector,
@@ -37,14 +38,14 @@ use fcp_s3::connector::S3Connector;
 // ============================================================================
 
 struct S3ConnectorAdapter {
-    connector: S3Connector,
+    connector: Mutex<S3Connector>,
     id: ConnectorId,
 }
 
 impl S3ConnectorAdapter {
     fn new() -> Self {
         Self {
-            connector: S3Connector::new(),
+            connector: Mutex::new(S3Connector::new()),
             id: ConnectorId::from_static("s3"),
         }
     }
@@ -59,21 +60,26 @@ impl FcpConnector for S3ConnectorAdapter {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> fcp_core::FcpResult<()> {
-        self.connector.handle_configure(config).await.map(|_| ())
+        self.connector
+            .lock()
+            .await
+            .handle_configure(config)
+            .await
+            .map(|_| ())
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
         let request = serde_json::to_value(req).map_err(|err| FcpError::Internal {
             message: format!("failed to serialize handshake request: {err}"),
         })?;
-        let response = self.connector.handle_handshake(request).await?;
+        let response = self.connector.lock().await.handle_handshake(request).await?;
         serde_json::from_value(response).map_err(|err| FcpError::Internal {
             message: format!("failed to deserialize handshake response: {err}"),
         })
     }
 
     async fn health(&self) -> HealthSnapshot {
-        match self.connector.handle_health().await {
+        match self.connector.lock().await.handle_health().await {
             Ok(val) => {
                 let status = val
                     .get("status")
@@ -90,7 +96,7 @@ impl FcpConnector for S3ConnectorAdapter {
     }
 
     async fn self_check(&self) -> fcp_core::FcpResult<SelfCheckReport> {
-        let value = self.connector.handle_self_check().await?;
+        let value = self.connector.lock().await.handle_self_check().await?;
         serde_json::from_value(value).map_err(|e| FcpError::Internal {
             message: format!("Failed to parse self_check result: {e}"),
         })
@@ -139,7 +145,7 @@ impl FcpConnector for S3ConnectorAdapter {
             "input": req.input,
             "capability_token": req.capability_token,
         });
-        let value = self.connector.handle_invoke(params).await?;
+        let value = self.connector.lock().await.handle_invoke(params).await?;
         Ok(InvokeResponse::ok(request_id, value))
     }
 
@@ -147,7 +153,7 @@ impl FcpConnector for S3ConnectorAdapter {
         let request = serde_json::to_value(req).map_err(|err| FcpError::Internal {
             message: err.to_string(),
         })?;
-        let value = self.connector.handle_simulate(request).await?;
+        let value = self.connector.lock().await.handle_simulate(request).await?;
         Ok(serde_json::from_value(value).unwrap())
     }
 

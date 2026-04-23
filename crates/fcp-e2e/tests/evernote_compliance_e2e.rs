@@ -270,6 +270,14 @@ fn build_token(
     operations: &[&str],
 ) -> CapabilityToken {
     let now = Utc::now();
+    // C3.4 default-deny: constraints claim is mandatory. (br-1maun)
+    let constraints = fcp_core::CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut constraints_cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut constraints_cbor)
+        .expect("serialize constraints to CBOR");
     CapabilityToken::from_raw(
         CapabilityTokenBuilder::new()
             .capability_id(capability)
@@ -278,6 +286,7 @@ fn build_token(
             .operations(operations)
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
+            .constraints_cbor(&constraints_cbor)
             .sign(signing_key)
             .expect("capability token sign"),
     )
@@ -440,6 +449,20 @@ async fn evernote_allow_valid_token_connector_suite_passes() {
         .expect("connector suite run");
 
     assert!(report.passed, "allow suite should pass: {report:#?}");
+
+    // br-7e15h: independently verify the notebooks endpoint was hit.
+    let received = mock.received_requests().await;
+    let notebooks_hits = received
+        .iter()
+        .filter(|r| {
+            r.method == wiremock::http::Method::GET
+                && r.url.path().starts_with("/notebooks")
+        })
+        .count();
+    assert_eq!(
+        notebooks_hits, 1,
+        "expected exactly one GET to /notebooks*; got {notebooks_hits}"
+    );
 }
 
 #[test]

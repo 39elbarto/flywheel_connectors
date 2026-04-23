@@ -428,6 +428,16 @@ async fn google_ai_allow_valid_token_connector_suite_passes() {
         invoke_entry.context.get("invoke_status"),
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
     );
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|request| request.url.path() == "/v1beta/models/gemini-2.0-flash:generateContent")
+        .count();
+    assert_eq!(
+        hits,
+        1,
+        "expected exactly one POST to /v1beta/models/gemini-2.0-flash:generateContent"
+    );
 }
 
 // ============================================================================

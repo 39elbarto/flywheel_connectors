@@ -289,6 +289,18 @@ async fn gcp_happy_path_compute_list_suite_passes() {
         invoke_entry.context.get("invoke_status"),
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
     );
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|request| {
+            request.url.path() == "/compute/v1/projects/test-project/zones/us-central1-a/instances"
+        })
+        .count();
+    assert_eq!(
+        hits,
+        1,
+        "expected exactly one GET to /compute/v1/projects/test-project/zones/us-central1-a/instances"
+    );
     assert_report_logs_validate(&report);
 }
 

@@ -1548,8 +1548,9 @@ impl MeshNode {
         now_secs: u64,
     ) -> Result<(), MeshNodeError> {
         self.verify_summary_signature(&summary)?;
-        self.gossip.handle_summary(summary, now_secs);
-        self.metrics.gossip_updates = self.metrics.gossip_updates.saturating_add(1);
+        if self.gossip.handle_summary(summary, now_secs) {
+            self.metrics.gossip_updates = self.metrics.gossip_updates.saturating_add(1);
+        }
         Ok(())
     }
 
@@ -2922,37 +2923,23 @@ mod tests {
         );
         node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
 
+        let mut peer_gossip = MeshGossip::with_defaults(TailscaleNodeId::new("peer-1"));
+        peer_gossip.announce_object(
+            &ZoneId::work(),
+            &test_object_id("summary-valid"),
+            ObjectAdmissionClass::Admitted,
+            1_000,
+        );
+        let template = peer_gossip
+            .create_summary(&ZoneId::work(), EpochId::new("epoch-1"))
+            .expect("summary should exist");
         let summary = GossipSummary {
-            from: TailscaleNodeId::new("peer-1"),
-            zone_id: ZoneId::work(),
-            epoch_id: EpochId::new("epoch-1"),
-            object_filter_digest: [0x11; 32],
-            symbol_filter_digest: [0x22; 32],
-            object_count: 3,
-            symbol_count: 7,
-            iblt: b"[]".to_vec(),
-            timestamp: 1_000,
             signature: Some(fcp_core::NodeSignature::new(
                 fcp_core::NodeId::new(peer.as_str()),
-                signing_key
-                    .sign(
-                        &GossipSummary {
-                            from: TailscaleNodeId::new("peer-1"),
-                            zone_id: ZoneId::work(),
-                            epoch_id: EpochId::new("epoch-1"),
-                            object_filter_digest: [0x11; 32],
-                            symbol_filter_digest: [0x22; 32],
-                            object_count: 3,
-                            symbol_count: 7,
-                            iblt: b"[]".to_vec(),
-                            timestamp: 1_000,
-                            signature: None,
-                        }
-                        .signing_bytes(),
-                    )
-                    .to_bytes(),
+                signing_key.sign(&template.signing_bytes()).to_bytes(),
                 1_000,
             )),
+            ..template
         };
 
         node.handle_gossip_message(GossipMessage::Summary(summary), 1_000)
@@ -3252,6 +3239,67 @@ mod tests {
             node.metrics().gossip_updates,
             0,
             "node-mismatched summary must not record a gossip update"
+        );
+    }
+
+    #[test]
+    fn handle_summary_rejects_older_signed_summary_when_newer_peer_state_exists() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+
+        let signed_summary = |timestamp: u64, object_names: &[&str]| {
+            let mut peer_gossip = MeshGossip::with_defaults(TailscaleNodeId::new("peer-1"));
+            for object_name in object_names {
+                peer_gossip.announce_object(
+                    &ZoneId::work(),
+                    &test_object_id(object_name),
+                    ObjectAdmissionClass::Admitted,
+                    timestamp,
+                );
+            }
+            let template = peer_gossip
+                .create_summary(&ZoneId::work(), EpochId::new("epoch-1"))
+                .expect("summary should exist");
+            GossipSummary {
+                signature: Some(fcp_core::NodeSignature::new(
+                    fcp_core::NodeId::new(peer.as_str()),
+                    signing_key.sign(&template.signing_bytes()).to_bytes(),
+                    timestamp,
+                )),
+                ..template
+            }
+        };
+
+        let newer_summary = signed_summary(2_000, &["newer-a", "newer-b"]);
+        node.handle_gossip_message(GossipMessage::Summary(newer_summary), 2_000)
+            .expect("newer summary should verify");
+        assert_eq!(node.metrics().gossip_updates, 1);
+
+        let older_summary = signed_summary(1_500, &["older-only"]);
+        node.handle_gossip_message(GossipMessage::Summary(older_summary), 2_000)
+            .expect("older-but-signed summary should be ignored, not fail verification");
+
+        let accepted = node
+            .gossip
+            .peer_last_summary(&TailscaleNodeId::new("peer-1"))
+            .expect("newer summary should remain recorded");
+        assert_eq!(accepted.timestamp, 2_000);
+        assert_eq!(accepted.object_count, 2);
+        assert_eq!(accepted.symbol_count, 0);
+        assert_eq!(
+            node.metrics().gossip_updates,
+            1,
+            "older summary must not count as a fresh gossip update"
         );
     }
 

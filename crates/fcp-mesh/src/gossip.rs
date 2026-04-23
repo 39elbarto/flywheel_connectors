@@ -399,7 +399,8 @@ impl IbltPlaceholder {
             return Ok(Self::with_max_changes(max_changes));
         }
 
-        let iblt: Iblt = ciborium::from_reader(bytes).map_err(|_| IbltDecodeError::InvalidEncoding)?;
+        let iblt: Iblt =
+            ciborium::from_reader(bytes).map_err(|_| IbltDecodeError::InvalidEncoding)?;
         // Enforce the caller-supplied cell-count budget. The budget is
         // expressed in expected-difference units, so compare against
         // the recommended cell count for that budget.
@@ -1527,7 +1528,10 @@ impl MeshGossip {
     /// Callers on an untrusted network path must verify `summary.signature`
     /// before invoking this lower-level state mutator.
     /// [`crate::node::MeshNode`] provides the authenticated dispatch entrypoint.
-    pub fn handle_summary(&mut self, summary: GossipSummary, now: u64) {
+    ///
+    /// Returns `true` when the summary was accepted and mutated peer state,
+    /// or `false` when it was rejected and ignored.
+    pub fn handle_summary(&mut self, summary: GossipSummary, now: u64) -> bool {
         if summary.is_stale(now, self.config.summary_ttl_secs) {
             let age_secs = now.saturating_sub(summary.timestamp);
             warn!(
@@ -1541,7 +1545,7 @@ impl MeshGossip {
                 age_seconds = age_secs,
                 ttl_seconds = self.config.summary_ttl_secs
             );
-            return;
+            return false;
         }
 
         if summary.object_count as usize > self.config.max_objects_per_summary
@@ -1558,7 +1562,7 @@ impl MeshGossip {
                 max_objects = self.config.max_objects_per_summary,
                 max_symbols = self.config.max_symbols_per_summary
             );
-            return;
+            return false;
         }
 
         let peer_id = summary.from.clone();
@@ -1588,7 +1592,7 @@ impl MeshGossip {
                     max_iblt_bytes,
                     decode_ms
                 );
-                return;
+                return false;
             }
         };
         let decode_ms = u64::try_from(decode_start.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -1616,7 +1620,32 @@ impl MeshGossip {
                 peer_state_count = self.peer_states.len(),
                 peer_state_cap = self.config.max_peer_states,
             );
-            return;
+            return false;
+        }
+
+        if self
+            .peer_states
+            .get(&peer_id)
+            .and_then(|state| state.last_summary.as_ref())
+            .is_some_and(|current| summary.timestamp < current.timestamp)
+        {
+            let newer_timestamp = self
+                .peer_states
+                .get(&peer_id)
+                .and_then(|state| state.last_summary.as_ref())
+                .map_or(0, |current| current.timestamp);
+            warn!(
+                component = "mesh.gossip",
+                event = "summary_rejected",
+                reason = "older_than_current",
+                peer_node_id = %peer_id.as_str(),
+                zone_id = %summary.zone_id,
+                object_count,
+                symbol_count,
+                summary_timestamp = summary.timestamp,
+                newer_timestamp
+            );
+            return false;
         }
 
         // Update peer state
@@ -1638,6 +1667,7 @@ impl MeshGossip {
             decode_ms,
             accepted = true
         );
+        true
     }
 
     /// Find peers that might have an object.
@@ -1873,6 +1903,14 @@ impl MeshGossip {
     #[must_use]
     pub fn peer_count(&self) -> usize {
         self.peer_states.len()
+    }
+
+    /// Return the last accepted summary recorded for a peer.
+    #[must_use]
+    pub fn peer_last_summary(&self, peer_id: &TailscaleNodeId) -> Option<&GossipSummary> {
+        self.peer_states
+            .get(peer_id)
+            .and_then(|state| state.last_summary.as_ref())
     }
 
     /// Remove peer states that have gone stale.
@@ -2364,12 +2402,8 @@ mod tests {
             max_iblt_bytes,
         );
         // The sketch must be decodable by a peer with the same batch size.
-        IbltPlaceholder::decode_with_limits(
-            &summary.iblt,
-            64,
-            max_iblt_bytes,
-        )
-        .expect("created summary must be decodable");
+        IbltPlaceholder::decode_with_limits(&summary.iblt, 64, max_iblt_bytes)
+            .expect("created summary must be decodable");
     }
 
     #[test]
@@ -3452,10 +3486,7 @@ mod tests {
         let diff = decoded.as_iblt().subtract(&empty).unwrap();
         let result = diff.decode();
         assert!(result.is_complete());
-        assert_eq!(
-            result.only_left,
-            [obj_a, obj_b].into_iter().collect()
-        );
+        assert_eq!(result.only_left, [obj_a, obj_b].into_iter().collect());
     }
 
     #[test]
@@ -4434,7 +4465,9 @@ mod tests {
             "summary from an unknown peer past the cap must NOT expand peer_states",
         );
         assert!(
-            gossip.find_object_sources(&test_object_id("anything")).is_empty()
+            gossip
+                .find_object_sources(&test_object_id("anything"))
+                .is_empty()
                 || !gossip
                     .peer_states
                     .keys()

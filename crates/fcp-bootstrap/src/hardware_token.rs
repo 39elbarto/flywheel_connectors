@@ -1244,6 +1244,9 @@ fn certificate_has_x509_issuer_chain(
     if !remaining.is_empty() {
         return false;
     }
+    if !parsed.validity().is_valid() {
+        return false;
+    }
 
     if certificate.is_ca && certificate.subject == certificate.issuer {
         return parsed.verify_signature(None).is_ok();
@@ -1260,6 +1263,9 @@ fn certificate_has_x509_issuer_chain(
                 return false;
             };
             if !issuer_remaining.is_empty() {
+                return false;
+            }
+            if !issuer_parsed.validity().is_valid() {
                 return false;
             }
 
@@ -1907,11 +1913,15 @@ pub mod mock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, DnType, IsCa, KeyPair,
+    };
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
     use tempfile::tempdir;
+    use time::{Duration as TimeDuration, OffsetDateTime};
 
     fn test_token() -> DetectedToken {
         DetectedToken {
@@ -3095,6 +3105,81 @@ mod tests {
         }
     }
 
+    fn test_x509_certificate(
+        label: &str,
+        id: &[u8],
+        issuer_label: &str,
+        is_ca: bool,
+        not_before: OffsetDateTime,
+        not_after: OffsetDateTime,
+        signing_issuer: Option<&CertifiedIssuer<'_, KeyPair>>,
+    ) -> TokenCertificate {
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.not_before = not_before;
+        params.not_after = not_after;
+        params.distinguished_name.push(DnType::CommonName, label);
+        if is_ca {
+            params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        }
+
+        let key_pair = KeyPair::generate().unwrap();
+        let cert = match signing_issuer {
+            Some(issuer) => params.signed_by(&key_pair, issuer).unwrap(),
+            None => params.self_signed(&key_pair).unwrap(),
+        };
+
+        TokenCertificate {
+            label: label.to_string(),
+            id: id.to_vec(),
+            der_bytes: cert.der().to_vec(),
+            subject: format!("CN={label}"),
+            issuer: format!("CN={issuer_label}"),
+            is_ca,
+        }
+    }
+
+    fn test_x509_leaf_signed_by_ca(
+        label: &str,
+        id: &[u8],
+        issuer_id: &[u8],
+        issuer_label: &str,
+        not_before: OffsetDateTime,
+        not_after: OffsetDateTime,
+        issuer_not_before: OffsetDateTime,
+        issuer_not_after: OffsetDateTime,
+    ) -> (TokenCertificate, TokenCertificate) {
+        let mut issuer_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        issuer_params.not_before = issuer_not_before;
+        issuer_params.not_after = issuer_not_after;
+        issuer_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        issuer_params
+            .distinguished_name
+            .push(DnType::CommonName, issuer_label);
+        let issuer_key = KeyPair::generate().unwrap();
+        let issuer = CertifiedIssuer::self_signed(issuer_params, issuer_key).unwrap();
+
+        let leaf = test_x509_certificate(
+            label,
+            id,
+            issuer_label,
+            false,
+            not_before,
+            not_after,
+            Some(&issuer),
+        );
+
+        let ca = TokenCertificate {
+            label: issuer_label.to_string(),
+            id: issuer_id.to_vec(),
+            der_bytes: issuer.der().to_vec(),
+            subject: format!("CN={issuer_label}"),
+            issuer: format!("CN={issuer_label}"),
+            is_ca: true,
+        };
+
+        (leaf, ca)
+    }
+
     // ── Certificate/key type tests ──────────────────────────────────────
 
     #[test]
@@ -3414,6 +3499,93 @@ mod tests {
         let driver = MockSessionDriver::with_certs_and_keys(
             vec![test_cert("leaf-cert", &[1])],
             vec![test_key("leaf-key", &[1], TokenKeyType::Ed25519)],
+        );
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+
+        let err = select_certificate_for_provisioning(&token, &pin, &driver).unwrap_err();
+        assert!(matches!(
+            err,
+            TokenError::CertificateSelectionFailed(
+                CertificateSelectionRefusal::NoVerifiedIssuerChain
+            )
+        ));
+    }
+
+    #[test]
+    fn select_cert_expired_x509_leaf_returns_refusal() {
+        let now = OffsetDateTime::now_utc();
+        let (expired_leaf, ca) = test_x509_leaf_signed_by_ca(
+            "expired-leaf",
+            &[1],
+            &[9],
+            "Valid Test CA",
+            now - TimeDuration::days(30),
+            now - TimeDuration::days(1),
+            now - TimeDuration::days(60),
+            now + TimeDuration::days(60),
+        );
+        let driver = MockSessionDriver::with_certs_and_keys(
+            vec![expired_leaf, ca],
+            vec![test_key("expired-key", &[1], TokenKeyType::Ed25519)],
+        );
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+
+        let err = select_certificate_for_provisioning(&token, &pin, &driver).unwrap_err();
+        assert!(matches!(
+            err,
+            TokenError::CertificateSelectionFailed(
+                CertificateSelectionRefusal::NoVerifiedIssuerChain
+            )
+        ));
+    }
+
+    #[test]
+    fn select_cert_not_yet_valid_x509_leaf_returns_refusal() {
+        let now = OffsetDateTime::now_utc();
+        let (future_leaf, ca) = test_x509_leaf_signed_by_ca(
+            "future-leaf",
+            &[2],
+            &[9],
+            "Valid Test CA",
+            now + TimeDuration::days(1),
+            now + TimeDuration::days(30),
+            now - TimeDuration::days(60),
+            now + TimeDuration::days(60),
+        );
+        let driver = MockSessionDriver::with_certs_and_keys(
+            vec![future_leaf, ca],
+            vec![test_key("future-key", &[2], TokenKeyType::Ed25519)],
+        );
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+
+        let err = select_certificate_for_provisioning(&token, &pin, &driver).unwrap_err();
+        assert!(matches!(
+            err,
+            TokenError::CertificateSelectionFailed(
+                CertificateSelectionRefusal::NoVerifiedIssuerChain
+            )
+        ));
+    }
+
+    #[test]
+    fn select_cert_expired_x509_ca_returns_refusal() {
+        let now = OffsetDateTime::now_utc();
+        let (leaf, expired_ca) = test_x509_leaf_signed_by_ca(
+            "leaf-with-expired-ca",
+            &[3],
+            &[9],
+            "Expired Test CA",
+            now - TimeDuration::days(7),
+            now + TimeDuration::days(7),
+            now - TimeDuration::days(90),
+            now - TimeDuration::days(1),
+        );
+        let driver = MockSessionDriver::with_certs_and_keys(
+            vec![leaf, expired_ca],
+            vec![test_key("leaf-key", &[3], TokenKeyType::Ed25519)],
         );
         let token = test_token();
         let pin = HardwareTokenPin::new("123456");

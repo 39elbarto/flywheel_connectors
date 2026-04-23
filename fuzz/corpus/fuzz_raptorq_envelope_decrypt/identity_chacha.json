@@ -1,0 +1,16 @@
+{
+  "key_seed": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+  "zone_key_id": [16, 16, 16, 16, 16, 16, 16, 16],
+  "object_id": [17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17],
+  "algorithm": "chacha20_poly1305",
+  "mutation": "identity",
+  "mutation_index": 0,
+  "plaintext_len": 48,
+  "plaintext_fill": 66,
+  "esi": 42,
+  "k": 10,
+  "epoch_id": 1000,
+  "sender_instance_id": 81985529216486895,
+  "frame_seq": 12345,
+  "source_suffix": 1
+}

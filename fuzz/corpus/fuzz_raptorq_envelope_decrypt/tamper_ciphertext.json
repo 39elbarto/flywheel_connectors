@@ -1,0 +1,16 @@
+{
+  "key_seed": [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+  "zone_key_id": [32, 32, 32, 32, 32, 32, 32, 32],
+  "object_id": [34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34, 34],
+  "algorithm": "chacha20_poly1305",
+  "mutation": "ciphertext_bitflip",
+  "mutation_index": 3,
+  "plaintext_len": 96,
+  "plaintext_fill": 17,
+  "esi": 7,
+  "k": 4,
+  "epoch_id": 2000,
+  "sender_instance_id": 1229801703532086340,
+  "frame_seq": 444,
+  "source_suffix": 2
+}

@@ -1,0 +1,16 @@
+{
+  "key_seed": [3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3],
+  "zone_key_id": [48, 48, 48, 48, 48, 48, 48, 48],
+  "object_id": [51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51, 51],
+  "algorithm": "xchacha20_poly1305",
+  "mutation": "auth_tag_bitflip",
+  "mutation_index": 15,
+  "plaintext_len": 80,
+  "plaintext_fill": 90,
+  "esi": 999,
+  "k": 12,
+  "epoch_id": 3000,
+  "sender_instance_id": 2459584641779389781,
+  "frame_seq": 8888,
+  "source_suffix": 3
+}

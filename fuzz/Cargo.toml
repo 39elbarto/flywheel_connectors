@@ -304,5 +304,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_raptorq_envelope_decrypt"
+path = "fuzz_targets/raptorq_envelope_decrypt.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

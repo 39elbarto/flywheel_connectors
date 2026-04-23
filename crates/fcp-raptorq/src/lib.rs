@@ -41,6 +41,6 @@ pub use chunk::{ChunkedObjectManifest, RawChunk};
 pub use config::{RaptorQConfig, RaptorQPathProfile, RaptorQPreset};
 pub use decode::{DecodeAdmissionController, DecodePermit, RaptorQDecoder};
 pub use encode::{EncodingDecision, RaptorQEncoder};
-pub use envelope::SymbolEnvelope;
+pub use envelope::{SymbolEnvelope, SymbolEnvelopeError};
 pub use error::{ChunkError, DecodeError, EncodeError};
 pub use oti::ObjectTransmissionInformation;

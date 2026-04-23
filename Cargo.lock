@@ -2812,9 +2812,12 @@ dependencies = [
  "fcp-host",
  "fcp-manifest",
  "fcp-mesh",
+ "fcp-oauth",
  "fcp-protocol",
  "fcp-raptorq",
+ "fcp-ratelimit",
  "fcp-registry",
+ "fcp-sandbox",
  "fcp-store",
  "fcp-tailscale",
  "fcp-webhook",
@@ -2827,7 +2830,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "url",
  "uuid",
+ "wasmtime",
+ "wasmtime-wasi",
 ]
 
 [[package]]
@@ -5626,6 +5632,7 @@ name = "fcp-streaming"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "fcp-async-core",
@@ -5635,6 +5642,7 @@ dependencies = [
  "rand 0.9.4",
  "serde",
  "serde_json",
+ "sha1 0.10.6",
  "thiserror 2.0.18",
  "tracing",
  "wiremock",
@@ -6194,6 +6202,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "ciborium",
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",

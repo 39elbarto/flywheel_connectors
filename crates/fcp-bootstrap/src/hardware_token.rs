@@ -1183,8 +1183,6 @@ pub fn match_certificate_key_pairs(
     pairs
 }
 
-const SOFT_TOKEN_CERT_PREFIX: &[u8] = b"SOFT-CERT-V1:";
-
 const fn is_owner_signing_key(key: &TokenKeyInfo) -> bool {
     matches!(key.key_type, TokenKeyType::Ed25519) && key.can_sign
 }
@@ -1206,31 +1204,9 @@ fn certificate_has_verified_issuer_chain_inner(
         return false;
     }
 
-    let verified = if certificate.der_bytes.starts_with(SOFT_TOKEN_CERT_PREFIX) {
-        certificate_has_soft_token_issuer_chain(certificate, certificates, visited)
-    } else {
-        certificate_has_x509_issuer_chain(certificate, certificates, visited)
-    };
-
+    let verified = certificate_has_x509_issuer_chain(certificate, certificates, visited);
     visited.remove(&certificate.id);
     verified
-}
-
-fn certificate_has_soft_token_issuer_chain(
-    certificate: &TokenCertificate,
-    certificates: &[TokenCertificate],
-    visited: &mut HashSet<Vec<u8>>,
-) -> bool {
-    if certificate.is_ca {
-        return certificate.subject == certificate.issuer;
-    }
-
-    certificates
-        .iter()
-        .filter(|issuer| {
-            issuer.is_ca && issuer.subject == certificate.issuer && issuer.id != certificate.id
-        })
-        .any(|issuer| certificate_has_verified_issuer_chain_inner(issuer, certificates, visited))
 }
 
 fn certificate_has_x509_issuer_chain(
@@ -1385,11 +1361,7 @@ fn token_locator(token: &DetectedToken) -> String {
     )
 }
 
-fn cleanup_failed_session(
-    provider: &Path,
-    session: Session,
-    pkcs11: Pkcs11,
-) {
+fn cleanup_failed_session(provider: &Path, session: Session, pkcs11: Pkcs11) {
     let _ = session.close();
     let _ = finalize_pkcs11_context(provider, pkcs11);
 }
@@ -1420,11 +1392,12 @@ fn acquire_provider_context(provider: &Path) -> Result<Pkcs11, TokenError> {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let pkcs11 = Pkcs11::new(provider).map_err(map_pkcs11_error)?;
-    let initialized_here = match pkcs11.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)) {
-        Ok(()) => true,
-        Err(Pkcs11Error::Pkcs11(RvError::CryptokiAlreadyInitialized, _)) => false,
-        Err(err) => return Err(map_pkcs11_error(err)),
-    };
+    let initialized_here =
+        match pkcs11.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)) {
+            Ok(()) => true,
+            Err(Pkcs11Error::Pkcs11(RvError::CryptokiAlreadyInitialized, _)) => false,
+            Err(err) => return Err(map_pkcs11_error(err)),
+        };
 
     note_provider_session_open(&mut sessions, provider, initialized_here);
     Ok(pkcs11)
@@ -1913,9 +1886,8 @@ pub mod mock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rcgen::{
-        BasicConstraints, CertificateParams, CertifiedIssuer, DnType, IsCa, KeyPair,
-    };
+    use ed25519_dalek::{SigningKey, pkcs8::EncodePrivateKey};
+    use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, DnType, IsCa, KeyPair};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -3073,11 +3045,47 @@ mod tests {
 
     // ── Test helpers for certificate selection ───────────────────────────
 
+    fn deterministic_test_signing_key(label: &str, id: &[u8], purpose: &[u8]) -> SigningKey {
+        let mut signing_key_bytes = [0u8; 32];
+        let mut key_context = Vec::with_capacity(purpose.len() + label.len() + id.len() + 2);
+        key_context.extend_from_slice(purpose);
+        key_context.push(0);
+        key_context.extend_from_slice(label.as_bytes());
+        key_context.push(0);
+        key_context.extend_from_slice(id);
+
+        let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(b"fcp-bootstrap-test-cert"), &key_context);
+        hk.expand(b"fcp-bootstrap-test-cert-ed25519", &mut signing_key_bytes)
+            .expect("32 bytes is a valid HKDF-SHA256 output length");
+
+        SigningKey::from_bytes(&signing_key_bytes)
+    }
+
+    fn deterministic_test_key_pair(label: &str, id: &[u8], purpose: &[u8]) -> KeyPair {
+        let signing_key = deterministic_test_signing_key(label, id, purpose);
+        let pkcs8 = signing_key.to_pkcs8_der().unwrap();
+        KeyPair::try_from(pkcs8.as_bytes()).unwrap()
+    }
+
+    fn deterministic_test_ca(label: &str) -> CertifiedIssuer<'static, KeyPair> {
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.distinguished_name.push(DnType::CommonName, label);
+        let key_pair = deterministic_test_key_pair(label, b"", b"ca");
+        CertifiedIssuer::self_signed(params, key_pair).unwrap()
+    }
+
     fn test_cert(label: &str, id: &[u8]) -> TokenCertificate {
+        let issuer = deterministic_test_ca("TestCA");
+        let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.distinguished_name.push(DnType::CommonName, label);
+        let key_pair = deterministic_test_key_pair(label, id, b"leaf");
+        let cert = params.signed_by(&key_pair, &issuer).unwrap();
+
         TokenCertificate {
             label: label.to_string(),
             id: id.to_vec(),
-            der_bytes: [SOFT_TOKEN_CERT_PREFIX, id].concat(),
+            der_bytes: cert.der().to_vec(),
             subject: format!("CN={label}"),
             issuer: "CN=TestCA".to_string(),
             is_ca: false,
@@ -3085,10 +3093,11 @@ mod tests {
     }
 
     fn test_ca_cert(label: &str, id: &[u8]) -> TokenCertificate {
+        let issuer = deterministic_test_ca(label);
         TokenCertificate {
             label: label.to_string(),
             id: id.to_vec(),
-            der_bytes: [SOFT_TOKEN_CERT_PREFIX, id].concat(),
+            der_bytes: issuer.der().to_vec(),
             subject: format!("CN={label}"),
             issuer: format!("CN={label}"),
             is_ca: true,

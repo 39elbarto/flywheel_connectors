@@ -32,7 +32,8 @@ use crate::hardware_token::{
     AuthenticatedSessionState, AuthenticatedTokenSession, DetectedToken, HardwareTokenPin,
     HardwareTokenSessionDriver, TokenCertificate, TokenError, TokenKeyInfo, TokenKeyType,
 };
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{SigningKey, pkcs8::EncodePrivateKey};
+use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, DnType, IsCa, KeyPair};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -165,6 +166,13 @@ struct MaterializedIdentity {
     signing_key_bytes: [u8; 32],
 }
 
+struct DerivedIdentity {
+    spec: SoftTokenIdentitySpec,
+    id: Vec<u8>,
+    key_info: TokenKeyInfo,
+    signing_key_bytes: [u8; 32],
+}
+
 /// Deterministic soft-token driver implementing [`HardwareTokenSessionDriver`].
 ///
 /// Each instance holds pre-materialized identities generated from a fixed seed.
@@ -177,8 +185,7 @@ struct SoftTokenDriver {
     detected_token: DetectedToken,
     /// Pre-materialized identities indexed by their `CKA_ID`.
     identities: Vec<MaterializedIdentity>,
-    /// Synthetic certificate objects that model issuer material present on the
-    /// token without introducing additional selectable key pairs.
+    /// Additional CA certificates present on the token without matching keys.
     extra_certificates: Vec<TokenCertificate>,
     /// Counter for close-action invocations (for cleanup determinism tests).
     close_count: Arc<AtomicUsize>,
@@ -310,69 +317,54 @@ impl HardwareTokenSessionDriver for SoftTokenDriver {
 
 /// Derive deterministic identity material from the master seed.
 fn materialize_identities(specs: &[SoftTokenIdentitySpec]) -> Vec<MaterializedIdentity> {
-    let mut identities = Vec::with_capacity(specs.len());
+    let derived_identities = specs
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| derive_identity(index, spec))
+        .collect::<Vec<_>>();
+    let default_ca = derived_identities
+        .iter()
+        .find(|identity| identity.spec.is_ca);
 
-    for (index, spec) in specs.iter().enumerate() {
-        // Derive a per-identity signing key using HKDF from the master seed + index.
-        // No RNG needed — the key material is fully deterministic.
-        let mut signing_key_bytes = [0u8; 32];
-        let hk = hkdf::Hkdf::<sha2::Sha256>::new(
-            Some(&DEFAULT_MASTER_SEED),
-            &(index as u64).to_le_bytes(),
-        );
-        hk.expand(b"fcp-soft-token-identity", &mut signing_key_bytes)
-            .expect("32 bytes is a valid HKDF-SHA256 output length");
+    derived_identities
+        .iter()
+        .map(|identity| {
+            let certificate = if identity.spec.is_ca {
+                build_self_signed_certificate(
+                    &identity.spec.label,
+                    &identity.id,
+                    &identity.spec.subject_cn,
+                    &identity.signing_key_bytes,
+                    true,
+                )
+            } else if let Some(ca_identity) = default_ca {
+                build_signed_certificate(
+                    &identity.spec.label,
+                    &identity.id,
+                    &identity.spec.subject_cn,
+                    &ca_identity.spec.subject_cn,
+                    &identity.signing_key_bytes,
+                    &ca_identity.signing_key_bytes,
+                )
+            } else {
+                build_signed_certificate(
+                    &identity.spec.label,
+                    &identity.id,
+                    &identity.spec.subject_cn,
+                    "FCP SoftToken CA",
+                    &identity.signing_key_bytes,
+                    &implicit_ca_signing_key_bytes(),
+                )
+            };
 
-        let signing_key = SigningKey::from_bytes(&signing_key_bytes);
-        let public_key_bytes = signing_key.verifying_key().to_bytes();
-
-        // Generate a deterministic CKA_ID from the public key (first 20 bytes of BLAKE3).
-        let id_hash = blake3::hash(&public_key_bytes);
-        let cka_id = id_hash.as_bytes()[..20].to_vec();
-
-        // Build synthetic DER certificate bytes.
-        // We don't need a real X.509 structure — just enough to be non-empty
-        // and distinguishable per identity.  The DER bytes encode:
-        //   [magic prefix][public key bytes][identity index]
-        let mut der_bytes = Vec::with_capacity(64);
-        der_bytes.extend_from_slice(b"SOFT-CERT-V1:");
-        der_bytes.extend_from_slice(&public_key_bytes);
-        #[allow(clippy::cast_possible_truncation)] // index < 256 in practice
-        der_bytes.push(index as u8);
-
-        let subject = format!("CN={}", spec.subject_cn);
-        let issuer = if spec.is_ca {
-            subject.clone() // self-signed → subject == issuer
-        } else {
-            "CN=FCP SoftToken CA".to_string()
-        };
-
-        let certificate = TokenCertificate {
-            label: spec.label.clone(),
-            id: cka_id.clone(),
-            der_bytes,
-            subject,
-            issuer,
-            is_ca: spec.is_ca,
-        };
-
-        let key_info = TokenKeyInfo {
-            label: spec.label.clone(),
-            id: cka_id.clone(),
-            key_type: spec.key_type,
-            can_sign: spec.can_sign,
-            can_derive: spec.can_derive,
-        };
-
-        identities.push(MaterializedIdentity {
-            id: cka_id,
-            certificate,
-            key_info,
-            signing_key_bytes,
-        });
-    }
-
-    identities
+            MaterializedIdentity {
+                id: identity.id.clone(),
+                certificate,
+                key_info: identity.key_info.clone(),
+                signing_key_bytes: identity.signing_key_bytes,
+            }
+        })
+        .collect()
 }
 
 fn implicit_ca_certificates(specs: &[SoftTokenIdentitySpec]) -> Vec<TokenCertificate> {
@@ -382,22 +374,129 @@ fn implicit_ca_certificates(specs: &[SoftTokenIdentitySpec]) -> Vec<TokenCertifi
         return Vec::new();
     }
 
+    vec![implicit_ca_certificate()]
+}
+
+fn derive_identity(index: usize, spec: &SoftTokenIdentitySpec) -> DerivedIdentity {
+    // Derive a per-identity signing key using HKDF from the master seed + index.
+    // No RNG needed — the key material is fully deterministic.
+    let mut signing_key_bytes = [0u8; 32];
+    let hk =
+        hkdf::Hkdf::<sha2::Sha256>::new(Some(&DEFAULT_MASTER_SEED), &(index as u64).to_le_bytes());
+    hk.expand(b"fcp-soft-token-identity", &mut signing_key_bytes)
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+
+    let signing_key = SigningKey::from_bytes(&signing_key_bytes);
+    let public_key_bytes = signing_key.verifying_key().to_bytes();
+
+    // Generate a deterministic CKA_ID from the public key (first 20 bytes of BLAKE3).
+    let id_hash = blake3::hash(&public_key_bytes);
+    let cka_id = id_hash.as_bytes()[..20].to_vec();
+
+    let key_info = TokenKeyInfo {
+        label: spec.label.clone(),
+        id: cka_id.clone(),
+        key_type: spec.key_type,
+        can_sign: spec.can_sign,
+        can_derive: spec.can_derive,
+    };
+
+    DerivedIdentity {
+        spec: spec.clone(),
+        id: cka_id,
+        key_info,
+        signing_key_bytes,
+    }
+}
+
+fn build_certificate_params(common_name: &str, is_ca: bool) -> CertificateParams {
+    let mut params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, common_name);
+    if is_ca {
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    }
+    params
+}
+
+fn rcgen_key_pair_from_signing_key(signing_key_bytes: &[u8; 32]) -> KeyPair {
+    let signing_key = SigningKey::from_bytes(signing_key_bytes);
+    let pkcs8 = signing_key.to_pkcs8_der().unwrap();
+    KeyPair::try_from(pkcs8.as_bytes()).unwrap()
+}
+
+fn build_self_signed_certificate(
+    label: &str,
+    id: &[u8],
+    subject_cn: &str,
+    signing_key_bytes: &[u8; 32],
+    is_ca: bool,
+) -> TokenCertificate {
+    let params = build_certificate_params(subject_cn, is_ca);
+    let key_pair = rcgen_key_pair_from_signing_key(signing_key_bytes);
+    let certificate = params.self_signed(&key_pair).unwrap();
+    let subject = format!("CN={subject_cn}");
+
+    TokenCertificate {
+        label: label.to_string(),
+        id: id.to_vec(),
+        der_bytes: certificate.der().to_vec(),
+        subject: subject.clone(),
+        issuer: subject,
+        is_ca,
+    }
+}
+
+fn certified_issuer(
+    subject_cn: &str,
+    signing_key_bytes: &[u8; 32],
+) -> CertifiedIssuer<'static, KeyPair> {
+    let params = build_certificate_params(subject_cn, true);
+    let key_pair = rcgen_key_pair_from_signing_key(signing_key_bytes);
+    CertifiedIssuer::self_signed(params, key_pair).unwrap()
+}
+
+fn build_signed_certificate(
+    label: &str,
+    id: &[u8],
+    subject_cn: &str,
+    issuer_cn: &str,
+    signing_key_bytes: &[u8; 32],
+    issuer_signing_key_bytes: &[u8; 32],
+) -> TokenCertificate {
+    let params = build_certificate_params(subject_cn, false);
+    let key_pair = rcgen_key_pair_from_signing_key(signing_key_bytes);
+    let issuer = certified_issuer(issuer_cn, issuer_signing_key_bytes);
+    let certificate = params.signed_by(&key_pair, &issuer).unwrap();
+
+    TokenCertificate {
+        label: label.to_string(),
+        id: id.to_vec(),
+        der_bytes: certificate.der().to_vec(),
+        subject: format!("CN={subject_cn}"),
+        issuer: format!("CN={issuer_cn}"),
+        is_ca: false,
+    }
+}
+
+fn implicit_ca_signing_key_bytes() -> [u8; 32] {
+    let mut signing_key_bytes = [0u8; 32];
+    let hk =
+        hkdf::Hkdf::<sha2::Sha256>::new(Some(&DEFAULT_MASTER_SEED), b"fcp-soft-token-implicit-ca");
+    hk.expand(b"fcp-soft-token-ca", &mut signing_key_bytes)
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    signing_key_bytes
+}
+
+fn implicit_ca_certificate() -> TokenCertificate {
     let ca_label = "soft-token-ca";
-    let ca_subject = "CN=FCP SoftToken CA".to_string();
+    let subject_cn = "FCP SoftToken CA";
     let id_hash = blake3::hash(b"fcp-soft-token-ca");
     let cka_id = id_hash.as_bytes()[..20].to_vec();
-    let mut der_bytes = Vec::with_capacity(32);
-    der_bytes.extend_from_slice(b"SOFT-CERT-V1:");
-    der_bytes.extend_from_slice(b"issuer-ca");
+    let signing_key_bytes = implicit_ca_signing_key_bytes();
 
-    vec![TokenCertificate {
-        label: ca_label.to_string(),
-        id: cka_id,
-        der_bytes,
-        subject: ca_subject.clone(),
-        issuer: ca_subject,
-        is_ca: true,
-    }]
+    build_self_signed_certificate(ca_label, &cka_id, subject_cn, &signing_key_bytes, true)
 }
 
 /// Build a multi-token soft-token environment with separate drivers per token.

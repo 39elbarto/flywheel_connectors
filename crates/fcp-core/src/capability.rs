@@ -2306,6 +2306,50 @@ pub struct Principal {
     pub display: Option<String>,
 }
 
+impl Principal {
+    /// Enforce the baseline principal-to-zone access floor.
+    ///
+    /// This is defense-in-depth for call sites that only have a [`Principal`]
+    /// plus a [`ZoneId`] and have not yet consulted explicit host policy. It
+    /// does NOT replace host-side zone membership or capability checks.
+    ///
+    /// Current floor:
+    /// - `Blocked` principals are denied everywhere.
+    /// - External principals are denied in high-trust zones (`z:private`,
+    ///   `z:owner`) unless a higher layer performs an explicit allow.
+    ///
+    /// # Errors
+    /// Returns [`FcpError::Unauthorized`] when the principal fails the
+    /// baseline zone-access floor.
+    pub fn verify_zone_access(&self, zone_id: &ZoneId) -> FcpResult<()> {
+        if self.trust == TrustLevel::Blocked {
+            return Err(FcpError::Unauthorized {
+                code: 2001,
+                message: format!(
+                    "blocked principal '{}' cannot access zone '{}'",
+                    self.id,
+                    zone_id.as_str()
+                ),
+            });
+        }
+
+        if matches!(zone_id.as_str(), ZoneId::PRIVATE | ZoneId::OWNER)
+            && self.trust != TrustLevel::Owner
+        {
+            return Err(FcpError::Unauthorized {
+                code: 2001,
+                message: format!(
+                    "principal '{}' requires explicit zone policy to access '{}'",
+                    self.id,
+                    zone_id.as_str()
+                ),
+            });
+        }
+
+        Ok(())
+    }
+}
+
 /// Trust level for principals.
 ///
 /// Per FCP Specification Section 6.5 (Ingress Bindings):
@@ -5298,6 +5342,84 @@ mod tests {
         };
         let json = serde_json::to_string(&p).unwrap();
         assert!(!json.contains("display"));
+    }
+
+    #[test]
+    fn principal_verify_zone_access_denies_blocked_everywhere() {
+        let principal = Principal {
+            kind: "user".into(),
+            id: "blocked-user".into(),
+            trust: TrustLevel::Blocked,
+            display: None,
+        };
+
+        let err = principal.verify_zone_access(&ZoneId::public()).unwrap_err();
+        assert!(matches!(
+            &err,
+            FcpError::Unauthorized { code, message }
+            if *code == 2001
+                && message == "blocked principal 'blocked-user' cannot access zone 'z:public'"
+        ));
+    }
+
+    #[test]
+    fn principal_verify_zone_access_denies_paired_private_without_policy() {
+        let principal = Principal {
+            kind: "user".into(),
+            id: "alice".into(),
+            trust: TrustLevel::Paired,
+            display: None,
+        };
+
+        let err = principal.verify_zone_access(&ZoneId::private()).unwrap_err();
+        assert!(matches!(
+            &err,
+            FcpError::Unauthorized { code, message }
+            if *code == 2001
+                && message == "principal 'alice' requires explicit zone policy to access 'z:private'"
+        ));
+    }
+
+    #[test]
+    fn principal_verify_zone_access_denies_admin_owner_without_policy() {
+        let principal = Principal {
+            kind: "service".into(),
+            id: "ops-bot".into(),
+            trust: TrustLevel::Admin,
+            display: None,
+        };
+
+        let err = principal.verify_zone_access(&ZoneId::owner()).unwrap_err();
+        assert!(matches!(
+            &err,
+            FcpError::Unauthorized { code, message }
+            if *code == 2001
+                && message == "principal 'ops-bot' requires explicit zone policy to access 'z:owner'"
+        ));
+    }
+
+    #[test]
+    fn principal_verify_zone_access_allows_owner_in_owner_zone() {
+        let principal = Principal {
+            kind: "user".into(),
+            id: "root".into(),
+            trust: TrustLevel::Owner,
+            display: None,
+        };
+
+        principal.verify_zone_access(&ZoneId::owner()).unwrap();
+    }
+
+    #[test]
+    fn principal_verify_zone_access_allows_paired_in_work_zone() {
+        let principal = Principal {
+            kind: "user".into(),
+            id: "alice".into(),
+            trust: TrustLevel::Paired,
+            display: None,
+        };
+
+        principal.verify_zone_access(&ZoneId::work()).unwrap();
     }
 
     #[test]

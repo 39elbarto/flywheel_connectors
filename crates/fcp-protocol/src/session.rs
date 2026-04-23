@@ -75,6 +75,12 @@ pub enum SessionError {
     #[error("session ack selected a suite not offered by the hello")]
     AckSuiteNotOffered,
 
+    #[error("session ack selected suite {actual:?} below minimum {minimum:?}")]
+    AckSuiteBelowMinimum {
+        actual: SessionCryptoSuite,
+        minimum: SessionCryptoSuite,
+    },
+
     #[error("attestation verification failed: {reason}")]
     AttestationVerifyFailed { reason: String },
 
@@ -437,9 +443,7 @@ impl MeshSessionAck {
         if self.from.as_str() != hello.to.as_str() || self.to.as_str() != hello.from.as_str() {
             return Err(SessionError::AckHelloMismatch);
         }
-        if !hello.suites.contains(&self.suite) {
-            return Err(SessionError::AckSuiteNotOffered);
-        }
+        verify_ack_suite_against_floor(self.suite, &hello.suites, MINIMUM_SUITE)?;
         let signature = self.signature.ok_or(SessionError::MissingSignature)?;
         let transcript = self.transcript_bytes(hello)?;
         verifying_key
@@ -866,6 +870,23 @@ pub fn negotiate_suite(
         .iter()
         .copied()
         .find(|suite| initiator_suites.contains(suite) && suite_rank(*suite) >= floor)
+}
+
+fn verify_ack_suite_against_floor(
+    ack_suite: SessionCryptoSuite,
+    hello_suites: &[SessionCryptoSuite],
+    minimum_suite: SessionCryptoSuite,
+) -> Result<(), SessionError> {
+    if suite_rank(ack_suite) < suite_rank(minimum_suite) {
+        return Err(SessionError::AckSuiteBelowMinimum {
+            actual: ack_suite,
+            minimum: minimum_suite,
+        });
+    }
+    if !hello_suites.contains(&ack_suite) {
+        return Err(SessionError::AckSuiteNotOffered);
+    }
+    Ok(())
 }
 
 /// Compute the stateless cookie for a hello message.
@@ -2649,6 +2670,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ack_suite_validation_rejects_suite_below_future_floor() {
+        let context = LogContext::new("handshake", "verify").with_reason("suite_below_floor");
+        run_logged_test(
+            "ack_suite_validation_rejects_suite_below_future_floor",
+            1,
+            &context,
+            || {
+                let err = verify_ack_suite_against_floor(
+                    SessionCryptoSuite::Suite1,
+                    &[SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2],
+                    SessionCryptoSuite::Suite2,
+                )
+                .expect_err("suite below a future floor must fail");
+                assert!(matches!(
+                    err,
+                    SessionError::AckSuiteBelowMinimum {
+                        actual: SessionCryptoSuite::Suite1,
+                        minimum: SessionCryptoSuite::Suite2,
+                    }
+                ));
+            },
+        );
+    }
+
     // ── suite id roundtrip ──────────────────────────────────────────
 
     #[test]
@@ -2787,6 +2833,14 @@ mod tests {
                 SessionError::AckSuiteNotOffered
                     .to_string()
                     .contains("suite not offered")
+            );
+            assert!(
+                SessionError::AckSuiteBelowMinimum {
+                    actual: SessionCryptoSuite::Suite1,
+                    minimum: SessionCryptoSuite::Suite2,
+                }
+                .to_string()
+                .contains("below minimum")
             );
             assert!(
                 SessionError::InvalidMacKeyLength

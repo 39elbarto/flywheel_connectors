@@ -683,7 +683,7 @@ mod tests {
 
         let err = AuthClaims::from_canonical_cbor(&bytes).expect_err("must reject non-canonical");
         assert!(
-            matches!(err, SchemaError::Decode(msg) if msg.contains("non-canonical")),
+            matches!(&err, SchemaError::Decode(msg) if msg.contains("non-canonical")),
             "expected non-canonical decode error, got {err:?}"
         );
     }

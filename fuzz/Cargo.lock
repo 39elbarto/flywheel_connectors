@@ -1313,6 +1313,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-auth-schema"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ciborium",
+ "fcp-cbor",
+ "serde",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "fcp-bootstrap"
 version = "0.1.0"
 dependencies = [
@@ -1369,6 +1380,7 @@ dependencies = [
  "ciborium",
  "ed25519-dalek",
  "fcp-async-core",
+ "fcp-auth-schema",
  "fcp-cbor",
  "fcp-crypto",
  "futures-util",
@@ -1395,6 +1407,8 @@ dependencies = [
  "coset",
  "curve25519-dalek",
  "ed25519-dalek",
+ "fcp-auth-schema",
+ "fcp-cbor",
  "frost-ed25519",
  "hex",
  "hkdf",

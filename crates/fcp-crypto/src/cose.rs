@@ -376,7 +376,10 @@ impl CwtClaims {
         let mut claims = BTreeMap::new();
         for (k, v) in map {
             let key = match k {
-                ciborium::Value::Integer(i) => i64::try_from(i)
+                // `i: &ciborium::value::Integer`; deref to an owned copy
+                // before `try_from` because ciborium's TryFrom impl is on
+                // `Integer`, not `&Integer`.
+                ciborium::Value::Integer(i) => i64::try_from(*i)
                     .map_err(|_| CryptoError::SerializationError("invalid claim key".into()))?,
                 _ => {
                     return Err(CryptoError::SerializationError(

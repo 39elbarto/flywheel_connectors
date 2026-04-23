@@ -248,26 +248,20 @@ impl SoftTokenDriver {
     pub fn wrong_pin() -> HardwareTokenPin {
         HardwareTokenPin::new("WRONG-PIN")
     }
-}
 
-impl HardwareTokenSessionDriver for SoftTokenDriver {
-    fn open_authenticated_session(
+    fn validate_token_and_pin(
         &self,
         token: &DetectedToken,
         pin: &HardwareTokenPin,
-    ) -> Result<AuthenticatedTokenSession, TokenError> {
-        // Validate PIN
+    ) -> Result<(), TokenError> {
         if pin.is_empty() {
             return Err(TokenError::PinRequired);
         }
 
-        // Authenticate against the stored redacted PIN wrapper so comparison stays
-        // on the constant-time path provided by `HardwareTokenPin`.
         if pin != &self.pin {
             return Err(TokenError::InvalidPin);
         }
 
-        // Verify token identity
         if token.provider != self.detected_token.provider || token.slot != self.detected_token.slot
         {
             return Err(TokenError::TokenNotFound(format!(
@@ -276,6 +270,18 @@ impl HardwareTokenSessionDriver for SoftTokenDriver {
                 token.slot
             )));
         }
+
+        Ok(())
+    }
+}
+
+impl HardwareTokenSessionDriver for SoftTokenDriver {
+    fn open_authenticated_session(
+        &self,
+        token: &DetectedToken,
+        pin: &HardwareTokenPin,
+    ) -> Result<AuthenticatedTokenSession, TokenError> {
+        self.validate_token_and_pin(token, pin)?;
 
         let close_count = Arc::clone(&self.close_count);
         Ok(AuthenticatedTokenSession::with_close_action(
@@ -291,9 +297,11 @@ impl HardwareTokenSessionDriver for SoftTokenDriver {
 
     fn enumerate_certificates(
         &self,
-        _token: &DetectedToken,
-        _pin: &HardwareTokenPin,
+        token: &DetectedToken,
+        pin: &HardwareTokenPin,
     ) -> Result<Vec<TokenCertificate>, TokenError> {
+        self.validate_token_and_pin(token, pin)?;
+
         Ok(self
             .identities
             .iter()
@@ -304,9 +312,11 @@ impl HardwareTokenSessionDriver for SoftTokenDriver {
 
     fn enumerate_keys(
         &self,
-        _token: &DetectedToken,
-        _pin: &HardwareTokenPin,
+        token: &DetectedToken,
+        pin: &HardwareTokenPin,
     ) -> Result<Vec<TokenKeyInfo>, TokenError> {
+        self.validate_token_and_pin(token, pin)?;
+
         Ok(self
             .identities
             .iter()
@@ -623,6 +633,27 @@ mod tests {
     }
 
     #[test]
+    fn enumeration_with_wrong_pin_returns_invalid_pin() {
+        let driver = SoftTokenDriver::deterministic(SoftTokenConfig::default());
+        let token = driver.detected_token().clone();
+        let wrong_pin = SoftTokenDriver::wrong_pin();
+
+        let cert_err = driver
+            .enumerate_certificates(&token, &wrong_pin)
+            .unwrap_err();
+        assert!(
+            matches!(cert_err, TokenError::InvalidPin),
+            "expected certificate enumeration to reject wrong PIN, got: {cert_err}"
+        );
+
+        let key_err = driver.enumerate_keys(&token, &wrong_pin).unwrap_err();
+        assert!(
+            matches!(key_err, TokenError::InvalidPin),
+            "expected key enumeration to reject wrong PIN, got: {key_err}"
+        );
+    }
+
+    #[test]
     fn empty_pin_returns_pin_required() {
         let driver = SoftTokenDriver::deterministic(SoftTokenConfig::default());
         let token = driver.detected_token().clone();
@@ -862,6 +893,21 @@ mod tests {
         // Step 4: cleanup
         outcome.session.close().unwrap();
         assert_eq!(driver.close_count(), 1);
+    }
+
+    #[test]
+    fn full_pipeline_select_certificate_with_wrong_pin_returns_invalid_pin() {
+        use crate::hardware_token::select_certificate_for_provisioning;
+
+        let driver = SoftTokenDriver::deterministic(SoftTokenConfig::default());
+        let token = driver.detected_token().clone();
+        let wrong_pin = SoftTokenDriver::wrong_pin();
+
+        let err = select_certificate_for_provisioning(&token, &wrong_pin, &driver).unwrap_err();
+        assert!(
+            matches!(err, TokenError::InvalidPin),
+            "expected provisioning selection to reject wrong PIN, got: {err}"
+        );
     }
 
     #[test]

@@ -1,3 +1,8 @@
+// Covers the deprecated check_replay + record_event pair (br-v3wrz); see
+// claim_event_rejects_duplicate_under_split_call_pattern in handler.rs for
+// the canonical atomic-claim regression.
+#![allow(deprecated)]
+
 use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::thread;

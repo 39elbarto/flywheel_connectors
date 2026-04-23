@@ -3,6 +3,11 @@
 //! These tests exercise the full webhook pipeline (signature verification,
 //! event parsing, routing, dead letter queue) without any external mocks.
 
+// Pre-existing tests cover the deprecated check_replay + record_event pair
+// (br-v3wrz). Claim_event is the atomic replacement; see
+// claim_event_rejects_duplicate_under_split_call_pattern for the canonical
+// regression. Keep the legacy tests running under allow(deprecated).
+#![allow(deprecated)]
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,

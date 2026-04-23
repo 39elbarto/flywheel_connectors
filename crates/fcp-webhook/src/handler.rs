@@ -175,6 +175,21 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
     ///
     /// # Errors
     /// Returns [`WebhookError::ReplayDetected`] when `event_id` was already seen.
+    ///
+    /// # Deprecated
+    /// This split pair (`check_replay` + [`record_event`]) is TOCTOU-racy:
+    /// two concurrent deliveries of the same untrusted `event_id` can both
+    /// pass `check_replay` before either records, so both are processed —
+    /// defeating the exactly-once guarantee on webhook input. Use
+    /// [`claim_event`] instead, which performs the duplicate check and
+    /// the insert under a single write lock (br-v3wrz).
+    ///
+    /// [`record_event`]: Self::record_event
+    /// [`claim_event`]: Self::claim_event
+    #[deprecated(
+        since = "0.1.0",
+        note = "use claim_event — split check/record is TOCTOU-racy (br-v3wrz)"
+    )]
     pub fn check_replay(&self, event_id: &str) -> WebhookResult<()> {
         if !self.config.idempotency_enabled {
             return Ok(());
@@ -208,6 +223,18 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
     ///
     /// # Errors
     /// Returns [`WebhookError::ReplayCacheFull`] when the cache has reached its maximum size.
+    ///
+    /// # Deprecated
+    /// The write half of the racy [`check_replay`] + `record_event` pair.
+    /// Use [`claim_event`] instead — it performs the duplicate check and
+    /// the insert atomically under a single write lock (br-v3wrz).
+    ///
+    /// [`check_replay`]: Self::check_replay
+    /// [`claim_event`]: Self::claim_event
+    #[deprecated(
+        since = "0.1.0",
+        note = "use claim_event — split check/record is TOCTOU-racy (br-v3wrz)"
+    )]
     pub fn record_event(&self, event_id: &str) -> WebhookResult<()> {
         if self.config.idempotency_enabled {
             let mut state = self.seen_events.write();
@@ -223,10 +250,21 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
     }
 
     /// Check for replay and record the event in one atomic operation.
+    ///
+    /// This is the ONLY correct way to enforce exactly-once processing on
+    /// untrusted webhook input. Duplicate-detection and the insert are
+    /// performed under a single `seen_events.write()` acquisition, so two
+    /// concurrent deliveries of the same `event_id` cannot both see "not
+    /// seen yet". Prefer this over the deprecated [`check_replay`] /
+    /// [`record_event`] pair (br-v3wrz).
+    ///
     /// Returns `Err(ReplayDetected)` if already seen.
     ///
     /// # Errors
     /// Returns [`WebhookError::ReplayDetected`] when `event_id` was already claimed.
+    ///
+    /// [`check_replay`]: Self::check_replay
+    /// [`record_event`]: Self::record_event
     pub fn claim_event(&self, event_id: &str) -> WebhookResult<()> {
         if !self.config.idempotency_enabled {
             return Ok(());
@@ -398,6 +436,11 @@ impl DeadLetterQueue {
 }
 
 #[cfg(test)]
+// Inline tests historically documented the split check_replay + record_event
+// pair (now deprecated; see br-v3wrz). Keeping them running under
+// allow(deprecated) preserves the regression surface while the pair exists.
+// New code MUST use claim_event; see claim_event_is_atomic below.
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::HmacSha256Verifier;
@@ -598,6 +641,59 @@ mod tests {
             handler.claim_event("evt_1"),
             Err(WebhookError::ReplayDetected { .. })
         ));
+    }
+
+    /// Regression for br-v3wrz: `claim_event` MUST behave atomically
+    /// under the concurrent delivery pattern that made the deprecated
+    /// `check_replay` + `record_event` split pair unsafe.
+    ///
+    /// Simulates N concurrent deliveries of the same untrusted
+    /// `event_id` across OS threads. Exactly one thread must observe
+    /// `Ok(())`; every other thread must observe `ReplayDetected`.
+    /// `AtomicUsize` success counter pins the property.
+    #[test]
+    fn claim_event_is_atomic_under_concurrent_deliveries() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const THREADS: usize = 16;
+        const EVENT_ID: &str = "v3wrz-atomicity-regression";
+
+        let verifier = HmacSha256Verifier::new("secret");
+        let handler = Arc::new(WebhookHandler::new(verifier, "test"));
+        let claim_ok = Arc::new(AtomicUsize::new(0));
+        let claim_dup = Arc::new(AtomicUsize::new(0));
+
+        let mut joins = Vec::with_capacity(THREADS);
+        for _ in 0..THREADS {
+            let h = Arc::clone(&handler);
+            let ok = Arc::clone(&claim_ok);
+            let dup = Arc::clone(&claim_dup);
+            joins.push(std::thread::spawn(move || match h.claim_event(EVENT_ID) {
+                Ok(()) => {
+                    ok.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(WebhookError::ReplayDetected { .. }) => {
+                    dup.fetch_add(1, Ordering::SeqCst);
+                }
+                Err(other) => panic!("unexpected error under concurrent claim: {other:?}"),
+            }));
+        }
+        for j in joins {
+            j.join().expect("worker panic");
+        }
+
+        assert_eq!(
+            claim_ok.load(Ordering::SeqCst),
+            1,
+            "claim_event must grant exactly one Ok under {THREADS} concurrent deliveries"
+        );
+        assert_eq!(
+            claim_dup.load(Ordering::SeqCst),
+            THREADS - 1,
+            "remaining {} claims must all see ReplayDetected",
+            THREADS - 1
+        );
     }
 
     #[test]

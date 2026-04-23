@@ -886,21 +886,22 @@ impl AppState {
     /// Resolve the zone policy object for a request.
     ///
     /// Returns the configured policy when one is registered for `zone_id`,
-    /// otherwise falls back to the permissive `host_runtime_policy` and
-    /// emits a `warn!` so operators see that rule-based denial is not
-    /// active for this zone.
-    async fn lookup_zone_policy(&self, zone_id: &ZoneId) -> ZonePolicyObject {
+    /// otherwise fails closed so live preflight cannot bypass deny rules.
+    async fn lookup_zone_policy(&self, zone_id: &ZoneId) -> HostResult<ZonePolicyObject> {
         let policies = self.zone_policies.read().await;
         if let Some(policy) = policies.get(zone_id) {
-            return policy.clone();
+            return Ok(policy.clone());
         }
         drop(policies);
-        tracing::warn!(
+        tracing::error!(
             zone_id = %zone_id.as_str(),
-            event = "zone_policy_fallback_to_permissive",
-            "no zone policy configured for zone; admin deny rules cannot fire (br-d4cij)",
+            event = "zone_policy_missing",
+            "no zone policy configured for zone; denying live request",
         );
-        host_runtime_policy(zone_id.clone())
+        Err(HostError::PreflightFailed(format!(
+            "no zone policy configured for live request zone `{}`",
+            zone_id.as_str()
+        )))
     }
 }
 
@@ -1604,12 +1605,7 @@ async fn verify_live_request(
         .approval_mode
         .is_some_and(|mode| !matches!(mode, ApprovalMode::None));
     let request_input_hash = request_input_hash(&request.input)?;
-    // br-flywheel_connectors-d4cij: pull the per-zone policy from the
-    // configured store before evaluating. host_runtime_policy is the
-    // permissive fallback (every pattern list empty, every transport
-    // allowed) — when it fires, AppState::lookup_zone_policy emits a
-    // warn so operators can see that rule-based denial is not active.
-    let zone_policy = state.lookup_zone_policy(&request.zone_id).await;
+    let zone_policy = state.lookup_zone_policy(&request.zone_id).await?;
     let receipt = simulate_policy_decision(&PolicySimulationInput {
         zone_policy,
         invoke_request: request.clone(),
@@ -5780,6 +5776,68 @@ mod tests {
         assert!(
             error.to_string().contains("policy denied"),
             "expected policy-deny rejection, got: {error}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn verify_live_request_rejects_missing_zone_policy() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping missing-zone-policy test");
+            return;
+        }
+
+        let connector_id = "fcp.test.zone-policy-missing:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![subprocess_test_connector_config(connector_id)],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            ..(*base_state).clone()
+        });
+
+        let token = test_capability_token(
+            &signing_key,
+            "cap.test.echo",
+            "test.echo",
+            ZoneId::work().as_str(),
+        );
+
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "should be denied without zone policy" }),
+            capability_token: token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let error = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("missing zone policy must reject the live request");
+        assert!(
+            error
+                .to_string()
+                .contains("no zone policy configured for live request zone"),
+            "expected missing-zone-policy rejection, got: {error}"
         );
     }
 

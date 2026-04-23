@@ -218,6 +218,7 @@ fn validate_tracestate(value: &str) -> Option<&str> {
             return None;
         }
 
+        let member = trim_tracestate_ows(member);
         let (key, member_value) = member.split_once('=')?;
         if !is_valid_tracestate_key(key) || !is_valid_tracestate_value(member_value) {
             return None;
@@ -225,6 +226,10 @@ fn validate_tracestate(value: &str) -> Option<&str> {
     }
 
     Some(value)
+}
+
+fn trim_tracestate_ows(value: &str) -> &str {
+    value.trim_matches(|ch| matches!(ch, ' ' | '\t'))
 }
 
 fn is_valid_tracestate_key(key: &str) -> bool {
@@ -828,6 +833,44 @@ mod tests {
         assert_eq!(
             ctx.trace_state.as_deref(),
             Some("vendor=value,tenant@system=opaque")
+        );
+    }
+
+    #[test]
+    fn test_extract_preserves_valid_tracestate_with_optional_spaces() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            TRACEPARENT_HEADER.to_string(),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+        );
+        headers.insert(
+            TRACESTATE_HEADER.to_string(),
+            "vendor=value, tenant@system=opaque".to_string(),
+        );
+
+        let ctx = extract_trace_context(&headers).expect("traceparent should still extract");
+        assert_eq!(
+            ctx.trace_state.as_deref(),
+            Some("vendor=value, tenant@system=opaque")
+        );
+    }
+
+    #[test]
+    fn test_extract_preserves_valid_tracestate_with_optional_tabs() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            TRACEPARENT_HEADER.to_string(),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+        );
+        headers.insert(
+            TRACESTATE_HEADER.to_string(),
+            "vendor=value,\ttenant@system=opaque".to_string(),
+        );
+
+        let ctx = extract_trace_context(&headers).expect("traceparent should still extract");
+        assert_eq!(
+            ctx.trace_state.as_deref(),
+            Some("vendor=value,\ttenant@system=opaque")
         );
     }
 

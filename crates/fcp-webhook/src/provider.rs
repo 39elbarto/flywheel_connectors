@@ -34,6 +34,23 @@ const MAX_STRIPE_SIGNATURE_LEN: usize = 128;
 /// variants while fail-closing multi-megabyte attacker-controlled values.
 const MAX_SLACK_TIMESTAMP_LEN: usize = 20;
 
+#[derive(Debug, Clone, Copy)]
+enum WebhookClockSource {
+    SystemUtc,
+    #[cfg(test)]
+    Fixed(i64),
+}
+
+impl WebhookClockSource {
+    fn now_timestamp(self) -> i64 {
+        match self {
+            Self::SystemUtc => Utc::now().timestamp(),
+            #[cfg(test)]
+            Self::Fixed(now) => now,
+        }
+    }
+}
+
 fn validate_timestamp_with_reason(
     timestamp: i64,
     now: i64,
@@ -227,6 +244,7 @@ pub struct StripeWebhook {
     verifier: HmacSha256Verifier,
     timestamp_tolerance: Duration,
     max_payload_size: usize,
+    clock_source: WebhookClockSource,
 }
 
 impl StripeWebhook {
@@ -237,6 +255,7 @@ impl StripeWebhook {
             verifier: HmacSha256Verifier::new(secret),
             timestamp_tolerance: default_timestamp_tolerance(),
             max_payload_size: default_max_payload_size(),
+            clock_source: WebhookClockSource::SystemUtc,
         }
     }
 
@@ -254,6 +273,13 @@ impl StripeWebhook {
     #[must_use]
     pub const fn with_max_payload_size(mut self, size: usize) -> Self {
         self.max_payload_size = size;
+        self
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    fn with_fixed_now_for_tests(mut self, now: i64) -> Self {
+        self.clock_source = WebhookClockSource::Fixed(now);
         self
     }
 
@@ -395,7 +421,7 @@ impl StripeWebhook {
 
     /// Validate timestamp is within tolerance.
     fn validate_timestamp(&self, timestamp: i64) -> WebhookResult<()> {
-        self.validate_timestamp_at(timestamp, Utc::now().timestamp())
+        self.validate_timestamp_at(timestamp, self.clock_source.now_timestamp())
     }
 
     fn validate_timestamp_at(&self, timestamp: i64, now: i64) -> WebhookResult<()> {
@@ -414,6 +440,7 @@ pub struct SlackWebhook {
     verifier: HmacSha256Verifier,
     timestamp_tolerance: Duration,
     max_payload_size: usize,
+    clock_source: WebhookClockSource,
 }
 
 impl SlackWebhook {
@@ -424,6 +451,7 @@ impl SlackWebhook {
             verifier: HmacSha256Verifier::new(signing_secret),
             timestamp_tolerance: default_timestamp_tolerance(),
             max_payload_size: default_max_payload_size(),
+            clock_source: WebhookClockSource::SystemUtc,
         }
     }
 
@@ -443,6 +471,13 @@ impl SlackWebhook {
     #[must_use]
     pub const fn with_timestamp_tolerance(mut self, tolerance: Duration) -> Self {
         self.timestamp_tolerance = tolerance;
+        self
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    fn with_fixed_now_for_tests(mut self, now: i64) -> Self {
+        self.clock_source = WebhookClockSource::Fixed(now);
         self
     }
 
@@ -483,7 +518,7 @@ impl SlackWebhook {
             .map_err(|_| WebhookError::InvalidPayload("Invalid timestamp".into()))?;
 
         // Validate timestamp
-        self.validate_timestamp_at(timestamp, Utc::now().timestamp())?;
+        self.validate_timestamp_at(timestamp, self.clock_source.now_timestamp())?;
 
         // Build Slack signature base string
         let mut base_string = format!("v0:{timestamp_str}:").into_bytes();
@@ -1219,6 +1254,31 @@ mod tests {
     }
 
     #[test]
+    fn test_slack_verify_and_parse_uses_injected_clock() {
+        let signing_secret = "test-secret";
+        let fixed_now = 1_700_000_000_i64;
+        let timestamp = fixed_now - 299;
+        let handler = SlackWebhook::new(signing_secret)
+            .with_timestamp_tolerance(Duration::from_secs(300))
+            .with_fixed_now_for_tests(fixed_now);
+        let body = br#"{"event":{"type":"message"}}"#;
+
+        let base_string = format!("v0:{timestamp}:{}", String::from_utf8_lossy(body));
+        let verifier = HmacSha256Verifier::new(signing_secret);
+        let computed = verifier.compute(base_string.as_bytes());
+
+        let mut headers = HashMap::new();
+        headers.insert("x-slack-signature".to_string(), format!("v0={computed}"));
+        headers.insert(
+            "x-slack-request-timestamp".to_string(),
+            timestamp.to_string(),
+        );
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(event.event_type, "message");
+    }
+
+    #[test]
     fn test_slack_extracts_nested_event_type() {
         let signing_secret = "test-secret";
         let handler = SlackWebhook::new(signing_secret);
@@ -1908,6 +1968,30 @@ mod tests {
             handler.validate_timestamp_at(now - 1, now),
             Err(WebhookError::TimestampValidation { .. })
         ));
+    }
+
+    #[test]
+    fn test_stripe_verify_and_parse_uses_injected_clock() {
+        let secret = "whsec_test_secret";
+        let fixed_now = 1_700_000_000_i64;
+        let timestamp = fixed_now - 299;
+        let handler = StripeWebhook::new(secret)
+            .with_timestamp_tolerance(Duration::from_secs(300))
+            .with_fixed_now_for_tests(fixed_now);
+        let body = br#"{"id":"evt_123","type":"payment_intent.succeeded","data":{}}"#;
+
+        let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(body));
+        let verifier = HmacSha256Verifier::new(secret);
+        let sig = verifier.compute(signed_payload.as_bytes());
+
+        let mut headers = HashMap::new();
+        headers.insert(
+            "stripe-signature".to_string(),
+            format!("t={timestamp},v1={sig}"),
+        );
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(event.id, "evt_123");
     }
 
     #[test]

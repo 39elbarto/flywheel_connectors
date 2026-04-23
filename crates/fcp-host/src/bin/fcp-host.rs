@@ -35,10 +35,9 @@ use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_async_core::task::{self, JoinHandle};
 use fcp_core::{
     ApprovalToken, CapabilityVerifier, CostEstimateConfidence, Decision, DecisionReceiptPolicy,
-    ObjectHeader, PolicyPattern, PolicySimulationInput, Provenance, ResourceAvailability,
-    RolloutPolicy, SafetyTier, TransportMode, UsageMetric, UsageMetricKind, ZoneId,
-    ZonePolicyObject, ZoneTransportPolicy,
-    simulate_policy_decision,
+    ObjectHeader, PolicySimulationInput, Provenance, ResourceAvailability, RolloutPolicy,
+    SafetyTier, TransportMode, UsageMetric, UsageMetricKind, ZoneId, ZonePolicyObject,
+    ZoneTransportPolicy, simulate_policy_decision,
 };
 use fcp_crypto::{
     canonicalize::to_deterministic_cbor,
@@ -1509,6 +1508,27 @@ async fn verify_live_request(
         .map_err(|error| {
             HostError::PreflightFailed(format!("capability token rejected: {error}"))
         })?;
+    let verified_claims = verified_token.claims();
+
+    // SECURITY: holder-bound tokens (`holder_node` claim present) must never
+    // silently degrade to bearer tokens. Until fcp-host wires live holder-proof
+    // signature verification against node attestations, fail closed here.
+    if let Some(expected_holder) = verified_claims.get_holder_node() {
+        let Some(holder_proof) = request.holder_proof.as_ref() else {
+            return Err(HostError::PreflightFailed(format!(
+                "capability token is holder-bound to `{expected_holder}`, but the request did not include holder_proof"
+            )));
+        };
+        if holder_proof.holder_node.as_str() != expected_holder {
+            return Err(HostError::PreflightFailed(format!(
+                "holder_proof node `{}` does not match capability token holder_node `{expected_holder}`",
+                holder_proof.holder_node.as_str()
+            )));
+        }
+        return Err(HostError::PreflightFailed(format!(
+            "capability token is holder-bound to `{expected_holder}`, but fcp-host does not yet verify holder_proof signatures for live requests"
+        )));
+    }
 
     let persisted_verify = state
         .lifecycle
@@ -1534,7 +1554,7 @@ async fn verify_live_request(
         )));
     }
 
-    let principal = claims_principal(verified_token.claims()).ok_or_else(|| {
+    let principal = claims_principal(verified_claims).ok_or_else(|| {
         HostError::PreflightFailed(
             "capability token is missing the subject or principal_id claim required for live execution".to_string(),
         )
@@ -5314,6 +5334,30 @@ mod tests {
         )
     }
 
+    fn test_capability_token_with_holder_node(
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+        capability_id: &str,
+        operation_id: &str,
+        zone_id: &str,
+        connector_id: &str,
+        holder_node: &str,
+    ) -> fcp_core::CapabilityToken {
+        let now = Utc::now();
+        fcp_core::CapabilityToken::from_raw(
+            fcp_crypto::cose::CapabilityTokenBuilder::new()
+                .capability_id(capability_id)
+                .zone_id(zone_id)
+                .principal("user:test")
+                .audience(connector_id)
+                .issuer("host:test")
+                .operations(&[operation_id])
+                .holder_node(holder_node)
+                .validity(now, now + chrono::Duration::hours(1))
+                .sign(signing_key)
+                .expect("test holder-bound capability token should sign"),
+        )
+    }
+
     fn failing_admin_state_path(dir: &tempfile::TempDir) -> std::path::PathBuf {
         let blocker = dir.path().join("admin-state-blocker");
         std::fs::write(&blocker, "block persistence here").expect("write blocker file");
@@ -5516,6 +5560,129 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn verify_live_request_rejects_holder_bound_token_without_holder_proof() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping holder-proof test");
+            return;
+        }
+
+        let connector_id = "fcp.test.holder-bound:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![subprocess_test_connector_config(connector_id)],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            ..(*base_state).clone()
+        });
+
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "holder-bound token should fail closed" }),
+            capability_token: test_capability_token_with_holder_node(
+                &signing_key,
+                "cap.test.echo",
+                "test.echo",
+                ZoneId::work().as_str(),
+                connector_id,
+                "node:laptop",
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let error = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("holder-bound token without holder_proof must be rejected");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("holder-bound") && msg.contains("holder_proof"),
+            "expected missing holder_proof rejection, got: {msg}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn verify_live_request_rejects_holder_proof_node_mismatch() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!(
+                "compiled fcp-test-connector missing; skipping holder-proof node mismatch test"
+            );
+            return;
+        }
+
+        let connector_id = "fcp.test.holder-node-mismatch:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![subprocess_test_connector_config(connector_id)],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            ..(*base_state).clone()
+        });
+
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "mismatched holder proof should fail" }),
+            capability_token: test_capability_token_with_holder_node(
+                &signing_key,
+                "cap.test.echo",
+                "test.echo",
+                ZoneId::work().as_str(),
+                connector_id,
+                "node:laptop",
+            ),
+            holder_proof: Some(fcp_core::HolderProof::new(
+                [0u8; 64],
+                fcp_core::TailscaleNodeId::new("node:desktop"),
+            )),
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let error = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("holder_proof node mismatch must be rejected");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("holder_proof node") && msg.contains("holder_node"),
+            "expected holder-node mismatch rejection, got: {msg}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
     async fn verify_live_request_applies_configured_zone_principal_deny() {
         // br-flywheel_connectors-d4cij: when a zone policy with a populated
         // principal_deny pattern list is registered for the request's zone,
@@ -5540,7 +5707,7 @@ mod tests {
         .await;
 
         let mut deny_policy = host_runtime_policy(ZoneId::work());
-        deny_policy.principal_deny = vec![PolicyPattern {
+        deny_policy.principal_deny = vec![fcp_core::PolicyPattern {
             pattern: "user:test".to_string(),
         }];
         let mut policies: HashMap<ZoneId, ZonePolicyObject> = HashMap::new();

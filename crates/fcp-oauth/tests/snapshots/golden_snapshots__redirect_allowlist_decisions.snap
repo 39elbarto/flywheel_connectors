@@ -8,11 +8,13 @@ registered_path_mismatch: ERR Invalid OAuth configuration: redirect_uri is not p
 registered_plain_http_non_loopback: ERR Invalid OAuth configuration: redirect_uri must use https or loopback http
 registered_loopback_match: OK (http://localhost:3000/dev-cb)
 registered_fragment_rejected: ERR Invalid OAuth configuration: redirect_uri must not include a fragment
-registered_query_rejected: ERR Invalid OAuth configuration: redirect_uri must not include query parameters
+registered_query_not_in_allowlist: ERR Invalid OAuth configuration: redirect_uri is not present in allowed_redirect_uris
+registered_query_collides_with_response_param: ERR Invalid OAuth configuration: redirect_uri registered query parameter `code` collides with an OAuth response parameter
 registered_embedded_credentials_rejected: ERR Invalid OAuth configuration: redirect_uri must not include embedded credentials
 registered_relative_rejected: ERR Invalid OAuth configuration: redirect_uri must be a valid absolute URL: relative URL without a base
 callback_with_oauth_response_params: OK (https://example.com/oauth/callback)
 callback_host_mismatch: ERR Invalid OAuth configuration: callback_url resolved to a redirect URI outside allowed_redirect_uris
 callback_plain_http_non_loopback: ERR Invalid OAuth configuration: callback_url must use https or loopback http
 callback_loopback_ok: OK (http://localhost:3000/dev-cb)
-callback_unexpected_query_rejected: ERR Invalid OAuth configuration: callback_url contains unexpected query parameter `next`
+callback_extra_query_not_in_registered_allowlist: ERR Invalid OAuth configuration: callback_url resolved to a redirect URI outside allowed_redirect_uris
+callback_registered_query_preserved_ok: OK (https://example.com/oauth/callback?tenant=acme)

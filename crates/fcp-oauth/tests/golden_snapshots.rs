@@ -248,8 +248,17 @@ fn snapshot_redirect_allowlist_enforcement() {
         ensure_allowlisted_redirect_uri("https://example.com/oauth/callback#frag", &allowlist),
     ));
     report.push_str(&run(
-        "registered_query_rejected",
+        "registered_query_not_in_allowlist",
         ensure_allowlisted_redirect_uri("https://example.com/oauth/callback?x=1", &allowlist),
+    ));
+    // br-i58yx: a registered query component whose key collides with an
+    // OAuth response parameter is rejected at shape validation time.
+    report.push_str(&run(
+        "registered_query_collides_with_response_param",
+        ensure_allowlisted_redirect_uri(
+            "https://example.com/oauth/callback?code=pwn",
+            &allowlist,
+        ),
     ));
     report.push_str(&run(
         "registered_embedded_credentials_rejected",
@@ -291,10 +300,24 @@ fn snapshot_redirect_allowlist_enforcement() {
         ),
     ));
     report.push_str(&run(
-        "callback_unexpected_query_rejected",
+        "callback_extra_query_not_in_registered_allowlist",
         ensure_callback_redirect_is_allowlisted(
             "https://example.com/oauth/callback?code=auth123&next=%2Fadmin",
             &allowlist,
+        ),
+    ));
+    // br-i58yx: positive path — registered allowlist entry carries a
+    // pre-registered query component, callback preserves it, membership
+    // check passes.
+    let tenant_aware_allowlist = parse_registered_redirect_allowlist(&[
+        "https://example.com/oauth/callback?tenant=acme",
+    ])
+    .expect("test allowlist must parse");
+    report.push_str(&run(
+        "callback_registered_query_preserved_ok",
+        ensure_callback_redirect_is_allowlisted(
+            "https://example.com/oauth/callback?tenant=acme&code=auth123&state=abc",
+            &tenant_aware_allowlist,
         ),
     ));
 

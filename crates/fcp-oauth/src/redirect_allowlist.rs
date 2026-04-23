@@ -129,29 +129,49 @@ pub fn validate_redirect_uri_shape(url: &Url, field: &str, allow_query: bool) ->
 /// Parse and validate a redirect URI that an operator pre-registered.
 ///
 /// Applies to entries in the allowlist plus the `redirect_uri` echoed
-/// back on the authorization request. Query parameters and fragments
-/// are rejected because the registered URI has to match the provider's
-/// stored value byte-for-byte modulo encoding.
+/// back on the authorization request. Fragments are rejected because
+/// they are reserved for the implicit-grant flow. Query components ARE
+/// permitted per RFC 6749 §3.1.2 — a standards-compliant client may
+/// register `https://client.example/callback?tenant=acme` — but
+/// registered query pairs MUST NOT overlap with the standard OAuth
+/// response parameter names (`code`, `state`, `error`,
+/// `error_description`, `error_uri`, `iss`). Overlap would make the
+/// callback ambiguous since the provider appends those same names to
+/// the redirect. See br-i58yx.
 ///
 /// # Errors
 ///
-/// Returns [`OAuthError::InvalidConfig`] if the URI is unparseable or
-/// fails [`validate_redirect_uri_shape`].
+/// Returns [`OAuthError::InvalidConfig`] if the URI is unparseable, its
+/// shape is invalid, or a registered query pair collides with an OAuth
+/// response parameter.
 pub fn normalize_registered_redirect_uri(raw: &str, field: &str) -> OAuthResult<Url> {
     let url = Url::parse(raw).map_err(|e| {
         OAuthError::InvalidConfig(format!("{field} must be a valid absolute URL: {e}"))
     })?;
-    validate_redirect_uri_shape(&url, field, false)?;
+    validate_redirect_uri_shape(&url, field, true)?;
+    for (key, _) in url.query_pairs() {
+        if CALLBACK_OAUTH_RESPONSE_PARAMS.contains(&key.as_ref()) {
+            return Err(OAuthError::InvalidConfig(format!(
+                "{field} registered query parameter `{key}` collides with an OAuth response parameter"
+            )));
+        }
+    }
     Ok(url)
 }
 
 /// Parse and validate a provider callback URL.
 ///
 /// Returns the normalized form with the OAuth response parameters
-/// (`code`, `state`, `error`) stripped. The stripped form is what
-/// should be compared against the allowlist — if comparison were done
-/// against the raw callback URL with the query intact, every match
-/// would fail.
+/// (`code`, `state`, `error`, `error_description`, `error_uri`, `iss`)
+/// STRIPPED while preserving any registered query parameters (per
+/// RFC 6749 §3.1.2; see br-i58yx). The stripped form is what gets
+/// compared against the allowlist.
+///
+/// Example: callback
+/// `https://client.example/callback?tenant=acme&code=X&state=Y`
+/// normalizes to
+/// `https://client.example/callback?tenant=acme` — matching a
+/// registered `https://client.example/callback?tenant=acme` entry.
 ///
 /// # Errors
 ///
@@ -163,21 +183,32 @@ pub fn normalize_callback_redirect_uri(callback_url: &str) -> OAuthResult<Url> {
         OAuthError::InvalidConfig(format!("callback_url must be a valid absolute URL: {e}"))
     })?;
     validate_redirect_uri_shape(&url, "callback_url", true)?;
-    validate_callback_query_params(&url)?;
-    url.set_query(None);
+    strip_oauth_response_params(&mut url);
     url.set_fragment(None);
     Ok(url)
 }
 
-fn validate_callback_query_params(url: &Url) -> OAuthResult<()> {
-    for (key, _) in url.query_pairs() {
-        if !CALLBACK_OAUTH_RESPONSE_PARAMS.contains(&key.as_ref()) {
-            return Err(OAuthError::InvalidConfig(format!(
-                "callback_url contains unexpected query parameter `{key}`"
-            )));
+/// Remove the standard OAuth response parameters from `url`'s query,
+/// leaving all other (registered) query pairs in place. If the query
+/// ends up empty, clear it entirely so equality comparisons against
+/// registered URIs that never had a query in the first place still
+/// match. See br-i58yx.
+fn strip_oauth_response_params(url: &mut Url) {
+    let preserved: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| !CALLBACK_OAUTH_RESPONSE_PARAMS.contains(&key.as_ref()))
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    if preserved.is_empty() {
+        url.set_query(None);
+    } else {
+        let mut pairs = url.query_pairs_mut();
+        pairs.clear();
+        for (k, v) in &preserved {
+            pairs.append_pair(k, v);
         }
+        drop(pairs);
     }
-    Ok(())
 }
 
 /// Confirm a caller-supplied `redirect_uri` is byte-equal (modulo
@@ -350,13 +381,33 @@ mod tests {
     }
 
     #[test]
-    fn normalize_registered_rejects_query() {
-        let err = normalize_registered_redirect_uri(
-            "https://example.com/cb?x=1",
+    fn normalize_registered_accepts_rfc6749_query_component() {
+        // br-i58yx: RFC 6749 §3.1.2 permits pre-registered query
+        // components on the redirection endpoint. A standards-compliant
+        // client registering `https://client.example/callback?tenant=acme`
+        // must be accepted.
+        let url = normalize_registered_redirect_uri(
+            "https://example.com/cb?tenant=acme",
             "allowed_redirect_uris",
         )
-        .unwrap_err();
-        assert!(matches!(err, OAuthError::InvalidConfig(ref m) if m.contains("query")));
+        .unwrap();
+        assert_eq!(url.as_str(), "https://example.com/cb?tenant=acme");
+    }
+
+    #[test]
+    fn normalize_registered_rejects_oauth_response_param_in_query() {
+        // The registered redirect MUST NOT collide with an OAuth
+        // response parameter name, or the callback split later
+        // becomes ambiguous.
+        for param in &["code", "state", "error", "error_description", "error_uri", "iss"] {
+            let raw = format!("https://example.com/cb?{param}=x");
+            let err =
+                normalize_registered_redirect_uri(&raw, "allowed_redirect_uris").unwrap_err();
+            assert!(
+                matches!(err, OAuthError::InvalidConfig(ref m) if m.contains("OAuth response parameter")),
+                "parameter {param:?} should collide, got {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -396,12 +447,18 @@ mod tests {
     }
 
     #[test]
-    fn normalize_callback_rejects_non_oauth_query_parameters() {
-        let err = normalize_callback_redirect_uri("https://example.com/cb?code=abc&next=/admin")
-            .unwrap_err();
-        assert!(
-            matches!(err, OAuthError::InvalidConfig(ref m) if m.contains("unexpected query parameter"))
-        );
+    fn normalize_callback_preserves_registered_query_alongside_oauth_response_params() {
+        // br-i58yx: pre-registered query components (here `tenant=acme`)
+        // travel side-by-side with provider-added OAuth response
+        // parameters on the callback. The response parameters are
+        // stripped; the registered ones are preserved so callback-vs-
+        // allowlist equality still matches against a registered entry
+        // that carried `tenant=acme`.
+        let url = normalize_callback_redirect_uri(
+            "https://example.com/cb?tenant=acme&code=abc&state=def",
+        )
+        .unwrap();
+        assert_eq!(url.as_str(), "https://example.com/cb?tenant=acme");
     }
 
     // ── ensure_allowlisted_redirect_uri ────────────────────────────────────
@@ -466,15 +523,48 @@ mod tests {
 
     #[test]
     fn callback_rejects_attacker_added_query_even_when_base_uri_matches() {
+        // br-i58yx: an attacker-added non-response query param is now
+        // preserved through normalization (because legitimately-
+        // registered query components must survive), but the
+        // allowlist membership check still rejects it because
+        // `?next=https://evil.example` was NOT in the registered
+        // entry. Confusion-deputy defense holds via the allowlist
+        // comparison, not via a blanket query rejection.
         let allowed = allowlist(&["https://example.com/cb"]);
         let err = ensure_callback_redirect_is_allowlisted(
             "https://example.com/cb?code=abc&next=https://evil.example",
             &allowed,
         )
         .unwrap_err();
-        assert!(
-            matches!(err, OAuthError::InvalidConfig(ref m) if m.contains("unexpected query parameter"))
-        );
+        assert!(matches!(err, OAuthError::InvalidConfig(ref m) if m.contains("outside")));
+    }
+
+    #[test]
+    fn callback_allowlisted_when_registered_query_component_matches() {
+        // br-i58yx positive path: register a URI with a query
+        // component, send a callback carrying the registered query +
+        // OAuth response params, expect the allowlist check to pass.
+        let allowed = allowlist(&["https://example.com/cb?tenant=acme"]);
+        let url = ensure_callback_redirect_is_allowlisted(
+            "https://example.com/cb?tenant=acme&code=abc&state=def",
+            &allowed,
+        )
+        .expect("registered query should pass through allowlist");
+        assert_eq!(url.as_str(), "https://example.com/cb?tenant=acme");
+    }
+
+    #[test]
+    fn callback_rejected_when_registered_query_component_mismatches() {
+        // Registered with tenant=acme; callback arrives with
+        // tenant=other. Allowlist membership check rejects — a
+        // different registered-query value is a different URI.
+        let allowed = allowlist(&["https://example.com/cb?tenant=acme"]);
+        let err = ensure_callback_redirect_is_allowlisted(
+            "https://example.com/cb?tenant=other&code=abc",
+            &allowed,
+        )
+        .unwrap_err();
+        assert!(matches!(err, OAuthError::InvalidConfig(ref m) if m.contains("outside")));
     }
 
     // ── parse_registered_redirect_allowlist ────────────────────────────────

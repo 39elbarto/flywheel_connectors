@@ -1763,18 +1763,39 @@ mod tests {
     }
 
     #[test]
-    fn test_client_rejects_redirect_uri_with_query() {
+    fn test_client_accepts_redirect_uri_with_registered_query_component() {
+        // br-i58yx: RFC 6749 §3.1.2 permits a pre-registered query
+        // component on the redirection endpoint. A standards-compliant
+        // tenant-aware URL must be accepted.
         let config = OAuth2Config::new(
             "id",
             "secret",
             "https://auth.example.com/authorize",
             "https://auth.example.com/token",
         )
-        .with_redirect_uri("https://example.com/callback?next=/pwn");
+        .with_redirect_uri("https://example.com/callback?tenant=acme");
+        let client = OAuth2Client::new(config).expect("tenant-aware redirect must be accepted");
+        assert_eq!(
+            client.config.redirect_uri.as_deref(),
+            Some("https://example.com/callback?tenant=acme")
+        );
+    }
+
+    #[test]
+    fn test_client_rejects_redirect_uri_with_oauth_response_param_in_query() {
+        // Registered URIs MUST NOT collide with OAuth response
+        // parameter names — callback parsing would become ambiguous.
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        )
+        .with_redirect_uri("https://example.com/callback?code=pwn");
         let err = OAuth2Client::new(config).unwrap_err();
         assert!(matches!(
             err,
-            OAuthError::InvalidConfig(ref m) if m.contains("query parameters")
+            OAuthError::InvalidConfig(ref m) if m.contains("OAuth response parameter")
         ));
     }
 

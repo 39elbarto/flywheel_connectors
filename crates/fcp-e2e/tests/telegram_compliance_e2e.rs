@@ -447,6 +447,19 @@ async fn telegram_allow_valid_token_connector_suite_passes() {
         .find(|entry| entry.context.get("operation") == Some(&json!("invoke")))
         .expect("invoke entry");
     assert_eq!(invoke_entry.result, "pass");
+    let received = mock.received_requests().await;
+    let send_requests: Vec<_> = received
+        .iter()
+        .filter(|request| {
+            request.method.as_str() == "POST"
+                && request.url.path() == format!("/bot{TEST_BOT_TOKEN}/sendMessage")
+        })
+        .collect();
+    assert_eq!(send_requests.len(), 1, "expected exactly one sendMessage POST");
+    let send_body: serde_json::Value =
+        serde_json::from_slice(&send_requests[0].body).expect("telegram send body json");
+    assert_eq!(send_body.get("chat_id"), Some(&json!("987654321")));
+    assert_eq!(send_body.get("text"), Some(&json!("hello from e2e")));
     assert_eq!(
         invoke_entry.context.get("invoke_status"),
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))

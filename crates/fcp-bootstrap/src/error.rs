@@ -149,6 +149,25 @@ pub enum BootstrapError {
         detail: String,
     },
 
+    /// Hardware-token bootstrap reached the provisioning-handoff step
+    /// but the enrollment path is not yet implemented (br-nh2xl).
+    ///
+    /// The certificate selection succeeded — this error carries the
+    /// locator + chosen key material type so the operator knows the
+    /// token was usable and only the enrollment stage was skipped.
+    /// Caller code that needs to fork on this specific "not implemented"
+    /// signal can match on this variant instead of substring-matching
+    /// the legacy [`Self::HardwareToken`] message.
+    #[error(
+        "hardware token provisioning enrollment is not implemented yet: token={token_display}, key_material={key_material}"
+    )]
+    HardwareTokenEnrollmentNotImplemented {
+        /// Human-readable token locator selected for provisioning.
+        token_display: String,
+        /// Selected key material type (e.g. "Ed25519", "EcP256").
+        key_material: String,
+    },
+
     /// Cryptographic error.
     #[error("cryptographic error: {0}")]
     Crypto(String),
@@ -278,6 +297,18 @@ mod tests {
     fn display_no_hardware_tokens() {
         let err = BootstrapError::NoHardwareTokens;
         assert!(err.to_string().contains("no hardware tokens"));
+    }
+
+    #[test]
+    fn display_hardware_token_enrollment_not_implemented() {
+        let err = BootstrapError::HardwareTokenEnrollmentNotImplemented {
+            token_display: "YubiKey 5 [SN 123] via /usr/lib/libykcs11.so slot 0".into(),
+            key_material: "Ed25519".into(),
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains("enrollment is not implemented"));
+        assert!(rendered.contains("YubiKey 5"));
+        assert!(rendered.contains("Ed25519"));
     }
 
     #[test]

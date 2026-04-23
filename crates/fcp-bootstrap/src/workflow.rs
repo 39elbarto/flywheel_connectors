@@ -563,12 +563,14 @@ impl BootstrapWorkflow {
             ))
         })?;
 
-        // Provisioning handoff: the next bead (24llg.4.2.3) will consume the
-        // provisioning material to complete key provisioning and enrollment.
-        Err(BootstrapError::HardwareToken(format!(
-            "certificate selected for {token_display} using {} key material, but provisioning enrollment is not implemented yet",
-            provisioning_material.pair.key.key_type
-        )))
+        // Provisioning handoff: the enrollment path is not yet wired.
+        // Returns a typed refusal variant (br-nh2xl) so callers can
+        // match on the specific "not implemented" signal instead of
+        // substring-matching the legacy HardwareToken message.
+        Err(BootstrapError::HardwareTokenEnrollmentNotImplemented {
+            token_display: token_display.to_string(),
+            key_material: provisioning_material.pair.key.key_type.to_string(),
+        })
     }
 
     /// Run import bootstrap from existing recovery phrase.

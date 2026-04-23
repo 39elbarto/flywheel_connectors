@@ -1604,6 +1604,14 @@ pub struct CapabilityVerifier {
     pub instance_id: Option<InstanceId>,
 }
 
+/// Capability-token timing tolerance for verifier-side clock skew.
+///
+/// This applies uniformly to all `CapabilityVerifier` entrypoints because
+/// they all funnel through `verify_claims_inner`. Raw `CoseToken`
+/// verification stays strict; the skew allowance is a policy choice at the
+/// capability-verification boundary.
+pub const CAPABILITY_TOKEN_CLOCK_SKEW_SECS: i64 = 300;
+
 impl CapabilityVerifier {
     /// Create a new capability verifier that enforces the instance-binding
     /// check against the given `instance_id`.
@@ -1647,6 +1655,24 @@ impl CapabilityVerifier {
         ciborium::from_reader(&bytes[..]).map_err(|e| FcpError::Internal {
             message: format!("Deserialization error: {e}"),
         })
+    }
+
+    fn validate_timing_with_clock_skew(claims: &CwtClaims, now: chrono::DateTime<Utc>) -> FcpResult<()> {
+        let now_ts = now.timestamp();
+
+        if let Some(exp) = claims.get_expiration() {
+            if now_ts >= exp.saturating_add(CAPABILITY_TOKEN_CLOCK_SKEW_SECS) {
+                return Err(FcpError::TokenExpired);
+            }
+        }
+
+        if let Some(nbf) = claims.get_not_before() {
+            if now_ts < nbf.saturating_sub(CAPABILITY_TOKEN_CLOCK_SKEW_SECS) {
+                return Err(FcpError::TokenNotYetValid);
+            }
+        }
+
+        Ok(())
     }
 
     /// Verify a capability token, producing a `CapabilityToken<CryptographicallyVerified>`.
@@ -1869,10 +1895,7 @@ impl CapabilityVerifier {
 
         // 4. Validate timing
         let now = Utc::now();
-        CoseToken::validate_timing(&claims, now).map_err(|e| match e {
-            fcp_crypto::CryptoError::TokenNotYetValid => FcpError::TokenNotYetValid,
-            _ => FcpError::TokenExpired,
-        })?;
+        Self::validate_timing_with_clock_skew(&claims, now)?;
 
         // 5. Check zone binding
         if let Some(iss) = claims.get_zone_id() {
@@ -2756,7 +2779,10 @@ mod tests {
             .principal("user:test")
             .operations(&["op.test"])
             .issuer("node:primary")
-            .validity(now - Duration::hours(2), now - Duration::hours(1)) // Expired
+            .validity(
+                now - Duration::hours(2),
+                now - Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS + 1),
+            )
             .constraints_cbor(&test_constraints_cbor())
             .sign(&signing_key)
             .unwrap();
@@ -2768,6 +2794,98 @@ mod tests {
 
         let result = verifier.verify(token, &cap, &op, &[]);
         assert!(matches!(result, Err(FcpError::TokenExpired)));
+    }
+
+    #[test]
+    fn verify_accepts_expired_within_clock_skew_tolerance() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let pub_bytes = verifying_key.to_bytes();
+
+        let now = Utc::now();
+        let cose_token = CapabilityTokenBuilder::new()
+            .capability_id("cap.test")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.test"])
+            .issuer("node:primary")
+            .validity(
+                now - Duration::hours(1),
+                now - Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS - 1),
+            )
+            .constraints_cbor(&test_constraints_cbor())
+            .sign(&signing_key)
+            .unwrap();
+
+        let token = CapabilityToken::from_raw(cose_token);
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
+
+        verifier
+            .verify(token, &cap, &op, &[])
+            .expect("token expired within skew tolerance should verify");
+    }
+
+    #[test]
+    fn verify_accepts_not_yet_valid_within_clock_skew_tolerance() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let pub_bytes = verifying_key.to_bytes();
+
+        let now = Utc::now();
+        let cose_token = CapabilityTokenBuilder::new()
+            .capability_id("cap.test")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.test"])
+            .issuer("node:primary")
+            .validity(
+                now + Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS - 1),
+                now + Duration::hours(1),
+            )
+            .constraints_cbor(&test_constraints_cbor())
+            .sign(&signing_key)
+            .unwrap();
+
+        let token = CapabilityToken::from_raw(cose_token);
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
+
+        verifier
+            .verify(token, &cap, &op, &[])
+            .expect("token not yet valid within skew tolerance should verify");
+    }
+
+    #[test]
+    fn verify_rejects_not_yet_valid_beyond_clock_skew_tolerance() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let pub_bytes = verifying_key.to_bytes();
+
+        let now = Utc::now();
+        let cose_token = CapabilityTokenBuilder::new()
+            .capability_id("cap.test")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.test"])
+            .issuer("node:primary")
+            .validity(
+                now + Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS + 1),
+                now + Duration::hours(1),
+            )
+            .constraints_cbor(&test_constraints_cbor())
+            .sign(&signing_key)
+            .unwrap();
+
+        let token = CapabilityToken::from_raw(cose_token);
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
+
+        let result = verifier.verify(token, &cap, &op, &[]);
+        assert!(matches!(result, Err(FcpError::TokenNotYetValid)));
     }
 
     #[test]

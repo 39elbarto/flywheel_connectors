@@ -11,10 +11,12 @@ use cryptoki::slot::Slot;
 use cryptoki::types::AuthPin;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use x509_parser::parse_x509_certificate;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Information about a detected hardware token.
@@ -448,24 +450,14 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
             return Err(TokenError::PinRequired);
         }
 
-        let provider_guard = provider_probe_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let pkcs11 = Pkcs11::new(&token.provider).map_err(map_pkcs11_error)?;
-        let owns_initialization =
-            match pkcs11.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)) {
-                Ok(()) => true,
-                Err(Pkcs11Error::Pkcs11(RvError::CryptokiAlreadyInitialized, _)) => false,
-                Err(err) => return Err(map_pkcs11_error(err)),
-            };
+        let (pkcs11, owns_initialization) = acquire_provider_context(&token.provider)?;
 
         let slot = Slot::try_from(u64::from(token.slot))
             .map_err(|err| TokenError::Pkcs11(err.to_string()))?;
         let session = match pkcs11.open_rw_session(slot) {
             Ok(session) => session,
             Err(err) => {
-                let _ = finalize_pkcs11_context(pkcs11, owns_initialization);
+                let _ = finalize_pkcs11_context(&token.provider, pkcs11, owns_initialization);
                 return Err(map_pkcs11_error(err));
             }
         };
@@ -474,7 +466,7 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
         match session.login(UserType::User, Some(&auth_pin)) {
             Ok(()) | Err(Pkcs11Error::Pkcs11(RvError::UserAlreadyLoggedIn, _)) => {}
             Err(err) => {
-                cleanup_failed_session(session, pkcs11, owns_initialization);
+                cleanup_failed_session(&token.provider, session, pkcs11, owns_initialization);
                 return Err(map_pkcs11_error(err));
             }
         }
@@ -482,13 +474,14 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
         let session_info = match session.get_session_info() {
             Ok(session_info) => session_info,
             Err(err) => {
-                cleanup_failed_session(session, pkcs11, owns_initialization);
+                cleanup_failed_session(&token.provider, session, pkcs11, owns_initialization);
                 return Err(map_pkcs11_error(err));
             }
         };
 
         let session_state = AuthenticatedSessionState::from(session_info.session_state());
         let read_write = session_info.read_write();
+        let provider = token.provider.clone();
 
         Ok(AuthenticatedTokenSession::with_close_action(
             token.clone(),
@@ -496,8 +489,8 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
             read_write,
             move || {
                 let close_result = close_pkcs11_session(session, session_state);
-                let finalize_result = finalize_pkcs11_context(pkcs11, owns_initialization);
-                drop(provider_guard);
+                let finalize_result =
+                    finalize_pkcs11_context(&provider, pkcs11, owns_initialization);
                 close_result.and(finalize_result)
             },
         ))
@@ -582,19 +575,16 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
 /// browse step, extending the lifetime of authenticated hardware-token
 /// access without re-prompting for the PIN.
 ///
-/// This wrapper owns the PKCS#11 context + session + provider-probe lock
+/// This wrapper owns the PKCS#11 context + session
 /// and routes teardown through [`close_pkcs11_session`] (logout + close)
 /// and [`finalize_pkcs11_context`]. An [`EnumerationSession::close`]
 /// consuming method is the preferred exit path; [`Drop`] runs the same
 /// cleanup on panic or early return as a defense-in-depth backstop.
 struct EnumerationSession {
+    provider: PathBuf,
     pkcs11: Option<Pkcs11>,
     session: Option<Session>,
     owns_initialization: bool,
-    // Provider-probe lock is held for the full lifetime of the
-    // enumeration session so concurrent pkcs11 init/finalize from other
-    // call sites cannot race with our teardown.
-    _provider_guard: MutexGuard<'static, ()>,
 }
 
 impl EnumerationSession {
@@ -618,7 +608,11 @@ impl EnumerationSession {
                 // at close time is always ReadWriteUser.
                 let close_result =
                     close_pkcs11_session(session, AuthenticatedSessionState::ReadWriteUser);
-                let finalize_result = finalize_pkcs11_context(pkcs11, self.owns_initialization);
+                let finalize_result = finalize_pkcs11_context(
+                    &self.provider,
+                    pkcs11,
+                    self.owns_initialization,
+                );
                 close_result.and(finalize_result)
             }
             _ => Ok(()),
@@ -648,8 +642,8 @@ impl Drop for EnumerationSession {
 
 /// Open a temporary authenticated session for object enumeration.
 ///
-/// The returned [`EnumerationSession`] carries the PKCS#11 context,
-/// read-write user session, and provider-probe lock so that teardown
+/// The returned [`EnumerationSession`] carries the PKCS#11 context
+/// and read-write user session so that teardown
 /// (logout + close + finalize) always runs, whether via
 /// [`EnumerationSession::close`] or [`Drop`]. See br-tcp0f.
 fn open_enumeration_session(
@@ -660,23 +654,12 @@ fn open_enumeration_session(
         return Err(TokenError::PinRequired);
     }
 
-    let provider_guard = provider_probe_lock()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-    let pkcs11 = Pkcs11::new(&token.provider).map_err(map_pkcs11_error)?;
-    let owns_initialization = match pkcs11.initialize(CInitializeArgs::new(
-        cryptoki::context::CInitializeFlags::OS_LOCKING_OK,
-    )) {
-        Ok(()) => true,
-        Err(Pkcs11Error::Pkcs11(RvError::CryptokiAlreadyInitialized, _)) => false,
-        Err(err) => return Err(map_pkcs11_error(err)),
-    };
+    let (pkcs11, owns_initialization) = acquire_provider_context(&token.provider)?;
 
     let slot = match Slot::try_from(u64::from(token.slot)) {
         Ok(slot) => slot,
         Err(err) => {
-            let _ = finalize_pkcs11_context(pkcs11, owns_initialization);
+            let _ = finalize_pkcs11_context(&token.provider, pkcs11, owns_initialization);
             return Err(TokenError::Pkcs11(err.to_string()));
         }
     };
@@ -684,7 +667,7 @@ fn open_enumeration_session(
     let session = match pkcs11.open_rw_session(slot) {
         Ok(session) => session,
         Err(err) => {
-            let _ = finalize_pkcs11_context(pkcs11, owns_initialization);
+            let _ = finalize_pkcs11_context(&token.provider, pkcs11, owns_initialization);
             return Err(map_pkcs11_error(err));
         }
     };
@@ -693,16 +676,16 @@ fn open_enumeration_session(
     match session.login(UserType::User, Some(&auth_pin)) {
         Ok(()) | Err(Pkcs11Error::Pkcs11(RvError::UserAlreadyLoggedIn, _)) => {}
         Err(err) => {
-            cleanup_failed_session(session, pkcs11, owns_initialization);
+            cleanup_failed_session(&token.provider, session, pkcs11, owns_initialization);
             return Err(map_pkcs11_error(err));
         }
     }
 
     Ok(EnumerationSession {
+        provider: token.provider.clone(),
         pkcs11: Some(pkcs11),
         session: Some(session),
         owns_initialization,
-        _provider_guard: provider_guard,
     })
 }
 
@@ -1319,9 +1302,14 @@ fn token_locator(token: &DetectedToken) -> String {
     )
 }
 
-fn cleanup_failed_session(session: Session, pkcs11: Pkcs11, owns_initialization: bool) {
+fn cleanup_failed_session(
+    provider: &Path,
+    session: Session,
+    pkcs11: Pkcs11,
+    owns_initialization: bool,
+) {
     let _ = session.close();
-    let _ = finalize_pkcs11_context(pkcs11, owns_initialization);
+    let _ = finalize_pkcs11_context(provider, pkcs11, owns_initialization);
 }
 
 fn close_pkcs11_session(
@@ -1344,12 +1332,51 @@ fn close_pkcs11_session(
     logout_result.and(close_result)
 }
 
-fn finalize_pkcs11_context(pkcs11: Pkcs11, owns_initialization: bool) -> Result<(), TokenError> {
-    if owns_initialization {
+fn acquire_provider_context(provider: &Path) -> Result<(Pkcs11, bool), TokenError> {
+    let mut sessions = provider_session_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let pkcs11 = Pkcs11::new(provider).map_err(map_pkcs11_error)?;
+    let owns_initialization = match pkcs11.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)) {
+        Ok(()) => true,
+        Err(Pkcs11Error::Pkcs11(RvError::CryptokiAlreadyInitialized, _)) => false,
+        Err(err) => return Err(map_pkcs11_error(err)),
+    };
+
+    *sessions.entry(provider.to_path_buf()).or_insert(0) += 1;
+    Ok((pkcs11, owns_initialization))
+}
+
+fn finalize_pkcs11_context(
+    provider: &Path,
+    pkcs11: Pkcs11,
+    owns_initialization: bool,
+) -> Result<(), TokenError> {
+    let mut sessions = provider_session_registry()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let provider_key = provider.to_path_buf();
+
+    let should_finalize = {
+        let active_sessions = sessions.entry(provider_key.clone()).or_insert(0);
+        if *active_sessions > 0 {
+            *active_sessions -= 1;
+        }
+        owns_initialization && *active_sessions == 0
+    };
+
+    let finalize_result = if should_finalize {
         pkcs11.finalize().map_err(map_pkcs11_error)
     } else {
         Ok(())
+    };
+
+    if sessions.get(&provider_key).copied().unwrap_or_default() == 0 {
+        sessions.remove(&provider_key);
     }
+
+    finalize_result
 }
 
 fn map_pkcs11_error(error: Pkcs11Error) -> TokenError {
@@ -1689,6 +1716,11 @@ fn normalize_token_field(value: &str) -> String {
 fn provider_probe_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn provider_session_registry() -> &'static Mutex<HashMap<PathBuf, usize>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Mock token provider for testing.

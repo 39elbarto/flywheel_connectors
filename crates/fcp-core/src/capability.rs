@@ -1602,6 +1602,8 @@ pub struct CapabilityVerifier {
     /// [`Self::without_instance_binding`], and instance-bound tokens
     /// reach the connector where the check is meaningful.
     pub instance_id: Option<InstanceId>,
+
+    clock_source: CapabilityVerifierClock,
 }
 
 /// Capability-token timing tolerance for verifier-side clock skew.
@@ -1612,6 +1614,13 @@ pub struct CapabilityVerifier {
 /// capability-verification boundary.
 pub const CAPABILITY_TOKEN_CLOCK_SKEW_SECS: i64 = 300;
 
+#[derive(Debug, Clone, Copy)]
+enum CapabilityVerifierClock {
+    SystemUtc,
+    #[cfg(test)]
+    Fixed(chrono::DateTime<Utc>),
+}
+
 impl CapabilityVerifier {
     /// Create a new capability verifier that enforces the instance-binding
     /// check against the given `instance_id`.
@@ -1621,6 +1630,7 @@ impl CapabilityVerifier {
             host_public_key,
             zone_id,
             instance_id: Some(instance_id),
+            clock_source: CapabilityVerifierClock::SystemUtc,
         }
     }
 
@@ -1643,7 +1653,14 @@ impl CapabilityVerifier {
             host_public_key,
             zone_id,
             instance_id: None,
+            clock_source: CapabilityVerifierClock::SystemUtc,
         }
+    }
+
+    #[cfg(test)]
+    fn with_fixed_now_for_tests(mut self, now: chrono::DateTime<Utc>) -> Self {
+        self.clock_source = CapabilityVerifierClock::Fixed(now);
+        self
     }
 
     /// Helper to deserialize CBOR value
@@ -1673,6 +1690,14 @@ impl CapabilityVerifier {
         }
 
         Ok(())
+    }
+
+    fn now(&self) -> chrono::DateTime<Utc> {
+        match self.clock_source {
+            CapabilityVerifierClock::SystemUtc => Utc::now(),
+            #[cfg(test)]
+            CapabilityVerifierClock::Fixed(now) => now,
+        }
     }
 
     /// Verify a capability token, producing a `CapabilityToken<CryptographicallyVerified>`.
@@ -1894,7 +1919,7 @@ impl CapabilityVerifier {
         }
 
         // 4. Validate timing
-        let now = Utc::now();
+        let now = self.now();
         Self::validate_timing_with_clock_skew(&claims, now)?;
 
         // 5. Check zone binding
@@ -2772,7 +2797,7 @@ mod tests {
         let verifying_key = signing_key.verifying_key();
         let pub_bytes = verifying_key.to_bytes();
 
-        let now = Utc::now();
+        let now = chrono::DateTime::<Utc>::from_timestamp(1_704_067_200, 0).unwrap();
         let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.test")
             .zone_id("z:work")
@@ -2788,7 +2813,8 @@ mod tests {
             .unwrap();
 
         let token = CapabilityToken::from_raw(cose_token);
-        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new())
+            .with_fixed_now_for_tests(now);
         let op = OperationId::new("op.test").unwrap();
         let cap = CapabilityId::new("cap.test").unwrap();
 
@@ -2802,7 +2828,7 @@ mod tests {
         let verifying_key = signing_key.verifying_key();
         let pub_bytes = verifying_key.to_bytes();
 
-        let now = Utc::now();
+        let now = chrono::DateTime::<Utc>::from_timestamp(1_704_067_200, 0).unwrap();
         let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.test")
             .zone_id("z:work")
@@ -2818,7 +2844,8 @@ mod tests {
             .unwrap();
 
         let token = CapabilityToken::from_raw(cose_token);
-        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new())
+            .with_fixed_now_for_tests(now);
         let op = OperationId::new("op.test").unwrap();
         let cap = CapabilityId::new("cap.test").unwrap();
 
@@ -2833,7 +2860,7 @@ mod tests {
         let verifying_key = signing_key.verifying_key();
         let pub_bytes = verifying_key.to_bytes();
 
-        let now = Utc::now();
+        let now = chrono::DateTime::<Utc>::from_timestamp(1_704_067_200, 0).unwrap();
         let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.test")
             .zone_id("z:work")
@@ -2849,7 +2876,8 @@ mod tests {
             .unwrap();
 
         let token = CapabilityToken::from_raw(cose_token);
-        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new())
+            .with_fixed_now_for_tests(now);
         let op = OperationId::new("op.test").unwrap();
         let cap = CapabilityId::new("cap.test").unwrap();
 
@@ -2864,7 +2892,7 @@ mod tests {
         let verifying_key = signing_key.verifying_key();
         let pub_bytes = verifying_key.to_bytes();
 
-        let now = Utc::now();
+        let now = chrono::DateTime::<Utc>::from_timestamp(1_704_067_200, 0).unwrap();
         let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.test")
             .zone_id("z:work")
@@ -2880,7 +2908,8 @@ mod tests {
             .unwrap();
 
         let token = CapabilityToken::from_raw(cose_token);
-        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new())
+            .with_fixed_now_for_tests(now);
         let op = OperationId::new("op.test").unwrap();
         let cap = CapabilityId::new("cap.test").unwrap();
 

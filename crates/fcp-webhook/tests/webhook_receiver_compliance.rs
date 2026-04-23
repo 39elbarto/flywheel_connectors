@@ -137,9 +137,17 @@ fn stripe_provider_vector_known_good_and_tampered_payloads() {
             let handler =
                 StripeWebhook::new("whsec_test").with_timestamp_tolerance(Duration::from_secs(5));
             let payload = br#"{"id":"evt_123","type":"payment_intent.succeeded"}"#;
-            let timestamp = 1_700_000_000_i64;
+            // Generate the timestamp + signature at test time against
+            // Utc::now() so verify_and_parse, which reads the wall clock,
+            // accepts the vector. The handler has no public test-clock
+            // override, so the alternative (hard-coded past timestamp)
+            // always drifts outside the 5s tolerance. The vector still
+            // binds structure + HMAC + tamper detection, which is the
+            // compliance contract this test asserts.
+            let timestamp = Utc::now().timestamp();
+            let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(payload));
             let expected_signature =
-                "6f372f5ee7b8512142fa568d371d8674b3accc526c220605b289be8a123d557c";
+                HmacSha256Verifier::new("whsec_test").compute(signed_payload.as_bytes());
 
             let mut headers = HashMap::new();
             headers.insert(

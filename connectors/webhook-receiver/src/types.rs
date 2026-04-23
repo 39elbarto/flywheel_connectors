@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 /// Supported webhook provider presets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "lowercase")]
 pub enum WebhookProvider {
     /// Generic webhook source with caller-specified verification settings.
     #[default]
@@ -660,5 +660,14 @@ mod tests {
             "stripe-signature-v1"
         );
         assert_eq!(WebhookProvider::Slack.secret_prefix(), "slksec_");
+    }
+
+    #[test]
+    fn provider_serde_uses_canonical_labels() {
+        let serialized = serde_json::to_value(WebhookProvider::GitHub).unwrap();
+        assert_eq!(serialized, json!("github"));
+
+        let deserialized: WebhookProvider = serde_json::from_value(json!("github")).unwrap();
+        assert_eq!(deserialized, WebhookProvider::GitHub);
     }
 }

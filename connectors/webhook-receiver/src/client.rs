@@ -5,7 +5,7 @@
 //! buffers received events.
 
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use tracing::debug;
@@ -39,6 +39,11 @@ pub struct WebhookStore {
     endpoints: HashMap<String, WebhookEndpoint>,
     /// Events per endpoint, keyed by `endpoint_id`.
     events: HashMap<String, Vec<WebhookEvent>>,
+    /// All seen event IDs per endpoint, keyed by `endpoint_id`.
+    ///
+    /// This stays independent from the bounded event body buffer so replay
+    /// protection remains fail-closed even after old event bodies are evicted.
+    event_ids: HashMap<String, HashSet<String>>,
 }
 
 impl WebhookStore {
@@ -48,6 +53,7 @@ impl WebhookStore {
             public_base_url: DEFAULT_PUBLIC_BASE_URL.to_string(),
             endpoints: HashMap::new(),
             events: HashMap::new(),
+            event_ids: HashMap::new(),
         }
     }
 
@@ -128,6 +134,8 @@ impl WebhookStore {
         self.endpoints
             .insert(endpoint.endpoint_id.clone(), endpoint.clone());
         self.events.insert(endpoint.endpoint_id.clone(), Vec::new());
+        self.event_ids
+            .insert(endpoint.endpoint_id.clone(), HashSet::new());
 
         Ok(endpoint)
     }
@@ -155,6 +163,7 @@ impl WebhookStore {
             });
         }
         self.events.remove(endpoint_id);
+        self.event_ids.remove(endpoint_id);
         debug!(endpoint_id = %endpoint_id, "Deleted webhook endpoint");
         Ok(())
     }
@@ -193,18 +202,18 @@ impl WebhookStore {
             return Err(WebhookReceiverError::EndpointNotFound { endpoint_id });
         }
 
-        let events = self.events.entry(endpoint_id.clone()).or_default();
-
         // Fail closed on duplicate delivery IDs for the same endpoint.
-        // Receiver endpoints advertise strict idempotency; appending the same
-        // provider event twice would let a replayed webhook mutate downstream
-        // state twice even after signature verification succeeded.
-        if events.iter().any(|existing| existing.event_id == event_id) {
+        // Replay protection must outlive the bounded event body buffer, so
+        // dedup state is stored separately from recent event retention.
+        let event_ids = self.event_ids.entry(endpoint_id.clone()).or_default();
+        if !event_ids.insert(event_id.clone()) {
             return Err(WebhookReceiverError::DuplicateEvent {
                 endpoint_id,
                 event_id,
             });
         }
+
+        let events = self.events.entry(endpoint_id.clone()).or_default();
 
         // Evict oldest events if at capacity
         if events.len() >= MAX_EVENTS_PER_ENDPOINT {
@@ -278,6 +287,7 @@ impl WebhookStore {
     pub fn clear(&mut self) {
         self.endpoints.clear();
         self.events.clear();
+        self.event_ids.clear();
     }
 }
 
@@ -615,6 +625,51 @@ mod tests {
         let ids: Vec<&str> = events.iter().map(|e| e.event_id.as_str()).collect();
         assert!(!ids.contains(&"evt_0"));
         assert!(ids.contains(&"evt_new"));
+    }
+
+    #[test]
+    fn record_event_duplicate_event_id_still_rejected_after_original_evicted() {
+        let mut store = WebhookStore::new();
+        let ep = store
+            .create_endpoint("/hooks/test".into(), "s".into(), vec![])
+            .unwrap();
+
+        let mut original =
+            WebhookEvent::new(ep.endpoint_id.clone(), json!({"index": 0}), true, None);
+        original.event_id = "evt_replay".into();
+        store.record_event(original).unwrap();
+
+        for i in 1..=MAX_EVENTS_PER_ENDPOINT {
+            let mut event =
+                WebhookEvent::new(ep.endpoint_id.clone(), json!({"index": i}), true, None);
+            event.event_id = format!("evt_{i}");
+            store.record_event(event).unwrap();
+        }
+
+        let recent = store
+            .get_recent_events(Some(&ep.endpoint_id), Some(MAX_EVENTS_LIMIT), None)
+            .unwrap();
+        assert!(
+            !recent.iter().any(|event| event.event_id == "evt_replay"),
+            "bounded event retention should evict the oldest event body"
+        );
+
+        let mut replay =
+            WebhookEvent::new(ep.endpoint_id.clone(), json!({"index": "replay"}), true, None);
+        replay.event_id = "evt_replay".into();
+        let err = store
+            .record_event(replay)
+            .expect_err("dedup state must outlive event-body eviction");
+        match err {
+            WebhookReceiverError::DuplicateEvent {
+                endpoint_id,
+                event_id,
+            } => {
+                assert_eq!(endpoint_id, ep.endpoint_id);
+                assert_eq!(event_id, "evt_replay");
+            }
+            other => panic!("expected DuplicateEvent, got {other:?}"),
+        }
     }
 
     #[test]

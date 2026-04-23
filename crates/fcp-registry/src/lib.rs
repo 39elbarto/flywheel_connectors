@@ -2544,19 +2544,27 @@ mod tests {
     }
 
     fn base_manifest_toml() -> String {
+        // Read the shared minimal-manifest fixture verbatim and substitute
+        // its placeholder interface hash with a freshly-computed one. The
+        // fixture already declares `minimal.op` as a required capability
+        // alongside `network.dns`, so no string patching is needed
+        // (br-giw5h: the previous helper patched the `optional` list via
+        // replacen and tripped a fixture-drift assert after 9c3a290e moved
+        // `minimal.op` into `required`).
+        //
+        // If the fixture drifts again and PLACEHOLDER_HASH is no longer
+        // present, the .replace below becomes a no-op and the compute_
+        // interface_hash result is silently ignored — guard explicitly
+        // against that so drift is loud.
         let raw = include_str!("../../../tests/vectors/manifest/manifest_minimal.toml");
-        let patched = raw.replacen(
-            "required = [\"network.dns\"]\noptional = []",
-            "required = [\"network.dns\"]\noptional = [\"minimal.op\"]",
-            1,
+        assert!(
+            raw.contains(PLACEHOLDER_HASH),
+            "minimal manifest fixture no longer contains PLACEHOLDER_HASH; \
+             update base_manifest_toml helper (br-giw5h)"
         );
-        assert_ne!(
-            patched, raw,
-            "minimal manifest fixture drifted; update base_manifest_toml"
-        );
-        let unchecked = ConnectorManifest::parse_str_unchecked(&patched).expect("manifest");
+        let unchecked = ConnectorManifest::parse_str_unchecked(raw).expect("manifest");
         let hash = unchecked.compute_interface_hash().expect("interface hash");
-        patched.replace(PLACEHOLDER_HASH, &hash.to_string())
+        raw.replace(PLACEHOLDER_HASH, &hash.to_string())
     }
 
     fn unsigned_manifest_toml(extra_sections: &str) -> String {

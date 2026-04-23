@@ -788,11 +788,24 @@ impl ReconnectingWsStream {
         self.reset_backoff_after_first_message = true;
     }
 
-    fn note_message_received(&mut self) {
-        if self.reset_backoff_after_first_message {
-            self.handler.reset();
-            self.reset_backoff_after_first_message = false;
+    fn note_message_received(&mut self, message: &WsMessage) {
+        // br-hjaej: a Close frame is NOT proof of a healthy session —
+        // a peer that completes the handshake and immediately sends
+        // Close still returns Ok(Some(Close(...))) from recv(), so
+        // the pre-fix unconditional reset here turned "handshake
+        // accepted, connection refused" into a reconnect storm against
+        // the peer. Only reset the backoff when we've actually seen a
+        // data-carrying frame (Text / Binary) or a ping/pong
+        // round-trip. Close frames leave the retry budget intact so
+        // the next connect attempt waits out the configured delay.
+        if !self.reset_backoff_after_first_message {
+            return;
         }
+        if message.is_close() {
+            return;
+        }
+        self.handler.reset();
+        self.reset_backoff_after_first_message = false;
     }
 
     fn note_connection_lost(&mut self) {
@@ -844,7 +857,7 @@ impl Stream for ReconnectingWsStream {
                 }
                 ReconnectState::Receiving(future) => match future.as_mut().poll(cx) {
                     Poll::Ready((connection, Ok(Some(message)))) => {
-                        self.note_message_received();
+                        self.note_message_received(&message);
                         self.state = ReconnectState::Connected(connection);
                         return Poll::Ready(Some(Ok(message)));
                     }
@@ -994,7 +1007,84 @@ mod tests {
         assert!(!stream.reset_backoff_after_first_message);
 
         stream.note_connection_established();
-        stream.note_message_received();
+        stream.note_message_received(&WsMessage::text("healthy"));
+        assert_eq!(stream.handler.attempts(), 0);
+        assert!(!stream.reset_backoff_after_first_message);
+    }
+
+    /// br-hjaej regression: a peer that completes the WS handshake and
+    /// immediately sends Close still returns Ok(Some(WsMessage::Close))
+    /// from recv(). The pre-fix note_message_received reset the backoff
+    /// unconditionally on any Ok(Some(_)), which defeated the 6e6cr
+    /// hardening and turned "handshake-then-close" into a near-hot
+    /// reconnect loop. After the fix, Close frames leave the retry
+    /// budget untouched.
+    #[test]
+    fn reconnect_stream_close_frame_does_not_reset_backoff() {
+        let client = WsClient::new("ws://localhost:8080");
+        let mut stream = ReconnectingWsStream::new(client);
+
+        stream.handler.record_failure();
+        stream.handler.record_failure();
+        stream.handler.record_failure();
+        assert_eq!(stream.handler.attempts(), 3);
+
+        stream.note_connection_established();
+        assert!(stream.reset_backoff_after_first_message);
+
+        // Peer completes handshake and immediately sends Close.
+        // This must NOT reset the backoff counter; the reset gate
+        // stays armed so a subsequent data frame (if any) would still
+        // clear it, but the retry budget is preserved.
+        stream.note_message_received(&WsMessage::Close(None));
+        assert_eq!(
+            stream.handler.attempts(),
+            3,
+            "Close frame must NOT reset backoff (br-hjaej)"
+        );
+        assert!(
+            stream.reset_backoff_after_first_message,
+            "reset gate stays armed after Close so a subsequent data frame can still clear it"
+        );
+    }
+
+    #[test]
+    fn reconnect_stream_close_frame_with_reason_also_preserves_backoff() {
+        let client = WsClient::new("ws://localhost:8080");
+        let mut stream = ReconnectingWsStream::new(client);
+
+        stream.handler.record_failure();
+        assert_eq!(stream.handler.attempts(), 1);
+        stream.note_connection_established();
+
+        stream.note_message_received(&WsMessage::Close(Some(WsCloseFrame::new(
+            1011,
+            "server error",
+        ))));
+        assert_eq!(
+            stream.handler.attempts(),
+            1,
+            "Close with reason payload must also preserve the retry budget"
+        );
+    }
+
+    #[test]
+    fn reconnect_stream_data_message_after_close_still_resets_backoff() {
+        // The reset gate must remain armed after a Close so the first
+        // real data frame on a *subsequent* successful connect can
+        // clear it. This pins the "arm once, reset on first genuine
+        // data" contract.
+        let client = WsClient::new("ws://localhost:8080");
+        let mut stream = ReconnectingWsStream::new(client);
+
+        stream.handler.record_failure();
+        stream.handler.record_failure();
+        stream.note_connection_established();
+        stream.note_message_received(&WsMessage::Close(None));
+        assert_eq!(stream.handler.attempts(), 2);
+        // A subsequent Text frame — the reset gate is still armed —
+        // must now clear the retry budget.
+        stream.note_message_received(&WsMessage::text("finally healthy"));
         assert_eq!(stream.handler.attempts(), 0);
         assert!(!stream.reset_backoff_after_first_message);
     }

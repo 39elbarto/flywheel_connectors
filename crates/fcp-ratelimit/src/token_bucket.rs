@@ -1005,4 +1005,114 @@ mod tests {
         // Zero permits should still succeed even on empty bucket
         assert!(limiter.try_consume(0));
     }
+
+    // ── Property-based burst/capacity invariants ─────────────────────
+    //
+    // These props lock down the time-independent part of the
+    // `count ≤ burst + window*rate` guarantee. They exercise
+    // try_consume directly (a sync private fn accessible from the
+    // same-module test submodule) so no runtime / clock mocking is
+    // needed — we verify the bucket's burst-phase behavior before
+    // any refill period elapses.
+    //
+    // Time-dependent invariants (refill arithmetic under real
+    // wall-clock) are covered by the existing async tests in this
+    // module; they can't be lifted to proptest without a mock clock.
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        /// Burst cap: a fresh bucket of capacity C permits EXACTLY C
+        /// immediate try_consume(1) successes before the first refill
+        /// interval elapses. The (C+1)th attempt must fail.
+        ///
+        /// Window is set to 10 minutes so no refill can occur during
+        /// the tight consume loop below, even under extreme CI
+        /// scheduling. Capacity is capped at 10_000 to keep runtime
+        /// bounded across 64 proptest cases.
+        #[test]
+        fn prop_burst_cap_is_exactly_capacity(
+            capacity in 1u32..10_000,
+        ) {
+            let bucket = TokenBucket::new(capacity, std::time::Duration::from_secs(600));
+
+            for i in 0..capacity {
+                proptest::prop_assert!(
+                    bucket.try_consume(1),
+                    "try_consume(1) #{i} must succeed (bucket has {capacity} tokens)"
+                );
+            }
+            proptest::prop_assert!(
+                !bucket.try_consume(1),
+                "try_consume(1) #{capacity}+1 must fail — burst exceeded capacity"
+            );
+        }
+
+        /// Overflow rejection: any request for more permits than
+        /// `capacity` must fail, regardless of current token count.
+        /// This is a strict bound that prevents a single over-sized
+        /// request from silently consuming the entire bucket.
+        #[test]
+        fn prop_permits_exceeding_capacity_always_fail(
+            capacity in 1u32..10_000,
+            requested in 1u32..u32::MAX,
+        ) {
+            proptest::prop_assume!(requested > capacity);
+            let bucket = TokenBucket::new(capacity, std::time::Duration::from_secs(600));
+            proptest::prop_assert!(
+                !bucket.try_consume(requested),
+                "try_consume({requested}) with capacity {capacity} must fail"
+            );
+            // Bucket state unchanged — full capacity should still be usable.
+            proptest::prop_assert_eq!(bucket.remaining(), capacity);
+        }
+
+        /// Zero-permit neutrality: try_consume(0) always succeeds and
+        /// does not change the token count, even on an empty bucket.
+        /// This is load-bearing for callers that conditionally
+        /// acquire and need to probe without paying.
+        #[test]
+        fn prop_zero_permits_is_state_neutral(
+            capacity in 1u32..10_000,
+            pre_drain in 0u32..10_000,
+        ) {
+            let bucket = TokenBucket::new(capacity, std::time::Duration::from_secs(600));
+            let pre_drain = pre_drain.min(capacity);
+            for _ in 0..pre_drain {
+                bucket.try_consume(1);
+            }
+            let before = bucket.remaining();
+            proptest::prop_assert!(bucket.try_consume(0));
+            proptest::prop_assert_eq!(
+                bucket.remaining(),
+                before,
+                "try_consume(0) must not change token count"
+            );
+        }
+
+        /// Partial consumption: after consuming `k ≤ capacity` tokens
+        /// from a full bucket, exactly `capacity - k` tokens remain
+        /// accessible via subsequent try_consume(1) calls before the
+        /// (capacity - k + 1)th fails.
+        #[test]
+        fn prop_partial_consume_leaves_exact_remaining(
+            capacity in 2u32..5_000,
+            k in 1u32..5_000,
+        ) {
+            proptest::prop_assume!(k < capacity);
+            let bucket = TokenBucket::new(capacity, std::time::Duration::from_secs(600));
+            proptest::prop_assert!(bucket.try_consume(k));
+
+            let remaining = capacity - k;
+            for i in 0..remaining {
+                proptest::prop_assert!(
+                    bucket.try_consume(1),
+                    "try_consume(1) #{i} after partial drain must succeed"
+                );
+            }
+            proptest::prop_assert!(
+                !bucket.try_consume(1),
+                "try_consume(1) past remaining must fail (capacity={capacity}, k={k})"
+            );
+        }
+    }
 }

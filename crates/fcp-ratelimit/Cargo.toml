@@ -39,3 +39,4 @@ rand = "0.9"
 [dev-dependencies]
 ciborium.workspace = true
 uuid.workspace = true
+proptest.workspace = true

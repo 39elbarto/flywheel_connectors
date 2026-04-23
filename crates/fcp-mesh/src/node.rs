@@ -309,11 +309,10 @@ pub struct PeerState {
     pub held_leases: Vec<HeldLease>,
     /// Zones this peer is authorized for (populated by the transport layer
     /// after attestation verification via `update_peer_zones`). An empty
-    /// set means "not yet populated" — the zone authorization gate on
-    /// symbol requests is skipped in that case to preserve compatibility
-    /// with callers that have not wired attestation-driven zone
-    /// membership yet. Once populated, requests for zones outside the
-    /// set are rejected with `SymbolRequestError::UnauthorizedZone`.
+    /// set means "not yet populated", so symbol requests fail closed
+    /// until attestation-driven zone membership lands. Once populated,
+    /// requests for zones outside the set are rejected with
+    /// `SymbolRequestError::UnauthorizedZone`.
     pub zones: HashSet<ZoneId>,
     /// Last observed timestamp (ms since epoch).
     pub last_seen_ms: u64,
@@ -931,11 +930,27 @@ impl MeshNode {
     {
         request.validate_idempotency_key()?;
 
-        // br-jkcka.8 TODO: migrate to verifier.verify_bound / verify_unbound
-        // once callers pass the intended typestate. Today this callsite
-        // accepts whichever mode the supplied verifier was constructed in.
-        #[allow(deprecated)]
-        let verified_token = verifier.verify(
+        // br-rp0ej: invoke is the mesh's gateway for executing an
+        // operation on this concrete node instance. Per the jkcka
+        // typestate design, execution requires a BoundVerified token —
+        // i.e. the verifier MUST carry this node's instance_id and the
+        // token's INSTANCE_ID claim MUST match.
+        //
+        // Calling `verify_bound` here rejects (a) forged tokens as
+        // before, and (b) the legitimate-but-dangerous case of a caller
+        // that constructed the verifier with
+        // `CapabilityVerifier::without_instance_binding()` — that mode
+        // used to bypass instance binding entirely through the deprecated
+        // `verify()` ambiguity. Now: `verify_bound` returns
+        // FcpError::Internal when `self.instance_id.is_none()`, which
+        // bubbles as MeshNodeEnforcementError::CapabilityVerification and
+        // fails the invoke closed.
+        //
+        // Unbound gateway-vantage verification (without instance
+        // binding) belongs at the gateway → connector handoff (via
+        // `verify_unbound` + `promote_with_instance`), NOT at the
+        // terminal invoke boundary.
+        let verified_token = verifier.verify_bound(
             request.capability_token.clone(),
             required_capability,
             &request.operation,
@@ -1188,18 +1203,22 @@ impl MeshNode {
         // elevation stick for every subsequent request.
         let mut authenticated = self.is_peer_authenticated(peer);
 
-        // Check if peer is authorized for the requested zone. An empty
-        // `zones` set means the transport layer has not yet populated
-        // attestation-driven zone membership for this peer, so we skip
-        // the gate rather than reject-by-default — callers opt into
-        // enforcement by calling `update_peer_zones` after attestation.
-        if let Some(state) = self.peers.get(peer) {
-            if !state.zones.is_empty() && !state.zones.contains(&request.zone_id) {
-                return Err(SymbolRequestError::UnauthorizedZone {
-                    peer: peer.as_str().to_string(),
-                    zone_id: request.zone_id.to_string(),
-                });
-            }
+        // Enforce the same fail-closed zone gate used by summary and
+        // revocation verification. A peer with missing or empty
+        // attested-zone state is not authorized to request symbols
+        // from any zone until the transport calls `update_peer_zones`.
+        let state = self
+            .peers
+            .get(peer)
+            .ok_or_else(|| SymbolRequestError::UnauthorizedZone {
+                peer: peer.as_str().to_string(),
+                zone_id: request.zone_id.to_string(),
+            })?;
+        if !state.zones.contains(&request.zone_id) {
+            return Err(SymbolRequestError::UnauthorizedZone {
+                peer: peer.as_str().to_string(),
+                zone_id: request.zone_id.to_string(),
+            });
         }
 
         self.check_symbol_request_gate(request, peer, authenticated, now_ms)?;
@@ -2290,14 +2309,15 @@ mod tests {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([9u8; 8]);
         let object_id = test_object_id("meshnode-prune-state");
+        let peer = NodeId::new("peer-1");
+        node.update_peer_zones(&peer, [zone_id.clone()].into_iter().collect());
         // q92i7 migration: pre-mark the peer as authenticated via the
         // admission controller rather than passing `true` as the ignored
         // `_is_authenticated` arg to `handle_symbol_request`. The OR
         // bypass that let tests rely on the caller-supplied bool is
         // closed; the explicit pre-auth step documents that the peer
         // is intended to be in the authenticated tier for this test.
-        node.admission_mut()
-            .set_authenticated(&NodeId::new("peer-1"), true, 0);
+        node.admission_mut().set_authenticated(&peer, true, 0);
 
         let oti = ObjectTransmissionInformation::new(256, 64, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -2342,13 +2362,13 @@ mod tests {
             }
 
             let _ = node
-                .handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
+                .handle_symbol_request(request, &peer, true, 0)
                 .await
                 .expect("symbol request");
         })
         .expect("runtime");
 
-        let transfer_key = TransferKey::new(&NodeId::new("peer-1"), &object_id);
+        let transfer_key = TransferKey::new(&peer, &object_id);
         assert_eq!(node.symbol_requests.active_transfer_count(), 1);
         assert!(node.sent_symbols.contains_key(&transfer_key));
 
@@ -2366,6 +2386,8 @@ mod tests {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([10u8; 8]);
         let object_id = test_object_id("meshnode-quarantined-request");
+        let peer = NodeId::new("peer-1");
+        node.update_peer_zones(&peer, [zone_id.clone()].into_iter().collect());
 
         node.quarantine_store()
             .quarantine(QuarantinedObject {
@@ -2389,7 +2411,7 @@ mod tests {
         );
 
         let err = fcp_async_core::runtime::block_on_sync(async {
-            node.handle_symbol_request(request, &NodeId::new("peer-1"), true, 0)
+            node.handle_symbol_request(request, &peer, true, 0)
                 .await
                 .expect_err("quarantined request should fail")
         })
@@ -2426,6 +2448,7 @@ mod tests {
             !node.is_peer_authenticated(&peer),
             "precondition: peer must start unauthenticated"
         );
+        node.update_peer_zones(&peer, [zone_id.clone()].into_iter().collect());
 
         let oti = ObjectTransmissionInformation::new(256, 64, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -2511,6 +2534,7 @@ mod tests {
         let signing_key = Ed25519SigningKey::generate();
         request.sign(&signing_key);
         node.register_peer_signing_key(peer_id.clone(), signing_key.verifying_key());
+        node.update_peer_zones(&peer_id, [zone_id.clone()].into_iter().collect());
 
         let result = fcp_async_core::runtime::block_on_sync(async {
             node.symbol_store
@@ -2574,6 +2598,7 @@ mod tests {
         let wrong_key = Ed25519SigningKey::generate();
         request.sign(&wrong_key);
         node.register_peer_signing_key(peer_id.clone(), signing_key.verifying_key());
+        node.update_peer_zones(&peer_id, [zone_id.clone()].into_iter().collect());
 
         let err = fcp_async_core::runtime::block_on_sync(async {
             node.symbol_store
@@ -2605,6 +2630,69 @@ mod tests {
         .expect_err("invalid signature should fail");
 
         assert!(matches!(err, SymbolRequestError::SignatureInvalid));
+    }
+
+    #[test]
+    fn symbol_request_rejects_peer_with_empty_zone_state() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([13u8; 8]);
+        let object_id = test_object_id("meshnode-empty-zone-state");
+        let peer_id = NodeId::new("peer-empty-zone");
+
+        let oti = ObjectTransmissionInformation::new(256, 64, 1, 1, 1);
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: ObjectTransmissionInfo::from(oti),
+            source_symbols: 2,
+            first_symbol_at: 0,
+        };
+
+        let mut request = SymbolRequest::new(
+            test_object_header(),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            2,
+            1,
+        );
+
+        let signing_key = Ed25519SigningKey::generate();
+        request.sign(&signing_key);
+        node.register_peer_signing_key(peer_id.clone(), signing_key.verifying_key());
+
+        let err = fcp_async_core::runtime::block_on_sync(async {
+            node.symbol_store
+                .put_object_meta(meta)
+                .await
+                .expect("store meta");
+
+            for esi in 0..2u32 {
+                let symbol = StoredSymbol {
+                    meta: SymbolMeta {
+                        object_id,
+                        esi,
+                        zone_id: zone_id.clone(),
+                        source_node: Some(1),
+                        stored_at: 0,
+                    },
+                    data: bytes::Bytes::from(vec![u8::try_from(esi).unwrap_or(0); 64]),
+                };
+                node.symbol_store
+                    .put_symbol(symbol)
+                    .await
+                    .expect("store symbol");
+            }
+
+            node.handle_symbol_request(request, &peer_id, false, 0)
+                .await
+                .expect_err("empty peer-zone state must fail closed")
+        })
+        .expect("runtime");
+
+        assert!(matches!(err, SymbolRequestError::UnauthorizedZone { .. }));
     }
 
     // ---- MeshNodeConfig builder tests ----
@@ -5277,6 +5365,9 @@ mod tests {
         let zone_id = ZoneId::work();
         let zone_key_id = ZoneKeyId::from_bytes([0xCD; 8]);
         let object_id = ObjectId::from_bytes([0xCE; 32]);
+
+        node.update_peer_zones(&peer_a, [zone_id.clone()].into_iter().collect());
+        node.update_peer_zones(&peer_b, [zone_id.clone()].into_iter().collect());
 
         fcp_async_core::runtime::block_on_sync(async {
             for esi in 0..4 {

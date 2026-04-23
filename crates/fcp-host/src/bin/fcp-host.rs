@@ -242,11 +242,18 @@ impl SubprocessConnector {
             return Ok(());
         };
 
-        {
-            let handshaken_zone = self.handshaken_zone.lock().await;
-            if handshaken_zone.as_ref() == Some(zone) {
-                return Ok(());
-            }
+        // br-j1pjg: hold the handshaken_zone mutex across the handshake
+        // RPC. The previous read-then-await-then-write pattern let two
+        // concurrent same-zone callers both miss the cache and issue
+        // duplicate handshakes, which resets session/verifier state on
+        // the connector and can burn external handshake budget before
+        // the first real invoke runs. Serializing the critical section
+        // per-connector coalesces waiters onto the first handshake —
+        // the second waiter acquires the lock, sees the cached zone,
+        // and returns without a second RPC.
+        let mut handshaken_zone = self.handshaken_zone.lock().await;
+        if handshaken_zone.as_ref() == Some(zone) {
+            return Ok(());
         }
 
         let nonce = *blake3::hash(RequestId::random().0.as_bytes()).as_bytes();
@@ -278,7 +285,6 @@ impl SubprocessConnector {
                 self.summary.id
             )));
         }
-        let mut handshaken_zone = self.handshaken_zone.lock().await;
         *handshaken_zone = Some(zone.clone());
         Ok(())
     }
@@ -6498,6 +6504,69 @@ mod tests {
 
         assert!(response.would_succeed);
         assert!(response.failure_reason.is_none());
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn subprocess_connector_concurrent_same_zone_invokes_all_succeed() {
+        // br-j1pjg regression: two concurrent same-zone invokes on a
+        // just-spawned connector must both complete successfully
+        // without deadlocking. With the pre-fix pattern
+        // (read-then-await-then-write on handshaken_zone) two callers
+        // could both miss the cache and race; post-fix the mutex is
+        // held across the handshake RPC so the second caller coalesces
+        // onto the cached zone. We cannot assert RPC count=1 here
+        // without a connector-side counter probe (filed as a follow-up
+        // bead on fcp-test-connector) — this test at minimum pins the
+        // no-deadlock + both-succeed invariant.
+        let connector_id = "fcp.test.concurrent-handshake:utility:1.0.0";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let connector = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            SubprocessConnector::spawn(
+                subprocess_test_connector_config_requiring_handshake(connector_id),
+                Arc::new(ResilienceLayer::default()),
+                Some(signing_key.verifying_key().to_bytes()),
+            ),
+        )
+        .await
+        .expect("spawn should not hang")
+        .expect("spawn should succeed");
+
+        let make_request = || InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "concurrent probe" }),
+            capability_token: test_capability_token(
+                &signing_key,
+                "cap.test.echo",
+                "test.echo",
+                "z:work",
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let responses = fcp_async_core::time::timeout(
+            Duration::from_secs(5),
+            join_all((0..8).map(|_| connector.invoke(make_request()))),
+        )
+        .await
+        .expect("concurrent same-zone invokes should not hang");
+
+        assert_eq!(responses.len(), 8);
+        for response in responses {
+            let response = response.expect("invoke should succeed");
+            assert_eq!(response.status, InvokeStatus::Ok);
+        }
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

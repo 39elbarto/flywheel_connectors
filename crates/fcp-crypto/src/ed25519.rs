@@ -633,6 +633,111 @@ mod tests {
         }
     }
 
+    // ── Metamorphic sign/verify relations ────────────────────────────
+    //
+    // These proptests lift the existing single-case wrong-message /
+    // wrong-key / determinism tests into proptests over the full
+    // (keypair × message) property space. Each asserts a relation
+    // that Ed25519 is NORMATIVELY required to satisfy:
+    //
+    //   M1 core identity          verify(sign(m, sk), pk, m) == Ok
+    //   M2 message-mutation       verify(sign(m, sk), pk, m') == Err when m' ≠ m
+    //   M3 key-mutation           verify(sign(m, sk_a), pk_b, m) == Err when sk_a ≠ sk_b
+    //   M5 determinism            sign(m, sk) produces byte-identical bytes on repeat
+    //                             (Ed25519 / RFC 8032 is deterministic, unlike ECDSA)
+    //
+    // M4 (signature mutation) is already covered by the malleability
+    // proptest above. Numbering follows /testing-metamorphic taxonomy.
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// M1: a freshly signed message verifies against its own keypair.
+        #[test]
+        fn metamorphic_m1_sign_then_verify_is_ok(
+            sk_seed in any::<[u8; 32]>(),
+            message in prop::collection::vec(any::<u8>(), 0..1024),
+        ) {
+            let sk = Ed25519SigningKey::from_bytes(&sk_seed)
+                .expect("any 32-byte seed yields a valid Ed25519 SK");
+            let pk = sk.verifying_key();
+            let sig = sk.sign(&message);
+            prop_assert!(
+                pk.verify(&message, &sig).is_ok(),
+                "M1 (core identity) broken: sign(m, sk) must verify under pk"
+            );
+        }
+
+        /// M2: signing `m` then verifying against a distinct message
+        /// `m_prime` MUST fail. The shrink target is small messages
+        /// that differ in a single byte.
+        #[test]
+        fn metamorphic_m2_mutated_message_fails_verify(
+            sk_seed in any::<[u8; 32]>(),
+            message in prop::collection::vec(any::<u8>(), 1..512),
+            mutation_index in any::<usize>(),
+        ) {
+            let sk = Ed25519SigningKey::from_bytes(&sk_seed).expect("valid SK");
+            let pk = sk.verifying_key();
+            let sig = sk.sign(&message);
+
+            let mut mutated = message.clone();
+            let idx = mutation_index % mutated.len();
+            mutated[idx] ^= 0x01;
+            // Guard: ensure we actually produced a distinct message
+            // (single-byte XOR always does when the original is
+            // non-empty, but assert for clarity).
+            prop_assert_ne!(&mutated, &message);
+
+            prop_assert!(
+                pk.verify(&mutated, &sig).is_err(),
+                "M2 (message mutation) broken: signature over m must not verify m' ≠ m"
+            );
+        }
+
+        /// M3: verifying a valid signature under a DIFFERENT verifying
+        /// key (from an independent keypair) MUST fail. Seeds are
+        /// constrained to be distinct to guarantee the keys differ.
+        #[test]
+        fn metamorphic_m3_cross_key_verify_fails(
+            seed_a in any::<[u8; 32]>(),
+            seed_b in any::<[u8; 32]>(),
+            message in prop::collection::vec(any::<u8>(), 0..512),
+        ) {
+            prop_assume!(seed_a != seed_b);
+            let sk_a = Ed25519SigningKey::from_bytes(&seed_a).expect("valid SK");
+            let sk_b = Ed25519SigningKey::from_bytes(&seed_b).expect("valid SK");
+            // Distinct seeds produce distinct public keys for Ed25519
+            // with overwhelming probability; assert it rather than
+            // assuming.
+            prop_assume!(sk_a.verifying_key() != sk_b.verifying_key());
+
+            let sig = sk_a.sign(&message);
+            prop_assert!(
+                sk_b.verifying_key().verify(&message, &sig).is_err(),
+                "M3 (cross-key replay) broken: sig from sk_a must not verify under pk_b"
+            );
+        }
+
+        /// M5: Ed25519 (RFC 8032) is deterministic — repeated signing
+        /// of the same (key, message) pair MUST produce byte-identical
+        /// signatures. This is a hard spec requirement and differs
+        /// from ECDSA; drift here would indicate an RNG leak.
+        #[test]
+        fn metamorphic_m5_sign_is_deterministic(
+            sk_seed in any::<[u8; 32]>(),
+            message in prop::collection::vec(any::<u8>(), 0..512),
+        ) {
+            let sk = Ed25519SigningKey::from_bytes(&sk_seed).expect("valid SK");
+            let sig_1 = sk.sign(&message);
+            let sig_2 = sk.sign(&message);
+            let sig_3 = sk.sign(&message);
+            prop_assert_eq!(&sig_1, &sig_2,
+                "M5 (determinism) broken: two signs of same (sk, m) must match");
+            prop_assert_eq!(&sig_2, &sig_3,
+                "M5 (determinism) broken: three signs of same (sk, m) must match");
+        }
+    }
+
     #[test]
     fn empty_message_signature() {
         // Verify we can sign and verify empty messages

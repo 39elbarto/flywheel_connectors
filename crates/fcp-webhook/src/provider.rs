@@ -331,11 +331,21 @@ impl StripeWebhook {
                         "Stripe-Signature timestamp exceeds maximum length".into(),
                     ));
                 }
+                if timestamp.is_some() {
+                    return Err(WebhookError::InvalidPayload(
+                        "Stripe-Signature contains multiple timestamp values".into(),
+                    ));
+                }
                 timestamp = ts.parse().ok().map(|parsed| (ts.to_string(), parsed));
             } else if let Some(sig) = part.strip_prefix("v1=") {
                 if signatures.len() >= Self::MAX_STRIPE_SIGNATURES {
                     return Err(WebhookError::InvalidPayload(
                         "too many signatures in Stripe-Signature header".into(),
+                    ));
+                }
+                if sig.is_empty() {
+                    return Err(WebhookError::InvalidPayload(
+                        "Stripe-Signature v1 value must not be empty".into(),
                     ));
                 }
                 if sig.len() > MAX_STRIPE_SIGNATURE_LEN {
@@ -2588,11 +2598,15 @@ mod tests {
     #[test]
     fn test_stripe_parse_signature_v1_empty_value() {
         let result = StripeWebhook::parse_stripe_signature("t=123,v1=");
-        assert!(result.is_ok());
-        let (raw_ts, ts, sigs) = result.unwrap();
-        assert_eq!(raw_ts, "123");
-        assert_eq!(ts, 123);
-        assert_eq!(sigs, vec![""]);
+        match result {
+            Err(WebhookError::InvalidPayload(msg)) => {
+                assert!(
+                    msg.contains("v1"),
+                    "error should name the malformed component: {msg}"
+                );
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2620,13 +2634,17 @@ mod tests {
     }
 
     #[test]
-    fn test_stripe_parse_signature_multiple_timestamps_uses_last() {
-        // Multiple t= values - parse takes the last parsed value
+    fn test_stripe_parse_signature_multiple_timestamps_rejected() {
         let result = StripeWebhook::parse_stripe_signature("t=100,t=200,v1=sig");
-        assert!(result.is_ok());
-        let (raw_ts, ts, _) = result.unwrap();
-        assert_eq!(raw_ts, "200");
-        assert_eq!(ts, 200);
+        match result {
+            Err(WebhookError::InvalidPayload(msg)) => {
+                assert!(
+                    msg.contains("multiple timestamp"),
+                    "error should explain the ambiguity: {msg}"
+                );
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
     }
 
     #[test]

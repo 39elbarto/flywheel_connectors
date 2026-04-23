@@ -502,6 +502,13 @@ impl WsConfig {
         self.auto_reconnect = enabled;
         self
     }
+
+    fn io_timeout(&self) -> Duration {
+        let keepalive_budget = self.ping_interval.map_or(self.pong_timeout, |interval| {
+            interval.saturating_add(self.pong_timeout)
+        });
+        self.connect_timeout.max(keepalive_budget)
+    }
 }
 
 /// WebSocket client.
@@ -581,6 +588,15 @@ impl WsConnection {
         }
     }
 
+    fn io_timeout(&self) -> Duration {
+        self.config.io_timeout()
+    }
+
+    fn timeout_error(&mut self) -> StreamError {
+        self.closed = true;
+        StreamError::Timeout(self.io_timeout())
+    }
+
     /// Send a message.
     ///
     /// # Errors
@@ -591,9 +607,10 @@ impl WsConnection {
         }
 
         let is_close = message.is_close();
-        self.inner
-            .send(message.into())
+        let io_timeout = self.io_timeout();
+        timeout(io_timeout, self.inner.send(message.into()))
             .await
+            .map_err(|_| self.timeout_error())?
             .map_err(websocket_error)?;
         if is_close {
             self.closed = true;
@@ -636,7 +653,12 @@ impl WsConnection {
             return Ok(None);
         }
 
-        if let Some(message) = self.inner.recv().await.map_err(websocket_error)? {
+        let io_timeout = self.io_timeout();
+        if let Some(message) = timeout(io_timeout, self.inner.recv())
+            .await
+            .map_err(|_| self.timeout_error())?
+            .map_err(websocket_error)?
+        {
             let message: WsMessage = message.into();
             if message.is_close() {
                 self.closed = true;
@@ -654,9 +676,10 @@ impl WsConnection {
     /// Returns a stream error if the close handshake fails.
     pub async fn close(&mut self) -> StreamResult<()> {
         if !self.closed {
-            self.inner
-                .close(CloseReason::normal())
+            let io_timeout = self.io_timeout();
+            timeout(io_timeout, self.inner.close(CloseReason::normal()))
                 .await
+                .map_err(|_| self.timeout_error())?
                 .map_err(websocket_error)?;
             self.closed = true;
         }
@@ -669,9 +692,10 @@ impl WsConnection {
     /// Returns a stream error if the close handshake fails.
     pub async fn close_with_frame(&mut self, frame: WsCloseFrame) -> StreamResult<()> {
         if !self.closed {
-            self.inner
-                .close(frame.into())
+            let io_timeout = self.io_timeout();
+            timeout(io_timeout, self.inner.close(frame.into()))
                 .await
+                .map_err(|_| self.timeout_error())?
                 .map_err(websocket_error)?;
             self.closed = true;
         }
@@ -832,12 +856,92 @@ impl Stream for ReconnectingWsStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener as StdTcpListener, TcpStream as StdTcpStream};
+    use std::thread;
+
+    use base64::Engine as _;
+    use futures_util::StreamExt as _;
+    use sha1::{Digest, Sha1};
 
     fn block_on<F>(future: F) -> F::Output
     where
         F: Future,
     {
         fcp_async_core::runtime::block_on_sync(future).expect("test runtime")
+    }
+
+    fn read_http_request(stream: &mut StdTcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buf = [0_u8; 1024];
+        while !request.ends_with(b"\r\n\r\n") {
+            let n = stream.read(&mut buf).expect("read websocket handshake");
+            assert!(n > 0, "client closed before handshake completed");
+            request.extend_from_slice(&buf[..n]);
+        }
+        String::from_utf8(request).expect("websocket handshake utf8")
+    }
+
+    fn websocket_accept_value(key: &str) -> String {
+        let mut digest = Sha1::new();
+        digest.update(key.as_bytes());
+        digest.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+        base64::engine::general_purpose::STANDARD.encode(digest.finalize())
+    }
+
+    fn complete_server_handshake(stream: &mut StdTcpStream) {
+        let request = read_http_request(stream);
+        let key = request
+            .lines()
+            .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
+            .expect("Sec-WebSocket-Key header");
+        let response = format!(
+            "HTTP/1.1 101 Switching Protocols\r\n\
+             Connection: Upgrade\r\n\
+             Upgrade: websocket\r\n\
+             Sec-WebSocket-Accept: {}\r\n\
+             \r\n",
+            websocket_accept_value(key.trim())
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write websocket handshake response");
+        stream.flush().expect("flush websocket handshake response");
+    }
+
+    fn spawn_blackhole_websocket_server(stall: Duration) -> (String, thread::JoinHandle<()>) {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind websocket test listener");
+        let address = listener.local_addr().expect("listener addr");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept websocket client");
+            complete_server_handshake(&mut stream);
+            thread::sleep(stall);
+        });
+        (format!("ws://{address}"), handle)
+    }
+
+    fn spawn_blackhole_then_message_server(
+        stall: Duration,
+        message: &'static str,
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind websocket test listener");
+        let address = listener.local_addr().expect("listener addr");
+        let handle = thread::spawn(move || {
+            let (mut first, _) = listener.accept().expect("accept first websocket client");
+            complete_server_handshake(&mut first);
+            thread::sleep(stall);
+            drop(first);
+
+            let (mut second, _) = listener.accept().expect("accept second websocket client");
+            complete_server_handshake(&mut second);
+            let payload = message.as_bytes();
+            assert!(payload.len() < 126, "test payload must fit in a short frame");
+            let mut frame = vec![0x81, payload.len() as u8];
+            frame.extend_from_slice(payload);
+            second.write_all(&frame).expect("write websocket frame");
+            second.flush().expect("flush websocket frame");
+        });
+        (format!("ws://{address}"), handle)
     }
 
     #[test]
@@ -1012,6 +1116,55 @@ mod tests {
             );
             assert!(client.connect().await.is_err());
         });
+    }
+
+    #[test]
+    fn ws_connection_recv_times_out_when_peer_blackholes_after_handshake() {
+        let (url, server) = spawn_blackhole_websocket_server(Duration::from_millis(250));
+        let timeout_duration = Duration::from_millis(50);
+
+        block_on(async {
+            let mut config = WsConfig::new().with_connect_timeout(Duration::from_secs(1));
+            config.pong_timeout = timeout_duration;
+            config.auto_reconnect = false;
+
+            let client = WsClient::with_config(url, config);
+            let mut connection = client.connect().await.expect("connect websocket");
+            let err = connection.recv().await.expect_err("recv should time out");
+            assert!(matches!(err, StreamError::Timeout(t) if t == timeout_duration));
+            assert!(connection.is_closed());
+        });
+
+        server.join().expect("websocket server thread");
+    }
+
+    #[test]
+    fn reconnecting_stream_recovers_after_recv_timeout() {
+        let (url, server) =
+            spawn_blackhole_then_message_server(Duration::from_millis(250), "recovered");
+        let timeout_duration = Duration::from_millis(50);
+
+        block_on(async {
+            let mut config = WsConfig::new().with_connect_timeout(Duration::from_secs(1));
+            config.pong_timeout = timeout_duration;
+            config.reconnect_delay = Duration::from_millis(10);
+            config.max_reconnect_attempts = Some(3);
+
+            let client = WsClient::with_config(url, config);
+            let mut stream = client.stream();
+            let item = timeout(
+                Duration::from_secs(1),
+                Box::pin(async { stream.next().await }),
+            )
+            .await
+            .expect("stream should not hang")
+            .expect("stream item")
+            .expect("reconnected message");
+
+            assert_eq!(item, WsMessage::text("recovered"));
+        });
+
+        server.join().expect("websocket server thread");
     }
 
     // ── WsMessage: close variant ───────────────────────────────────────

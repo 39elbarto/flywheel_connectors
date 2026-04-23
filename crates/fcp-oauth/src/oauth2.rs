@@ -16,6 +16,7 @@ use url::Url;
 
 use crate::{
     GrantType, OAuthError, OAuthResult, OAuthTokens, Pkce, PkceMethod, ResponseMode, TokenResponse,
+    normalize_registered_redirect_uri,
 };
 
 const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
@@ -317,6 +318,17 @@ impl std::fmt::Debug for OAuth2Client {
     }
 }
 
+fn validate_oauth2_config(mut config: OAuth2Config) -> OAuthResult<OAuth2Config> {
+    Url::parse(&config.authorization_url)?;
+    Url::parse(&config.token_url)?;
+    if let Some(redirect_uri) = config.redirect_uri.as_deref() {
+        config.redirect_uri = Some(
+            normalize_registered_redirect_uri(redirect_uri, "redirect_uri")?.into(),
+        );
+    }
+    Ok(config)
+}
+
 impl OAuth2Client {
     /// Create a new OAuth 2.0 client.
     ///
@@ -324,11 +336,7 @@ impl OAuth2Client {
     /// Returns an error when the configured authorization URL, token URL,
     /// or redirect URI is invalid.
     pub fn new(config: OAuth2Config) -> OAuthResult<Self> {
-        Url::parse(&config.authorization_url)?;
-        Url::parse(&config.token_url)?;
-        if let Some(redirect_uri) = config.redirect_uri.as_deref() {
-            Url::parse(redirect_uri)?;
-        }
+        let config = validate_oauth2_config(config)?;
 
         Ok(Self {
             config,
@@ -346,11 +354,7 @@ impl OAuth2Client {
     /// Returns an error when the configured authorization URL, token URL,
     /// or redirect URI is invalid.
     pub fn with_http_client(config: OAuth2Config, http_client: HttpClient) -> OAuthResult<Self> {
-        Url::parse(&config.authorization_url)?;
-        Url::parse(&config.token_url)?;
-        if let Some(redirect_uri) = config.redirect_uri.as_deref() {
-            Url::parse(redirect_uri)?;
-        }
+        let config = validate_oauth2_config(config)?;
 
         Ok(Self {
             config,
@@ -538,13 +542,17 @@ impl OAuth2Client {
             params.insert("redirect_uri", redirect_uri.clone());
         }
 
-        if let Some(pkce) = pkce {
-            params.insert("code_verifier", pkce.verifier().to_string());
-        }
-
-        // Extra parameters
+        // Extra parameters first — a real PKCE verifier (below) MUST win over
+        // any `code_verifier` a caller accidentally left in
+        // `extra_token_params`. Writing PKCE after the merge closes a latent
+        // hole where an attacker-influenced extra_token_params entry would
+        // overwrite the honest verifier produced by the authorization flow.
         for (key, value) in &self.config.extra_token_params {
             params.insert(key, value.clone());
+        }
+
+        if let Some(pkce) = pkce {
+            params.insert("code_verifier", pkce.verifier().to_string());
         }
 
         self.token_request(params).await
@@ -1717,6 +1725,70 @@ mod tests {
     }
 
     #[test]
+    fn test_client_rejects_non_loopback_http_redirect_uri() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        )
+        .with_redirect_uri("http://attacker.example/callback");
+        let err = OAuth2Client::new(config).unwrap_err();
+        assert!(matches!(
+            err,
+            OAuthError::InvalidConfig(ref m) if m.contains("https or loopback http")
+        ));
+    }
+
+    #[test]
+    fn test_client_rejects_redirect_uri_with_embedded_credentials() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        )
+        .with_redirect_uri("https://user:pass@example.com/callback");
+        let err = OAuth2Client::new(config).unwrap_err();
+        assert!(matches!(
+            err,
+            OAuthError::InvalidConfig(ref m) if m.contains("embedded credentials")
+        ));
+    }
+
+    #[test]
+    fn test_client_rejects_redirect_uri_with_query() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        )
+        .with_redirect_uri("https://example.com/callback?next=/pwn");
+        let err = OAuth2Client::new(config).unwrap_err();
+        assert!(matches!(
+            err,
+            OAuthError::InvalidConfig(ref m) if m.contains("query parameters")
+        ));
+    }
+
+    #[test]
+    fn test_client_rejects_redirect_uri_with_fragment() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        )
+        .with_redirect_uri("https://example.com/callback#fragment");
+        let err = OAuth2Client::new(config).unwrap_err();
+        assert!(matches!(
+            err,
+            OAuthError::InvalidConfig(ref m) if m.contains("fragment")
+        ));
+    }
+
+    #[test]
     fn test_client_accepts_no_redirect_uri() {
         let config = OAuth2Config::new(
             "id",
@@ -2422,6 +2494,23 @@ mod tests {
         assert_eq!(client.config().auth_style, AuthStyle::Basic);
     }
 
+    #[test]
+    fn test_client_with_custom_http_client_rejects_non_loopback_http_redirect_uri() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        )
+        .with_redirect_uri("http://attacker.example/callback");
+        let http_client = HttpClientBuilder::new().build();
+        let err = OAuth2Client::with_http_client(config, http_client).unwrap_err();
+        assert!(matches!(
+            err,
+            OAuthError::InvalidConfig(ref m) if m.contains("https or loopback http")
+        ));
+    }
+
     // ── Expanded: config field defaults and combinations ──
 
     #[test]
@@ -2615,6 +2704,54 @@ mod tests {
                 err.to_string().contains("requires PKCE"),
                 "unexpected error: {err}"
             );
+        });
+    }
+
+    #[test]
+    fn test_exchange_code_pkce_wins_over_extra_token_params_code_verifier() {
+        // Regression guard (br-fwcci): a stale / attacker-influenced
+        // `code_verifier` entry in `extra_token_params` MUST NOT
+        // overwrite the honest PKCE verifier produced by the
+        // authorization flow. The Pkce argument is applied AFTER the
+        // extra_token_params merge so it wins on conflict.
+        run_with_test_runtime(async {
+            let server = MockServer::start().await;
+            let pkce = Pkce::with_method(PkceMethod::S256);
+            let honest_verifier = pkce.verifier().to_string();
+            let bogus_verifier = "bogus-extra-verifier-that-must-not-win";
+            assert_ne!(honest_verifier, bogus_verifier);
+
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_string_contains("grant_type=authorization_code"))
+                .and(body_string_contains(format!(
+                    "code_verifier={honest_verifier}"
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "tok-pkce-wins",
+                    "token_type": "Bearer",
+                    "expires_in": 3600
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "id",
+                "secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_redirect_uri("https://localhost:3000/callback")
+            .with_token_param("code_verifier", bogus_verifier);
+            let client = OAuth2Client::new(config).unwrap();
+
+            let tokens = client
+                .exchange_code_with_pkce("auth-code-xyz", &pkce)
+                .await
+                .expect("honest PKCE must be sent and accepted");
+            assert_eq!(tokens.access_token(), "tok-pkce-wins");
+            server.verify().await;
         });
     }
 

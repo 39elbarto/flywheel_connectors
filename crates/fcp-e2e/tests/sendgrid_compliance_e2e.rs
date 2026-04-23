@@ -515,6 +515,12 @@ async fn sendgrid_happy_path_compliance_suite_passes() {
         report.passed,
         "happy path compliance should pass: {report:#?}"
     );
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|r| r.url.path() == "/marketing/contacts")
+        .count();
+    assert_eq!(hits, 1, "expected exactly one GET to /marketing/contacts");
     assert_report_logs_validate(&report);
 }
 
@@ -569,6 +575,15 @@ async fn sendgrid_dangerous_delete_emits_receipt_audit_and_stable_evidence() {
     assert!(
         report.passed,
         "dangerous delete evidence suite should pass: {report:#?}"
+    );
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|r| r.url.path() == "/marketing/lists/list_abc")
+        .count();
+    assert_eq!(
+        hits, 1,
+        "expected exactly one DELETE to /marketing/lists/list_abc"
     );
     assert_report_logs_validate(&report);
 

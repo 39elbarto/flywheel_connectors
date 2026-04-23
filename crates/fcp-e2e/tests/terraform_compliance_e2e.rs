@@ -485,6 +485,31 @@ async fn terraform_allow_valid_token_connector_suite_passes() {
         .expect("connector suite run");
 
     assert!(report.passed, "allow suite should pass");
+    let received = mock.received_requests().await;
+    let workspace_hits = received
+        .iter()
+        .filter(|r| r.url.path() == "/organizations/test-org/workspaces/test-ws")
+        .count();
+    assert_eq!(
+        workspace_hits, 1,
+        "expected exactly one GET to /organizations/test-org/workspaces/test-ws"
+    );
+    let state_version_hits = received
+        .iter()
+        .filter(|r| r.url.path() == "/workspaces/ws-test-001/current-state-version")
+        .count();
+    assert_eq!(
+        state_version_hits, 1,
+        "expected exactly one GET to /workspaces/ws-test-001/current-state-version"
+    );
+    let resource_hits = received
+        .iter()
+        .filter(|r| r.url.path() == "/state-versions/sv-test-001/resources")
+        .count();
+    assert_eq!(
+        resource_hits, 1,
+        "expected exactly one GET to /state-versions/sv-test-001/resources"
+    );
     let invoke_entry = report
         .logs
         .iter()

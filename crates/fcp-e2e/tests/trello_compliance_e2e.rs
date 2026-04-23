@@ -527,6 +527,12 @@ async fn trello_allow_valid_token_connector_suite_passes() {
         .expect("connector suite run");
 
     assert!(report.passed, "allow suite should pass: {report:#?}");
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|r| r.url.path() == "/members/me/boards")
+        .count();
+    assert_eq!(hits, 1, "expected exactly one GET to /members/me/boards");
     assert_report_logs_validate(&report);
     let invoke_entry = report
         .logs
@@ -588,6 +594,12 @@ async fn trello_dangerous_delete_emits_receipt_audit_and_stable_evidence() {
         report.passed,
         "dangerous delete compliance should pass: {report:#?}"
     );
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|r| r.url.path() == "/cards/card_abc123")
+        .count();
+    assert_eq!(hits, 1, "expected exactly one DELETE to /cards/card_abc123");
     assert_report_logs_validate(&report);
 
     let invoke_entry = report

@@ -197,7 +197,7 @@ impl FcpConnector for SpotifyConnectorAdapter {
                 message: "invalid capability id".into(),
             })?;
         if let Some(verifier) = &self.verifier {
-            verifier.verify(req.capability_token, &cap_id, &req.operation, &[])?;
+            verifier.verify(req.capability_token.clone(), &cap_id, &req.operation, &[])?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -452,6 +452,9 @@ async fn allow_valid_token_connector_suite_passes() {
         .expect("connector suite run");
 
     assert!(report.passed, "allow suite should pass");
+    let received = mock.received_requests().await;
+    let hits = received.iter().filter(|r| r.url.path() == "/search").count();
+    assert_eq!(hits, 1, "expected exactly one GET to /search");
     let invoke_entry = report
         .logs
         .iter()

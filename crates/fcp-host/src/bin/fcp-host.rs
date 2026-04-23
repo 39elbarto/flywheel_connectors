@@ -1017,6 +1017,7 @@ fn resolve_admin_bearer_token() -> HostResult<Option<Arc<str>>> {
 /// When absent, the capability-based identity model applies — the
 /// token IS the principal (br-flywheel_connectors-t623k).
 const PRINCIPAL_HEADER: &str = "x-principal";
+const ADMIN_ZONE_HEADER: &str = "x-fcp-zone";
 
 /// Extract the caller's asserted principal from the `X-Principal` header.
 ///
@@ -1031,6 +1032,25 @@ fn extract_principal_header(headers: &HeaderMap) -> Option<String> {
     } else {
         Some(trimmed.to_owned())
     }
+}
+
+fn extract_admin_zone_header(headers: &HeaderMap) -> HostResult<ZoneId> {
+    let raw = headers
+        .get(ADMIN_ZONE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            HostError::PreflightFailed(format!(
+                "missing or invalid {ADMIN_ZONE_HEADER} header for admin API"
+            ))
+        })?;
+
+    raw.parse().map_err(|error| {
+        HostError::PreflightFailed(format!(
+            "invalid {ADMIN_ZONE_HEADER} header for admin API: {error}"
+        ))
+    })
 }
 
 fn validate_admin_authorization(state: &AppState, headers: &HeaderMap) -> HostResult<()> {
@@ -1066,6 +1086,14 @@ fn validate_admin_authorization(state: &AppState, headers: &HeaderMap) -> HostRe
         return Err(HostError::PreflightFailed(
             "admin bearer token rejected".to_string(),
         ));
+    }
+
+    let asserted_zone = extract_admin_zone_header(headers)?;
+    if asserted_zone != ZoneId::owner() {
+        return Err(HostError::PreflightFailed(format!(
+            "admin API requires {ADMIN_ZONE_HEADER}: {}",
+            ZoneId::owner().as_str()
+        )));
     }
     Ok(())
 }
@@ -7050,6 +7078,7 @@ mod tests {
             axum::http::header::AUTHORIZATION,
             HeaderValue::from_static("Bearer topsecret"),
         );
+        headers.insert(ADMIN_ZONE_HEADER, HeaderValue::from_static("z:owner"));
 
         validate_admin_authorization(&state, &headers).expect("matching token");
     }
@@ -7087,6 +7116,7 @@ mod tests {
             axum::http::header::AUTHORIZATION,
             HeaderValue::from_static("bearer topsecret"),
         );
+        headers.insert(ADMIN_ZONE_HEADER, HeaderValue::from_static("z:owner"));
 
         validate_admin_authorization(&state, &headers).expect("matching token");
     }
@@ -7126,6 +7156,7 @@ mod tests {
             axum::http::header::AUTHORIZATION,
             HeaderValue::from_static("Bearer topsecrex"),
         );
+        headers.insert(ADMIN_ZONE_HEADER, HeaderValue::from_static("z:owner"));
 
         let error = validate_admin_authorization(&state, &headers)
             .expect_err("mismatched token must be rejected");
@@ -7140,8 +7171,94 @@ mod tests {
             axum::http::header::AUTHORIZATION,
             HeaderValue::from_static("Bearer wrong"),
         );
+        headers.insert(ADMIN_ZONE_HEADER, HeaderValue::from_static("z:owner"));
         validate_admin_authorization(&state, &headers)
             .expect_err("short mismatched token must be rejected");
+    }
+
+    #[test]
+    fn validate_admin_authorization_rejects_missing_owner_zone_header() {
+        let registry = Arc::new(empty_registry(1));
+        let budget = Arc::new(BudgetPolicyEngine::new());
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = AppState {
+            registry: Arc::clone(&registry),
+            doctor: DoctorService::new(Arc::clone(&registry)),
+            budget: Arc::clone(&budget),
+            discovery: Arc::new(DiscoveryEndpoint::new(
+                Arc::clone(&registry),
+                Arc::clone(&budget),
+            )),
+            cancellation: Arc::new(CancellationController::new()),
+            lifecycle: Arc::clone(&lifecycle),
+            rollout: Arc::new(RolloutController::new(
+                Arc::clone(&registry),
+                Arc::clone(&lifecycle),
+            )),
+            supply_chain: Arc::new(SupplyChainGate::default()),
+            capability_verifying_key: None,
+            approval_verifying_key: None,
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            connectors_file: None,
+            zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            started_at: Instant::now(),
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer topsecret"),
+        );
+
+        let error = validate_admin_authorization(&state, &headers)
+            .expect_err("admin API must require owner-zone assertion");
+        assert!(
+            error.to_string().contains(ADMIN_ZONE_HEADER),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn validate_admin_authorization_rejects_non_owner_zone_header() {
+        let registry = Arc::new(empty_registry(1));
+        let budget = Arc::new(BudgetPolicyEngine::new());
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = AppState {
+            registry: Arc::clone(&registry),
+            doctor: DoctorService::new(Arc::clone(&registry)),
+            budget: Arc::clone(&budget),
+            discovery: Arc::new(DiscoveryEndpoint::new(
+                Arc::clone(&registry),
+                Arc::clone(&budget),
+            )),
+            cancellation: Arc::new(CancellationController::new()),
+            lifecycle: Arc::clone(&lifecycle),
+            rollout: Arc::new(RolloutController::new(
+                Arc::clone(&registry),
+                Arc::clone(&lifecycle),
+            )),
+            supply_chain: Arc::new(SupplyChainGate::default()),
+            capability_verifying_key: None,
+            approval_verifying_key: None,
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            connectors_file: None,
+            zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            started_at: Instant::now(),
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer topsecret"),
+        );
+        headers.insert(ADMIN_ZONE_HEADER, HeaderValue::from_static("z:work"));
+
+        let error = validate_admin_authorization(&state, &headers)
+            .expect_err("admin API must reject non-owner zone assertions");
+        assert!(
+            error.to_string().contains("z:owner"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

@@ -14,6 +14,16 @@ use serde::{Deserialize, Serialize};
 use crate::coverage::SymbolDistribution;
 use crate::error::SymbolStoreError;
 
+/// Maximum source-symbol count (K) accepted in an [`ObjectSymbolMeta`].
+///
+/// Matches the RFC 6330 §5.1.2 K_MAX limit also enforced by
+/// `fcp_raptorq::encode::Encoder::new` (56403). `put_object_meta`
+/// receives metadata from untrusted mesh inputs; a forged value of
+/// e.g. `u32::MAX` would otherwise drive a multi-GB `HashMap::
+/// with_capacity(...)` allocation under the global `objects.write()`
+/// lock before any symbols arrive. See br-ywpup.
+const MAX_SOURCE_SYMBOLS: u32 = 56_403;
+
 /// Metadata for a stored symbol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolMeta {
@@ -336,6 +346,21 @@ impl SymbolStore for MemorySymbolStore {
     }
 
     async fn put_object_meta(&self, meta: ObjectSymbolMeta) -> Result<(), SymbolStoreError> {
+        // Reject attacker-controlled source-symbol counts BEFORE taking the
+        // write lock on `objects`. Any K above RFC 6330's K_MAX is invalid
+        // under the codec the store is paired with, so accepting it would
+        // only serve to drive a large `HashMap::with_capacity(...)`
+        // allocation and stall every concurrent symbol-store operation on
+        // `objects.write()`. Rejected early, no lock held (br-ywpup).
+        if meta.source_symbols == 0 || meta.source_symbols > MAX_SOURCE_SYMBOLS {
+            return Err(SymbolStoreError::InvalidSymbol {
+                reason: format!(
+                    "source_symbols={} out of range (1..={}) for object {}",
+                    meta.source_symbols, MAX_SOURCE_SYMBOLS, meta.object_id
+                ),
+            });
+        }
+
         let mut objects = self.objects.write();
 
         // If already exists, check consistency
@@ -348,9 +373,11 @@ impl SymbolStore for MemorySymbolStore {
             return Ok(());
         }
 
-        // Pre-allocate the symbols HashMap to the expected source symbol count.
-        // This avoids multiple rehashes as symbols arrive (K symbols typical).
-        let capacity = meta.source_symbols as usize;
+        // Pre-allocate the symbols HashMap to the expected source symbol
+        // count. `source_symbols` has already been bounded to
+        // `MAX_SOURCE_SYMBOLS` above; the `min` here is belt-and-braces so
+        // future changes to the check can't regress the allocation budget.
+        let capacity = (meta.source_symbols as usize).min(MAX_SOURCE_SYMBOLS as usize);
         objects.insert(
             meta.object_id,
             ObjectSymbols {
@@ -1527,6 +1554,57 @@ mod tests {
                 ..StoreLogData::default()
             }
         });
+    }
+
+    /// Regression for br-ywpup: a forged `source_symbols` above RFC 6330
+    /// K_MAX MUST be rejected BEFORE any `HashMap::with_capacity(...)`
+    /// allocation, and without holding the global `objects.write()` lock.
+    #[test]
+    fn put_object_meta_rejects_oversized_source_symbols() {
+        run_store_test(
+            "put_meta_rejects_oversized_source_symbols",
+            "verify",
+            "write",
+            3,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+
+                // Straight above-K_MAX rejection.
+                let mut oversize = test_object_meta();
+                oversize.source_symbols = MAX_SOURCE_SYMBOLS + 1;
+                let result = store.put_object_meta(oversize).await;
+                assert!(
+                    matches!(
+                        &result,
+                        Err(SymbolStoreError::InvalidSymbol { reason })
+                            if reason.contains("source_symbols")
+                    ),
+                    "expected InvalidSymbol for K>K_MAX, got {result:?}"
+                );
+
+                // The u32::MAX attacker payload must be rejected without
+                // panicking via the `as usize` cast on 64-bit platforms.
+                let mut poisoned = test_object_meta();
+                poisoned.object_id = ObjectId::from_bytes([9_u8; 32]);
+                poisoned.source_symbols = u32::MAX;
+                let result = store.put_object_meta(poisoned).await;
+                assert!(matches!(result, Err(SymbolStoreError::InvalidSymbol { .. })));
+
+                // Zero is also invalid (would preallocate an empty HashMap
+                // but leave a zombie object_id entry that can never be
+                // completed).
+                let mut zero = test_object_meta();
+                zero.object_id = ObjectId::from_bytes([8_u8; 32]);
+                zero.source_symbols = 0;
+                let result = store.put_object_meta(zero).await;
+                assert!(matches!(result, Err(SymbolStoreError::InvalidSymbol { .. })));
+
+                StoreLogData {
+                    details: Some(json!({"rejected": "oversized_source_symbols"})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
     #[test]

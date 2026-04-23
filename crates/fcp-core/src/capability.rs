@@ -990,13 +990,14 @@ mod verified_sealed {
 }
 
 /// Marker bound for state-agnostic helpers that accept either
-/// `BoundVerified` or `UnboundVerified`. Sealed: cannot be implemented
-/// outside of `fcp-core`.
+/// `BoundVerified` or `UnboundVerified`. The deprecated legacy marker
+/// [`CryptographicallyVerified`] is intentionally EXCLUDED so new generic
+/// helpers cannot silently widen back to the ambiguous pre-jkcka surface.
+///
+/// Sealed: cannot be implemented outside of `fcp-core`.
 pub trait AnyVerified: verified_sealed::Sealed {}
 impl AnyVerified for BoundVerified {}
 impl AnyVerified for UnboundVerified {}
-#[allow(deprecated)]
-impl AnyVerified for CryptographicallyVerified {}
 
 /// Convenience alias for an unverified capability token.
 pub type UnverifiedToken = CapabilityToken<Unverified>;
@@ -3054,6 +3055,14 @@ mod tests {
             via_bound.claims().get_zone_id(),
             via_promote.claims().get_zone_id()
         );
+    }
+
+    #[test]
+    fn any_verified_trait_only_covers_typed_markers() {
+        fn assert_any_verified<T: AnyVerified>() {}
+
+        assert_any_verified::<BoundVerified>();
+        assert_any_verified::<UnboundVerified>();
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 use std::io::{BufRead, Write};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -447,6 +448,7 @@ struct TestConnector {
     start_time: Instant,
     configured: bool,
     handshaken_zone: Option<ZoneId>,
+    handshake_count: Mutex<u32>,
     profile: TestConnectorProfile,
 }
 
@@ -457,8 +459,16 @@ impl TestConnector {
             start_time: Instant::now(),
             configured: false,
             handshaken_zone: None,
+            handshake_count: Mutex::new(0),
             profile: TestConnectorProfile::from_env(),
         }
+    }
+
+    fn handshake_count(&self) -> u32 {
+        *self
+            .handshake_count
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn handle_configure(
@@ -474,6 +484,11 @@ impl TestConnector {
         &mut self,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, FcpError> {
+        *self
+            .handshake_count
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+
         let req: HandshakeRequest =
             serde_json::from_value(params).map_err(|err| FcpError::InvalidRequest {
                 code: 1003,
@@ -519,7 +534,17 @@ impl TestConnector {
     }
 
     fn handle_self_check(&self) -> Result<serde_json::Value, FcpError> {
-        let report = self.profile.health_mode.self_check();
+        let mut report = self.profile.health_mode.self_check();
+        let mut details = report.details.take().unwrap_or_else(|| json!({}));
+        if let Some(object) = details.as_object_mut() {
+            object.insert("handshake_count".to_string(), json!(self.handshake_count()));
+        } else {
+            details = json!({
+                "handshake_count": self.handshake_count(),
+                "report_details": details,
+            });
+        }
+        report.details = Some(details);
         serde_json::to_value(report).map_err(|err| FcpError::Internal {
             message: format!("Failed to serialize self-check report: {err}"),
         })
@@ -816,6 +841,21 @@ mod tests {
         .expect("simulate request should serialize")
     }
 
+    fn handshake_request() -> serde_json::Value {
+        serde_json::to_value(HandshakeRequest {
+            protocol_version: "1.0.0".into(),
+            zone: ZoneId::work(),
+            zone_dir: None,
+            host_public_key: [0_u8; 32],
+            nonce: [7_u8; 32],
+            capabilities_requested: Vec::new(),
+            host: None,
+            transport_caps: None,
+            requested_instance_id: None,
+        })
+        .expect("handshake request should serialize")
+    }
+
     #[test]
     fn unset_archetype_env_defaults_to_unknown() {
         assert_eq!(
@@ -867,6 +907,7 @@ mod tests {
             start_time: Instant::now(),
             configured: true,
             handshaken_zone: None,
+            handshake_count: Mutex::new(0),
             profile: test_profile(true),
         };
 
@@ -884,6 +925,7 @@ mod tests {
             start_time: Instant::now(),
             configured: true,
             handshaken_zone: Some(ZoneId::work()),
+            handshake_count: Mutex::new(0),
             profile: test_profile(false),
         };
 
@@ -891,5 +933,40 @@ mod tests {
             .handle_simulate(simulate_request(&connector_id, "test.other"))
             .expect_err("simulate should reject mismatched operation");
         assert!(matches!(err, FcpError::InvalidRequest { code: 1006, .. }));
+    }
+
+    #[test]
+    fn handshake_counter_probe_tracks_calls_and_self_check_exposes_it() {
+        let connector_id = ConnectorId::from_static("fcp.test.handshake:utility:1.0.0");
+        let mut connector = TestConnector {
+            id: connector_id,
+            start_time: Instant::now(),
+            configured: true,
+            handshaken_zone: None,
+            handshake_count: Mutex::new(0),
+            profile: test_profile(true),
+        };
+
+        assert_eq!(connector.handshake_count(), 0);
+        connector
+            .handle_handshake(handshake_request())
+            .expect("handshake should succeed");
+        connector
+            .handle_handshake(handshake_request())
+            .expect("second handshake should succeed");
+        assert_eq!(connector.handshake_count(), 2);
+
+        let report: SelfCheckReport = serde_json::from_value(
+            connector
+                .handle_self_check()
+                .expect("self-check should serialize"),
+        )
+        .expect("self-check response should deserialize");
+        assert_eq!(
+            report.details,
+            Some(json!({
+                "handshake_count": 2
+            }))
+        );
     }
 }

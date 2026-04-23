@@ -584,7 +584,6 @@ struct EnumerationSession {
     provider: PathBuf,
     pkcs11: Option<Pkcs11>,
     session: Option<Session>,
-    owns_initialization: bool,
 }
 
 impl EnumerationSession {
@@ -608,11 +607,7 @@ impl EnumerationSession {
                 // at close time is always ReadWriteUser.
                 let close_result =
                     close_pkcs11_session(session, AuthenticatedSessionState::ReadWriteUser);
-                let finalize_result = finalize_pkcs11_context(
-                    &self.provider,
-                    pkcs11,
-                    self.owns_initialization,
-                );
+                let finalize_result = finalize_pkcs11_context(&self.provider, pkcs11);
                 close_result.and(finalize_result)
             }
             _ => Ok(()),
@@ -654,12 +649,12 @@ fn open_enumeration_session(
         return Err(TokenError::PinRequired);
     }
 
-    let (pkcs11, owns_initialization) = acquire_provider_context(&token.provider)?;
+    let pkcs11 = acquire_provider_context(&token.provider)?;
 
     let slot = match Slot::try_from(u64::from(token.slot)) {
         Ok(slot) => slot,
         Err(err) => {
-            let _ = finalize_pkcs11_context(&token.provider, pkcs11, owns_initialization);
+            let _ = finalize_pkcs11_context(&token.provider, pkcs11);
             return Err(TokenError::Pkcs11(err.to_string()));
         }
     };
@@ -667,7 +662,7 @@ fn open_enumeration_session(
     let session = match pkcs11.open_rw_session(slot) {
         Ok(session) => session,
         Err(err) => {
-            let _ = finalize_pkcs11_context(&token.provider, pkcs11, owns_initialization);
+            let _ = finalize_pkcs11_context(&token.provider, pkcs11);
             return Err(map_pkcs11_error(err));
         }
     };
@@ -676,7 +671,7 @@ fn open_enumeration_session(
     match session.login(UserType::User, Some(&auth_pin)) {
         Ok(()) | Err(Pkcs11Error::Pkcs11(RvError::UserAlreadyLoggedIn, _)) => {}
         Err(err) => {
-            cleanup_failed_session(&token.provider, session, pkcs11, owns_initialization);
+            cleanup_failed_session(&token.provider, session, pkcs11);
             return Err(map_pkcs11_error(err));
         }
     }
@@ -685,7 +680,6 @@ fn open_enumeration_session(
         provider: token.provider.clone(),
         pkcs11: Some(pkcs11),
         session: Some(session),
-        owns_initialization,
     })
 }
 
@@ -1052,11 +1046,13 @@ pub enum CertificateSelectionRefusal {
     NoKeys,
     /// Certificates exist but none have a matching private key.
     NoMatchingKeyPair,
-    /// Matching pairs exist but none have an FCP-compatible key type.
+    /// Matching pairs exist but none expose an owner-signing Ed25519 key.
     NoCompatibleKeyType {
         /// The key types that were found.
         found: Vec<TokenKeyType>,
     },
+    /// Signing-capable leaf certificates exist, but none chain to a verifiable issuer.
+    NoVerifiedIssuerChain,
     /// Multiple ambiguous matches with no deterministic winner.
     AmbiguousSelection {
         /// The number of equally-ranked candidates.
@@ -1076,10 +1072,14 @@ impl fmt::Display for CertificateSelectionRefusal {
                 let types: Vec<_> = found.iter().map(ToString::to_string).collect();
                 write!(
                     f,
-                    "no FCP-compatible key type found (have: {})",
+                    "no signing-capable Ed25519 provisioning identity found (have: {})",
                     types.join(", ")
                 )
             }
+            Self::NoVerifiedIssuerChain => write!(
+                f,
+                "no provisioning certificate has a verifiable issuer chain on this token"
+            ),
             Self::AmbiguousSelection { count } => {
                 write!(
                     f,
@@ -1184,25 +1184,99 @@ pub fn match_certificate_key_pairs(
     pairs
 }
 
-/// FCP-compatible key type preference: Ed25519 > X25519 > ECDSA-P256 > ECDSA-P384.
-/// RSA and unknown types are not compatible.
-const fn fcp_key_type_rank(kt: TokenKeyType) -> Option<u8> {
-    match kt {
-        TokenKeyType::Ed25519 => Some(0),
-        TokenKeyType::X25519 => Some(1),
-        TokenKeyType::EcdsaP256 => Some(2),
-        TokenKeyType::EcdsaP384 => Some(3),
-        TokenKeyType::Rsa | TokenKeyType::Other(_) => None,
+const SOFT_TOKEN_CERT_PREFIX: &[u8] = b"SOFT-CERT-V1:";
+
+const fn is_owner_signing_key(key: &TokenKeyInfo) -> bool {
+    matches!(key.key_type, TokenKeyType::Ed25519) && key.can_sign
+}
+
+fn certificate_has_verified_issuer_chain(
+    certificate: &TokenCertificate,
+    certificates: &[TokenCertificate],
+) -> bool {
+    let mut visited = HashSet::new();
+    certificate_has_verified_issuer_chain_inner(certificate, certificates, &mut visited)
+}
+
+fn certificate_has_verified_issuer_chain_inner(
+    certificate: &TokenCertificate,
+    certificates: &[TokenCertificate],
+    visited: &mut HashSet<Vec<u8>>,
+) -> bool {
+    if !visited.insert(certificate.id.clone()) {
+        return false;
     }
+
+    let verified = if certificate.der_bytes.starts_with(SOFT_TOKEN_CERT_PREFIX) {
+        certificate_has_soft_token_issuer_chain(certificate, certificates, visited)
+    } else {
+        certificate_has_x509_issuer_chain(certificate, certificates, visited)
+    };
+
+    visited.remove(&certificate.id);
+    verified
+}
+
+fn certificate_has_soft_token_issuer_chain(
+    certificate: &TokenCertificate,
+    certificates: &[TokenCertificate],
+    visited: &mut HashSet<Vec<u8>>,
+) -> bool {
+    if certificate.is_ca {
+        return certificate.subject == certificate.issuer;
+    }
+
+    certificates
+        .iter()
+        .filter(|issuer| {
+            issuer.is_ca && issuer.subject == certificate.issuer && issuer.id != certificate.id
+        })
+        .any(|issuer| certificate_has_verified_issuer_chain_inner(issuer, certificates, visited))
+}
+
+fn certificate_has_x509_issuer_chain(
+    certificate: &TokenCertificate,
+    certificates: &[TokenCertificate],
+    visited: &mut HashSet<Vec<u8>>,
+) -> bool {
+    let Ok((remaining, parsed)) = parse_x509_certificate(&certificate.der_bytes) else {
+        return false;
+    };
+    if !remaining.is_empty() {
+        return false;
+    }
+
+    if certificate.is_ca && certificate.subject == certificate.issuer {
+        return parsed.verify_signature(None).is_ok();
+    }
+
+    certificates
+        .iter()
+        .filter(|issuer| {
+            issuer.is_ca && issuer.subject == certificate.issuer && issuer.id != certificate.id
+        })
+        .any(|issuer| {
+            let Ok((issuer_remaining, issuer_parsed)) = parse_x509_certificate(&issuer.der_bytes)
+            else {
+                return false;
+            };
+            if !issuer_remaining.is_empty() {
+                return false;
+            }
+
+            parsed
+                .verify_signature(Some(&issuer_parsed.tbs_certificate.subject_pki))
+                .is_ok()
+                && certificate_has_verified_issuer_chain_inner(issuer, certificates, visited)
+        })
 }
 
 /// Select the best certificate–key pair for FCP provisioning.
 ///
 /// Selection rules:
-/// 1. Only pairs with FCP-compatible key types are considered.
-/// 2. Ed25519 is preferred, then X25519, then ECDSA curves.
-/// 3. Among equal key types, signing-capable keys are preferred.
-/// 4. Final tiebreak: lexicographic on (label, id) for determinism.
+/// 1. Only signing-capable Ed25519 identities are considered.
+/// 2. The certificate must chain to a verifiable issuer on the token.
+/// 3. Final tiebreak: lexicographic on (label, id) for determinism.
 ///
 /// # Errors
 ///
@@ -1244,27 +1318,31 @@ pub(crate) fn select_certificate_for_provisioning<D: HardwareTokenSessionDriver>
         ));
     }
 
-    // Filter to FCP-compatible key types.
+    // Owner bootstrap requires an Ed25519 signing identity whose certificate
+    // chains to a verifiable issuer on the token.
     let mut compatible: Vec<_> = pairs
         .iter()
-        .filter(|p| fcp_key_type_rank(p.key.key_type).is_some())
+        .filter(|p| is_owner_signing_key(&p.key))
+        .filter(|p| certificate_has_verified_issuer_chain(&p.certificate, &certs))
         .collect();
 
     if compatible.is_empty() {
         let found: Vec<_> = pairs.iter().map(|p| p.key.key_type).collect();
+        let has_owner_signing_key = pairs.iter().any(|p| is_owner_signing_key(&p.key));
         return Err(TokenError::CertificateSelectionFailed(
-            CertificateSelectionRefusal::NoCompatibleKeyType { found },
+            if has_owner_signing_key {
+                CertificateSelectionRefusal::NoVerifiedIssuerChain
+            } else {
+                CertificateSelectionRefusal::NoCompatibleKeyType { found }
+            },
         ));
     }
 
-    // Sort by preference: key type rank, then signing capability, then deterministic tiebreak.
+    // Sort deterministically after security requirements are satisfied.
     compatible.sort_by(|a, b| {
-        let rank_a = fcp_key_type_rank(a.key.key_type).unwrap_or(u8::MAX);
-        let rank_b = fcp_key_type_rank(b.key.key_type).unwrap_or(u8::MAX);
-        rank_a
-            .cmp(&rank_b)
-            .then_with(|| b.key.can_sign.cmp(&a.key.can_sign))
-            .then_with(|| a.certificate.label.cmp(&b.certificate.label))
+        a.certificate
+            .label
+            .cmp(&b.certificate.label)
             .then_with(|| a.key.id.cmp(&b.key.id))
     });
 
@@ -1272,8 +1350,8 @@ pub(crate) fn select_certificate_for_provisioning<D: HardwareTokenSessionDriver>
     let candidates_considered = compatible.len();
 
     let selection_reason = format!(
-        "key type {} ranked best among {} compatible pair(s)",
-        best.key.key_type, candidates_considered
+        "Ed25519 signing certificate with verified issuer chain selected among {} compatible pair(s)",
+        candidates_considered
     );
 
     tracing::info!(
@@ -1306,10 +1384,9 @@ fn cleanup_failed_session(
     provider: &Path,
     session: Session,
     pkcs11: Pkcs11,
-    owns_initialization: bool,
 ) {
     let _ = session.close();
-    let _ = finalize_pkcs11_context(provider, pkcs11, owns_initialization);
+    let _ = finalize_pkcs11_context(provider, pkcs11);
 }
 
 fn close_pkcs11_session(
@@ -1332,49 +1409,34 @@ fn close_pkcs11_session(
     logout_result.and(close_result)
 }
 
-fn acquire_provider_context(provider: &Path) -> Result<(Pkcs11, bool), TokenError> {
+fn acquire_provider_context(provider: &Path) -> Result<Pkcs11, TokenError> {
     let mut sessions = provider_session_registry()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     let pkcs11 = Pkcs11::new(provider).map_err(map_pkcs11_error)?;
-    let owns_initialization = match pkcs11.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)) {
+    let initialized_here = match pkcs11.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)) {
         Ok(()) => true,
         Err(Pkcs11Error::Pkcs11(RvError::CryptokiAlreadyInitialized, _)) => false,
         Err(err) => return Err(map_pkcs11_error(err)),
     };
 
-    *sessions.entry(provider.to_path_buf()).or_insert(0) += 1;
-    Ok((pkcs11, owns_initialization))
+    note_provider_session_open(&mut sessions, provider, initialized_here);
+    Ok(pkcs11)
 }
 
-fn finalize_pkcs11_context(
-    provider: &Path,
-    pkcs11: Pkcs11,
-    owns_initialization: bool,
-) -> Result<(), TokenError> {
+fn finalize_pkcs11_context(provider: &Path, pkcs11: Pkcs11) -> Result<(), TokenError> {
     let mut sessions = provider_session_registry()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let provider_key = provider.to_path_buf();
-
-    let should_finalize = {
-        let active_sessions = sessions.entry(provider_key.clone()).or_insert(0);
-        if *active_sessions > 0 {
-            *active_sessions -= 1;
-        }
-        owns_initialization && *active_sessions == 0
-    };
+    let should_finalize = note_provider_session_close(&mut sessions, provider);
+    drop(sessions);
 
     let finalize_result = if should_finalize {
         pkcs11.finalize().map_err(map_pkcs11_error)
     } else {
         Ok(())
     };
-
-    if sessions.get(&provider_key).copied().unwrap_or_default() == 0 {
-        sessions.remove(&provider_key);
-    }
 
     finalize_result
 }
@@ -1718,8 +1780,42 @@ fn provider_probe_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn provider_session_registry() -> &'static Mutex<HashMap<PathBuf, usize>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, usize>>> = OnceLock::new();
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ProviderSessionState {
+    active_sessions: usize,
+    finalize_required: bool,
+}
+
+fn note_provider_session_open(
+    sessions: &mut HashMap<PathBuf, ProviderSessionState>,
+    provider: &Path,
+    initialized_here: bool,
+) {
+    let state = sessions.entry(provider.to_path_buf()).or_default();
+    state.active_sessions += 1;
+    state.finalize_required |= initialized_here;
+}
+
+fn note_provider_session_close(
+    sessions: &mut HashMap<PathBuf, ProviderSessionState>,
+    provider: &Path,
+) -> bool {
+    let provider_key = provider.to_path_buf();
+    let Some(mut state) = sessions.remove(&provider_key) else {
+        return false;
+    };
+
+    if state.active_sessions > 1 {
+        state.active_sessions -= 1;
+        sessions.insert(provider_key, state);
+        return false;
+    }
+
+    state.finalize_required
+}
+
+fn provider_session_registry() -> &'static Mutex<HashMap<PathBuf, ProviderSessionState>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, ProviderSessionState>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -2915,10 +3011,21 @@ mod tests {
         TokenCertificate {
             label: label.to_string(),
             id: id.to_vec(),
-            der_bytes: vec![0x30, 0x82], // minimal DER stub
+            der_bytes: [SOFT_TOKEN_CERT_PREFIX, id].concat(),
             subject: format!("CN={label}"),
             issuer: "CN=TestCA".to_string(),
             is_ca: false,
+        }
+    }
+
+    fn test_ca_cert(label: &str, id: &[u8]) -> TokenCertificate {
+        TokenCertificate {
+            label: label.to_string(),
+            id: id.to_vec(),
+            der_bytes: [SOFT_TOKEN_CERT_PREFIX, id].concat(),
+            subject: format!("CN={label}"),
+            issuer: format!("CN={label}"),
+            is_ca: true,
         }
     }
 
@@ -3138,7 +3245,11 @@ mod tests {
     #[test]
     fn select_cert_prefers_ed25519_over_ecdsa() {
         let driver = MockSessionDriver::with_certs_and_keys(
-            vec![test_cert("ecdsa-cert", &[1]), test_cert("ed-cert", &[2])],
+            vec![
+                test_cert("ecdsa-cert", &[1]),
+                test_cert("ed-cert", &[2]),
+                test_ca_cert("TestCA", &[9]),
+            ],
             vec![
                 test_key("ecdsa-key", &[1], TokenKeyType::EcdsaP256),
                 test_key("ed-key", &[2], TokenKeyType::Ed25519),
@@ -3150,13 +3261,17 @@ mod tests {
         let material = select_certificate_for_provisioning(&token, &pin, &driver).unwrap();
         assert_eq!(material.pair.key.key_type, TokenKeyType::Ed25519);
         assert_eq!(material.pair.certificate.label, "ed-cert");
-        assert_eq!(material.candidates_considered, 2);
+        assert_eq!(material.candidates_considered, 1);
     }
 
     #[test]
-    fn select_cert_prefers_x25519_over_ecdsa() {
+    fn select_cert_x25519_only_returns_refusal() {
         let driver = MockSessionDriver::with_certs_and_keys(
-            vec![test_cert("ec-cert", &[1]), test_cert("x-cert", &[2])],
+            vec![
+                test_cert("ec-cert", &[1]),
+                test_cert("x-cert", &[2]),
+                test_ca_cert("TestCA", &[9]),
+            ],
             vec![
                 test_key("ec-key", &[1], TokenKeyType::EcdsaP384),
                 test_key("x-key", &[2], TokenKeyType::X25519),
@@ -3165,14 +3280,21 @@ mod tests {
         let token = test_token();
         let pin = HardwareTokenPin::new("123456");
 
-        let material = select_certificate_for_provisioning(&token, &pin, &driver).unwrap();
-        assert_eq!(material.pair.key.key_type, TokenKeyType::X25519);
+        let err = select_certificate_for_provisioning(&token, &pin, &driver).unwrap_err();
+        match err {
+            TokenError::CertificateSelectionFailed(
+                CertificateSelectionRefusal::NoCompatibleKeyType { found },
+            ) => {
+                assert_eq!(found, vec![TokenKeyType::EcdsaP384, TokenKeyType::X25519]);
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     #[test]
     fn select_cert_single_ed25519_pair_succeeds() {
         let driver = MockSessionDriver::with_certs_and_keys(
-            vec![test_cert("my-cert", &[0xAB])],
+            vec![test_cert("my-cert", &[0xAB]), test_ca_cert("TestCA", &[9])],
             vec![test_key("my-key", &[0xAB], TokenKeyType::Ed25519)],
         );
         let token = test_token();
@@ -3195,7 +3317,11 @@ mod tests {
         let sign_key = test_key("sign-key", &[2], TokenKeyType::Ed25519);
 
         let driver = MockSessionDriver::with_certs_and_keys(
-            vec![test_cert("d-cert", &[1]), test_cert("s-cert", &[2])],
+            vec![
+                test_cert("d-cert", &[1]),
+                test_cert("s-cert", &[2]),
+                test_ca_cert("TestCA", &[9]),
+            ],
             vec![derive_key, sign_key],
         );
         let token = test_token();
@@ -3210,7 +3336,11 @@ mod tests {
     fn select_cert_deterministic_tiebreak_by_label() {
         // Two Ed25519 signing keys — tiebreak by certificate label.
         let driver = MockSessionDriver::with_certs_and_keys(
-            vec![test_cert("beta-cert", &[2]), test_cert("alpha-cert", &[1])],
+            vec![
+                test_cert("beta-cert", &[2]),
+                test_cert("alpha-cert", &[1]),
+                test_ca_cert("TestCA", &[9]),
+            ],
             vec![
                 test_key("k2", &[2], TokenKeyType::Ed25519),
                 test_key("k1", &[1], TokenKeyType::Ed25519),
@@ -3221,6 +3351,24 @@ mod tests {
 
         let material = select_certificate_for_provisioning(&token, &pin, &driver).unwrap();
         assert_eq!(material.pair.certificate.label, "alpha-cert");
+    }
+
+    #[test]
+    fn select_cert_missing_verified_issuer_chain_returns_refusal() {
+        let driver = MockSessionDriver::with_certs_and_keys(
+            vec![test_cert("leaf-cert", &[1])],
+            vec![test_key("leaf-key", &[1], TokenKeyType::Ed25519)],
+        );
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+
+        let err = select_certificate_for_provisioning(&token, &pin, &driver).unwrap_err();
+        assert!(matches!(
+            err,
+            TokenError::CertificateSelectionFailed(
+                CertificateSelectionRefusal::NoVerifiedIssuerChain
+            )
+        ));
     }
 
     // ── CertificateSelectionRefusal display ─────────────────────────────
@@ -3246,6 +3394,11 @@ mod tests {
             found: vec![TokenKeyType::Rsa],
         };
         assert!(no_compat.to_string().contains("RSA"));
+        assert!(
+            CertificateSelectionRefusal::NoVerifiedIssuerChain
+                .to_string()
+                .contains("issuer chain")
+        );
         let ambig = CertificateSelectionRefusal::AmbiguousSelection { count: 3 };
         assert!(ambig.to_string().contains('3'));
     }

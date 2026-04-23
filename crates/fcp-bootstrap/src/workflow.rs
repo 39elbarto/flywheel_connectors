@@ -2109,6 +2109,7 @@ mod tests {
             CertificateSelectionRefusal::NoCompatibleKeyType {
                 found: vec![TokenKeyType::Rsa],
             },
+            CertificateSelectionRefusal::NoVerifiedIssuerChain,
             CertificateSelectionRefusal::AmbiguousSelection { count: 2 },
         ];
 

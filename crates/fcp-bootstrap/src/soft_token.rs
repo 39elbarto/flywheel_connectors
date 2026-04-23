@@ -177,6 +177,9 @@ struct SoftTokenDriver {
     detected_token: DetectedToken,
     /// Pre-materialized identities indexed by their `CKA_ID`.
     identities: Vec<MaterializedIdentity>,
+    /// Synthetic certificate objects that model issuer material present on the
+    /// token without introducing additional selectable key pairs.
+    extra_certificates: Vec<TokenCertificate>,
     /// Counter for close-action invocations (for cleanup determinism tests).
     close_count: Arc<AtomicUsize>,
 }
@@ -197,11 +200,13 @@ impl SoftTokenDriver {
         };
 
         let identities = materialize_identities(&config.identities);
+        let extra_certificates = implicit_ca_certificates(&config.identities);
 
         Self {
             pin: HardwareTokenPin::new(config.pin),
             detected_token,
             identities,
+            extra_certificates,
             close_count: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -286,6 +291,7 @@ impl HardwareTokenSessionDriver for SoftTokenDriver {
             .identities
             .iter()
             .map(|id| id.certificate.clone())
+            .chain(self.extra_certificates.iter().cloned())
             .collect())
     }
 
@@ -367,6 +373,31 @@ fn materialize_identities(specs: &[SoftTokenIdentitySpec]) -> Vec<MaterializedId
     }
 
     identities
+}
+
+fn implicit_ca_certificates(specs: &[SoftTokenIdentitySpec]) -> Vec<TokenCertificate> {
+    let has_leaf = specs.iter().any(|spec| !spec.is_ca);
+    let has_explicit_ca = specs.iter().any(|spec| spec.is_ca);
+    if !has_leaf || has_explicit_ca {
+        return Vec::new();
+    }
+
+    let ca_label = "soft-token-ca";
+    let ca_subject = "CN=FCP SoftToken CA".to_string();
+    let id_hash = blake3::hash(b"fcp-soft-token-ca");
+    let cka_id = id_hash.as_bytes()[..20].to_vec();
+    let mut der_bytes = Vec::with_capacity(32);
+    der_bytes.extend_from_slice(b"SOFT-CERT-V1:");
+    der_bytes.extend_from_slice(b"issuer-ca");
+
+    vec![TokenCertificate {
+        label: ca_label.to_string(),
+        id: cka_id,
+        der_bytes,
+        subject: ca_subject.clone(),
+        issuer: ca_subject,
+        is_ca: true,
+    }]
 }
 
 /// Build a multi-token soft-token environment with separate drivers per token.
@@ -452,6 +483,7 @@ mod tests {
         let driver = SoftTokenDriver::deterministic(config);
 
         assert_eq!(driver.identities.len(), 2);
+        assert_eq!(driver.extra_certificates.len(), 1);
         assert_ne!(
             driver.identities[0].signing_key_bytes, driver.identities[1].signing_key_bytes,
             "different identities must have different keys"
@@ -587,8 +619,9 @@ mod tests {
         let certs = driver.enumerate_certificates(&token, &pin).unwrap();
         let keys = driver.enumerate_keys(&token, &pin).unwrap();
 
-        assert_eq!(certs.len(), keys.len());
-        for (cert, key) in certs.iter().zip(keys.iter()) {
+        let leaf_certs: Vec<_> = certs.iter().filter(|cert| !cert.is_ca).collect();
+        assert_eq!(leaf_certs.len(), keys.len());
+        for (cert, key) in leaf_certs.iter().zip(keys.iter()) {
             assert_eq!(
                 cert.id, key.id,
                 "certificate and key CKA_ID must match for binding"
@@ -1726,10 +1759,11 @@ mod verification_pack {
             ));
         }
 
-        // Verify RSA is excluded from candidate count (only Ed25519 + X25519 are FCP-compatible)
+        // Verify only the owner-signing Ed25519 identity remains after
+        // provisioning compatibility checks.
         {
-            let step = record.add_step("assert", "RSA excluded from compatible candidates");
-            step.passed = material.candidates_considered == 2; // Ed25519 + X25519
+            let step = record.add_step("assert", "Only Ed25519 owner-signing candidates remain");
+            step.passed = material.candidates_considered == 1;
             step.evidence.push(format!(
                 "compatible_count={}",
                 material.candidates_considered

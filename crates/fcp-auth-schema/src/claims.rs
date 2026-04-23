@@ -50,12 +50,28 @@ pub enum SchemaError {
         /// Observed type name.
         got: &'static str,
     },
-    /// Timestamp value did not fit a valid `DateTime`.
+    /// Integer value was the right CBOR type but out of range for the
+    /// destination Rust type (e.g. u16, u64, or i64 timestamp).
+    ///
+    /// `value` is the full CBOR integer as i128 to preserve the
+    /// original for diagnostics — CBOR integers can span the full
+    /// i128 range even when our target fields are narrower.
+    #[error("claim {label}: integer value {value} out of range for {expected}")]
+    OutOfRange {
+        /// CBOR integer label.
+        label: i64,
+        /// Observed value as i128 (full CBOR range).
+        value: i128,
+        /// Name of the expected destination type.
+        expected: &'static str,
+    },
+    /// Timestamp value fit as i64 but did not produce a valid
+    /// `DateTime<Utc>` (e.g., out of chrono's representable range).
     #[error("claim {label}: invalid timestamp {value}")]
     InvalidTimestamp {
         /// CBOR integer label.
         label: i64,
-        /// Observed timestamp.
+        /// Observed timestamp seconds.
         value: i64,
     },
     /// Schema-version mismatch. Verifier sets this via
@@ -433,10 +449,10 @@ fn expect_u64(label: i64, v: ciborium::Value) -> Result<u64, SchemaError> {
     match v {
         ciborium::Value::Integer(i) => {
             let as_i128: i128 = i.into();
-            u64::try_from(as_i128).map_err(|_| SchemaError::UnexpectedType {
+            u64::try_from(as_i128).map_err(|_| SchemaError::OutOfRange {
                 label,
+                value: as_i128,
                 expected: "u64",
-                got: "out-of-range integer",
             })
         }
         other => Err(SchemaError::UnexpectedType {
@@ -451,10 +467,10 @@ fn expect_u16(label: i64, v: ciborium::Value) -> Result<u16, SchemaError> {
     match v {
         ciborium::Value::Integer(i) => {
             let as_i128: i128 = i.into();
-            u16::try_from(as_i128).map_err(|_| SchemaError::UnexpectedType {
+            u16::try_from(as_i128).map_err(|_| SchemaError::OutOfRange {
                 label,
+                value: as_i128,
                 expected: "u16",
-                got: "out-of-range integer",
             })
         }
         other => Err(SchemaError::UnexpectedType {
@@ -469,9 +485,12 @@ fn timestamp(label: i64, v: ciborium::Value) -> Result<DateTime<Utc>, SchemaErro
     match v {
         ciborium::Value::Integer(i) => {
             let as_i128: i128 = i.into();
-            let secs: i64 = i64::try_from(as_i128).map_err(|_| SchemaError::InvalidTimestamp {
+            // Preserve the full value in the error if it doesn't fit i64 —
+            // earlier drafts silently reported `value: 0` which was misleading.
+            let secs: i64 = i64::try_from(as_i128).map_err(|_| SchemaError::OutOfRange {
                 label,
-                value: 0,
+                value: as_i128,
+                expected: "i64 timestamp",
             })?;
             Utc.timestamp_opt(secs, 0)
                 .single()
@@ -662,6 +681,104 @@ mod tests {
         let parsed = AuthClaims::from_canonical_cbor(&bytes).unwrap();
         assert_eq!(parsed.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(parsed.capability_id.as_deref(), Some("cap"));
+    }
+
+    // ── Fresh-eyes audit (8n0rm): OutOfRange error regression tests ───────
+
+    #[test]
+    fn decode_out_of_range_u16_yields_out_of_range_error_with_value() {
+        // SCHEMA_VERSION is u16; feed an integer that fits i64 but not u16.
+        let entries = vec![
+            (
+                ciborium::Value::Integer(fcp2_claims::SCHEMA_VERSION.into()),
+                ciborium::Value::Integer(100_000_i64.into()), // > u16::MAX
+            ),
+            (
+                ciborium::Value::Integer(fcp2_claims::CAPABILITY_ID.into()),
+                ciborium::Value::Text("cap".into()),
+            ),
+        ];
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&ciborium::Value::Map(entries), &mut bytes).unwrap();
+        let err = AuthClaims::from_canonical_cbor(&bytes).unwrap_err();
+        match err {
+            SchemaError::OutOfRange {
+                label,
+                value,
+                expected,
+            } => {
+                assert_eq!(label, fcp2_claims::SCHEMA_VERSION);
+                assert_eq!(value, 100_000);
+                assert_eq!(expected, "u16");
+            }
+            other => panic!("expected OutOfRange; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_out_of_range_u64_preserves_value() {
+        // CHK_SEQ is u64; feed a negative integer (fits i128 but not u64).
+        let entries = vec![
+            (
+                ciborium::Value::Integer(fcp2_claims::SCHEMA_VERSION.into()),
+                ciborium::Value::Integer(i64::from(CURRENT_SCHEMA_VERSION).into()),
+            ),
+            (
+                ciborium::Value::Integer(fcp2_claims::CHK_SEQ.into()),
+                ciborium::Value::Integer((-1_i64).into()),
+            ),
+        ];
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&ciborium::Value::Map(entries), &mut bytes).unwrap();
+        let err = AuthClaims::from_canonical_cbor(&bytes).unwrap_err();
+        match err {
+            SchemaError::OutOfRange {
+                label,
+                value,
+                expected,
+            } => {
+                assert_eq!(label, fcp2_claims::CHK_SEQ);
+                assert_eq!(value, -1, "value must preserve original negative integer");
+                assert_eq!(expected, "u64");
+            }
+            other => panic!("expected OutOfRange; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_invalid_timestamp_reports_actual_value_not_zero() {
+        // Regression: earlier drafts silently dropped the original
+        // out-of-range value and reported `value: 0`, masking the real
+        // input. Now OutOfRange preserves it as i128.
+        //
+        // We cannot trigger the "fits i64 but chrono rejects it" path via
+        // ciborium because ciborium's Integer max fits within i128, and
+        // i64::MAX (~9.2e18 seconds = ~2.9e11 years) is well beyond chrono's
+        // year 262143 upper bound, so it rejects at the timestamp_opt step
+        // with InvalidTimestamp{value: <actual secs>} — testing THAT.
+        let entries = vec![
+            (
+                ciborium::Value::Integer(fcp2_claims::SCHEMA_VERSION.into()),
+                ciborium::Value::Integer(i64::from(CURRENT_SCHEMA_VERSION).into()),
+            ),
+            (
+                ciborium::Value::Integer(cwt_claims::EXP.into()),
+                ciborium::Value::Integer(i64::MAX.into()),
+            ),
+        ];
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&ciborium::Value::Map(entries), &mut bytes).unwrap();
+        let err = AuthClaims::from_canonical_cbor(&bytes).unwrap_err();
+        match err {
+            SchemaError::InvalidTimestamp { label, value } => {
+                assert_eq!(label, cwt_claims::EXP);
+                assert_eq!(
+                    value, i64::MAX,
+                    "value must be the actual out-of-range timestamp, not 0"
+                );
+            }
+            other => panic!("expected InvalidTimestamp; got {other:?}"),
+        }
     }
 
     // ── 8n0rm.5: schema_version policy regression tests ─────────────────

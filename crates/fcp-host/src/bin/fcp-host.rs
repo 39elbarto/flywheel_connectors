@@ -110,6 +110,7 @@ struct SubprocessConnector {
     handshaken_zone: Mutex<Option<ZoneId>>,
 }
 
+#[derive(Debug)]
 struct ConnectorRpcRequest {
     request: serde_json::Value,
     response_tx: oneshot::Sender<std::io::Result<serde_json::Value>>,
@@ -197,20 +198,36 @@ impl SubprocessConnector {
                     "params": params,
                 });
                 let (response_tx, response_rx) = oneshot::channel();
-                self.runner_tx
-                    .send(ConnectorRpcRequest {
+                fcp_async_core::time::timeout(
+                    CONNECTOR_RPC_IO_TIMEOUT,
+                    self.runner_tx.send(ConnectorRpcRequest {
                         request,
                         response_tx,
-                    })
+                    }),
+                )
+                .await
+                .map_err(|_| {
+                    HostError::RegistryError(format!(
+                        "connector dispatcher queue timed out after {}s",
+                        CONNECTOR_RPC_IO_TIMEOUT.as_secs()
+                    ))
+                })?
+                .map_err(|_| {
+                    HostError::RegistryError("connector dispatcher unavailable".to_string())
+                })?;
+                let response = fcp_async_core::time::timeout(CONNECTOR_RPC_IO_TIMEOUT, response_rx)
                     .await
                     .map_err(|_| {
-                        HostError::RegistryError("connector dispatcher unavailable".to_string())
+                        HostError::RegistryError(format!(
+                            "connector dispatcher response timed out after {}s",
+                            CONNECTOR_RPC_IO_TIMEOUT.as_secs()
+                        ))
+                    })?
+                    .map_err(|_| {
+                        HostError::RegistryError(
+                            "connector dispatcher stopped before replying".to_string(),
+                        )
                     })?;
-                let response = response_rx.await.map_err(|_| {
-                    HostError::RegistryError(
-                        "connector dispatcher stopped before replying".to_string(),
-                    )
-                })?;
                 let response = response.map_err(|err| {
                     HostError::RegistryError(format!("connector IO error: {err}"))
                 })?;
@@ -271,10 +288,10 @@ impl SubprocessConnector {
             let handshake_params = serde_json::to_value(request).map_err(|err| {
                 HostError::RegistryError(format!("handshake encode error: {err}"))
             })?;
-            let response: HandshakeResponse =
-                serde_json::from_value(self.rpc("handshake", handshake_params).await?).map_err(
-                    |err| HostError::RegistryError(format!("handshake parse error: {err}")),
-                )?;
+            let response: HandshakeResponse = serde_json::from_value(
+                self.rpc("handshake", handshake_params).await?,
+            )
+            .map_err(|err| HostError::RegistryError(format!("handshake parse error: {err}")))?;
             if response.status != "accepted" {
                 return Err(HostError::RegistryError(format!(
                     "handshake rejected by connector '{}': {}",
@@ -302,7 +319,9 @@ impl SubprocessConnector {
     async fn invoke(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
         let params = serde_json::to_value(&request)
             .map_err(|err| HostError::RegistryError(format!("invoke encode error: {err}")))?;
-        let result = self.rpc_in_handshaken_zone(&request.zone_id, "invoke", params).await?;
+        let result = self
+            .rpc_in_handshaken_zone(&request.zone_id, "invoke", params)
+            .await?;
         serde_json::from_value(result)
             .map_err(|err| HostError::RegistryError(format!("invoke parse error: {err}")))
     }
@@ -6411,6 +6430,60 @@ mod tests {
             let response = response.expect("health should succeed");
             assert!(matches!(response.status, HealthState::Ready));
         }
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn subprocess_connector_queue_saturation_returns_error() {
+        let connector_id = ConnectorId::from_static("fcp.test.queue-saturation:utility:1.0.0");
+        let summary = ConnectorSummary {
+            id: connector_id.clone(),
+            name: connector_id.to_string(),
+            description: None,
+            version: semver::Version::new(1, 0, 0),
+            categories: Vec::new(),
+            tool_count: 0,
+            max_safety_tier: SafetyTier::Safe,
+            enabled: true,
+            health: ConnectorHealth::healthy(),
+            last_health_check: None,
+        };
+        let (runner_tx, runner_rx) = mpsc::channel::<ConnectorRpcRequest>(1);
+        let (response_tx, _response_rx) = oneshot::channel();
+        runner_tx
+            .send(ConnectorRpcRequest {
+                request: json!({}),
+                response_tx,
+            })
+            .await
+            .unwrap_or_else(|_| panic!("queue fill should succeed"));
+        let runner_task = task::spawn(async move {
+            let _runner_rx = runner_rx;
+            fcp_async_core::time::sleep(CONNECTOR_RPC_IO_TIMEOUT + Duration::from_secs(1)).await;
+        });
+        let connector = SubprocessConnector {
+            summary,
+            runner_tx,
+            _runner_task: runner_task,
+            resilience: Arc::new(ResilienceLayer::default()),
+            capability_verifying_key: None,
+            handshaken_zone: Mutex::new(None),
+        };
+        connector.resilience.ensure_connector(&connector.summary.id);
+
+        let error = fcp_async_core::time::timeout(
+            CONNECTOR_RPC_IO_TIMEOUT + Duration::from_secs(2),
+            connector.health(),
+        )
+        .await
+        .expect("queue saturation should fail before outer timeout")
+        .expect_err("queue saturation should return an error");
+
+        assert!(
+            error
+                .to_string()
+                .contains("connector dispatcher queue timed out"),
+            "unexpected error: {error}"
+        );
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

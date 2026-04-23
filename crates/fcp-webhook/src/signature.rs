@@ -205,8 +205,20 @@ impl Ed25519Verifier {
 
 impl SignatureVerifier for Ed25519Verifier {
     fn verify(&self, payload: &[u8], signature: &str) -> WebhookResult<()> {
-        use ed25519_dalek::Verifier;
-
+        // `verify_strict` rejects:
+        //   * signatures whose S scalar is in the upper half of the curve
+        //     order (RFC 8032 §5.1.7 says verifiers SHOULD reject S >= L),
+        //   * mixed-order A points,
+        // both of which permit bytewise-distinct-but-equivalently-valid
+        // signatures over the same payload. Webhook signatures come from
+        // an untrusted network boundary and feed downstream dedupe / audit
+        // / idempotency-cache code that assumes an accepted signature
+        // encoding is unique; accepting malleable variants there breaks
+        // those invariants (br-r3ygj).
+        //
+        // The rest of the workspace (fcp-crypto, fcp-bootstrap, etc.)
+        // already uses `verify_strict` for untrusted signatures; this
+        // brings the webhook path in line.
         let sig_bytes = decode_fixed_hex(signature, ED25519_SIGNATURE_HEX_LEN)?;
         let sig_array: [u8; 64] = sig_bytes
             .try_into()
@@ -215,7 +227,7 @@ impl SignatureVerifier for Ed25519Verifier {
         let signature = ed25519_dalek::Signature::from_bytes(&sig_array);
 
         self.public_key
-            .verify(payload, &signature)
+            .verify_strict(payload, &signature)
             .map_err(|_| WebhookError::InvalidSignature)
     }
 
@@ -285,6 +297,68 @@ mod tests {
         let sig_hex = hex::encode(signature.to_bytes());
 
         assert!(verifier.verify(payload, &sig_hex).is_ok());
+    }
+
+    /// Regression for br-r3ygj: the Ed25519 verifier MUST reject malleable
+    /// signatures (S in the upper half of the curve order). Before the
+    /// switch from `verify` to `verify_strict`, a valid signature (R || S)
+    /// could be malleated into (R || S + L) — bytewise-distinct but
+    /// accepted by plain verification — which breaks any downstream
+    /// dedupe / audit / idempotency path that keys off the signature
+    /// encoding.
+    #[test]
+    fn test_ed25519_rejects_malleable_high_s_signature() {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        // Ed25519 group order L in little-endian 32-byte form:
+        //   L = 2^252 + 27742317777372353535851937790883648493
+        // RFC 8032 §5.1.7: verifiers SHOULD reject S >= L. Strict
+        // verification makes this MUST.
+        const L: [u8; 32] = [
+            0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9,
+            0xde, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x10,
+        ];
+
+        let signing_key = SigningKey::from_bytes(&[
+            0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec,
+            0x2c, 0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03,
+            0x1c, 0xae, 0x7f, 0x60,
+        ]);
+        let verifying_key = signing_key.verifying_key();
+        let payload = b"r3ygj-malleability-regression";
+        let canonical = signing_key.sign(payload);
+        let mut sig_bytes = canonical.to_bytes();
+
+        // Add L little-endian to the S half (sig_bytes[32..64]). Ed25519
+        // sign() emits canonical S < L < 2^253, so S + L fits in 256 bits
+        // without overflow beyond the high byte.
+        let mut carry: u16 = 0;
+        for i in 0..32 {
+            let sum = u16::from(sig_bytes[32 + i]) + u16::from(L[i]) + carry;
+            sig_bytes[32 + i] = (sum & 0xff) as u8;
+            carry = sum >> 8;
+        }
+        assert_eq!(carry, 0, "S + L overflowed 256 bits; signing-key rolled bad S");
+        assert_ne!(
+            &sig_bytes[32..64],
+            &canonical.to_bytes()[32..64],
+            "mutation did not change S bytes"
+        );
+
+        let verifier = Ed25519Verifier::from_bytes(&verifying_key.to_bytes()).unwrap();
+
+        // Sanity: the canonical signature must still verify.
+        let canonical_hex = hex::encode(canonical.to_bytes());
+        verifier.verify(payload, &canonical_hex).expect("canonical signature must still verify");
+
+        // Core assertion: the S + L malleation MUST be rejected.
+        let malleated_hex = hex::encode(sig_bytes);
+        let result = verifier.verify(payload, &malleated_hex);
+        assert!(
+            matches!(result, Err(WebhookError::InvalidSignature)),
+            "verify_strict must reject high-S malleable signature, got {result:?}"
+        );
     }
 
     // ── New tests ──

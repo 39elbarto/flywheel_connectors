@@ -1641,6 +1641,10 @@ fn map_oauth_error_to_fcp(error: OAuthError) -> FcpError {
             code: 1003,
             message: "GitHub OAuth refresh token is unavailable".into(),
         },
+        OAuthError::EmptyTokenField(field) => FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("GitHub OAuth token response omitted required field `{field}`"),
+        },
         OAuthError::JsonError(error) => FcpError::InvalidRequest {
             code: 1003,
             message: format!("GitHub OAuth request invalid: {error}"),

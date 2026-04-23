@@ -1235,16 +1235,7 @@ impl TelegramConnector {
             options.reply_to_message_id = Some(reply_to);
         }
 
-        let map_external = |e: TelegramError| FcpError::External {
-            service: "telegram".into(),
-            message: e.to_string(),
-            status_code: match &e {
-                TelegramError::Api { code, .. } => u16::try_from(*code).ok(),
-                _ => None,
-            },
-            retryable: e.is_retryable(),
-            retry_after: None,
-        };
+        let map_external = TelegramError::to_fcp_error;
 
         let message = match client
             .send_message(chat_id.clone(), render.rendered, options.clone())
@@ -1348,16 +1339,7 @@ impl TelegramConnector {
             options.reply_to_message_id = Some(reply_to);
         }
 
-        let map_external = |e: TelegramError| FcpError::External {
-            service: "telegram".into(),
-            message: e.to_string(),
-            status_code: match &e {
-                TelegramError::Api { code, .. } => u16::try_from(*code).ok(),
-                _ => None,
-            },
-            retryable: e.is_retryable(),
-            retry_after: None,
-        };
+        let map_external = TelegramError::to_fcp_error;
 
         let message: Message = match media_type {
             "photo" => client
@@ -1414,20 +1396,10 @@ impl TelegramConnector {
                     message: "Missing file_id".into(),
                 })?;
 
-        let file =
-            client
-                .get_file(file_id)
-                .await
-                .map_err(|e: TelegramError| FcpError::External {
-                    service: "telegram".into(),
-                    message: e.to_string(),
-                    status_code: match &e {
-                        TelegramError::Api { code, .. } => u16::try_from(*code).ok(),
-                        _ => None,
-                    },
-                    retryable: e.is_retryable(),
-                    retry_after: None,
-                })?;
+        let file = client
+            .get_file(file_id)
+            .await
+            .map_err(TelegramError::to_fcp_error)?;
 
         let download_url = file
             .file_path
@@ -1470,16 +1442,7 @@ impl TelegramConnector {
         let success = client
             .answer_callback_query(callback_query_id, text)
             .await
-            .map_err(|e: TelegramError| FcpError::External {
-                service: "telegram".into(),
-                message: e.to_string(),
-                status_code: match &e {
-                    TelegramError::Api { code, .. } => u16::try_from(*code).ok(),
-                    _ => None,
-                },
-                retryable: e.is_retryable(),
-                retry_after: None,
-            })?;
+            .map_err(TelegramError::to_fcp_error)?;
 
         let response = json!({ "success": success });
 

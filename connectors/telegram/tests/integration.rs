@@ -293,7 +293,13 @@ async fn unauthorized_maps_to_fcp_error() {
         }))
         .await;
 
-    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::Unauthorized { code, message } => {
+            assert_eq!(code, 2001);
+            assert!(message.contains("Unauthorized"));
+        }
+        other => panic!("expected Unauthorized, got {other:?}"),
+    }
 }
 
 #[fcp_async_core::test]
@@ -322,7 +328,12 @@ async fn rate_limited_maps_to_fcp_error() {
         }))
         .await;
 
-    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::RateLimited { retry_after_ms, .. } => {
+            assert_eq!(retry_after_ms, 30_000);
+        }
+        other => panic!("expected RateLimited, got {other:?}"),
+    }
 }
 
 // ============================================================================
@@ -974,12 +985,13 @@ async fn forbidden_403_maps_to_fcp_error() {
         }))
         .await;
 
-    assert!(result.is_err());
-    let err_str = format!("{:?}", result.unwrap_err());
-    assert!(
-        err_str.contains("403") || err_str.contains("Forbidden") || err_str.contains("blocked"),
-        "Error should mention 403/Forbidden, got: {err_str}"
-    );
+    match result.unwrap_err() {
+        fcp_core::FcpError::CapabilityDenied { capability, reason } => {
+            assert_eq!(capability, "telegram.api");
+            assert!(reason.contains("Forbidden"));
+        }
+        other => panic!("expected CapabilityDenied, got {other:?}"),
+    }
 }
 
 #[fcp_async_core::test]
@@ -1035,7 +1047,19 @@ async fn get_file_api_error() {
         }))
         .await;
 
-    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::External {
+            service,
+            status_code,
+            retryable,
+            ..
+        } => {
+            assert_eq!(service, "telegram");
+            assert_eq!(status_code, Some(400));
+            assert!(!retryable);
+        }
+        other => panic!("expected External, got {other:?}"),
+    }
 }
 
 #[fcp_async_core::test]
@@ -1067,7 +1091,88 @@ async fn send_media_photo_api_error_500() {
         }))
         .await;
 
-    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::External {
+            service,
+            status_code,
+            retryable,
+            ..
+        } => {
+            assert_eq!(service, "telegram");
+            assert_eq!(status_code, Some(500));
+            assert!(retryable);
+        }
+        other => panic!("expected External, got {other:?}"),
+    }
+}
+
+#[fcp_async_core::test]
+async fn get_file_unauthorized_maps_to_fcp_error() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.error.get_file_unauthorized");
+    let mut connector = TelegramConnector::new();
+    let (mock_server, signing_key) = full_setup(&mut connector, &["telegram.get_file"]).await;
+
+    Mock::given(method("GET"))
+        .and(path(token_path("getFile")))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "ok": false,
+            "error_code": 401,
+            "description": "Unauthorized"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let token = generate_valid_token(&signing_key, "telegram.get_file");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "telegram.get_file",
+            "input": { "file_id": "BQACAgIAAxkBAAIsK2Y" },
+            "capability_token": token
+        }))
+        .await;
+
+    match result.unwrap_err() {
+        fcp_core::FcpError::Unauthorized { code, message } => {
+            assert_eq!(code, 2001);
+            assert!(message.contains("Unauthorized"));
+        }
+        other => panic!("expected Unauthorized, got {other:?}"),
+    }
+}
+
+#[fcp_async_core::test]
+async fn answer_callback_query_rate_limited_maps_to_fcp_error() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.error.callback_rate_limited");
+    let mut connector = TelegramConnector::new();
+    let (mock_server, signing_key) =
+        full_setup(&mut connector, &["telegram.answer_callback_query"]).await;
+
+    Mock::given(method("POST"))
+        .and(path(token_path("answerCallbackQuery")))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+            "ok": false,
+            "error_code": 429,
+            "description": "Too Many Requests: retry after 1",
+            "parameters": { "retry_after": 1 }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let token = generate_valid_token(&signing_key, "telegram.answer_callback_query");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "telegram.answer_callback_query",
+            "input": { "callback_query_id": "cq-12345" },
+            "capability_token": token
+        }))
+        .await;
+
+    match result.unwrap_err() {
+        fcp_core::FcpError::RateLimited { retry_after_ms, .. } => {
+            assert_eq!(retry_after_ms, 30_000);
+        }
+        other => panic!("expected RateLimited, got {other:?}"),
+    }
 }
 
 // ============================================================================

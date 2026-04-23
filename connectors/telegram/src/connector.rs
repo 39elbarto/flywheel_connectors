@@ -1235,7 +1235,7 @@ impl TelegramConnector {
             options.reply_to_message_id = Some(reply_to);
         }
 
-        let map_external = TelegramError::to_fcp_error;
+        let map_external = |err: TelegramError| err.to_fcp_error();
 
         let message = match client
             .send_message(chat_id.clone(), render.rendered, options.clone())
@@ -1339,7 +1339,7 @@ impl TelegramConnector {
             options.reply_to_message_id = Some(reply_to);
         }
 
-        let map_external = TelegramError::to_fcp_error;
+        let map_external = |err: TelegramError| err.to_fcp_error();
 
         let message: Message = match media_type {
             "photo" => client
@@ -1399,7 +1399,7 @@ impl TelegramConnector {
         let file = client
             .get_file(file_id)
             .await
-            .map_err(TelegramError::to_fcp_error)?;
+            .map_err(|err| err.to_fcp_error())?;
 
         let download_url = file
             .file_path
@@ -1442,7 +1442,7 @@ impl TelegramConnector {
         let success = client
             .answer_callback_query(callback_query_id, text)
             .await
-            .map_err(TelegramError::to_fcp_error)?;
+            .map_err(|err| err.to_fcp_error())?;
 
         let response = json!({ "success": success });
 
@@ -2756,6 +2756,49 @@ mod tests {
             response.get("message_id").and_then(|v| v.as_i64()),
             Some(55)
         );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_send_message_markdown_v2_unescaped_controls_fall_back_to_plaintext() {
+        let (connector, token, server) = setup_connector_with_token("telegram.send_message").await;
+
+        let text = "*bold* [click](https://example.com)";
+
+        Mock::given(method("POST"))
+            .and(path(token_path("sendMessage")))
+            .and(body_json(serde_json::json!({
+                "chat_id": "123456789",
+                "text": text
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "message_id": 56,
+                    "chat": { "id": 123456789, "type": "private", "first_name": "Test" },
+                    "date": 1234567890,
+                    "text": text
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let input = serde_json::json!({
+            "chat_id": "123456789",
+            "text": text,
+            "parse_mode": "MarkdownV2"
+        });
+
+        let result = connector
+            .handle_invoke(serde_json::json!({
+                "operation": "telegram.send_message",
+                "input": input,
+                "capability_token": token
+            }))
+            .await
+            .expect("plaintext fallback should succeed");
+
+        assert_eq!(result["message_id"], 56);
     }
 
     #[fcp_async_core::runtime::test]

@@ -222,6 +222,10 @@ fn validate_markdown(input: &str) -> Result<(), FormatError> {
         }
         if ch == '\\' {
             escape = true;
+            continue;
+        }
+        if is_markdown_control(ch) {
+            return Err(FormatError::InvalidMarkdown);
         }
     }
 
@@ -242,7 +246,9 @@ fn fallback_plaintext(input: &str, mode: FormatMode) -> String {
     let stripped = match mode {
         FormatMode::Plain => input.to_string(),
         FormatMode::Html => strip_html(input),
-        FormatMode::MarkdownV2 => strip_markdown(input),
+        // Without a parse_mode Telegram renders this literally, so preserve the
+        // original user text instead of dropping punctuation on fallback.
+        FormatMode::MarkdownV2 => input.to_string(),
     };
 
     escape_control_chars(&stripped)
@@ -303,6 +309,7 @@ fn strip_html(input: &str) -> String {
     out
 }
 
+#[cfg(test)]
 fn strip_markdown(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut escape = false;
@@ -558,7 +565,15 @@ mod tests {
     #[test]
     fn render_markdown_invalid_falls_back() {
         let result = Formatter::render_with_fallback("trailing \\", FormatMode::MarkdownV2);
-        // Should fall back to plaintext with markdown stripped
+        // Should fall back to plaintext
+        assert!(result.parse_mode_used.is_none());
+    }
+
+    #[test]
+    fn render_markdown_unescaped_controls_fall_back_to_plaintext() {
+        let input = "*bold* [click](https://example.com)";
+        let result = Formatter::render_with_fallback(input, FormatMode::MarkdownV2);
+        assert_eq!(result.rendered, input);
         assert!(result.parse_mode_used.is_none());
     }
 
@@ -581,7 +596,7 @@ mod tests {
     #[test]
     fn render_plaintext_fallback_markdown() {
         let result = Formatter::render_plaintext_fallback("hello *world*", FormatMode::MarkdownV2);
-        assert!(!result.rendered.contains('*'));
+        assert_eq!(result.rendered, "hello *world*");
         assert!(result.parse_mode_used.is_none());
     }
 
@@ -1331,8 +1346,7 @@ mod tests {
     #[test]
     fn fallback_plaintext_markdown_strips_and_escapes() {
         let result = fallback_plaintext("*bold*\x01text", FormatMode::MarkdownV2);
-        // * stripped, control escaped
-        assert!(!result.contains('*'));
+        assert!(result.contains("*bold*"));
         assert!(result.contains("\\u{1}"));
     }
 
@@ -1534,7 +1548,7 @@ mod tests {
     #[test]
     fn render_plaintext_fallback_markdown_escapes_preserved() {
         let result = Formatter::render_plaintext_fallback("\\*star\\*", FormatMode::MarkdownV2);
-        assert_eq!(result.rendered, "*star*");
+        assert_eq!(result.rendered, "\\*star\\*");
     }
 
     // ── EXPANDED: strip_html complex scenarios ──────────────────────
@@ -1954,7 +1968,7 @@ mod tests {
     #[test]
     fn fallback_plaintext_markdown_with_escapes_and_controls() {
         let result = fallback_plaintext("\\*hello* _world_", FormatMode::MarkdownV2);
-        assert_eq!(result, "*hello world");
+        assert_eq!(result, "\\*hello* _world_");
     }
 
     // ── EXPANDED: Formatter::render (private) via render_with_fallback

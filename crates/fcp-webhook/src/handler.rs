@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -17,6 +18,7 @@ use crate::{
 /// Maximum number of entries allowed in the replay event cache.
 /// When this limit is reached, new events are rejected to prevent unbounded memory growth.
 const MAX_SEEN_EVENTS: usize = 100_000;
+const CLEANUP_INTERVAL_MILLIS: i64 = 60_000;
 
 /// Webhook handler configuration.
 #[derive(Debug, Clone)]
@@ -102,6 +104,7 @@ pub struct WebhookHandler<V: SignatureVerifier> {
     provider: String,
     config: WebhookConfig,
     seen_events: Arc<RwLock<SeenEventsState>>,
+    next_cleanup_at_millis: AtomicI64,
 }
 
 struct SeenEventsState {
@@ -113,28 +116,32 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
     /// Create a new webhook handler.
     #[must_use]
     pub fn new(verifier: V, provider: impl Into<String>) -> Self {
+        let now = Utc::now();
         Self {
             verifier,
             provider: provider.into(),
             config: WebhookConfig::default(),
             seen_events: Arc::new(RwLock::new(SeenEventsState {
                 events: HashMap::new(),
-                last_cleanup: Utc::now(),
+                last_cleanup: now,
             })),
+            next_cleanup_at_millis: AtomicI64::new(next_cleanup_deadline(now)),
         }
     }
 
     /// Create with configuration.
     #[must_use]
     pub fn with_config(verifier: V, provider: impl Into<String>, config: WebhookConfig) -> Self {
+        let now = Utc::now();
         Self {
             verifier,
             provider: provider.into(),
             config,
             seen_events: Arc::new(RwLock::new(SeenEventsState {
                 events: HashMap::new(),
-                last_cleanup: Utc::now(),
+                last_cleanup: now,
             })),
+            next_cleanup_at_millis: AtomicI64::new(next_cleanup_deadline(now)),
         }
     }
 
@@ -302,11 +309,18 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
     /// Clean up old seen events periodically to avoid O(N) traversal on every request.
     fn cleanup_seen_events(&self) {
         let now = Utc::now();
+        if now.timestamp_millis() < self.next_cleanup_at_millis.load(Ordering::Acquire) {
+            return;
+        }
 
         let mut state = self.seen_events.write();
+        let cleanup_interval =
+            chrono::Duration::milliseconds(CLEANUP_INTERVAL_MILLIS);
 
         // Only run cleanup if at least 1 minute has passed since last cleanup
-        if now - state.last_cleanup < chrono::Duration::minutes(1) {
+        if now - state.last_cleanup < cleanup_interval {
+            self.next_cleanup_at_millis
+                .store(next_cleanup_deadline(state.last_cleanup), Ordering::Release);
             return;
         }
 
@@ -316,6 +330,8 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
 
         state.events.retain(|_, time| now - *time < ttl);
         state.last_cleanup = now;
+        self.next_cleanup_at_millis
+            .store(next_cleanup_deadline(now), Ordering::Release);
     }
 
     /// Get the provider name.
@@ -339,6 +355,12 @@ impl<V: SignatureVerifier + std::fmt::Debug> std::fmt::Debug for WebhookHandler<
             .field("config", &self.config)
             .finish_non_exhaustive()
     }
+}
+
+fn next_cleanup_deadline(last_cleanup: DateTime<Utc>) -> i64 {
+    last_cleanup
+        .timestamp_millis()
+        .saturating_add(CLEANUP_INTERVAL_MILLIS)
 }
 
 /// Event router for dispatching webhooks.

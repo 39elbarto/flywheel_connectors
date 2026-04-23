@@ -1036,7 +1036,7 @@ pub type VerifiedToken = CapabilityToken<CryptographicallyVerified>;
 ///
 /// This type-level distinction prevents accidentally using an unverified token
 /// where a verified one is required — the compiler catches the mistake.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CapabilityToken<S = Unverified> {
     /// The raw `COSE_Sign1` token
     raw: CoseToken,
@@ -1044,6 +1044,22 @@ pub struct CapabilityToken<S = Unverified> {
     verified_claims: Option<CwtClaims>,
     /// Phantom data for compile-time state tracking.
     _state: std::marker::PhantomData<S>,
+}
+
+impl<S> Clone for CapabilityToken<S> {
+    fn clone(&self) -> Self {
+        Self {
+            raw: self.raw.clone(),
+            verified_claims: self.verified_claims.clone(),
+            _state: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<S> From<&CapabilityToken<S>> for CapabilityToken<S> {
+    fn from(token: &CapabilityToken<S>) -> Self {
+        token.clone()
+    }
 }
 
 // Methods available on ALL token states
@@ -1731,13 +1747,17 @@ impl CapabilityVerifier {
         note = "ambiguous return type; use verify_bound (full enforcement) or verify_unbound (gateway vantage)"
     )]
     #[allow(deprecated)]
-    pub fn verify(
+    pub fn verify<T>(
         &self,
-        token: CapabilityToken,
+        token: T,
         required_capability: &CapabilityId,
         operation: &OperationId,
         resource_uris: &[String],
-    ) -> FcpResult<CapabilityToken<CryptographicallyVerified>> {
+    ) -> FcpResult<CapabilityToken<CryptographicallyVerified>>
+    where
+        T: Into<CapabilityToken>,
+    {
+        let token = token.into();
         let claims =
             self.verify_claims_inner(&token, required_capability, operation, resource_uris)?;
 
@@ -1763,13 +1783,17 @@ impl CapabilityVerifier {
     /// missing/expired, zone binding fails, the operation is not
     /// granted, or the token's `instance_id` claim does not match the
     /// verifier's `instance_id`.
-    pub fn verify_bound(
+    pub fn verify_bound<T>(
         &self,
-        token: CapabilityToken,
+        token: T,
         required_capability: &CapabilityId,
         operation: &OperationId,
         resource_uris: &[String],
-    ) -> FcpResult<CapabilityToken<BoundVerified>> {
+    ) -> FcpResult<CapabilityToken<BoundVerified>>
+    where
+        T: Into<CapabilityToken>,
+    {
+        let token = token.into();
         if self.instance_id.is_none() {
             return Err(FcpError::Internal {
                 message: "verify_bound requires verifier constructed with ::new (instance_id), \
@@ -1805,13 +1829,17 @@ impl CapabilityVerifier {
     /// granted. Also returns `Err(FcpError::Internal)` if the verifier
     /// was constructed with a bound `instance_id` — use
     /// [`Self::verify_bound`] in that case.
-    pub fn verify_unbound(
+    pub fn verify_unbound<T>(
         &self,
-        token: CapabilityToken,
+        token: T,
         required_capability: &CapabilityId,
         operation: &OperationId,
         resource_uris: &[String],
-    ) -> FcpResult<CapabilityToken<UnboundVerified>> {
+    ) -> FcpResult<CapabilityToken<UnboundVerified>>
+    where
+        T: Into<CapabilityToken>,
+    {
+        let token = token.into();
         if self.instance_id.is_some() {
             return Err(FcpError::Internal {
                 message: "verify_unbound requires verifier constructed with \

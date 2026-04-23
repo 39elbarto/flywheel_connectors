@@ -191,7 +191,7 @@ impl FcpConnector for DocuSignConnectorAdapter {
                 message: "invalid capability id".into(),
             })?;
         if let Some(verifier) = &self.verifier {
-            verifier.verify(req.capability_token, &cap_id, &req.operation, &[])?;
+            verifier.verify(&req.capability_token, &cap_id, &req.operation, &[])?;
         } else {
             return Err(FcpError::NotConfigured);
         }

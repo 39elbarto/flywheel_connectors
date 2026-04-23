@@ -1271,6 +1271,7 @@ fn test_context() -> EnforcementContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_cbor::SchemaId;
 
     // ── EnforcementConfig ──
 
@@ -2232,18 +2233,18 @@ mod tests {
         assert!(outcome.is_allow());
     }
 
-    // ── RevocationFreshnessCheck ──
+    // ── RevocationCheck freshness behavior ──
 
     #[test]
     fn revocation_freshness_name() {
-        assert_eq!(RevocationFreshnessCheck.name(), "revocation_freshness");
+        assert_eq!(RevocationCheck.name(), "revocation");
     }
 
     #[test]
     fn revocation_freshness_allow_within_window() {
         let ctx = test_context();
         let config = EnforcementConfig::default();
-        let outcome = RevocationFreshnessCheck.check(&ctx, &config);
+        let outcome = RevocationCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }
 
@@ -2252,7 +2253,7 @@ mod tests {
         let mut ctx = test_context();
         ctx.revocation_list_age_ms = None;
         let config = EnforcementConfig::default();
-        let outcome = RevocationFreshnessCheck.check(&ctx, &config);
+        let outcome = RevocationCheck.check(&ctx, &config);
         assert!(outcome.is_skip());
     }
 
@@ -2261,7 +2262,7 @@ mod tests {
         let mut ctx = test_context();
         ctx.revocation_list_age_ms = Some(700_000);
         let config = EnforcementConfig::default();
-        let outcome = RevocationFreshnessCheck.check(&ctx, &config);
+        let outcome = RevocationCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
         if let CheckOutcome::Deny { reason_code, .. } = &outcome {
             assert_eq!(reason_code, "REVOCATION_LIST_STALE");
@@ -2273,7 +2274,7 @@ mod tests {
         let mut ctx = test_context();
         ctx.revocation_list_age_ms = Some(600_000);
         let config = EnforcementConfig::default();
-        let outcome = RevocationFreshnessCheck.check(&ctx, &config);
+        let outcome = RevocationCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }
 
@@ -2282,7 +2283,7 @@ mod tests {
         let mut ctx = test_context();
         ctx.revocation_list_age_ms = Some(600_001);
         let config = EnforcementConfig::default();
-        let outcome = RevocationFreshnessCheck.check(&ctx, &config);
+        let outcome = RevocationCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
     }
 
@@ -2291,7 +2292,7 @@ mod tests {
         let mut ctx = test_context();
         ctx.revocation_list_age_ms = Some(200);
         let config = EnforcementConfig::new().with_revocation_max_age_ms(500);
-        let outcome = RevocationFreshnessCheck.check(&ctx, &config);
+        let outcome = RevocationCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }
 
@@ -3624,10 +3625,17 @@ mod tests {
         let revocation = fcp_core::RevocationObject {
             header: fcp_core::ObjectHeader {
                 zone_id: ZoneId::work(),
-                schema: fcp_core::RevocationObject::schema(),
+                schema: SchemaId::new(
+                    "fcp.core",
+                    "RevocationObject",
+                    semver::Version::new(1, 0, 0),
+                ),
+                created_at: 1_700_000_000,
+                provenance: fcp_core::Provenance::new(ZoneId::work()),
                 refs: Vec::new(),
                 foreign_refs: Vec::new(),
-                metadata: std::collections::BTreeMap::new(),
+                ttl_secs: None,
+                placement: None,
             },
             scope: fcp_core::RevocationScope::Capability,
             revoked: vec![token_id],
@@ -3641,16 +3649,16 @@ mod tests {
         let config = EnforcementConfig::default()
             .with_revocation_registry(Arc::new(registry));
 
-        let ctx = EnforcementContextBuilder::new()
+        let mut ctx = EnforcementContextBuilder::new()
             .request_id("r1")
             .connector_id("c1")
             .operation("op1")
             .zone_id("z1")
             .principal("p1")
-            .token_id(token_id)
             .revocation_list_age_ms(100)
             .build()
             .unwrap();
+        ctx.token_id = Some(token_id);
 
         let check = RevocationCheck;
         let outcome = check.check(&ctx, &config);
@@ -3668,16 +3676,16 @@ mod tests {
         let config = EnforcementConfig::default()
             .with_revocation_registry(Arc::new(registry));
 
-        let ctx = EnforcementContextBuilder::new()
+        let mut ctx = EnforcementContextBuilder::new()
             .request_id("r1")
             .connector_id("c1")
             .operation("op1")
             .zone_id("z1")
             .principal("p1")
-            .token_id(ObjectId::from_bytes([0xBB; 32]))
             .revocation_list_age_ms(100)
             .build()
             .unwrap();
+        ctx.token_id = Some(ObjectId::from_bytes([0xBB; 32]));
 
         let check = RevocationCheck;
         let outcome = check.check(&ctx, &config);
@@ -3853,14 +3861,14 @@ mod tests {
         assert!(outcome.is_deny());
     }
 
-    // ── RevocationFreshnessCheck boundary ──
+    // ── RevocationCheck freshness boundary ──
 
     #[test]
     fn revocation_freshness_deny_at_max_u64() {
         let mut ctx = test_context();
         ctx.revocation_list_age_ms = Some(u64::MAX);
         let config = EnforcementConfig::default();
-        let outcome = RevocationFreshnessCheck.check(&ctx, &config);
+        let outcome = RevocationCheck.check(&ctx, &config);
         assert!(outcome.is_deny());
     }
 
@@ -3869,7 +3877,7 @@ mod tests {
         let mut ctx = test_context();
         ctx.revocation_list_age_ms = Some(0);
         let config = EnforcementConfig::new().with_revocation_max_age_ms(0);
-        let outcome = RevocationFreshnessCheck.check(&ctx, &config);
+        let outcome = RevocationCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }
 
@@ -3878,7 +3886,7 @@ mod tests {
         let mut ctx = test_context();
         ctx.revocation_list_age_ms = Some(0);
         let config = EnforcementConfig::default();
-        let outcome = RevocationFreshnessCheck.check(&ctx, &config);
+        let outcome = RevocationCheck.check(&ctx, &config);
         assert!(outcome.is_allow());
     }
 

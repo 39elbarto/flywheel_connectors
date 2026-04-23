@@ -700,28 +700,41 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_map_keys_rejected() {
-        // Create CBOR with duplicate keys manually.
+    fn deserialize_rejects_map_keys_that_collide_after_canonicalization() {
         let schema = SchemaId::new("fcp.test", "Map", Version::new(0, 1, 0));
 
-        // Manually construct a CBOR map with duplicate keys.
-        // { "a": 1, "a": 2 } - this is invalid.
+        // { -0.0: 1, 0.0: 2 } uses two distinct wire encodings, but
+        // canonicalization normalizes -0.0 to 0.0 so both keys collapse to
+        // the same deterministic bytes.
         let cbor_bytes = vec![
             0xA2, // Map with 2 entries.
-            0x61, // Text string, length 1.
-            b'a', 0x01, // Integer 1.
-            0x61, // Text string, length 1.
-            b'a', // Duplicate key "a".
-            0x02, // Integer 2.
+            0xF9, 0x80, 0x00, // -0.0 (half-precision float).
+            0x01, // 1
+            0xF9, 0x00, 0x00, // 0.0 (half-precision float).
+            0x02, // 2
         ];
 
         let mut bytes = Vec::new();
         bytes.extend_from_slice(schema.hash().as_bytes());
         bytes.extend_from_slice(&cbor_bytes);
 
-        // This should fail because of duplicate keys.
-        let result = CanonicalSerializer::deserialize::<HashMap<String, u8>>(&bytes, &schema);
-        assert!(result.is_err());
+        let err = CanonicalSerializer::deserialize::<Value>(&bytes, &schema).unwrap_err();
+        assert!(matches!(err, SerializationError::DuplicateMapKey { .. }));
+
+        let err = CanonicalSerializer::deserialize_unchecked::<Value>(&bytes, &schema).unwrap_err();
+        assert!(matches!(err, SerializationError::DuplicateMapKey { .. }));
+    }
+
+    #[test]
+    fn serialize_rejects_map_keys_that_collide_after_canonicalization() {
+        let schema = SchemaId::new("fcp.test", "Map", Version::new(0, 1, 0));
+        let value = Value::Map(vec![
+            (Value::Float(-0.0), Value::Integer(1.into())),
+            (Value::Float(0.0), Value::Integer(2.into())),
+        ]);
+
+        let err = CanonicalSerializer::serialize(&value, &schema).unwrap_err();
+        assert!(matches!(err, SerializationError::DuplicateMapKey { .. }));
     }
 
     #[test]

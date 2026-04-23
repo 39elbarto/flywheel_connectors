@@ -50,12 +50,17 @@ fcp-async-core = { path = "../fcp-async-core" }
 async-trait.workspace = true
 base64.workspace = true
 sha2.workspace = true
+fcp-manifest = { path = "../fcp-manifest" }
+fcp-ratelimit = { path = "../fcp-ratelimit" }
 fcp-registry = { path = "../fcp-registry" }
 fcp-raptorq = { path = "../fcp-raptorq" }
 fcp-host = { path = "../fcp-host" }
 fcp-oauth = { path = "../fcp-oauth" }
+fcp-sandbox = { path = "../fcp-sandbox" }
 url.workspace = true
 criterion.workspace = true
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true
 
 [[bench]]
 name = "cutover_harness"

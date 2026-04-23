@@ -34,6 +34,31 @@ const MAX_STRIPE_SIGNATURE_LEN: usize = 128;
 /// variants while fail-closing multi-megabyte attacker-controlled values.
 const MAX_SLACK_TIMESTAMP_LEN: usize = 20;
 
+fn validate_timestamp_with_reason(
+    timestamp: i64,
+    now: i64,
+    tolerance: Duration,
+    reason: &'static str,
+) -> WebhookResult<()> {
+    let tolerance_secs = tolerance.as_secs();
+    let outside_window = if tolerance_secs == 0 {
+        now.abs_diff(timestamp) != 0
+    } else {
+        now.abs_diff(timestamp) >= tolerance_secs
+    };
+
+    if outside_window {
+        return Err(WebhookError::TimestampValidation {
+            reason: reason.into(),
+            timestamp: Some(timestamp),
+            current_time: now,
+            tolerance,
+        });
+    }
+
+    Ok(())
+}
+
 fn header_value_case_insensitive<'a>(
     headers: &'a HashMap<String, String>,
     name: &str,
@@ -370,19 +395,16 @@ impl StripeWebhook {
 
     /// Validate timestamp is within tolerance.
     fn validate_timestamp(&self, timestamp: i64) -> WebhookResult<()> {
-        let now = Utc::now().timestamp();
-        let tolerance = self.timestamp_tolerance.as_secs();
+        self.validate_timestamp_at(timestamp, Utc::now().timestamp())
+    }
 
-        if now.abs_diff(timestamp) > tolerance {
-            return Err(WebhookError::TimestampValidation {
-                reason: "Timestamp outside tolerance window".into(),
-                timestamp: Some(timestamp),
-                current_time: now,
-                tolerance: self.timestamp_tolerance,
-            });
-        }
-
-        Ok(())
+    fn validate_timestamp_at(&self, timestamp: i64, now: i64) -> WebhookResult<()> {
+        validate_timestamp_with_reason(
+            timestamp,
+            now,
+            self.timestamp_tolerance,
+            "Timestamp outside tolerance window",
+        )
     }
 }
 
@@ -461,16 +483,7 @@ impl SlackWebhook {
             .map_err(|_| WebhookError::InvalidPayload("Invalid timestamp".into()))?;
 
         // Validate timestamp
-        let now = Utc::now().timestamp();
-        let tolerance = self.timestamp_tolerance.as_secs();
-        if now.abs_diff(timestamp) > tolerance {
-            return Err(WebhookError::TimestampValidation {
-                reason: "Timestamp outside tolerance".into(),
-                timestamp: Some(timestamp),
-                current_time: now,
-                tolerance: self.timestamp_tolerance,
-            });
-        }
+        self.validate_timestamp_at(timestamp, Utc::now().timestamp())?;
 
         // Build Slack signature base string
         let mut base_string = format!("v0:{timestamp_str}:").into_bytes();
@@ -509,6 +522,15 @@ impl SlackWebhook {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown"),
         }
+    }
+
+    fn validate_timestamp_at(&self, timestamp: i64, now: i64) -> WebhookResult<()> {
+        validate_timestamp_with_reason(
+            timestamp,
+            now,
+            self.timestamp_tolerance,
+            "Timestamp outside tolerance",
+        )
     }
 }
 
@@ -1185,6 +1207,18 @@ mod tests {
     }
 
     #[test]
+    fn test_slack_timestamp_exactly_at_boundary_rejected() {
+        let handler =
+            SlackWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(300));
+        let now = 1_700_000_000_i64;
+        assert!(matches!(
+            handler.validate_timestamp_at(now - 300, now),
+            Err(WebhookError::TimestampValidation { .. })
+        ));
+        assert!(handler.validate_timestamp_at(now - 299, now).is_ok());
+    }
+
+    #[test]
     fn test_slack_extracts_nested_event_type() {
         let signing_secret = "test-secret";
         let handler = SlackWebhook::new(signing_secret);
@@ -1854,20 +1888,26 @@ mod tests {
     fn test_stripe_timestamp_exactly_at_boundary() {
         let handler =
             StripeWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(300));
-        let now = Utc::now().timestamp();
-        // Exactly at boundary should pass
-        assert!(handler.validate_timestamp(now).is_ok());
+        let now = 1_700_000_000_i64;
+        // Exact replay-window boundary must fail closed.
+        assert!(matches!(
+            handler.validate_timestamp_at(now - 300, now),
+            Err(WebhookError::TimestampValidation { .. })
+        ));
         // Within tolerance should pass
-        assert!(handler.validate_timestamp(now - 100).is_ok());
+        assert!(handler.validate_timestamp_at(now - 100, now).is_ok());
     }
 
     #[test]
     fn test_stripe_zero_tolerance() {
         let handler = StripeWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(0));
-        let now = Utc::now().timestamp();
-        // With zero tolerance, only exact match would pass
-        // Due to timing, now should match exactly
-        assert!(handler.validate_timestamp(now).is_ok());
+        let now = 1_700_000_000_i64;
+        // With zero tolerance, only exact match passes.
+        assert!(handler.validate_timestamp_at(now, now).is_ok());
+        assert!(matches!(
+            handler.validate_timestamp_at(now - 1, now),
+            Err(WebhookError::TimestampValidation { .. })
+        ));
     }
 
     #[test]

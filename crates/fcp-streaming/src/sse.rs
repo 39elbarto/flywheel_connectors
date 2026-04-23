@@ -436,6 +436,7 @@ impl SseClient {
             return Err(StreamError::HttpError {
                 status: response.head.status,
                 message: response.head.reason,
+                retry_after: None,
             });
         }
 

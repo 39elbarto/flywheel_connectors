@@ -9,6 +9,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use fcp_async_core::{
     AsyncError,
     bytes::Bytes,
@@ -52,6 +53,43 @@ fn socket_addr(url: &WsUrl) -> String {
 
 fn connection_failed(message: impl Into<String>) -> StreamError {
     StreamError::ConnectionFailed(message.into())
+}
+
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u128>() {
+        return Some(Duration::from_secs(seconds.min(u128::from(u64::MAX)) as u64));
+    }
+
+    let retry_at = DateTime::parse_from_rfc2822(value).ok()?;
+    let wait = retry_at
+        .with_timezone(&Utc)
+        .signed_duration_since(Utc::now());
+    if wait <= chrono::Duration::zero() {
+        Some(Duration::ZERO)
+    } else {
+        wait.to_std().ok().or(Some(Duration::from_secs(u64::MAX)))
+    }
+}
+
+fn http_error_from_response(response: &HttpResponse) -> StreamError {
+    let retry_after = if response.status == 429 {
+        response.header("retry-after").and_then(parse_retry_after)
+    } else {
+        None
+    };
+
+    StreamError::HttpError {
+        status: response.status,
+        message: response.reason.clone(),
+        retry_after,
+    }
+}
+
+fn reconnect_delay_for_error(handler: &ReconnectHandler, err: &StreamError) -> Duration {
+    let base = handler.config().delay_for_attempt(handler.attempts());
+    err.retry_after()
+        .map_or(base, |retry_after| base.max(retry_after))
 }
 
 fn websocket_error(err: WsError) -> StreamError {
@@ -148,6 +186,9 @@ where
         .map_err(|err| connection_failed(err.to_string()))?;
     let response =
         HttpResponse::parse(&response_bytes).map_err(|err| connection_failed(err.to_string()))?;
+    if response.status != 101 {
+        return Err(http_error_from_response(&response));
+    }
     handshake
         .validate_response(&response)
         .map_err(|err| connection_failed(err.to_string()))?;
@@ -736,8 +777,7 @@ impl Stream for ReconnectingWsStream {
                         if !self.handler.can_reconnect() {
                             return Poll::Ready(Some(Err(err)));
                         }
-                        let attempt = self.handler.attempts();
-                        let delay = self.handler.config().delay_for_attempt(attempt);
+                        let delay = reconnect_delay_for_error(&self.handler, &err);
                         self.handler.record_failure();
                         self.state = ReconnectState::Waiting(Box::pin(sleep(delay)));
                     }
@@ -778,8 +818,7 @@ impl Stream for ReconnectingWsStream {
                         if !self.handler.can_reconnect() {
                             return Poll::Ready(Some(Err(err)));
                         }
-                        let attempt = self.handler.attempts();
-                        let delay = self.handler.config().delay_for_attempt(attempt);
+                        let delay = reconnect_delay_for_error(&self.handler, &err);
                         self.handler.record_failure();
                         self.state = ReconnectState::Waiting(Box::pin(sleep(delay)));
                     }
@@ -1242,6 +1281,72 @@ mod tests {
         assert!(matches!(err, StreamError::ConnectionFailed(ref s) if s == "test failure"));
     }
 
+    #[test]
+    fn retry_after_delta_seconds_parses() {
+        assert_eq!(parse_retry_after("7"), Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn retry_after_large_delta_seconds_saturates() {
+        assert_eq!(
+            parse_retry_after("340282366920938463463374607431768211455"),
+            Some(Duration::from_secs(u64::MAX))
+        );
+    }
+
+    #[test]
+    fn http_error_from_429_response_preserves_retry_after() {
+        let response =
+            HttpResponse::parse(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 7\r\n\r\n")
+                .unwrap();
+        let err = http_error_from_response(&response);
+        assert!(matches!(
+            err,
+            StreamError::HttpError {
+                status: 429,
+                retry_after: Some(delay),
+                ..
+            } if delay == Duration::from_secs(7)
+        ));
+    }
+
+    #[test]
+    fn reconnect_delay_uses_retry_after_when_server_requests_longer_wait() {
+        let config = crate::reconnect::ReconnectConfig::new()
+            .with_initial_delay(Duration::from_millis(100))
+            .with_max_delay(Duration::from_secs(30))
+            .with_jitter(false);
+        let handler = ReconnectHandler::new(config);
+        let err = StreamError::HttpError {
+            status: 429,
+            message: "Too Many Requests".into(),
+            retry_after: Some(Duration::from_secs(5)),
+        };
+        assert_eq!(
+            reconnect_delay_for_error(&handler, &err),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn reconnect_delay_keeps_backoff_when_retry_after_is_shorter_than_base() {
+        let config = crate::reconnect::ReconnectConfig::new()
+            .with_initial_delay(Duration::from_secs(2))
+            .with_max_delay(Duration::from_secs(30))
+            .with_jitter(false);
+        let mut handler = ReconnectHandler::new(config);
+        handler.record_failure();
+        let err = StreamError::HttpError {
+            status: 429,
+            message: "Too Many Requests".into(),
+            retry_after: Some(Duration::from_millis(500)),
+        };
+        assert_eq!(
+            reconnect_delay_for_error(&handler, &err),
+            Duration::from_secs(4)
+        );
+    }
+
     // ── WsMessage roundtrips: ping/pong ────────────────────────────────
 
     #[test]
@@ -1488,7 +1593,10 @@ mod tests {
         let config = WsConfig::new().with_max_message_size(usize::MAX);
         let websocket_config = websocket_config(&config);
 
-        assert_eq!(websocket_config.max_message_size, MAX_WEBSOCKET_MESSAGE_SIZE);
+        assert_eq!(
+            websocket_config.max_message_size,
+            MAX_WEBSOCKET_MESSAGE_SIZE
+        );
     }
 
     #[test]

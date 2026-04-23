@@ -27,6 +27,8 @@ pub enum StreamError {
         status: u16,
         /// Error message.
         message: String,
+        /// Optional `Retry-After` guidance from the upstream server.
+        retry_after: Option<Duration>,
     },
 
     /// Parse error.
@@ -81,6 +83,17 @@ pub enum StreamError {
 /// Result type for streaming operations.
 pub type StreamResult<T> = Result<T, StreamError>;
 
+impl StreamError {
+    /// Return any upstream `Retry-After` hint carried by this error.
+    #[must_use]
+    pub const fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::HttpError { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +127,7 @@ mod tests {
         let e = StreamError::HttpError {
             status: 404,
             message: "Not Found".into(),
+            retry_after: None,
         };
         assert_eq!(e.to_string(), "HTTP error: 404 - Not Found");
     }
@@ -226,6 +240,7 @@ mod tests {
         let e = StreamError::HttpError {
             status: 503,
             message: "Service Unavailable".into(),
+            retry_after: None,
         };
         let debug = format!("{e:?}");
         assert!(debug.contains("503"));
@@ -294,6 +309,7 @@ mod tests {
         let e = StreamError::HttpError {
             status: 0,
             message: "zero".into(),
+            retry_after: None,
         };
         assert_eq!(e.to_string(), "HTTP error: 0 - zero");
     }
@@ -375,6 +391,7 @@ mod tests {
         let e = StreamError::HttpError {
             status: 500,
             message: "\u{26A0} internal".into(),
+            retry_after: None,
         };
         assert!(e.to_string().contains('\u{26A0}'));
     }
@@ -420,6 +437,7 @@ mod tests {
         let e = StreamError::HttpError {
             status: u16::MAX,
             message: "max".into(),
+            retry_after: None,
         };
         assert!(e.to_string().contains("65535"));
     }
@@ -523,6 +541,7 @@ mod tests {
         let e = StreamError::HttpError {
             status: 500,
             message: "<h1>Internal Server Error</h1>".into(),
+            retry_after: None,
         };
         let display = e.to_string();
         assert!(display.contains("<h1>"));
@@ -589,6 +608,7 @@ mod tests {
         let e = StreamError::HttpError {
             status: 429,
             message: "Too Many Requests".into(),
+            retry_after: Some(Duration::from_secs(7)),
         };
         let debug = format!("{e:?}");
         assert!(debug.contains("429"));
@@ -673,6 +693,7 @@ mod tests {
         let e = StreamError::HttpError {
             status: 500,
             message: String::new(),
+            retry_after: None,
         };
         assert_eq!(e.to_string(), "HTTP error: 500 - ");
     }
@@ -720,8 +741,19 @@ mod tests {
         let e = StreamError::HttpError {
             status: 503,
             message: "unavailable".into(),
+            retry_after: None,
         };
         assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn http_error_retry_after_accessor() {
+        let e = StreamError::HttpError {
+            status: 429,
+            message: "Too Many Requests".into(),
+            retry_after: Some(Duration::from_secs(9)),
+        };
+        assert_eq!(e.retry_after(), Some(Duration::from_secs(9)));
     }
 
     #[test]

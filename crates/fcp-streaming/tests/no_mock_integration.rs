@@ -756,6 +756,7 @@ fn error_variants_all_produce_nonempty_display() {
         StreamError::HttpError {
             status: 429,
             message: "Too Many Requests".into(),
+            retry_after: Some(Duration::from_secs(3)),
         },
         StreamError::ParseError("invalid JSON".into()),
         StreamError::Timeout(Duration::from_secs(30)),
@@ -1212,6 +1213,7 @@ fn error_http_error_contains_status() {
     let err = StreamError::HttpError {
         status: 503,
         message: "Service Unavailable".into(),
+        retry_after: None,
     };
     let display = err.to_string();
     assert!(display.contains("503") || display.contains("Service Unavailable"));

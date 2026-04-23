@@ -45,6 +45,9 @@ optional = [
     "network.dns",
     "network.egress",
     "network.tls.sni",
+    "webhook.endpoints.write",
+    "webhook.endpoints.read",
+    "webhook.events.read",
 ]
 forbidden = [
     "system.exec",

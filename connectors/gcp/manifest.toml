@@ -28,7 +28,15 @@ forbidden = ["z:public", "z:community"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = []
+optional = [
+    "gcp.compute.read",
+    "gcp.compute.write",
+    "gcp.storage.read",
+    "gcp.storage.write",
+    "gcp.run.read",
+    "gcp.run.write",
+    "gcp.iam.read",
+]
 forbidden = ["system.exec", "network.listen", "system.privileged"]
 
 [provides.operations."gcp.compute.list_instances"]

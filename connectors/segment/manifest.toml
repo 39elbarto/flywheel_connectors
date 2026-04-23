@@ -40,7 +40,11 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "segment.destinations.read",
+    "segment.sources.read",
+    "segment.track.write",
+]
 forbidden = [
     "system.exec",
     "network.listen",

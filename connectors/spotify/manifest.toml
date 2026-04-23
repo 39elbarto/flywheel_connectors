@@ -28,7 +28,18 @@ forbidden = ["z:public"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
-optional = ["media.download"]
+optional = [
+    "media.download",
+    "spotify.read",
+    "spotify.library.read",
+    "spotify.library.write",
+    "spotify.playback.read",
+    "spotify.playback.write",
+    "spotify.playlists.write",
+    "spotify.playlists.read",
+    "spotify.stream",
+    "spotify.media.read",
+]
 forbidden = ["system.exec", "network.listen"]
 
 # ── Knowledge operations ───────────────────────────────────────────────────────

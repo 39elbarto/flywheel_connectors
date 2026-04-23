@@ -38,6 +38,9 @@ required = ["storage.state"]
 optional = [
     "network.dns",
     "network.egress",
+    "cron.executions.read",
+    "cron.schedules.write",
+    "cron.schedules.read",
 ]
 forbidden = [
     "system.exec",

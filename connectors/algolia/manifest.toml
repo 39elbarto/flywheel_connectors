@@ -40,7 +40,12 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "algolia.indices.read",
+    "algolia.search.read",
+    "algolia.records.read",
+    "algolia.records.write",
+]
 forbidden = [
     "system.exec",
     "network.listen",

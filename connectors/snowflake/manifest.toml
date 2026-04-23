@@ -43,7 +43,12 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "snowflake.databases.read",
+    "snowflake.sql.write",
+    "snowflake.sql.read",
+    "snowflake.warehouses.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

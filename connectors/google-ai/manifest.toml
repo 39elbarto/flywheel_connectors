@@ -42,7 +42,13 @@ required = [
     "network.egress",
     "network.tls.sni",
 ]
-optional = []
+optional = [
+    "google-ai.embed",
+    "google-ai.models",
+    "google-ai.generate",
+    "google-ai.usage",
+    "google-ai.tuning",
+]
 forbidden = [
     "system.exec",
     "network.listen",

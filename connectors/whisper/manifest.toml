@@ -38,7 +38,11 @@ required = [
     "network.egress",
     "network.tls.sni",
 ]
-optional = []
+optional = [
+    "whisper.transcription",
+    "whisper.translation",
+    "whisper.info",
+]
 forbidden = [
     "system.exec",
     "network.listen",

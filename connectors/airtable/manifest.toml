@@ -41,7 +41,13 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = ["media.download"]
+optional = [
+    "media.download",
+    "airtable.write",
+    "airtable.delete",
+    "airtable.webhooks.manage",
+    "airtable.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

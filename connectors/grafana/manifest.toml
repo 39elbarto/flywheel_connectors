@@ -43,7 +43,14 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "grafana.alerts.write",
+    "grafana.alerts.read",
+    "grafana.annotations.write",
+    "grafana.dashboards.write",
+    "grafana.dashboards.read",
+    "grafana.datasources.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

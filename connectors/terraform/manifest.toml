@@ -28,7 +28,12 @@ forbidden = ["z:public", "z:community", "z:work"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
-optional = []
+optional = [
+    "terraform.plan",
+    "terraform.apply",
+    "terraform.state",
+    "terraform.state_write",
+]
 forbidden = ["system.exec", "network.listen", "media.download", "media.upload"]
 
 # ── Read-only plan operations ───────────────────────────────────────

@@ -39,7 +39,15 @@ required = [
     "network.egress",
     "network.tls.sni",
 ]
-optional = ["storage.state"]
+optional = [
+    "storage.state",
+    "vectordb.collections.write",
+    "vectordb.collections.delete",
+    "vectordb.vectors.delete",
+    "vectordb.collections.read",
+    "vectordb.vectors.read",
+    "vectordb.vectors.write",
+]
 forbidden = [
     "system.exec",
     "network.listen",

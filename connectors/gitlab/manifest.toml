@@ -43,7 +43,13 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "gitlab.issues.write",
+    "gitlab.issues.read",
+    "gitlab.merge_requests.read",
+    "gitlab.pipelines.read",
+    "gitlab.projects.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

@@ -43,7 +43,19 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "salesforce.accounts.read",
+    "salesforce.cases.write",
+    "salesforce.cases.read",
+    "salesforce.contacts.write",
+    "salesforce.contacts.read",
+    "salesforce.leads.write",
+    "salesforce.leads.read",
+    "salesforce.opportunities.write",
+    "salesforce.opportunities.read",
+    "salesforce.reports.read",
+    "salesforce.soql.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

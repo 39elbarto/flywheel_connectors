@@ -48,7 +48,13 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = ["media.download"]
+optional = [
+    "media.download",
+    "sentry.alerts",
+    "sentry.admin",
+    "sentry.read",
+    "sentry.write",
+]
 forbidden = [
     "system.exec",
     "network.listen",

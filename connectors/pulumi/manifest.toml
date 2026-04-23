@@ -40,7 +40,11 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "pulumi.deployments.read",
+    "pulumi.stacks.write",
+    "pulumi.stacks.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

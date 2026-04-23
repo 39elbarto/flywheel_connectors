@@ -39,7 +39,10 @@ required = [
     "network.egress",
     "network.tls.sni",
 ]
-optional = []
+optional = [
+    "semanticscholar.authors.read",
+    "semanticscholar.papers.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

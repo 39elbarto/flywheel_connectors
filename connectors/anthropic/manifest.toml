@@ -39,7 +39,12 @@ required = [
     "network.egress",
     "network.tls.sni",
 ]
-optional = []
+optional = [
+    "anthropic.chat",
+    "anthropic.get_usage",
+    "anthropic.message",
+    "anthropic.message.stream",
+]
 forbidden = [
     "system.exec",
     "network.listen",

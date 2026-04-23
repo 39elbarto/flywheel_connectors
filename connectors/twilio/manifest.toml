@@ -41,7 +41,21 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = ["media.download"]
+optional = [
+    "media.download",
+    "twilio.message",
+    "twilio.read",
+    "twilio.voice",
+    "twilio.whatsapp",
+    "twilio.conversations",
+    "twilio.conversations.participants",
+    "twilio.verify",
+    "twilio.video.rooms.write",
+    "twilio.video.rooms.read",
+    "twilio.video.participants.read",
+    "twilio.video.recordings.read",
+    "twilio.webhook",
+]
 forbidden = [
     "system.exec",
     "network.listen",

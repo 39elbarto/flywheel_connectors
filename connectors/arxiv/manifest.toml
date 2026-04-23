@@ -48,7 +48,14 @@ required = [
     "storage.state",
     "media.download",
 ]
-optional = []
+optional = [
+    "arxiv.read",
+    "arxiv.citations",
+    "arxiv.authors",
+    "arxiv.categories",
+    "arxiv.monitor",
+    "arxiv.search",
+]
 forbidden = [
     "system.exec",
     "network.listen",

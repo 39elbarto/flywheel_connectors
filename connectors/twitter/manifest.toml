@@ -40,7 +40,14 @@ required = [
     "network.egress",
     "network.tls.sni",
 ]
-optional = []
+optional = [
+    "twitter.stream",
+    "twitter.write",
+    "twitter.write.dms",
+    "twitter.read.dms",
+    "twitter.delete",
+    "twitter.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

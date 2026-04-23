@@ -40,7 +40,10 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "retool.workflows.read",
+    "retool.workflows.write",
+]
 forbidden = [
     "system.exec",
     "network.listen",

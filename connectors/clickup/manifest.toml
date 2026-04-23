@@ -43,7 +43,12 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "clickup.lists.read",
+    "clickup.spaces.read",
+    "clickup.tasks.write",
+    "clickup.tasks.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

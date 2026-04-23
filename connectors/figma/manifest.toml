@@ -41,7 +41,13 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = ["media.download"]
+optional = [
+    "media.download",
+    "figma.read",
+    "figma.write",
+    "figma.delete",
+    "figma.webhook",
+]
 forbidden = [
     "system.exec",
     "network.listen",

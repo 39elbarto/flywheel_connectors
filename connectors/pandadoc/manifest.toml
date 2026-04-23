@@ -43,7 +43,11 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "pandadoc.documents.write",
+    "pandadoc.documents.read",
+    "pandadoc.templates.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

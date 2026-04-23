@@ -44,7 +44,15 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "plaid.accounts.read",
+    "plaid.auth.read",
+    "plaid.identity.read",
+    "plaid.investments.read",
+    "plaid.liabilities.read",
+    "plaid.link",
+    "plaid.transactions.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

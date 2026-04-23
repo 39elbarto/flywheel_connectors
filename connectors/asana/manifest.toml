@@ -43,7 +43,12 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "asana.projects.read",
+    "asana.tasks.write",
+    "asana.tasks.read",
+    "asana.workspaces.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

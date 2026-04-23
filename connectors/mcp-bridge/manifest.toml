@@ -42,7 +42,13 @@ required = [
     "network.egress",
     "storage.state",
 ]
-optional = ["network.tls.sni"]
+optional = [
+    "network.tls.sni",
+    "mcp.prompts.read",
+    "mcp.resources.read",
+    "mcp.tools.write",
+    "mcp.tools.read",
+]
 forbidden = [
     "system.exec",
     "media.upload",

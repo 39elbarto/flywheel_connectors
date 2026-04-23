@@ -40,7 +40,12 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = ["media.download"]
+optional = [
+    "media.download",
+    "jira.write",
+    "jira.read",
+    "jira.delete",
+]
 forbidden = [
     "system.exec",
     "network.listen",

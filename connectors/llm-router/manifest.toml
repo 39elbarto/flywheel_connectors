@@ -36,7 +36,10 @@ required = [
     "network.egress",
     "network.tls.sni",
 ]
-optional = []
+optional = [
+    "llm-router.route",
+    "llm-router.admin",
+]
 forbidden = [
     "system.exec",
     "network.listen",

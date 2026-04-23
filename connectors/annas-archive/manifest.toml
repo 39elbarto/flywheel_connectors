@@ -39,7 +39,10 @@ required = [
     "network.egress",
     "network.tls.sni",
 ]
-optional = []
+optional = [
+    "annas.search",
+    "annas.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

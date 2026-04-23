@@ -47,7 +47,13 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = ["network.tls.mtls"]
+optional = [
+    "network.tls.mtls",
+    "kubernetes.admin",
+    "kubernetes.read",
+    "kubernetes.secrets",
+    "kubernetes.write",
+]
 forbidden = [
     "system.exec",
     "network.listen",

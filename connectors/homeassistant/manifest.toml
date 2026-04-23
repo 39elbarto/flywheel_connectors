@@ -48,7 +48,12 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = ["network.tls.mtls"]
+optional = [
+    "network.tls.mtls",
+    "homeassistant.control",
+    "homeassistant.read",
+    "homeassistant.write",
+]
 forbidden = [
     "system.exec",
     "network.listen",

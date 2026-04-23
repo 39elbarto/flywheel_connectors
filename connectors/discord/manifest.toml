@@ -41,7 +41,14 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "discord.send",
+    "discord.edit",
+    "discord.delete",
+    "discord.read",
+    "discord.react",
+    "discord.threads",
+]
 forbidden = [
     "system.exec",
     "network.listen",

@@ -28,7 +28,15 @@ forbidden = ["z:public", "z:work"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
-optional = ["media.download", "media.upload"]
+optional = [
+    "media.download",
+    "media.upload",
+    "gmail.send",
+    "gmail.read",
+    "gmail.history.read",
+    "gmail.write",
+    "gmail.delete",
+]
 forbidden = ["system.exec", "network.listen"]
 
 # ── Operations ──────────────────────────────────────────────────

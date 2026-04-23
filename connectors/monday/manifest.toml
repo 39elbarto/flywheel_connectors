@@ -43,7 +43,11 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "monday.boards.read",
+    "monday.items.write",
+    "monday.items.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

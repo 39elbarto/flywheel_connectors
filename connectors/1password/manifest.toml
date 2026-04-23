@@ -40,7 +40,11 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "1password.items.write",
+    "1password.items.read",
+    "1password.vaults.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

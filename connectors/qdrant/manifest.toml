@@ -42,7 +42,12 @@ required = [
     "network.egress",
     "network.tls.sni",
 ]
-optional = []
+optional = [
+    "qdrant.points.read",
+    "qdrant.collections.read",
+    "qdrant.collections.write",
+    "qdrant.points.write",
+]
 forbidden = [
     "system.exec",
     "network.listen",

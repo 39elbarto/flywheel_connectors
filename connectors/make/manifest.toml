@@ -40,7 +40,11 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "make.executions.read",
+    "make.scenarios.read",
+    "make.scenarios.write",
+]
 forbidden = [
     "system.exec",
     "network.listen",

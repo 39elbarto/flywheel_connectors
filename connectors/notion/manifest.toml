@@ -28,7 +28,13 @@ forbidden = ["z:public"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
-optional = ["media.download"]
+optional = [
+    "media.download",
+    "notion.write",
+    "notion.read",
+    "notion.delete",
+    "notion.search",
+]
 forbidden = ["system.exec", "network.listen"]
 
 # ── Operations ──────────────────────────────────────────────────

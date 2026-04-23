@@ -38,7 +38,12 @@ required = [
     "network.dns",
     "storage.state",
 ]
-optional = ["network.egress"]
+optional = [
+    "network.egress",
+    "roam.blocks.write",
+    "roam.blocks.read",
+    "roam.pages.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

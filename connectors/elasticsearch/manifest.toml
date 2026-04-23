@@ -43,7 +43,13 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "elasticsearch.index.write",
+    "elasticsearch.cluster.read",
+    "elasticsearch.search.read",
+    "elasticsearch.indices.write",
+    "elasticsearch.indices.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

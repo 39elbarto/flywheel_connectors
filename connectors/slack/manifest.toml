@@ -28,7 +28,14 @@ forbidden = ["z:public"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = ["media.download", "media.upload"]
+optional = [
+    "media.download",
+    "media.upload",
+    "slack.read",
+    "slack.write",
+    "slack.files.read",
+    "slack.files.write",
+]
 forbidden = ["system.exec", "network.listen"]
 
 # ── Operations ──────────────────────────────────────────────────

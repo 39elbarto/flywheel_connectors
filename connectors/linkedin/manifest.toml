@@ -43,7 +43,11 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "linkedin.posts.write",
+    "linkedin.posts.read",
+    "linkedin.profile.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

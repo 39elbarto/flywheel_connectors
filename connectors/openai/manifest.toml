@@ -39,7 +39,29 @@ required = [
     "network.egress",
     "network.tls.sni",
 ]
-optional = []
+optional = [
+    "openai.chat",
+    "openai.embeddings",
+    "openai.images",
+    "openai.audio.transcribe",
+    "openai.audio.tts",
+    "openai.finetune.create",
+    "openai.finetune.list",
+    "openai.finetune.get",
+    "openai.finetune.cancel",
+    "openai.finetune.events",
+    "openai.assistants.create",
+    "openai.assistants.list",
+    "openai.assistants.get",
+    "openai.assistants.delete",
+    "openai.threads.create",
+    "openai.threads.get",
+    "openai.threads.messages.create",
+    "openai.threads.messages.list",
+    "openai.threads.runs.create",
+    "openai.threads.runs.get",
+    "openai.threads.runs.cancel",
+]
 forbidden = [
     "system.exec",
     "network.listen",

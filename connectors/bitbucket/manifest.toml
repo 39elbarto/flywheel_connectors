@@ -43,7 +43,13 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "bitbucket.issues.read",
+    "bitbucket.pipelines.read",
+    "bitbucket.pull_requests.write",
+    "bitbucket.pull_requests.read",
+    "bitbucket.repos.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

@@ -44,7 +44,11 @@ required = [
     "storage.state",
     "media.download",
 ]
-optional = []
+optional = [
+    "docusign.write",
+    "docusign.read",
+    "docusign.send",
+]
 forbidden = [
     "system.exec",
     "network.listen",

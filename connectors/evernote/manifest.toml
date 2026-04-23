@@ -40,7 +40,11 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "evernote.notebooks.read",
+    "evernote.notes.write",
+    "evernote.notes.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

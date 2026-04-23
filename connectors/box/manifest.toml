@@ -43,7 +43,13 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = ["media.download"]
+optional = [
+    "media.download",
+    "box.files.write",
+    "box.files.read",
+    "box.folders.read",
+    "box.sharing.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

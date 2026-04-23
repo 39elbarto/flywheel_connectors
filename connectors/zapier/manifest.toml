@@ -40,7 +40,10 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "zapier.zaps.write",
+    "zapier.zaps.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

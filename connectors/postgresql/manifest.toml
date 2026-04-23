@@ -43,7 +43,10 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "pg.read",
+    "pg.write",
+]
 forbidden = [
     "system.exec",
     "network.listen",

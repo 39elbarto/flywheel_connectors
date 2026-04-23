@@ -28,7 +28,13 @@ forbidden = ["z:public"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
-optional = ["media.download", "media.upload"]
+optional = [
+    "media.download",
+    "media.upload",
+    "s3.write",
+    "s3.read",
+    "s3.delete",
+]
 forbidden = ["system.exec", "network.listen"]
 
 # ── Operations ──────────────────────────────────────────────────

@@ -44,7 +44,20 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = ["media.download"]
+optional = [
+    "media.download",
+    "hubspot.analytics.read",
+    "hubspot.companies.read",
+    "hubspot.companies.write",
+    "hubspot.contacts.read",
+    "hubspot.associations.read",
+    "hubspot.contacts.write",
+    "hubspot.deals.write",
+    "hubspot.deals.read",
+    "hubspot.associations.write",
+    "hubspot.events.read",
+    "hubspot.pipelines.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

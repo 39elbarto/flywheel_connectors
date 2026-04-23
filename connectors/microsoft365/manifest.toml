@@ -50,7 +50,24 @@ required = [
     "media.download",
     "media.upload",
 ]
-optional = ["network.tls.mtls"]
+optional = [
+    "network.tls.mtls",
+    "m365.calendar.write",
+    "m365.calendar.read",
+    "m365.delta.read",
+    "m365.files.write",
+    "m365.files.read",
+    "m365.mail.write",
+    "m365.mail.send",
+    "m365.mail.read",
+    "m365.onenote.write",
+    "m365.onenote.read",
+    "m365.subscriptions.write",
+    "m365.tasks.write",
+    "m365.tasks.read",
+    "m365.word.write",
+    "m365.word.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

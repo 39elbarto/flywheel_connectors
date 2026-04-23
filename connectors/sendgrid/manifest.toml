@@ -40,7 +40,13 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "sendgrid.contacts.write",
+    "sendgrid.contacts.read",
+    "sendgrid.mail.write",
+    "sendgrid.stats.read",
+    "sendgrid.templates.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

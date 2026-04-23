@@ -43,7 +43,10 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "telegram.send",
+    "telegram.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

@@ -40,7 +40,11 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "amplitude.charts.read",
+    "amplitude.cohorts.read",
+    "amplitude.events.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

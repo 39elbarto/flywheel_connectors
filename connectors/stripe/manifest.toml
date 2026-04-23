@@ -28,7 +28,12 @@ forbidden = ["z:public", "z:work"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = []
+optional = [
+    "stripe.write",
+    "stripe.read",
+    "stripe.payment",
+    "stripe.webhook",
+]
 forbidden = ["system.exec", "network.listen"]
 
 # ── Operations ──────────────────────────────────────────────────

@@ -43,7 +43,15 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "datadog.events.write",
+    "datadog.events.read",
+    "datadog.logs.read",
+    "datadog.metrics.read",
+    "datadog.metrics.write",
+    "datadog.monitors.write",
+    "datadog.monitors.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

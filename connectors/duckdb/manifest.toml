@@ -38,7 +38,11 @@ forbidden = [
 
 [capabilities]
 required = ["storage.state"]
-optional = []
+optional = [
+    "duckdb.execute.write",
+    "duckdb.query.read",
+    "duckdb.tables.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

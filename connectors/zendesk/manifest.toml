@@ -41,7 +41,12 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = ["media.download"]
+optional = [
+    "media.download",
+    "zendesk.write",
+    "zendesk.read",
+    "zendesk.delete",
+]
 forbidden = [
     "system.exec",
     "network.listen",

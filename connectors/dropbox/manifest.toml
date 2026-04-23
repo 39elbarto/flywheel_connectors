@@ -43,7 +43,12 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = ["media.download"]
+optional = [
+    "media.download",
+    "dropbox.files.write",
+    "dropbox.files.read",
+    "dropbox.sharing.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

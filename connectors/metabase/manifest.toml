@@ -39,7 +39,11 @@ required = [
     "network.egress",
     "storage.state",
 ]
-optional = ["network.tls.sni"]
+optional = [
+    "network.tls.sni",
+    "metabase.dashboards.read",
+    "metabase.questions.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

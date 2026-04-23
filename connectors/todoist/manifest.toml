@@ -43,7 +43,11 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "todoist.projects.read",
+    "todoist.tasks.write",
+    "todoist.tasks.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

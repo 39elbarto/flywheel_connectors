@@ -43,7 +43,13 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "intercom.contacts.write",
+    "intercom.contacts.read",
+    "intercom.conversations.read",
+    "intercom.conversations.write",
+    "intercom.tags.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

@@ -45,7 +45,17 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = ["media.download"]
+optional = [
+    "media.download",
+    "reddit.comment",
+    "reddit.post",
+    "reddit.media.read",
+    "reddit.read",
+    "reddit.moderate",
+    "reddit.search",
+    "reddit.message",
+    "reddit.stream",
+]
 forbidden = [
     "system.exec",
     "network.listen",

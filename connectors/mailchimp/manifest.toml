@@ -40,7 +40,13 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "mailchimp.campaigns.read",
+    "mailchimp.campaigns.write",
+    "mailchimp.lists.read",
+    "mailchimp.members.write",
+    "mailchimp.members.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

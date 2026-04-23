@@ -40,7 +40,11 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "mixpanel.events.read",
+    "mixpanel.funnels.read",
+    "mixpanel.insights.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

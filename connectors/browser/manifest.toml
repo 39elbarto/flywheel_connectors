@@ -44,7 +44,17 @@ required = [
     "storage.state",
     "media.download",
 ]
-optional = ["media.upload"]
+optional = [
+    "media.upload",
+    "browser.interact",
+    "browser.execute",
+    "browser.extract",
+    "browser.cookies",
+    "browser.navigate",
+    "browser.capture",
+    "browser.sessions",
+    "browser.proxy",
+]
 forbidden = [
     "system.exec",
     "network.listen",

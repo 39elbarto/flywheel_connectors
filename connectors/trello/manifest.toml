@@ -43,7 +43,11 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "trello.boards.read",
+    "trello.cards.write",
+    "trello.cards.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

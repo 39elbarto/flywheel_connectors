@@ -38,7 +38,12 @@ required = [
     "network.dns",
     "storage.state",
 ]
-optional = ["network.egress"]
+optional = [
+    "network.egress",
+    "n8n.executions.read",
+    "n8n.workflows.write",
+    "n8n.workflows.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

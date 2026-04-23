@@ -42,7 +42,12 @@ required = [
     "network.egress",
     "network.tls.sni",
 ]
-optional = []
+optional = [
+    "pinecone.indexes.write",
+    "pinecone.vectors.write",
+    "pinecone.indexes.read",
+    "pinecone.vectors.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

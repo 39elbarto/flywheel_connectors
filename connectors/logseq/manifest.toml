@@ -38,7 +38,12 @@ required = [
     "network.dns",
     "storage.state",
 ]
-optional = ["network.egress"]
+optional = [
+    "network.egress",
+    "logseq.blocks.write",
+    "logseq.blocks.read",
+    "logseq.pages.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

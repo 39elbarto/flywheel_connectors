@@ -22,7 +22,7 @@ allowed_targets = ["z:work"]
 forbidden = []
 
 [capabilities]
-required = ["network.dns"]
+required = ["network.dns", "minimal.op"]
 optional = []
 forbidden = ["system.exec"]
 

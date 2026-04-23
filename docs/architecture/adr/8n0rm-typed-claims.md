@@ -29,13 +29,20 @@ A small, dependency-light crate (only `serde` + `ciborium` + `chrono`
 + `blake3`-adjacent types) that owns `AuthClaims` and the label
 constants. Both `fcp-crypto` and `fcp-core` depend on it.
 
-- `fcp-crypto` becomes schema-agnostic: it accepts
-  `&fcp_auth_schema::AuthClaims`, serializes it via the schema crate's
-  canonical-CBOR serde impl, and signs the bytes. It does not know any
-  FCP claim field names.
-- `fcp-core::CapabilityVerifier` parses signed bytes into
-  `AuthClaims` and operates on typed fields (`.capability_id`,
-  `.zone_id`, `.grants`) instead of raw CBOR lookups.
+The bullets below describe the intended post-cutover shape for
+8n0rm.4+; they are not all fully landed in the current tree yet.
+
+- `fcp-crypto` is expected to become schema-agnostic: it should accept
+  `&fcp_auth_schema::AuthClaims`, serialize it via the schema crate's
+  canonical-CBOR serde impl, and sign the bytes. Today it still
+  exposes field-wise `CapabilityTokenBuilder` setters and retains
+  legacy raw-claim synthesis logic for FCP field labels and the
+  GRANTS↔OPERATIONS bridge.
+- `fcp-core::CapabilityVerifier` is expected to parse signed bytes into
+  `AuthClaims` and operate on typed fields (`.capability_id`,
+  `.zone_id`, `.grants`) instead of raw CBOR lookups. Today the live
+  verifier still reads and validates the raw `CwtClaims` / CBOR map
+  directly.
 - Label integer constants (`fcp2_claims::CAPABILITY_ID` etc.) move to
   `fcp-auth-schema`. `fcp-crypto` re-exports them for backwards
   compatibility during the transition; after 8n0rm.4 migration
@@ -65,8 +72,14 @@ Files:
 - `src/claims.rs` — `AuthClaims` struct + serde impl
 - `src/labels.rs` — `cwt_claims` and `fcp2_claims` label integer
   constants (moved from `fcp-crypto::cose`)
-- `src/grants.rs` — `CapabilityGrant`, `CapabilityConstraints` (moved
-  from `fcp-core::capability`)
+- planned: `src/grants.rs` — `CapabilityGrant`,
+  `CapabilityConstraints` once they move out of
+  `fcp-core::capability`
+
+As of the current checkout, `fcp-auth-schema` only contains
+`src/lib.rs`, `src/claims.rs`, and `src/labels.rs`; typed grant and
+constraint structs still live in `fcp-core`, while `AuthClaims`
+currently carries those payloads as opaque `ciborium::Value`.
 
 No `tokio`, no `fcp-async-core` — schema-only crate.
 
@@ -161,7 +174,9 @@ compatibility — no users yet").
   to `fcp-auth-schema` is a modest refactor (they are small types;
   main risk is that they've grown implementation methods that pull in
   fcp-core-only deps — must verify in 8n0rm.3)
-- ~20 `CapabilityTokenBuilder` chain methods deleted in 8n0rm.4
+- ~20 `CapabilityTokenBuilder` chain methods are expected to be
+  deleted once 8n0rm.4 fully removes the legacy field-wise builder
+  surface
 
 ### Wire compat
 Zero. Bit-for-bit identical to current emitted CBOR for equal field
@@ -184,7 +199,9 @@ values. Validated by the conformance test in 8n0rm.7.
 
 ## Handoff
 
-8n0rm.3 implements `AuthClaims` per the API shape above. 8n0rm.4
-refactors `fcp-crypto::cose` to consume it. 8n0rm.5 adds
-`schema_version`. 8n0rm.6 removes the GRANTS-fallback-to-OPERATIONS
-branch. 8n0rm.7 adds conformance golden vectors.
+8n0rm.3 implemented the initial `AuthClaims` crate surface. The
+remaining steps are still staged work: 8n0rm.4 refactors
+`fcp-crypto::cose` to consume it end-to-end, 8n0rm.5 adds
+`schema_version`, 8n0rm.6 removes the GRANTS-fallback-to-OPERATIONS
+branch, and 8n0rm.7 adds conformance golden vectors. Until those land,
+the builder and verifier remain partially migrated.

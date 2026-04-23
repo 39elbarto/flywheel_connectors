@@ -150,10 +150,13 @@ impl CapabilityToken<UnboundVerified> {
 
 ### Legacy `verify()` / `CryptographicallyVerified`
 
-Per AGENTS.md "we do not care about backwards compatibility":
-**delete `verify(...)` and `CryptographicallyVerified`.** Every caller
-must explicitly pick between `verify_bound` / `verify_unbound` after
-jkcka.3-4.
+Per AGENTS.md "we do not care about backwards compatibility", the
+target end-state is to **delete `verify(...)` and
+`CryptographicallyVerified`** so every caller explicitly picks between
+`verify_bound` / `verify_unbound` after jkcka.3-4. The current tree has
+not completed that cleanup yet: the deprecated `verify(...)`,
+`CryptographicallyVerified`, and the `VerifiedToken` alias still exist
+as transitional surface area.
 
 ### Generic helpers (sealed trait)
 
@@ -241,5 +244,8 @@ is unchanged after this change.
   - `promote_with_instance_correct_id_returns_bound` — happy path
   - `promote_with_instance_wrong_id_returns_error` — sad path
 - **jkcka.6 compile-fail tests** (trybuild):
-  - Function requiring `BoundVerified` refuses `UnboundVerified`
-  - External construction of `BoundVerified` is not possible
+  - landed today: a function requiring `BoundVerified` refuses
+    `UnboundVerified`
+  - still expected future coverage: once the marker construction story
+    is sealed or privatized, add a fixture proving external
+    construction of `BoundVerified` is not possible

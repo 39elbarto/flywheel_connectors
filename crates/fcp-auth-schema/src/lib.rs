@@ -18,7 +18,7 @@
 //! 3. Canonical-CBOR serialization (deterministic, sorted by label
 //!    integer) and its inverse.
 //!
-//! `fcp-crypto` consumes `AuthClaims` to build COSE_Sign1 token bytes.
+//! `fcp-crypto` consumes `AuthClaims` to build `COSE_Sign1` token bytes.
 //! `fcp-core` parses signed-bytes payload into `AuthClaims` to run
 //! capability verification against typed fields.
 //!

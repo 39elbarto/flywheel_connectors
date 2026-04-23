@@ -1534,7 +1534,7 @@ async fn verify_live_request(
         )));
     }
 
-    let principal = claims_principal(verified_token.claims_unbound()).ok_or_else(|| {
+    let principal = claims_principal(verified_token.claims()).ok_or_else(|| {
         HostError::PreflightFailed(
             "capability token is missing the subject or principal_id claim required for live execution".to_string(),
         )

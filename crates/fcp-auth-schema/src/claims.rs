@@ -50,7 +50,7 @@ pub enum SchemaError {
         /// Observed type name.
         got: &'static str,
     },
-    /// Timestamp value did not fit a valid DateTime.
+    /// Timestamp value did not fit a valid `DateTime`.
     #[error("claim {label}: invalid timestamp {value}")]
     InvalidTimestamp {
         /// CBOR integer label.
@@ -485,7 +485,7 @@ fn timestamp(label: i64, v: ciborium::Value) -> Result<DateTime<Utc>, SchemaErro
     }
 }
 
-fn value_kind(v: &ciborium::Value) -> &'static str {
+const fn value_kind(v: &ciborium::Value) -> &'static str {
     match v {
         ciborium::Value::Null => "null",
         ciborium::Value::Bool(_) => "bool",

@@ -890,16 +890,16 @@ impl CapabilityTokenBuilder {
 }
 
 /// Synthesize the canonical `fcp2_claims::GRANTS` claim from the legacy
-/// (capability_id + operations) shape if GRANTS is absent.
+/// (`capability_id` + `operations`) shape if `GRANTS` is absent.
 ///
-/// The canonical GRANTS shape is an array of
+/// The canonical `GRANTS` shape is an array of
 /// `{capability: <id>, operation: <op>}` maps — matching the serde
 /// derive on `fcp_core::capability::CapabilityGrant`. This function
-/// builds that shape via raw ciborium without depending on fcp-core,
-/// preserving the fcp-auth-schema → fcp-crypto → fcp-core layering.
+/// builds that shape via raw ciborium without depending on `fcp-core`,
+/// preserving the `fcp-auth-schema` → `fcp-crypto` → `fcp-core` layering.
 ///
-/// No-op if GRANTS is already set OR if capability_id/operations are
-/// missing (the verifier will surface an appropriate MissingField error
+/// No-op if `GRANTS` is already set OR if `capability_id`/`operations` are
+/// missing (the verifier will surface an appropriate `MissingField` error
 /// in those cases).
 fn synthesize_grants_from_legacy_operations(claims: &mut CwtClaims) {
     if claims.get(fcp2_claims::GRANTS).is_some() {

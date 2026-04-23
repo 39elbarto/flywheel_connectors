@@ -237,56 +237,60 @@ impl SubprocessConnector {
             .map_err(|err| HostError::RegistryError(format!("health parse error: {err}")))
     }
 
-    async fn ensure_handshake(&self, zone: &ZoneId) -> HostResult<()> {
+    async fn rpc_in_handshaken_zone(
+        &self,
+        zone: &ZoneId,
+        method: &str,
+        params: serde_json::Value,
+    ) -> HostResult<serde_json::Value> {
         let Some(host_public_key) = self.capability_verifying_key else {
-            return Ok(());
+            return self.rpc(method, params).await;
         };
 
-        // br-j1pjg: hold the handshaken_zone mutex across the handshake
-        // RPC. The previous read-then-await-then-write pattern let two
-        // concurrent same-zone callers both miss the cache and issue
-        // duplicate handshakes, which resets session/verifier state on
-        // the connector and can burn external handshake budget before
-        // the first real invoke runs. Serializing the critical section
-        // per-connector coalesces waiters onto the first handshake —
-        // the second waiter acquires the lock, sees the cached zone,
-        // and returns without a second RPC.
+        // br-j1pjg serialized same-zone handshakes, but the lock still
+        // dropped before the follow-up invoke/simulate RPC. A later
+        // cross-zone caller could then re-handshake the connector and
+        // invalidate the earlier caller's zone-bound session before the
+        // first real operation was queued. Keep the lock through the
+        // zone-bound RPC so the handshake and first invoke/simulate form
+        // one critical section.
         let mut handshaken_zone = self.handshaken_zone.lock().await;
-        if handshaken_zone.as_ref() == Some(zone) {
-            return Ok(());
+        if handshaken_zone.as_ref() != Some(zone) {
+            let nonce = *blake3::hash(RequestId::random().0.as_bytes()).as_bytes();
+            let request = HandshakeRequest {
+                protocol_version: "1.0.0".to_string(),
+                zone: zone.clone(),
+                zone_dir: None,
+                host_public_key,
+                nonce,
+                capabilities_requested: Vec::new(),
+                host: None,
+                transport_caps: None,
+                requested_instance_id: None,
+            };
+            let handshake_params = serde_json::to_value(request).map_err(|err| {
+                HostError::RegistryError(format!("handshake encode error: {err}"))
+            })?;
+            let response: HandshakeResponse =
+                serde_json::from_value(self.rpc("handshake", handshake_params).await?).map_err(
+                    |err| HostError::RegistryError(format!("handshake parse error: {err}")),
+                )?;
+            if response.status != "accepted" {
+                return Err(HostError::RegistryError(format!(
+                    "handshake rejected by connector '{}': {}",
+                    self.summary.id, response.status
+                )));
+            }
+            if response.nonce != nonce {
+                return Err(HostError::RegistryError(format!(
+                    "handshake nonce mismatch for connector '{}'",
+                    self.summary.id
+                )));
+            }
+            *handshaken_zone = Some(zone.clone());
         }
 
-        let nonce = *blake3::hash(RequestId::random().0.as_bytes()).as_bytes();
-        let request = HandshakeRequest {
-            protocol_version: "1.0.0".to_string(),
-            zone: zone.clone(),
-            zone_dir: None,
-            host_public_key,
-            nonce,
-            capabilities_requested: Vec::new(),
-            host: None,
-            transport_caps: None,
-            requested_instance_id: None,
-        };
-        let params = serde_json::to_value(request)
-            .map_err(|err| HostError::RegistryError(format!("handshake encode error: {err}")))?;
-        let response: HandshakeResponse =
-            serde_json::from_value(self.rpc("handshake", params).await?)
-                .map_err(|err| HostError::RegistryError(format!("handshake parse error: {err}")))?;
-        if response.status != "accepted" {
-            return Err(HostError::RegistryError(format!(
-                "handshake rejected by connector '{}': {}",
-                self.summary.id, response.status
-            )));
-        }
-        if response.nonce != nonce {
-            return Err(HostError::RegistryError(format!(
-                "handshake nonce mismatch for connector '{}'",
-                self.summary.id
-            )));
-        }
-        *handshaken_zone = Some(zone.clone());
-        Ok(())
+        self.rpc(method, params).await
     }
 
     async fn self_check(&self) -> HostResult<SelfCheckReport> {
@@ -296,19 +300,19 @@ impl SubprocessConnector {
     }
 
     async fn invoke(&self, request: InvokeRequest) -> HostResult<InvokeResponse> {
-        self.ensure_handshake(&request.zone_id).await?;
-        let params = serde_json::to_value(request)
+        let params = serde_json::to_value(&request)
             .map_err(|err| HostError::RegistryError(format!("invoke encode error: {err}")))?;
-        let result = self.rpc("invoke", params).await?;
+        let result = self.rpc_in_handshaken_zone(&request.zone_id, "invoke", params).await?;
         serde_json::from_value(result)
             .map_err(|err| HostError::RegistryError(format!("invoke parse error: {err}")))
     }
 
     async fn simulate(&self, request: SimulateRequest) -> HostResult<SimulateResponse> {
-        self.ensure_handshake(&request.zone_id).await?;
-        let params = serde_json::to_value(request)
+        let params = serde_json::to_value(&request)
             .map_err(|err| HostError::RegistryError(format!("simulate encode error: {err}")))?;
-        let result = self.rpc("simulate", params).await?;
+        let result = self
+            .rpc_in_handshaken_zone(&request.zone_id, "simulate", params)
+            .await?;
         serde_json::from_value(result)
             .map_err(|err| HostError::RegistryError(format!("simulate parse error: {err}")))
     }
@@ -6561,6 +6565,70 @@ mod tests {
         )
         .await
         .expect("concurrent same-zone invokes should not hang");
+
+        assert_eq!(responses.len(), 8);
+        for response in responses {
+            let response = response.expect("invoke should succeed");
+            assert_eq!(response.status, InvokeStatus::Ok);
+        }
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn subprocess_connector_concurrent_cross_zone_invokes_do_not_invalidate_earlier_zone() {
+        // br-zkl3b regression: the connector handshake is zone-bound, so
+        // a later caller for a different zone must not be able to
+        // re-handshake the subprocess and invalidate an earlier caller
+        // before its invoke RPC is queued.
+        let connector_id = "fcp.test.concurrent-cross-zone-handshake:utility:1.0.0";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let connector = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            SubprocessConnector::spawn(
+                subprocess_test_connector_config_requiring_handshake(connector_id),
+                Arc::new(ResilienceLayer::default()),
+                Some(signing_key.verifying_key().to_bytes()),
+            ),
+        )
+        .await
+        .expect("spawn should not hang")
+        .expect("spawn should succeed");
+
+        let make_request = |zone_id: ZoneId, message: &'static str| InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            capability_token: test_capability_token(
+                &signing_key,
+                "cap.test.echo",
+                "test.echo",
+                zone_id.as_str(),
+            ),
+            zone_id,
+            input: json!({ "message": message }),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let responses = fcp_async_core::time::timeout(
+            Duration::from_secs(5),
+            join_all((0..8).map(|idx| {
+                let request = if idx % 2 == 0 {
+                    make_request(ZoneId::work(), "work")
+                } else {
+                    make_request(ZoneId::private(), "private")
+                };
+                connector.invoke(request)
+            })),
+        )
+        .await
+        .expect("concurrent cross-zone invokes should not hang");
 
         assert_eq!(responses.len(), 8);
         for response in responses {

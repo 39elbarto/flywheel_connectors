@@ -11,7 +11,7 @@ use std::io::{BufRead, Write};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fcp_core::{CapabilityId, OAuthConfig, ObjectId, RiskLevel, SafetyTier};
+use fcp_core::{CapabilityId, OAuthConfig, ObjectId, RiskLevel, SafetyTier, ZoneId};
 use fcp_host::ConnectorArchetype;
 use fcp_kernel::{
     AgentHint, ApprovalMode, AuthCaps, ConnectorId, EventCaps, FcpError, HandshakeRequest,
@@ -446,7 +446,7 @@ struct TestConnector {
     id: ConnectorId,
     start_time: Instant,
     configured: bool,
-    handshaken: bool,
+    handshaken_zone: Option<ZoneId>,
     profile: TestConnectorProfile,
 }
 
@@ -456,7 +456,7 @@ impl TestConnector {
             id,
             start_time: Instant::now(),
             configured: false,
-            handshaken: false,
+            handshaken_zone: None,
             profile: TestConnectorProfile::from_env(),
         }
     }
@@ -466,7 +466,7 @@ impl TestConnector {
         _params: serde_json::Value,
     ) -> Result<serde_json::Value, FcpError> {
         self.configured = true;
-        self.handshaken = false;
+        self.handshaken_zone = None;
         Ok(json!({ "status": "ok" }))
     }
 
@@ -499,7 +499,7 @@ impl TestConnector {
             auth_caps: self.profile.auth_mode.auth_caps(),
             op_catalog_hash: None,
         };
-        self.handshaken = handshaken;
+        self.handshaken_zone = handshaken.then_some(req.zone.clone());
 
         serde_json::to_value(response).map_err(|err| FcpError::Internal {
             message: format!("Failed to serialize handshake response: {err}"),
@@ -546,8 +546,20 @@ impl TestConnector {
                 message: format!("Invalid invoke request: {err}"),
             })?;
 
-        if self.profile.require_handshake && !self.handshaken {
-            return Err(FcpError::NotHandshaken);
+        if self.profile.require_handshake {
+            let Some(handshaken_zone) = self.handshaken_zone.as_ref() else {
+                return Err(FcpError::NotHandshaken);
+            };
+            if handshaken_zone != &req.zone_id {
+                return Err(FcpError::InvalidRequest {
+                    code: 1007,
+                    message: format!(
+                        "Zone mismatch: handshaken for {}, got {}",
+                        handshaken_zone.as_str(),
+                        req.zone_id.as_str()
+                    ),
+                });
+            }
         }
 
         if req.connector_id != self.id {
@@ -616,8 +628,20 @@ impl TestConnector {
                 message: format!("Invalid simulate request: {err}"),
             })?;
 
-        if self.profile.require_handshake && !self.handshaken {
-            return Err(FcpError::NotHandshaken);
+        if self.profile.require_handshake {
+            let Some(handshaken_zone) = self.handshaken_zone.as_ref() else {
+                return Err(FcpError::NotHandshaken);
+            };
+            if handshaken_zone != &req.zone_id {
+                return Err(FcpError::InvalidRequest {
+                    code: 1007,
+                    message: format!(
+                        "Zone mismatch: handshaken for {}, got {}",
+                        handshaken_zone.as_str(),
+                        req.zone_id.as_str()
+                    ),
+                });
+            }
         }
 
         if req.connector_id != self.id {
@@ -842,7 +866,7 @@ mod tests {
             id: connector_id.clone(),
             start_time: Instant::now(),
             configured: true,
-            handshaken: false,
+            handshaken_zone: None,
             profile: test_profile(true),
         };
 
@@ -859,7 +883,7 @@ mod tests {
             id: connector_id.clone(),
             start_time: Instant::now(),
             configured: true,
-            handshaken: true,
+            handshaken_zone: Some(ZoneId::work()),
             profile: test_profile(false),
         };
 

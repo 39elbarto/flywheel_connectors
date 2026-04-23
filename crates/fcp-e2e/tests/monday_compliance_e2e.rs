@@ -455,6 +455,12 @@ async fn monday_happy_path_connector_suite_passes() {
         .expect("connector suite run");
 
     assert!(report.passed, "happy path should pass: {report:#?}");
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|request| request.url.path() == "/")
+        .count();
+    assert_eq!(hits, 1, "expected exactly one POST to /");
     let invoke_entry = report
         .logs
         .iter()

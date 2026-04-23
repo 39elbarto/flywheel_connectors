@@ -621,6 +621,12 @@ async fn mcp_bridge_happy_path_connector_suite_passes() {
         .expect("connector suite run");
 
     assert!(report.passed, "happy path should pass: {report:#?}");
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|request| request.url.path() == "/mcp")
+        .count();
+    assert_eq!(hits, 1, "expected exactly one POST to /mcp");
     assert_report_logs_validate(&report);
     let invoke_entry = report
         .logs
@@ -687,6 +693,12 @@ async fn mcp_bridge_tool_call_emits_receipt_audit_and_stable_evidence() {
         report.passed,
         "tool call evidence suite should pass: {report:#?}"
     );
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|request| request.url.path() == "/mcp")
+        .count();
+    assert_eq!(hits, 1, "expected exactly one POST to /mcp");
     assert_report_logs_validate(&report);
 
     let invoke_entry = report

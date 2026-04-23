@@ -219,6 +219,20 @@ fn build_token(
     operations: &[&str],
 ) -> CapabilityToken {
     let now = Utc::now();
+    // Capability constraints are MANDATORY per C3.4 (default-deny): the
+    // verifier rejects tokens with no constraints claim OR an empty
+    // constraint set. Use a wildcard `resource_allow` so the test grants
+    // access to any telegram resource URI the connector builds from the
+    // invoke input (e.g. `telegram:chat:<chat_id>`). The wildcard `"*"`
+    // pattern is explicitly documented as "all resources" in
+    // fcp-core/capability.rs:1320.
+    let constraints = fcp_core::CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut constraints_cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut constraints_cbor)
+        .expect("serialize constraints to CBOR");
     let cose = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -226,6 +240,7 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
+        .constraints_cbor(&constraints_cbor)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -378,13 +393,19 @@ async fn telegram_allow_valid_token_connector_suite_passes() {
 
     let mut connector = TelegramConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
+    // The connector's introspection declares `telegram.send_message`
+    // requires capability `telegram.send` (see telegram/connector.rs
+    // handle_introspect). After br-8n0rm.6 removed the legacy OPERATIONS
+    // fallback, the verifier checks the GRANTS shape strictly: each
+    // grant's `capability` field must equal the operation's required
+    // capability. So the token must grant `telegram.send`, not the op id.
     let handshake = handshake_request(
         signing_key.verifying_key().to_bytes(),
-        &["telegram.send_message"],
+        &["telegram.send"],
     );
     let token = build_token(
         &signing_key,
-        "telegram.send_message",
+        "telegram.send",
         &["telegram.send_message"],
     );
     let invoke = invoke_request(
@@ -508,15 +529,16 @@ async fn telegram_send_message_returns_message_id() {
             "zone_dir": zone_dir.to_string_lossy(),
             "host_public_key": signing_key.verifying_key().to_bytes().to_vec(),
             "nonce": vec![0u8; 32],
-            "capabilities_requested": ["telegram.send_message"]
+            "capabilities_requested": ["telegram.send"]
         }))
         .await
         .expect("handshake should succeed");
 
-    // Build valid token and invoke
+    // Build valid token and invoke (capability class is `telegram.send`,
+    // see test 2's comment for the C3.4 / br-8n0rm.6 rationale).
     let token = build_token(
         &signing_key,
-        "telegram.send_message",
+        "telegram.send",
         &["telegram.send_message"],
     );
     let result = connector

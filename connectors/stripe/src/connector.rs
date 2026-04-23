@@ -1112,8 +1112,10 @@ impl StripeConnector {
             message: "Invalid capability ID format".into(),
         })?;
 
+        let resource_uris = resource_uris_for_operation(operation, &input)?;
+
         if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
+            verifier.verify(token, &cap_id, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -1713,6 +1715,104 @@ impl Default for StripeConnector {
     }
 }
 
+fn stripe_resource_uri(kind: &str, id: &str) -> String {
+    format!("stripe:{kind}:{id}")
+}
+
+fn stripe_object_resource_uri(object_type: &str, object_id: &str) -> Option<String> {
+    match object_type {
+        "customer" => Some(stripe_resource_uri("customer", object_id)),
+        "payment_intent" => Some(stripe_resource_uri("payment_intent", object_id)),
+        "refund" => Some(stripe_resource_uri("refund", object_id)),
+        "subscription" => Some(stripe_resource_uri("subscription", object_id)),
+        "invoice" => Some(stripe_resource_uri("invoice", object_id)),
+        "charge" => Some(stripe_resource_uri("charge", object_id)),
+        _ => None,
+    }
+}
+
+fn resource_uris_for_operation(
+    operation: &str,
+    input: &serde_json::Value,
+) -> FcpResult<Vec<String>> {
+    let mut resource_uris = Vec::new();
+    let mut push_unique = |uri: String| {
+        if !resource_uris.contains(&uri) {
+            resource_uris.push(uri);
+        }
+    };
+
+    match operation {
+        "stripe.create_customer" | "stripe.list_customers" | "stripe.get_balance" => {
+            push_unique(stripe_resource_uri("account", "self"));
+        }
+        "stripe.get_customer" | "stripe.update_customer" | "stripe.delete_customer" => {
+            let customer_id = require_str(input, "customer_id")?;
+            push_unique(stripe_resource_uri("customer", customer_id));
+        }
+        "stripe.create_payment_intent" => {
+            if let Some(customer_id) = input.get("customer").and_then(|v| v.as_str()) {
+                push_unique(stripe_resource_uri("customer", customer_id));
+            } else {
+                push_unique(stripe_resource_uri("account", "self"));
+            }
+        }
+        "stripe.get_payment_intent"
+        | "stripe.confirm_payment_intent"
+        | "stripe.capture_payment_intent"
+        | "stripe.cancel_payment_intent" => {
+            let payment_intent_id = require_str(input, "payment_intent_id")?;
+            push_unique(stripe_resource_uri("payment_intent", payment_intent_id));
+        }
+        "stripe.create_refund" => {
+            let payment_intent_id = require_str(input, "payment_intent")?;
+            push_unique(stripe_resource_uri("payment_intent", payment_intent_id));
+        }
+        "stripe.create_subscription" => {
+            let customer_id = require_str(input, "customer")?;
+            push_unique(stripe_resource_uri("customer", customer_id));
+        }
+        "stripe.get_subscription" | "stripe.cancel_subscription" => {
+            let subscription_id = require_str(input, "subscription_id")?;
+            push_unique(stripe_resource_uri("subscription", subscription_id));
+        }
+        "stripe.list_subscriptions" | "stripe.list_invoices" => {
+            if let Some(customer_id) = input.get("customer").and_then(|v| v.as_str()) {
+                push_unique(stripe_resource_uri("customer", customer_id));
+            } else {
+                push_unique(stripe_resource_uri("account", "self"));
+            }
+        }
+        "stripe.get_invoice" => {
+            let invoice_id = require_str(input, "invoice_id")?;
+            push_unique(stripe_resource_uri("invoice", invoice_id));
+        }
+        "stripe.ingest_webhook_event" => {
+            let payload = require_str(input, "payload")?;
+            let event: StripeWebhookEvent =
+                serde_json::from_str(payload).map_err(|_| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "payload must be a valid Stripe event JSON object".into(),
+                })?;
+            let object_type = event
+                .data
+                .object
+                .get("object")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let object_id = event.data.object.get("id").and_then(|v| v.as_str());
+            if let Some(uri) = object_id.and_then(|id| stripe_object_resource_uri(object_type, id)) {
+                push_unique(uri);
+            } else {
+                push_unique(stripe_resource_uri("event", &event.id));
+            }
+        }
+        _ => {}
+    }
+
+    Ok(resource_uris)
+}
+
 fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
     input
         .get(field)
@@ -1894,10 +1994,19 @@ mod tests {
         cap: &str,
         operations: &[&str],
     ) -> CapabilityToken {
+        generate_valid_token_with_resources(signing_key, cap, operations, &["*"])
+    }
+
+    fn generate_valid_token_with_resources(
+        signing_key: &Ed25519SigningKey,
+        cap: &str,
+        operations: &[&str],
+        resource_allow: &[&str],
+    ) -> CapabilityToken {
         let now = Utc::now();
         // C3.4: tokens MUST include constraints (default-deny)
         let constraints = CapabilityConstraints {
-            resource_allow: vec!["*".into()],
+            resource_allow: resource_allow.iter().map(|value| (*value).to_string()).collect(),
             ..Default::default()
         };
         let mut cbor = Vec::new();
@@ -2046,6 +2155,67 @@ mod tests {
                 assert!(message.contains("email or name"));
             }
             e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resource_uris_bind_stripe_targets() {
+        let customer = resource_uris_for_operation(
+            "stripe.get_customer",
+            &json!({ "customer_id": "cus_123" }),
+        )
+        .unwrap();
+        assert_eq!(customer, vec!["stripe:customer:cus_123"]);
+
+        let account = resource_uris_for_operation("stripe.get_balance", &json!({})).unwrap();
+        assert_eq!(account, vec!["stripe:account:self"]);
+
+        let webhook = resource_uris_for_operation(
+            "stripe.ingest_webhook_event",
+            &json!({
+                "payload": r#"{"id":"evt_123","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#
+            }),
+        )
+        .unwrap();
+        assert_eq!(webhook, vec!["stripe:invoice:in_123"]);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_rejects_customer_outside_resource_allow() {
+        let mut connector = StripeConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["stripe.get_customer"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_valid_token_with_resources(
+            &signing_key,
+            "stripe.read",
+            &["stripe.get_customer"],
+            &["stripe:customer:cus_allowed"],
+        );
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "stripe.get_customer",
+                "input": { "customer_id": "cus_denied" },
+                "capability_token": token
+            }))
+            .await;
+
+        match result.unwrap_err() {
+            FcpError::ResourceNotAllowed { resource } => {
+                assert_eq!(resource, "stripe:customer:cus_denied");
+            }
+            other => panic!("Expected ResourceNotAllowed, got: {other:?}"),
         }
     }
 

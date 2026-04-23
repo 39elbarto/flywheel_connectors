@@ -789,19 +789,24 @@ impl ReconnectingWsStream {
     }
 
     fn note_message_received(&mut self, message: &WsMessage) {
-        // br-hjaej: a Close frame is NOT proof of a healthy session —
-        // a peer that completes the handshake and immediately sends
-        // Close still returns Ok(Some(Close(...))) from recv(), so
-        // the pre-fix unconditional reset here turned "handshake
-        // accepted, connection refused" into a reconnect storm against
-        // the peer. Only reset the backoff when we've actually seen a
-        // data-carrying frame (Text / Binary) or a ping/pong
-        // round-trip. Close frames leave the retry budget intact so
-        // the next connect attempt waits out the configured delay.
+        // br-hjaej + br-f46kk: only a data-carrying application frame
+        // (Text or Binary) is proof of a healthy session. The earlier
+        // fix (br-hjaej) correctly excluded Close, but Ping and Pong
+        // control frames ALSO reach note_message_received via
+        // Ok(Some(WsMessage::Ping/Pong(..))) from recv(), and an
+        // adversarial peer that completes the WS handshake then
+        // immediately streams Pings (or replays a Pong without our
+        // initiating a Ping) would have still reset the retry budget
+        // to zero — leaving the reconnect storm defence in place only
+        // against Close-on-accept, not against Ping-flood-on-accept.
+        // A genuine ping/pong round-trip is NOT observable at this
+        // call site (we see inbound control frames only, not the
+        // outbound ping that would prove reachability); to preserve
+        // the invariant we only reset on Text / Binary.
         if !self.reset_backoff_after_first_message {
             return;
         }
-        if message.is_close() {
+        if !(message.is_text() || message.is_binary()) {
             return;
         }
         self.handler.reset();
@@ -1085,6 +1090,88 @@ mod tests {
         // A subsequent Text frame — the reset gate is still armed —
         // must now clear the retry budget.
         stream.note_message_received(&WsMessage::text("finally healthy"));
+        assert_eq!(stream.handler.attempts(), 0);
+        assert!(!stream.reset_backoff_after_first_message);
+    }
+
+    /// br-f46kk regression: Ping is a CONTROL frame, not proof of a
+    /// healthy data path. An adversarial peer that completes the
+    /// handshake and immediately streams Pings would otherwise have
+    /// reset the retry budget through the hjaej-era gate, because
+    /// hjaej excluded only Close. Now the reset predicate requires
+    /// Text or Binary.
+    #[test]
+    fn reconnect_stream_ping_frame_does_not_reset_backoff() {
+        let client = WsClient::new("ws://localhost:8080");
+        let mut stream = ReconnectingWsStream::new(client);
+
+        stream.handler.record_failure();
+        stream.handler.record_failure();
+        stream.handler.record_failure();
+        assert_eq!(stream.handler.attempts(), 3);
+        stream.note_connection_established();
+
+        stream.note_message_received(&WsMessage::ping(vec![0x42; 4]));
+        assert_eq!(
+            stream.handler.attempts(),
+            3,
+            "Ping must NOT reset backoff (br-f46kk)"
+        );
+        assert!(
+            stream.reset_backoff_after_first_message,
+            "reset gate stays armed after Ping so a subsequent data frame can still clear it"
+        );
+    }
+
+    /// br-f46kk regression: Pong is symmetric to Ping — an inbound
+    /// Pong observed here is not a verified round-trip because this
+    /// call site cannot distinguish "response to our Ping" from
+    /// "unsolicited Pong the peer replayed to sneak past the gate".
+    /// Only data frames reset.
+    #[test]
+    fn reconnect_stream_pong_frame_does_not_reset_backoff() {
+        let client = WsClient::new("ws://localhost:8080");
+        let mut stream = ReconnectingWsStream::new(client);
+
+        stream.handler.record_failure();
+        stream.handler.record_failure();
+        stream.note_connection_established();
+
+        stream.note_message_received(&WsMessage::pong(vec![0x00]));
+        assert_eq!(
+            stream.handler.attempts(),
+            2,
+            "Pong must NOT reset backoff (br-f46kk)"
+        );
+        assert!(stream.reset_backoff_after_first_message);
+    }
+
+    /// br-f46kk: after a burst of control frames (any mix of Close +
+    /// Ping + Pong), the first genuine Text or Binary frame MUST
+    /// still clear the retry budget. Control frames neither reset
+    /// nor disarm the gate.
+    #[test]
+    fn reconnect_stream_data_frame_after_control_burst_resets_backoff() {
+        let client = WsClient::new("ws://localhost:8080");
+        let mut stream = ReconnectingWsStream::new(client);
+
+        stream.handler.record_failure();
+        stream.handler.record_failure();
+        stream.handler.record_failure();
+        stream.note_connection_established();
+
+        stream.note_message_received(&WsMessage::ping(vec![1, 2]));
+        stream.note_message_received(&WsMessage::pong(vec![3, 4]));
+        stream.note_message_received(&WsMessage::Close(None));
+        assert_eq!(
+            stream.handler.attempts(),
+            3,
+            "control-frame burst must leave the budget intact"
+        );
+        assert!(stream.reset_backoff_after_first_message);
+
+        // And the first data frame resets.
+        stream.note_message_received(&WsMessage::binary(vec![0xAA; 8]));
         assert_eq!(stream.handler.attempts(), 0);
         assert!(!stream.reset_backoff_after_first_message);
     }

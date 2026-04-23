@@ -2792,6 +2792,78 @@ mod tests {
     }
 
     #[test]
+    fn verify_rejects_cross_project_audience_confused_deputy() {
+        let signing_key = Ed25519SigningKey::generate();
+        let pub_bytes = signing_key.verifying_key().to_bytes();
+        let foo_zone: ZoneId = "z:project:foo".parse().unwrap();
+        let bar_zone: ZoneId = "z:project:bar".parse().unwrap();
+        let now = Utc::now();
+
+        let token = CapabilityToken::from_raw(
+            CapabilityTokenBuilder::new()
+                .capability_id("cap.test")
+                .zone_id(foo_zone.as_str())
+                .audience(foo_zone.as_str())
+                .principal("user:test")
+                .operations(&["op.test"])
+                .issuer("node:primary")
+                .validity(now, now + Duration::hours(1))
+                .constraints_cbor(&test_constraints_cbor())
+                .sign(&signing_key)
+                .unwrap(),
+        );
+
+        let verifier = CapabilityVerifier::new(pub_bytes, bar_zone, InstanceId::new());
+        let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
+        let err = verifier.verify(token, &cap, &op, &[]).unwrap_err();
+
+        assert!(
+            matches!(&err, FcpError::ZoneViolation { message, source_zone, target_zone }
+                if message == "Token audience mismatch"
+                    && source_zone == "z:project:foo"
+                    && target_zone == "z:project:bar"),
+            "cross-project audience binding must reject token reuse, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_cross_project_zone_with_wildcard_audience() {
+        let signing_key = Ed25519SigningKey::generate();
+        let pub_bytes = signing_key.verifying_key().to_bytes();
+        let foo_zone: ZoneId = "z:project:foo".parse().unwrap();
+        let bar_zone: ZoneId = "z:project:bar".parse().unwrap();
+        let now = Utc::now();
+
+        let token = CapabilityToken::from_raw(
+            CapabilityTokenBuilder::new()
+                .capability_id("cap.test")
+                .zone_id(foo_zone.as_str())
+                .audience("*")
+                .principal("user:test")
+                .operations(&["op.test"])
+                .issuer("node:primary")
+                .validity(now, now + Duration::hours(1))
+                .constraints_cbor(&test_constraints_cbor())
+                .sign(&signing_key)
+                .unwrap(),
+        );
+
+        let verifier = CapabilityVerifier::new(pub_bytes, bar_zone, InstanceId::new());
+        let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
+        let err = verifier.verify(token, &cap, &op, &[]).unwrap_err();
+
+        assert!(
+            matches!(&err, FcpError::ZoneViolation { message, source_zone, target_zone }
+                if message == "Token zone mismatch"
+                    && source_zone == "z:project:foo"
+                    && target_zone == "z:project:bar"),
+            "wildcard audience must not bypass project-zone binding, got {err:?}"
+        );
+    }
+
+    #[test]
     fn verify_rejects_expired() {
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();

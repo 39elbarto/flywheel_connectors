@@ -421,6 +421,9 @@ pub enum ZoneIdError {
     #[error("zone id must not be empty")]
     Empty,
 
+    #[error("zone id contains an empty segment at byte {index}")]
+    EmptySegment { index: usize },
+
     #[error("zone id too long ({len} bytes > {max} bytes)")]
     TooLong { len: usize, max: usize },
 
@@ -541,6 +544,16 @@ impl ZoneId {
 
         if !zone_id.starts_with("z:") {
             return Err(ZoneIdError::MissingPrefix);
+        }
+
+        let mut segment_start = 2;
+        for segment in zone_id[2..].split(':') {
+            if segment.is_empty() {
+                return Err(ZoneIdError::EmptySegment {
+                    index: segment_start,
+                });
+            }
+            segment_start += segment.len() + 1;
         }
 
         for (index, ch) in zone_id.char_indices() {
@@ -3825,6 +3838,12 @@ mod tests {
     }
 
     #[test]
+    fn zone_id_parse_valid_project_zone() {
+        let z: ZoneId = "z:project:foo".parse().unwrap();
+        assert_eq!(z.as_str(), "z:project:foo");
+    }
+
+    #[test]
     fn zone_id_rejects_missing_prefix() {
         assert!(matches!(
             "work".parse::<ZoneId>(),
@@ -3835,6 +3854,30 @@ mod tests {
     #[test]
     fn zone_id_rejects_empty() {
         assert!(matches!("".parse::<ZoneId>(), Err(ZoneIdError::Empty)));
+    }
+
+    #[test]
+    fn zone_id_rejects_empty_segment_after_prefix() {
+        assert!(matches!(
+            "z:".parse::<ZoneId>(),
+            Err(ZoneIdError::EmptySegment { index: 2 })
+        ));
+    }
+
+    #[test]
+    fn zone_id_rejects_empty_segment_in_middle() {
+        assert!(matches!(
+            "z:project::foo".parse::<ZoneId>(),
+            Err(ZoneIdError::EmptySegment { index: 10 })
+        ));
+    }
+
+    #[test]
+    fn zone_id_rejects_empty_trailing_segment() {
+        assert!(matches!(
+            "z:project:".parse::<ZoneId>(),
+            Err(ZoneIdError::EmptySegment { index: 10 })
+        ));
     }
 
     #[test]
@@ -4664,6 +4707,12 @@ mod tests {
     fn zone_id_error_display_empty() {
         let err = ZoneIdError::Empty;
         assert_eq!(err.to_string(), "zone id must not be empty");
+    }
+
+    #[test]
+    fn zone_id_error_display_empty_segment() {
+        let err = ZoneIdError::EmptySegment { index: 10 };
+        assert_eq!(err.to_string(), "zone id contains an empty segment at byte 10");
     }
 
     #[test]

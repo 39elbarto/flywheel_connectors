@@ -49,7 +49,14 @@ fn auth_claims_canonical_cbor_survives_builder_roundtrip() {
     assert_eq!(roundtrip, claims);
 }
 
-/// Minimal claim set — single capability, single zone. Golden hex vector.
+/// Minimal claim set — single capability, single zone. Golden vector.
+///
+/// Keys follow RFC 8949 bytewise lexicographic ordering of the encoded
+/// CBOR integer representations. All three labels here are "negative
+/// int in the 32-bit range" (major type 1, 5-byte encoding), so the
+/// byte-lex order is numerically-reversed on their absolute values:
+/// CAPABILITY_ID (-65537, `3A 00 01 00 00`) < ZONE_ID (-65538,
+/// `3A 00 01 00 01`) < SCHEMA_VERSION (-65552, `3A 00 01 00 0F`).
 #[test]
 fn minimal_claims_golden_vector() {
     let claims = AuthClaims {
@@ -60,9 +67,6 @@ fn minimal_claims_golden_vector() {
     };
     let bytes = claims.to_canonical_cbor().unwrap();
 
-    // Golden: structure is a CBOR map with exactly 3 entries
-    // (SCHEMA_VERSION, CAPABILITY_ID, ZONE_ID) in label-ascending
-    // order.
     let value: ciborium::Value = ciborium::from_reader(&bytes[..]).unwrap();
     let ciborium::Value::Map(entries) = value else {
         panic!("expected map");
@@ -73,7 +77,6 @@ fn minimal_claims_golden_vector() {
         "minimal claims must produce exactly 3 entries (schema_version + capability_id + zone_id)"
     );
 
-    // Keys ascending.
     let keys: Vec<i64> = entries
         .iter()
         .filter_map(|(k, _)| match k {
@@ -84,18 +87,19 @@ fn minimal_claims_golden_vector() {
             _ => None,
         })
         .collect();
-    let mut sorted = keys.clone();
-    sorted.sort_unstable();
-    assert_eq!(keys, sorted);
 
-    // Specific label ordering check: SCHEMA_VERSION (-65552) sorts
-    // below CAPABILITY_ID (-65537) and ZONE_ID (-65538) in i64.
-    assert_eq!(keys[0], fcp2_claims::SCHEMA_VERSION);
-    // Second and third are CAPABILITY_ID (-65537) and ZONE_ID (-65538)
-    // in some order — sorted, lowest first.
-    let mut expected_rest = vec![fcp2_claims::CAPABILITY_ID, fcp2_claims::ZONE_ID];
-    expected_rest.sort_unstable();
-    assert_eq!(keys[1..], expected_rest[..]);
+    // RFC 8949 §4.2.1 deterministic encoding: bytewise lex order of
+    // encoded keys. All three labels encode to 5-byte negative ints
+    // `3A 00 01 XX XX` differing only in the last two bytes.
+    assert_eq!(
+        keys,
+        vec![
+            fcp2_claims::CAPABILITY_ID, // -65537 → `3A 00 01 00 00`
+            fcp2_claims::ZONE_ID,       // -65538 → `3A 00 01 00 01`
+            fcp2_claims::SCHEMA_VERSION, // -65552 → `3A 00 01 00 0F`
+        ],
+        "canonical CBOR must emit keys in RFC 8949 bytewise order"
+    );
 }
 
 /// Full claim set — every optional field populated. Round-trips
@@ -166,4 +170,135 @@ fn canonical_cbor_is_byte_deterministic() {
     let c = claims.to_canonical_cbor().unwrap();
     assert_eq!(a, b, "two encodes of same AuthClaims must be byte-identical");
     assert_eq!(b, c, "three encodes of same AuthClaims must be byte-identical");
+}
+
+// ── Edge-case coverage (br-8n0rm.7 follow-up) ────────────────────────
+//
+// Boundary and forward-compatibility tests that lock down behavior the
+// builder / verifier depend on. Any change that breaks these tests
+// should be treated as a wire-format change and require a
+// `schema_version` bump per
+// `docs/architecture/adr/8n0rm-claim-schema-versioning.md`.
+
+/// `AuthClaims::default()` (all `None`, schema_version=0) must still
+/// encode to a well-formed CBOR map carrying exactly one entry — the
+/// always-emitted SCHEMA_VERSION. This pins the minimum wire shape so
+/// no optional field silently leaks into the default encoding.
+#[test]
+fn default_claims_encode_single_schema_version_entry() {
+    let claims = AuthClaims::default();
+    assert_eq!(
+        claims.schema_version, 0,
+        "default must stamp schema_version=0 (sentinel); CURRENT is set via ::empty()"
+    );
+
+    let bytes = claims.to_canonical_cbor().expect("encode default");
+    let value: ciborium::Value = ciborium::from_reader(&bytes[..]).expect("decode");
+    let ciborium::Value::Map(entries) = value else {
+        panic!("expected map, got {value:?}");
+    };
+    assert_eq!(
+        entries.len(),
+        1,
+        "default AuthClaims must emit exactly one entry (SCHEMA_VERSION)"
+    );
+    let (k, v) = &entries[0];
+    assert_eq!(
+        k,
+        &ciborium::Value::Integer(fcp2_claims::SCHEMA_VERSION.into()),
+        "sole entry must be keyed by SCHEMA_VERSION"
+    );
+    assert_eq!(
+        v,
+        &ciborium::Value::Integer(0_i64.into()),
+        "default schema_version value must be 0"
+    );
+
+    let back = AuthClaims::from_canonical_cbor(&bytes).expect("decode default");
+    assert_eq!(back, claims, "default round-trip must be lossless");
+}
+
+/// Forward-compat contract: unknown integer labels are silently ignored
+/// at decode so a future `schema_version` can add labels without
+/// breaking older verifiers that stay within an accepted version set.
+/// Covers both positive-space (9999) and far-negative-space (-70000)
+/// extras to ensure neither side of the number line is aliased.
+///
+/// Re-encodes through `fcp_cbor::to_canonical_cbor` so the resulting
+/// bytes satisfy the strict canonical-encoding check added in
+/// commit 6df66c79 (fix(auth): canonicalize capability-claim CBOR
+/// ordering). Forward-compat does NOT mean "accept any ordering" — it
+/// means "accept canonical bytes that include unknown labels."
+#[test]
+fn unknown_labels_silently_ignored_on_decode() {
+    let claims = AuthClaims {
+        schema_version: CURRENT_SCHEMA_VERSION,
+        capability_id: Some("cap:fwd".into()),
+        ..AuthClaims::default()
+    };
+    let base = claims.to_canonical_cbor().expect("encode");
+    let value: ciborium::Value = ciborium::from_reader(&base[..]).expect("decode");
+    let ciborium::Value::Map(mut entries) = value else {
+        panic!("expected map");
+    };
+    entries.push((
+        ciborium::Value::Integer((-70_000_i64).into()),
+        ciborium::Value::Text("future-field".into()),
+    ));
+    entries.push((
+        ciborium::Value::Integer(9_999_i64.into()),
+        ciborium::Value::Bytes(vec![0xDE, 0xAD]),
+    ));
+
+    let with_extras = fcp_cbor::to_canonical_cbor(&ciborium::Value::Map(entries))
+        .expect("re-canonicalize with extras");
+
+    let parsed = AuthClaims::from_canonical_cbor(&with_extras)
+        .expect("decode must succeed when extras sit in their canonical positions");
+    assert_eq!(
+        parsed, claims,
+        "typed fields must round-trip unchanged when extras are present"
+    );
+}
+
+/// Boundary: `schema_version` is typed `u16`, so values 0 and
+/// `u16::MAX` must both survive a canonical CBOR round-trip. A value
+/// that overflows u16 on the wire (e.g. i64 = u16::MAX + 1) must
+/// produce `SchemaError::OutOfRange` at decode, not silently truncate.
+#[test]
+fn schema_version_u16_boundary_round_trip() {
+    // Min: zero (default sentinel).
+    let zero = AuthClaims {
+        schema_version: 0,
+        ..AuthClaims::default()
+    };
+    let bytes = zero.to_canonical_cbor().unwrap();
+    let back = AuthClaims::from_canonical_cbor(&bytes).unwrap();
+    assert_eq!(back.schema_version, 0);
+
+    // Max: u16::MAX.
+    let max = AuthClaims {
+        schema_version: u16::MAX,
+        ..AuthClaims::default()
+    };
+    let bytes = max.to_canonical_cbor().unwrap();
+    let back = AuthClaims::from_canonical_cbor(&bytes).unwrap();
+    assert_eq!(back.schema_version, u16::MAX);
+
+    // Overflow: craft a raw CBOR map that puts u16::MAX+1 under
+    // SCHEMA_VERSION. Decoder MUST reject, not truncate.
+    let overflow = i64::from(u16::MAX) + 1;
+    let crafted = ciborium::Value::Map(vec![(
+        ciborium::Value::Integer(fcp2_claims::SCHEMA_VERSION.into()),
+        ciborium::Value::Integer(overflow.into()),
+    )]);
+    let mut tampered = Vec::new();
+    ciborium::into_writer(&crafted, &mut tampered).unwrap();
+    let err = AuthClaims::from_canonical_cbor(&tampered)
+        .expect_err("u16-overflowing schema_version must not decode silently");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("out of range") || msg.contains("u16"),
+        "expected OutOfRange-flavored error, got: {msg}"
+    );
 }

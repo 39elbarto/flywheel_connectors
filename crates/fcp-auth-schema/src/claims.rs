@@ -720,7 +720,7 @@ mod tests {
     fn unknown_labels_are_ignored_on_decode() {
         // Forward-compat: decoding a token that carries an extra
         // unknown integer label must not fail.
-        let mut entries: Vec<(ciborium::Value, ciborium::Value)> = vec![
+        let entries: Vec<(ciborium::Value, ciborium::Value)> = vec![
             (
                 ciborium::Value::Integer(fcp2_claims::SCHEMA_VERSION.into()),
                 ciborium::Value::Integer(i64::from(CURRENT_SCHEMA_VERSION).into()),
@@ -735,15 +735,8 @@ mod tests {
                 ciborium::Value::Text("mystery".into()),
             ),
         ];
-        entries.sort_by_key(|(k, _)| match k {
-            ciborium::Value::Integer(i) => {
-                let x: i128 = (*i).into();
-                x
-            }
-            _ => 0,
-        });
-        let mut bytes = Vec::new();
-        ciborium::into_writer(&ciborium::Value::Map(entries), &mut bytes).unwrap();
+        let bytes = fcp_cbor::to_canonical_cbor(&ciborium::Value::Map(entries))
+            .expect("canonical CBOR serialize");
         let parsed = AuthClaims::from_canonical_cbor(&bytes).unwrap();
         assert_eq!(parsed.schema_version, CURRENT_SCHEMA_VERSION);
         assert_eq!(parsed.capability_id.as_deref(), Some("cap"));
@@ -764,8 +757,8 @@ mod tests {
                 ciborium::Value::Text("cap".into()),
             ),
         ];
-        let mut bytes = Vec::new();
-        ciborium::into_writer(&ciborium::Value::Map(entries), &mut bytes).unwrap();
+        let bytes = fcp_cbor::to_canonical_cbor(&ciborium::Value::Map(entries))
+            .expect("canonical CBOR serialize");
         let err = AuthClaims::from_canonical_cbor(&bytes).unwrap_err();
         match err {
             SchemaError::OutOfRange {
@@ -794,8 +787,8 @@ mod tests {
                 ciborium::Value::Integer((-1_i64).into()),
             ),
         ];
-        let mut bytes = Vec::new();
-        ciborium::into_writer(&ciborium::Value::Map(entries), &mut bytes).unwrap();
+        let bytes = fcp_cbor::to_canonical_cbor(&ciborium::Value::Map(entries))
+            .expect("canonical CBOR serialize");
         let err = AuthClaims::from_canonical_cbor(&bytes).unwrap_err();
         match err {
             SchemaError::OutOfRange {
@@ -832,8 +825,8 @@ mod tests {
                 ciborium::Value::Integer(i64::MAX.into()),
             ),
         ];
-        let mut bytes = Vec::new();
-        ciborium::into_writer(&ciborium::Value::Map(entries), &mut bytes).unwrap();
+        let bytes = fcp_cbor::to_canonical_cbor(&ciborium::Value::Map(entries))
+            .expect("canonical CBOR serialize");
         let err = AuthClaims::from_canonical_cbor(&bytes).unwrap_err();
         match err {
             SchemaError::InvalidTimestamp { label, value } => {
@@ -910,8 +903,8 @@ mod tests {
                 ciborium::Value::Bytes(vec![0x01]),
             ),
         ];
-        let mut bytes = Vec::new();
-        ciborium::into_writer(&ciborium::Value::Map(entries), &mut bytes).unwrap();
+        let bytes = fcp_cbor::to_canonical_cbor(&ciborium::Value::Map(entries))
+            .expect("canonical CBOR serialize");
         let err = AuthClaims::from_canonical_cbor(&bytes).unwrap_err();
         assert!(
             matches!(

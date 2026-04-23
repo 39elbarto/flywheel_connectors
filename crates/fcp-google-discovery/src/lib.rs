@@ -13,7 +13,7 @@
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,19 @@ pub const DEFAULT_ALTERNATE_DISCOVERY_TEMPLATE: &str =
     "https://{api_name}.googleapis.com/$discovery/rest?version={api_version}";
 
 const MAX_SCHEMA_DEPTH: usize = 64;
+/// Default HTTP timeout for Google Discovery transport helpers.
+pub const DEFAULT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub(crate) fn build_http_client(timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .expect("google discovery HTTP client should build")
+}
+
+pub(crate) fn default_http_client() -> reqwest::Client {
+    build_http_client(DEFAULT_HTTP_TIMEOUT)
+}
 
 /// Errors emitted by the Google Discovery substrate.
 #[derive(Debug, thiserror::Error)]
@@ -326,7 +339,7 @@ pub struct DiscoveryFetcher {
 impl Default for DiscoveryFetcher {
     fn default() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: default_http_client(),
             standard_base: DEFAULT_STANDARD_DISCOVERY_BASE.to_string(),
             alternate_template: DEFAULT_ALTERNATE_DISCOVERY_TEMPLATE.to_string(),
         }
@@ -1232,6 +1245,34 @@ mod tests {
             .timeout(Duration::from_secs(5))
             .build()
             .expect("build test client")
+    }
+
+    #[test]
+    fn default_http_timeout_matches_google_client_convention() {
+        assert_eq!(DEFAULT_HTTP_TIMEOUT, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn build_http_client_times_out_slow_response() {
+        run_with_test_runtime(async {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_delay(Duration::from_millis(150))
+                        .set_body_string("{}"),
+                )
+                .mount(&server)
+                .await;
+
+            let client = build_http_client(Duration::from_millis(50));
+            let err = client
+                .get(server.uri())
+                .send()
+                .await
+                .expect_err("slow response should hit bounded timeout");
+            assert!(err.is_timeout(), "expected timeout, got {err}");
+        });
     }
 
     fn run_with_test_runtime<F, T>(future: F) -> T

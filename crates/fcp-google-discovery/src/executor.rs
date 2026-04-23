@@ -430,7 +430,7 @@ pub struct GoogleRestExecutor {
 impl Default for GoogleRestExecutor {
     fn default() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::default_http_client(),
         }
     }
 }

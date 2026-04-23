@@ -32,7 +32,22 @@ pub struct RaptorQDecoder {
     payload_hash: Option<[u8; 32]>,
     config: RaptorQConfig,
     started_at: Instant,
+    /// Received-count at the last decode attempt (0 = never attempted).
+    /// Used by the post-K retry coalescer to skip redundant full-decode
+    /// passes (br-yu0l5).
+    last_attempted_at_count: u32,
+    /// How many additional symbols must arrive before the next scheduled
+    /// decode attempt. Starts at 1 (try at K, K+1, ...) and doubles on
+    /// failure up to `MAX_POST_K_RETRY_STEP`. Any repair-symbol
+    /// arrival also forces an immediate attempt and resets the schedule.
+    post_k_retry_step: u32,
 }
+
+/// Upper bound on the post-K retry backoff. A K+N receive pattern where
+/// N grows unbounded would otherwise defer the decode arbitrarily; this
+/// cap forces a decode attempt at worst every 32 extra symbols so a
+/// slowly-arriving repair tail still completes in finite time.
+const MAX_POST_K_RETRY_STEP: u32 = 32;
 
 fn max_symbols_with_headroom(
     transfer_len: usize,
@@ -87,6 +102,8 @@ impl RaptorQDecoder {
             payload_hash: oti.payload_hash(),
             config: config.clone(),
             started_at: Instant::now(),
+            last_attempted_at_count: 0,
+            post_k_retry_step: 1,
         }
     }
 
@@ -106,6 +123,8 @@ impl RaptorQDecoder {
             payload_hash: None,
             config: config.clone(),
             started_at: Instant::now(),
+            last_attempted_at_count: 0,
+            post_k_retry_step: 1,
         }
     }
 
@@ -136,16 +155,60 @@ impl RaptorQDecoder {
 
         // Attempt reconstruction when we have at least K symbols.
         // The internal codec handles K < K' padding automatically.
-        // We try at K (optimistic) and keep collecting on failure.
-        if self.received_count() >= self.k {
-            match self.try_reconstruct() {
-                Ok(payload) => Ok(Some(payload)),
-                Err(DecodeError::InsufficientSymbols { .. }) => Ok(None),
-                Err(err) => Err(err),
-            }
-        } else {
-            Ok(None)
+        //
+        // br-yu0l5: try_reconstruct rebuilds the full decoder state,
+        // clones every buffered symbol, and allocates K'-K virtual
+        // padding rows on every call. Calling it on EVERY symbol past
+        // K turns a lossy tail into sum_{i=K}^{K+R} O(i * symbol_size)
+        // work instead of one decode plus bounded retries. Use an
+        // exponential-backoff schedule — attempt at K, K+1, K+2, K+4,
+        // K+8, K+16, K+32, … (cap MAX_POST_K_RETRY_STEP) — plus an
+        // immediate attempt whenever a repair symbol (ESI >= K)
+        // arrives, since repair equations add strictly new independent
+        // information to the decoding matrix.
+        if self.received_count() < self.k {
+            return Ok(None);
         }
+        if !self.should_attempt_decode(esi) {
+            return Ok(None);
+        }
+        self.last_attempted_at_count = self.received_count();
+        match self.try_reconstruct() {
+            Ok(payload) => Ok(Some(payload)),
+            Err(DecodeError::InsufficientSymbols { .. }) => {
+                self.post_k_retry_step = self
+                    .post_k_retry_step
+                    .saturating_mul(2)
+                    .min(MAX_POST_K_RETRY_STEP);
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Decide whether to run a full `try_reconstruct` for the newly
+    /// inserted ESI. Returns `true` at the first K-symbol crossover,
+    /// on every repair-symbol arrival, and on the exponential-backoff
+    /// schedule driven by [`Self::post_k_retry_step`] after failures.
+    /// Returns `false` to let the caller buffer more symbols before
+    /// paying the full decode cost again. See br-yu0l5.
+    fn should_attempt_decode(&self, just_added_esi: u32) -> bool {
+        let count = self.received_count();
+        if count < self.k {
+            return false;
+        }
+        // First crossover: always try.
+        if self.last_attempted_at_count == 0 {
+            return true;
+        }
+        // Repair symbol: always try — adds a fresh LT equation.
+        if just_added_esi >= self.k {
+            return true;
+        }
+        // Otherwise honor the backoff schedule.
+        count >= self
+            .last_attempted_at_count
+            .saturating_add(self.post_k_retry_step)
     }
 
     /// Attempt to reconstruct the payload from buffered symbols.
@@ -2509,5 +2572,126 @@ mod tests {
         let cloned = original.clone();
         assert_eq!(cloned.max_concurrent(), 7);
         assert_eq!(original.max_concurrent(), 7);
+    }
+
+    // ── br-yu0l5: post-K retry coalescer ───────────────────────────────
+
+    #[test]
+    fn should_attempt_decode_first_crossover_fires() {
+        // First time we cross K, attempt must run (last_attempted_at_count == 0).
+        let config = test_config();
+        let oti = ObjectTransmissionInformation::new(640, 64, 1, 1, 8);
+        let decoder = RaptorQDecoder::new(oti, &config);
+        assert_eq!(decoder.last_attempted_at_count, 0);
+        // With received_count == K, the helper reports attempt=true.
+        let mut forced = decoder;
+        for esi in 0..forced.k {
+            forced.received.insert(esi, vec![0u8; 64]);
+        }
+        assert!(forced.should_attempt_decode(forced.k - 1));
+    }
+
+    #[test]
+    fn should_attempt_decode_source_only_skips_between_backoff_ticks() {
+        // After the first attempt, a new source-ESI arrival that
+        // does NOT satisfy the backoff schedule must not fire.
+        let config = test_config();
+        let oti = ObjectTransmissionInformation::new(640, 64, 1, 1, 8);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        // Simulate a post-K state: K symbols buffered, one attempt
+        // already made, backoff step doubled.
+        for esi in 0..decoder.k {
+            decoder.received.insert(esi, vec![0u8; 64]);
+        }
+        decoder.last_attempted_at_count = decoder.k;
+        decoder.post_k_retry_step = 4;
+        // New source-like arrival (ESI < K); count only reached K+1,
+        // but schedule wants K+4 — must skip.
+        decoder.received.insert(0, vec![1u8; 64]); // duplicate slot won't matter
+        assert!(
+            !decoder.should_attempt_decode(0),
+            "source-ESI between backoff ticks must not fire"
+        );
+    }
+
+    #[test]
+    fn should_attempt_decode_repair_symbol_always_fires() {
+        // Repair arrivals (ESI >= K) must always trigger an attempt
+        // since they introduce a fresh LT equation.
+        let config = test_config();
+        let oti = ObjectTransmissionInformation::new(640, 64, 1, 1, 8);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        for esi in 0..decoder.k {
+            decoder.received.insert(esi, vec![0u8; 64]);
+        }
+        decoder.last_attempted_at_count = decoder.k;
+        decoder.post_k_retry_step = 32; // far into backoff
+        assert!(
+            decoder.should_attempt_decode(decoder.k + 10_000),
+            "repair symbols must bypass the backoff schedule"
+        );
+    }
+
+    #[test]
+    fn should_attempt_decode_fires_when_backoff_threshold_is_reached() {
+        let config = test_config();
+        let oti = ObjectTransmissionInformation::new(640, 64, 1, 1, 8);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        for esi in 0..decoder.k {
+            decoder.received.insert(esi, vec![0u8; 64]);
+        }
+        decoder.last_attempted_at_count = decoder.k;
+        decoder.post_k_retry_step = 2;
+        // Simulate receiving 2 more symbols — exactly the threshold.
+        decoder
+            .received
+            .insert(decoder.k, vec![0u8; 64]);
+        decoder
+            .received
+            .insert(decoder.k + 1, vec![0u8; 64]);
+        assert!(
+            decoder.should_attempt_decode(decoder.k - 1),
+            "reaching last_attempted + retry_step MUST trigger"
+        );
+    }
+
+    #[test]
+    fn post_k_retry_step_doubles_on_insufficient_failure_and_caps() {
+        // Drive many symbols to build up backoff without a successful
+        // decode — the only way to exhaust the schedule in a unit
+        // test without a working mini-encoder. We fall back to
+        // directly exercising the arithmetic.
+        let mut step: u32 = 1;
+        for _ in 0..12 {
+            step = step.saturating_mul(2).min(MAX_POST_K_RETRY_STEP);
+        }
+        assert_eq!(step, MAX_POST_K_RETRY_STEP);
+    }
+
+    #[test]
+    fn round_trip_decode_after_backoff_coalesce_preserves_correctness() {
+        // Correctness regression: the backoff must never cause a
+        // decodable chain to fail. Encode a small payload, feed every
+        // symbol through add_symbol, and assert we get the original
+        // payload back. `RaptorQEncoder` emits symbols in a schedule
+        // that exercises both the K-crossover and repair paths.
+        let config = test_config();
+        let payload: Vec<u8> = (0..640_u32).map(|i| (i & 0xFF) as u8).collect();
+        let encoder = RaptorQEncoder::new(&payload, &config).expect("encode");
+        let oti = encoder.transmission_info();
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let mut decoded: Option<Vec<u8>> = None;
+        for (esi, data) in encoder.encode_all() {
+            match decoder.add_symbol(esi, data) {
+                Ok(Some(p)) => {
+                    decoded = Some(p);
+                    break;
+                }
+                Ok(None) => continue,
+                Err(e) => panic!("decode failed under coalescer: {e:?}"),
+            }
+        }
+        let decoded = decoded.expect("backoff coalescer must still reach a decode");
+        assert_eq!(decoded, payload);
     }
 }

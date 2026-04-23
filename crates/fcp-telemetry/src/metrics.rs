@@ -2,6 +2,7 @@
 //!
 //! Provides counters, gauges, histograms, and timers with label support.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -9,9 +10,20 @@ use metrics::{
     Counter, Gauge, Histogram, counter, describe_counter, describe_gauge, describe_histogram,
     gauge, histogram,
 };
+use parking_lot::Mutex;
 
 /// Global metrics registry state.
 static METRICS_INITIALIZED: OnceLock<bool> = OnceLock::new();
+static LABEL_CARDINALITY_GUARD: OnceLock<
+    Mutex<HashMap<(&'static str, &'static str), HashSet<String>>>,
+> = OnceLock::new();
+
+const MAX_DISTINCT_LABEL_VALUES_PER_METRIC: usize = 64;
+const MAX_LABEL_VALUE_BYTES: usize = 64;
+const EMPTY_LABEL_BUCKET: &str = "__fcp_empty";
+const OVERFLOW_LABEL_BUCKET: &str = "__fcp_other";
+const TOO_LONG_LABEL_BUCKET: &str = "__fcp_too_long";
+const CONTROL_LABEL_BUCKET: &str = "__fcp_control";
 
 /// Initialize the metrics system with standard FCP metrics descriptions.
 pub fn init_metrics() {
@@ -106,22 +118,19 @@ pub fn init_metrics() {
 
 /// Increment a counter by 1.
 pub fn increment_counter(name: &'static str, labels: &[(&'static str, &str)]) {
-    let labels: Vec<(&'static str, String)> =
-        labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
+    let labels = metric_labels(name, labels);
     counter!(name, &labels).increment(1);
 }
 
 /// Increment a counter by a specific amount.
 pub fn increment_counter_by(name: &'static str, value: u64, labels: &[(&'static str, &str)]) {
-    let labels: Vec<(&'static str, String)> =
-        labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
+    let labels = metric_labels(name, labels);
     counter!(name, &labels).increment(value);
 }
 
 /// Get a counter handle for repeated operations.
 pub fn get_counter(name: &'static str, labels: &[(&'static str, &str)]) -> Counter {
-    let labels: Vec<(&'static str, String)> =
-        labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
+    let labels = metric_labels(name, labels);
     counter!(name, &labels)
 }
 
@@ -131,29 +140,25 @@ pub fn get_counter(name: &'static str, labels: &[(&'static str, &str)]) -> Count
 
 /// Set a gauge value.
 pub fn set_gauge(name: &'static str, value: f64, labels: &[(&'static str, &str)]) {
-    let labels: Vec<(&'static str, String)> =
-        labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
+    let labels = metric_labels(name, labels);
     gauge!(name, &labels).set(value);
 }
 
 /// Increment a gauge.
 pub fn increment_gauge(name: &'static str, value: f64, labels: &[(&'static str, &str)]) {
-    let labels: Vec<(&'static str, String)> =
-        labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
+    let labels = metric_labels(name, labels);
     gauge!(name, &labels).increment(value);
 }
 
 /// Decrement a gauge.
 pub fn decrement_gauge(name: &'static str, value: f64, labels: &[(&'static str, &str)]) {
-    let labels: Vec<(&'static str, String)> =
-        labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
+    let labels = metric_labels(name, labels);
     gauge!(name, &labels).decrement(value);
 }
 
 /// Get a gauge handle for repeated operations.
 pub fn get_gauge(name: &'static str, labels: &[(&'static str, &str)]) -> Gauge {
-    let labels: Vec<(&'static str, String)> =
-        labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
+    let labels = metric_labels(name, labels);
     gauge!(name, &labels)
 }
 
@@ -163,15 +168,13 @@ pub fn get_gauge(name: &'static str, labels: &[(&'static str, &str)]) -> Gauge {
 
 /// Record a histogram value.
 pub fn record_histogram(name: &'static str, value: f64, labels: &[(&'static str, &str)]) {
-    let labels: Vec<(&'static str, String)> =
-        labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
+    let labels = metric_labels(name, labels);
     histogram!(name, &labels).record(value);
 }
 
 /// Get a histogram handle for repeated operations.
 pub fn get_histogram(name: &'static str, labels: &[(&'static str, &str)]) -> Histogram {
-    let labels: Vec<(&'static str, String)> =
-        labels.iter().map(|(k, v)| (*k, v.to_string())).collect();
+    let labels = metric_labels(name, labels);
     histogram!(name, &labels)
 }
 
@@ -193,7 +196,7 @@ impl Timer {
         Self {
             start: Instant::now(),
             name,
-            labels: labels.iter().map(|(k, v)| (*k, v.to_string())).collect(),
+            labels: metric_labels(name, labels),
         }
     }
 
@@ -250,6 +253,48 @@ impl Drop for TimerGuard {
             timer.stop();
         }
     }
+}
+
+fn metric_labels(
+    metric_name: &'static str,
+    labels: &[(&'static str, &str)],
+) -> Vec<(&'static str, String)> {
+    labels
+        .iter()
+        .map(|(key, value)| (*key, guarded_label_value(metric_name, key, value)))
+        .collect()
+}
+
+fn guarded_label_value(metric_name: &'static str, label_key: &'static str, value: &str) -> String {
+    let bounded = bucket_label_value(value);
+    if bounded == OVERFLOW_LABEL_BUCKET {
+        return bounded;
+    }
+
+    let guard = LABEL_CARDINALITY_GUARD.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = guard.lock();
+    let seen_values = guard.entry((metric_name, label_key)).or_default();
+    if seen_values.contains(&bounded) {
+        return bounded;
+    }
+    if seen_values.len() >= MAX_DISTINCT_LABEL_VALUES_PER_METRIC {
+        return OVERFLOW_LABEL_BUCKET.to_string();
+    }
+    seen_values.insert(bounded.clone());
+    bounded
+}
+
+fn bucket_label_value(value: &str) -> String {
+    if value.is_empty() {
+        return EMPTY_LABEL_BUCKET.to_string();
+    }
+    if value.len() > MAX_LABEL_VALUE_BYTES {
+        return TOO_LONG_LABEL_BUCKET.to_string();
+    }
+    if value.chars().any(char::is_control) {
+        return CONTROL_LABEL_BUCKET.to_string();
+    }
+    value.to_string()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -761,6 +806,42 @@ mod tests {
     fn test_event_dropped_with_long_reason() {
         let long_reason = "x".repeat(256);
         record_event_dropped("connector", "message", &long_reason);
+    }
+
+    #[test]
+    fn test_metric_labels_cap_distinct_values_per_metric_key() {
+        let metric_name = "cap_distinct_values_metric";
+        let mut overflow_seen = false;
+
+        for idx in 0..=MAX_DISTINCT_LABEL_VALUES_PER_METRIC {
+            let value = format!("connector-{idx}");
+            let labels = metric_labels(metric_name, &[("connector", value.as_str())]);
+            let observed = &labels[0].1;
+            if idx < MAX_DISTINCT_LABEL_VALUES_PER_METRIC {
+                assert_eq!(observed, &value);
+            } else {
+                assert_eq!(observed, OVERFLOW_LABEL_BUCKET);
+                overflow_seen = true;
+            }
+        }
+
+        assert!(overflow_seen);
+    }
+
+    #[test]
+    fn test_metric_labels_bucket_overlong_values() {
+        let overlong = "x".repeat(MAX_LABEL_VALUE_BYTES + 1);
+        let labels = metric_labels(
+            "bucket_overlong_metric",
+            &[("reason", overlong.as_str())],
+        );
+        assert_eq!(labels[0].1, TOO_LONG_LABEL_BUCKET);
+    }
+
+    #[test]
+    fn test_metric_labels_bucket_control_values() {
+        let labels = metric_labels("bucket_control_metric", &[("reason", "bad\nvalue")]);
+        assert_eq!(labels[0].1, CONTROL_LABEL_BUCKET);
     }
 
     #[test]

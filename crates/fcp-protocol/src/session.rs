@@ -3249,6 +3249,70 @@ mod tests {
     }
 
     #[test]
+    fn captured_ack_from_old_session_cannot_complete_fresh_handshake() {
+        let initiator = TailscaleNodeId::new("node-i");
+        let responder = TailscaleNodeId::new("node-r");
+        let initiator_signing_key = Ed25519SigningKey::generate();
+        let responder_signing_key = Ed25519SigningKey::generate();
+
+        let mut old_hello = MeshSessionHello {
+            from: initiator.clone(),
+            to: responder.clone(),
+            eph_pubkey: X25519SecretKey::generate().public_key(),
+            nonce: SessionNonce([0x31; 16]),
+            cookie: None,
+            timestamp: 1_704_067_200,
+            suites: vec![SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2],
+            transport_limits: None,
+            signature: None,
+        };
+        old_hello.sign(&initiator_signing_key).expect("sign old hello");
+
+        let mut captured_ack = MeshSessionAck {
+            from: responder.clone(),
+            to: initiator.clone(),
+            eph_pubkey: X25519SecretKey::generate().public_key(),
+            nonce: SessionNonce([0x41; 16]),
+            session_id: MeshSessionId([0xC1; 16]),
+            suite: SessionCryptoSuite::Suite2,
+            timestamp: 1_704_067_205,
+            signature: None,
+        };
+        captured_ack
+            .sign(&old_hello, &responder_signing_key)
+            .expect("sign captured ack");
+        captured_ack
+            .verify(&old_hello, &responder_signing_key.verifying_key())
+            .expect("captured ack must verify against the original hello");
+
+        let mut fresh_hello = MeshSessionHello {
+            from: initiator,
+            to: responder,
+            eph_pubkey: X25519SecretKey::generate().public_key(),
+            nonce: SessionNonce([0x32; 16]),
+            cookie: None,
+            timestamp: 1_704_067_260,
+            suites: vec![SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2],
+            transport_limits: None,
+            signature: None,
+        };
+        fresh_hello
+            .sign(&initiator_signing_key)
+            .expect("sign fresh hello");
+        fresh_hello
+            .verify(&initiator_signing_key.verifying_key())
+            .expect("fresh hello must verify");
+
+        assert!(
+            matches!(
+                captured_ack.verify(&fresh_hello, &responder_signing_key.verifying_key()),
+                Err(SessionError::InvalidSignature)
+            ),
+            "a captured ack from an old session must not verify against a fresh hello from the same peers"
+        );
+    }
+
+    #[test]
     fn negotiate_suite_single_overlap() {
         let result = negotiate_suite(&[SessionCryptoSuite::Suite1], &[SessionCryptoSuite::Suite1]);
         assert_eq!(result, Some(SessionCryptoSuite::Suite1));

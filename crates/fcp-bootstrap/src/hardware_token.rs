@@ -1425,19 +1425,42 @@ fn acquire_provider_context(provider: &Path) -> Result<Pkcs11, TokenError> {
 }
 
 fn finalize_pkcs11_context(provider: &Path, pkcs11: Pkcs11) -> Result<(), TokenError> {
+    // br-idk2k: hold the registry lock across the actual pkcs11.finalize()
+    // call so no concurrent acquire_provider_context can observe the
+    // dangling "already initialized but about to be finalized" state.
+    //
+    // Old code dropped the lock immediately after
+    // note_provider_session_close returned should_finalize = true, then
+    // called finalize outside the lock. A racing acquire could slip
+    // between the drop and the finalize:
+    //   1. Thread A: note_close → should_finalize=true, drop lock.
+    //   2. Thread B: acquire lock, Pkcs11::new OK, initialize() returns
+    //      CryptokiAlreadyInitialized (A hasn't finalized yet), so
+    //      initialized_here=false. note_open records active=1,
+    //      finalize_required=false. B drops lock and uses Pkcs11 handle.
+    //   3. Thread A: finalize() runs, tearing down the shared runtime
+    //      out from under B. B's next C_* call fails with
+    //      CryptokiNotInitialized.
+    //
+    // Keeping the lock across finalize serializes A's teardown against
+    // B's startup. `finalize` is already a short, rare operation so the
+    // extra hold time is negligible vs. the correctness gain.
+    //
+    // Poison handling: PoisonError::into_inner lets us keep making
+    // forward progress even if a prior lock holder panicked; finalize
+    // is the cleanup path we most want to run after a panic.
     let mut sessions = provider_session_registry()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let should_finalize = note_provider_session_close(&mut sessions, provider);
-    drop(sessions);
 
-    let finalize_result = if should_finalize {
+    if should_finalize {
         pkcs11.finalize().map_err(map_pkcs11_error)
     } else {
         Ok(())
-    };
-
-    finalize_result
+    }
+    // `sessions` guard drops here (end of scope), AFTER finalize has
+    // returned — new acquires will see a clean uninitialized state.
 }
 
 fn map_pkcs11_error(error: Pkcs11Error) -> TokenError {

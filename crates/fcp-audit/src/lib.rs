@@ -322,6 +322,21 @@ impl AuditEntry {
     /// to canonicalize the payload.
     pub fn signing_bytes(&self) -> Result<Vec<u8>, AuditError> {
         let id = self.computed_id()?;
+        Ok(self.signing_bytes_from_id(&id))
+    }
+
+    /// Build signing bytes from a **pre-computed** canonical id,
+    /// skipping the redundant `computed_id()` canonicalization.
+    ///
+    /// Used by batch verification paths (e.g.
+    /// [`verify_chain_with_signers`]) that already hold the canonical
+    /// id for each entry; prevents paying the canonical-CBOR +
+    /// BLAKE3 cost twice per entry per call (br-atd32). The caller is
+    /// responsible for having computed `id` via
+    /// [`AuditEntry::computed_id`] — passing an arbitrary string
+    /// produces a valid but meaningless signing transcript.
+    #[must_use]
+    pub fn signing_bytes_from_id(&self, id: &str) -> Vec<u8> {
         let id_bytes = id.as_bytes();
         let kid_slice: &[u8] = self
             .issuer_kid
@@ -344,7 +359,7 @@ impl AuditEntry {
                 .to_le_bytes(),
         );
         bytes.extend_from_slice(kid_slice);
-        Ok(bytes)
+        bytes
     }
 
     /// Sign this entry with the supplied Ed25519 signing key, populating
@@ -378,6 +393,32 @@ impl AuditEntry {
         &self,
         verifying_key: &Ed25519VerifyingKey,
     ) -> Result<(), AuditError> {
+        let id = self.computed_id()?;
+        self.verify_signature_with_id(verifying_key, &id)
+    }
+
+    /// Verify the entry's signature using a **pre-computed** canonical
+    /// id for the signing transcript, avoiding the redundant
+    /// canonicalize+hash work that [`verify_signature`] performs.
+    ///
+    /// Used by batch verification (see [`verify_chain_with_signers`])
+    /// that already holds the canonical id for each entry; paired with
+    /// [`signing_bytes_from_id`] this halves the per-entry
+    /// serialization cost of a signed-chain check (br-atd32).
+    ///
+    /// # Errors
+    /// Same as [`verify_signature`]: [`AuditError::SignerMissing`] when
+    /// `issuer_kid` or `signature` is absent;
+    /// [`AuditError::SignatureInvalid`] when the signer/key do not
+    /// match or the signature does not verify against the canonical
+    /// transcript.
+    ///
+    /// [`signing_bytes_from_id`]: Self::signing_bytes_from_id
+    pub fn verify_signature_with_id(
+        &self,
+        verifying_key: &Ed25519VerifyingKey,
+        id: &str,
+    ) -> Result<(), AuditError> {
         let kid = self
             .issuer_kid
             .as_ref()
@@ -391,7 +432,7 @@ impl AuditEntry {
             return Err(AuditError::SignatureInvalid { seq: self.seq });
         }
 
-        let transcript = self.signing_bytes()?;
+        let transcript = self.signing_bytes_from_id(id);
         verifying_key
             .verify(&transcript, signature)
             .map_err(|_| AuditError::SignatureInvalid { seq: self.seq })
@@ -1432,6 +1473,34 @@ pub fn verify_chain(
     head: Option<&ChainHead>,
     zone_id: Option<&str>,
 ) -> VerifyReport {
+    let precomputed: Vec<Result<String, AuditError>> =
+        entries.iter().map(AuditEntry::computed_id).collect();
+    verify_chain_with_precomputed_ids(entries, head, zone_id, &precomputed)
+}
+
+/// Internal core of [`verify_chain`] that accepts precomputed canonical
+/// ids. Exposed for batch callers (see [`verify_chain_with_signers`])
+/// that need to share canonical-id work across signature verification
+/// AND chain-integrity verification (br-atd32).
+///
+/// The slice length MUST equal `entries.len()`; each element is either
+/// `Ok(canonical_id)` or `Err(err)` for the corresponding entry.
+/// `Err` positions surface an `audit.object_id_unverifiable` issue in
+/// the returned report, matching the behavior of the unified
+/// [`verify_chain`] path.
+#[must_use]
+pub fn verify_chain_with_precomputed_ids(
+    entries: &[AuditEntry],
+    head: Option<&ChainHead>,
+    zone_id: Option<&str>,
+    precomputed_ids: &[Result<String, AuditError>],
+) -> VerifyReport {
+    debug_assert_eq!(
+        entries.len(),
+        precomputed_ids.len(),
+        "precomputed_ids length must match entries length"
+    );
+
     let mut issues = Vec::new();
 
     if entries.is_empty() {
@@ -1448,11 +1517,11 @@ pub fn verify_chain(
         return report;
     }
 
-    let mut canonical_ids = Vec::with_capacity(entries.len());
-    for entry in entries {
-        match entry.computed_id() {
+    let mut canonical_ids: Vec<Option<String>> = Vec::with_capacity(entries.len());
+    for (entry, precomputed) in entries.iter().zip(precomputed_ids.iter()) {
+        match precomputed {
             Ok(canonical_id) => {
-                if entry.id != canonical_id {
+                if entry.id != *canonical_id {
                     issues.push(
                         VerifyIssue::new(
                             "audit.object_id_mismatch",
@@ -1464,7 +1533,7 @@ pub fn verify_chain(
                         .with_entry_id(&entry.id),
                     );
                 }
-                canonical_ids.push(Some(canonical_id));
+                canonical_ids.push(Some(canonical_id.clone()));
             }
             Err(err) => {
                 issues.push(
@@ -1716,7 +1785,15 @@ pub fn verify_chain_with_signers(
     zone_id: Option<&str>,
     key_lookup: impl Fn(&KeyId) -> Option<Ed25519VerifyingKey>,
 ) -> Result<VerifyReport, AuditError> {
-    for entry in entries {
+    // br-atd32: canonicalize each entry exactly once and share the
+    // result between signature verification and chain-integrity
+    // verification. Previously this path paid ~2 full canonical-CBOR
+    // + BLAKE3 passes per entry (one inside verify_signature ->
+    // signing_bytes -> computed_id, one inside verify_chain).
+    let precomputed_ids: Vec<Result<String, AuditError>> =
+        entries.iter().map(AuditEntry::computed_id).collect();
+
+    for (entry, id_result) in entries.iter().zip(precomputed_ids.iter()) {
         let kid = entry
             .issuer_kid
             .as_ref()
@@ -1725,7 +1802,15 @@ pub fn verify_chain_with_signers(
             return Err(AuditError::SignerMissing { seq: entry.seq });
         }
         let verifying_key = key_lookup(kid).ok_or(AuditError::UnknownIssuer { seq: entry.seq })?;
-        entry.verify_signature(&verifying_key)?;
+        // If computed_id failed for this entry, propagate the
+        // serialization error with the original semantics (the old
+        // verify_signature path bubbled it through ?). Clone is cheap:
+        // AuditError derives Clone (see definition).
+        let id = match id_result {
+            Ok(id) => id.as_str(),
+            Err(err) => return Err(err.clone()),
+        };
+        entry.verify_signature_with_id(&verifying_key, id)?;
     }
 
     // br-ax97w: authenticate the ChainHead quorum too. verify_chain only
@@ -1741,7 +1826,12 @@ pub fn verify_chain_with_signers(
         head.verify_signatures(&key_lookup)?;
     }
 
-    Ok(verify_chain(entries, head, zone_id))
+    Ok(verify_chain_with_precomputed_ids(
+        entries,
+        head,
+        zone_id,
+        &precomputed_ids,
+    ))
 }
 
 /// Verify an audit chain AND reject entries timestamped implausibly far in
@@ -2715,6 +2805,76 @@ mod tests {
             Err(AuditError::SignerMissing { seq: 0 }) => {}
             other => panic!("expected SignerMissing for unsigned entry, got {other:?}"),
         }
+    }
+
+    /// Regression for br-atd32: the new `signing_bytes_from_id` +
+    /// `verify_signature_with_id` fast path must be byte-identical to
+    /// the legacy `signing_bytes` + `verify_signature` path for a
+    /// well-formed signed entry. This pins the perf refactor against
+    /// accidental transcript drift.
+    #[test]
+    fn signing_bytes_from_id_matches_signing_bytes_for_signed_entry() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        let mut entry = signed_test_entry(0, None);
+        entry.id = entry.computed_id().unwrap();
+        entry.sign(&signing_key).expect("sign succeeds");
+
+        let canonical_id = entry.computed_id().expect("computed_id");
+        let legacy_bytes = entry.signing_bytes().expect("signing_bytes");
+        let fast_bytes = entry.signing_bytes_from_id(&canonical_id);
+        assert_eq!(
+            legacy_bytes, fast_bytes,
+            "signing_bytes_from_id must produce byte-identical transcript to signing_bytes"
+        );
+
+        // Both verify paths must accept the legitimate signature.
+        entry.verify_signature(&verifying_key).expect("legacy verify ok");
+        entry
+            .verify_signature_with_id(&verifying_key, &canonical_id)
+            .expect("fast-path verify ok");
+
+        // And both must reject a wrong key (guard against accidental
+        // skip-verify regressions in the fast path).
+        let other_key = Ed25519SigningKey::generate().verifying_key();
+        assert!(matches!(
+            entry.verify_signature(&other_key),
+            Err(AuditError::SignatureInvalid { .. })
+        ));
+        assert!(matches!(
+            entry.verify_signature_with_id(&other_key, &canonical_id),
+            Err(AuditError::SignatureInvalid { .. })
+        ));
+    }
+
+    /// Regression for br-atd32: `verify_chain_with_precomputed_ids`
+    /// must return the same `VerifyReport` as `verify_chain` for the
+    /// same input. This pins the refactor so the precomputed-id public
+    /// helper cannot silently diverge from the canonical path.
+    #[test]
+    fn verify_chain_with_precomputed_ids_matches_verify_chain() {
+        let signing_key = Ed25519SigningKey::generate();
+
+        let mut entries = Vec::new();
+        let mut prev_id: Option<String> = None;
+        for seq in 0..4 {
+            let mut entry = signed_test_entry(seq, prev_id.as_deref());
+            entry.id = entry.computed_id().unwrap();
+            entry.sign(&signing_key).expect("sign succeeds");
+            prev_id = Some(entry.id.clone());
+            entries.push(entry);
+        }
+
+        let legacy = verify_chain(&entries, None, Some("z:work"));
+        let precomputed: Vec<Result<String, AuditError>> =
+            entries.iter().map(AuditEntry::computed_id).collect();
+        let fast = verify_chain_with_precomputed_ids(&entries, None, Some("z:work"), &precomputed);
+
+        assert_eq!(legacy.status, fast.status);
+        assert_eq!(legacy.chain_len, fast.chain_len);
+        assert_eq!(legacy.issues.len(), fast.issues.len());
+        assert_eq!(legacy.zone_id, fast.zone_id);
     }
 
     #[test]

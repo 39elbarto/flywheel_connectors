@@ -225,15 +225,58 @@ impl CwtClaims {
     /// The bytes are deserialized into a `ciborium::Value` so they are
     /// stored as a native CBOR map (not wrapped in a byte string).
     ///
-    /// # Panics
-    ///
-    /// Panics if `cbor_bytes` is not valid CBOR.
+    /// **Deprecated (br-zp1xx):** this variant panics on malformed
+    /// CBOR and exposes a denial-of-service surface to any caller
+    /// that forwards attacker-supplied bytes. Prefer
+    /// [`Self::try_constraints_cbor`], which returns a typed
+    /// [`CryptoError::SerializationError`]. For backward compatibility
+    /// this method now tracing-warns and LEAVES THE CLAIM UNSET when
+    /// the input is invalid, so an existing caller's worst-case
+    /// outcome is a token without a constraints claim (which the
+    /// verifier's constraint-required gate will then reject) rather
+    /// than a process abort.
     #[must_use]
+    #[deprecated(
+        since = "0.2.0",
+        note = "panic-prone; use `try_constraints_cbor` for the fallible variant (br-zp1xx)"
+    )]
     pub fn constraints_cbor(mut self, cbor_bytes: &[u8]) -> Self {
-        let value: ciborium::Value =
-            ciborium::from_reader(cbor_bytes).expect("constraints_cbor: invalid CBOR");
-        self.claims.insert(fcp2_claims::CONSTRAINTS, value);
+        // Parse into a local value first so `self` stays owned for
+        // both the success and fallback paths. On malformed CBOR we
+        // tracing-warn and leave the constraints claim UNSET — the
+        // verifier's C3.4 constraints-required gate will then reject
+        // the resulting token at verify time, which is strictly
+        // better than aborting the process mid-build.
+        match ciborium::from_reader::<ciborium::Value, _>(cbor_bytes) {
+            Ok(value) => {
+                self.claims.insert(fcp2_claims::CONSTRAINTS, value);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    component = "fcp_crypto.cose",
+                    error = %err,
+                    "constraints_cbor: ignoring malformed CBOR; caller should migrate to try_constraints_cbor"
+                );
+            }
+        }
         self
+    }
+
+    /// Fallible variant of [`Self::constraints_cbor`] (br-zp1xx).
+    ///
+    /// The bytes are deserialized into a `ciborium::Value` so they are
+    /// stored as a native CBOR map (not wrapped in a byte string).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::SerializationError`] when `cbor_bytes`
+    /// is not valid CBOR, rather than panicking.
+    pub fn try_constraints_cbor(mut self, cbor_bytes: &[u8]) -> CryptoResult<Self> {
+        let value: ciborium::Value = ciborium::from_reader(cbor_bytes).map_err(|err| {
+            CryptoError::SerializationError(format!("constraints_cbor: invalid CBOR: {err}"))
+        })?;
+        self.claims.insert(fcp2_claims::CONSTRAINTS, value);
+        Ok(self)
     }
 
     /// Set custom claim.
@@ -898,10 +941,32 @@ impl CapabilityTokenBuilder {
     ///
     /// Use `ciborium::into_writer(&constraints, &mut buf)` to serialize
     /// a `CapabilityConstraints` before passing here.
+    ///
+    /// **Deprecated (br-zp1xx):** forwards to the panic-prone
+    /// [`CwtClaims::constraints_cbor`] shim. Migrate to
+    /// [`Self::try_constraints_cbor`] for typed error handling.
     #[must_use]
+    #[deprecated(
+        since = "0.2.0",
+        note = "panic-prone; use `try_constraints_cbor` for the fallible variant (br-zp1xx)"
+    )]
     pub fn constraints_cbor(mut self, cbor_bytes: &[u8]) -> Self {
-        self.claims = self.claims.constraints_cbor(cbor_bytes);
+        #[allow(deprecated)]
+        {
+            self.claims = self.claims.constraints_cbor(cbor_bytes);
+        }
         self
+    }
+
+    /// Fallible variant of [`Self::constraints_cbor`] (br-zp1xx).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::SerializationError`] when `cbor_bytes`
+    /// is not valid CBOR, rather than panicking.
+    pub fn try_constraints_cbor(mut self, cbor_bytes: &[u8]) -> CryptoResult<Self> {
+        self.claims = self.claims.try_constraints_cbor(cbor_bytes)?;
+        Ok(self)
     }
 
     /// Build and sign the token.
@@ -2456,5 +2521,75 @@ mod tests {
 
         let err = CwtClaims::from_cbor(&bytes).unwrap_err();
         assert!(err.to_string().contains("duplicate claim key: 1"));
+    }
+
+    // ── br-zp1xx: constraints_cbor panic -> fallible variant ──────────
+
+    #[test]
+    fn cwt_claims_try_constraints_cbor_rejects_malformed_cbor() {
+        // Arbitrary non-CBOR bytes (0xFF is a CBOR "break" stop byte
+        // outside any indefinite-length context, which ciborium
+        // refuses at the top level).
+        let garbage = vec![0xFF, 0xDE, 0xAD, 0xBE, 0xEF];
+        let err = CwtClaims::new()
+            .try_constraints_cbor(&garbage)
+            .expect_err("malformed CBOR must yield an error, not a panic");
+        match err {
+            CryptoError::SerializationError(msg) => {
+                assert!(
+                    msg.contains("constraints_cbor"),
+                    "error must name the field: {msg}"
+                );
+                assert!(msg.contains("invalid CBOR"), "error must describe cause: {msg}");
+            }
+            other => panic!("expected SerializationError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cwt_claims_try_constraints_cbor_accepts_valid_cbor() {
+        // A well-formed CBOR map should round-trip without error.
+        let mut bytes = Vec::new();
+        ciborium::into_writer(
+            &ciborium::Value::Map(vec![(
+                ciborium::Value::Text("resource_allow".into()),
+                ciborium::Value::Array(vec![ciborium::Value::Text("*".into())]),
+            )]),
+            &mut bytes,
+        )
+        .expect("serialize valid constraints");
+        let claims = CwtClaims::new()
+            .try_constraints_cbor(&bytes)
+            .expect("valid CBOR must succeed");
+        assert!(claims.get(fcp2_claims::CONSTRAINTS).is_some());
+    }
+
+    #[test]
+    fn capability_token_builder_try_constraints_cbor_rejects_malformed_cbor() {
+        // The builder wrapper delegates to CwtClaims::try_constraints_cbor
+        // and MUST propagate the same typed error without panicking.
+        let garbage = vec![0xFF, 0x00, 0xFF, 0x00];
+        let result = CapabilityTokenBuilder::new().try_constraints_cbor(&garbage);
+        match result {
+            Ok(_) => panic!("builder wrapper must fail closed on malformed CBOR"),
+            Err(CryptoError::SerializationError(msg)) => {
+                assert!(msg.contains("invalid CBOR"), "error must describe cause: {msg}");
+            }
+            Err(other) => panic!("expected SerializationError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cwt_claims_constraints_cbor_legacy_shim_skips_malformed_without_panic() {
+        // The deprecated panicking variant now warn-and-skips so a
+        // caller stuck on the old API no longer aborts the process.
+        // The resulting token carries no constraints claim — which the
+        // verifier's C3.4 constraints-required gate will reject at
+        // verify time, strictly better than a panic here.
+        let garbage = vec![0xFF, 0xFF];
+        #[allow(deprecated)]
+        let claims = CwtClaims::new().issuer("test").constraints_cbor(&garbage);
+        assert!(claims.get(fcp2_claims::CONSTRAINTS).is_none());
+        assert_eq!(claims.get_issuer(), Some("test"));
     }
 }

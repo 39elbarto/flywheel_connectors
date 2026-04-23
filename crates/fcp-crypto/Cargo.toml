@@ -63,6 +63,10 @@ thiserror.workspace = true
 # Time (for token validation)
 chrono.workspace = true
 
+# Structured logging — fail-safe paths (br-zp1xx) warn on malformed
+# inputs instead of panicking.
+tracing.workspace = true
+
 [dev-dependencies]
 # Testing
 serde_json.workspace = true

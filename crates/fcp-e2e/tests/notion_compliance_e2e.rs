@@ -207,6 +207,17 @@ fn build_token(
     operations: &[&str],
 ) -> CapabilityToken {
     let now = Utc::now();
+    // C3.4 default-deny: the verifier rejects tokens with no
+    // constraints claim. Wildcard `resource_allow` grants access to
+    // any resource URI the connector builds. (See br-1maun for the
+    // full rationale; same pattern landed in telegram_compliance_e2e.)
+    let constraints = fcp_core::CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut constraints_cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut constraints_cbor)
+        .expect("serialize constraints to CBOR");
     let cose = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -214,6 +225,7 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
+        .constraints_cbor(&constraints_cbor)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -376,8 +388,10 @@ async fn notion_allow_valid_token_connector_suite_passes() {
 
     let mut connector = NotionConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["notion.get_page"]);
-    let token = build_token(&signing_key, "notion.get_page", &["notion.get_page"]);
+    // Introspection declares `notion.get_page` operation requires
+    // capability `notion.read` (permission class, not op id).
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["notion.read"]);
+    let token = build_token(&signing_key, "notion.read", &["notion.get_page"]);
     let invoke = invoke_request(
         "notion.get_page",
         json!({ "page_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890" }),
@@ -418,6 +432,10 @@ async fn notion_allow_valid_token_connector_suite_passes() {
         invoke_entry.context.get("invoke_status"),
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
     );
+
+    // br-7e15h: independently verify the connector actually hit the
+    // mock API, not just that the runner's report says passed.
+    mock.assert_received("/pages/a1b2c3d4-e5f6-7890-abcd-ef1234567890").await;
 }
 
 // ============================================================================

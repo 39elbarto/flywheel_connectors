@@ -205,6 +205,14 @@ fn build_token(
     operations: &[&str],
 ) -> CapabilityToken {
     let now = Utc::now();
+    // C3.4 default-deny: constraints claim is mandatory. (br-1maun)
+    let constraints = fcp_core::CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut constraints_cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut constraints_cbor)
+        .expect("serialize constraints to CBOR");
     let cose = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -212,6 +220,7 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
+        .constraints_cbor(&constraints_cbor)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -387,11 +396,13 @@ async fn youtube_allow_valid_token_connector_suite_passes() {
 
     let mut connector = YouTubeConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
+    // Introspection declares `youtube.get_video` requires capability
+    // `youtube.read` (permission class), not the op id itself.
     let handshake = handshake_request(
         signing_key.verifying_key().to_bytes(),
-        &["youtube.get_video"],
+        &["youtube.read"],
     );
-    let token = build_token(&signing_key, "youtube.get_video", &["youtube.get_video"]);
+    let token = build_token(&signing_key, "youtube.read", &["youtube.get_video"]);
     let invoke = invoke_request(
         "youtube.get_video",
         json!({ "video_id": "dQw4w9WgXcQ" }),
@@ -431,6 +442,24 @@ async fn youtube_allow_valid_token_connector_suite_passes() {
     assert_eq!(
         invoke_entry.context.get("invoke_status"),
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
+    );
+
+    // br-7e15h: independently verify the connector hit the /videos
+    // endpoint. Filter on path prefix since the client appends a
+    // query string (part, id, key) that varies per request.
+    let received = mock.received_requests().await;
+    let videos_hits = received
+        .iter()
+        .filter(|r| {
+            r.method == wiremock::http::Method::GET
+                && r.url.path().starts_with("/videos")
+        })
+        .count();
+    assert_eq!(
+        videos_hits, 1,
+        "expected exactly one GET to /videos*; got {videos_hits} \
+         (received: {:?})",
+        received.iter().map(|r| r.url.path().to_string()).collect::<Vec<_>>()
     );
 }
 

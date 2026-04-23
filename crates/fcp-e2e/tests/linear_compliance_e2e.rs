@@ -205,6 +205,16 @@ fn build_token(
     operations: &[&str],
 ) -> CapabilityToken {
     let now = Utc::now();
+    // C3.4 default-deny: the verifier rejects tokens with no
+    // constraints claim. Wildcard grants any resource URI the
+    // connector builds. (See br-1maun for full rationale.)
+    let constraints = fcp_core::CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut constraints_cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut constraints_cbor)
+        .expect("serialize constraints to CBOR");
     let cose = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -212,6 +222,7 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
+        .constraints_cbor(&constraints_cbor)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -381,11 +392,13 @@ async fn linear_allow_valid_token_connector_suite_passes() {
 
     let mut connector = LinearConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
+    // Introspection declares `linear.get_issue` requires capability
+    // `linear.read` (permission class), not the op id itself.
     let handshake = handshake_request(
         signing_key.verifying_key().to_bytes(),
-        &["linear.get_issue"],
+        &["linear.read"],
     );
-    let token = build_token(&signing_key, "linear.get_issue", &["linear.get_issue"]);
+    let token = build_token(&signing_key, "linear.read", &["linear.get_issue"]);
     let invoke = invoke_request("linear.get_issue", json!({ "issue_id": "LIN-42" }), token);
     let suite = ConnectorSuite {
         test_name: "linear_allow_valid_token".to_string(),
@@ -422,6 +435,9 @@ async fn linear_allow_valid_token_connector_suite_passes() {
         invoke_entry.context.get("invoke_status"),
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
     );
+
+    // br-7e15h: independently verify the GraphQL endpoint was hit.
+    mock.assert_received("/graphql").await;
 }
 
 // ============================================================================

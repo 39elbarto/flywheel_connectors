@@ -409,11 +409,40 @@ impl MemoryObjectStore {
         self
     }
 
-    fn object_size(obj: &StoredObject) -> u64 {
-        // Approximate size: body + header overhead
-        #[allow(clippy::cast_possible_truncation)]
-        let size = obj.body.len() as u64 + 512; // 512 byte header estimate
-        size
+    /// Size accounted against `max_bytes` — the actual canonical
+    /// encoding length of the object (magic prefix + canonical-CBOR
+    /// header + body).
+    ///
+    /// Before br-fm746 this returned `body.len() + 512`, which under-
+    /// counted header-heavy objects (large `refs` / `foreign_refs` /
+    /// `placement`). An attacker could store many small-body,
+    /// large-header objects and bypass `max_bytes` by orders of
+    /// magnitude because the in-memory `ObjectHeader` footprint was
+    /// pegged at a 512-byte estimate. Now we measure the real canonical
+    /// size via [`StoredObject::canonical_bytes`] — the same encoding
+    /// used for `ObjectId` derivation and the 64 MiB canonical cap.
+    ///
+    /// Fallibility: `canonical_bytes` can only fail on non-canonical-
+    /// izable values (NaN / Infinity / duplicate-key maps) or oversized
+    /// payloads. `put()` gates every incoming object through
+    /// `validate_structure()` first, which runs the same pipeline — a
+    /// value that fails here after passing `put()` would mean internal
+    /// state corruption. Rather than panic in quota accounting, we fall
+    /// back to the 64 MiB canonical ceiling so the accounting over-
+    /// charges and fails closed. Quota overestimates are safe;
+    /// underestimates are the bug we're fixing.
+    pub(crate) fn object_size(obj: &StoredObject) -> u64 {
+        // 64 MiB — matches fcp_cbor::MAX_CANONICAL_OBJECT_BYTES. We
+        // can't import fcp-cbor as a regular dep (it lives under
+        // dev-dependencies in this crate), and adding it would pull its
+        // full transitive graph into every lib build. A local constant
+        // is authoritative enough for a conservative fallback.
+        const MAX_CANONICAL_FALLBACK: u64 = 64 * 1024 * 1024;
+
+        match StoredObject::canonical_bytes(&obj.header, &obj.body) {
+            Ok(bytes) => bytes.len() as u64,
+            Err(_) => MAX_CANONICAL_FALLBACK,
+        }
     }
 }
 
@@ -1234,12 +1263,15 @@ mod tests {
     #[test]
     fn quota_exact_boundary() {
         run_store_test("quota_exact_boundary", "verify", "write", 2, || async {
-            // Object size = body.len() + 512 header estimate
-            // So a body of 488 bytes → 1000 total
-            let config = MemoryObjectStoreConfig { max_bytes: 1000 };
+            // Post-br-fm746: object_size is the canonical header size +
+            // body length. Size the quota dynamically to the first
+            // object's actual cost so the boundary check remains tight
+            // regardless of how the canonical CBOR encoding evolves.
+            let obj = test_stored_object(1, &vec![0_u8; 488]);
+            let exact = MemoryObjectStore::object_size(&obj);
+            let config = MemoryObjectStoreConfig { max_bytes: exact };
             let store = MemoryObjectStore::new(config);
 
-            let obj = test_stored_object(1, &vec![0_u8; 488]);
             store.put(obj).await.unwrap(); // Exactly at quota
 
             // Second object should fail
@@ -1478,11 +1510,13 @@ mod tests {
     #[test]
     fn quota_boundary_exact_fit() {
         run_store_test("quota_boundary_exact", "verify", "write", 1, || async {
-            // Object size = body.len() + 512 header estimate
-            // If body is 0 bytes, object_size = 512. Set quota to exactly 512.
-            let config = MemoryObjectStoreConfig { max_bytes: 512 };
-            let store = MemoryObjectStore::new(config);
+            // Post-br-fm746: object_size is the canonical header size +
+            // body length. Fit the quota to the object's actual cost so
+            // the boundary test remains encoder-agnostic.
             let obj = test_stored_object(1, b"");
+            let exact = MemoryObjectStore::object_size(&obj);
+            let config = MemoryObjectStoreConfig { max_bytes: exact };
+            let store = MemoryObjectStore::new(config);
             let result = store.put(obj).await;
             assert!(result.is_ok());
 
@@ -1493,9 +1527,12 @@ mod tests {
     #[test]
     fn quota_boundary_one_byte_short() {
         run_store_test("quota_boundary_short", "verify", "write", 1, || async {
-            let config = MemoryObjectStoreConfig { max_bytes: 511 };
-            let store = MemoryObjectStore::new(config);
+            // See quota_boundary_exact_fit: one byte below the object's
+            // actual canonical-size cost must reject.
             let obj = test_stored_object(1, b"");
+            let exact = MemoryObjectStore::object_size(&obj);
+            let config = MemoryObjectStoreConfig { max_bytes: exact - 1 };
+            let store = MemoryObjectStore::new(config);
             let result = store.put(obj).await;
             assert!(matches!(
                 result,
@@ -1777,11 +1814,19 @@ mod tests {
             || async {
                 let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
 
-                store.put(test_stored_object(1, b"aaaa")).await.unwrap(); // 4 + 512
-                store.put(test_stored_object(2, b"bb")).await.unwrap(); // 2 + 512
+                // Post-br-fm746: size = canonical-header bytes + body.
+                // Compute each object's cost dynamically so the assertion
+                // stays correct even if the canonical CBOR encoding of
+                // test headers changes.
+                let obj1 = test_stored_object(1, b"aaaa");
+                let obj2 = test_stored_object(2, b"bb");
+                let expected = MemoryObjectStore::object_size(&obj1)
+                    + MemoryObjectStore::object_size(&obj2);
+                store.put(obj1).await.unwrap();
+                store.put(obj2).await.unwrap();
 
                 let used = store.storage_used().await;
-                assert_eq!(used, (4 + 512) + (2 + 512));
+                assert_eq!(used, expected);
 
                 StoreLogData {
                     details: Some(json!({"total_used": used})),
@@ -2136,6 +2181,75 @@ mod tests {
         );
     }
 
+    /// Regression for br-fm746: a header-heavy object (tiny body, huge
+    /// `refs` list) MUST have its canonical header cost counted against
+    /// the store quota. Before the fix, MemoryObjectStore pegged header
+    /// overhead at a flat 512-byte estimate regardless of actual
+    /// canonical size, so an attacker could store many `refs`-heavy
+    /// objects with ~0-byte bodies and drive in-memory footprint
+    /// arbitrarily high while the quota accounting still reported plenty
+    /// of headroom.
+    #[test]
+    fn put_counts_canonical_header_in_quota() {
+        run_store_test(
+            "put_counts_canonical_header_in_quota",
+            "verify",
+            "write",
+            4,
+            || async {
+                // 512 ObjectId refs — each is a 32-byte content hash + CBOR
+                // framing bytes, so the canonical header is ~17 KB. The body
+                // is empty. Under the old 512-byte estimate this would count
+                // as ~512 bytes; under the fix it must count as the real
+                // ~17 KB.
+                let mut header_heavy = test_stored_object(1, b"");
+                header_heavy.header.refs =
+                    (0..512_u32).map(|i| ObjectId::from_bytes([i as u8; 32])).collect();
+
+                let actual_size = MemoryObjectStore::object_size(&header_heavy);
+                assert!(
+                    actual_size > 4_096,
+                    "canonical header-heavy object must cost > 4 KiB, got {actual_size}"
+                );
+
+                // Confirm the old 512-byte estimate would have drastically
+                // undercounted — this pins the attack surface.
+                #[allow(clippy::cast_possible_truncation)]
+                let old_estimate = header_heavy.body.len() as u64 + 512;
+                assert!(
+                    actual_size > old_estimate * 8,
+                    "new accounting must dominate the 512-byte estimate by >=8x to \
+                     meaningfully close the DoS window; actual={actual_size} old={old_estimate}"
+                );
+
+                // Quota set below the real cost must reject the object.
+                let config = MemoryObjectStoreConfig { max_bytes: actual_size - 1 };
+                let store = MemoryObjectStore::new(config);
+                let result = store.put(header_heavy.clone()).await;
+                assert!(
+                    matches!(result, Err(ObjectStoreError::QuotaExceeded { .. })),
+                    "header-heavy object must be rejected when quota < canonical cost, got {result:?}"
+                );
+
+                // Quota set at exactly the real cost must accept it.
+                let exact_config = MemoryObjectStoreConfig { max_bytes: actual_size };
+                let exact_store = MemoryObjectStore::new(exact_config);
+                exact_store
+                    .put(header_heavy)
+                    .await
+                    .expect("exact-fit quota must accept the object");
+
+                StoreLogData {
+                    details: Some(json!({
+                        "canonical_size": actual_size,
+                        "old_estimate": old_estimate,
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
     /// Regression test for `flywheel_connectors-sfunf`: the quota
     /// check in `MemoryObjectStore::put` previously read
     /// `used_bytes` inside the `objects.write()` critical section but
@@ -2162,17 +2276,19 @@ mod tests {
             2,
             || async {
                 use std::sync::Arc;
-                // `object_size` adds a 512-byte header estimate to the
-                // body length. With body=500, every object costs 1012
-                // bytes. max_bytes=5_000 admits at most 4 objects
-                // (4 * 1012 = 4048); a 5th would push to 5060 > 5000.
+                // Post-br-fm746: object_size = canonical header + body.
+                // Size the quota to exactly `FIT_COUNT` objects' worth
+                // so the concurrent-put scheduler has no ambiguity
+                // about how many inserts should succeed.
                 const BODY: usize = 500;
-                const MAX_BYTES: u64 = 5_000;
+                const FIT_COUNT: u64 = 4;
                 const TASKS: usize = 16;
 
-                let config = MemoryObjectStoreConfig {
-                    max_bytes: MAX_BYTES,
-                };
+                let probe = test_stored_object(0, &vec![0_u8; BODY]);
+                let per_object = MemoryObjectStore::object_size(&probe);
+                let max_bytes = per_object * FIT_COUNT; // exactly FIT_COUNT fit
+
+                let config = MemoryObjectStoreConfig { max_bytes };
                 let store = Arc::new(MemoryObjectStore::new(config));
 
                 let mut handles = Vec::with_capacity(TASKS);
@@ -2201,8 +2317,8 @@ mod tests {
 
                 let used_after = store.storage_used().await;
                 assert!(
-                    used_after <= MAX_BYTES,
-                    "quota violated under concurrent puts: used={used_after} max={MAX_BYTES} accepted={accepted} rejected={rejected}"
+                    used_after <= max_bytes,
+                    "quota violated under concurrent puts: used={used_after} max={max_bytes} accepted={accepted} rejected={rejected}"
                 );
                 assert_eq!(
                     accepted + rejected,
@@ -2216,7 +2332,7 @@ mod tests {
                         "accepted": accepted,
                         "rejected": rejected,
                         "used_after": used_after,
-                        "max_bytes": MAX_BYTES,
+                        "max_bytes": max_bytes,
                     })),
                     ..StoreLogData::default()
                 }

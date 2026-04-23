@@ -478,6 +478,12 @@ async fn segment_happy_path_compliance_suite_passes() {
         report.passed,
         "happy path compliance should pass: {report:#?}"
     );
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|r| r.url.path() == "/sources")
+        .count();
+    assert_eq!(hits, 1, "expected exactly one GET to /sources");
 }
 
 #[test]

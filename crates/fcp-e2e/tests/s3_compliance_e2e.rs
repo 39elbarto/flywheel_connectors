@@ -17,8 +17,8 @@ use fcp_core::{
     AgentHint, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics, FcpConnector,
     FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId,
     Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo,
-    RequestId, RiskLevel, SafetyTier, ShutdownRequest, SimulateRequest, SimulateResponse,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
+    RequestId, RiskLevel, SafetyTier, SelfCheckReport, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -63,7 +63,13 @@ impl FcpConnector for S3ConnectorAdapter {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
-        self.connector.handle_handshake(req).await
+        let request = serde_json::to_value(req).map_err(|err| FcpError::Internal {
+            message: format!("failed to serialize handshake request: {err}"),
+        })?;
+        let response = self.connector.handle_handshake(request).await?;
+        serde_json::from_value(response).map_err(|err| FcpError::Internal {
+            message: format!("failed to deserialize handshake response: {err}"),
+        })
     }
 
     async fn health(&self) -> HealthSnapshot {
@@ -74,7 +80,7 @@ impl FcpConnector for S3ConnectorAdapter {
                     .and_then(|s| s.as_str())
                     .unwrap_or("unknown");
                 if status == "healthy" {
-                    HealthSnapshot::healthy()
+                    HealthSnapshot::ready()
                 } else {
                     HealthSnapshot::degraded("not_healthy")
                 }
@@ -371,6 +377,15 @@ async fn s3_allow_valid_token_connector_suite_passes() {
         .expect("connector suite run");
 
     assert!(report.passed, "allow suite should pass");
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|r| r.url.path() == "/test-bucket/test-file.txt")
+        .count();
+    assert_eq!(
+        hits, 1,
+        "expected exactly one GET to /test-bucket/test-file.txt"
+    );
     let invoke_entry = report
         .logs
         .iter()

@@ -393,6 +393,12 @@ async fn qdrant_allow_read_with_valid_token_connector_suite_passes() {
         .expect("connector suite run");
 
     assert!(report.passed, "allow read suite should pass");
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|r| r.url.path() == "/collections")
+        .count();
+    assert_eq!(hits, 1, "expected exactly one GET to /collections");
     let invoke_entry = report
         .logs
         .iter()
@@ -479,6 +485,15 @@ async fn qdrant_allow_write_with_valid_token_connector_suite_passes() {
         .expect("connector suite run");
 
     assert!(report.passed, "allow write suite should pass");
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|r| r.url.path() == "/collections/test-collection/points")
+        .count();
+    assert_eq!(
+        hits, 1,
+        "expected exactly one PUT to /collections/test-collection/points"
+    );
 }
 
 // ============================================================================

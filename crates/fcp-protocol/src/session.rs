@@ -1307,6 +1307,98 @@ mod tests {
     }
 
     #[test]
+    fn hello_signature_rejects_tampered_suite_offers() {
+        let initiator = TailscaleNodeId::new("node-initiator");
+        let responder = TailscaleNodeId::new("node-responder");
+        let context = LogContext::new("handshake", "hello_verify")
+            .with_peer(&initiator)
+            .with_reason("suite_offer_tamper");
+        run_logged_test(
+            "hello_signature_rejects_tampered_suite_offers",
+            2,
+            &context,
+            || {
+                let signing_key = Ed25519SigningKey::generate();
+                let mut hello = MeshSessionHello {
+                    from: initiator.clone(),
+                    to: responder.clone(),
+                    eph_pubkey: X25519SecretKey::generate().public_key(),
+                    nonce: SessionNonce([0x12_u8; 16]),
+                    cookie: None,
+                    timestamp: 1_704_067_200,
+                    suites: vec![SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2],
+                    transport_limits: None,
+                    signature: None,
+                };
+                hello.sign(&signing_key).expect("sign");
+                hello.verify(&signing_key.verifying_key()).expect("verify");
+
+                let mut tampered = hello;
+                tampered.suites = vec![SessionCryptoSuite::Suite1];
+                assert!(matches!(
+                    tampered.verify(&signing_key.verifying_key()),
+                    Err(SessionError::InvalidSignature)
+                ));
+            },
+        );
+    }
+
+    #[test]
+    fn ack_verify_rejects_tampered_suite_offers_after_responder_selects_stronger_suite() {
+        let initiator = TailscaleNodeId::new("node-initiator");
+        let responder = TailscaleNodeId::new("node-responder");
+        let session_id = MeshSessionId([0x43_u8; 16]);
+        let context = LogContext::new("handshake", "ack_verify")
+            .with_session(&session_id)
+            .with_peer(&responder)
+            .with_reason("suite_offer_downgrade");
+        run_logged_test(
+            "ack_verify_rejects_tampered_suite_offers_after_responder_selects_stronger_suite",
+            3,
+            &context,
+            || {
+                let initiator_signing_key = Ed25519SigningKey::generate();
+                let responder_signing_key = Ed25519SigningKey::generate();
+                let mut hello = MeshSessionHello {
+                    from: initiator.clone(),
+                    to: responder.clone(),
+                    eph_pubkey: X25519SecretKey::generate().public_key(),
+                    nonce: SessionNonce([0x13_u8; 16]),
+                    cookie: None,
+                    timestamp: 1_704_067_200,
+                    suites: vec![SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2],
+                    transport_limits: None,
+                    signature: None,
+                };
+                hello.sign(&initiator_signing_key).expect("sign hello");
+                hello.verify(&initiator_signing_key.verifying_key())
+                    .expect("verify hello");
+
+                let mut ack = MeshSessionAck {
+                    from: responder.clone(),
+                    to: initiator.clone(),
+                    eph_pubkey: X25519SecretKey::generate().public_key(),
+                    nonce: SessionNonce([0x23_u8; 16]),
+                    session_id,
+                    suite: SessionCryptoSuite::Suite2,
+                    timestamp: 1_704_067_205,
+                    signature: None,
+                };
+                ack.sign(&hello, &responder_signing_key).expect("sign ack");
+                ack.verify(&hello, &responder_signing_key.verifying_key())
+                    .expect("verify ack");
+
+                let mut tampered = hello;
+                tampered.suites = vec![SessionCryptoSuite::Suite1];
+                assert!(matches!(
+                    ack.verify(&tampered, &responder_signing_key.verifying_key()),
+                    Err(SessionError::AckSuiteNotOffered)
+                ));
+            },
+        );
+    }
+
+    #[test]
     fn cookie_verification_detects_tampering() {
         let initiator = TailscaleNodeId::new("node-initiator");
         let responder = TailscaleNodeId::new("node-responder");

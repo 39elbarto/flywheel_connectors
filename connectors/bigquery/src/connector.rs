@@ -691,7 +691,6 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
 ///
 /// Accepts:
 ///   - `bigquery.googleapis.com` (primary)
-///   - `*.googleapis.com` (other Google endpoints)
 ///   - `localhost`, `127.0.0.1`, `::1` (local testing)
 fn base_url_policy(base_url: &str) -> (bool, String) {
     match normalize_base_url(Some(base_url)) {
@@ -1622,12 +1621,6 @@ mod tests {
     }
 
     #[test]
-    fn base_url_policy_accepts_other_googleapis() {
-        let (ok, _) = base_url_policy("https://content-bigquery.googleapis.com/bigquery/v2");
-        assert!(ok);
-    }
-
-    #[test]
     fn base_url_policy_accepts_localhost() {
         let (ok, _) = base_url_policy("http://localhost:8080");
         assert!(ok);
@@ -1650,7 +1643,7 @@ mod tests {
     fn base_url_policy_rejects_unknown_host() {
         let (ok, message) = base_url_policy("https://evil.example.com");
         assert!(!ok);
-        assert!(message.contains("googleapis.com"));
+        assert!(message.contains("bigquery.googleapis.com"));
     }
 
     #[test]

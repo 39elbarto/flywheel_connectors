@@ -43,7 +43,12 @@ required = [
     "network.tls.sni",
     "storage.state",
 ]
-optional = []
+optional = [
+    "bigquery.datasets.read",
+    "bigquery.jobs.read",
+    "bigquery.jobs.write",
+    "bigquery.tables.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",
@@ -76,7 +81,6 @@ type = "array"
 [provides.operations."bigquery.datasets.list".network_constraints]
 host_allow = [
     "bigquery.googleapis.com",
-    "*.googleapis.com",
 ]
 port_allow = [443]
 ip_allow = []
@@ -125,7 +129,6 @@ type = "array"
 [provides.operations."bigquery.jobs.list".network_constraints]
 host_allow = [
     "bigquery.googleapis.com",
-    "*.googleapis.com",
 ]
 port_allow = [443]
 ip_allow = []
@@ -183,7 +186,6 @@ type = "array"
 [provides.operations."bigquery.jobs.query".network_constraints]
 host_allow = [
     "bigquery.googleapis.com",
-    "*.googleapis.com",
 ]
 port_allow = [443]
 ip_allow = []
@@ -237,7 +239,6 @@ type = "array"
 [provides.operations."bigquery.tables.list".network_constraints]
 host_allow = [
     "bigquery.googleapis.com",
-    "*.googleapis.com",
 ]
 port_allow = [443]
 ip_allow = []

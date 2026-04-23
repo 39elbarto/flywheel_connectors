@@ -95,12 +95,10 @@ pub(crate) fn normalize_base_url(base_url: Option<&str>) -> BigQueryResult<Strin
         .ok_or_else(|| BigQueryError::Config("base_url must include a host".into()))?;
 
     let local = is_local_test_host(host);
-    let allowed_host = host.eq_ignore_ascii_case("bigquery.googleapis.com")
-        || host.to_ascii_lowercase().ends_with(".googleapis.com")
-        || local;
+    let allowed_host = host.eq_ignore_ascii_case("bigquery.googleapis.com") || local;
     if !allowed_host {
         return Err(BigQueryError::Config(
-            "base_url must target googleapis.com (localhost/127.0.0.1/::1 allowed for tests)"
+            "base_url must target bigquery.googleapis.com (localhost/127.0.0.1/::1 allowed for tests)"
                 .into(),
         ));
     }

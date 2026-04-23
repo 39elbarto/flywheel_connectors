@@ -175,7 +175,6 @@ impl SessionGoldenVector {
     ///
     /// # Errors
     /// Returns an error message if any value doesn't match.
-    #[cfg(test)]
     pub fn verify(&self) -> Result<(), String> {
         use fcp_crypto::{HkdfSha256, X25519SecretKey, hkdf_sha256_array};
 

@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use fcp_core::TaintFlag;
 use fcp_webhook::{
-    GitHubWebhook, HmacSha256Verifier, SignatureVerifier, WebhookConfig, WebhookError,
-    WebhookHandler,
+    GitHubWebhook, HmacSha256Verifier, SignatureVerifier, StripeWebhook, WebhookConfig,
+    WebhookError, WebhookHandler,
 };
 use serde_json::{Value, json};
 
@@ -75,6 +75,100 @@ fn signature_vector_hmac_sha256_is_stable_and_validates() {
             json!({
                 "vector_id": "hmac_sha256_secret_test_payload",
                 "expected_signature": expected_signature,
+            })
+        },
+    );
+}
+
+#[test]
+fn github_provider_vector_known_good_and_tampered_payloads() {
+    run_compliance_test(
+        "github_provider_vector_known_good_and_tampered_payloads",
+        "verify",
+        "webhook.github.vector",
+        5,
+        || {
+            let handler = GitHubWebhook::new("gh_secret_test");
+            let payload = br#"{"action":"opened","issue":{"number":1}}"#;
+            let expected_signature =
+                "a2c0fd1a0bef03e34345f687745a1690684332161d72bcded76b00110befdd88";
+
+            let mut headers = HashMap::new();
+            headers.insert(
+                "x-hub-signature-256".to_string(),
+                format!("sha256={expected_signature}"),
+            );
+            headers.insert("x-github-event".to_string(), "issues".to_string());
+            headers.insert("x-github-delivery".to_string(), "gh_evt_123".to_string());
+
+            let event = handler
+                .verify_and_parse(&headers, payload)
+                .expect("known-good GitHub vector must verify");
+            assert_eq!(event.id, "gh_evt_123");
+            assert_eq!(event.event_type, "issues");
+
+            let mut tampered = payload.to_vec();
+            tampered[0] ^= 0x01;
+            assert!(matches!(
+                handler.verify_and_parse(&headers, &tampered),
+                Err(WebhookError::InvalidSignature)
+            ));
+
+            let computed = HmacSha256Verifier::new("gh_secret_test").compute(payload);
+            assert_eq!(computed, expected_signature);
+
+            json!({
+                "vector_id": "github_issue_opened_v1",
+                "expected_signature": expected_signature,
+                "event_id": event.id,
+            })
+        },
+    );
+}
+
+#[test]
+fn stripe_provider_vector_known_good_and_tampered_payloads() {
+    run_compliance_test(
+        "stripe_provider_vector_known_good_and_tampered_payloads",
+        "verify",
+        "webhook.stripe.vector",
+        5,
+        || {
+            let handler =
+                StripeWebhook::new("whsec_test").with_timestamp_tolerance(Duration::from_secs(5));
+            let payload = br#"{"id":"evt_123","type":"payment_intent.succeeded"}"#;
+            let timestamp = 1_700_000_000_i64;
+            let expected_signature =
+                "6f372f5ee7b8512142fa568d371d8674b3accc526c220605b289be8a123d557c";
+
+            let mut headers = HashMap::new();
+            headers.insert(
+                "stripe-signature".to_string(),
+                format!("t={timestamp},v1={expected_signature}"),
+            );
+
+            let event = handler
+                .verify_and_parse(&headers, payload)
+                .expect("known-good Stripe vector must verify");
+            assert_eq!(event.id, "evt_123");
+            assert_eq!(event.event_type, "payment_intent.succeeded");
+
+            let mut tampered = payload.to_vec();
+            tampered[0] ^= 0x01;
+            assert!(matches!(
+                handler.verify_and_parse(&headers, &tampered),
+                Err(WebhookError::InvalidSignature)
+            ));
+
+            let signed = format!("{timestamp}.{}", String::from_utf8_lossy(payload));
+            let computed = HmacSha256Verifier::new("whsec_test").compute(signed.as_bytes());
+            assert_eq!(computed, expected_signature);
+
+            json!({
+                "vector_id": "stripe_payment_intent_succeeded_v1",
+                "timestamp": timestamp,
+                "expected_signature": expected_signature,
+                "event_id": event.id,
             })
         },
     );

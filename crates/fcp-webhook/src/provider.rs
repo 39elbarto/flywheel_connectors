@@ -28,6 +28,12 @@ const MAX_STRIPE_TIMESTAMP_LEN: usize = 20;
 /// before ever reaching the HMAC verifier.
 const MAX_STRIPE_SIGNATURE_LEN: usize = 128;
 
+/// Cap Slack's `X-Slack-Request-Timestamp` header before copying it into
+/// the `v0:{timestamp}:{body}` HMAC base string. Unix seconds fit in 10
+/// decimal digits until the year 2286, so 20 allows legitimate leading-zero
+/// variants while fail-closing multi-megabyte attacker-controlled values.
+const MAX_SLACK_TIMESTAMP_LEN: usize = 20;
+
 fn header_value_case_insensitive<'a>(
     headers: &'a HashMap<String, String>,
     name: &str,
@@ -434,6 +440,11 @@ impl SlackWebhook {
 
         let timestamp_str = header_value_case_insensitive(headers, "x-slack-request-timestamp")?
             .ok_or_else(|| WebhookError::MissingSignature("X-Slack-Request-Timestamp".into()))?;
+        if timestamp_str.len() > MAX_SLACK_TIMESTAMP_LEN {
+            return Err(WebhookError::InvalidPayload(
+                "X-Slack-Request-Timestamp exceeds maximum length".into(),
+            ));
+        }
 
         let timestamp: i64 = timestamp_str
             .parse()
@@ -1121,6 +1132,28 @@ mod tests {
         );
         let result = handler.verify_and_parse(&headers, b"{}");
         assert!(matches!(result, Err(WebhookError::InvalidPayload(_))));
+    }
+
+    #[test]
+    fn test_slack_rejects_oversized_timestamp_value() {
+        let handler = SlackWebhook::new("secret");
+        let mut headers = HashMap::new();
+        headers.insert("x-slack-signature".to_string(), "v0=abc".to_string());
+        headers.insert(
+            "x-slack-request-timestamp".to_string(),
+            "0".repeat(MAX_SLACK_TIMESTAMP_LEN + 1),
+        );
+
+        let err = handler.verify_and_parse(&headers, b"{}").unwrap_err();
+        match err {
+            WebhookError::InvalidPayload(msg) => {
+                assert!(
+                    msg.contains("X-Slack-Request-Timestamp"),
+                    "message should name the bounded field: {msg}"
+                );
+            }
+            other => panic!("expected InvalidPayload, got {other:?}"),
+        }
     }
 
     #[test]

@@ -263,16 +263,22 @@ async fn connect_websocket(url: String, config: WsConfig) -> StreamResult<WsTran
 }
 
 /// WebSocket message types.
+///
+/// Binary/control payloads are stored as `Bytes` so that conversions
+/// from the upstream `fastwebsockets::Message::Binary(Bytes)` (and the
+/// matching Ping/Pong control frames) preserve the zero-copy
+/// reference-counted buffer instead of memcpying into a fresh
+/// `Vec<u8>` on every received frame (br-298cj).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WsMessage {
     /// Text message.
     Text(String),
     /// Binary message.
-    Binary(Vec<u8>),
+    Binary(Bytes),
     /// Ping message.
-    Ping(Vec<u8>),
+    Ping(Bytes),
     /// Pong message.
-    Pong(Vec<u8>),
+    Pong(Bytes),
     /// Close message.
     Close(Option<WsCloseFrame>),
 }
@@ -286,8 +292,20 @@ impl WsMessage {
 
     /// Create a binary message.
     #[must_use]
-    pub fn binary(data: impl Into<Vec<u8>>) -> Self {
+    pub fn binary(data: impl Into<Bytes>) -> Self {
         Self::Binary(data.into())
+    }
+
+    /// Create a ping control frame.
+    #[must_use]
+    pub fn ping(data: impl Into<Bytes>) -> Self {
+        Self::Ping(data.into())
+    }
+
+    /// Create a pong control frame.
+    #[must_use]
+    pub fn pong(data: impl Into<Bytes>) -> Self {
+        Self::Pong(data.into())
     }
 
     /// Check if this is a text message.
@@ -321,7 +339,7 @@ impl WsMessage {
     #[must_use]
     pub fn as_binary(&self) -> Option<&[u8]> {
         match self {
-            Self::Binary(data) => Some(data),
+            Self::Binary(data) => Some(data.as_ref()),
             _ => None,
         }
     }
@@ -333,7 +351,7 @@ impl WsMessage {
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
         match self {
             Self::Text(data) => serde_json::from_str(data),
-            Self::Binary(data) => serde_json::from_slice(data),
+            Self::Binary(data) => serde_json::from_slice(data.as_ref()),
             _ => Err(serde::de::Error::custom("Not a data message")),
         }
     }
@@ -363,9 +381,13 @@ impl From<Message> for WsMessage {
     fn from(message: Message) -> Self {
         match message {
             Message::Text(text) => Self::Text(text),
-            Message::Binary(data) => Self::Binary(data.to_vec()),
-            Message::Ping(data) => Self::Ping(data.to_vec()),
-            Message::Pong(data) => Self::Pong(data.to_vec()),
+            // br-298cj: zero-copy on the recv hot path.
+            // `Bytes` is reference-counted, so moving it from
+            // `Message::Binary(Bytes)` into `WsMessage::Binary(Bytes)`
+            // is a pointer transfer — no memcpy, no reallocation.
+            Message::Binary(data) => Self::Binary(data),
+            Message::Ping(data) => Self::Ping(data),
+            Message::Pong(data) => Self::Pong(data),
             Message::Close(reason) => Self::Close(reason.map(Self::close_frame_from_reason)),
         }
     }
@@ -381,9 +403,10 @@ impl From<WsMessage> for Message {
     fn from(message: WsMessage) -> Self {
         match message {
             WsMessage::Text(text) => Self::Text(text),
-            WsMessage::Binary(data) => Self::Binary(Bytes::from(data)),
-            WsMessage::Ping(data) => Self::Ping(Bytes::from(data)),
-            WsMessage::Pong(data) => Self::Pong(Bytes::from(data)),
+            // Zero-copy send path: both sides already hold `Bytes`.
+            WsMessage::Binary(data) => Self::Binary(data),
+            WsMessage::Ping(data) => Self::Ping(data),
+            WsMessage::Pong(data) => Self::Pong(data),
             WsMessage::Close(frame) => Self::Close(frame.map(CloseReason::from)),
         }
     }
@@ -630,7 +653,7 @@ impl WsConnection {
     ///
     /// # Errors
     /// Returns a stream error if the message cannot be sent.
-    pub async fn send_binary(&mut self, data: impl Into<Vec<u8>>) -> StreamResult<()> {
+    pub async fn send_binary(&mut self, data: impl Into<Bytes>) -> StreamResult<()> {
         self.send(WsMessage::binary(data)).await
     }
 
@@ -1011,8 +1034,8 @@ mod tests {
 
     #[test]
     fn ws_message_json_rejects_control_messages() {
-        assert!(WsMessage::Ping(vec![]).json::<serde_json::Value>().is_err());
-        assert!(WsMessage::Pong(vec![]).json::<serde_json::Value>().is_err());
+        assert!(WsMessage::ping(vec![]).json::<serde_json::Value>().is_err());
+        assert!(WsMessage::pong(vec![]).json::<serde_json::Value>().is_err());
         assert!(WsMessage::Close(None).json::<serde_json::Value>().is_err());
     }
 
@@ -1189,7 +1212,7 @@ mod tests {
 
     #[test]
     fn ws_message_ping_is_not_data() {
-        let msg = WsMessage::Ping(vec![1, 2, 3]);
+        let msg = WsMessage::ping(vec![1, 2, 3]);
         assert!(!msg.is_text());
         assert!(!msg.is_binary());
         assert!(!msg.is_close());
@@ -1199,7 +1222,7 @@ mod tests {
 
     #[test]
     fn ws_message_pong_is_not_data() {
-        let msg = WsMessage::Pong(vec![4, 5]);
+        let msg = WsMessage::pong(vec![4, 5]);
         assert!(!msg.is_text());
         assert!(!msg.is_binary());
         assert!(!msg.is_close());
@@ -1504,7 +1527,7 @@ mod tests {
 
     #[test]
     fn ws_message_roundtrip_ping() {
-        let original = WsMessage::Ping(vec![1, 2, 3]);
+        let original = WsMessage::ping(vec![1, 2, 3]);
         let message: Message = original.clone().into();
         let roundtrip: WsMessage = message.into();
         assert_eq!(roundtrip, original);
@@ -1512,7 +1535,7 @@ mod tests {
 
     #[test]
     fn ws_message_roundtrip_pong() {
-        let original = WsMessage::Pong(vec![4, 5, 6]);
+        let original = WsMessage::pong(vec![4, 5, 6]);
         let message: Message = original.clone().into();
         let roundtrip: WsMessage = message.into();
         assert_eq!(roundtrip, original);
@@ -1624,14 +1647,14 @@ mod tests {
 
     #[test]
     fn ws_message_clone_ping() {
-        let msg = WsMessage::Ping(vec![9, 8, 7]);
+        let msg = WsMessage::ping(vec![9, 8, 7]);
         let cloned = msg.clone();
         assert_eq!(msg, cloned);
     }
 
     #[test]
     fn ws_message_clone_pong() {
-        let msg = WsMessage::Pong(vec![5, 6]);
+        let msg = WsMessage::pong(vec![5, 6]);
         let cloned = msg.clone();
         assert_eq!(msg, cloned);
     }
@@ -1661,14 +1684,14 @@ mod tests {
 
     #[test]
     fn ws_message_debug_ping() {
-        let msg = WsMessage::Ping(vec![]);
+        let msg = WsMessage::ping(vec![]);
         let dbg = format!("{msg:?}");
         assert!(dbg.contains("Ping"));
     }
 
     #[test]
     fn ws_message_debug_pong() {
-        let msg = WsMessage::Pong(vec![]);
+        let msg = WsMessage::pong(vec![]);
         let dbg = format!("{msg:?}");
         assert!(dbg.contains("Pong"));
     }
@@ -1838,7 +1861,7 @@ mod tests {
 
     #[test]
     fn ws_message_roundtrip_empty_ping() {
-        let original = WsMessage::Ping(vec![]);
+        let original = WsMessage::ping(vec![]);
         let message: Message = original.clone().into();
         let roundtrip: WsMessage = message.into();
         assert_eq!(roundtrip, original);
@@ -1846,7 +1869,7 @@ mod tests {
 
     #[test]
     fn ws_message_roundtrip_empty_pong() {
-        let original = WsMessage::Pong(vec![]);
+        let original = WsMessage::pong(vec![]);
         let message: Message = original.clone().into();
         let roundtrip: WsMessage = message.into();
         assert_eq!(roundtrip, original);
@@ -1887,13 +1910,13 @@ mod tests {
 
     #[test]
     fn ws_message_ping_is_not_close() {
-        let msg = WsMessage::Ping(vec![]);
+        let msg = WsMessage::ping(vec![]);
         assert!(!msg.is_close());
     }
 
     #[test]
     fn ws_message_pong_is_not_close() {
-        let msg = WsMessage::Pong(vec![]);
+        let msg = WsMessage::pong(vec![]);
         assert!(!msg.is_close());
     }
 
@@ -2020,8 +2043,8 @@ mod tests {
 
     #[test]
     fn ws_message_ne_ping_vs_pong_same_data() {
-        let outgoing = WsMessage::Ping(vec![1, 2, 3]);
-        let reply = WsMessage::Pong(vec![1, 2, 3]);
+        let outgoing = WsMessage::ping(vec![1, 2, 3]);
+        let reply = WsMessage::pong(vec![1, 2, 3]);
         assert_ne!(outgoing, reply);
     }
 
@@ -2059,13 +2082,13 @@ mod tests {
 
     #[test]
     fn ws_message_as_text_on_ping() {
-        let msg = WsMessage::Ping(vec![1]);
+        let msg = WsMessage::ping(vec![1]);
         assert!(msg.as_text().is_none());
     }
 
     #[test]
     fn ws_message_as_binary_on_pong() {
-        let msg = WsMessage::Pong(vec![1]);
+        let msg = WsMessage::pong(vec![1]);
         assert!(msg.as_binary().is_none());
     }
 

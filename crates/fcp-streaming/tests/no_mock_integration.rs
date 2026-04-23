@@ -808,8 +808,8 @@ fn error_is_send() {
 fn ws_message_all_type_checks() {
     let text = WsMessage::text("hello");
     let binary = WsMessage::binary(vec![1, 2, 3]);
-    let ws_ping = WsMessage::Ping(vec![]);
-    let ws_pong = WsMessage::Pong(vec![]);
+    let ws_ping = WsMessage::ping(vec![]);
+    let ws_pong = WsMessage::pong(vec![]);
     let close_none = WsMessage::Close(None);
     let close_frame = WsMessage::Close(Some(WsCloseFrame::normal()));
 
@@ -855,8 +855,8 @@ fn ws_message_binary_json_roundtrip() {
 #[test]
 #[allow(clippy::similar_names)]
 fn ws_message_json_fails_on_non_data_types() {
-    let ws_ping = WsMessage::Ping(vec![]);
-    let ws_pong = WsMessage::Pong(vec![]);
+    let ws_ping = WsMessage::ping(vec![]);
+    let ws_pong = WsMessage::pong(vec![]);
     let close = WsMessage::Close(None);
 
     assert!(ws_ping.json::<serde_json::Value>().is_err());
@@ -1069,9 +1069,9 @@ fn ws_message_as_binary_returns_content() {
 
 #[test]
 fn ws_message_accessors_on_control_frames() {
-    assert!(WsMessage::Ping(vec![1]).as_text().is_none());
-    assert!(WsMessage::Ping(vec![1]).as_binary().is_none());
-    assert!(WsMessage::Pong(vec![2]).as_text().is_none());
+    assert!(WsMessage::ping(vec![1]).as_text().is_none());
+    assert!(WsMessage::ping(vec![1]).as_binary().is_none());
+    assert!(WsMessage::pong(vec![2]).as_text().is_none());
     assert!(WsMessage::Close(None).as_text().is_none());
     assert!(WsMessage::Close(None).as_binary().is_none());
 }

@@ -2437,4 +2437,50 @@ mod tests {
             Err(TailscaleError::InvalidNodeId(_))
         ));
     }
+
+    #[test]
+    fn status_peers_rejects_distinct_peers_claiming_same_node_id() {
+        let status = TailscaleStatus {
+            backend_state: "Running".to_string(),
+            self_node: MockTailscaleClient::mock_self_node(
+                "self-node",
+                "self",
+                "100.64.0.1".parse().unwrap(),
+                &[],
+            ),
+            peer: HashMap::from([
+                (
+                    "node-a".to_string(),
+                    MockTailscaleClient::mock_peer(
+                        "node-a",
+                        "host-a",
+                        "100.64.0.2".parse().unwrap(),
+                        &[],
+                    ),
+                ),
+                (
+                    "node-b".to_string(),
+                    // Distinct Tailscale peer map entry tries to alias the
+                    // already-claimed canonical NodeId "node-a".
+                    MockTailscaleClient::mock_peer(
+                        "node-a",
+                        "host-b",
+                        "100.64.0.3".parse().unwrap(),
+                        &[],
+                    ),
+                ),
+            ]),
+            user: None,
+            tailnet: None,
+        };
+
+        let err = status
+            .peers()
+            .expect_err("distinct peers aliasing the same NodeId must be rejected");
+        assert!(matches!(err, TailscaleError::ParseError(_)));
+        assert!(
+            err.to_string().contains("does not match embedded ID"),
+            "expected collision/mismatch rejection, got {err}"
+        );
+    }
 }

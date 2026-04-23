@@ -145,12 +145,12 @@ impl SymbolResponse {
 pub struct SymbolRequestHandler {
     /// Policy configuration.
     policy: SymbolRequestPolicy,
-    /// Active transfers (object_id -> transfer state).
-    active_transfers: HashMap<ObjectId, TransferState>,
-    /// Completed transfers awaiting SymbolAck (object_id -> timestamp_ms).
-    completed_awaiting_ack: HashMap<ObjectId, u64>,
-    /// Completed transfers (SymbolAck received) (object_id -> timestamp_ms).
-    completed_transfers: HashMap<ObjectId, u64>,
+    /// Active transfers keyed by receiving peer + object.
+    active_transfers: HashMap<TransferKey, TransferState>,
+    /// Completed transfers awaiting SymbolAck keyed by receiving peer + object.
+    completed_awaiting_ack: HashMap<TransferKey, u64>,
+    /// Completed transfers (SymbolAck received) keyed by receiving peer + object.
+    completed_transfers: HashMap<TransferKey, u64>,
 }
 
 /// Policy for symbol request handling.
@@ -179,6 +179,23 @@ impl Default for SymbolRequestPolicy {
             require_proof_of_need_above: 100, // Require hints for large requests
             allow_unauthenticated: true,      // Zone can override
             transfer_state_ttl_ms: 3_600_000, // 1 hour
+        }
+    }
+}
+
+/// State for an active transfer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct TransferKey {
+    peer: NodeId,
+    object_id: ObjectId,
+}
+
+impl TransferKey {
+    #[must_use]
+    pub(crate) fn new(peer: &NodeId, object_id: &ObjectId) -> Self {
+        Self {
+            peer: peer.clone(),
+            object_id: object_id.clone(),
         }
     }
 }
@@ -382,17 +399,19 @@ impl SymbolRequestHandler {
     /// objects that were actually in `active_transfers`, so a forged status
     /// for a random object_id cannot be used to fill `completed_awaiting_ack`
     /// unboundedly between `prune_stale_state` cycles.
-    pub fn process_decode_status(&mut self, status: &DecodeStatus, now_ms: u64) {
+    pub fn process_decode_status(&mut self, peer: &NodeId, status: &DecodeStatus, now_ms: u64) {
+        let key = TransferKey::new(peer, &status.object_id);
         // Gate all state writes on "we actually have an active transfer for
         // this object". A complete=true status for an unknown object would
         // otherwise insert into completed_awaiting_ack — bounded only by the
         // prune_stale_state cadence.
-        let Some(state) = self.active_transfers.get_mut(&status.object_id) else {
+        let Some(state) = self.active_transfers.get_mut(&key) else {
             if status.complete {
                 warn!(
+                    peer = %peer,
                     object_id = %hex::encode(status.object_id.as_bytes()),
                     received = status.received_unique,
-                    "DecodeStatus for unknown object_id — dropped"
+                    "DecodeStatus for unknown peer/object transfer — dropped"
                 );
             }
             return;
@@ -409,26 +428,28 @@ impl SymbolRequestHandler {
 
         if status.complete {
             info!(
+                peer = %peer,
                 object_id = %hex::encode(status.object_id.as_bytes()),
                 received = status.received_unique,
                 "decode complete, awaiting SymbolAck"
             );
             state.stopped = true;
-            self.completed_awaiting_ack
-                .insert(status.object_id.clone(), now_ms);
+            self.completed_awaiting_ack.insert(key, now_ms);
         }
     }
 
     /// Track symbols sent for a request (starts or updates transfer state).
     pub fn track_transfer(
         &mut self,
+        peer: &NodeId,
         request: &SymbolRequest,
         sent_esis: impl IntoIterator<Item = u32>,
         now_ms: u64,
     ) {
+        let key = TransferKey::new(peer, &request.object_id);
         let state = self
             .active_transfers
-            .entry(request.object_id)
+            .entry(key)
             .or_insert_with(|| TransferState {
                 object_id: request.object_id,
                 total_needed: request.max_symbols,
@@ -455,9 +476,10 @@ impl SymbolRequestHandler {
     /// (active transfer or already completed-awaiting-ack), so a fake ack for
     /// a random object_id cannot be used to fill `completed_transfers`
     /// unboundedly between `prune_stale_state` cycles.
-    pub fn process_symbol_ack(&mut self, ack: &SymbolAck, now_ms: u64) {
-        let was_awaiting_ack = self.completed_awaiting_ack.remove(&ack.object_id).is_some();
-        let had_active = self.active_transfers.contains_key(&ack.object_id);
+    pub fn process_symbol_ack(&mut self, peer: &NodeId, ack: &SymbolAck, now_ms: u64) {
+        let key = TransferKey::new(peer, &ack.object_id);
+        let was_awaiting_ack = self.completed_awaiting_ack.remove(&key).is_some();
+        let had_active = self.active_transfers.contains_key(&key);
 
         if !was_awaiting_ack && !had_active {
             // An ack for an object we never transferred: either a buggy peer,
@@ -465,40 +487,41 @@ impl SymbolRequestHandler {
             // caller. Log and drop instead of polluting completed_transfers
             // (which is bounded only by prune_stale_state cadence).
             warn!(
+                peer = %peer,
                 object_id = %hex::encode(ack.object_id.as_bytes()),
                 reason = ?ack.reason,
-                "SymbolAck for unknown object_id — dropped"
+                "SymbolAck for unknown peer/object transfer — dropped"
             );
             return;
         }
 
         info!(
+            peer = %peer,
             object_id = %hex::encode(ack.object_id.as_bytes()),
             reason = ?ack.reason,
             final_count = ack.final_symbol_count,
             "received SymbolAck, stopping transfer"
         );
 
-        self.completed_transfers.insert(ack.object_id, now_ms);
+        self.completed_transfers.insert(key.clone(), now_ms);
 
-        if let Some(state) = self.active_transfers.get_mut(&ack.object_id) {
+        if let Some(state) = self.active_transfers.get_mut(&key) {
             state.stopped = true;
             state.last_activity = now_ms;
         }
 
         // Can clean up transfer state
-        self.active_transfers.remove(&ack.object_id);
+        self.active_transfers.remove(&key);
     }
 
     /// Check if a transfer should stop.
     #[must_use]
-    pub fn should_stop(&self, object_id: &ObjectId) -> bool {
-        if self.completed_transfers.contains_key(object_id) {
+    pub fn should_stop(&self, peer: &NodeId, object_id: &ObjectId) -> bool {
+        let key = TransferKey::new(peer, object_id);
+        if self.completed_transfers.contains_key(&key) {
             return true;
         }
-        self.active_transfers
-            .get(object_id)
-            .is_some_and(|s| s.stopped)
+        self.active_transfers.get(&key).is_some_and(|s| s.stopped)
     }
 
     /// Prune stale transfer state.
@@ -859,6 +882,10 @@ mod tests {
         req
     }
 
+    fn test_peer(name: &str) -> NodeId {
+        NodeId::new(name)
+    }
+
     #[test]
     fn validate_authenticated_request() {
         let handler = SymbolRequestHandler::with_default_policy();
@@ -1110,9 +1137,10 @@ mod tests {
     fn process_symbol_ack_stops_transfer() {
         let mut handler = SymbolRequestHandler::with_default_policy();
         let object_id = ObjectId::from_bytes([0x11; 32]);
+        let peer = test_peer("peer-ack-stop");
 
         // Initially not stopped
-        assert!(!handler.should_stop(&object_id));
+        assert!(!handler.should_stop(&peer, &object_id));
 
         // Process ack
         let ack = SymbolAck::new(
@@ -1127,7 +1155,7 @@ mod tests {
             500,
         );
 
-        handler.process_symbol_ack(&ack, 0);
+        handler.process_symbol_ack(&peer, &ack, 0);
 
         // Transfer state should be removed
         assert_eq!(handler.active_transfer_count(), 0);
@@ -1225,10 +1253,11 @@ mod tests {
     fn decode_status_complete_stops_transfer() {
         let mut handler = SymbolRequestHandler::with_default_policy();
         let object_id = ObjectId::from_bytes([0x11; 32]);
+        let peer = test_peer("peer-status-complete");
 
         // Start a transfer
         let request = test_symbol_request(50, None);
-        handler.track_transfer(&request, 0..10, 0);
+        handler.track_transfer(&peer, &request, 0..10, 0);
         assert_eq!(handler.active_transfer_count(), 1);
 
         // Process decode status marking transfer complete
@@ -1246,22 +1275,23 @@ mod tests {
             missing_hint: None,
             signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
         };
-        handler.process_decode_status(&status, 0);
+        handler.process_decode_status(&peer, &status, 0);
 
         // Transfer should be stopped
-        assert!(handler.should_stop(&object_id));
+        assert!(handler.should_stop(&peer, &object_id));
     }
 
     #[test]
     fn track_transfer_accumulates_sent_esis() {
         let mut handler = SymbolRequestHandler::with_default_policy();
         let request = test_symbol_request(100, None);
+        let peer = test_peer("peer-track");
 
-        handler.track_transfer(&request, 0..5, 0);
+        handler.track_transfer(&peer, &request, 0..5, 0);
         assert_eq!(handler.active_transfer_count(), 1);
 
         // Track more symbols for the same object
-        handler.track_transfer(&request, 5..10, 0);
+        handler.track_transfer(&peer, &request, 5..10, 0);
         assert_eq!(handler.active_transfer_count(), 1); // Same transfer
     }
 
@@ -1269,13 +1299,14 @@ mod tests {
     fn should_stop_after_ack() {
         let mut handler = SymbolRequestHandler::with_default_policy();
         let object_id = ObjectId::from_bytes([0x11; 32]);
+        let peer = test_peer("peer-stop-after-ack");
 
         // Initially not stopped
-        assert!(!handler.should_stop(&object_id));
+        assert!(!handler.should_stop(&peer, &object_id));
 
         // Start tracking then ack
         let request = test_symbol_request(50, None);
-        handler.track_transfer(&request, 0..5, 0);
+        handler.track_transfer(&peer, &request, 0..5, 0);
 
         let ack = SymbolAck::new(
             test_object_header(),
@@ -1288,10 +1319,10 @@ mod tests {
             SymbolAckReason::Complete,
             5,
         );
-        handler.process_symbol_ack(&ack, 0);
+        handler.process_symbol_ack(&peer, &ack, 0);
 
         // Should stop and be fully cleaned up
-        assert!(handler.should_stop(&object_id));
+        assert!(handler.should_stop(&peer, &object_id));
         assert_eq!(handler.active_transfer_count(), 0);
     }
 
@@ -1501,9 +1532,10 @@ mod tests {
         };
         let mut handler = SymbolRequestHandler::new(policy);
         let request = test_symbol_request(50, None);
+        let peer = test_peer("peer-prune-expired");
 
         // Track a transfer at time 0
-        handler.track_transfer(&request, 0..5, 0);
+        handler.track_transfer(&peer, &request, 0..5, 0);
         assert_eq!(handler.active_transfer_count(), 1);
 
         // Prune at time 500 (within TTL) — nothing removed
@@ -1525,10 +1557,11 @@ mod tests {
         };
         let mut handler = SymbolRequestHandler::new(policy);
         let object_id = ObjectId::from_bytes([0x11; 32]);
+        let peer = test_peer("peer-awaiting-ack");
 
         // Simulate a decode complete → moves to completed_awaiting_ack
         let request = test_symbol_request(50, None);
-        handler.track_transfer(&request, 0..5, 0);
+        handler.track_transfer(&peer, &request, 0..5, 0);
 
         let status = DecodeStatus {
             header: test_object_header(),
@@ -1544,7 +1577,7 @@ mod tests {
             missing_hint: None,
             signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
         };
-        handler.process_decode_status(&status, 100);
+        handler.process_decode_status(&peer, &status, 100);
 
         // Should have 1 completed_awaiting_ack + 1 stopped active
         // Prune at 2000 (past TTL from activity at 100)
@@ -1560,13 +1593,14 @@ mod tests {
         };
         let mut handler = SymbolRequestHandler::new(policy);
         let object_id = ObjectId::from_bytes([0x11; 32]);
+        let peer = test_peer("peer-prune-complete");
 
         // Establish an active transfer first — process_symbol_ack only
         // promotes known transfers into completed_transfers. See the
         // `process_symbol_ack_unknown_object_is_dropped` test for the
         // defensive guard this exercises.
         let request = test_symbol_request(50, None);
-        handler.track_transfer(&request, 0..5, 0);
+        handler.track_transfer(&peer, &request, 0..5, 0);
 
         // Process ack → moves to completed_transfers
         let ack = SymbolAck::new(
@@ -1580,17 +1614,17 @@ mod tests {
             SymbolAckReason::Complete,
             50,
         );
-        handler.process_symbol_ack(&ack, 100);
+        handler.process_symbol_ack(&peer, &ack, 100);
 
         // Should stop before pruning
-        assert!(handler.should_stop(&object_id));
+        assert!(handler.should_stop(&peer, &object_id));
 
         // Prune at 1000 (past TTL from 100)
         let removed = handler.prune_stale_state(1000);
         assert_eq!(removed, 1);
 
         // No longer should_stop after pruning
-        assert!(!handler.should_stop(&object_id));
+        assert!(!handler.should_stop(&peer, &object_id));
     }
 
     #[test]
@@ -1598,8 +1632,9 @@ mod tests {
         let mut handler = SymbolRequestHandler::with_default_policy();
         let object_id = ObjectId::from_bytes([0x11; 32]);
         let request = test_symbol_request(50, None);
+        let peer = test_peer("peer-incomplete");
 
-        handler.track_transfer(&request, 0..10, 0);
+        handler.track_transfer(&peer, &request, 0..10, 0);
 
         // Send incomplete decode status
         let status = DecodeStatus {
@@ -1616,10 +1651,10 @@ mod tests {
             missing_hint: None,
             signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
         };
-        handler.process_decode_status(&status, 500);
+        handler.process_decode_status(&peer, &status, 500);
 
         // Should NOT stop — transfer still in progress
-        assert!(!handler.should_stop(&object_id));
+        assert!(!handler.should_stop(&peer, &object_id));
         assert_eq!(handler.active_transfer_count(), 1);
     }
 
@@ -1979,6 +2014,7 @@ mod tests {
     #[test]
     fn handler_tracks_multiple_objects_independently() {
         let mut handler = SymbolRequestHandler::with_default_policy();
+        let peer = test_peer("peer-multi-object");
 
         let req1 = test_symbol_request(50, None);
         let mut header2 = test_object_header();
@@ -1993,8 +2029,8 @@ mod tests {
             0,
         );
 
-        handler.track_transfer(&req1, 0..5, 0);
-        handler.track_transfer(&req2, 0..3, 0);
+        handler.track_transfer(&peer, &req1, 0..5, 0);
+        handler.track_transfer(&peer, &req2, 0..3, 0);
 
         assert_eq!(handler.active_transfer_count(), 2);
 
@@ -2010,11 +2046,41 @@ mod tests {
             SymbolAckReason::Complete,
             5,
         );
-        handler.process_symbol_ack(&ack1, 100);
+        handler.process_symbol_ack(&peer, &ack1, 100);
 
         assert_eq!(handler.active_transfer_count(), 1);
-        assert!(handler.should_stop(&ObjectId::from_bytes([0x11; 32])));
-        assert!(!handler.should_stop(&ObjectId::from_bytes([0x22; 32])));
+        assert!(handler.should_stop(&peer, &ObjectId::from_bytes([0x11; 32])));
+        assert!(!handler.should_stop(&peer, &ObjectId::from_bytes([0x22; 32])));
+    }
+
+    #[test]
+    fn handler_scopes_stop_state_per_peer_for_same_object() {
+        let mut handler = SymbolRequestHandler::with_default_policy();
+        let peer_a = test_peer("peer-a");
+        let peer_b = test_peer("peer-b");
+        let request = test_symbol_request(50, None);
+        let object_id = request.object_id.clone();
+
+        handler.track_transfer(&peer_a, &request, 0..5, 0);
+        handler.track_transfer(&peer_b, &request, 0..5, 0);
+        assert_eq!(handler.active_transfer_count(), 2);
+
+        let ack = SymbolAck::new(
+            test_object_header(),
+            object_id,
+            test_zone_id(),
+            ZoneKeyId::from_bytes([0x22; 8]),
+            1000,
+            fcp_core::TailscaleNodeId::new("node-1"),
+            1009,
+            SymbolAckReason::Complete,
+            5,
+        );
+        handler.process_symbol_ack(&peer_a, &ack, 100);
+
+        assert!(handler.should_stop(&peer_a, &object_id));
+        assert!(!handler.should_stop(&peer_b, &object_id));
+        assert_eq!(handler.active_transfer_count(), 1);
     }
 
     // ── Prune edge cases ─────────────────────────────────────────
@@ -2034,7 +2100,8 @@ mod tests {
         };
         let mut handler = SymbolRequestHandler::new(policy);
         let request = test_symbol_request(50, None);
-        handler.track_transfer(&request, 0..5, 50);
+        let peer = test_peer("peer-threshold");
+        handler.track_transfer(&peer, &request, 0..5, 50);
 
         // At exactly threshold boundary (now - ttl = activity time)
         let removed = handler.prune_stale_state(150);
@@ -2050,7 +2117,8 @@ mod tests {
         };
         let mut handler = SymbolRequestHandler::new(policy);
         let request = test_symbol_request(50, None);
-        handler.track_transfer(&request, 0..5, 49);
+        let peer = test_peer("peer-past-threshold");
+        handler.track_transfer(&peer, &request, 0..5, 49);
 
         // Just past threshold
         let removed = handler.prune_stale_state(150);
@@ -2408,6 +2476,7 @@ mod tests {
     #[test]
     fn process_decode_status_unknown_object_is_noop() {
         let mut handler = SymbolRequestHandler::with_default_policy();
+        let peer = test_peer("peer-unknown-status");
 
         let status = DecodeStatus {
             header: test_object_header(),
@@ -2423,7 +2492,7 @@ mod tests {
             missing_hint: None,
             signature: fcp_crypto::Ed25519Signature::from_bytes(&[0u8; 64]),
         };
-        handler.process_decode_status(&status, 0);
+        handler.process_decode_status(&peer, &status, 0);
         assert_eq!(handler.active_transfer_count(), 0);
     }
 
@@ -2437,6 +2506,7 @@ mod tests {
         // and would cause should_stop() to lie about transfer state.
         let mut handler = SymbolRequestHandler::with_default_policy();
         let unknown_id = ObjectId::from_bytes([0xFF; 32]);
+        let peer = test_peer("peer-unknown-ack");
         let ack = SymbolAck::new(
             test_object_header(),
             unknown_id,
@@ -2448,11 +2518,11 @@ mod tests {
             SymbolAckReason::Complete,
             0,
         );
-        handler.process_symbol_ack(&ack, 0);
+        handler.process_symbol_ack(&peer, &ack, 0);
 
         // completed_transfers must NOT have been populated for the unknown id.
         assert!(
-            !handler.should_stop(&unknown_id),
+            !handler.should_stop(&peer, &unknown_id),
             "unknown-object ack must not register a stop condition"
         );
     }
@@ -2463,11 +2533,12 @@ mod tests {
     fn track_transfer_updates_total_needed_upward() {
         let mut handler = SymbolRequestHandler::with_default_policy();
         let req1 = test_symbol_request(50, None);
-        handler.track_transfer(&req1, 0..5, 0);
+        let peer = test_peer("peer-total-needed");
+        handler.track_transfer(&peer, &req1, 0..5, 0);
 
         // Second track with larger max_symbols
         let req2 = test_symbol_request(100, None);
-        handler.track_transfer(&req2, 5..10, 100);
+        handler.track_transfer(&peer, &req2, 5..10, 100);
 
         // Still 1 transfer (same object_id)
         assert_eq!(handler.active_transfer_count(), 1);
@@ -2480,7 +2551,8 @@ mod tests {
         let mut handler = SymbolRequestHandler::with_default_policy();
         let object_id = ObjectId::from_bytes([0x11; 32]);
         let request = test_symbol_request(50, None);
-        handler.track_transfer(&request, 0..5, 0);
+        let peer = test_peer("peer-cancel");
+        handler.track_transfer(&peer, &request, 0..5, 0);
 
         let ack = SymbolAck::new(
             test_object_header(),
@@ -2493,9 +2565,9 @@ mod tests {
             SymbolAckReason::Cancelled,
             3,
         );
-        handler.process_symbol_ack(&ack, 100);
+        handler.process_symbol_ack(&peer, &ack, 100);
 
-        assert!(handler.should_stop(&object_id));
+        assert!(handler.should_stop(&peer, &object_id));
         assert_eq!(handler.active_transfer_count(), 0);
     }
 
@@ -2587,7 +2659,8 @@ mod tests {
     #[test]
     fn handler_should_stop_unknown_object_false() {
         let handler = SymbolRequestHandler::with_default_policy();
-        assert!(!handler.should_stop(&ObjectId::from_bytes([0xAB; 32])));
+        let peer = test_peer("peer-empty");
+        assert!(!handler.should_stop(&peer, &ObjectId::from_bytes([0xAB; 32])));
     }
 
     // ── TargetedRepairEngine with single ESI ─────────────────────
@@ -2692,7 +2765,8 @@ mod tests {
     fn prune_stale_state_max_timestamp() {
         let mut handler = SymbolRequestHandler::with_default_policy();
         let request = test_symbol_request(50, None);
-        handler.track_transfer(&request, 0..5, 0);
+        let peer = test_peer("peer-max-timestamp");
+        handler.track_transfer(&peer, &request, 0..5, 0);
 
         // Even with u64::MAX all entries should be expired (activity at 0)
         let removed = handler.prune_stale_state(u64::MAX);
@@ -2758,7 +2832,8 @@ mod tests {
     fn track_transfer_empty_esi_iterator() {
         let mut handler = SymbolRequestHandler::with_default_policy();
         let request = test_symbol_request(50, None);
-        handler.track_transfer(&request, std::iter::empty(), 0);
+        let peer = test_peer("peer-empty-transfer");
+        handler.track_transfer(&peer, &request, std::iter::empty(), 0);
         assert_eq!(handler.active_transfer_count(), 1);
     }
 }

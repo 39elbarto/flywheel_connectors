@@ -935,8 +935,9 @@ fn symbol_request_policy_defaults() {
 #[test]
 fn symbol_request_handler_with_default_policy() {
     let handler = SymbolRequestHandler::with_default_policy();
+    let peer = NodeId::new("peer-default");
     let obj = test_object_id(1);
-    assert!(!handler.should_stop(&obj));
+    assert!(!handler.should_stop(&peer, &obj));
 }
 
 #[test]

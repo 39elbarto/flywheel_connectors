@@ -50,7 +50,7 @@ use crate::planner::{
 use crate::session::MeshSession;
 use crate::symbol_request::{
     SymbolRequestError, SymbolRequestHandler, SymbolRequestMetrics, SymbolRequestPolicy,
-    SymbolResponse, SymbolResponseBuilder, TargetedRepairEngine, ValidatedRequest,
+    SymbolResponse, SymbolResponseBuilder, TargetedRepairEngine, TransferKey, ValidatedRequest,
 };
 use crate::transport::{RankedPath, TransportPath, TransportSelector};
 
@@ -383,7 +383,7 @@ pub struct MeshNode {
     local_zones: HashSet<ZoneId>,
     local_symbols: HashSet<ObjectId>,
     local_leases: Vec<HeldLease>,
-    sent_symbols: HashMap<ObjectId, (u64, HashSet<u32>)>,
+    sent_symbols: HashMap<TransferKey, (u64, HashSet<u32>)>,
     metrics: MeshNodeMetrics,
     trace_capture: Option<TraceCapture>,
     trace_capture_zones: Option<HashSet<ZoneId>>,
@@ -1094,12 +1094,10 @@ impl MeshNode {
         _is_authenticated: bool,
         now_ms: u64,
     ) -> Result<SymbolResponse, SymbolRequestError> {
-        let (validated, meta) = self
-            .validate_symbol_request(&request, peer, now_ms)
-            .await?;
+        let (validated, meta) = self.validate_symbol_request(&request, peer, now_ms).await?;
 
         let response = match self
-            .build_symbol_response(&request, &validated, &meta, now_ms)
+            .build_symbol_response(&request, peer, &validated, &meta, now_ms)
             .await
         {
             Ok(response) => response,
@@ -1134,7 +1132,7 @@ impl MeshNode {
         authenticated: bool,
         now_ms: u64,
     ) -> Result<(), SymbolRequestError> {
-        if self.symbol_requests.should_stop(&request.object_id) {
+        if self.symbol_requests.should_stop(peer, &request.object_id) {
             self.record_admission_outcome(
                 peer,
                 "reject",
@@ -1307,6 +1305,7 @@ impl MeshNode {
     async fn build_symbol_response(
         &mut self,
         request: &SymbolRequest,
+        peer: &NodeId,
         validated: &ValidatedRequest,
         meta: &fcp_store::ObjectSymbolMeta,
         now_ms: u64,
@@ -1326,9 +1325,10 @@ impl MeshNode {
         let mut engine = TargetedRepairEngine::new();
         engine.register_available(request.object_id, available.iter().copied());
 
+        let transfer_key = TransferKey::new(peer, &request.object_id);
         let sent_entry = self
             .sent_symbols
-            .entry(request.object_id)
+            .entry(transfer_key)
             .or_insert_with(|| (now_ms, HashSet::new()));
 
         sent_entry.0 = now_ms; // Update timestamp
@@ -1357,8 +1357,12 @@ impl MeshNode {
         );
 
         already_sent.extend(response.symbol_esis.iter().copied());
-        self.symbol_requests
-            .track_transfer(request, response.symbol_esis.iter().copied(), now_ms);
+        self.symbol_requests.track_transfer(
+            peer,
+            request,
+            response.symbol_esis.iter().copied(),
+            now_ms,
+        );
         self.symbol_metrics
             .record_symbols_sent(response.symbol_count(), request.missing_hint.is_some());
 
@@ -1722,7 +1726,8 @@ impl MeshNode {
                 peer: peer.as_str().to_string(),
                 message_kind: "decode status",
             })?;
-        self.symbol_requests.process_decode_status(status, now_ms);
+        self.symbol_requests
+            .process_decode_status(peer, status, now_ms);
         Ok(())
     }
 
@@ -1746,9 +1751,10 @@ impl MeshNode {
                 peer: peer.as_str().to_string(),
                 message_kind: "symbol ack",
             })?;
-        self.symbol_requests.process_symbol_ack(ack, now_ms);
+        self.symbol_requests.process_symbol_ack(peer, ack, now_ms);
         self.symbol_metrics.record_ack();
-        self.sent_symbols.remove(&ack.object_id);
+        self.sent_symbols
+            .remove(&TransferKey::new(peer, &ack.object_id));
         Ok(())
     }
 
@@ -1844,7 +1850,8 @@ impl MeshNode {
         now_ms: u64,
         handler: &dyn ControlPlaneHandler,
     ) -> Result<Option<ControlPlaneEnvelope>, MeshNodeError> {
-        let envelope = self.decode_control_plane(peer, frame, expected_zone_id, retention, now_ms)?;
+        let envelope =
+            self.decode_control_plane(peer, frame, expected_zone_id, retention, now_ms)?;
         if let Some(ref env) = envelope {
             handler.handle(env.clone())?;
         }
@@ -2340,15 +2347,16 @@ mod tests {
         })
         .expect("runtime");
 
+        let transfer_key = TransferKey::new(&NodeId::new("peer-1"), &object_id);
         assert_eq!(node.symbol_requests.active_transfer_count(), 1);
-        assert!(node.sent_symbols.contains_key(&object_id));
+        assert!(node.sent_symbols.contains_key(&transfer_key));
 
         let ttl = node.symbol_requests.policy().transfer_state_ttl_ms;
         let pruned = node.prune_stale_state(ttl + 1);
 
         assert!(pruned > 0);
         assert_eq!(node.symbol_requests.active_transfer_count(), 0);
-        assert!(!node.sent_symbols.contains_key(&object_id));
+        assert!(!node.sent_symbols.contains_key(&transfer_key));
     }
 
     #[test]
@@ -2456,8 +2464,9 @@ mod tests {
         assert!(
             matches!(
                 err,
-                SymbolRequestError::AdmissionRejected(AdmissionError::AuthenticationRequired { .. })
-                    | SymbolRequestError::SignatureInvalid
+                SymbolRequestError::AdmissionRejected(
+                    AdmissionError::AuthenticationRequired { .. }
+                ) | SymbolRequestError::SignatureInvalid
             ),
             "expected an auth-required / signature-invalid refusal, got {err:?}"
         );
@@ -2994,7 +3003,10 @@ mod tests {
             .handle_gossip_message(GossipMessage::Summary(summary), 1_000)
             .expect_err("unknown peer must be rejected");
         match err {
-            MeshNodeError::UnknownPeer { peer: reported, message_kind } => {
+            MeshNodeError::UnknownPeer {
+                peer: reported,
+                message_kind,
+            } => {
                 assert_eq!(reported, "peer-unknown");
                 assert_eq!(message_kind, "gossip summary");
             }
@@ -3034,7 +3046,10 @@ mod tests {
             .handle_revocation_push(push, 1_000)
             .expect_err("unknown peer must be rejected");
         match err {
-            MeshNodeError::UnknownPeer { peer: reported, message_kind } => {
+            MeshNodeError::UnknownPeer {
+                peer: reported,
+                message_kind,
+            } => {
                 assert_eq!(reported, "peer-unknown");
                 assert_eq!(message_kind, "revocation push");
             }
@@ -3088,7 +3103,10 @@ mod tests {
             .handle_gossip_message(GossipMessage::Summary(summary), 1_000)
             .expect_err("peer with empty zones must be rejected");
         match err {
-            MeshNodeError::UnauthorizedZone { peer: reported, zone_id } => {
+            MeshNodeError::UnauthorizedZone {
+                peer: reported,
+                zone_id,
+            } => {
                 assert_eq!(reported, "peer-empty");
                 assert_eq!(zone_id, ZoneId::work().to_string());
             }
@@ -3141,7 +3159,10 @@ mod tests {
             .handle_gossip_message(GossipMessage::Summary(summary), 1_000)
             .expect_err("summary must be rejected for unauthorized zone");
         match err {
-            MeshNodeError::UnauthorizedZone { peer: reported, zone_id } => {
+            MeshNodeError::UnauthorizedZone {
+                peer: reported,
+                zone_id,
+            } => {
                 assert_eq!(reported, "peer-scoped");
                 assert_eq!(zone_id, unauthorized_zone.to_string());
             }
@@ -3606,7 +3627,11 @@ mod tests {
 
         let context = PlannerContext::new(connector_id);
         let candidates = node.plan_execution(&context, 2000);
-        assert_eq!(candidates.len(), 2, "both local and peer should be candidates");
+        assert_eq!(
+            candidates.len(),
+            2,
+            "both local and peer should be candidates"
+        );
 
         let local_candidate = candidates
             .iter()
@@ -5037,6 +5062,117 @@ mod tests {
             node.metrics().symbol_requests.acks_received,
             0,
             "forged ack must not increment acks_received"
+        );
+    }
+
+    #[test]
+    fn symbol_transfer_state_is_scoped_per_peer() {
+        let mut node = test_node("node-ack");
+        let peer_a = NodeId::new("peer-a");
+        let peer_b = NodeId::new("peer-b");
+        let zone_id = ZoneId::work();
+        let zone_key_id = ZoneKeyId::from_bytes([0xCD; 8]);
+        let object_id = ObjectId::from_bytes([0xCE; 32]);
+
+        fcp_async_core::runtime::block_on_sync(async {
+            for esi in 0..4 {
+                let symbol = StoredSymbol {
+                    meta: SymbolMeta {
+                        object_id,
+                        esi,
+                        zone_id: zone_id.clone(),
+                        source_node: Some(1),
+                        stored_at: 0,
+                    },
+                    data: bytes::Bytes::from(vec![u8::try_from(esi).unwrap_or(0); 64]),
+                };
+                node.symbol_store
+                    .put_symbol(symbol)
+                    .await
+                    .expect("store symbol");
+            }
+
+            let request_a = SymbolRequest::new(
+                test_object_header(),
+                object_id,
+                zone_id.clone(),
+                zone_key_id,
+                1,
+                2,
+                0,
+            );
+            let response_a = node
+                .handle_symbol_request(request_a, &peer_a, true, 0)
+                .await
+                .expect("peer A request");
+
+            let request_b = SymbolRequest::new(
+                test_object_header(),
+                object_id,
+                zone_id.clone(),
+                zone_key_id,
+                1,
+                2,
+                0,
+            );
+            let response_b = node
+                .handle_symbol_request(request_b, &peer_b, true, 1)
+                .await
+                .expect("peer B request");
+
+            assert_eq!(
+                response_b.symbol_esis, response_a.symbol_esis,
+                "peer B must not inherit peer A's sent-symbol suppression"
+            );
+        })
+        .expect("runtime");
+
+        let signing_key_a = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer_a.clone(), signing_key_a.verifying_key());
+
+        let mut ack = SymbolAck::new(
+            test_object_header(),
+            object_id,
+            zone_id.clone(),
+            zone_key_id,
+            1,
+            TailscaleNodeId::new("node-ack"),
+            808,
+            SymbolAckReason::Complete,
+            2,
+        );
+        ack.sign(&signing_key_a);
+        node.handle_symbol_ack(&peer_a, &ack, 2)
+            .expect("peer A ack");
+
+        assert!(
+            node.symbol_requests.should_stop(&peer_a, &object_id),
+            "ack must stop only peer A's transfer"
+        );
+        assert!(
+            !node.symbol_requests.should_stop(&peer_b, &object_id),
+            "peer B transfer must remain active"
+        );
+
+        let response_b_follow_up = fcp_async_core::runtime::block_on_sync(async {
+            let request_b_follow_up = SymbolRequest::new(
+                test_object_header(),
+                object_id,
+                zone_id,
+                zone_key_id,
+                1,
+                2,
+                2,
+            );
+            node.handle_symbol_request(request_b_follow_up, &peer_b, true, 3)
+                .await
+        })
+        .expect("runtime")
+        .expect("peer B follow-up request should still succeed");
+
+        assert!(
+            !response_b_follow_up.symbol_esis.is_empty(),
+            "peer B should keep receiving symbols after peer A acked"
         );
     }
 

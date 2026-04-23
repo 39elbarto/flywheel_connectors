@@ -388,6 +388,7 @@ pub fn xchacha20_decrypt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn chacha20_roundtrip() {
@@ -968,6 +969,130 @@ mod tests {
             let ct = chacha20_encrypt(&key, &nonce, msg.as_bytes(), b"").unwrap();
             let pt = chacha20_decrypt(&key, &nonce, &ct, b"").unwrap();
             assert_eq!(pt, msg.as_bytes());
+        }
+    }
+
+    // ── Metamorphic encrypt/decrypt proptests ────────────────────────
+    //
+    // AEAD identity relations lifted from single-case tests
+    // (chacha20_roundtrip, xchacha20_roundtrip, tampered_ciphertext_fails,
+    // wrong_aad_fails) into property-space. For both ChaCha20-Poly1305
+    // and XChaCha20-Poly1305:
+    //
+    //   M1 identity        decrypt(encrypt(k, n, pt, aad), k, n, aad) == pt
+    //   M2 ct tamper       flipping any byte in ciphertext|tag must fail
+    //                      decryption (AEAD integrity guarantee)
+    //   M3 aad tamper      changing aad on decrypt must fail
+    //
+    // Each property samples the full (key × nonce × plaintext × aad)
+    // space — the nonce reuse concern doesn't apply here because each
+    // trial generates a fresh (key, nonce) pair, so the tests never
+    // reuse a nonce under the same key.
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(48))]
+
+        /// M1 (ChaCha20-Poly1305): encrypt then decrypt is identity.
+        #[test]
+        fn chacha20_encrypt_then_decrypt_is_identity(
+            key_bytes in any::<[u8; AEAD_KEY_SIZE]>(),
+            nonce_bytes in any::<[u8; CHACHA20_NONCE_SIZE]>(),
+            plaintext in prop::collection::vec(any::<u8>(), 0..1024),
+            aad in prop::collection::vec(any::<u8>(), 0..128),
+        ) {
+            let key = AeadKey::from_bytes(key_bytes);
+            let nonce = ChaCha20Nonce::from_bytes(nonce_bytes);
+            let ct = chacha20_encrypt(&key, &nonce, &plaintext, &aad)
+                .expect("encrypt must not fail on valid inputs");
+            let pt = chacha20_decrypt(&key, &nonce, &ct, &aad)
+                .expect("decrypt must succeed with matching k/n/aad");
+            prop_assert_eq!(pt, plaintext);
+        }
+
+        /// M2 (ChaCha20-Poly1305): flipping any byte in the ciphertext
+        /// (or the Poly1305 tag appended to it) must fail decrypt.
+        #[test]
+        fn chacha20_tampered_ciphertext_fails_decrypt(
+            key_bytes in any::<[u8; AEAD_KEY_SIZE]>(),
+            nonce_bytes in any::<[u8; CHACHA20_NONCE_SIZE]>(),
+            plaintext in prop::collection::vec(any::<u8>(), 1..512),
+            aad in prop::collection::vec(any::<u8>(), 0..64),
+            flip_index in any::<usize>(),
+        ) {
+            let key = AeadKey::from_bytes(key_bytes);
+            let nonce = ChaCha20Nonce::from_bytes(nonce_bytes);
+            let mut ct = chacha20_encrypt(&key, &nonce, &plaintext, &aad).unwrap();
+            let idx = flip_index % ct.len();
+            ct[idx] ^= 0x01;
+            let result = chacha20_decrypt(&key, &nonce, &ct, &aad);
+            prop_assert!(
+                matches!(result, Err(CryptoError::AeadDecryptFailed)),
+                "M2 (ct tamper) broken: byte-flipped ciphertext must yield \
+                 AeadDecryptFailed, got {:?}",
+                result
+            );
+        }
+
+        /// M3 (ChaCha20-Poly1305): decrypt with different aad must fail.
+        /// `aad1 != aad2` is enforced via prop_assume.
+        #[test]
+        fn chacha20_different_aad_fails_decrypt(
+            key_bytes in any::<[u8; AEAD_KEY_SIZE]>(),
+            nonce_bytes in any::<[u8; CHACHA20_NONCE_SIZE]>(),
+            plaintext in prop::collection::vec(any::<u8>(), 0..512),
+            aad1 in prop::collection::vec(any::<u8>(), 0..64),
+            aad2 in prop::collection::vec(any::<u8>(), 0..64),
+        ) {
+            prop_assume!(aad1 != aad2);
+            let key = AeadKey::from_bytes(key_bytes);
+            let nonce = ChaCha20Nonce::from_bytes(nonce_bytes);
+            let ct = chacha20_encrypt(&key, &nonce, &plaintext, &aad1).unwrap();
+            let result = chacha20_decrypt(&key, &nonce, &ct, &aad2);
+            prop_assert!(
+                matches!(result, Err(CryptoError::AeadDecryptFailed)),
+                "M3 (aad tamper) broken: decrypt with different aad must fail, \
+                 got {:?}",
+                result
+            );
+        }
+
+        /// M1 (XChaCha20-Poly1305): encrypt then decrypt is identity.
+        /// XChaCha20 takes a 24-byte nonce, safe for random generation.
+        #[test]
+        fn xchacha20_encrypt_then_decrypt_is_identity(
+            key_bytes in any::<[u8; AEAD_KEY_SIZE]>(),
+            nonce_bytes in any::<[u8; XCHACHA20_NONCE_SIZE]>(),
+            plaintext in prop::collection::vec(any::<u8>(), 0..1024),
+            aad in prop::collection::vec(any::<u8>(), 0..128),
+        ) {
+            let key = AeadKey::from_bytes(key_bytes);
+            let nonce = XChaCha20Nonce::from_bytes(nonce_bytes);
+            let ct = xchacha20_encrypt(&key, &nonce, &plaintext, &aad)
+                .expect("xchacha20 encrypt must not fail on valid inputs");
+            let pt = xchacha20_decrypt(&key, &nonce, &ct, &aad)
+                .expect("xchacha20 decrypt must succeed with matching k/n/aad");
+            prop_assert_eq!(pt, plaintext);
+        }
+
+        /// M2 (XChaCha20-Poly1305): byte-flip tamper rejection.
+        #[test]
+        fn xchacha20_tampered_ciphertext_fails_decrypt(
+            key_bytes in any::<[u8; AEAD_KEY_SIZE]>(),
+            nonce_bytes in any::<[u8; XCHACHA20_NONCE_SIZE]>(),
+            plaintext in prop::collection::vec(any::<u8>(), 1..512),
+            aad in prop::collection::vec(any::<u8>(), 0..64),
+            flip_index in any::<usize>(),
+        ) {
+            let key = AeadKey::from_bytes(key_bytes);
+            let nonce = XChaCha20Nonce::from_bytes(nonce_bytes);
+            let mut ct = xchacha20_encrypt(&key, &nonce, &plaintext, &aad).unwrap();
+            let idx = flip_index % ct.len();
+            ct[idx] ^= 0x01;
+            let result = xchacha20_decrypt(&key, &nonce, &ct, &aad);
+            prop_assert!(
+                matches!(result, Err(CryptoError::AeadDecryptFailed)),
+                "M2 (xchacha20 ct tamper) broken, got {:?}",
+                result
+            );
         }
     }
 }

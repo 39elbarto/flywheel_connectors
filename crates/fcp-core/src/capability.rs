@@ -37,6 +37,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use fcp_async_core::time;
+use fcp_auth_schema::claims::CURRENT_SCHEMA_VERSION;
 use fcp_crypto::ed25519::Ed25519VerifyingKey;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
@@ -1805,14 +1806,45 @@ impl CapabilityVerifier {
             .verify(&verifying_key)
             .map_err(|_| FcpError::InvalidSignature)?;
 
-        // 2. Validate timing
+        // 2. Enforce the typed auth-claim schema version before consuming any
+        // other private claims. `fcp-auth-schema` introduced an explicit
+        // deployment-gated `SCHEMA_VERSION` claim, but the runtime verifier
+        // must still reject stale or hand-crafted tokens here at the trust
+        // boundary.
+        let schema_version = match claims.get(fcp2_claims::SCHEMA_VERSION) {
+            Some(ciborium::Value::Integer(version)) => {
+                let as_i128: i128 = (*version).into();
+                u16::try_from(as_i128).map_err(|_| FcpError::VersionMismatch {
+                    expected: CURRENT_SCHEMA_VERSION.to_string(),
+                    actual: as_i128.to_string(),
+                })?
+            }
+            Some(_) => {
+                return Err(FcpError::MissingField {
+                    field: "schema_version (must be CBOR integer u16)".into(),
+                });
+            }
+            None => {
+                return Err(FcpError::MissingField {
+                    field: "schema_version".into(),
+                });
+            }
+        };
+        if schema_version != CURRENT_SCHEMA_VERSION {
+            return Err(FcpError::VersionMismatch {
+                expected: CURRENT_SCHEMA_VERSION.to_string(),
+                actual: schema_version.to_string(),
+            });
+        }
+
+        // 3. Validate timing
         let now = Utc::now();
         CoseToken::validate_timing(&claims, now).map_err(|e| match e {
             fcp_crypto::CryptoError::TokenNotYetValid => FcpError::TokenNotYetValid,
             _ => FcpError::TokenExpired,
         })?;
 
-        // 3. Check zone binding
+        // 4. Check zone binding
         if let Some(iss) = claims.get_zone_id() {
             if iss != self.zone_id.as_str() {
                 return Err(FcpError::ZoneViolation {
@@ -1827,7 +1859,7 @@ impl CapabilityVerifier {
             });
         }
 
-        // 3.5. Check instance binding if present.
+        // 4.5. Check instance binding if present.
         //
         // The previous implementation silently fell through when the
         // INSTANCE_ID claim was present but not a CBOR Text value (e.g. an
@@ -1870,7 +1902,7 @@ impl CapabilityVerifier {
             // level non-Text rejection above still fired.
         }
 
-        // 4. Check operation grant
+        // 5. Check operation grant
         //
         // br-8n0rm.6: `fcp2_claims::GRANTS` is the CANONICAL shape. The
         // legacy `OPERATIONS` fallback branch was removed once 8n0rm.8
@@ -1903,7 +1935,7 @@ impl CapabilityVerifier {
             });
         }
 
-        // 5. Enforce constraints (NORMATIVE — C3.4: mandatory, default-deny)
+        // 6. Enforce constraints (NORMATIVE — C3.4: mandatory, default-deny)
         if let Some(constr_val) = claims.get(fcp2_claims::CONSTRAINTS) {
             let constraints: CapabilityConstraints = Self::deserialize_cbor(constr_val)?;
             if constraints.is_empty() {
@@ -2844,6 +2876,54 @@ mod tests {
         assert!(
             matches!(&err, FcpError::MissingField { field, .. } if field == "caps"),
             "legacy OPERATIONS-only token must be rejected with MissingField(caps); got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verifier_rejects_unsupported_schema_version_token() {
+        let signing_key = Ed25519SigningKey::generate();
+        let pub_bytes = signing_key.verifying_key().to_bytes();
+        let now = Utc::now();
+
+        let grants = ciborium::Value::Array(vec![ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("capability".into()),
+                ciborium::Value::Text("cap.test".into()),
+            ),
+            (
+                ciborium::Value::Text("operation".into()),
+                ciborium::Value::Text("op.test".into()),
+            ),
+        ])]);
+
+        let claims = fcp_crypto::cose::CwtClaims::new()
+            .issuer("z:work")
+            .capability_id("cap.test")
+            .zone_id("z:work")
+            .issued_at(now)
+            .expiration(now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
+            .custom(fcp2_claims::GRANTS, grants)
+            .custom(
+                fcp2_claims::SCHEMA_VERSION,
+                ciborium::Value::Integer(999_i64.into()),
+            );
+        let cose_token = fcp_crypto::cose::CoseToken::sign(&signing_key, &claims).unwrap();
+        let token = CapabilityToken::from_raw(cose_token);
+
+        let verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
+        let cap = CapabilityId::new("cap.test").unwrap();
+        let op = OperationId::new("op.test").unwrap();
+        let err = verifier.verify(token, &cap, &op, &[]).unwrap_err();
+        let expected_schema = CURRENT_SCHEMA_VERSION.to_string();
+
+        assert!(
+            matches!(
+                &err,
+                FcpError::VersionMismatch { expected, actual }
+                    if expected == &expected_schema && actual == "999"
+            ),
+            "unsupported schema_version must be rejected with VersionMismatch; got {err:?}"
         );
     }
 

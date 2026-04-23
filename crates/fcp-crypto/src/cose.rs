@@ -549,6 +549,8 @@ impl CoseToken {
     ///
     /// Returns an error if signing fails.
     pub fn sign(signing_key: &Ed25519SigningKey, claims: &CwtClaims) -> CryptoResult<Self> {
+        let mut claims = claims.clone();
+        synthesize_schema_version(&mut claims);
         let payload = claims.to_cbor()?;
         let kid = signing_key.key_id();
 
@@ -956,6 +958,24 @@ fn synthesize_grants_from_legacy_operations(claims: &mut CwtClaims) {
     *claims = claims.clone().custom(fcp2_claims::GRANTS, ciborium::Value::Array(grants));
 }
 
+/// Stamp the current auth-claim schema version when the caller did not
+/// provide one explicitly.
+///
+/// This keeps the legacy chain builder and direct `CoseToken::sign`
+/// callers aligned with the typed `AuthClaims` path, which always emits
+/// `SCHEMA_VERSION`. Existing explicit values are preserved so tests and
+/// staged rollout fixtures can still construct mismatched-version tokens
+/// intentionally.
+fn synthesize_schema_version(claims: &mut CwtClaims) {
+    if claims.get(fcp2_claims::SCHEMA_VERSION).is_some() {
+        return;
+    }
+    *claims = claims.clone().custom(
+        fcp2_claims::SCHEMA_VERSION,
+        ciborium::Value::Integer(i64::from(fcp_auth_schema::claims::CURRENT_SCHEMA_VERSION).into()),
+    );
+}
+
 impl Default for CapabilityTokenBuilder {
     fn default() -> Self {
         Self::new()
@@ -1047,6 +1067,32 @@ mod tests {
         let ciborium::Value::Map(map) = &arr[0] else { panic!() };
         let (_, cap) = map.iter().find(|(k, _)| matches!(k, ciborium::Value::Text(s) if s == "capability")).unwrap();
         assert!(matches!(cap, ciborium::Value::Text(s) if s == "cap:prewritten"));
+    }
+
+    #[test]
+    fn cose_sign_stamps_current_schema_version_when_missing() {
+        let signing_key = Ed25519SigningKey::generate();
+        let now = Utc::now();
+        let claims = CwtClaims::new()
+            .issuer("z:work")
+            .capability_id("cap:test")
+            .zone_id("z:work")
+            .expiration(now + Duration::hours(1));
+
+        let token = CoseToken::sign(&signing_key, &claims).expect("sign");
+        let verified = token
+            .verify(&signing_key.verifying_key())
+            .expect("verify current-schema token");
+
+        match verified.get(fcp2_claims::SCHEMA_VERSION) {
+            Some(ciborium::Value::Integer(version)) => {
+                assert_eq!(
+                    i64::try_from(*version).unwrap(),
+                    i64::from(fcp_auth_schema::claims::CURRENT_SCHEMA_VERSION)
+                );
+            }
+            other => panic!("expected synthesized schema_version integer, got {other:?}"),
+        }
     }
 
     // ── 8n0rm.4: typed AuthClaims ↔ CapabilityTokenBuilder interop ────────

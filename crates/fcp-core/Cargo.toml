@@ -20,6 +20,7 @@ chrono.workspace = true
 ciborium.workspace = true
 ed25519-dalek.workspace = true
 fcp-async-core.workspace = true
+fcp-auth-schema = { path = "../fcp-auth-schema" }
 fcp-cbor = { path = "../fcp-cbor" }
 fcp-crypto = { path = "../fcp-crypto" }
 futures-util.workspace = true

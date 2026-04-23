@@ -218,6 +218,13 @@ fn build_token(
     operations: &[&str],
 ) -> CapabilityToken {
     let now = Utc::now();
+    let constraints = fcp_core::CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut constraints_cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut constraints_cbor)
+        .expect("serialize constraints to CBOR");
     let cose = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -225,6 +232,7 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
+        .constraints_cbor(&constraints_cbor)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -402,15 +410,8 @@ async fn discord_allow_valid_token_connector_suite_passes() {
 
     let mut connector = DiscordConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["discord.send_message"],
-    );
-    let token = build_token(
-        &signing_key,
-        "discord.send_message",
-        &["discord.send_message"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["discord.send"]);
+    let token = build_token(&signing_key, "discord.send", &["discord.send_message"]);
     let invoke = invoke_request(
         "discord.send_message",
         json!({
@@ -450,6 +451,22 @@ async fn discord_allow_valid_token_connector_suite_passes() {
         .find(|entry| entry.context.get("operation") == Some(&json!("invoke")))
         .expect("invoke entry");
     assert_eq!(invoke_entry.result, "pass");
+    let received = mock.received_requests().await;
+    let send_requests: Vec<_> = received
+        .iter()
+        .filter(|request| {
+            request.method.as_str() == "POST"
+                && request.url.path() == "/api/v10/channels/123456789012345678/messages"
+        })
+        .collect();
+    assert_eq!(
+        send_requests.len(),
+        1,
+        "expected exactly one Discord send_message POST"
+    );
+    let send_body: serde_json::Value =
+        serde_json::from_slice(&send_requests[0].body).expect("discord send body json");
+    assert_eq!(send_body.get("content"), Some(&json!("hello from e2e")));
     assert_eq!(
         invoke_entry.context.get("invoke_status"),
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
@@ -641,7 +658,7 @@ async fn discord_rate_limit_surfaces_correctly() {
             "zone_dir": zone_dir.to_string_lossy(),
             "host_public_key": signing_key.verifying_key().to_bytes().to_vec(),
             "nonce": vec![0u8; 32],
-            "capabilities_requested": ["discord.send_message"]
+            "capabilities_requested": ["discord.send"]
         }))
         .await
         .expect("handshake should succeed");
@@ -649,7 +666,7 @@ async fn discord_rate_limit_surfaces_correctly() {
     // Build valid token and invoke -- should get rate limited
     let token = build_token(
         &signing_key,
-        "discord.send_message",
+        "discord.send",
         &["discord.send_message"],
     );
     let result = connector

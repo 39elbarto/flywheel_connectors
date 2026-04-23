@@ -1,6 +1,6 @@
 //! OAuth token types and management.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -70,6 +70,17 @@ impl TokenResponse {
     }
 }
 
+fn parse_scope_list(scope: &str) -> Vec<String> {
+    scope.split_whitespace().map(String::from).collect()
+}
+
+fn refreshed_scopes_are_subset(original: &[String], refreshed: &[String]) -> bool {
+    let original_scopes: HashSet<&str> = original.iter().map(String::as_str).collect();
+    refreshed
+        .iter()
+        .all(|scope| original_scopes.contains(scope.as_str()))
+}
+
 /// Stored OAuth tokens with metadata.
 #[derive(Clone, Serialize)]
 pub struct OAuthTokens {
@@ -130,7 +141,8 @@ impl OAuthTokens {
 
         let scopes = response
             .scope
-            .map(|s| s.split_whitespace().map(String::from).collect())
+            .as_deref()
+            .map(parse_scope_list)
             .unwrap_or_default();
 
         Ok(Self {
@@ -248,6 +260,8 @@ impl OAuthTokens {
     ///
     /// Returns [`OAuthError::EmptyTokenField`] when the refresh
     /// response carries an empty `access_token` or an empty `token_type`.
+    /// Returns [`OAuthError::InvalidTokenResponse`] when the refresh response
+    /// tries to widen the previously granted scope set.
     pub fn update_from_response(&mut self, response: TokenResponse) -> OAuthResult<()> {
         // Validate response-level invariants before any mutation so the
         // update is atomic.  An empty access_token with a fresh expires_in
@@ -262,6 +276,18 @@ impl OAuthTokens {
         }
 
         let now = Utc::now();
+        let refreshed_scopes = match response.scope.as_deref() {
+            Some(scope) => {
+                let parsed = parse_scope_list(scope);
+                if !refreshed_scopes_are_subset(&self.scopes, &parsed) {
+                    return Err(OAuthError::InvalidTokenResponse(
+                        "refresh response expanded granted scopes".into(),
+                    ));
+                }
+                Some(parsed)
+            }
+            None => None,
+        };
 
         self.access_token = response.access_token;
         self.token_type = response.token_type;
@@ -288,8 +314,8 @@ impl OAuthTokens {
         }
 
         // Update scopes if provided
-        if let Some(scope) = response.scope {
-            self.scopes = scope.split_whitespace().map(String::from).collect();
+        if let Some(scopes) = refreshed_scopes {
+            self.scopes = scopes;
         }
 
         // Update ID token if provided (same empty-string guard as refresh token).
@@ -1098,14 +1124,21 @@ mod tests {
 
     #[test]
     fn test_token_update_from_response() {
-        let mut tokens = valid_tokens(mock_token_response(Some(3600)));
+        let mut tokens = valid_tokens(TokenResponse {
+            access_token: "test_access_token".into(),
+            token_type: "Bearer".into(),
+            expires_in: Some(3600),
+            refresh_token: Some("test_refresh_token".into()),
+            scope: Some("read write admin".into()),
+            id_token: None,
+        });
 
         let new_resp = TokenResponse {
             access_token: "new_access".into(),
             token_type: "Bearer".into(),
             expires_in: Some(7200),
             refresh_token: Some("new_refresh".into()),
-            scope: Some("read write admin".into()),
+            scope: Some("read write".into()),
             id_token: Some("new_id".into()),
         };
 
@@ -1116,6 +1149,36 @@ mod tests {
         assert_eq!(tokens.refresh_token(), Some("new_refresh"));
         assert_eq!(tokens.scopes(), &["read", "write", "admin"]);
         assert_eq!(tokens.id_token(), Some("new_id"));
+    }
+
+    #[test]
+    fn test_token_update_rejects_scope_expansion_atomically() {
+        let mut tokens = valid_tokens(mock_token_response(Some(3600)));
+        let original_access_token = tokens.access_token().to_string();
+        let original_refresh_token = tokens.refresh_token().map(ToOwned::to_owned);
+        let original_scopes = tokens.scopes().to_vec();
+        let original_id_token = tokens.id_token().map(ToOwned::to_owned);
+        let original_expiry = tokens.expires_at;
+        let original_issued_at = tokens.issued_at;
+
+        let err = tokens
+            .update_from_response(TokenResponse {
+                access_token: "new_access".into(),
+                token_type: "Bearer".into(),
+                expires_in: Some(7200),
+                refresh_token: Some("rotated_refresh".into()),
+                scope: Some("read write admin".into()),
+                id_token: Some("new_id".into()),
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, OAuthError::InvalidTokenResponse(_)));
+        assert_eq!(tokens.access_token(), original_access_token);
+        assert_eq!(tokens.refresh_token(), original_refresh_token.as_deref());
+        assert_eq!(tokens.scopes(), original_scopes.as_slice());
+        assert_eq!(tokens.id_token(), original_id_token.as_deref());
+        assert_eq!(tokens.expires_at, original_expiry);
+        assert_eq!(tokens.issued_at, original_issued_at);
     }
 
     #[test]
@@ -1143,14 +1206,8 @@ mod tests {
     #[test]
     fn test_token_store_keys() {
         let store = TokenStore::new();
-        store.store(
-            "user1",
-            valid_tokens(mock_token_response(Some(3600))),
-        );
-        store.store(
-            "user2",
-            valid_tokens(mock_token_response(Some(3600))),
-        );
+        store.store("user1", valid_tokens(mock_token_response(Some(3600))));
+        store.store("user2", valid_tokens(mock_token_response(Some(3600))));
 
         let keys = store.keys();
         assert_eq!(keys.len(), 2);
@@ -1161,10 +1218,7 @@ mod tests {
     #[test]
     fn test_token_store_clear() {
         let store = TokenStore::new();
-        store.store(
-            "user1",
-            valid_tokens(mock_token_response(Some(3600))),
-        );
+        store.store("user1", valid_tokens(mock_token_response(Some(3600))));
         store.clear();
         assert!(store.keys().is_empty());
     }
@@ -1386,10 +1440,7 @@ mod tests {
     #[test]
     fn test_token_store_update_existing() {
         let store = TokenStore::new();
-        store.store(
-            "key",
-            valid_tokens(mock_token_response(Some(3600))),
-        );
+        store.store("key", valid_tokens(mock_token_response(Some(3600))));
 
         let new_tokens = valid_tokens(TokenResponse {
             access_token: "updated".into(),
@@ -1425,10 +1476,7 @@ mod tests {
     #[test]
     fn test_token_store_has_valid_token_expired() {
         let store = TokenStore::new();
-        store.store(
-            "expired",
-            valid_tokens(mock_token_response(Some(0))),
-        );
+        store.store("expired", valid_tokens(mock_token_response(Some(0))));
         assert!(!store.has_valid_token("expired"));
     }
 
@@ -1459,7 +1507,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(OAuthError::EmptyTokenField("access_token"))
-        );
+        ));
         assert!(!store.has_valid_token("invalid_material"));
     }
 
@@ -1473,10 +1521,7 @@ mod tests {
     #[allow(clippy::redundant_clone)]
     fn test_token_store_clone() {
         let store = TokenStore::new();
-        store.store(
-            "key",
-            valid_tokens(mock_token_response(Some(3600))),
-        );
+        store.store("key", valid_tokens(mock_token_response(Some(3600))));
         let cloned = store.clone();
         assert!(cloned.has_valid_token("key"));
     }
@@ -1485,10 +1530,7 @@ mod tests {
     fn test_token_store_with_cleanup_interval() {
         let store = TokenStore::new().with_cleanup_interval(Duration::from_secs(120));
         // Should still work normally
-        store.store(
-            "key",
-            valid_tokens(mock_token_response(Some(3600))),
-        );
+        store.store("key", valid_tokens(mock_token_response(Some(3600))));
         assert!(store.has_valid_token("key"));
     }
 
@@ -1609,7 +1651,7 @@ mod tests {
     }
 
     #[test]
-    fn test_token_update_overwrites_scopes_if_provided() {
+    fn test_token_update_allows_same_scopes_if_provided() {
         let mut tokens = valid_tokens(TokenResponse {
             access_token: "t".into(),
             token_type: "Bearer".into(),
@@ -1624,11 +1666,11 @@ mod tests {
                 token_type: "Bearer".into(),
                 expires_in: Some(3600),
                 refresh_token: None,
-                scope: Some("updated".into()),
+                scope: Some("original".into()),
                 id_token: None,
             })
             .expect("non-empty access_token and token_type must succeed");
-        assert_eq!(tokens.scopes(), &["updated"]);
+        assert_eq!(tokens.scopes(), &["original"]);
     }
 
     #[test]
@@ -1673,10 +1715,7 @@ mod tests {
     #[test]
     fn test_token_store_remove_returns_tokens() {
         let store = TokenStore::new();
-        store.store(
-            "key",
-            valid_tokens(mock_token_response(Some(3600))),
-        );
+        store.store("key", valid_tokens(mock_token_response(Some(3600))));
         let removed = store.remove("key");
         assert!(removed.is_some());
         assert_eq!(removed.unwrap().access_token(), "test_access_token");
@@ -1714,10 +1753,7 @@ mod tests {
     #[test]
     fn test_token_store_empty_key() {
         let store = TokenStore::new();
-        store.store(
-            "",
-            valid_tokens(mock_token_response(Some(3600))),
-        );
+        store.store("", valid_tokens(mock_token_response(Some(3600))));
         assert!(store.has_valid_token(""));
         assert!(store.get("").is_some());
     }
@@ -1735,16 +1771,10 @@ mod tests {
     #[test]
     fn test_token_store_clear_then_add() {
         let store = TokenStore::new();
-        store.store(
-            "key1",
-            valid_tokens(mock_token_response(Some(3600))),
-        );
+        store.store("key1", valid_tokens(mock_token_response(Some(3600))));
         store.clear();
         assert!(store.keys().is_empty());
-        store.store(
-            "key2",
-            valid_tokens(mock_token_response(Some(3600))),
-        );
+        store.store("key2", valid_tokens(mock_token_response(Some(3600))));
         assert_eq!(store.keys().len(), 1);
         assert!(store.has_valid_token("key2"));
     }
@@ -1937,14 +1967,8 @@ mod tests {
     #[test]
     fn test_token_store_overwrite_preserves_key_count() {
         let store = TokenStore::new();
-        store.store(
-            "key",
-            valid_tokens(mock_token_response(Some(3600))),
-        );
-        store.store(
-            "key",
-            valid_tokens(mock_token_response(Some(7200))),
-        );
+        store.store("key", valid_tokens(mock_token_response(Some(3600))));
+        store.store("key", valid_tokens(mock_token_response(Some(7200))));
         assert_eq!(store.keys().len(), 1);
     }
 
@@ -1988,14 +2012,8 @@ mod tests {
     #[test]
     fn test_token_store_keys_order_independent() {
         let store = TokenStore::new();
-        store.store(
-            "b",
-            valid_tokens(mock_token_response(Some(3600))),
-        );
-        store.store(
-            "a",
-            valid_tokens(mock_token_response(Some(3600))),
-        );
+        store.store("b", valid_tokens(mock_token_response(Some(3600))));
+        store.store("a", valid_tokens(mock_token_response(Some(3600))));
         let keys = store.keys();
         assert_eq!(keys.len(), 2);
         assert!(keys.contains(&"a".to_string()));
@@ -2021,10 +2039,7 @@ mod tests {
     #[test]
     fn test_token_store_get_returns_clone_not_reference() {
         let store = TokenStore::new();
-        store.store(
-            "key",
-            valid_tokens(mock_token_response(Some(3600))),
-        );
+        store.store("key", valid_tokens(mock_token_response(Some(3600))));
         let t1 = store.get("key").unwrap();
         let t2 = store.get("key").unwrap();
         // Both should have the same access token
@@ -2213,10 +2228,7 @@ mod tests {
         assert!(!store.has_valid_token(key));
 
         // Store
-        store.store(
-            key,
-            valid_tokens(mock_token_response(Some(3600))),
-        );
+        store.store(key, valid_tokens(mock_token_response(Some(3600))));
         assert!(store.get(key).is_some());
         assert!(store.has_valid_token(key));
 
@@ -2233,11 +2245,7 @@ mod tests {
         let mut metadata = HashMap::new();
         metadata.insert("env".to_string(), "production".to_string());
 
-        store.store_with_metadata(
-            "k",
-            valid_tokens(mock_token_response(Some(3600))),
-            metadata,
-        );
+        store.store_with_metadata("k", valid_tokens(mock_token_response(Some(3600))), metadata);
 
         let new_tokens = valid_tokens(TokenResponse {
             access_token: "updated_at".into(),
@@ -2307,16 +2315,10 @@ mod tests {
     #[test]
     fn test_token_store_clear_does_not_affect_cleanup_interval() {
         let store = TokenStore::new().with_cleanup_interval(Duration::from_secs(999));
-        store.store(
-            "k",
-            valid_tokens(mock_token_response(Some(3600))),
-        );
+        store.store("k", valid_tokens(mock_token_response(Some(3600))));
         store.clear();
         // Should still be functional after clear
-        store.store(
-            "k2",
-            valid_tokens(mock_token_response(Some(3600))),
-        );
+        store.store("k2", valid_tokens(mock_token_response(Some(3600))));
         assert!(store.has_valid_token("k2"));
     }
 }

@@ -34,6 +34,42 @@ pub struct RaptorQDecoder {
     started_at: Instant,
 }
 
+fn max_symbols_with_headroom(
+    transfer_len: usize,
+    symbol_size: usize,
+    repair_ratio_bps: u16,
+) -> u32 {
+    let source_symbols =
+        u32::try_from(transfer_len.div_ceil(symbol_size.max(1))).unwrap_or(u32::MAX);
+    let repair_symbols =
+        u32::try_from(u64::from(source_symbols) * u64::from(repair_ratio_bps) / 10_000)
+            .unwrap_or(u32::MAX);
+    source_symbols
+        .saturating_add(repair_symbols)
+        .saturating_add(1000)
+}
+
+fn max_buffer_bytes_for_budget(
+    transfer_len: usize,
+    symbol_size: usize,
+    repair_ratio_bps: u16,
+    overflow_limit: usize,
+) -> Result<(u32, usize), DecodeError> {
+    let max_symbols = max_symbols_with_headroom(transfer_len, symbol_size, repair_ratio_bps);
+    let max_symbols_usize =
+        usize::try_from(max_symbols).map_err(|_| DecodeError::MemoryLimitExceeded {
+            used: usize::MAX,
+            limit: overflow_limit,
+        })?;
+    let max_buffer_bytes = max_symbols_usize.checked_mul(symbol_size.max(1)).ok_or(
+        DecodeError::MemoryLimitExceeded {
+            used: usize::MAX,
+            limit: overflow_limit,
+        },
+    )?;
+    Ok((max_symbols, max_buffer_bytes))
+}
+
 impl RaptorQDecoder {
     /// Create a decoder with the given transmission info.
     #[must_use]
@@ -522,6 +558,21 @@ impl RaptorQDecoder {
             });
         }
 
+        let (_, required_buffer_bytes) = max_buffer_bytes_for_budget(
+            transfer_len,
+            usize::from(self.symbol_size),
+            self.config.repair_ratio_bps,
+            max_object_size,
+        )?;
+        let allowed_buffer_bytes =
+            DecodeAdmissionController::configured_buffer_budget(&self.config)?;
+        if required_buffer_bytes > allowed_buffer_bytes {
+            return Err(DecodeError::MemoryLimitExceeded {
+                used: required_buffer_bytes,
+                limit: allowed_buffer_bytes,
+            });
+        }
+
         Ok(())
     }
 
@@ -565,12 +616,12 @@ impl RaptorQDecoder {
                 limit: self.config.max_object_size as usize,
             }
         })?;
-        let max_symbols = self.config.total_symbols(transfer_len).saturating_add(1000);
-        let max_symbols_usize =
-            usize::try_from(max_symbols).map_err(|_| DecodeError::MemoryLimitExceeded {
-                used: usize::MAX,
-                limit: self.config.max_object_size as usize,
-            })?;
+        let (max_symbols, max_buffer_bytes) = max_buffer_bytes_for_budget(
+            transfer_len,
+            usize::from(self.symbol_size),
+            self.config.repair_ratio_bps,
+            self.config.max_object_size as usize,
+        )?;
         if self.received_count() >= max_symbols {
             return Err(DecodeError::SymbolBufferExceeded {
                 buffered: self.received_count(),
@@ -583,19 +634,6 @@ impl RaptorQDecoder {
             self.received
                 .len()
                 .checked_add(1)
-                .ok_or(DecodeError::MemoryLimitExceeded {
-                    used: usize::MAX,
-                    limit: self.config.max_object_size as usize,
-                })?;
-        // Byte-budget derived from max_symbols so the memory cap matches the
-        // symbol-count cap above. Using max_object_size directly here falsely
-        // rejected legitimate repair symbols whenever transfer_length was
-        // close to max_object_size (every `projected_symbols * symbol_size`
-        // past transfer_length tripped the cap, even though
-        // total_symbols(transfer_len) explicitly budgets repair overhead).
-        let max_buffer_bytes =
-            max_symbols_usize
-                .checked_mul(symbol_size)
                 .ok_or(DecodeError::MemoryLimitExceeded {
                     used: usize::MAX,
                     limit: self.config.max_object_size as usize,
@@ -640,17 +678,32 @@ pub struct DecodeAdmissionController {
 }
 
 impl DecodeAdmissionController {
+    fn configured_buffer_budget(config: &RaptorQConfig) -> Result<usize, DecodeError> {
+        let (_, max_buffer_bytes) = max_buffer_bytes_for_budget(
+            config.max_object_size as usize,
+            usize::from(config.symbol_size),
+            config.repair_ratio_bps,
+            config.max_object_size as usize,
+        )?;
+        Ok(max_buffer_bytes)
+    }
+
     /// Create a new admission controller with the given config.
     #[must_use]
     pub fn new(config: &RaptorQConfig) -> Self {
         // Calculate max symbols needed for max object size, plus safety margin
-        let max_symbols = config.total_symbols(config.max_object_size as usize);
-        let max_symbols_buffered = max_symbols.saturating_add(1000);
+        let max_symbols_buffered = max_symbols_with_headroom(
+            config.max_object_size as usize,
+            usize::from(config.symbol_size),
+            config.repair_ratio_bps,
+        );
+        let max_memory_per_decode =
+            Self::configured_buffer_budget(config).unwrap_or(config.max_object_size as usize);
 
         Self {
             max_concurrent: 16,
             active: Arc::new(AtomicUsize::new(0)),
-            max_memory_per_decode: config.max_object_size as usize,
+            max_memory_per_decode,
             timeout: config.decode_timeout,
             max_symbols_buffered,
         }
@@ -1499,6 +1552,36 @@ mod tests {
     }
 
     #[test]
+    fn decode_with_context_allows_repair_headroom_at_object_size_boundary() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let config = RaptorQConfig {
+                symbol_size: 64,
+                max_object_size: 640,
+                repair_ratio_bps: 500,
+                ..test_config()
+            };
+            let controller = DecodeAdmissionController::new(&config);
+            let context = ExecutionContext::request_scoped(Duration::from_secs(5));
+            let mut decoder = RaptorQDecoder::new(
+                ObjectTransmissionInformation::new(639, 64, 1, 1, 8),
+                &config,
+            );
+
+            let symbols = (0..=10_u32)
+                .map(|esi| (esi, vec![0u8; 64]))
+                .collect::<Vec<_>>();
+
+            let payload = controller
+                .decode_with_context(&context, &mut decoder, symbols)
+                .await
+                .expect("repair-headroom path should no longer fail admission");
+            assert_eq!(payload.len(), 639);
+            assert_eq!(decoder.received_count(), 10);
+        })
+        .expect("runtime available for async decode test");
+    }
+
+    #[test]
     fn decode_with_context_rejects_zero_length_source_block_before_buffering() {
         fcp_async_core::runtime::block_on_sync(async {
             let config = test_config();
@@ -1851,6 +1934,24 @@ mod tests {
         let err = decoder
             .add_symbol(0, vec![0u8; 64])
             .expect_err("oversized transfer length must be rejected before buffering");
+        assert!(matches!(err, DecodeError::MemoryLimitExceeded { .. }));
+        assert_eq!(decoder.received_count(), 0);
+    }
+
+    #[test]
+    fn decoder_rejects_oti_symbol_size_exceeding_configured_buffer_budget() {
+        let config = RaptorQConfig {
+            symbol_size: 64,
+            max_object_size: 256,
+            repair_ratio_bps: 0,
+            ..test_config()
+        };
+        let oti = ObjectTransmissionInformation::new(256, 128, 1, 1, 8);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+
+        let err = decoder
+            .add_symbol(0, vec![0xAA; 128])
+            .expect_err("hostile OTI must be rejected before buffering");
         assert!(matches!(err, DecodeError::MemoryLimitExceeded { .. }));
         assert_eq!(decoder.received_count(), 0);
     }

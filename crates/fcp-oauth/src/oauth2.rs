@@ -326,6 +326,12 @@ fn validate_oauth2_config(mut config: OAuth2Config) -> OAuthResult<OAuth2Config>
             normalize_registered_redirect_uri(redirect_uri, "redirect_uri")?.into(),
         );
     }
+    if config.extra_token_params.contains_key("code_verifier") {
+        return Err(OAuthError::InvalidConfig(
+            "static code_verifier is forbidden; generate PKCE per flow via authorization_session[_with_pkce]() and exchange_code_with_pkce()"
+                .into(),
+        ));
+    }
     Ok(config)
 }
 
@@ -499,9 +505,9 @@ impl OAuth2Client {
     /// # Errors
     /// Returns an error when token exchange fails or the response is invalid.
     pub async fn exchange_code(&self, code: &str) -> OAuthResult<OAuthTokens> {
-        if self.config.use_pkce && !self.config.extra_token_params.contains_key("code_verifier") {
+        if self.config.use_pkce {
             return Err(OAuthError::InvalidConfig(
-                "authorization_code flow requires PKCE; use exchange_code_with_pkce or supply code_verifier explicitly"
+                "authorization_code flow requires PKCE; use exchange_code_with_pkce() with per-flow PKCE material"
                     .into(),
             ));
         }
@@ -526,12 +532,9 @@ impl OAuth2Client {
         code: &str,
         pkce: Option<&Pkce>,
     ) -> OAuthResult<OAuthTokens> {
-        if self.config.use_pkce
-            && pkce.is_none()
-            && !self.config.extra_token_params.contains_key("code_verifier")
-        {
+        if self.config.use_pkce && pkce.is_none() {
             return Err(OAuthError::InvalidConfig(
-                "authorization_code flow requires PKCE code_verifier".into(),
+                "authorization_code flow requires per-flow PKCE code_verifier".into(),
             ));
         }
         let mut params = HashMap::new();
@@ -548,6 +551,9 @@ impl OAuth2Client {
         // hole where an attacker-influenced extra_token_params entry would
         // overwrite the honest verifier produced by the authorization flow.
         for (key, value) in &self.config.extra_token_params {
+            if key == "code_verifier" {
+                continue;
+            }
             params.insert(key, value.clone());
         }
 
@@ -1789,6 +1795,22 @@ mod tests {
     }
 
     #[test]
+    fn test_client_rejects_static_code_verifier_token_param() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        )
+        .with_token_param("code_verifier", "static-verifier");
+        let err = OAuth2Client::new(config).unwrap_err();
+        assert!(matches!(
+            err,
+            OAuthError::InvalidConfig(ref m) if m.contains("static code_verifier is forbidden")
+        ));
+    }
+
+    #[test]
     fn test_client_accepts_no_redirect_uri() {
         let config = OAuth2Config::new(
             "id",
@@ -2698,7 +2720,7 @@ mod tests {
             let err = client
                 .exchange_code("code-without-verifier")
                 .await
-                .expect_err("PKCE-enabled exchange must fail without code_verifier");
+                .expect_err("PKCE-enabled exchange must fail without per-flow PKCE");
             assert!(matches!(err, OAuthError::InvalidConfig(_)));
             assert!(
                 err.to_string().contains("requires PKCE"),
@@ -2708,51 +2730,20 @@ mod tests {
     }
 
     #[test]
-    fn test_exchange_code_pkce_wins_over_extra_token_params_code_verifier() {
-        // Regression guard (br-fwcci): a stale / attacker-influenced
-        // `code_verifier` entry in `extra_token_params` MUST NOT
-        // overwrite the honest PKCE verifier produced by the
-        // authorization flow. The Pkce argument is applied AFTER the
-        // extra_token_params merge so it wins on conflict.
-        run_with_test_runtime(async {
-            let server = MockServer::start().await;
-            let pkce = Pkce::with_method(PkceMethod::S256);
-            let honest_verifier = pkce.verifier().to_string();
-            let bogus_verifier = "bogus-extra-verifier-that-must-not-win";
-            assert_ne!(honest_verifier, bogus_verifier);
-
-            Mock::given(method("POST"))
-                .and(path("/token"))
-                .and(body_string_contains("grant_type=authorization_code"))
-                .and(body_string_contains(format!(
-                    "code_verifier={honest_verifier}"
-                )))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "access_token": "tok-pkce-wins",
-                    "token_type": "Bearer",
-                    "expires_in": 3600
-                })))
-                .expect(1)
-                .mount(&server)
-                .await;
-
-            let config = OAuth2Config::new(
-                "id",
-                "secret",
-                format!("{}/authorize", server.uri()),
-                format!("{}/token", server.uri()),
-            )
-            .with_redirect_uri("https://localhost:3000/callback")
-            .with_token_param("code_verifier", bogus_verifier);
-            let client = OAuth2Client::new(config).unwrap();
-
-            let tokens = client
-                .exchange_code_with_pkce("auth-code-xyz", &pkce)
-                .await
-                .expect("honest PKCE must be sent and accepted");
-            assert_eq!(tokens.access_token(), "tok-pkce-wins");
-            server.verify().await;
-        });
+    fn test_exchange_code_with_pkce_rejects_static_code_verifier_config() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        )
+        .with_redirect_uri("https://localhost:3000/callback")
+        .with_token_param("code_verifier", "bogus-extra-verifier-that-must-not-win");
+        let err = OAuth2Client::new(config).unwrap_err();
+        assert!(matches!(
+            err,
+            OAuthError::InvalidConfig(ref m) if m.contains("static code_verifier is forbidden")
+        ));
     }
 
     #[test]

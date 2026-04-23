@@ -551,16 +551,23 @@ fn interop_capability_tests() {
     );
 }
 
-/// Cross-zone enforcement interop tests pass independently.
-#[test]
-fn interop_cross_zone_tests() {
-    let summary = fcp_conformance::interop::cross_zone::run_tests();
-    assert!(
-        summary.all_passed(),
-        "cross-zone tests: {} failures",
-        summary.failed
-    );
-}
+// The former `interop_cross_zone_tests` assertion has been retired
+// (br-1vcqs). It invoked `fcp_conformance::interop::cross_zone::run_tests()`
+// against a self-contained string-typed shadow model with its own
+// `CrossZoneRequest`, `ApprovalToken`, `ReasonCode`, and
+// `evaluate_cross_zone_access` implementation (see
+// `crates/fcp-conformance/src/interop/cross_zone.rs:366-537`). The suite
+// asserted nothing about the real `fcp_core` / `fcp_host` cross-zone
+// enforcement path — the shadow model can stay green while real
+// `ApprovalToken`, zone-bound policy, or host enforcement code regresses.
+//
+// Removing the assertion is the honest move: a passing shadow test
+// creates false conformance confidence that a deleted test does not.
+// A follow-up bead tracks building real host-backed cross-zone
+// conformance coverage that drives `PolicyEngine::evaluate_invoke` with
+// genuine `ApprovalToken`s and asserts the DecisionReasonCode surface
+// (`TaintCrossZoneUnapproved`, `ApprovalMissingDeclassification`,
+// `ApprovalZoneMismatch`, `ApprovalExpired`, `ApprovalTokenInvalid`).
 
 // ============================================================================
 // Static Compliance Tests (Manifest Validation)

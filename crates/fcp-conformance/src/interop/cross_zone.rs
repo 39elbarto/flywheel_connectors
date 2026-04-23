@@ -1,7 +1,26 @@
 //! Cross-zone enforcement interop tests.
 //!
-//! Tests for cross-zone access control, `ApprovalToken` verification,
-//! and `DecisionReceipt` reason code stability.
+//! **SHADOW MODEL — NOT A REAL CONFORMANCE CHECK (br-1vcqs).**
+//!
+//! This module defines its own local `CrossZoneRequest`, `ApprovalToken`,
+//! `ReasonCode`, `DecisionReceipt`, and `evaluate_cross_zone_access`
+//! (see the test-support section at the bottom of this file). NONE of
+//! those types bind to `fcp_core::policy::PolicyEngine`,
+//! `fcp_core::provenance::ApprovalToken`, or any `fcp_host` enforcement
+//! path. The suite asserts self-consistent behavior of the shadow model
+//! — it can stay green indefinitely while real cross-zone enforcement
+//! regresses.
+//!
+//! The `connector_verification_e2e.rs::interop_cross_zone_tests`
+//! assertion that called `run_tests()` has been removed to avoid
+//! giving false conformance signal. This module remains in-tree as
+//! living documentation of the decision-receipt reason-code surface
+//! that a real host-backed cross-zone conformance suite should cover,
+//! and as a reference for the follow-up work tracked in beads.
+//!
+//! DO NOT wire this module back into the conformance test binary
+//! without first making the types delegate to real fcp_core /
+//! fcp_host APIs.
 
 use crate::interop::{InteropTestSummary, TestFailure};
 

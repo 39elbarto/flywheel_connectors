@@ -267,6 +267,15 @@ impl CwtClaims {
         })
     }
 
+    /// Get audience (`aud`) claim as string.
+    #[must_use]
+    pub fn get_audience(&self) -> Option<&str> {
+        self.get(cwt_claims::AUD).and_then(|v| match v {
+            ciborium::Value::Text(s) => Some(s.as_str()),
+            _ => None,
+        })
+    }
+
     /// Get expiration as timestamp.
     #[must_use]
     pub fn get_expiration(&self) -> Option<i64> {
@@ -551,6 +560,7 @@ impl CoseToken {
     pub fn sign(signing_key: &Ed25519SigningKey, claims: &CwtClaims) -> CryptoResult<Self> {
         let mut claims = claims.clone();
         synthesize_schema_version(&mut claims);
+        synthesize_audience_from_zone(&mut claims);
         let payload = claims.to_cbor()?;
         let kid = signing_key.key_id();
 
@@ -976,6 +986,22 @@ fn synthesize_schema_version(claims: &mut CwtClaims) {
     );
 }
 
+/// Stamp `aud` from `zone_id` when the caller omitted it.
+///
+/// Capability verifiers bind tokens to a target zone via `aud`, but most
+/// legacy builder call sites only set the private `ZONE_ID` claim. Preserve
+/// those call sites by synthesizing `aud = zone_id` here. Explicit `aud`
+/// values, including `"*"`, always win.
+fn synthesize_audience_from_zone(claims: &mut CwtClaims) {
+    if claims.get(cwt_claims::AUD).is_some() {
+        return;
+    }
+    let Some(zone) = claims.get_zone_id() else {
+        return;
+    };
+    *claims = claims.clone().audience(zone);
+}
+
 impl Default for CapabilityTokenBuilder {
     fn default() -> Self {
         Self::new()
@@ -1093,6 +1119,24 @@ mod tests {
             }
             other => panic!("expected synthesized schema_version integer, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cose_sign_stamps_audience_from_zone_when_missing() {
+        let signing_key = Ed25519SigningKey::generate();
+        let now = Utc::now();
+        let claims = CwtClaims::new()
+            .issuer("node:test")
+            .zone_id("z:work")
+            .capability_id("cap:test")
+            .expiration(now + Duration::hours(1));
+
+        let token = CoseToken::sign(&signing_key, &claims).expect("sign");
+        let verified = token
+            .verify(&signing_key.verifying_key())
+            .expect("verify current-zone audience token");
+
+        assert_eq!(verified.get_audience(), Some("z:work"));
     }
 
     // ── 8n0rm.4: typed AuthClaims ↔ CapabilityTokenBuilder interop ────────

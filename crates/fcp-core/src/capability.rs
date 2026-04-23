@@ -45,7 +45,7 @@ use uuid::Uuid;
 use crate::object::ObjectId;
 use crate::policy::pattern_matches;
 use crate::{CredentialId, CredentialValidationError, FcpError, FcpResult};
-use fcp_crypto::cose::{CoseToken, CwtClaims, fcp2_claims};
+use fcp_crypto::cose::{CoseToken, CwtClaims, cwt_claims, fcp2_claims};
 
 /// Canonical identifier validation error (NORMATIVE).
 ///
@@ -1837,14 +1837,44 @@ impl CapabilityVerifier {
             });
         }
 
-        // 3. Validate timing
+        // 3. Enforce audience binding. Capability tokens are valid for a
+        // specific target zone (`aud == "z:..."`) or for all zones
+        // (`aud == "*"`) — missing / empty / malformed `aud` must not turn
+        // into implicit allow-all.
+        let audience = match claims.get(cwt_claims::AUD) {
+            Some(ciborium::Value::Text(aud)) if !aud.is_empty() => aud.as_str(),
+            Some(ciborium::Value::Text(_)) => {
+                return Err(FcpError::MissingField {
+                    field: "aud (must not be empty)".into(),
+                });
+            }
+            Some(_) => {
+                return Err(FcpError::MissingField {
+                    field: "aud (must be CBOR text)".into(),
+                });
+            }
+            None => {
+                return Err(FcpError::MissingField {
+                    field: "aud".into(),
+                });
+            }
+        };
+        if audience != "*" && audience != self.zone_id.as_str() {
+            return Err(FcpError::ZoneViolation {
+                source_zone: audience.to_string(),
+                target_zone: self.zone_id.0.to_string(),
+                message: "Token audience mismatch".into(),
+            });
+        }
+
+        // 4. Validate timing
         let now = Utc::now();
         CoseToken::validate_timing(&claims, now).map_err(|e| match e {
             fcp_crypto::CryptoError::TokenNotYetValid => FcpError::TokenNotYetValid,
             _ => FcpError::TokenExpired,
         })?;
 
-        // 4. Check zone binding
+        // 5. Check zone binding
         if let Some(iss) = claims.get_zone_id() {
             if iss != self.zone_id.as_str() {
                 return Err(FcpError::ZoneViolation {
@@ -1859,7 +1889,7 @@ impl CapabilityVerifier {
             });
         }
 
-        // 4.5. Check instance binding if present.
+        // 5.5. Check instance binding if present.
         //
         // The previous implementation silently fell through when the
         // INSTANCE_ID claim was present but not a CBOR Text value (e.g. an
@@ -1902,7 +1932,7 @@ impl CapabilityVerifier {
             // level non-Text rejection above still fired.
         }
 
-        // 5. Check operation grant
+        // 6. Check operation grant
         //
         // br-8n0rm.6: `fcp2_claims::GRANTS` is the CANONICAL shape. The
         // legacy `OPERATIONS` fallback branch was removed once 8n0rm.8
@@ -1935,7 +1965,7 @@ impl CapabilityVerifier {
             });
         }
 
-        // 6. Enforce constraints (NORMATIVE — C3.4: mandatory, default-deny)
+        // 7. Enforce constraints (NORMATIVE — C3.4: mandatory, default-deny)
         if let Some(constr_val) = claims.get(fcp2_claims::CONSTRAINTS) {
             let constraints: CapabilityConstraints = Self::deserialize_cbor(constr_val)?;
             if constraints.is_empty() {
@@ -2459,6 +2489,96 @@ mod tests {
             .expect("Verification failed");
 
         assert_eq!(result.claims().get_capability_id(), Some("cap.test"));
+    }
+
+    #[test]
+    fn verify_rejects_empty_audience() {
+        let signing_key = Ed25519SigningKey::generate();
+        let pub_bytes = signing_key.verifying_key().to_bytes();
+
+        let now = Utc::now();
+        let token = CapabilityToken::from_raw(
+            CapabilityTokenBuilder::new()
+                .capability_id("cap.test")
+                .zone_id("z:work")
+                .audience("")
+                .principal("user:test")
+                .operations(&["op.test"])
+                .issuer("node:primary")
+                .validity(now, now + Duration::hours(1))
+                .constraints_cbor(&test_constraints_cbor())
+                .sign(&signing_key)
+                .unwrap(),
+        );
+
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
+        let err = verifier.verify(token, &cap, &op, &[]).unwrap_err();
+
+        assert!(
+            matches!(&err, FcpError::MissingField { field } if field == "aud (must not be empty)"),
+            "empty audience must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_wrong_audience_zone() {
+        let signing_key = Ed25519SigningKey::generate();
+        let pub_bytes = signing_key.verifying_key().to_bytes();
+
+        let now = Utc::now();
+        let token = CapabilityToken::from_raw(
+            CapabilityTokenBuilder::new()
+                .capability_id("cap.test")
+                .zone_id("z:work")
+                .audience("z:private")
+                .principal("user:test")
+                .operations(&["op.test"])
+                .issuer("node:primary")
+                .validity(now, now + Duration::hours(1))
+                .constraints_cbor(&test_constraints_cbor())
+                .sign(&signing_key)
+                .unwrap(),
+        );
+
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
+        let err = verifier.verify(token, &cap, &op, &[]).unwrap_err();
+
+        assert!(
+            matches!(&err, FcpError::ZoneViolation { message, .. } if message == "Token audience mismatch"),
+            "wrong audience zone must be rejected, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_accepts_wildcard_audience() {
+        let signing_key = Ed25519SigningKey::generate();
+        let pub_bytes = signing_key.verifying_key().to_bytes();
+
+        let now = Utc::now();
+        let token = CapabilityToken::from_raw(
+            CapabilityTokenBuilder::new()
+                .capability_id("cap.test")
+                .zone_id("z:work")
+                .audience("*")
+                .principal("user:test")
+                .operations(&["op.test"])
+                .issuer("node:primary")
+                .validity(now, now + Duration::hours(1))
+                .constraints_cbor(&test_constraints_cbor())
+                .sign(&signing_key)
+                .unwrap(),
+        );
+
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());
+        let op = OperationId::new("op.test").unwrap();
+        let cap = CapabilityId::new("cap.test").unwrap();
+        verifier
+            .verify(token, &cap, &op, &[])
+            .expect("wildcard audience should be accepted");
     }
 
     #[test]

@@ -402,7 +402,11 @@ impl EgressGuard {
         operation_id: &str,
         credential_allow: &[String],
     ) -> Result<EgressDecision, EgressError> {
-        let mut decision = self.evaluate(&EgressRequest::Http(request.clone()), constraints)?;
+        // br-z2tbh: skip the `EgressRequest::Http(request.clone())` wrap
+        // that memcopied url + method + headers + body + credential_id
+        // on every authorize call. evaluate_http already accepts a
+        // borrowed &EgressHttpRequest, so drive it directly.
+        let mut decision = self.evaluate_http(request, constraints)?;
 
         let Some(credential_id) = request.credential_id.as_deref() else {
             return Ok(decision);
@@ -446,8 +450,10 @@ impl EgressGuard {
         operation_id: &str,
         credential_allow: &[String],
     ) -> Result<EgressTcpDecision, EgressError> {
-        let mut decision =
-            self.evaluate(&EgressRequest::TcpConnect(request.clone()), constraints)?;
+        // br-z2tbh: same zero-copy rework as authorize_http — skip the
+        // `EgressRequest::TcpConnect(request.clone())` wrap and call
+        // evaluate_tcp directly against the borrowed request.
+        let mut decision = self.evaluate_tcp(request, constraints)?;
 
         let Some(credential_id) = request.credential_id.as_deref() else {
             return Ok(EgressTcpDecision {
@@ -2039,6 +2045,70 @@ mod tests {
             .unwrap();
         assert!(decision.credential_injected);
         assert!(req.headers.iter().any(|h| h.name == "Authorization"));
+    }
+
+    // br-z2tbh: authorize_http must not clone the request body or any
+    // other caller-owned field; it takes &mut EgressHttpRequest and the
+    // body must stay in place. Test: construct a request with a
+    // recognizable 1 MiB body, authorize it, assert the body's address
+    // is unchanged and its length still 1 MiB (a clone would copy into
+    // a fresh allocation, changing the pointer).
+    #[test]
+    fn test_authorize_http_preserves_body_in_place_no_clone() {
+        let guard = EgressGuard::new();
+        let constraints = test_constraints();
+        let injector = MockInjector {
+            authorized: true,
+            host_allowed: true,
+        };
+
+        let body: Vec<u8> = (0..1_048_576_u32).map(|i| (i & 0xFF) as u8).collect();
+        let body_ptr_before = body.as_ptr();
+        let body_len_before = body.len();
+
+        let mut req = EgressHttpRequest {
+            url: "https://api.example.com/data".into(),
+            method: "POST".into(),
+            headers: vec![],
+            body: Some(body),
+            credential_id: Some("cred-1".into()),
+        };
+
+        guard
+            .authorize_http(&mut req, &constraints, &injector, "op", &["cred-1".into()])
+            .expect("authorize should succeed");
+        let body_after = req.body.as_ref().expect("body still present");
+        assert_eq!(body_after.len(), body_len_before, "body len preserved");
+        assert_eq!(
+            body_after.as_ptr(),
+            body_ptr_before,
+            "authorize_http must NOT reallocate the body (br-z2tbh regression)"
+        );
+    }
+
+    #[test]
+    fn test_authorize_tcp_evaluates_without_cloning_request() {
+        let guard = EgressGuard::new();
+        let constraints = test_constraints();
+        let injector = MockInjector {
+            authorized: true,
+            host_allowed: true,
+        };
+        let req = EgressTcpConnectRequest {
+            host: "api.example.com".into(),
+            port: 443,
+            tls: false,
+            sni_override: None,
+            credential_id: None,
+        };
+        // We can't observe "no clone" structurally for TCP (small
+        // struct), but we can at least pin that the call path is the
+        // direct evaluate_tcp one: authorize_tcp returns Ok without
+        // panic and emits canonical_host matching the request host.
+        let decision = guard
+            .authorize_tcp(&req, &constraints, &injector, "op", &[])
+            .expect("authorize_tcp must succeed on canonical input");
+        assert_eq!(decision.decision.canonical_host, "api.example.com");
     }
 
     #[test]

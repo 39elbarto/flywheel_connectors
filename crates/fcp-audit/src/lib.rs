@@ -38,6 +38,7 @@ const DECISION_RECEIPT_SIG_DOMAIN: &[u8] = b"FCP2-DECISION-RECEIPT-SIG-V1";
 /// tolerance used by Kerberos and most IAM systems.
 pub const MAX_FUTURE_TIMESTAMP_SKEW_SECS: u64 = 300;
 const AUDIT_ENTRY_SIG_DOMAIN: &[u8] = b"FCP2-AUDIT-ENTRY-SIG-V1";
+const CHAIN_HEAD_SIG_DOMAIN: &[u8] = b"FCP2-AUDIT-CHAIN-HEAD-SIG-V1";
 
 // ============================================================================
 // Event type constants
@@ -685,6 +686,112 @@ impl ChainHead {
     #[must_use]
     pub fn signature_count_consistent(&self) -> bool {
         usize::try_from(self.signature_count).is_ok_and(|n| n == self.signatures.len())
+    }
+
+    /// Canonical bytes that a quorum issuer signs to bind their identity
+    /// to this chain head (br-ax97w).
+    ///
+    /// Format:
+    ///   `CHAIN_HEAD_SIG_DOMAIN
+    ///    || u32(zone_id_len, LE)   || zone_id
+    ///    || u32(head_entry_len, LE) || head_entry
+    ///    || u64(head_seq, LE)
+    ///    || u64(coverage_bps, LE)   // coverage in basis points [0, 10_000]
+    ///    || u32(epoch_id_len, LE)   || epoch_id
+    ///    || u32(signature_count, LE)`
+    ///
+    /// Intentionally EXCLUDES [`Self::signatures`] to break the
+    /// recursion (a signature cannot commit to itself). The transcript
+    /// DOES commit to `signature_count` so a producer cannot silently
+    /// add or drop a signature entry after the quorum signs.
+    /// `coverage` is converted to basis points so the transcript is
+    /// deterministic across f64 round-trips.
+    #[must_use]
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let zone_bytes = self.zone_id.as_bytes();
+        let head_entry_bytes = self.head_entry.as_bytes();
+        let epoch_bytes = self.epoch_id.as_bytes();
+        let coverage_bps =
+            (self.coverage.clamp(0.0, 1.0) * 10_000.0).round() as u64;
+
+        let mut bytes = Vec::with_capacity(
+            CHAIN_HEAD_SIG_DOMAIN.len()
+                + 4
+                + zone_bytes.len()
+                + 4
+                + head_entry_bytes.len()
+                + 8
+                + 8
+                + 4
+                + epoch_bytes.len()
+                + 4,
+        );
+        bytes.extend_from_slice(CHAIN_HEAD_SIG_DOMAIN);
+        bytes.extend_from_slice(
+            &u32::try_from(zone_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(zone_bytes);
+        bytes.extend_from_slice(
+            &u32::try_from(head_entry_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(head_entry_bytes);
+        bytes.extend_from_slice(&self.head_seq.to_le_bytes());
+        bytes.extend_from_slice(&coverage_bps.to_le_bytes());
+        bytes.extend_from_slice(
+            &u32::try_from(epoch_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(epoch_bytes);
+        bytes.extend_from_slice(&self.signature_count.to_le_bytes());
+        bytes
+    }
+
+    /// Verify every [`HeadSignature`] in [`Self::signatures`] against
+    /// the caller-supplied issuer key registry (br-ax97w).
+    ///
+    /// The head's `head_seq` is used as the `seq` on any returned
+    /// [`AuditError`] so callers can correlate the rejection with the
+    /// chain tip. Verification is ALL-OR-NOTHING: the first signature
+    /// that fails to resolve (`UnknownIssuer`) or fails to verify
+    /// (`SignatureInvalid`) aborts with a typed error.
+    ///
+    /// # Errors
+    ///
+    /// - [`AuditError::SignerMissing`] — the head carries no signatures
+    ///   at all (caller explicitly requested head auth).
+    /// - [`AuditError::UnknownIssuer`] — a signature references an
+    ///   `issuer_kid` that `key_lookup` does not resolve.
+    /// - [`AuditError::SignatureInvalid`] — a signature either has
+    ///   wrong-length bytes, the kid does not match the verifying key,
+    ///   or the Ed25519 verify fails against [`Self::signing_bytes`].
+    pub fn verify_signatures(
+        &self,
+        key_lookup: &impl Fn(&KeyId) -> Option<Ed25519VerifyingKey>,
+    ) -> Result<(), AuditError> {
+        if self.signatures.is_empty() {
+            return Err(AuditError::SignerMissing { seq: self.head_seq });
+        }
+        let transcript = self.signing_bytes();
+        for sig in &self.signatures {
+            let kid = KeyId::from_hex(&sig.issuer_kid)
+                .map_err(|_| AuditError::UnknownIssuer { seq: self.head_seq })?;
+            let verifying_key = key_lookup(&kid)
+                .ok_or(AuditError::UnknownIssuer { seq: self.head_seq })?;
+            if verifying_key.key_id().as_slice() != kid.as_slice() {
+                return Err(AuditError::SignatureInvalid { seq: self.head_seq });
+            }
+            let signature = Ed25519Signature::try_from_slice(&sig.signature)
+                .map_err(|_| AuditError::SignatureInvalid { seq: self.head_seq })?;
+            verifying_key
+                .verify(&transcript, &signature)
+                .map_err(|_| AuditError::SignatureInvalid { seq: self.head_seq })?;
+        }
+        Ok(())
     }
 }
 
@@ -1619,6 +1726,19 @@ pub fn verify_chain_with_signers(
         }
         let verifying_key = key_lookup(kid).ok_or(AuditError::UnknownIssuer { seq: entry.seq })?;
         entry.verify_signature(&verifying_key)?;
+    }
+
+    // br-ax97w: authenticate the ChainHead quorum too. verify_chain only
+    // checks head-entry linkage + signature_count consistency; an
+    // attacker who tampers with a serialized head can swap the quorum
+    // signatures for arbitrary bytes while preserving the linkage
+    // fields, and the old verify_chain_with_signers would still return
+    // Ok. Here we cryptographically verify EVERY head signature against
+    // the issuer key registry, over the `ChainHead::signing_bytes()`
+    // transcript (which commits to zone_id, head_entry, head_seq,
+    // coverage, epoch_id, and signature_count).
+    if let Some(head) = head {
+        head.verify_signatures(&key_lookup)?;
     }
 
     Ok(verify_chain(entries, head, zone_id))
@@ -2664,6 +2784,150 @@ mod tests {
             Err(AuditError::UnknownIssuer { seq: 0 }) => {}
             other => panic!("expected UnknownIssuer, got {other:?}"),
         }
+    }
+
+    // ── br-ax97w: ChainHead quorum signatures are verified too ────
+
+    fn signed_chain_and_head(signing_key: &Ed25519SigningKey) -> (Vec<AuditEntry>, ChainHead) {
+        let mut entries = Vec::new();
+        let mut prev_id: Option<String> = None;
+        for seq in 0..2 {
+            let mut entry = signed_test_entry(seq, prev_id.as_deref());
+            entry.id = entry.computed_id().unwrap();
+            entry.sign(signing_key).expect("sign");
+            prev_id = Some(entry.id.clone());
+            entries.push(entry);
+        }
+        let tip = entries.last().unwrap().clone();
+        let head = ChainHead {
+            zone_id: tip.zone_id.clone(),
+            head_entry: tip.id.clone(),
+            head_seq: tip.seq,
+            coverage: 1.0,
+            epoch_id: "epoch-ax97w".to_string(),
+            signature_count: 1,
+            signatures: Vec::new(),
+        };
+        (entries, head)
+    }
+
+    fn sign_head(head: &mut ChainHead, signing_key: &Ed25519SigningKey) {
+        let transcript = head.signing_bytes();
+        let signature = signing_key.sign(&transcript);
+        head.signatures = vec![HeadSignature {
+            issuer_kid: signing_key.key_id().to_hex(),
+            signature: signature.to_bytes().to_vec(),
+        }];
+        head.signature_count = 1;
+    }
+
+    #[test]
+    fn verify_chain_with_signers_accepts_signed_head() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let (entries, mut head) = signed_chain_and_head(&signing_key);
+        sign_head(&mut head, &signing_key);
+
+        let resolver = |_kid: &KeyId| -> Option<Ed25519VerifyingKey> {
+            Some(verifying_key.clone())
+        };
+        let report = verify_chain_with_signers(&entries, Some(&head), Some("z:work"), resolver)
+            .expect("properly-signed head must verify");
+        assert_eq!(report.chain_len, entries.len());
+    }
+
+    #[test]
+    fn verify_chain_with_signers_rejects_head_with_no_signatures() {
+        // The bead scenario: an attacker-tampered head with
+        // signature_count claimed but signatures list emptied out.
+        // Old behavior: verify_chain_with_signers returned Ok(report).
+        // New behavior (br-ax97w): SignerMissing at head_seq.
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let (entries, head) = signed_chain_and_head(&signing_key);
+        // head.signatures intentionally left empty even though
+        // signature_count = 1. This is the canonical tamper payload.
+        assert!(head.signatures.is_empty());
+        assert_eq!(head.signature_count, 1);
+
+        let resolver = |_kid: &KeyId| -> Option<Ed25519VerifyingKey> {
+            Some(verifying_key.clone())
+        };
+        match verify_chain_with_signers(&entries, Some(&head), Some("z:work"), resolver) {
+            Err(AuditError::SignerMissing { .. }) => {}
+            other => panic!("expected SignerMissing for unsigned head, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_chain_with_signers_rejects_head_with_forged_signature_bytes() {
+        // Attacker keeps signature_count consistent and a signature
+        // entry present, but fills the bytes with garbage. Must fail
+        // closed at the Ed25519 verify step.
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let (entries, mut head) = signed_chain_and_head(&signing_key);
+        head.signatures = vec![HeadSignature {
+            issuer_kid: signing_key.key_id().to_hex(),
+            signature: vec![0xAA; 64],
+        }];
+        head.signature_count = 1;
+
+        let resolver = |_kid: &KeyId| -> Option<Ed25519VerifyingKey> {
+            Some(verifying_key.clone())
+        };
+        match verify_chain_with_signers(&entries, Some(&head), Some("z:work"), resolver) {
+            Err(AuditError::SignatureInvalid { .. }) => {}
+            other => panic!("expected SignatureInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_chain_with_signers_rejects_head_signed_by_unknown_issuer() {
+        // head signed by a rotating-out issuer whose kid is not in
+        // the resolver map. Must surface UnknownIssuer.
+        let trusted = Ed25519SigningKey::generate();
+        let rotated_out = Ed25519SigningKey::generate();
+        let trusted_vk = trusted.verifying_key();
+        let trusted_kid = trusted.key_id();
+        let (entries, mut head) = signed_chain_and_head(&trusted);
+        sign_head(&mut head, &rotated_out);
+
+        let resolver = |looking: &KeyId| -> Option<Ed25519VerifyingKey> {
+            if looking.as_slice() == trusted_kid.as_slice() {
+                Some(trusted_vk.clone())
+            } else {
+                None
+            }
+        };
+        match verify_chain_with_signers(&entries, Some(&head), Some("z:work"), resolver) {
+            Err(AuditError::UnknownIssuer { .. }) => {}
+            other => panic!("expected UnknownIssuer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chain_head_signing_bytes_changes_on_any_covered_field_tamper() {
+        let (_, head) = signed_chain_and_head(&Ed25519SigningKey::generate());
+        let baseline = head.signing_bytes();
+        let mut tampered_zone = head.clone();
+        tampered_zone.zone_id = "z:attacker".into();
+        assert_ne!(tampered_zone.signing_bytes(), baseline);
+        let mut tampered_seq = head.clone();
+        tampered_seq.head_seq = tampered_seq.head_seq.wrapping_add(1);
+        assert_ne!(tampered_seq.signing_bytes(), baseline);
+        let mut tampered_coverage = head.clone();
+        tampered_coverage.coverage = 0.5;
+        assert_ne!(tampered_coverage.signing_bytes(), baseline);
+        let mut tampered_count = head.clone();
+        tampered_count.signature_count = tampered_count.signature_count.wrapping_add(1);
+        assert_ne!(tampered_count.signing_bytes(), baseline);
+        let mut tampered_epoch = head.clone();
+        tampered_epoch.epoch_id = "epoch-drift".into();
+        assert_ne!(tampered_epoch.signing_bytes(), baseline);
+        let mut tampered_entry = head.clone();
+        tampered_entry.head_entry = "forged-tip".into();
+        assert_ne!(tampered_entry.signing_bytes(), baseline);
     }
 
     // ── AuditEntryBuilder ────────────────────────────────────────────────

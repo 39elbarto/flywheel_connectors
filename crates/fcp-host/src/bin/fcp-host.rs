@@ -25,6 +25,7 @@ use axum::{
 };
 use base64::Engine;
 use chrono::{DateTime, Utc};
+use fcp_async_core::channel::{mpsc, oneshot};
 use fcp_async_core::hyper_bridge::{HyperExecutor, HyperIo};
 use fcp_async_core::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use fcp_async_core::net::TcpListener;
@@ -102,10 +103,16 @@ enum CliAction {
 
 struct SubprocessConnector {
     summary: ConnectorSummary,
-    runner: Mutex<ConnectorProcessRunner>,
+    runner_tx: mpsc::Sender<ConnectorRpcRequest>,
+    _runner_task: JoinHandle<()>,
     resilience: Arc<ResilienceLayer>,
     capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
     handshaken_zone: Mutex<Option<ZoneId>>,
+}
+
+struct ConnectorRpcRequest {
+    request: serde_json::Value,
+    response_tx: oneshot::Sender<std::io::Result<serde_json::Value>>,
 }
 
 impl SubprocessConnector {
@@ -147,10 +154,20 @@ impl SubprocessConnector {
         let runner = ConnectorProcessRunner::spawn(&config.binary, &config.args, &config.env)
             .await
             .map_err(|err| HostError::Internal(format!("spawn failed: {err}")))?;
+        let (runner_tx, mut runner_rx) =
+            mpsc::channel::<ConnectorRpcRequest>(CONNECTOR_RPC_QUEUE_CAPACITY);
+        let runner_task = task::spawn(async move {
+            let mut runner = runner;
+            while let Some(request) = runner_rx.recv().await {
+                let response = runner.request(&request.request).await;
+                let _ = request.response_tx.send(response);
+            }
+        });
 
         let connector = Self {
             summary,
-            runner: Mutex::new(runner),
+            runner_tx,
+            _runner_task: runner_task,
             resilience,
             capability_verifying_key,
             handshaken_zone: Mutex::new(None),
@@ -173,14 +190,28 @@ impl SubprocessConnector {
         let connector_id = self.summary.id.clone();
         self.resilience
             .execute(&connector_id, operation_priority(method), method, async {
-                let mut runner = self.runner.lock().await;
                 let request = json!({
                     "jsonrpc": "2.0",
                     "id": RequestId::random().0,
                     "method": method,
                     "params": params,
                 });
-                let response = runner.request(&request).await.map_err(|err| {
+                let (response_tx, response_rx) = oneshot::channel();
+                self.runner_tx
+                    .send(ConnectorRpcRequest {
+                        request,
+                        response_tx,
+                    })
+                    .await
+                    .map_err(|_| {
+                        HostError::RegistryError("connector dispatcher unavailable".to_string())
+                    })?;
+                let response = response_rx.await.map_err(|_| {
+                    HostError::RegistryError(
+                        "connector dispatcher stopped before replying".to_string(),
+                    )
+                })?;
+                let response = response.map_err(|err| {
                     HostError::RegistryError(format!("connector IO error: {err}"))
                 })?;
                 if let Some(error) = response.get("error") {
@@ -211,9 +242,11 @@ impl SubprocessConnector {
             return Ok(());
         };
 
-        let mut handshaken_zone = self.handshaken_zone.lock().await;
-        if handshaken_zone.as_ref() == Some(zone) {
-            return Ok(());
+        {
+            let handshaken_zone = self.handshaken_zone.lock().await;
+            if handshaken_zone.as_ref() == Some(zone) {
+                return Ok(());
+            }
         }
 
         let nonce = *blake3::hash(RequestId::random().0.as_bytes()).as_bytes();
@@ -245,6 +278,7 @@ impl SubprocessConnector {
                 self.summary.id
             )));
         }
+        let mut handshaken_zone = self.handshaken_zone.lock().await;
         *handshaken_zone = Some(zone.clone());
         Ok(())
     }
@@ -669,6 +703,19 @@ struct ConnectorProcessRunner {
     _stderr_task: JoinHandle<()>,
 }
 
+const CONNECTOR_RPC_QUEUE_CAPACITY: usize = 64;
+const CONNECTOR_RPC_IO_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn connector_io_timeout_error(phase: &'static str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!(
+            "connector {phase} timed out after {}s",
+            CONNECTOR_RPC_IO_TIMEOUT.as_secs()
+        ),
+    )
+}
+
 impl ConnectorProcessRunner {
     async fn spawn(
         command: &str,
@@ -725,15 +772,24 @@ impl ConnectorProcessRunner {
     async fn send_json(&mut self, value: &serde_json::Value) -> std::io::Result<()> {
         let line = serde_json::to_string(value)
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-        self.stdin.write_all(line.as_bytes()).await?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await?;
+        fcp_async_core::time::timeout(CONNECTOR_RPC_IO_TIMEOUT, async {
+            self.stdin.write_all(line.as_bytes()).await?;
+            self.stdin.write_all(b"\n").await?;
+            self.stdin.flush().await
+        })
+        .await
+        .map_err(|_| connector_io_timeout_error("stdin write"))??;
         Ok(())
     }
 
     async fn read_json(&mut self) -> std::io::Result<serde_json::Value> {
         let mut line = String::new();
-        let bytes = self.stdout.read_line(&mut line).await?;
+        let bytes = fcp_async_core::time::timeout(
+            CONNECTOR_RPC_IO_TIMEOUT,
+            self.stdout.read_line(&mut line),
+        )
+        .await
+        .map_err(|_| connector_io_timeout_error("stdout read"))??;
         if bytes == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
@@ -6316,6 +6372,35 @@ mod tests {
             introspection.operations[0].id,
             OperationId::from_static("test.echo")
         );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn subprocess_connector_queues_concurrent_health_requests() {
+        let connector_id = "fcp.test.concurrent-health:utility:1.0.0";
+        let connector = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            SubprocessConnector::spawn(
+                subprocess_test_connector_config(connector_id),
+                Arc::new(ResilienceLayer::default()),
+                None,
+            ),
+        )
+        .await
+        .expect("spawn should not hang")
+        .expect("spawn should succeed");
+
+        let responses = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            join_all((0..8).map(|_| connector.health())),
+        )
+        .await
+        .expect("concurrent health requests should not hang");
+
+        assert_eq!(responses.len(), 8);
+        for response in responses {
+            let response = response.expect("health should succeed");
+            assert!(matches!(response.status, HealthState::Ready));
+        }
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

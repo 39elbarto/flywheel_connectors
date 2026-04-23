@@ -459,12 +459,28 @@ pub struct GossipState {
 
     /// Last update timestamp.
     last_updated: u64,
+
+    /// Incrementally-maintained IBLT over `admitted_objects` (br-m68xt).
+    /// Updated in O(1) by `announce_object` / `remove_object` so
+    /// `build_iblt` / `reconcile_with_peer_iblt` can avoid the O(N)
+    /// rebuild-every-peer cost. Sized at construction using
+    /// `config.reconciliation_batch_size`; callers that request a
+    /// different `expected_difference` fall back to the full rebuild
+    /// path (which preserves exact legacy semantics for that call).
+    cached_iblt: Iblt,
+    /// Cell count of `cached_iblt`; cached to avoid repeated
+    /// `recommended_cell_count` lookups on the hot path.
+    cached_iblt_cell_count: usize,
 }
 
 impl GossipState {
     /// Create a new gossip state for a zone.
     #[must_use]
     pub fn new(zone_id: ZoneId, config: &GossipConfig) -> Self {
+        let cached_iblt_cell_count =
+            Iblt::recommended_cell_count(config.reconciliation_batch_size);
+        let cached_iblt = Iblt::with_cell_count(cached_iblt_cell_count)
+            .expect("reconciliation_batch_size yields a valid cell count");
         Self {
             zone_id,
             object_filter: XorFilterPlaceholder::new(),
@@ -473,6 +489,8 @@ impl GossipState {
             admitted_objects: BTreeSet::new(),
             symbol_availability: BTreeMap::new(),
             last_updated: 0,
+            cached_iblt,
+            cached_iblt_cell_count,
         }
     }
 
@@ -490,6 +508,9 @@ impl GossipState {
         if self.admitted_objects.insert(*object_id) {
             self.object_filter.insert(object_id.as_bytes());
             self.iblt_state.note_local_change(object_id, None);
+            // br-m68xt: maintain the reconciliation IBLT incrementally.
+            // The BTreeSet::insert guard above ensures no double-inserts.
+            self.cached_iblt.insert(*object_id);
             self.last_updated = now;
         }
     }
@@ -579,7 +600,15 @@ impl GossipState {
 
     /// Remove an object from gossip state.
     pub fn remove_object(&mut self, object_id: &ObjectId, now: u64) {
-        self.admitted_objects.remove(object_id);
+        // br-m68xt: delete from the cached IBLT BEFORE we lose the
+        // was-present signal from `BTreeSet::remove`. Skipping the
+        // delete when the object was never present keeps the cached
+        // IBLT perfectly in sync with `admitted_objects` — spurious
+        // deletes would push cell counters negative and corrupt
+        // decode().
+        if self.admitted_objects.remove(object_id) {
+            self.cached_iblt.delete(*object_id);
+        }
         self.symbol_availability.remove(object_id);
         self.rebuild_filters();
         self.last_updated = now;
@@ -607,12 +636,38 @@ impl GossipState {
         self.admitted_objects.iter().take(limit).copied().collect()
     }
 
+    /// Test-only accessor for the authoritative admitted-objects set.
+    /// Used by the br-m68xt cache-sync regression tests to rebuild an
+    /// independent IBLT for comparison against the cached one.
+    #[cfg(test)]
+    fn admitted_objects_iter_for_test(&self) -> impl Iterator<Item = &ObjectId> {
+        self.admitted_objects.iter()
+    }
+
     /// Build a production IBLT sketch from the admitted objects set.
     ///
     /// The IBLT is sized for the expected difference between nodes. Callers
     /// should pass a reasonable estimate (e.g. the count of recent changes).
+    ///
+    /// Fast path (br-m68xt): when `expected_difference` yields the same
+    /// cell count as the incrementally-maintained `cached_iblt`,
+    /// returns a clone of that sketch — O(cell_count) instead of
+    /// O(admitted_objects.len()) per call. This is the hot path for
+    /// `reconcile_with_peer_iblt` during gossip fanout, where rebuilding
+    /// a full sketch per peer was the dominant CPU cost.
+    ///
+    /// Slow path: when the requested `expected_difference` maps to a
+    /// different cell budget than the cached sketch (rare — callers
+    /// typically use the config-derived batch size consistently), the
+    /// legacy full-rebuild path is used for that one call so exact
+    /// semantics are preserved for every caller.
     #[must_use]
     pub fn build_iblt(&self, expected_difference: usize) -> Iblt {
+        let requested_cell_count = Iblt::recommended_cell_count(expected_difference);
+        if requested_cell_count == self.cached_iblt_cell_count {
+            return self.cached_iblt.clone();
+        }
+
         let mut iblt = Iblt::with_expected_difference(expected_difference);
         for object_id in &self.admitted_objects {
             iblt.insert(*object_id);
@@ -4054,6 +4109,95 @@ mod tests {
     }
 
     // ── Production IBLT Wiring Tests (br21t.3) ────────────────
+
+    /// Regression for br-m68xt: the cached IBLT must stay byte-
+    /// identical to a freshly-rebuilt one after every
+    /// announce_object / remove_object, across arbitrary orderings.
+    /// This pins the incremental-maintenance invariant so a future
+    /// refactor cannot silently desync the cache from
+    /// `admitted_objects`.
+    #[test]
+    fn gossip_state_cached_iblt_stays_in_sync_with_admitted_objects() {
+        let config = GossipConfig::default();
+        let mut state = GossipState::new(test_zone(), &config);
+
+        let ids: Vec<_> = (0..16).map(|i| test_object_id(&format!("m68xt-{i}"))).collect();
+
+        // Interleave announces and removes; after each operation the
+        // cached IBLT (returned via build_iblt at the cache's cell
+        // count) must equal a rebuilt-from-scratch IBLT over the same
+        // admitted set.
+        for (i, id) in ids.iter().enumerate() {
+            state.announce_object(id, u64::try_from(i).unwrap());
+
+            let cached = state.build_iblt(config.reconciliation_batch_size);
+            let mut fresh = Iblt::with_cell_count(cached.cell_count()).unwrap();
+            for admitted in state.admitted_objects_iter_for_test() {
+                fresh.insert(*admitted);
+            }
+            assert_eq!(
+                cached.cells(),
+                fresh.cells(),
+                "cached IBLT desynced from admitted_objects after announce #{i}"
+            );
+        }
+
+        // Remove every other object; cache must still match a rebuild.
+        for (i, id) in ids.iter().enumerate().step_by(2) {
+            state.remove_object(id, u64::try_from(100 + i).unwrap());
+
+            let cached = state.build_iblt(config.reconciliation_batch_size);
+            let mut fresh = Iblt::with_cell_count(cached.cell_count()).unwrap();
+            for admitted in state.admitted_objects_iter_for_test() {
+                fresh.insert(*admitted);
+            }
+            assert_eq!(
+                cached.cells(),
+                fresh.cells(),
+                "cached IBLT desynced from admitted_objects after remove #{i}"
+            );
+        }
+
+        // Idempotency: a remove on an id that was already removed must
+        // NOT delete from the cache again (that would corrupt cell
+        // counters).
+        state.remove_object(&ids[0], 9999);
+        let cached = state.build_iblt(config.reconciliation_batch_size);
+        let mut fresh = Iblt::with_cell_count(cached.cell_count()).unwrap();
+        for admitted in state.admitted_objects_iter_for_test() {
+            fresh.insert(*admitted);
+        }
+        assert_eq!(cached.cells(), fresh.cells(), "idempotent remove desynced cache");
+    }
+
+    /// Regression for br-m68xt slow path: when build_iblt is called
+    /// with an expected_difference that maps to a DIFFERENT cell count
+    /// than the cached sketch, the result must still be a correct
+    /// rebuild over the current admitted set — the fast-path short
+    /// circuit cannot mask the slow-path semantics.
+    #[test]
+    fn gossip_state_build_iblt_slow_path_matches_admitted_set() {
+        let config = GossipConfig::default();
+        let mut state = GossipState::new(test_zone(), &config);
+        state.announce_object(&test_object_id("slow-a"), 1);
+        state.announce_object(&test_object_id("slow-b"), 2);
+
+        // Pick an expected_difference whose recommended_cell_count
+        // differs from the cached one so the slow path fires.
+        let mismatched_diff = config.reconciliation_batch_size * 4 + 7;
+        let slow = state.build_iblt(mismatched_diff);
+        assert_ne!(
+            slow.cell_count(),
+            state.build_iblt(config.reconciliation_batch_size).cell_count(),
+            "slow-path test needs a differently-sized IBLT"
+        );
+
+        let mut fresh = Iblt::with_cell_count(slow.cell_count()).unwrap();
+        for admitted in state.admitted_objects_iter_for_test() {
+            fresh.insert(*admitted);
+        }
+        assert_eq!(slow.cells(), fresh.cells(), "slow-path build_iblt desynced from admitted");
+    }
 
     #[test]
     fn gossip_state_build_iblt_contains_admitted_objects() {

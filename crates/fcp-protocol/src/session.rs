@@ -923,19 +923,28 @@ pub fn compute_session_mac(
     seq: u64,
     frame_bytes: &[u8],
 ) -> Result<[u8; SESSION_MAC_SIZE], SessionError> {
-    let data = mac_input(session_id, direction, seq, frame_bytes);
+    let direction = [direction.as_u8()];
+    let seq = seq.to_le_bytes();
     match suite {
         SessionCryptoSuite::Suite1 => {
             let mut mac = Hmac::<Sha256>::new_from_slice(mac_key)
                 .map_err(|_| SessionError::InvalidMacKeyLength)?;
-            mac.update(&data);
+            mac.update(session_id.as_bytes());
+            mac.update(&direction);
+            mac.update(&seq);
+            mac.update(frame_bytes);
             let full = mac.finalize().into_bytes();
             let mut out = [0u8; SESSION_MAC_SIZE];
             out.copy_from_slice(&full[..SESSION_MAC_SIZE]);
             Ok(out)
         }
         SessionCryptoSuite::Suite2 => {
-            let hash = blake3::keyed_hash(mac_key, &data);
+            let mut hasher = blake3::Hasher::new_keyed(mac_key);
+            hasher.update(session_id.as_bytes());
+            hasher.update(&direction);
+            hasher.update(&seq);
+            hasher.update(frame_bytes);
+            let hash = hasher.finalize();
             let mut out = [0u8; SESSION_MAC_SIZE];
             out.copy_from_slice(&hash.as_bytes()[..SESSION_MAC_SIZE]);
             Ok(out)
@@ -1028,21 +1037,6 @@ fn append_cbor<T: Serialize>(buf: &mut Vec<u8>, value: &T) -> Result<(), Session
     let bytes = to_canonical_cbor(value)?;
     buf.extend_from_slice(&bytes);
     Ok(())
-}
-
-#[inline]
-fn mac_input(
-    session_id: &MeshSessionId,
-    direction: SessionDirection,
-    seq: u64,
-    frame_bytes: &[u8],
-) -> Vec<u8> {
-    let mut data = Vec::with_capacity(SESSION_ID_SIZE + 1 + 8 + frame_bytes.len());
-    data.extend_from_slice(session_id.as_bytes());
-    data.push(direction.as_u8());
-    data.extend_from_slice(&seq.to_le_bytes());
-    data.extend_from_slice(frame_bytes);
-    data
 }
 
 #[cfg(test)]

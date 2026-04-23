@@ -966,6 +966,43 @@ fn parse_mxc_uri(uri: &str) -> FcpResult<(String, String)> {
     Ok((server_name.to_string(), media_id.to_string()))
 }
 
+fn resource_uris_for_operation(
+    operation: &str,
+    input: &serde_json::Value,
+) -> FcpResult<Vec<String>> {
+    let mut resource_uris = Vec::new();
+
+    match operation {
+        OP_JOIN_ROOM => {
+            let room = require_str(input, "room_id_or_alias")?;
+            if room.starts_with('#') {
+                resource_uris.push(format!("matrix:room_alias:{room}"));
+            } else {
+                resource_uris.push(format!("matrix:room:{room}"));
+            }
+        }
+        OP_LEAVE_ROOM | OP_SEND_MESSAGE | OP_GET_MESSAGES | OP_GET_ROOM_STATE | OP_LIST_MEMBERS => {
+            let room_id = require_str(input, "room_id")?;
+            resource_uris.push(format!("matrix:room:{room_id}"));
+        }
+        OP_DOWNLOAD_MEDIA => {
+            let (server_name, media_id) = if let Some(uri) = optional_str(input, "mxc_uri")? {
+                parse_mxc_uri(&uri)?
+            } else {
+                (
+                    require_str(input, "server_name")?.to_string(),
+                    require_str(input, "media_id")?.to_string(),
+                )
+            };
+            resource_uris.push(format!("matrix:media:{server_name}/{media_id}"));
+        }
+        OP_JOINED_ROOMS | OP_CREATE_ROOM | OP_SYNC | OP_UPLOAD_MEDIA => {}
+        _ => {}
+    }
+
+    Ok(resource_uris)
+}
+
 fn normalize_message_event(room_id: &str, event: &Event) -> serde_json::Value {
     json!({
         "room_id": room_id,
@@ -1404,7 +1441,8 @@ impl MatrixConnector {
         let verifier = self.verifier.as_ref().ok_or_else(|| FcpError::Internal {
             message: "connector ready state missing capability verifier".into(),
         })?;
-        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
+        let resource_uris = resource_uris_for_operation(operation, &req.input)?;
+        verifier.verify(req.capability_token, &required_cap, &req.operation, &resource_uris)?;
 
         let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
             message: "connector ready state missing Matrix client".into(),
@@ -1664,8 +1702,15 @@ mod tests {
     /// calls pass verification. For write/manage operations, a separate token
     /// with the matching `capability_id` would be needed.
     fn test_token_for_key(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+        test_token_for_key_with_resources(signing_key, &["*"])
+    }
+
+    fn test_token_for_key_with_resources(
+        signing_key: &Ed25519SigningKey,
+        resource_allow: &[&str],
+    ) -> CapabilityToken {
         let constraints = fcp_core::CapabilityConstraints {
-            resource_allow: vec!["*".into()],
+            resource_allow: resource_allow.iter().map(|value| (*value).to_string()).collect(),
             ..Default::default()
         };
         let mut cbor = Vec::new();
@@ -2100,6 +2145,23 @@ mod tests {
     }
 
     #[test]
+    fn resource_uris_bind_room_and_media_targets() {
+        let join_alias = resource_uris_for_operation(
+            OP_JOIN_ROOM,
+            &json!({ "room_id_or_alias": "#general:matrix.org" }),
+        )
+        .unwrap();
+        assert_eq!(join_alias, vec!["matrix:room_alias:#general:matrix.org"]);
+
+        let media = resource_uris_for_operation(
+            OP_DOWNLOAD_MEDIA,
+            &json!({ "mxc_uri": "mxc://matrix.org/media123" }),
+        )
+        .unwrap();
+        assert_eq!(media, vec!["matrix:media:matrix.org/media123"]);
+    }
+
+    #[test]
     fn project_sync_response_translates_room_deltas() {
         let sync = SyncResponse {
             next_batch: "batch_2".into(),
@@ -2257,6 +2319,48 @@ mod tests {
 
         let err = c.invoke(req).await.unwrap_err();
         assert!(matches!(err, FcpError::NotHandshaken));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_rejects_room_outside_resource_allow() {
+        let signing_key = test_signing_key();
+        let mut connector = MatrixConnector::new();
+        configure_and_handshake_with_key(
+            &mut connector,
+            "https://matrix.org",
+            &signing_key,
+            vec![CapabilityId::from_static(CAP_READ)],
+        )
+        .await;
+
+        let req = InvokeRequest {
+            r#type: "invoke".into(),
+            id: RequestId::new("req_room_scope"),
+            connector_id: connector.id().clone(),
+            operation: OperationId::from_static(OP_GET_MESSAGES),
+            zone_id: ZoneId::work(),
+            input: json!({ "room_id": "!denied:matrix.org" }),
+            capability_token: test_token_for_key_with_resources(
+                &signing_key,
+                &["matrix:room:!allowed:matrix.org"],
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let err = connector.invoke(req).await.unwrap_err();
+        match err {
+            FcpError::ResourceNotAllowed { resource } => {
+                assert_eq!(resource, "matrix:room:!denied:matrix.org");
+            }
+            other => panic!("expected ResourceNotAllowed, got {other:?}"),
+        }
     }
 
     #[fcp_async_core::runtime::test]

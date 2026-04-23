@@ -2337,18 +2337,33 @@ pub struct Principal {
 impl Principal {
     /// Enforce the baseline principal-to-zone access floor.
     ///
-    /// This is defense-in-depth for call sites that only have a [`Principal`]
-    /// plus a [`ZoneId`] and have not yet consulted explicit host policy. It
-    /// does NOT replace host-side zone membership or capability checks.
+    /// **Opt-in utility, not a global invariant (br-u8l4d).** This method
+    /// is provided for call sites that only have a [`Principal`] plus a
+    /// [`ZoneId`] and have NOT yet consulted explicit host policy. It is
+    /// intentionally not wired into the `CapabilityVerifier` / host admission
+    /// paths because those paths already have richer policy context and
+    /// wiring this floor in unconditionally would break legitimate
+    /// `Paired`/`Admin` flows that explicit host policy allows.
+    ///
+    /// Current production callers: **none** (covered by tests only). The
+    /// method is retained as a pub API building block for future
+    /// principal-bearing admission sites to invoke explicitly when they lack
+    /// richer context. The [`#[must_use]`] attribute below ensures callers
+    /// cannot silently ignore a denied result.
     ///
     /// Current floor:
     /// - `Blocked` principals are denied everywhere.
-    /// - External principals are denied in high-trust zones (`z:private`,
+    /// - Non-`Owner` principals are denied in high-trust zones (`z:private`,
     ///   `z:owner`) unless a higher layer performs an explicit allow.
+    ///
+    /// Do NOT treat this method as a substitute for zone membership, capability
+    /// tokens, or host-side `allowed_zones` policy.
     ///
     /// # Errors
     /// Returns [`FcpError::Unauthorized`] when the principal fails the
     /// baseline zone-access floor.
+    #[must_use = "verify_zone_access returns a Result; ignoring it silently grants access \
+                  and defeats the zone-access floor (br-u8l4d)"]
     pub fn verify_zone_access(&self, zone_id: &ZoneId) -> FcpResult<()> {
         if self.trust == TrustLevel::Blocked {
             return Err(FcpError::Unauthorized {

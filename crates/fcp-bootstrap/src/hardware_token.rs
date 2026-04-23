@@ -450,14 +450,14 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
             return Err(TokenError::PinRequired);
         }
 
-        let (pkcs11, owns_initialization) = acquire_provider_context(&token.provider)?;
+        let pkcs11 = acquire_provider_context(&token.provider)?;
 
         let slot = Slot::try_from(u64::from(token.slot))
             .map_err(|err| TokenError::Pkcs11(err.to_string()))?;
         let session = match pkcs11.open_rw_session(slot) {
             Ok(session) => session,
             Err(err) => {
-                let _ = finalize_pkcs11_context(&token.provider, pkcs11, owns_initialization);
+                let _ = finalize_pkcs11_context(&token.provider, pkcs11);
                 return Err(map_pkcs11_error(err));
             }
         };
@@ -466,7 +466,7 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
         match session.login(UserType::User, Some(&auth_pin)) {
             Ok(()) | Err(Pkcs11Error::Pkcs11(RvError::UserAlreadyLoggedIn, _)) => {}
             Err(err) => {
-                cleanup_failed_session(&token.provider, session, pkcs11, owns_initialization);
+                cleanup_failed_session(&token.provider, session, pkcs11);
                 return Err(map_pkcs11_error(err));
             }
         }
@@ -474,7 +474,7 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
         let session_info = match session.get_session_info() {
             Ok(session_info) => session_info,
             Err(err) => {
-                cleanup_failed_session(&token.provider, session, pkcs11, owns_initialization);
+                cleanup_failed_session(&token.provider, session, pkcs11);
                 return Err(map_pkcs11_error(err));
             }
         };
@@ -489,8 +489,7 @@ impl HardwareTokenSessionDriver for Pkcs11SessionDriver {
             read_write,
             move || {
                 let close_result = close_pkcs11_session(session, session_state);
-                let finalize_result =
-                    finalize_pkcs11_context(&provider, pkcs11, owns_initialization);
+                let finalize_result = finalize_pkcs11_context(&provider, pkcs11);
                 close_result.and(finalize_result)
             },
         ))
@@ -2709,6 +2708,40 @@ mod tests {
     fn hardware_token_pin_is_not_empty_for_real_pin() {
         let pin = HardwareTokenPin::new("123456");
         assert!(!pin.is_empty());
+    }
+
+    #[test]
+    fn provider_session_state_finalizes_after_last_overlapping_close() {
+        let provider = Path::new("/test/provider.so");
+        let mut sessions = HashMap::new();
+
+        note_provider_session_open(&mut sessions, provider, true);
+        note_provider_session_open(&mut sessions, provider, false);
+
+        assert!(!note_provider_session_close(&mut sessions, provider));
+        assert_eq!(
+            sessions.get(provider),
+            Some(&ProviderSessionState {
+                active_sessions: 1,
+                finalize_required: true,
+            })
+        );
+
+        assert!(note_provider_session_close(&mut sessions, provider));
+        assert!(!sessions.contains_key(provider));
+    }
+
+    #[test]
+    fn provider_session_state_skips_finalize_for_externally_initialized_provider() {
+        let provider = Path::new("/test/provider.so");
+        let mut sessions = HashMap::new();
+
+        note_provider_session_open(&mut sessions, provider, false);
+        note_provider_session_open(&mut sessions, provider, false);
+
+        assert!(!note_provider_session_close(&mut sessions, provider));
+        assert!(!note_provider_session_close(&mut sessions, provider));
+        assert!(!sessions.contains_key(provider));
     }
 
     // ---- DetectionStage serde roundtrip ----

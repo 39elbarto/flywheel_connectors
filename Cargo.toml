@@ -300,6 +300,7 @@ url = "2.5"
 # Internal crates
 fcp-async-core = { path = "crates/fcp-async-core" }
 fcp-audit = { path = "crates/fcp-audit" }
+fcp-auth-schema = { path = "crates/fcp-auth-schema" }
 fcp-bootstrap = { path = "crates/fcp-bootstrap" }
 fcp-cbor = { path = "crates/fcp-cbor" }
 fcp-core = { path = "crates/fcp-core" }

@@ -1145,19 +1145,31 @@ mod tests {
         }
     }
 
+    /// Responder-picks regression with structured logging.
+    ///
+    /// Same inputs as the post-crkft.2 flip at
+    /// `negotiate_suite_ignores_initiator_order_preference`
+    /// (initiator `[Suite2, Suite1]`, responder `[Suite1, Suite2]`) but
+    /// wrapped in `run_logged_test` so the responder-picks invariant is
+    /// exercised through the logging harness as well.
+    ///
+    /// Renamed from `suite_negotiation_prefers_initiator_order` (br-abezh):
+    /// the old name + assertion asserted initiator-picks semantics, which
+    /// directly contradicted `docs/protocol/session-handshake.md` after
+    /// crkft.2 flipped the public API to responder-picks.
     #[test]
-    fn suite_negotiation_prefers_initiator_order() {
+    fn suite_negotiation_prefers_responder_order() {
         let context = LogContext::new("handshake", "suite_negotiate");
         run_logged_test(
-            "suite_negotiation_prefers_initiator_order",
+            "suite_negotiation_prefers_responder_order",
             2,
             &context,
             || {
                 let initiator = [SessionCryptoSuite::Suite2, SessionCryptoSuite::Suite1];
                 let responder = [SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2];
                 let chosen = negotiate_suite(&initiator, &responder).expect("suite chosen");
-                assert_eq!(chosen, SessionCryptoSuite::Suite2);
-                assert_eq!(chosen.id(), 2);
+                assert_eq!(chosen, SessionCryptoSuite::Suite1);
+                assert_eq!(chosen.id(), 1);
             },
         );
     }

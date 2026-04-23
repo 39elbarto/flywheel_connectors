@@ -5343,17 +5343,19 @@ mod tests {
         holder_node: &str,
     ) -> fcp_core::CapabilityToken {
         let now = Utc::now();
+        let claims = fcp_crypto::cose::CwtClaims::new()
+            .issuer("host:test")
+            .subject("user:test")
+            .principal_id("user:test")
+            .audience(connector_id)
+            .zone_id(zone_id)
+            .capability_id(capability_id)
+            .operations(&[operation_id])
+            .holder_node(holder_node)
+            .not_before(now)
+            .expiration(now + chrono::Duration::hours(1));
         fcp_core::CapabilityToken::from_raw(
-            fcp_crypto::cose::CapabilityTokenBuilder::new()
-                .capability_id(capability_id)
-                .zone_id(zone_id)
-                .principal("user:test")
-                .audience(connector_id)
-                .issuer("host:test")
-                .operations(&[operation_id])
-                .holder_node(holder_node)
-                .validity(now, now + chrono::Duration::hours(1))
-                .sign(signing_key)
+            fcp_crypto::cose::CoseToken::sign(signing_key, &claims)
                 .expect("test holder-bound capability token should sign"),
         )
     }

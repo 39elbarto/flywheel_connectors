@@ -394,6 +394,42 @@ impl SymbolStore for MemorySymbolStore {
         object_id: &ObjectId,
         esi: u32,
     ) -> Result<StoredSymbol, SymbolStoreError> {
+        // Fast path: read-lock only. Serve the common case (no
+        // corruption at this ESI) without ever taking the global
+        // writer, so concurrent lookups no longer serialize on a
+        // single writer critical section (br-s5u65).
+        //
+        // Corruption detection: we filter by `symbol_matches_meta` on
+        // the read side instead of physically scrubbing the map. If
+        // the symbol at `esi` is consistent with the current meta we
+        // return it immediately. If it's NOT consistent, we fall
+        // through to the write-lock slow path so stale bytes are
+        // pruned and `used_bytes` converges — corruption is the rare
+        // case in a well-behaved store.
+        {
+            let objects = self.objects.read();
+            let obj = objects
+                .get(object_id)
+                .ok_or(SymbolStoreError::ObjectNotFound(*object_id))?;
+            match obj.symbols.get(&esi) {
+                Some(symbol) if Self::symbol_matches_meta(&obj.meta, symbol) => {
+                    return Ok(symbol.clone());
+                }
+                Some(_) => {
+                    // Corrupt symbol at target ESI — fall through to scrub.
+                }
+                None => {
+                    return Err(SymbolStoreError::NotFound {
+                        object_id: *object_id,
+                        esi,
+                    });
+                }
+            }
+        }
+
+        // Slow path: only reached when the fast path observed a
+        // mismatched symbol at `esi`. Upgrade to the write lock to
+        // prune and re-check.
         let mut objects = self.objects.write();
         let obj = objects
             .get_mut(object_id)
@@ -425,38 +461,41 @@ impl SymbolStore for MemorySymbolStore {
     }
 
     async fn get_all_symbols(&self, object_id: &ObjectId) -> Vec<StoredSymbol> {
-        let mut objects = self.objects.write();
-        let Some(obj) = objects.get_mut(object_id) else {
-            return Vec::new();
+        // Fast path: read-lock. Filter non-matching symbols during the
+        // copy rather than physically scrubbing the map. Observable
+        // result (only matching symbols) is identical to the old
+        // write-lock + scrub path; physical cleanup of corrupt entries
+        // defers to the next write operation (br-s5u65).
+        let mut symbols: Vec<_> = {
+            let objects = self.objects.read();
+            let Some(obj) = objects.get(object_id) else {
+                return Vec::new();
+            };
+            obj.symbols
+                .values()
+                .filter(|symbol| Self::symbol_matches_meta(&obj.meta, symbol))
+                .cloned()
+                .collect()
         };
-        let removed_bytes = Self::scrub_corrupt_symbols_locked(obj);
-        let mut symbols: Vec<_> = obj.symbols.values().cloned().collect();
-        drop(objects);
-
-        if removed_bytes > 0 {
-            let mut used = self.used_bytes.write();
-            *used = used.saturating_sub(removed_bytes);
-        }
 
         symbols.sort_unstable_by_key(|symbol| symbol.meta.esi);
         symbols
     }
 
     async fn symbol_count(&self, object_id: &ObjectId) -> u32 {
-        let mut objects = self.objects.write();
-        let Some(obj) = objects.get_mut(object_id) else {
+        // Fast path: read-lock. Count matching symbols at read time
+        // rather than physically pruning the map. Observable result
+        // matches the old write-lock + scrub path (br-s5u65).
+        let objects = self.objects.read();
+        let Some(obj) = objects.get(object_id) else {
             return 0;
         };
-        let removed_bytes = Self::scrub_corrupt_symbols_locked(obj);
-        let count = u32::try_from(obj.symbols.len()).unwrap_or(u32::MAX);
-        drop(objects);
-
-        if removed_bytes > 0 {
-            let mut used = self.used_bytes.write();
-            *used = used.saturating_sub(removed_bytes);
-        }
-
-        count
+        let matching = obj
+            .symbols
+            .values()
+            .filter(|symbol| Self::symbol_matches_meta(&obj.meta, symbol))
+            .count();
+        u32::try_from(matching).unwrap_or(u32::MAX)
     }
 
     async fn delete_object(&self, object_id: &ObjectId) -> Result<(), SymbolStoreError> {
@@ -707,6 +746,104 @@ mod tests {
                 ..StoreLogData::default()
             }
         });
+    }
+
+    /// Regression for br-s5u65: the read-path fast path must be
+    /// correct under concurrent reads on the same populated object.
+    /// Before the fix, every get_symbol / get_all_symbols /
+    /// symbol_count took `objects.write()` and serialized every
+    /// concurrent reader into a single critical section. The fix uses
+    /// `objects.read()` on the healthy path; this test smokes the
+    /// concurrency correctness (observable outputs match a sequential
+    /// reference under 32 concurrent readers).
+    #[test]
+    fn get_symbol_read_path_is_concurrent_safe() {
+        use std::sync::Arc;
+
+        run_store_test(
+            "get_symbol_read_path_is_concurrent_safe",
+            "verify",
+            "read",
+            3,
+            || async {
+                let store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+                store.put_object_meta(test_object_meta()).await.unwrap();
+                for esi in 0_u32..8 {
+                    store.put_symbol(test_symbol(esi)).await.unwrap();
+                }
+
+                let mut handles = Vec::with_capacity(32);
+                for _ in 0..32 {
+                    let s = Arc::clone(&store);
+                    handles.push(std::thread::spawn(move || {
+                        for esi in 0_u32..8 {
+                            let sym = fcp_async_core::runtime::block_on_sync(
+                                s.get_symbol(&test_object_id(), esi),
+                            )
+                            .expect("runtime")
+                            .unwrap();
+                            assert_eq!(sym.meta.esi, esi);
+                        }
+                        fcp_async_core::runtime::block_on_sync(
+                            s.symbol_count(&test_object_id()),
+                        )
+                        .expect("runtime")
+                    }));
+                }
+
+                let counts: Vec<u32> = handles
+                    .into_iter()
+                    .map(|h| h.join().expect("reader thread panicked"))
+                    .collect();
+
+                // Every reader must observe exactly 8 matching symbols.
+                assert!(
+                    counts.iter().all(|&c| c == 8),
+                    "concurrent readers disagreed on symbol_count: {counts:?}"
+                );
+
+                StoreLogData {
+                    object_id: Some(test_object_id()),
+                    symbol_count: Some(8),
+                    details: Some(json!({"concurrent_readers": counts.len()})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    /// Regression for br-s5u65 fast-path error semantics: the read-lock
+    /// fast path must return `ObjectNotFound` for unknown object_ids
+    /// and `NotFound` for unknown ESIs on known objects WITHOUT taking
+    /// the global write lock. Before the fix every such error path
+    /// wrote-locked the map. This pins the error-return shape so a
+    /// future refactor cannot silently regress.
+    #[test]
+    fn get_symbol_fast_path_errors_preserve_semantics() {
+        run_store_test(
+            "get_symbol_fast_path_errors",
+            "verify",
+            "read",
+            2,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+
+                // Unknown object_id → ObjectNotFound (no writes needed).
+                let err = store
+                    .get_symbol(&ObjectId::from_bytes([42_u8; 32]), 0)
+                    .await
+                    .unwrap_err();
+                assert!(matches!(err, SymbolStoreError::ObjectNotFound(_)));
+
+                // Known object, unknown ESI → NotFound.
+                store.put_object_meta(test_object_meta()).await.unwrap();
+                store.put_symbol(test_symbol(0)).await.unwrap();
+                let err = store.get_symbol(&test_object_id(), 99).await.unwrap_err();
+                assert!(matches!(err, SymbolStoreError::NotFound { .. }));
+
+                StoreLogData::default()
+            },
+        );
     }
 
     #[test]

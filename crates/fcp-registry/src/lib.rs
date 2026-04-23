@@ -20,7 +20,7 @@ use axum::{
 };
 use bytes::Bytes;
 use chrono::Utc;
-use fcp_cbor::{CanonicalSerializer, SerializationError};
+use fcp_cbor::{CanonicalSerializer, MAX_CANONICAL_OBJECT_BYTES, SerializationError};
 use fcp_core::{
     CapabilityId, ObjectHeader, ObjectId, ObjectIdKey, Provenance, RateLimitDeclarations,
     RetentionClass, StorageMeta, StoredObject, ZoneId, ZonePolicyObject,
@@ -257,6 +257,8 @@ pub enum RegistryError {
     IncompleteSymbols { received: u32, needed: u32 },
     #[error("decoded transfer length {len} exceeds platform limits")]
     TransferLengthOverflow { len: u64 },
+    #[error("reconstructed body length {len} exceeds canonical object limit {max}")]
+    ReconstructedBodyTooLarge { len: usize, max: usize },
     #[error("decoded body too short (expected at least {expected} bytes, got {actual})")]
     ReconstructedBodyTooShort { expected: usize, actual: usize },
     #[error("reconstructed body hash mismatch (expected {expected}, got {actual})")]
@@ -1320,6 +1322,18 @@ impl RegistryVerifier {
         symbol_store: &dyn SymbolStore,
         config: &RaptorQConfig,
     ) -> Result<ReconstructedConnectorBinary, RegistryError> {
+        let expected_len = usize::try_from(descriptor.oti.transfer_length).map_err(|_| {
+            RegistryError::TransferLengthOverflow {
+                len: descriptor.oti.transfer_length,
+            }
+        })?;
+        if expected_len > MAX_CANONICAL_OBJECT_BYTES {
+            return Err(RegistryError::ReconstructedBodyTooLarge {
+                len: expected_len,
+                max: MAX_CANONICAL_OBJECT_BYTES,
+            });
+        }
+
         let received = symbol_store
             .symbol_count(&descriptor.binary_object_id)
             .await;
@@ -1348,11 +1362,6 @@ impl RegistryVerifier {
         let decoded = decoded.ok_or(RegistryError::IncompleteSymbols {
             received,
             needed: descriptor.source_symbols,
-        })?;
-        let expected_len = usize::try_from(descriptor.oti.transfer_length).map_err(|_| {
-            RegistryError::TransferLengthOverflow {
-                len: descriptor.oti.transfer_length,
-            }
         })?;
         if decoded.len() < expected_len {
             return Err(RegistryError::ReconstructedBodyTooShort {

@@ -5,6 +5,7 @@
 //! and object store mirroring without mocks.
 
 use base64::Engine;
+use fcp_cbor::MAX_CANONICAL_OBJECT_BYTES;
 use fcp_core::{
     CapabilityId, DecisionReceiptPolicy, ObjectIdKey, Provenance, ZoneId, ZonePolicyObject,
     ZoneTransportPolicy,
@@ -1253,6 +1254,59 @@ async fn reconstruct_binary_from_symbols_rejects_hash_mismatch() {
     assert!(matches!(
         err,
         RegistryError::ReconstructedBinaryHashMismatch { .. }
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn reconstruct_binary_from_symbols_rejects_absurd_transfer_length_before_fetch() {
+    let large_binary = patterned_binary(4096);
+    let (bundle, trust) = signed_bundle_with_binary("pub1", large_binary);
+    let verifier = RegistryVerifier::new(trust);
+    let verified = verifier
+        .verify_bundle(&bundle, None, None, None)
+        .expect("verify");
+
+    let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+    let symbol_store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+    let zone = ZoneId::work();
+    let object_id_key = ObjectIdKey::from_bytes([1u8; 32]);
+
+    let mirror = verifier
+        .mirror_bundle(&verified, &bundle, zone.clone(), &object_id_key, &store)
+        .await
+        .expect("mirror");
+    let symbol_result = verifier
+        .mirror_bundle_symbols(
+            &verified,
+            &bundle,
+            &mirror,
+            zone,
+            &object_id_key,
+            &store,
+            &symbol_store,
+            &symbol_config(),
+            Some(14),
+        )
+        .await
+        .expect("mirror symbols");
+    let mut descriptor = verifier
+        .load_symbol_descriptor(&symbol_result.descriptor_object_id, &store)
+        .await
+        .expect("load descriptor");
+    descriptor.oti.transfer_length = u64::try_from(MAX_CANONICAL_OBJECT_BYTES)
+        .expect("canonical limit fits u64")
+        .saturating_add(1);
+
+    let err = verifier
+        .reconstruct_binary_from_symbols(&descriptor, &symbol_store, &symbol_config())
+        .await
+        .expect_err("oversized reconstructed body should fail");
+    assert!(matches!(
+        err,
+        RegistryError::ReconstructedBodyTooLarge {
+            len,
+            max: MAX_CANONICAL_OBJECT_BYTES,
+        } if len == MAX_CANONICAL_OBJECT_BYTES + 1
     ));
 }
 

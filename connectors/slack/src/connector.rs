@@ -862,8 +862,10 @@ impl SlackConnector {
                 message: "Invalid capability ID format".into(),
             })?;
 
+        let resource_uris = resource_uris_for_operation(operation, &input)?;
+
         if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
+            verifier.verify(token, &cap_id, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -1492,6 +1494,67 @@ fn required_capability_for_operation(operation: &str) -> &str {
     }
 }
 
+fn resource_uris_for_operation(
+    operation: &str,
+    input: &serde_json::Value,
+) -> FcpResult<Vec<String>> {
+    let mut resource_uris = Vec::new();
+
+    let mut push_unique = |uri: String| {
+        if !resource_uris.contains(&uri) {
+            resource_uris.push(uri);
+        }
+    };
+
+    match operation {
+        "slack.post_message" => {
+            let channel = require_str(input, "channel")?;
+            push_unique(format!("slack:channel:{channel}"));
+            if let Some(thread_ts) = input.get("thread_ts").and_then(|v| v.as_str()) {
+                push_unique(format!("slack:thread:{channel}:{thread_ts}"));
+            }
+        }
+        "slack.reply_thread" => {
+            let channel = require_str(input, "channel")?;
+            let thread_ts = require_str(input, "thread_ts")?;
+            push_unique(format!("slack:channel:{channel}"));
+            push_unique(format!("slack:thread:{channel}:{thread_ts}"));
+        }
+        "slack.get_channel_history" | "slack.set_channel_topic" => {
+            let channel = require_str(input, "channel")?;
+            push_unique(format!("slack:channel:{channel}"));
+        }
+        "slack.get_user_info" => {
+            let user = require_str(input, "user")?;
+            push_unique(format!("slack:user:{user}"));
+        }
+        "slack.upload_file" => {
+            let channels = require_str(input, "channels")?;
+            for channel in channels
+                .split(',')
+                .map(str::trim)
+                .filter(|channel| !channel.is_empty())
+            {
+                push_unique(format!("slack:channel:{channel}"));
+            }
+        }
+        "slack.download_file" => {
+            let file_id = require_str(input, "file_id")?;
+            push_unique(format!("slack:file:{file_id}"));
+        }
+        "slack.add_reaction" => {
+            let channel = require_str(input, "channel")?;
+            let timestamp = require_str(input, "timestamp")?;
+            push_unique(format!("slack:channel:{channel}"));
+            push_unique(format!("slack:message:{channel}:{timestamp}"));
+        }
+        "slack.search_messages" | "slack.list_channels" => {}
+        _ => {}
+    }
+
+    Ok(resource_uris)
+}
+
 fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
     input
         .get(field)
@@ -1613,10 +1676,18 @@ mod tests {
     }
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
+        generate_token_with_resources(signing_key, cap, &["*"])
+    }
+
+    fn generate_token_with_resources(
+        signing_key: &Ed25519SigningKey,
+        cap: &str,
+        resource_allow: &[&str],
+    ) -> CapabilityToken {
         let now = Utc::now();
         // C3.4: tokens MUST include constraints (default-deny)
         let constraints = CapabilityConstraints {
-            resource_allow: vec!["*".into()],
+            resource_allow: resource_allow.iter().map(|value| (*value).to_string()).collect(),
             ..Default::default()
         };
         let mut cbor = Vec::new();
@@ -1632,6 +1703,42 @@ mod tests {
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
+    }
+
+    #[test]
+    fn test_resource_uris_for_operation_bind_slack_targets() {
+        let uris = resource_uris_for_operation(
+            "slack.reply_thread",
+            &json!({
+                "channel": "C123",
+                "thread_ts": "171234.5678"
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            uris,
+            vec![
+                "slack:channel:C123".to_string(),
+                "slack:thread:C123:171234.5678".to_string()
+            ]
+        );
+
+        let uris = resource_uris_for_operation(
+            "slack.upload_file",
+            &json!({
+                "channels": "C111, C222,C111",
+                "content_object_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "resolved_content": "hello"
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            uris,
+            vec![
+                "slack:channel:C111".to_string(),
+                "slack:channel:C222".to_string()
+            ]
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -1729,6 +1836,50 @@ mod tests {
                 assert!(message.contains("text"));
             }
             e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_rejects_channel_outside_resource_allow() {
+        let mut connector = SlackConnector::new();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["slack.post_message"]
+            }))
+            .await
+            .unwrap();
+
+        let token = generate_token_with_resources(
+            &signing_key,
+            "slack.post_message",
+            &["slack:channel:C-allowed"],
+        );
+
+        let err = connector
+            .handle_invoke(json!({
+                "operation": "slack.post_message",
+                "input": {
+                    "channel": "C-denied",
+                    "text": "hello"
+                },
+                "capability_token": token
+            }))
+            .await
+            .unwrap_err();
+
+        match err {
+            FcpError::ResourceNotAllowed { resource } => {
+                assert_eq!(resource, "slack:channel:C-denied");
+            }
+            other => panic!("expected ResourceNotAllowed, got {other:?}"),
         }
     }
 

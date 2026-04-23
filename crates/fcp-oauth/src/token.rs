@@ -174,6 +174,14 @@ impl OAuthTokens {
         self.refresh_token.as_deref()
     }
 
+    /// Preserve the current refresh token when a successful refresh response
+    /// omits rotation.
+    pub(crate) fn preserve_refresh_token_if_missing(&mut self, refresh_token: &str) {
+        if self.refresh_token.is_none() && !refresh_token.is_empty() {
+            self.refresh_token = Some(refresh_token.to_string());
+        }
+    }
+
     /// Get the granted scopes.
     #[must_use]
     pub fn scopes(&self) -> &[String] {

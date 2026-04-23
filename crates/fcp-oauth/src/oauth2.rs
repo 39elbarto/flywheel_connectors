@@ -590,7 +590,13 @@ impl OAuth2Client {
             params.insert(key, value.clone());
         }
 
-        self.token_request(params).await
+        let mut tokens = self.token_request(params).await?;
+        // RFC-compliant providers may omit refresh_token on refresh when the
+        // existing refresh credential remains valid. Preserve the caller's
+        // current refresh token so a successful refresh does not silently drop
+        // future refresh capability.
+        tokens.preserve_refresh_token_if_missing(refresh_token);
+        Ok(tokens)
     }
 
     /// Make a token request.
@@ -1247,6 +1253,56 @@ mod tests {
     }
 
     #[test]
+    fn test_token_store_get_or_refresh_preserves_refresh_token_when_provider_omits_rotation() {
+        run_with_test_runtime(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_string_contains("grant_type=refresh_token"))
+                .and(body_string_contains("refresh_token=refresh-steady"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "access-new",
+                    "token_type": "Bearer",
+                    "expires_in": 3600
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "cid",
+                "csec",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_redirect_uri("https://localhost:3000/callback");
+            let client = OAuth2Client::new(config).unwrap();
+            let store = TokenStore::new();
+            store.store(
+                "user",
+                OAuthTokens::from_response(TokenResponse {
+                    access_token: "access-old".into(),
+                    token_type: "Bearer".into(),
+                    expires_in: Some(120),
+                    refresh_token: Some("refresh-steady".into()),
+                    scope: None,
+                    id_token: None,
+                })
+                .expect("valid token fixture must construct"),
+            );
+
+            let refreshed = store.get_or_refresh("user", &client).await.unwrap();
+            assert_eq!(refreshed.access_token(), "access-new");
+            assert_eq!(refreshed.refresh_token(), Some("refresh-steady"));
+
+            let stored = store.get("user").unwrap();
+            assert_eq!(stored.access_token(), "access-new");
+            assert_eq!(stored.refresh_token(), Some("refresh-steady"));
+            server.verify().await;
+        });
+    }
+
+    #[test]
     fn test_token_store_get_or_refresh_is_single_flight_per_key() {
         run_with_test_runtime(async {
             let server = MockServer::start().await;
@@ -1382,6 +1438,37 @@ mod tests {
             let tokens = client.refresh_tokens("refresh-token-xyz").await.unwrap();
             assert_eq!(tokens.access_token(), "fresh-access-token");
             assert_eq!(tokens.refresh_token(), Some("new-refresh-token"));
+        });
+    }
+
+    #[test]
+    fn test_refresh_tokens_preserves_existing_refresh_token_when_provider_omits_rotation() {
+        run_with_test_runtime(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_string_contains("grant_type=refresh_token"))
+                .and(body_string_contains("refresh_token=refresh-token-xyz"))
+                .and(body_string_contains("client_id=test_client_id"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "fresh-access-token",
+                    "token_type": "Bearer",
+                    "expires_in": 7200
+                })))
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "test_client_id",
+                "test_client_secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            );
+            let client = OAuth2Client::new(config).unwrap();
+
+            let tokens = client.refresh_tokens("refresh-token-xyz").await.unwrap();
+            assert_eq!(tokens.access_token(), "fresh-access-token");
+            assert_eq!(tokens.refresh_token(), Some("refresh-token-xyz"));
         });
     }
 

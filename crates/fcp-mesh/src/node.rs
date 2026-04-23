@@ -3203,6 +3203,59 @@ mod tests {
     }
 
     #[test]
+    fn handle_summary_rejects_signature_node_mismatch() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+
+        let template = GossipSummary {
+            from: TailscaleNodeId::new("peer-1"),
+            zone_id: ZoneId::work(),
+            epoch_id: EpochId::new("epoch-1"),
+            object_filter_digest: [0x11; 32],
+            symbol_filter_digest: [0x22; 32],
+            object_count: 3,
+            symbol_count: 7,
+            iblt: b"[]".to_vec(),
+            timestamp: 1_000,
+            signature: None,
+        };
+        let summary = GossipSummary {
+            signature: Some(fcp_core::NodeSignature::new(
+                fcp_core::NodeId::new("peer-2"),
+                signing_key.sign(&template.signing_bytes()).to_bytes(),
+                1_000,
+            )),
+            ..template
+        };
+
+        let err = node
+            .handle_gossip_message(GossipMessage::Summary(summary), 1_000)
+            .expect_err("summary signature bound to a different node must be rejected");
+        assert!(matches!(
+            err,
+            MeshNodeError::SignatureNodeMismatch {
+                message_kind: "gossip summary",
+                ..
+            }
+        ));
+        assert_eq!(
+            node.metrics().gossip_updates,
+            0,
+            "node-mismatched summary must not record a gossip update"
+        );
+    }
+
+    #[test]
     fn handle_revocation_push_returns_verified_descriptor() {
         let mut node = test_node("node-1");
         let peer = NodeId::new("peer-1");
@@ -3323,6 +3376,54 @@ mod tests {
         assert!(
             matches!(err, MeshNodeError::InvalidOwnerSignature { .. }),
             "expected InvalidOwnerSignature, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn handle_revocation_push_rejects_signature_node_mismatch() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        let owner_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.register_zone_owner_key(ZoneId::work(), owner_key.verifying_key());
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+
+        let mut push = RevocationPushMessage::new(
+            TailscaleNodeId::new("peer-1"),
+            ZoneId::work(),
+            vec![ObjectId::from_bytes([0x77; 32])],
+            17,
+            1_000,
+        );
+        sign_push_with_owner(&mut push, &signing_key, &owner_key, 1_000);
+        push.signature = Some(fcp_core::NodeSignature::new(
+            fcp_core::NodeId::new("peer-2"),
+            signing_key.sign(&push.signing_bytes()).to_bytes(),
+            1_000,
+        ));
+
+        let err = node
+            .handle_revocation_push(push, 1_000)
+            .expect_err("revocation push signature bound to a different node must be rejected");
+        assert!(matches!(
+            err,
+            MeshNodeError::SignatureNodeMismatch {
+                message_kind: "revocation push",
+                ..
+            }
+        ));
+        assert_eq!(
+            node.metrics().gossip_updates,
+            0,
+            "node-mismatched push must not record a gossip update"
         );
     }
 
@@ -3488,6 +3589,61 @@ mod tests {
         let err = node
             .dispatch_gossip_payload(b"not a gossip message", 0)
             .expect_err("garbage bytes must not decode as a gossip message");
+        assert!(matches!(err, MeshNodeError::GossipDecode(_)));
+    }
+
+    #[test]
+    fn dispatch_gossip_payload_rejects_summary_with_oversized_signature_field() {
+        let mut node = test_node("node-1");
+        let summary = GossipSummary {
+            from: TailscaleNodeId::new("peer-1"),
+            zone_id: ZoneId::work(),
+            epoch_id: EpochId::new("epoch-oversized"),
+            object_filter_digest: [0x11; 32],
+            symbol_filter_digest: [0x22; 32],
+            object_count: 0,
+            symbol_count: 0,
+            iblt: Vec::new(),
+            timestamp: 1_000,
+            signature: None,
+        };
+        let mut payload = serde_json::to_value(GossipMessage::Summary(summary))
+            .expect("summary should serialize");
+        payload["signature"] = serde_json::json!({
+            "node_id": "peer-1",
+            "signature": "ab".repeat(65),
+            "signed_at": 1_000_u64
+        });
+
+        let payload = serde_json::to_vec(&payload).expect("payload should encode");
+        let err = node
+            .dispatch_gossip_payload(&payload, 1_000)
+            .expect_err("oversized summary signature field must fail decode");
+        assert!(matches!(err, MeshNodeError::GossipDecode(_)));
+    }
+
+    #[test]
+    fn dispatch_gossip_payload_rejects_revocation_push_with_oversized_owner_signature_field() {
+        let mut node = test_node("node-1");
+        let push = RevocationPushMessage::new(
+            TailscaleNodeId::new("peer-1"),
+            ZoneId::work(),
+            vec![ObjectId::from_bytes([0x55; 32])],
+            9,
+            1_000,
+        );
+        let mut payload = serde_json::to_value(GossipMessage::RevocationPush(push))
+            .expect("revocation push should serialize");
+        payload["owner_signature"] = serde_json::json!({
+            "node_id": "peer-1",
+            "signature": "cd".repeat(65),
+            "signed_at": 1_000_u64
+        });
+
+        let payload = serde_json::to_vec(&payload).expect("payload should encode");
+        let err = node
+            .dispatch_gossip_payload(&payload, 1_000)
+            .expect_err("oversized owner signature field must fail decode");
         assert!(matches!(err, MeshNodeError::GossipDecode(_)));
     }
 

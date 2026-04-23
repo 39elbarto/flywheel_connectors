@@ -833,7 +833,10 @@ mod tests {
         // which proves the entire upstream pipeline works.
         let err = result.unwrap_err();
         assert!(
-            matches!(&err, BootstrapError::HardwareToken(msg) if msg.contains("provisioning enrollment is not implemented")),
+            matches!(
+                &err,
+                BootstrapError::HardwareTokenEnrollmentNotImplemented { .. }
+            ),
             "expected provisioning-not-implemented boundary, got: {err}"
         );
         let err_text = err.to_string();
@@ -932,9 +935,11 @@ mod tests {
             .run_hardware_token_bootstrap_with_driver(&token, &report, &soft)
             .unwrap_err();
         assert!(
-            matches!(&err, BootstrapError::HardwareToken(msg)
-                if msg.contains("provisioning enrollment is not implemented")
-                && msg.contains("Ed25519")),
+            matches!(
+                &err,
+                BootstrapError::HardwareTokenEnrollmentNotImplemented { key_material, .. }
+                    if key_material == "Ed25519"
+            ),
             "expected provisioning boundary with Ed25519 selection, got: {err}"
         );
     }
@@ -1638,7 +1643,7 @@ mod verification_pack {
             // Expect provisioning-not-implemented boundary (proves upstream pipeline works)
             let reached_provisioning = matches!(
                 &result,
-                Err(BootstrapError::HardwareToken(msg)) if msg.contains("provisioning enrollment is not implemented")
+                Err(BootstrapError::HardwareTokenEnrollmentNotImplemented { .. })
             );
             step.passed = reached_provisioning;
             step.duration_ms = millis_u64(t.elapsed());

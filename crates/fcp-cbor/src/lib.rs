@@ -215,7 +215,7 @@ impl CanonicalSerializer {
         buf.extend_from_slice(schema.hash().as_bytes());
 
         // Deterministic canonical CBOR (RFC 8949 §4.2).
-        buf.extend_from_slice(&to_canonical_cbor(value)?);
+        write_canonical_cbor(value, &mut buf)?;
 
         if buf.len() > MAX_CANONICAL_OBJECT_BYTES {
             return Err(SerializationError::PayloadTooLarge {

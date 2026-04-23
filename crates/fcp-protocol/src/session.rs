@@ -3180,6 +3180,75 @@ mod tests {
     }
 
     #[test]
+    fn nonce_reuse_with_same_keypair_does_not_allow_cross_session_replay() {
+        let sk = X25519SecretKey::from_bytes([0x21; 32]);
+        let pk = X25519SecretKey::from_bytes([0x43; 32]).public_key();
+        let shared = sk.diffie_hellman(&pk).unwrap();
+        let initiator = TailscaleNodeId::new("node-i");
+        let responder = TailscaleNodeId::new("node-r");
+        let hello_nonce = SessionNonce([0x11; 16]);
+        let ack_nonce = SessionNonce([0x22; 16]);
+        let session_a = MeshSessionId([0xA1; 16]);
+        let session_b = MeshSessionId([0xB2; 16]);
+
+        let keys_a = derive_session_keys(
+            &shared,
+            &session_a,
+            &initiator,
+            &responder,
+            &hello_nonce,
+            &ack_nonce,
+        )
+        .expect("keys a");
+        let keys_b = derive_session_keys(
+            &shared,
+            &session_b,
+            &initiator,
+            &responder,
+            &hello_nonce,
+            &ack_nonce,
+        )
+        .expect("keys b");
+
+        assert_ne!(
+            keys_a.k_mac_i2r, keys_b.k_mac_i2r,
+            "fresh session_id must domain-separate MAC keys even if nonces are reused"
+        );
+        assert_ne!(
+            keys_a.k_ctx, keys_b.k_ctx,
+            "context key must also change across sessions with reused nonces"
+        );
+
+        let frame_bytes = b"replayed frame";
+        let seq = 7;
+        let mac_a = compute_session_mac(
+            SessionCryptoSuite::Suite1,
+            keys_a.mac_key(SessionDirection::InitiatorToResponder),
+            &session_a,
+            SessionDirection::InitiatorToResponder,
+            seq,
+            frame_bytes,
+        )
+        .expect("compute old-session mac");
+
+        assert!(
+            matches!(
+                verify_session_mac(
+                    SessionCryptoSuite::Suite1,
+                    keys_b.mac_key(SessionDirection::InitiatorToResponder),
+                    &session_b,
+                    SessionDirection::InitiatorToResponder,
+                    seq,
+                    frame_bytes,
+                    &mac_a,
+                ),
+                Err(SessionError::InvalidSignature)
+            ),
+            "replaying a frame from session A into session B must fail even if both handshake nonces were reused"
+        );
+    }
+
+    #[test]
     fn negotiate_suite_single_overlap() {
         let result = negotiate_suite(&[SessionCryptoSuite::Suite1], &[SessionCryptoSuite::Suite1]);
         assert_eq!(result, Some(SessionCryptoSuite::Suite1));

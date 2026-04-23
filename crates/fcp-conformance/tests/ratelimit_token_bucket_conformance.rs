@@ -37,7 +37,10 @@ async fn token_bucket_multi_permit_acquire_is_atomic() {
 async fn token_bucket_refill_preserves_elapsed_phase() {
     let limiter = TokenBucket::new(1, Duration::from_millis(100));
 
-    assert!(limiter.try_acquire().await, "initial token should be available");
+    assert!(
+        limiter.try_acquire().await,
+        "initial token should be available"
+    );
 
     sleep(Duration::from_millis(150)).await;
     assert!(
@@ -66,7 +69,8 @@ async fn token_bucket_zero_permit_acquire_is_a_no_op() {
 
 #[fcp_async_core::runtime::test]
 async fn token_bucket_reset_restores_burst_capacity() {
-    let limiter = TokenBucket::from_config(&RateLimitConfig::new(2, Duration::from_secs(1)).with_burst(4));
+    let limiter =
+        TokenBucket::from_config(&RateLimitConfig::new(2, Duration::from_secs(1)).with_burst(4));
 
     assert!(limiter.try_acquire_n(4).await);
     let exhausted = limiter.state();

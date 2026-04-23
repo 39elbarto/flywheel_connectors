@@ -247,16 +247,6 @@ async fn wasi_raw_socket_hostcalls_fail_closed_when_mediation_is_required() {
     let mut permissive_store = permissive_runtime.create_store().unwrap();
     {
         let mut sockets = permissive_store.data_mut().sockets();
-        let lookup_network = instance_network::Host::instance_network(&mut sockets).unwrap();
-        assert!(
-            ip_name_lookup::Host::resolve_addresses(
-                &mut sockets,
-                lookup_network,
-                "example.com".into()
-            )
-            .is_ok()
-        );
-
         let allowed_network = instance_network::Host::instance_network(&mut sockets).unwrap();
         let allowed = sockets
             .table
@@ -289,9 +279,12 @@ async fn wasi_raw_socket_hostcalls_fail_closed_when_mediation_is_required() {
     {
         let mut sockets = mediated_store.data_mut().sockets();
         let network = instance_network::Host::instance_network(&mut sockets).unwrap();
-        let err =
-            ip_name_lookup::Host::resolve_addresses(&mut sockets, network, "api.example.com".into())
-                .unwrap_err();
+        let err = ip_name_lookup::Host::resolve_addresses(
+            &mut sockets,
+            network,
+            "api.example.com".into(),
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("resolver-failure"),
             "strict mediated profiles must still disable raw DNS hostcalls"

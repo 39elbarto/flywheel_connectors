@@ -18,6 +18,7 @@ use coset::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::Cursor;
 
 /// COSE algorithm identifier for Ed25519.
 pub const COSE_ALG_EDDSA: i64 = iana::Algorithm::EdDSA as i64;
@@ -40,7 +41,9 @@ pub use fcp_auth_schema::labels::{cwt_claims, fcp2_claims};
 
 /// CWT (CBOR Web Token) claims map.
 ///
-/// Claims are stored in a `BTreeMap` to ensure deterministic serialization.
+/// Claims are stored in a `BTreeMap` for stable construction; final wire
+/// encoding still goes through `fcp-cbor` so map keys follow RFC 8949
+/// deterministic byte ordering.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CwtClaims {
     claims: BTreeMap<i64, ciborium::Value>,
@@ -338,12 +341,8 @@ impl CwtClaims {
     ///
     /// Returns an error if serialization fails.
     pub fn to_cbor(&self) -> CryptoResult<Vec<u8>> {
-        // Pre-allocate for typical CWT claims (~200-300 bytes CBOR).
-        // Avoids 2-3 reallocations during ciborium serialization.
-        let mut bytes = Vec::with_capacity(256);
-        ciborium::into_writer(&self.claims, &mut bytes)
-            .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
-        Ok(bytes)
+        fcp_cbor::to_canonical_cbor(&self.claims)
+            .map_err(|e| CryptoError::SerializationError(e.to_string()))
     }
 
     /// Decode claims from CBOR bytes.
@@ -360,10 +359,17 @@ impl CwtClaims {
             )));
         }
 
-        let value: ciborium::Value = ciborium::from_reader(bytes)
+        let mut cursor = Cursor::new(bytes);
+        let value: ciborium::Value = ciborium::from_reader(&mut cursor)
             .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
+        #[allow(clippy::cast_possible_truncation)] // cursor position is bounded by bytes.len()
+        if cursor.position() as usize != bytes.len() {
+            return Err(CryptoError::SerializationError(
+                "trailing bytes after CBOR value".into(),
+            ));
+        }
 
-        let ciborium::Value::Map(map) = value else {
+        let ciborium::Value::Map(map) = &value else {
             return Err(CryptoError::SerializationError("expected CBOR map".into()));
         };
 
@@ -389,11 +395,19 @@ impl CwtClaims {
             // documents: keep the two crates in lockstep so any
             // non-canonical shape is refused at the earliest layer.
             reject_cbor_tags(&v)?;
-            if claims.insert(key, v).is_some() {
+            if claims.insert(key, v.clone()).is_some() {
                 return Err(CryptoError::SerializationError(format!(
                     "duplicate claim key: {key}"
                 )));
             }
+        }
+
+        let canonical = fcp_cbor::to_canonical_cbor(&value)
+            .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
+        if canonical != bytes {
+            return Err(CryptoError::SerializationError(
+                "non-canonical CBOR encoding".into(),
+            ));
         }
 
         Ok(Self { claims })
@@ -755,9 +769,9 @@ impl CapabilityTokenBuilder {
     pub fn with_claims(
         claims: &fcp_auth_schema::AuthClaims,
     ) -> Result<Self, fcp_auth_schema::SchemaError> {
-        // AuthClaims emits a CBOR Map with ascending-label ordering.
-        // Re-parse it into a CwtClaims BTreeMap so the existing build
-        // path (sign, COSE_Sign1 wrap) continues to work unchanged.
+        // AuthClaims emits canonical RFC 8949 CBOR. Re-parse it into a
+        // CwtClaims BTreeMap so the existing build path (sign,
+        // COSE_Sign1 wrap) continues to work unchanged.
         let bytes = claims.to_canonical_cbor()?;
         let value: ciborium::Value = ciborium::from_reader(&bytes[..])
             .map_err(|e| fcp_auth_schema::SchemaError::Decode(e.to_string()))?;
@@ -1776,6 +1790,81 @@ mod tests {
             ciborium::Value::Bool(b) => assert!(b),
             other => panic!("expected bool, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cwt_claims_to_cbor_uses_rfc8949_integer_key_order() {
+        let claims = CwtClaims::new()
+            .custom(fcp2_claims::SCHEMA_VERSION, ciborium::Value::Integer(1.into()))
+            .custom(fcp2_claims::ZONE_ID, ciborium::Value::Text("z:work".into()))
+            .custom(fcp2_claims::CAPABILITY_ID, ciborium::Value::Text("cap:test".into()))
+            .issuer("issuer-x")
+            .issued_at(Utc::now());
+
+        let cbor = claims.to_cbor().unwrap();
+        let value: ciborium::Value = ciborium::from_reader(&cbor[..]).unwrap();
+        let ciborium::Value::Map(entries) = value else {
+            panic!("expected map");
+        };
+        let keys: Vec<i64> = entries
+            .iter()
+            .map(|(k, _)| match k {
+                ciborium::Value::Integer(i) => i64::try_from(*i).expect("claim labels fit i64"),
+                other => panic!("expected integer key, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                cwt_claims::ISS,
+                cwt_claims::IAT,
+                fcp2_claims::CAPABILITY_ID,
+                fcp2_claims::ZONE_ID,
+                fcp2_claims::SCHEMA_VERSION,
+            ]
+        );
+    }
+
+    #[test]
+    fn cwt_claims_from_cbor_rejects_old_numeric_label_ordering() {
+        let map = vec![
+            (
+                ciborium::Value::Integer(fcp2_claims::SCHEMA_VERSION.into()),
+                ciborium::Value::Integer(1.into()),
+            ),
+            (
+                ciborium::Value::Integer(fcp2_claims::ZONE_ID.into()),
+                ciborium::Value::Text("z:work".into()),
+            ),
+            (
+                ciborium::Value::Integer(fcp2_claims::CAPABILITY_ID.into()),
+                ciborium::Value::Text("cap:test".into()),
+            ),
+            (
+                ciborium::Value::Integer(cwt_claims::ISS.into()),
+                ciborium::Value::Text("issuer-x".into()),
+            ),
+        ];
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&ciborium::Value::Map(map), &mut bytes).unwrap();
+
+        let err = CwtClaims::from_cbor(&bytes).expect_err("must reject non-canonical payload");
+        assert!(err.to_string().contains("non-canonical CBOR encoding"));
+    }
+
+    #[test]
+    fn cwt_claims_roundtrip_reserialize_is_byte_identical() {
+        let claims = CwtClaims::new()
+            .custom(fcp2_claims::SCHEMA_VERSION, ciborium::Value::Integer(1.into()))
+            .custom(fcp2_claims::ZONE_ID, ciborium::Value::Text("z:work".into()))
+            .custom(fcp2_claims::CAPABILITY_ID, ciborium::Value::Text("cap:test".into()))
+            .issuer("issuer-x")
+            .issued_at(Utc::now());
+
+        let encoded = claims.to_cbor().unwrap();
+        let decoded = CwtClaims::from_cbor(&encoded).unwrap();
+        let reencoded = decoded.to_cbor().unwrap();
+        assert_eq!(reencoded, encoded);
     }
 
     #[test]

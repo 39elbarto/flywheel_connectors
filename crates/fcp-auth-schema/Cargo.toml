@@ -9,6 +9,7 @@ description = "FCP typed capability-token claim schema shared between fcp-crypto
 workspace = true
 
 [dependencies]
+fcp-cbor = { path = "../fcp-cbor" }
 serde.workspace = true
 ciborium.workspace = true
 chrono.workspace = true

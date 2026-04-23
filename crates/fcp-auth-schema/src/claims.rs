@@ -6,12 +6,11 @@
 //!
 //! ## Canonical CBOR
 //!
-//! [`AuthClaims::to_canonical_cbor`] produces a CBOR map where entries
-//! are sorted by label integer (lowest first, negative integers sort
-//! below positive per Rust `i64` ordering). This makes serialization
-//! **deterministic** — two serializations of equal `AuthClaims` values
-//! produce byte-identical output regardless of field-declaration order
-//! or system-specific hash randomness.
+//! [`AuthClaims::to_canonical_cbor`] produces a CBOR map whose keys are
+//! ordered by RFC 8949 deterministic-encoding bytes. This makes
+//! serialization **deterministic** — two serializations of equal
+//! `AuthClaims` values produce byte-identical output regardless of
+//! field-declaration order or system-specific hash randomness.
 //!
 //! Absent optional fields and empty collections are OMITTED from the
 //! encoded map. Round-trip through `to_canonical_cbor` →
@@ -22,6 +21,7 @@ use crate::labels::{cwt_claims, fcp2_claims};
 use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::Cursor;
 use thiserror::Error;
 
 /// Current schema version stamped on freshly-minted `AuthClaims`.
@@ -196,18 +196,14 @@ impl AuthClaims {
 
     /// Serialize to canonical CBOR.
     ///
-    /// Determinism: entries are sorted by CBOR integer label
-    /// (ascending, so negative FCP2 labels emit before positive CWT
-    /// labels). Absent / empty optional fields are OMITTED.
+    /// Determinism: map keys are ordered by RFC 8949 deterministic
+    /// encoding bytes. Absent / empty optional fields are OMITTED.
     ///
     /// # Errors
     /// Propagates any underlying CBOR encoder error from `ciborium`.
     pub fn to_canonical_cbor(&self) -> Result<Vec<u8>, SchemaError> {
-        let map = self.to_canonical_map();
-        let mut bytes = Vec::new();
-        ciborium::into_writer(&ciborium::Value::Map(map), &mut bytes)
-            .map_err(|e| SchemaError::Encode(e.to_string()))?;
-        Ok(bytes)
+        fcp_cbor::to_canonical_cbor(&ciborium::Value::Map(self.to_canonical_map()))
+            .map_err(|e| SchemaError::Encode(e.to_string()))
     }
 
     /// Inverse of `to_canonical_cbor`. Accepts any CBOR map with the
@@ -217,8 +213,20 @@ impl AuthClaims {
     /// # Errors
     /// Propagates CBOR decoder errors and per-label type mismatches.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, SchemaError> {
-        let value: ciborium::Value = ciborium::from_reader(bytes)
-            .map_err(|e| SchemaError::Decode(e.to_string()))?;
+        let mut cursor = Cursor::new(bytes);
+        let value: ciborium::Value =
+            ciborium::from_reader(&mut cursor).map_err(|e| SchemaError::Decode(e.to_string()))?;
+        #[allow(clippy::cast_possible_truncation)] // cursor position is bounded by bytes.len()
+        if cursor.position() as usize != bytes.len() {
+            return Err(SchemaError::Decode(
+                "trailing bytes after CBOR value".into(),
+            ));
+        }
+        let canonical =
+            fcp_cbor::to_canonical_cbor(&value).map_err(|e| SchemaError::Decode(e.to_string()))?;
+        if canonical != bytes {
+            return Err(SchemaError::Decode("non-canonical CBOR encoding".into()));
+        }
         let ciborium::Value::Map(entries) = value else {
             return Err(SchemaError::Decode(
                 "top-level CBOR value must be a map".into(),
@@ -227,11 +235,12 @@ impl AuthClaims {
         Self::from_map_entries(entries)
     }
 
-    /// Produce the canonical CBOR map (sorted entries, omitted
-    /// absents) as a borrowable `Vec<(Value, Value)>`.
+    /// Produce the logical CBOR map (omitted absents) before the final
+    /// canonical re-encoding pass.
     fn to_canonical_map(&self) -> Vec<(ciborium::Value, ciborium::Value)> {
-        // BTreeMap keyed by label integer guarantees sorted iteration
-        // order regardless of field declaration order.
+        // BTreeMap keeps construction deterministic regardless of field
+        // declaration order. Final RFC 8949 map-key ordering is applied
+        // by `fcp_cbor::to_canonical_cbor`.
         let mut entries: BTreeMap<i64, ciborium::Value> = BTreeMap::new();
 
         // CWT standard
@@ -606,10 +615,9 @@ mod tests {
     }
 
     #[test]
-    fn label_ordering_is_ascending_in_wire_format() {
-        // The canonical map must list keys in ascending integer order.
-        // Build a claims set with mixed CWT + FCP2 fields and verify
-        // the decoded map's key sequence is sorted.
+    fn label_ordering_follows_rfc8949_integer_key_order() {
+        // RFC 8949 sorts map keys by bytewise lexicographic order of their
+        // deterministic encodings, not by Rust i64 numeric order.
         let c = AuthClaims {
             schema_version: CURRENT_SCHEMA_VERSION,
             capability_id: Some("cap".into()),
@@ -633,9 +641,67 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let mut sorted = keys.clone();
-        sorted.sort_unstable();
-        assert_eq!(keys, sorted, "canonical CBOR must emit keys in ascending order");
+        assert_eq!(
+            keys,
+            vec![
+                cwt_claims::ISS,
+                cwt_claims::IAT,
+                fcp2_claims::CAPABILITY_ID,
+                fcp2_claims::ZONE_ID,
+                fcp2_claims::SCHEMA_VERSION,
+            ],
+            "canonical CBOR must follow RFC 8949 bytewise integer-key ordering"
+        );
+    }
+
+    #[test]
+    fn decode_rejects_old_numeric_label_ordering() {
+        // This is the pre-fix bug shape: labels sorted by signed i64 rather than
+        // RFC 8949 encoded-byte order. Mixed positive/negative labels must be
+        // refused even though the top-level map is otherwise valid.
+        let entries = vec![
+            (
+                ciborium::Value::Integer(fcp2_claims::SCHEMA_VERSION.into()),
+                ciborium::Value::Integer(i64::from(CURRENT_SCHEMA_VERSION).into()),
+            ),
+            (
+                ciborium::Value::Integer(fcp2_claims::ZONE_ID.into()),
+                ciborium::Value::Text("zone".into()),
+            ),
+            (
+                ciborium::Value::Integer(fcp2_claims::CAPABILITY_ID.into()),
+                ciborium::Value::Text("cap".into()),
+            ),
+            (
+                ciborium::Value::Integer(cwt_claims::ISS.into()),
+                ciborium::Value::Text("iss".into()),
+            ),
+        ];
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&ciborium::Value::Map(entries), &mut bytes)
+            .expect("serialize legacy ordering");
+
+        let err = AuthClaims::from_canonical_cbor(&bytes).expect_err("must reject non-canonical");
+        assert!(
+            matches!(err, SchemaError::Decode(msg) if msg.contains("non-canonical")),
+            "expected non-canonical decode error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn roundtrip_reserialize_is_byte_identical_for_mixed_labels() {
+        let claims = AuthClaims {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            capability_id: Some("cap:test".into()),
+            zone_id: Some("z:work".into()),
+            issuer: Some("issuer-x".into()),
+            issued_at: Some(utc(2027, 1, 1)),
+            ..AuthClaims::default()
+        };
+        let encoded = claims.to_canonical_cbor().unwrap();
+        let decoded = AuthClaims::from_canonical_cbor(&encoded).unwrap();
+        let reencoded = decoded.to_canonical_cbor().unwrap();
+        assert_eq!(reencoded, encoded);
     }
 
     #[test]

@@ -25,6 +25,13 @@ pub enum WebhookReceiverError {
     #[error("Endpoint path already registered: {path}")]
     DuplicatePath { path: String },
 
+    /// Duplicate event delivery for the same endpoint
+    #[error("Event already recorded for endpoint {endpoint_id}: {event_id}")]
+    DuplicateEvent {
+        endpoint_id: String,
+        event_id: String,
+    },
+
     /// Invalid input
     #[error("Invalid input: {message}")]
     InvalidInput { message: String },
@@ -45,6 +52,7 @@ impl WebhookReceiverError {
             Self::CapacityExceeded { .. } => true,
             Self::EndpointNotFound { .. }
             | Self::DuplicatePath { .. }
+            | Self::DuplicateEvent { .. }
             | Self::InvalidInput { .. }
             | Self::Json(_)
             | Self::Internal { .. } => false,
@@ -75,6 +83,16 @@ impl WebhookReceiverError {
             Self::DuplicatePath { path } => FcpError::External {
                 service: "webhook-receiver".into(),
                 message: format!("Endpoint path already registered: {path}"),
+                status_code: Some(409),
+                retryable: false,
+                retry_after: None,
+            },
+            Self::DuplicateEvent {
+                endpoint_id,
+                event_id,
+            } => FcpError::External {
+                service: "webhook-receiver".into(),
+                message: format!("Event already recorded for endpoint {endpoint_id}: {event_id}"),
                 status_code: Some(409),
                 retryable: false,
                 retry_after: None,
@@ -163,6 +181,17 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_event_not_retryable() {
+        assert!(
+            !WebhookReceiverError::DuplicateEvent {
+                endpoint_id: "ep_1".into(),
+                event_id: "evt_1".into(),
+            }
+            .is_retryable()
+        );
+    }
+
+    #[test]
     fn capacity_exceeded_is_retryable() {
         assert!(
             WebhookReceiverError::CapacityExceeded {
@@ -201,6 +230,15 @@ mod tests {
     #[test]
     fn retry_after_none_for_duplicate_path() {
         let err = WebhookReceiverError::DuplicatePath { path: "/x".into() };
+        assert_eq!(err.retry_after(), None);
+    }
+
+    #[test]
+    fn retry_after_none_for_duplicate_event() {
+        let err = WebhookReceiverError::DuplicateEvent {
+            endpoint_id: "ep_1".into(),
+            event_id: "evt_1".into(),
+        };
         assert_eq!(err.retry_after(), None);
     }
 
@@ -288,6 +326,31 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_event_to_fcp_error() {
+        match (WebhookReceiverError::DuplicateEvent {
+            endpoint_id: "ep_abc".into(),
+            event_id: "evt_123".into(),
+        })
+        .to_fcp_error()
+        {
+            FcpError::External {
+                service,
+                status_code,
+                retryable,
+                message,
+                ..
+            } => {
+                assert_eq!(service, "webhook-receiver");
+                assert_eq!(status_code, Some(409));
+                assert!(!retryable);
+                assert!(message.contains("ep_abc"));
+                assert!(message.contains("evt_123"));
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn capacity_exceeded_to_fcp_error() {
         match (WebhookReceiverError::CapacityExceeded {
             message: "too many".into(),
@@ -350,6 +413,18 @@ mod tests {
             }
             .to_string(),
             "Endpoint path already registered: /hooks/test"
+        );
+    }
+
+    #[test]
+    fn error_display_duplicate_event() {
+        assert_eq!(
+            WebhookReceiverError::DuplicateEvent {
+                endpoint_id: "ep_1".into(),
+                event_id: "evt_1".into(),
+            }
+            .to_string(),
+            "Event already recorded for endpoint ep_1: evt_1"
         );
     }
 

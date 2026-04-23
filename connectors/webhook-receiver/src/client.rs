@@ -188,11 +188,23 @@ impl WebhookStore {
     /// Record a received webhook event.
     pub fn record_event(&mut self, event: WebhookEvent) -> WebhookReceiverResult<()> {
         let endpoint_id = event.endpoint_id.clone();
+        let event_id = event.event_id.clone();
         if !self.endpoints.contains_key(&endpoint_id) {
             return Err(WebhookReceiverError::EndpointNotFound { endpoint_id });
         }
 
-        let events = self.events.entry(endpoint_id).or_default();
+        let events = self.events.entry(endpoint_id.clone()).or_default();
+
+        // Fail closed on duplicate delivery IDs for the same endpoint.
+        // Receiver endpoints advertise strict idempotency; appending the same
+        // provider event twice would let a replayed webhook mutate downstream
+        // state twice even after signature verification succeeded.
+        if events.iter().any(|existing| existing.event_id == event_id) {
+            return Err(WebhookReceiverError::DuplicateEvent {
+                endpoint_id,
+                event_id,
+            });
+        }
 
         // Evict oldest events if at capacity
         if events.len() >= MAX_EVENTS_PER_ENDPOINT {
@@ -521,6 +533,56 @@ mod tests {
         let event = WebhookEvent::new("ep_nonexistent".into(), json!({}), true, None);
         let result = store.record_event(event);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn record_event_duplicate_event_id_rejected_for_same_endpoint() {
+        let mut store = WebhookStore::new();
+        let ep = store
+            .create_endpoint("/hooks/test".into(), "s".into(), vec![])
+            .unwrap();
+        let mut first = WebhookEvent::new(ep.endpoint_id.clone(), json!({"seq": 1}), true, None);
+        first.event_id = "evt_dup".into();
+        store.record_event(first).unwrap();
+
+        let mut duplicate =
+            WebhookEvent::new(ep.endpoint_id.clone(), json!({"seq": 2}), true, None);
+        duplicate.event_id = "evt_dup".into();
+        let err = store
+            .record_event(duplicate)
+            .expect_err("duplicate event_id must be rejected");
+        match err {
+            WebhookReceiverError::DuplicateEvent {
+                endpoint_id,
+                event_id,
+            } => {
+                assert_eq!(endpoint_id, ep.endpoint_id);
+                assert_eq!(event_id, "evt_dup");
+            }
+            other => panic!("expected DuplicateEvent, got {other:?}"),
+        }
+        assert_eq!(store.total_event_count(), 1);
+    }
+
+    #[test]
+    fn record_event_same_id_allowed_on_different_endpoints() {
+        let mut store = WebhookStore::new();
+        let ep1 = store
+            .create_endpoint("/hooks/a".into(), "s1".into(), vec![])
+            .unwrap();
+        let ep2 = store
+            .create_endpoint("/hooks/b".into(), "s2".into(), vec![])
+            .unwrap();
+
+        let mut event_a = WebhookEvent::new(ep1.endpoint_id.clone(), json!({"a": 1}), true, None);
+        event_a.event_id = "evt_shared".into();
+        store.record_event(event_a).unwrap();
+
+        let mut event_b = WebhookEvent::new(ep2.endpoint_id.clone(), json!({"b": 2}), true, None);
+        event_b.event_id = "evt_shared".into();
+        store.record_event(event_b).unwrap();
+
+        assert_eq!(store.total_event_count(), 2);
     }
 
     #[test]

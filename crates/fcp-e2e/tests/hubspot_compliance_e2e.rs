@@ -233,6 +233,13 @@ fn build_token(
     operations: &[&str],
 ) -> CapabilityToken {
     let now = Utc::now();
+    let constraints = fcp_core::CapabilityConstraints {
+        resource_allow: vec!["*".to_string()],
+        ..Default::default()
+    };
+    let mut constraints_cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut constraints_cbor)
+        .expect("serialize test constraints");
     let cose = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -240,6 +247,7 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
+        .constraints_cbor(&constraints_cbor)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)

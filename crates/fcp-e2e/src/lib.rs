@@ -3455,7 +3455,7 @@ mod openai_e2e_tests {
                         "required": ["response"],
                         "properties": { "response": { "type": "string" } }
                     }),
-                    capability: CapabilityId::from_static("openai.simple_chat"),
+                    capability: CapabilityId::from_static("openai.chat"),
                     risk_level: RiskLevel::Medium,
                     safety_tier: SafetyTier::Safe,
                     idempotency: IdempotencyClass::None,
@@ -3543,7 +3543,18 @@ mod openai_e2e_tests {
         capability: &str,
         operations: &[&str],
     ) -> CapabilityToken {
+        let capability = match capability {
+            "openai.simple_chat" | "openai.get_usage" => "openai.chat",
+            other => other,
+        };
         let now = Utc::now();
+        let constraints = fcp_core::CapabilityConstraints {
+            resource_allow: vec!["*".to_string()],
+            ..Default::default()
+        };
+        let mut constraints_cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut constraints_cbor)
+            .expect("serialize test constraints");
         let cose = CapabilityTokenBuilder::new()
             .capability_id(capability)
             .zone_id("z:work")
@@ -3551,6 +3562,7 @@ mod openai_e2e_tests {
             .operations(operations)
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
+            .constraints_cbor(&constraints_cbor)
             .sign(signing_key)
             .expect("capability token sign");
         CapabilityToken::from_raw(cose)
@@ -3776,7 +3788,7 @@ mod openai_e2e_tests {
             .await
             .expect("connector suite run");
 
-        assert!(report.passed, "allow suite should pass");
+        assert!(report.passed, "allow suite should pass: {report:#?}");
         let invoke_entry = report
             .logs
             .iter()
@@ -4057,6 +4069,13 @@ mod slack_e2e_tests {
         operations: &[&str],
     ) -> CapabilityToken {
         let now = Utc::now();
+        let constraints = fcp_core::CapabilityConstraints {
+            resource_allow: vec!["*".to_string()],
+            ..Default::default()
+        };
+        let mut constraints_cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut constraints_cbor)
+            .expect("serialize test constraints");
         let cose = CapabilityTokenBuilder::new()
             .capability_id(capability)
             .zone_id("z:work")
@@ -4064,6 +4083,7 @@ mod slack_e2e_tests {
             .operations(operations)
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
+            .constraints_cbor(&constraints_cbor)
             .sign(signing_key)
             .expect("capability token sign");
         CapabilityToken::from_raw(cose)
@@ -4171,7 +4191,10 @@ mod slack_e2e_tests {
             .await
             .expect("compliance suite run");
 
-        assert!(report.passed, "default deny compliance should pass");
+        assert!(
+            report.passed,
+            "default deny compliance should pass: {report:#?}"
+        );
     }
 
     #[fcp_async_core::runtime::test]

@@ -16,11 +16,12 @@ use chrono::{Duration as ChronoDuration, Utc};
 use fcp_async_core::sync::Mutex;
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
-    AgentHint, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics, FcpConnector,
-    FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId,
-    Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo,
-    RequestId, RiskLevel, SafetyTier, ShutdownRequest, SimulateRequest, SimulateResponse,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
+    AgentHint, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId,
+    ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse,
+    HealthSnapshot, IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse,
+    InvokeStatus, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, ShutdownRequest,
+    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -156,7 +157,23 @@ impl FcpConnector for AirtableConnectorAdapter {
             "input": req.input,
             "capability_token": req.capability_token,
         });
-        let value = self.connector.lock().await.handle_invoke(params).await?;
+
+        let value = std::thread::scope(|scope| {
+            scope
+                .spawn(move || {
+                    fcp_async_core::runtime::block_on_sync(async {
+                        self.connector.lock().await.handle_invoke(params).await
+                    })
+                })
+                .join()
+                .map_err(|_| FcpError::Internal {
+                    message: "airtable invoke helper thread panicked".to_string(),
+                })?
+                .map_err(|err| FcpError::Internal {
+                    message: format!("failed to run airtable invoke helper runtime: {err}"),
+                })?
+        })?;
+
         Ok(InvokeResponse::ok(request_id, value))
     }
 
@@ -218,6 +235,13 @@ fn build_token(
     operations: &[&str],
 ) -> CapabilityToken {
     let now = Utc::now();
+    let constraints = CapabilityConstraints {
+        resource_allow: vec!["*".to_string()],
+        ..CapabilityConstraints::default()
+    };
+    let mut constraints_cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut constraints_cbor)
+        .expect("serialize airtable test constraints");
     let cose = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -225,6 +249,7 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
+        .constraints_cbor(&constraints_cbor)
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -366,15 +391,8 @@ async fn airtable_allow_valid_token_connector_suite_passes() {
 
     let mut connector = AirtableConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["airtable.list_bases"],
-    );
-    let token = build_token(
-        &signing_key,
-        "airtable.list_bases",
-        &["airtable.list_bases"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["airtable.read"]);
+    let token = build_token(&signing_key, "airtable.read", &["airtable.list_bases"]);
     let invoke = invoke_request("airtable.list_bases", json!({}), token);
     let suite = ConnectorSuite {
         test_name: "airtable_allow_valid_token".to_string(),
@@ -397,7 +415,7 @@ async fn airtable_allow_valid_token_connector_suite_passes() {
         .await
         .expect("connector suite run");
 
-    assert!(report.passed, "allow suite should pass");
+    assert!(report.passed, "allow suite should pass: {report:#?}");
     let invoke_entry = report
         .logs
         .iter()
@@ -593,7 +611,7 @@ fn airtable_operation_risk_levels_properly_gated() {
     // Total operation count
     assert_eq!(
         operations.len(),
-        13,
-        "Airtable manifest should have 13 operations"
+        25,
+        "Airtable manifest should expose the current 25-operation surface"
     );
 }

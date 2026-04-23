@@ -14,6 +14,8 @@ use rand::Rng;
 /// W3C Trace Context header names.
 pub const TRACEPARENT_HEADER: &str = "traceparent";
 pub const TRACESTATE_HEADER: &str = "tracestate";
+const MAX_TRACESTATE_LEN: usize = 512;
+const MAX_TRACESTATE_MEMBERS: usize = 32;
 
 fn header_value_case_insensitive<'a, S: BuildHasher>(
     headers: &'a HashMap<String, String, S>,
@@ -68,7 +70,9 @@ pub fn extract_trace_context<S: BuildHasher>(
 ) -> Option<TraceContext> {
     let traceparent = header_value_case_insensitive(headers, TRACEPARENT_HEADER)?;
     let mut ctx = TraceContext::from_traceparent(traceparent)?;
-    ctx.trace_state = header_value_case_insensitive(headers, TRACESTATE_HEADER).map(str::to_owned);
+    ctx.trace_state = header_value_case_insensitive(headers, TRACESTATE_HEADER)
+        .and_then(validate_tracestate)
+        .map(str::to_owned);
     Some(ctx)
 }
 
@@ -199,6 +203,67 @@ fn is_lowercase_hex(value: &str) -> bool {
 
 fn is_all_zero_hex(value: &str) -> bool {
     value.bytes().all(|byte| byte == b'0')
+}
+
+fn validate_tracestate(value: &str) -> Option<&str> {
+    if value.is_empty() || value.len() > MAX_TRACESTATE_LEN {
+        return None;
+    }
+
+    let mut member_count = 0usize;
+
+    for member in value.split(',') {
+        member_count += 1;
+        if member_count > MAX_TRACESTATE_MEMBERS {
+            return None;
+        }
+
+        let (key, member_value) = member.split_once('=')?;
+        if !is_valid_tracestate_key(key) || !is_valid_tracestate_value(member_value) {
+            return None;
+        }
+    }
+
+    Some(value)
+}
+
+fn is_valid_tracestate_key(key: &str) -> bool {
+    if key.is_empty() || key.len() > 256 {
+        return false;
+    }
+
+    let (tenant, system) = key.split_once('@').map_or(("", key), |(tenant, system)| (tenant, system));
+    if !tenant.is_empty() && !is_valid_tracestate_token(tenant, true) {
+        return false;
+    }
+
+    is_valid_tracestate_token(system, false)
+}
+
+fn is_valid_tracestate_token(token: &str, allow_multi_tenant: bool) -> bool {
+    if token.is_empty() || token.len() > 241 {
+        return false;
+    }
+
+    token.bytes().all(|byte| {
+        matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' | b'*' | b'/')
+            || (allow_multi_tenant && byte == b'@')
+    })
+}
+
+fn is_valid_tracestate_value(value: &str) -> bool {
+    if value.is_empty()
+        || value.len() > 256
+        || value.starts_with(' ')
+        || value.ends_with(' ')
+        || value.ends_with('=')
+    {
+        return false;
+    }
+
+    value
+        .bytes()
+        .all(|byte| matches!(byte, 0x20..=0x2b | 0x2d..=0x3c | 0x3e..=0x7e))
 }
 
 fn ensure_nonzero_hex(value: String) -> String {
@@ -742,6 +807,57 @@ mod tests {
         );
         headers.insert(TRACESTATE_HEADER.to_string(), "vendor=fresh".to_string());
         headers.insert("TraceState".to_string(), "vendor=stale".to_string());
+
+        let ctx = extract_trace_context(&headers).expect("traceparent should still extract");
+        assert_eq!(ctx.trace_state, None);
+    }
+
+    #[test]
+    fn test_extract_preserves_valid_tracestate() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            TRACEPARENT_HEADER.to_string(),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+        );
+        headers.insert(
+            TRACESTATE_HEADER.to_string(),
+            "vendor=value,tenant@system=opaque".to_string(),
+        );
+
+        let ctx = extract_trace_context(&headers).expect("traceparent should still extract");
+        assert_eq!(
+            ctx.trace_state.as_deref(),
+            Some("vendor=value,tenant@system=opaque")
+        );
+    }
+
+    #[test]
+    fn test_extract_drops_oversized_tracestate() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            TRACEPARENT_HEADER.to_string(),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+        );
+        headers.insert(
+            TRACESTATE_HEADER.to_string(),
+            format!("vendor={}", "a".repeat(MAX_TRACESTATE_LEN)),
+        );
+
+        let ctx = extract_trace_context(&headers).expect("traceparent should still extract");
+        assert_eq!(ctx.trace_state, None);
+    }
+
+    #[test]
+    fn test_extract_drops_malformed_tracestate() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            TRACEPARENT_HEADER.to_string(),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+        );
+        headers.insert(
+            TRACESTATE_HEADER.to_string(),
+            "vendor =bad".to_string(),
+        );
 
         let ctx = extract_trace_context(&headers).expect("traceparent should still extract");
         assert_eq!(ctx.trace_state, None);

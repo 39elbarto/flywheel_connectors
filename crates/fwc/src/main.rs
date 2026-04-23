@@ -14759,18 +14759,18 @@ fn verify_registry_attestation(
 
     // SECURITY: tuf_verified / sigstore_verified stay false — this path
     // only validates the publisher signature, not TUF or Sigstore
-    // attestations (br-pcmm8).
-    Ok(RegistrySupplyChainEvidence {
-        transparency_log_present: false,
-        tuf_verified: false,
-        sigstore_verified: false,
-        attestations: vec![RegistryAttestationEvidence {
+    // attestations (br-pcmm8, br-i5iv4). `new()` returns an unverified
+    // baseline; the verified flags are private and can only be set via
+    // `with_*_verification_result(...)` after a real verifier adapter
+    // succeeds.
+    Ok(RegistrySupplyChainEvidence::new()
+        .with_transparency_log_present(false)
+        .with_attestations(vec![RegistryAttestationEvidence {
             attestation_type: fcp_manifest::AttestationType::InToto,
             slsa_level: Some(attestation.slsa_level),
             builder_id: Some(attestation.builder_id.clone()),
             expires_at: None,
-        }],
-    })
+        }]))
 }
 
 fn build_registry_package_build_metadata(

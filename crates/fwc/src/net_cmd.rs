@@ -327,6 +327,7 @@ fn rule_id_for(
         DenyReason::HostNotAllowed => Some("network_constraints.host_allow".to_string()),
         DenyReason::PortNotAllowed => Some("network_constraints.port_allow".to_string()),
         DenyReason::IpLiteralDenied => Some("network_constraints.deny_ip_literals".to_string()),
+        DenyReason::IpNotAllowed => Some("network_constraints.ip_allow".to_string()),
         DenyReason::LocalhostDenied => Some("network_constraints.deny_localhost".to_string()),
         DenyReason::PrivateRangeDenied => {
             Some("network_constraints.deny_private_ranges".to_string())
@@ -386,6 +387,15 @@ fn suggestion_for(
             action: "set".to_string(),
             value: Some("false".to_string()),
             note: Some("or use a hostname instead of an IP literal".to_string()),
+        }),
+        DenyReason::IpNotAllowed => Some(SuggestedChange {
+            field: "network_constraints.ip_allow".to_string(),
+            action: "add".to_string(),
+            value: None,
+            note: Some(
+                "resolved IP is not in ip_allow; add the resolved address or clear ip_allow"
+                    .to_string(),
+            ),
         }),
         DenyReason::LocalhostDenied => Some(SuggestedChange {
             field: "network_constraints.deny_localhost".to_string(),

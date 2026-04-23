@@ -547,17 +547,12 @@ min_slsa_level = 3
         .insert("pub1".to_string(), verifying_key);
 
     // Evidence with SLSA level 1 (below required 3)
-    let evidence = SupplyChainEvidence {
-        transparency_log_present: false,
-        tuf_verified: false,
-        sigstore_verified: false,
-        attestations: vec![AttestationEvidence {
-            attestation_type: AttestationType::InToto,
-            slsa_level: Some(1),
-            builder_id: None,
-            expires_at: None,
-        }],
-    };
+    let evidence = SupplyChainEvidence::new().with_attestations(vec![AttestationEvidence {
+        attestation_type: AttestationType::InToto,
+        slsa_level: Some(1),
+        builder_id: None,
+        expires_at: None,
+    }]);
 
     let verifier = RegistryVerifier::new(trust);
     let result = verifier.verify_bundle(&bundle, None, Some(&evidence), None);
@@ -599,17 +594,12 @@ trusted_builders = ["github-actions"]
         .publisher_keys
         .insert("pub1".to_string(), verifying_key);
 
-    let evidence = SupplyChainEvidence {
-        transparency_log_present: false,
-        tuf_verified: false,
-        sigstore_verified: false,
-        attestations: vec![AttestationEvidence {
-            attestation_type: AttestationType::InToto,
-            slsa_level: None,
-            builder_id: Some("evil-builder".to_string()),
-            expires_at: None,
-        }],
-    };
+    let evidence = SupplyChainEvidence::new().with_attestations(vec![AttestationEvidence {
+        attestation_type: AttestationType::InToto,
+        slsa_level: None,
+        builder_id: Some("evil-builder".to_string()),
+        expires_at: None,
+    }]);
 
     let verifier = RegistryVerifier::new(trust);
     let result = verifier.verify_bundle(&bundle, None, Some(&evidence), None);
@@ -650,17 +640,12 @@ require_attestation_types = ["in-toto"]
         .publisher_keys
         .insert("pub1".to_string(), verifying_key);
 
-    let evidence = SupplyChainEvidence {
-        transparency_log_present: false,
-        tuf_verified: false,
-        sigstore_verified: false,
-        attestations: vec![AttestationEvidence {
-            attestation_type: AttestationType::InToto,
-            slsa_level: Some(3),
-            builder_id: Some("trusted-builder".to_string()),
-            expires_at: Some(0),
-        }],
-    };
+    let evidence = SupplyChainEvidence::new().with_attestations(vec![AttestationEvidence {
+        attestation_type: AttestationType::InToto,
+        slsa_level: Some(3),
+        builder_id: Some("trusted-builder".to_string()),
+        expires_at: Some(0),
+    }]);
 
     let verifier = RegistryVerifier::new(trust);
     let result = verifier.verify_bundle(&bundle, None, Some(&evidence), None);
@@ -2226,17 +2211,12 @@ require_attestation_types = ["in-toto"]
         .insert(kid, signing_key.verifying_key().clone());
 
     let verifier = RegistryVerifier::new(policy);
-    let evidence = SupplyChainEvidence {
-        transparency_log_present: false,
-        tuf_verified: false,
-        sigstore_verified: false,
-        attestations: vec![AttestationEvidence {
-            attestation_type: AttestationType::InToto,
-            slsa_level: Some(2),
-            builder_id: None,
-            expires_at: None,
-        }],
-    };
+    let evidence = SupplyChainEvidence::new().with_attestations(vec![AttestationEvidence {
+        attestation_type: AttestationType::InToto,
+        slsa_level: Some(2),
+        builder_id: None,
+        expires_at: None,
+    }]);
 
     let result = verifier.verify_bundle(&bundle, None, Some(&evidence), None);
     assert!(result.is_ok(), "in-toto attestation present should pass");

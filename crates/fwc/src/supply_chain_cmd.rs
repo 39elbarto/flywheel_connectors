@@ -654,18 +654,18 @@ fn build_registry_supply_chain_evidence(
     // from CLI input, not from real TUF or Sigstore verifier adapters.
     // Deployments that set require_tuf / require_sigstore will correctly
     // fail until an adapter wires those booleans to real attestations
-    // (br-pcmm8).
-    SupplyChainEvidence {
-        transparency_log_present: false,
-        tuf_verified: false,
-        sigstore_verified: false,
-        attestations: vec![AttestationEvidence {
+    // (br-pcmm8, br-i5iv4). The `SupplyChainEvidence::new()` constructor
+    // returns an unverified baseline; there is no public way to set
+    // tuf_verified / sigstore_verified here since we never ran a
+    // verifier adapter.
+    SupplyChainEvidence::new()
+        .with_transparency_log_present(false)
+        .with_attestations(vec![AttestationEvidence {
             attestation_type: AttestationType::InToto,
             slsa_level: Some(attestation.slsa_level),
             builder_id: Some(attestation.builder_id.clone()),
             expires_at: None,
-        }],
-    }
+        }])
 }
 
 fn verify_attestation_signature(

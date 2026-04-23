@@ -288,30 +288,124 @@ pub struct RegistryTrustPolicy {
 /// Evidence from external supply-chain verification.
 ///
 /// Populated ONLY by real verifier adapters (see
-/// [`TransparencyLogVerifier`], [`TufClient`], [`SigstoreVerifier`]).
-/// The `*_verified` booleans are load-bearing: when the corresponding
-/// [`SupplyChainVerificationConfig`] flag (`require_tuf`,
-/// `require_sigstore`, `require_transparency`) is set, enforcement
-/// requires the matching evidence bool to be `true`. A default-constructed
-/// `SupplyChainEvidence` carries no verification claims and MUST NOT pass
-/// a `require_*` gate. See the `enforce_supply_chain_verification_config`
-/// checks below.
+/// [`TransparencyLogVerifier`], [`TufVerifier`], [`SigstoreVerifier`]).
+/// The `tuf_verified` / `sigstore_verified` booleans are load-bearing:
+/// when the corresponding [`SupplyChainVerificationConfig`] flag
+/// (`require_tuf`, `require_sigstore`, `require_transparency`) is set,
+/// enforcement requires the matching evidence bool to be `true`. A
+/// default-constructed `SupplyChainEvidence` carries no verification
+/// claims and MUST NOT pass a `require_*` gate. See
+/// [`enforce_supply_chain_verification_config`] below.
 ///
-/// Historical note (br-pcmm8): these fields were added after a review
-/// found the pre-existing presence-only checks (evidence.is_some()) were
-/// trivially bypassable — any default evidence satisfied the config.
+/// Historical note (br-pcmm8, br-i5iv4): these fields were added after a
+/// review found the pre-existing presence-only checks
+/// (`evidence.is_some()`) were trivially bypassable — any default evidence
+/// satisfied the config. Review br-i5iv4 then flagged the follow-up
+/// pattern — public `tuf_verified: bool` — as still caller-forgeable.
+/// The current shape keeps the verified fields PRIVATE and only exposes
+/// setters that require an actual verifier result type (which is itself
+/// only constructed by the trait's `verify_*` methods). Tests that need
+/// to short-circuit to a verified state go through the cfg-gated
+/// [`Self::mark_tuf_verified_for_tests`] /
+/// [`Self::mark_sigstore_verified_for_tests`] helpers, which are not
+/// visible to downstream crates outside a `--features test-mocks` build.
 #[derive(Debug, Clone, Default)]
 pub struct SupplyChainEvidence {
     pub transparency_log_present: bool,
-    /// True iff a TUF verifier adapter has validated the bundle against
-    /// pinned trust roots. Required when `config.require_tuf` or
-    /// `config.tuf_pinned_root` is set.
-    pub tuf_verified: bool,
-    /// True iff a Sigstore verifier adapter has validated the bundle's
-    /// certificate + Rekor inclusion proof. Required when
-    /// `config.require_sigstore` is set.
-    pub sigstore_verified: bool,
+    tuf_verified: bool,
+    sigstore_verified: bool,
     pub attestations: Vec<AttestationEvidence>,
+}
+
+impl SupplyChainEvidence {
+    /// Construct an empty evidence record with no verification claims.
+    ///
+    /// All `*_verified` flags stay `false`; callers MUST promote through
+    /// [`Self::with_tuf_verification_result`] /
+    /// [`Self::with_sigstore_verification_result`] after running the
+    /// corresponding verifier adapter, or (in tests) the cfg-gated
+    /// `mark_*_for_tests` helpers.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn with_transparency_log_present(mut self, present: bool) -> Self {
+        self.transparency_log_present = present;
+        self
+    }
+
+    #[must_use]
+    pub fn with_attestations(mut self, attestations: Vec<AttestationEvidence>) -> Self {
+        self.attestations = attestations;
+        self
+    }
+
+    /// Whether a TUF verifier adapter has validated the bundle.
+    ///
+    /// The only ways to flip this to `true` are:
+    /// - [`Self::with_tuf_verification_result`] with a
+    ///   `TufVerificationResult { verified: true, .. }` produced by a
+    ///   [`TufVerifier::verify_target`] call, OR
+    /// - [`Self::mark_tuf_verified_for_tests`] under `#[cfg(any(test,
+    ///   feature = "test-mocks"))]`.
+    #[must_use]
+    pub const fn tuf_verified(&self) -> bool {
+        self.tuf_verified
+    }
+
+    /// Whether a Sigstore verifier adapter has validated the bundle.
+    #[must_use]
+    pub const fn sigstore_verified(&self) -> bool {
+        self.sigstore_verified
+    }
+
+    /// Promote this evidence with a TUF verification result.
+    ///
+    /// Sets `tuf_verified = result.verified`. Callers obtain `result`
+    /// from a real [`TufVerifier::verify_target`] invocation; a result
+    /// with `verified == false` leaves the flag untouched so a failed
+    /// verification cannot silently upgrade the evidence.
+    #[must_use]
+    pub fn with_tuf_verification_result(mut self, result: &TufVerificationResult) -> Self {
+        if result.verified {
+            self.tuf_verified = true;
+        }
+        self
+    }
+
+    /// Promote this evidence with a Sigstore verification result.
+    #[must_use]
+    pub fn with_sigstore_verification_result(
+        mut self,
+        result: &SigstoreVerificationResult,
+    ) -> Self {
+        if result.verified {
+            self.sigstore_verified = true;
+        }
+        self
+    }
+
+    /// Test-only shortcut that stamps `tuf_verified = true` without
+    /// running a real TUF verifier. Gated behind `#[cfg(any(test,
+    /// feature = "test-mocks"))]` so downstream release builds cannot
+    /// reach it.
+    #[cfg(any(test, feature = "test-mocks"))]
+    #[must_use]
+    pub fn mark_tuf_verified_for_tests(mut self) -> Self {
+        self.tuf_verified = true;
+        self
+    }
+
+    /// Test-only shortcut that stamps `sigstore_verified = true`.
+    /// Gated the same way as [`Self::mark_tuf_verified_for_tests`].
+    #[cfg(any(test, feature = "test-mocks"))]
+    #[must_use]
+    pub fn mark_sigstore_verified_for_tests(mut self) -> Self {
+        self.sigstore_verified = true;
+        self
+    }
 }
 
 /// Attestation metadata verified by an external system.
@@ -1722,20 +1816,24 @@ fn enforce_supply_chain_verification_config(
     }
 
     if config.tuf_verification_required() {
-        // A TUF verifier adapter MUST have attested the bundle. Presence
-        // of a default SupplyChainEvidence is not enough — the bool must
-        // be true, meaning the adapter succeeded (br-pcmm8).
+        // A TUF verifier adapter MUST have attested the bundle.
+        // `tuf_verified()` is only true when evidence was promoted via
+        // `SupplyChainEvidence::with_tuf_verification_result` against a
+        // real `TufVerifier::verify_target` result, or the cfg-gated
+        // test-only helper (br-pcmm8, br-i5iv4).
         let evidence = evidence.ok_or(RegistryError::TufVerificationRequired)?;
-        if !evidence.tuf_verified {
+        if !evidence.tuf_verified() {
             return Err(RegistryError::TufVerificationRequired);
         }
     }
 
     if config.sigstore_verification_required() {
         // Same for Sigstore: the bundle must carry a verified Sigstore
-        // attestation, not merely some SupplyChainEvidence struct.
+        // attestation — promoted through
+        // `SupplyChainEvidence::with_sigstore_verification_result`
+        // (or the test-only helper).
         let evidence = evidence.ok_or(RegistryError::SigstoreVerificationRequired)?;
-        if !evidence.sigstore_verified {
+        if !evidence.sigstore_verified() {
             return Err(RegistryError::SigstoreVerificationRequired);
         }
     }
@@ -3149,12 +3247,7 @@ sig = "{sig}"
         let manifest = ConnectorManifest::parse_str(&unsigned_manifest_toml("")).unwrap();
 
         // Evidence carrying NO verified claims (the bypass payload).
-        let evidence = SupplyChainEvidence {
-            transparency_log_present: false,
-            tuf_verified: false,
-            sigstore_verified: false,
-            attestations: vec![],
-        };
+        let evidence = SupplyChainEvidence::new();
 
         let err = enforce_supply_chain_verification_config(&config, &manifest, Some(&evidence))
             .expect_err("unverified evidence must be rejected");
@@ -3163,11 +3256,10 @@ sig = "{sig}"
             "expected TufVerificationRequired, got {err:?}"
         );
 
-        // Positive control: flipping tuf_verified to true satisfies the gate.
-        let verified_evidence = SupplyChainEvidence {
-            tuf_verified: true,
-            ..evidence
-        };
+        // Positive control: promoting via a real verification result
+        // satisfies the gate. `mark_tuf_verified_for_tests` is the
+        // cfg-gated equivalent used inside the crate's own tests.
+        let verified_evidence = SupplyChainEvidence::new().mark_tuf_verified_for_tests();
         enforce_supply_chain_verification_config(&config, &manifest, Some(&verified_evidence))
             .expect("tuf_verified=true must satisfy require_tuf");
     }
@@ -3181,12 +3273,7 @@ sig = "{sig}"
         };
         let manifest = ConnectorManifest::parse_str(&unsigned_manifest_toml("")).unwrap();
 
-        let evidence = SupplyChainEvidence {
-            transparency_log_present: false,
-            tuf_verified: false,
-            sigstore_verified: false,
-            attestations: vec![],
-        };
+        let evidence = SupplyChainEvidence::new();
 
         let err = enforce_supply_chain_verification_config(&config, &manifest, Some(&evidence))
             .expect_err("unverified sigstore evidence must be rejected");
@@ -3195,12 +3282,62 @@ sig = "{sig}"
             "expected SigstoreVerificationRequired, got {err:?}"
         );
 
-        let verified_evidence = SupplyChainEvidence {
-            sigstore_verified: true,
-            ..evidence
-        };
+        let verified_evidence = SupplyChainEvidence::new().mark_sigstore_verified_for_tests();
         enforce_supply_chain_verification_config(&config, &manifest, Some(&verified_evidence))
             .expect("sigstore_verified=true must satisfy require_sigstore");
+    }
+
+    /// Regression for br-i5iv4: a failed TUF verification result MUST NOT
+    /// promote `tuf_verified` even when passed into
+    /// `with_tuf_verification_result`. Only a real result with
+    /// `verified == true` flips the flag.
+    #[test]
+    fn supply_chain_evidence_refuses_failed_tuf_verification_result() {
+        let failed = TufVerificationResult {
+            verified: false,
+            root_version: 1,
+            target: None,
+        };
+        let ok = TufVerificationResult {
+            verified: true,
+            root_version: 1,
+            target: None,
+        };
+
+        let ev_failed = SupplyChainEvidence::new().with_tuf_verification_result(&failed);
+        assert!(
+            !ev_failed.tuf_verified(),
+            "verified=false TufVerificationResult must NOT promote tuf_verified"
+        );
+
+        let ev_ok = SupplyChainEvidence::new().with_tuf_verification_result(&ok);
+        assert!(
+            ev_ok.tuf_verified(),
+            "verified=true TufVerificationResult must promote tuf_verified"
+        );
+    }
+
+    /// Regression for br-i5iv4 (sigstore side).
+    #[test]
+    fn supply_chain_evidence_refuses_failed_sigstore_verification_result() {
+        let failed = SigstoreVerificationResult {
+            verified: false,
+            identity: None,
+            issuer: None,
+            rekor_log_index: None,
+        };
+        let ok = SigstoreVerificationResult {
+            verified: true,
+            identity: Some("gha".into()),
+            issuer: Some("https://token.actions.githubusercontent.com".into()),
+            rekor_log_index: Some(42),
+        };
+
+        let ev_failed = SupplyChainEvidence::new().with_sigstore_verification_result(&failed);
+        assert!(!ev_failed.sigstore_verified());
+
+        let ev_ok = SupplyChainEvidence::new().with_sigstore_verification_result(&ok);
+        assert!(ev_ok.sigstore_verified());
     }
 
     #[test]

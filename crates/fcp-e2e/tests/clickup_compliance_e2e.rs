@@ -480,6 +480,12 @@ async fn clickup_happy_path_compliance_suite_passes() {
         invoke_entry.context.get("invoke_status"),
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
     );
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|request| request.url.path() == "/list/123/task")
+        .count();
+    assert_eq!(hits, 1, "expected exactly one GET to /list/123/task");
 }
 
 #[test]

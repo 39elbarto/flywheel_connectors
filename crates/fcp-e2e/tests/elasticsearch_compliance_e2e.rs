@@ -480,6 +480,12 @@ async fn elasticsearch_allow_valid_token_connector_suite_passes() {
         invoke_entry.context.get("invoke_status"),
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
     );
+    let received = mock.received_requests().await;
+    let hits = received
+        .iter()
+        .filter(|request| request.url.path() == "/logs-*/_search")
+        .count();
+    assert_eq!(hits, 1, "expected exactly one POST to /logs-*/_search");
 }
 
 #[test]

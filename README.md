@@ -8,7 +8,7 @@
 > target. `FCP_Specification_V2.md` is retained as historical / legacy-interoperability context.
 > When descriptions conflict, trust V3 for intended semantics and the code for current behavior.
 
-A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. The current tree includes **31 platform crates** under `crates/`, **150 connector crates** under `connectors/`, and a single agent-first CLI (`fwc`) that refuses to fabricate runtime state. Connector maturity is intentionally described as uneven: all 150 currently ship a `manifest.toml` and tests, 138 follow the full `src/client.rs` + `src/connector.rs` + `src/types.rs` layout, and a smaller set remain thinner or explicitly incubating/quarantined.
+A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. The current tree includes **32 platform crates** under `crates/`, **150 connector crates** under `connectors/`, and a single agent-first CLI (`fwc`) that refuses to fabricate runtime state. Connector maturity is intentionally described as uneven: all 150 currently ship a `manifest.toml` and tests, 138 follow the full `src/client.rs` + `src/connector.rs` + `src/types.rs` layout, and a smaller set remain thinner or explicitly incubating/quarantined.
 
 ---
 
@@ -1584,7 +1584,7 @@ control-plane failover.
 
 ## Project Structure
 
-This is a schematic map, not an exhaustive directory dump. The current tree contains 31 crates under `crates/` and 150 connector crates under `connectors/`. All 150 connector crates currently ship manifests and tests; 138 use the full `client.rs`/`connector.rs`/`types.rs` layout, while a smaller set are thinner or explicitly incubating/quarantined. Default workspace operations focus on a curated subset of platform crates; connector crates are usually targeted explicitly.
+This is a schematic map, not an exhaustive directory dump. The current tree contains 32 crates under `crates/` and 150 connector crates under `connectors/`. All 150 connector crates currently ship manifests and tests; 138 use the full `client.rs`/`connector.rs`/`types.rs` layout, while a smaller set are thinner or explicitly incubating/quarantined. Default workspace operations focus on a curated subset of platform crates; connector crates are usually targeted explicitly.
 
 ```
 flywheel_connectors/
@@ -1592,6 +1592,7 @@ flywheel_connectors/
 │   ├── fcp-async-core/        # Transitional async/runtime substrate
 │   ├── fcp-async-core-macros/ # Proc macros for async core
 │   ├── fcp-audit/             # Older audit-chain primitives still used in the migration
+│   ├── fcp-auth-schema/       # Shared typed auth-claim schema for capability tokens
 │   ├── fcp-bootstrap/         # Provisioning and first-run ceremony flows
 │   ├── fcp-core/              # Shared domain types: zones, capabilities, provenance, lifecycle
 │   ├── fcp-cbor/              # Deterministic CBOR and schema hashing

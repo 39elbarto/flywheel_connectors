@@ -11,6 +11,7 @@
 use crate::{CryptoError, CryptoResult, Ed25519Signature, Ed25519VerifyingKey};
 use frost_ed25519 as frost;
 use rand_core::{CryptoRng, RngCore};
+use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -324,11 +325,11 @@ impl std::fmt::Debug for FrostDkgRound2Package {
 /// `sign` consumes this value by move to enforce single-use at compile
 /// time. `Clone` is intentionally NOT derived: handing two callers a
 /// cloned copy would defeat the move-consume guarantee and re-open the
-/// nonce-reuse attack. `Serialize`/`Deserialize` remain so a participant
-/// can persist nonces between rounds on a single machine (or pass them
-/// across process boundaries once), but the caller is responsible for
-/// the "once" invariant across those hops.
-#[derive(PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+/// nonce-reuse attack. Serialization remains available for opaque
+/// logging/debug-avoidant persistence of an already-live value, but
+/// deserialization is intentionally blocked so a caller cannot round-trip
+/// one nonce package into multiple live copies.
+#[derive(PartialEq, Eq, Serialize, Zeroize, ZeroizeOnDrop)]
 pub struct FrostSigningNonces {
     #[zeroize(skip)]
     participant: u16,
@@ -358,6 +359,17 @@ impl FrostSigningNonces {
             participant,
             bytes: nonces.serialize().map_err(frost_error)?,
         })
+    }
+}
+
+impl<'de> Deserialize<'de> for FrostSigningNonces {
+    fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Err(de::Error::custom(
+            "FrostSigningNonces deserialization is disabled to enforce single-use",
+        ))
     }
 }
 
@@ -1786,6 +1798,38 @@ mod tests {
         let error = sign(&signing_package, nonces1, key_packages.get(&1).unwrap()).unwrap_err();
         assert!(matches!(error, CryptoError::FrostFailed(_)));
         assert!(error.to_string().contains("possible coordinator tampering"));
+    }
+
+    #[test]
+    fn signing_nonces_bincode_roundtrip_is_rejected() {
+        let (key_packages, _public_packages) = execute_dkg(2, 3);
+        let mut rng = participant_rng(42);
+        let (nonces, _commitments) =
+            commit_with_rng(key_packages.get(&1).unwrap(), &mut rng).unwrap();
+        let encoded = bincode::serialize(&nonces).expect("nonce serialization should succeed");
+        let err = bincode::deserialize::<FrostSigningNonces>(&encoded).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("deserialization is disabled to enforce single-use")
+        );
+    }
+
+    #[test]
+    fn signing_nonces_ciborium_roundtrip_is_rejected() {
+        let (key_packages, _public_packages) = execute_dkg(2, 3);
+        let mut rng = participant_rng(43);
+        let (nonces, _commitments) =
+            commit_with_rng(key_packages.get(&1).unwrap(), &mut rng).unwrap();
+
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&nonces, &mut encoded).expect("nonce serialization should succeed");
+
+        let err = ciborium::de::from_reader::<FrostSigningNonces, _>(encoded.as_slice())
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("deserialization is disabled to enforce single-use")
+        );
     }
 
     #[test]

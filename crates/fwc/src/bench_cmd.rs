@@ -1356,7 +1356,8 @@ fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
         .operations(&ops)
         .issuer("node:test")
         .validity(now, expires)
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("constraints should parse")
         .sign(&signing_key)
         .expect("capability token should sign");
 
@@ -1368,7 +1369,7 @@ fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
 
     let (percentiles, outliers) = run_benchmark_with_result(warmup, iterations, || {
         verifier
-            .verify(capability.clone(), &cap, &op, &[])
+            .verify_bound(capability.clone(), &cap, &op, &[])
             .expect("capability verification should succeed");
     });
 

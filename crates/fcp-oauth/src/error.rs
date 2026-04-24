@@ -31,13 +31,24 @@ pub enum OAuthError {
     AuthorizationSessionConsumed,
 
     /// Authorization error from provider.
-    #[error("Authorization error: {error} - {description}")]
+    ///
+    /// `description` and `error_uri` come from the attacker-controlled OAuth
+    /// callback URL query string. Display includes only the short `error`
+    /// code (enum-like: `invalid_request`, `unauthorized_client`, etc. per
+    /// RFC 6749 §4.1.2.1) so callback-injected free-form text cannot reach
+    /// Display-consuming paths (tracing logs, anyhow chains, HTTP error
+    /// responses). The structured `description` / `error_uri` fields remain
+    /// available to programmatic callers via field access — they just
+    /// don't auto-render into strings.
+    #[error("Authorization error: {error}")]
     AuthorizationError {
-        /// Error code from provider.
+        /// Error code from provider (RFC 6749 §4.1.2.1 short token).
         error: String,
-        /// Human-readable description.
+        /// Human-readable description. Attacker-controlled via the callback
+        /// URL; NOT rendered into Display output.
         description: String,
-        /// Error URI for more information.
+        /// Error URI for more information. Attacker-controlled via the
+        /// callback URL; NOT rendered into Display output.
         error_uri: Option<String>,
     },
 
@@ -105,15 +116,16 @@ impl fmt::Debug for OAuthError {
                 .finish(),
             Self::InvalidState(message) => f.debug_tuple("InvalidState").field(message).finish(),
             Self::AuthorizationSessionConsumed => f.write_str("AuthorizationSessionConsumed"),
-            Self::AuthorizationError {
-                error,
-                description,
-                error_uri,
-            } => f
+            Self::AuthorizationError { error, .. } => f
+                // description and error_uri are attacker-controlled via the
+                // OAuth callback URL; redact them from Debug output to match
+                // the Display-side redaction (and the StateMismatch pattern
+                // above). Only the short `error` code is kept, per RFC 6749
+                // §4.1.2.1 it's a bounded enum-like token.
                 .debug_struct("AuthorizationError")
                 .field("error", error)
-                .field("description", description)
-                .field("error_uri", error_uri)
+                .field("description", &"[REDACTED]")
+                .field("error_uri", &"[REDACTED]")
                 .finish(),
             Self::TokenExchangeFailed(message) => {
                 f.debug_tuple("TokenExchangeFailed").field(message).finish()
@@ -205,16 +217,42 @@ mod tests {
     }
 
     #[test]
-    fn authorization_error_display() {
+    fn authorization_error_display_redacts_callback_fields() {
+        // REVIEW R2 P3 (cc_1): description + error_uri come from the
+        // attacker-controlled OAuth callback URL. Display must expose only
+        // the short `error` code (bounded per RFC 6749 §4.1.2.1); the free-
+        // form description and error_uri must not reach any Display-
+        // consuming path (tracing logs, anyhow chains, HTTP error bodies).
         let e = OAuthError::AuthorizationError {
             error: "access_denied".into(),
-            description: "User denied".into(),
-            error_uri: None,
+            description: "injected\nLOG FORGERY\r\nadmin-only=true".into(),
+            error_uri: Some("https://attacker.example/leak?x=secret".into()),
         };
-        assert_eq!(
-            e.to_string(),
-            "Authorization error: access_denied - User denied"
-        );
+        let display = e.to_string();
+        assert_eq!(display, "Authorization error: access_denied");
+        assert!(!display.contains("injected"));
+        assert!(!display.contains("LOG FORGERY"));
+        assert!(!display.contains("attacker.example"));
+    }
+
+    #[test]
+    fn authorization_error_debug_redacts_callback_fields() {
+        // Debug must match the redaction pattern already applied to
+        // StateMismatch. Prior to this change, Debug printed description
+        // and error_uri verbatim while StateMismatch redacted its fields;
+        // a sibling-path leak for the same class of attacker-supplied data.
+        let e = OAuthError::AuthorizationError {
+            error: "access_denied".into(),
+            description: "injected\r\ntoken=leaked".into(),
+            error_uri: Some("https://attacker.example/x".into()),
+        };
+        let debug = format!("{e:?}");
+        assert!(debug.contains("AuthorizationError"));
+        assert!(debug.contains("access_denied"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("injected"));
+        assert!(!debug.contains("token=leaked"));
+        assert!(!debug.contains("attacker.example"));
     }
 
     #[test]
@@ -475,28 +513,56 @@ mod tests {
 
     #[test]
     fn authorization_error_empty_description() {
+        // Post-redaction: Display carries only the short `error` code;
+        // description / error_uri are never rendered into strings.
         let e = OAuthError::AuthorizationError {
             error: "temporarily_unavailable".into(),
             description: String::new(),
             error_uri: None,
         };
         let display = e.to_string();
-        assert!(display.contains("temporarily_unavailable"));
-        assert!(display.contains(" - "));
+        assert_eq!(display, "Authorization error: temporarily_unavailable");
     }
 
     // ── Expanded: error variant field access ──
 
     #[test]
     fn authorization_error_all_fields_populated() {
+        // Post-redaction: structured fields (description, error_uri) are
+        // accessible via programmatic pattern-match but do NOT reach
+        // Display output — attacker-controlled callback strings must not
+        // slip into logs/error chains.
         let e = OAuthError::AuthorizationError {
             error: "invalid_request".into(),
             description: "The request is missing a required parameter".into(),
             error_uri: Some("https://tools.ietf.org/html/rfc6749#section-4.1.2.1".into()),
         };
         let display = e.to_string();
-        assert!(display.contains("invalid_request"));
-        assert!(display.contains("The request is missing a required parameter"));
+        assert_eq!(display, "Authorization error: invalid_request");
+        assert!(
+            !display.contains("The request is missing"),
+            "description must not render into Display"
+        );
+        assert!(
+            !display.contains("rfc6749"),
+            "error_uri must not render into Display"
+        );
+
+        // Structured access still works for programmatic callers.
+        if let OAuthError::AuthorizationError {
+            description,
+            error_uri,
+            ..
+        } = &e
+        {
+            assert_eq!(description, "The request is missing a required parameter");
+            assert_eq!(
+                error_uri.as_deref(),
+                Some("https://tools.ietf.org/html/rfc6749#section-4.1.2.1")
+            );
+        } else {
+            panic!("expected AuthorizationError");
+        }
     }
 
     #[test]

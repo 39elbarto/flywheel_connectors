@@ -63,11 +63,58 @@ impl FcpConnector for BoxConnectorAdapter {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
-        self.connector
-            .handle_handshake(json!({
-                "session_id": "box-e2e-session",
-            }))
-            .await?;
+        let connector_label = self.id.to_string();
+        let session_id = SessionId::new();
+        let mut request = serde_json::to_value(&req).map_err(|err| FcpError::Internal {
+            message: format!("failed to serialize handshake request: {err}"),
+        })?;
+        let request_obj = request.as_object_mut().ok_or_else(|| FcpError::Internal {
+            message: format!("{connector_label} handshake request did not serialize to an object"),
+        })?;
+        request_obj.insert(
+            "session_id".to_string(),
+            serde_json::Value::String(session_id.0.to_string()),
+        );
+
+        let response = self.connector.handle_handshake(request).await?;
+        let protocol_version = response
+            .get("protocol_version")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FcpError::Internal {
+                message: format!("{connector_label} handshake response missing protocol_version"),
+            })?;
+        if protocol_version != "2.0" {
+            return Err(FcpError::Internal {
+                message: format!(
+                    "{connector_label} handshake protocol_version expected 2.0, got {protocol_version}"
+                ),
+            });
+        }
+        let _connector_id = response
+            .get("connector_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FcpError::Internal {
+                message: format!("{connector_label} handshake response missing connector_id"),
+            })?;
+        let connector_caps: std::collections::BTreeSet<String> = response
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| FcpError::Internal {
+                message: format!("{connector_label} handshake response missing capabilities array"),
+            })?
+            .iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect();
+        let capabilities_granted: Vec<CapabilityGrant> = req
+            .capabilities_requested
+            .iter()
+            .filter(|capability| connector_caps.contains(capability.as_str()))
+            .cloned()
+            .map(|capability| CapabilityGrant {
+                capability,
+                operation: None,
+            })
+            .collect();
 
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -77,16 +124,8 @@ impl FcpConnector for BoxConnectorAdapter {
 
         Ok(HandshakeResponse {
             status: "accepted".to_string(),
-            capabilities_granted: req
-                .capabilities_requested
-                .iter()
-                .cloned()
-                .map(|capability| CapabilityGrant {
-                    capability,
-                    operation: None,
-                })
-                .collect(),
-            session_id: SessionId::new(),
+            capabilities_granted,
+            session_id,
             manifest_hash: "sha256:box-e2e".to_string(),
             nonce: req.nonce,
             event_caps: None,

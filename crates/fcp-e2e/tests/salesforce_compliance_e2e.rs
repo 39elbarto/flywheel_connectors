@@ -23,7 +23,7 @@ use fcp_core::{
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_manifest::ConnectorManifest;
-use fcp_salesforce::connector::SalesforceConnector;
+use fcp_salesforce::{client::DEFAULT_API_PATH, connector::SalesforceConnector};
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{
@@ -483,9 +483,11 @@ async fn salesforce_default_deny_compliance_suite_passes() {
 async fn salesforce_happy_path_compliance_suite_passes() {
     let mock = MockApiServer::start().await;
 
-    // Mount mock for GET /services/data/v59.0/query (SOQL query endpoint)
+    let query_path = format!(r"^{DEFAULT_API_PATH}/query");
+
+    // Mount mock for the connector's default SOQL query endpoint.
     Mock::given(method("GET"))
-        .and(path_regex(r"^/services/data/v59\.0/query"))
+        .and(path_regex(&query_path))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_json(json!({"records": [], "totalSize": 0, "done": true})),
@@ -532,13 +534,14 @@ async fn salesforce_happy_path_compliance_suite_passes() {
         "happy path compliance should pass: {report:#?}"
     );
     let received = mock.received_requests().await;
+    let expected_path = format!("{DEFAULT_API_PATH}/query");
     let hits = received
         .iter()
-        .filter(|r| r.url.path() == "/services/data/v59.0/query")
+        .filter(|r| r.url.path() == expected_path)
         .count();
     assert_eq!(
         hits, 1,
-        "expected exactly one GET to /services/data/v59.0/query"
+        "expected exactly one GET to {expected_path}"
     );
 }
 

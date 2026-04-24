@@ -273,6 +273,72 @@ fn wasi_symlinked_preopens_fail_closed() {
     );
 }
 
+#[test]
+fn wasi_file_preopens_fail_closed() {
+    let file_root = unique_temp_dir("fcp-conformance-sandbox-file-preopen");
+    let readonly_file = file_root.join("readonly.txt");
+    let writable_file = file_root.join("writable.txt");
+    std::fs::write(&readonly_file, b"readonly").unwrap();
+    std::fs::write(&writable_file, b"writable").unwrap();
+
+    let readonly_runtime = WasiRuntime::new(WasiConfig {
+        readonly_paths: vec![readonly_file.clone()],
+        ..WasiConfig::default()
+    })
+    .unwrap();
+    let readonly_err = readonly_runtime.create_store().unwrap_err().to_string();
+    assert!(
+        readonly_err.contains("must be directories"),
+        "readonly file preopen must fail closed: {readonly_err}"
+    );
+
+    let writable_runtime = WasiRuntime::new(WasiConfig {
+        writable_paths: vec![writable_file.clone()],
+        ..WasiConfig::default()
+    })
+    .unwrap();
+    let writable_err = writable_runtime.create_store().unwrap_err().to_string();
+    assert!(
+        writable_err.contains("must be directories"),
+        "writable file preopen must fail closed: {writable_err}"
+    );
+}
+
+#[test]
+fn wasi_http_egress_invalid_urls_fail_closed() {
+    let mut non_http_constraints = open_constraints();
+    non_http_constraints.host_allow = vec!["*".to_string()];
+    non_http_constraints.port_allow = vec![21];
+
+    let non_http_runtime =
+        WasiRuntime::new(WasiConfig::default().with_network_constraints(non_http_constraints))
+            .unwrap();
+    let non_http_store = non_http_runtime.create_store().unwrap();
+    let non_http_err = non_http_store
+        .data()
+        .validate_http_access("ftp://files.example.com/data", "GET")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        non_http_err.contains("http or https"),
+        "non-http scheme must fail closed before port policy can allow it: {non_http_err}"
+    );
+
+    let credential_runtime =
+        WasiRuntime::new(WasiConfig::default().with_network_constraints(mediated_constraints()))
+            .unwrap();
+    let credential_store = credential_runtime.create_store().unwrap();
+    let credential_err = credential_store
+        .data()
+        .validate_http_access("https://user:pass@api.example.com/data", "GET")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        credential_err.contains("embedded credentials"),
+        "HTTP egress URLs with userinfo must fail closed: {credential_err}"
+    );
+}
+
 #[fcp_async_core::runtime::test]
 async fn wasi_raw_socket_hostcalls_fail_closed_when_mediation_is_required() {
     let default_runtime = WasiRuntime::new(WasiConfig::default()).unwrap();

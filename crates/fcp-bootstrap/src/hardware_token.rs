@@ -16,7 +16,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use x509_parser::{certificate::X509Certificate, parse_x509_certificate};
+use x509_parser::{certificate::X509Certificate, parse_x509_certificate, time::ASN1Time};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Information about a detected hardware token.
@@ -1220,7 +1220,7 @@ fn certificate_has_x509_issuer_chain(
     if !remaining.is_empty() {
         return false;
     }
-    if !parsed.validity().is_valid() {
+    if !x509_certificate_valid_for_bootstrap(&parsed) {
         return false;
     }
 
@@ -1246,7 +1246,7 @@ fn certificate_has_x509_issuer_chain(
             if !issuer_remaining.is_empty() {
                 return false;
             }
-            if !issuer_parsed.validity().is_valid() {
+            if !x509_certificate_valid_for_bootstrap(&issuer_parsed) {
                 return false;
             }
             if x509_cert_signing_allowed(&issuer_parsed) != Some(true) {
@@ -1261,6 +1261,23 @@ fn certificate_has_x509_issuer_chain(
                 .is_ok()
                 && certificate_has_verified_issuer_chain_inner(issuer, certificates, visited)
         })
+}
+
+const BOOTSTRAP_CERT_NOT_BEFORE_SKEW_SECS: i64 = 60;
+
+fn x509_certificate_valid_for_bootstrap(certificate: &X509Certificate<'_>) -> bool {
+    let validity = certificate.validity();
+    let now = ASN1Time::now();
+    let Ok(not_before_skew_limit) = ASN1Time::from_timestamp(
+        now.timestamp()
+            .saturating_add(BOOTSTRAP_CERT_NOT_BEFORE_SKEW_SECS),
+    ) else {
+        return false;
+    };
+
+    validity.not_before <= validity.not_after
+        && validity.not_before <= not_before_skew_limit
+        && now <= validity.not_after
 }
 
 fn certificate_der_declares_ca(certificate: &TokenCertificate) -> Option<bool> {
@@ -3701,6 +3718,30 @@ mod tests {
                 CertificateSelectionRefusal::NoVerifiedIssuerChain
             )
         ));
+    }
+
+    #[test]
+    fn select_cert_accepts_leaf_and_ca_not_before_within_bootstrap_skew() {
+        let now = OffsetDateTime::now_utc();
+        let (leaf, ca) = test_x509_leaf_signed_by_ca(
+            "slightly-future-leaf",
+            &[7],
+            &[9],
+            "Slightly Future CA",
+            now + TimeDuration::seconds(30),
+            now + TimeDuration::days(30),
+            now + TimeDuration::seconds(30),
+            now + TimeDuration::days(60),
+        );
+        let driver = MockSessionDriver::with_certs_and_keys(
+            vec![leaf, ca],
+            vec![test_key("slightly-future-key", &[7], TokenKeyType::Ed25519)],
+        );
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+
+        let material = select_certificate_for_provisioning(&token, &pin, &driver).unwrap();
+        assert_eq!(material.pair.certificate.label, "slightly-future-leaf");
     }
 
     #[test]

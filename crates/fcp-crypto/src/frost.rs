@@ -315,7 +315,20 @@ impl std::fmt::Debug for FrostDkgRound2Package {
 
 /// Secret FROST signing nonces retained by a participant between round 1 and
 /// round 2 of threshold signing.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+///
+/// **SECURITY (FROST nonce-reuse rule, RFC 9591 §6.3):** these nonces MUST
+/// be used for exactly one `sign` call. Reuse across two different messages
+/// lets any observer of both signature shares recover the participant's
+/// signing share — catastrophic for threshold security.
+///
+/// `sign` consumes this value by move to enforce single-use at compile
+/// time. `Clone` is intentionally NOT derived: handing two callers a
+/// cloned copy would defeat the move-consume guarantee and re-open the
+/// nonce-reuse attack. `Serialize`/`Deserialize` remain so a participant
+/// can persist nonces between rounds on a single machine (or pass them
+/// across process boundaries once), but the caller is responsible for
+/// the "once" invariant across those hops.
+#[derive(PartialEq, Eq, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct FrostSigningNonces {
     #[zeroize(skip)]
     participant: u16,

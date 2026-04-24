@@ -549,7 +549,7 @@ pub fn map_http_status(status: u16, service: &str, message: String) -> FcpError 
         },
         409 => FcpError::Conflict { message },
         429 => FcpError::RateLimited {
-            retry_after_ms: 0,
+            retry_after_ms: default_rate_limit_retry_after_ms(),
             violation: None,
         },
         // Server errors → External (upstream fault, retryable)
@@ -569,6 +569,10 @@ pub fn map_http_status(status: u16, service: &str, message: String) -> FcpError 
             retry_after: None,
         },
     }
+}
+
+fn default_rate_limit_retry_after_ms() -> u64 {
+    u64::try_from(crate::retry::default_rate_limit_retry_after().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Whether an HTTP status code is retryable per standard semantics.
@@ -2394,7 +2398,13 @@ deny_ptrace = true
     #[test]
     fn map_http_429_to_rate_limited() {
         let err = map_http_status(429, "test", "too many".into());
-        assert!(matches!(err, FcpError::RateLimited { .. }));
+        assert!(matches!(
+            err,
+            FcpError::RateLimited {
+                retry_after_ms,
+                ..
+            } if retry_after_ms == default_rate_limit_retry_after_ms()
+        ));
     }
 
     #[test]

@@ -2268,44 +2268,13 @@ fn write_connector_configs_file(
     })
 }
 
-fn merge_connector_update(
+fn replace_connector_update(
     existing: &ConnectorConfig,
     incoming: &ConnectorConfig,
 ) -> ConnectorConfig {
-    ConnectorConfig {
-        id: existing.id.clone(),
-        binary: incoming.binary.clone(),
-        name: incoming.name.clone().or_else(|| existing.name.clone()),
-        description: incoming
-            .description
-            .clone()
-            .or_else(|| existing.description.clone()),
-        args: if incoming.args.is_empty() {
-            existing.args.clone()
-        } else {
-            incoming.args.clone()
-        },
-        env: if incoming.env.is_empty() {
-            existing.env.clone()
-        } else {
-            incoming.env.clone()
-        },
-        allowed_zones: if incoming.allowed_zones.is_empty() {
-            existing.allowed_zones.clone()
-        } else {
-            incoming.allowed_zones.clone()
-        },
-        config: incoming.config.clone().or_else(|| existing.config.clone()),
-        categories: if incoming.categories.is_empty() {
-            existing.categories.clone()
-        } else {
-            incoming.categories.clone()
-        },
-        version: incoming
-            .version
-            .clone()
-            .or_else(|| existing.version.clone()),
-    }
+    let mut updated = incoming.clone();
+    updated.id = existing.id.clone();
+    updated
 }
 
 fn load_connector_configs() -> HostResult<LoadedConnectorConfigs> {
@@ -3283,8 +3252,8 @@ async fn connector_inventory_apply_handler(
                 .ok_or_else(|| {
                     map_host_error(HostError::ConnectorNotFound(request.connector.id.clone()))
                 })?;
-            let merged = merge_connector_update(&next_configs[target_index], &request.connector);
-            next_configs[target_index] = merged;
+            next_configs[target_index] =
+                replace_connector_update(&next_configs[target_index], &request.connector);
         }
     }
 
@@ -5495,6 +5464,47 @@ mod tests {
             version: None,
             allowed_zones: Vec::new(),
         }
+    }
+
+    #[test]
+    fn connector_inventory_update_replaces_empty_fields() {
+        let existing = ConnectorConfig {
+            id: "fcp.test.replace:utility:1.0.0".to_string(),
+            binary: "/old/bin".to_string(),
+            name: Some("Old Name".to_string()),
+            description: Some("old description".to_string()),
+            args: vec!["--old".to_string()],
+            env: BTreeMap::from([("OLD_ENV".to_string(), "1".to_string())]),
+            config: Some(json!({ "old": true })),
+            categories: vec!["old".to_string()],
+            version: Some("1.0.0".to_string()),
+            allowed_zones: vec!["z:work".to_string()],
+        };
+        let incoming = ConnectorConfig {
+            id: existing.id.clone(),
+            binary: "/new/bin".to_string(),
+            name: None,
+            description: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            config: None,
+            categories: Vec::new(),
+            version: None,
+            allowed_zones: Vec::new(),
+        };
+
+        let updated = replace_connector_update(&existing, &incoming);
+
+        assert_eq!(updated.id, existing.id);
+        assert_eq!(updated.binary, "/new/bin");
+        assert!(updated.name.is_none());
+        assert!(updated.description.is_none());
+        assert!(updated.args.is_empty());
+        assert!(updated.env.is_empty());
+        assert!(updated.config.is_none());
+        assert!(updated.categories.is_empty());
+        assert!(updated.version.is_none());
+        assert!(updated.allowed_zones.is_empty());
     }
 
     fn subprocess_test_connector_config_requiring_handshake(connector_id: &str) -> ConnectorConfig {

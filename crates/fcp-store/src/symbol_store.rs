@@ -1549,7 +1549,7 @@ mod tests {
 
                 {
                     let mut objects = store.objects.write();
-                    let obj = objects.get(&meta.object_id).unwrap().get_mut();
+                    let obj = objects.get_mut(&meta.object_id).unwrap().get_mut();
                     obj.symbols.insert(
                         0,
                         StoredSymbol {

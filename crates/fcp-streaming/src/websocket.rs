@@ -445,7 +445,7 @@ impl WsCloseFrame {
 }
 
 /// WebSocket configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct WsConfig {
     /// Connection timeout.
     pub connect_timeout: Duration,
@@ -463,6 +463,27 @@ pub struct WsConfig {
     pub max_reconnect_attempts: Option<u32>,
     /// Reconnection delay.
     pub reconnect_delay: Duration,
+}
+
+impl std::fmt::Debug for WsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted_headers: HashMap<&str, &str> = self
+            .headers
+            .keys()
+            .map(|key| (key.as_str(), "[REDACTED]"))
+            .collect();
+
+        f.debug_struct("WsConfig")
+            .field("connect_timeout", &self.connect_timeout)
+            .field("ping_interval", &self.ping_interval)
+            .field("pong_timeout", &self.pong_timeout)
+            .field("max_message_size", &self.max_message_size)
+            .field("headers", &redacted_headers)
+            .field("auto_reconnect", &self.auto_reconnect)
+            .field("max_reconnect_attempts", &self.max_reconnect_attempts)
+            .field("reconnect_delay", &self.reconnect_delay)
+            .finish()
+    }
 }
 
 impl Default for WsConfig {
@@ -1546,6 +1567,19 @@ mod tests {
         let config = WsConfig::default();
         let dbg = format!("{config:?}");
         assert!(dbg.contains("WsConfig"));
+    }
+
+    #[test]
+    fn ws_config_debug_redacts_header_values() {
+        let config = WsConfig::new()
+            .with_header("Authorization", "Bearer super-secret-token")
+            .with_header("Cookie", "session=topsecret");
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("Authorization"));
+        assert!(dbg.contains("Cookie"));
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(!dbg.contains("super-secret-token"));
+        assert!(!dbg.contains("session=topsecret"));
     }
 
     #[test]

@@ -260,7 +260,7 @@ impl SseParser {
 }
 
 /// SSE client configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SseConfig {
     /// Request timeout.
     pub timeout: Option<Duration>,
@@ -274,6 +274,25 @@ pub struct SseConfig {
     pub max_reconnect_attempts: Option<u32>,
     /// Initial reconnection delay.
     pub reconnect_delay: Duration,
+}
+
+impl fmt::Debug for SseConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let redacted_headers: HashMap<&str, &str> = self
+            .headers
+            .keys()
+            .map(|key| (key.as_str(), "[REDACTED]"))
+            .collect();
+
+        f.debug_struct("SseConfig")
+            .field("timeout", &self.timeout)
+            .field("max_buffer_size", &self.max_buffer_size)
+            .field("headers", &redacted_headers)
+            .field("auto_reconnect", &self.auto_reconnect)
+            .field("max_reconnect_attempts", &self.max_reconnect_attempts)
+            .field("reconnect_delay", &self.reconnect_delay)
+            .finish()
+    }
 }
 
 impl Default for SseConfig {
@@ -1004,6 +1023,19 @@ mod tests {
     }
 
     #[test]
+    fn test_sse_config_debug_redacts_header_values() {
+        let config = SseConfig::new()
+            .with_header("Authorization", "Bearer abc123")
+            .with_header("Cookie", "session=secret");
+        let debug = format!("{config:?}");
+        assert!(debug.contains("Authorization"));
+        assert!(debug.contains("Cookie"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("Bearer abc123"));
+        assert!(!debug.contains("session=secret"));
+    }
+
+    #[test]
     fn test_sse_config_new_equals_default() {
         let new = SseConfig::new();
         let default = SseConfig::default();
@@ -1041,6 +1073,18 @@ mod tests {
         let client = SseClient::new("https://example.com/sse");
         let debug = format!("{client:?}");
         assert!(debug.contains("SseClient"));
+    }
+
+    #[test]
+    fn test_sse_client_debug_redacts_header_values() {
+        let client = SseClient::with_config(
+            "https://example.com/sse",
+            SseConfig::new().with_header("Authorization", "Bearer hidden"),
+        );
+        let debug = format!("{client:?}");
+        assert!(debug.contains("Authorization"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("Bearer hidden"));
     }
 
     #[test]

@@ -641,17 +641,27 @@ impl EgressGuard {
         is_ip_literal: bool,
         constraints: &NetworkConstraints,
     ) -> bool {
+        self.host_matches_allow_entries(host, is_ip_literal, &constraints.host_allow, &constraints.ip_allow)
+    }
+
+    fn host_matches_allow_entries(
+        &self,
+        host: &str,
+        is_ip_literal: bool,
+        host_allow: &[String],
+        ip_allow: &[IpAddr],
+    ) -> bool {
         // Check explicit IP allow list
         if is_ip_literal {
             if let Ok(ip) = host.parse::<IpAddr>() {
-                if constraints.ip_allow.contains(&ip) {
+                if ip_allow.contains(&ip) {
                     return true;
                 }
             }
         }
 
         // Check hostname allow list
-        for pattern in &constraints.host_allow {
+        for pattern in host_allow {
             let Some(canonical_pattern) = canonicalize_host_pattern(pattern) else {
                 continue;
             };
@@ -792,6 +802,17 @@ impl EgressGuard {
 
         Ok(allowed_ips)
     }
+}
+
+/// Check whether a host matches a manifest-style allow list using the production
+/// canonicalization and wildcard rules.
+#[must_use]
+pub fn host_matches_allow_list(host: &str, host_allow: &[String]) -> bool {
+    let Some(canonical_host) = canonicalize_host(host) else {
+        return false;
+    };
+    let is_ip_literal = canonical_host.parse::<IpAddr>().is_ok();
+    EgressGuard::new().host_matches_allow_entries(&canonical_host, is_ip_literal, host_allow, &[])
 }
 
 /// Check whether `ip` is a member of the configured `ip_allow` list.

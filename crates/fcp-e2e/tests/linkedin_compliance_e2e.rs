@@ -377,12 +377,7 @@ fn operation_host_allow_list(manifest: &toml::Value, operation_name: &str) -> Ve
 }
 
 fn host_allowed(host: &str, host_allow: &[String]) -> bool {
-    host_allow.iter().any(|pattern| {
-        pattern == host
-            || pattern
-                .strip_prefix("*.")
-                .is_some_and(|suffix| host.ends_with(&format!(".{suffix}")))
-    })
+    fcp_sandbox::host_matches_allow_list(host, host_allow)
 }
 
 fn assert_report_logs_validate(report: &E2eReport) {

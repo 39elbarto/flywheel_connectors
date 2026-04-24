@@ -3620,12 +3620,7 @@ mod openai_e2e_tests {
     }
 
     fn host_allowed(host: &str, host_allow: &[String]) -> bool {
-        host_allow.iter().any(|pattern| {
-            pattern == host
-                || pattern
-                    .strip_prefix("*.")
-                    .is_some_and(|suffix| host.ends_with(&format!(".{suffix}")))
-        })
+        fcp_sandbox::host_matches_allow_list(host, host_allow)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -4141,12 +4136,7 @@ mod slack_e2e_tests {
     }
 
     fn host_allowed(host: &str, host_allow: &[String]) -> bool {
-        host_allow.iter().any(|pattern| {
-            pattern == host
-                || pattern
-                    .strip_prefix("*.")
-                    .is_some_and(|suffix| host.ends_with(&format!(".{suffix}")))
-        })
+        fcp_sandbox::host_matches_allow_list(host, host_allow)
     }
 
     // ── Tests ─────────────────────────────────────────────────────────────

@@ -87,8 +87,77 @@ impl FcpConnector for SpotifyConnectorAdapter {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
-        let nonce = req.nonce;
-        let caps = req.capabilities_requested.clone();
+        // br-a6ouw: serialize the REAL HandshakeRequest into the
+        // connector and assert on the connector-returned payload
+        // instead of fabricating a compliant HandshakeResponse in the
+        // adapter. The previous implementation discarded the
+        // connector's reply (`let _raw = ...`) and synthesized a fresh
+        // response that would pass even if the connector's handshake
+        // contract drifted (e.g., protocol_version change, capability
+        // list regression).
+        let session_id = SessionId::new();
+        let mut params = serde_json::to_value(&req).map_err(|err| FcpError::Internal {
+            message: format!("failed to serialize handshake request: {err}"),
+        })?;
+        // The spotify connector tracks a session_id internally; inject
+        // ours into the params bag so the connector's session state
+        // matches the adapter-level session reported back to the host.
+        if let Some(obj) = params.as_object_mut() {
+            obj.insert(
+                "session_id".to_string(),
+                serde_json::Value::String(session_id.0.to_string()),
+            );
+        }
+
+        let response = self.connector.handle_handshake(params).await?;
+
+        // Assert the connector-returned contract shape (protocol
+        // version, connector identity, capabilities list). Any drift
+        // in these must surface as a handshake failure at the adapter
+        // boundary, not silently pass.
+        let protocol_version = response
+            .get("protocol_version")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FcpError::Internal {
+                message: "spotify handshake response missing protocol_version".into(),
+            })?;
+        if protocol_version != "2.0" {
+            return Err(FcpError::Internal {
+                message: format!(
+                    "spotify handshake protocol_version expected 2.0, got {protocol_version}"
+                ),
+            });
+        }
+        let _connector_id = response
+            .get("connector_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FcpError::Internal {
+                message: "spotify handshake response missing connector_id".into(),
+            })?;
+        let connector_caps: std::collections::BTreeSet<String> = response
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| FcpError::Internal {
+                message: "spotify handshake response missing capabilities array".into(),
+            })?
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+
+        // Only grant capabilities the connector actually declared. A
+        // request for a capability the connector does not publish is
+        // silently dropped from `capabilities_granted` — matching the
+        // production host's expected behavior.
+        let capabilities_granted: Vec<CapabilityGrant> = req
+            .capabilities_requested
+            .iter()
+            .filter(|cap| connector_caps.contains(cap.as_str()))
+            .cloned()
+            .map(|capability| CapabilityGrant {
+                capability,
+                operation: None,
+            })
+            .collect();
 
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -96,24 +165,12 @@ impl FcpConnector for SpotifyConnectorAdapter {
             req.requested_instance_id.clone().unwrap_or_default(),
         ));
 
-        let request = serde_json::to_value(&req).map_err(|err| FcpError::Internal {
-            message: format!("failed to serialize handshake request: {err}"),
-        })?;
-        // Spotify connector returns simple JSON; build a proper HandshakeResponse.
-        let _raw = self.connector.handle_handshake(request).await?;
-        let capabilities_granted: Vec<CapabilityGrant> = caps
-            .into_iter()
-            .map(|cap| CapabilityGrant {
-                capability: cap,
-                operation: None,
-            })
-            .collect();
         Ok(HandshakeResponse {
             status: "accepted".into(),
             capabilities_granted,
-            session_id: SessionId::new(),
+            session_id,
             manifest_hash: "sha256:spotify-connector-v1".into(),
-            nonce,
+            nonce: req.nonce,
             event_caps: None,
             auth_caps: None,
             op_catalog_hash: None,

@@ -503,10 +503,6 @@ fn canonicalize_map_with_limit(
     Ok(())
 }
 
-fn canonicalize_map_scratch_capacity(entry_count: usize) -> usize {
-    canonicalize_map_scratch_capacity_with_limit(entry_count, MAX_CANONICAL_OBJECT_BYTES)
-}
-
 fn canonicalize_map_scratch_capacity_with_limit(entry_count: usize, byte_limit: usize) -> usize {
     entry_count
         .saturating_mul(32)
@@ -5092,15 +5088,24 @@ mod tests {
     fn canonicalize_map_scratch_capacity_hits_exact_cap_boundary() {
         let exact_cap_entry_count = MAX_CANONICAL_OBJECT_BYTES / 32;
         assert_eq!(
-            canonicalize_map_scratch_capacity(exact_cap_entry_count - 1),
+            canonicalize_map_scratch_capacity_with_limit(
+                exact_cap_entry_count - 1,
+                MAX_CANONICAL_OBJECT_BYTES
+            ),
             MAX_CANONICAL_OBJECT_BYTES - 32
         );
         assert_eq!(
-            canonicalize_map_scratch_capacity(exact_cap_entry_count),
+            canonicalize_map_scratch_capacity_with_limit(
+                exact_cap_entry_count,
+                MAX_CANONICAL_OBJECT_BYTES
+            ),
             MAX_CANONICAL_OBJECT_BYTES
         );
         assert_eq!(
-            canonicalize_map_scratch_capacity(exact_cap_entry_count + 1),
+            canonicalize_map_scratch_capacity_with_limit(
+                exact_cap_entry_count + 1,
+                MAX_CANONICAL_OBJECT_BYTES
+            ),
             MAX_CANONICAL_OBJECT_BYTES
         );
     }

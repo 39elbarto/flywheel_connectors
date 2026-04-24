@@ -171,15 +171,19 @@ impl FcpConnector for GoogleDocsConnectorAdapter {
 }
 
 fn docs_manifest_with_hash() -> String {
+    const PLACEHOLDER_HASH: &str =
+        "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
     let raw = include_str!("../../../connectors/google-docs/manifest.toml");
-    let unchecked = ConnectorManifest::parse_str_unchecked(raw).expect("unchecked manifest parse");
+    let normalized = raw.replace(
+        "blake3-256:fcp.interface.v2:google_docs_v1",
+        PLACEHOLDER_HASH,
+    );
+    let unchecked =
+        ConnectorManifest::parse_str_unchecked(&normalized).expect("unchecked manifest parse");
     let computed = unchecked
         .compute_interface_hash()
         .expect("compute interface hash");
-    raw.replace(
-        &unchecked.manifest.interface_hash.to_string(),
-        &computed.to_string(),
-    )
+    normalized.replace(PLACEHOLDER_HASH, &computed.to_string())
 }
 
 fn docs_manifest_toml() -> toml::Value {

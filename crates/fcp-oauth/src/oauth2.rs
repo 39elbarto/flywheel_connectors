@@ -3,6 +3,7 @@
 //! Supports authorization code flow (with PKCE) and client credentials flow.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -227,7 +228,7 @@ pub struct OAuth2Client {
 }
 
 /// One-time authorization session tying together state and optional PKCE.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AuthorizationSession {
     authorization_url: String,
     state: String,
@@ -236,7 +237,7 @@ pub struct AuthorizationSession {
 }
 
 /// Validated authorization grant extracted from a callback.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AuthorizationGrant {
     code: String,
     pkce: Option<Pkce>,
@@ -296,6 +297,17 @@ impl AuthorizationSession {
     }
 }
 
+impl fmt::Debug for AuthorizationSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthorizationSession")
+            .field("authorization_url", &self.authorization_url)
+            .field("state", &"[REDACTED]")
+            .field("pkce", &self.pkce)
+            .field("consumed", &self.consumed.load(Ordering::Acquire))
+            .finish()
+    }
+}
+
 impl AuthorizationGrant {
     /// Get the authorization code.
     #[must_use]
@@ -307,6 +319,15 @@ impl AuthorizationGrant {
     #[must_use]
     pub fn pkce(&self) -> Option<&Pkce> {
         self.pkce.as_ref()
+    }
+}
+
+impl fmt::Debug for AuthorizationGrant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthorizationGrant")
+            .field("code", &"[REDACTED]")
+            .field("pkce", &self.pkce)
+            .finish()
     }
 }
 
@@ -726,7 +747,7 @@ fn token_endpoint_unsuccessful_error(status: u16) -> OAuthError {
 }
 
 /// Authorization callback parameters.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct AuthorizationCallback {
     /// Authorization code.
     pub code: Option<String>,
@@ -738,6 +759,18 @@ pub struct AuthorizationCallback {
     pub error_description: Option<String>,
     /// Error URI.
     pub error_uri: Option<String>,
+}
+
+impl fmt::Debug for AuthorizationCallback {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthorizationCallback")
+            .field("code", &self.code.as_ref().map(|_| "[REDACTED]"))
+            .field("state", &self.state.as_ref().map(|_| "[REDACTED]"))
+            .field("error", &self.error)
+            .field("error_description", &self.error_description)
+            .field("error_uri", &self.error_uri)
+            .finish()
+    }
 }
 
 impl AuthorizationCallback {
@@ -2071,6 +2104,51 @@ mod tests {
         };
         let debug = format!("{callback:?}");
         assert!(debug.contains("AuthorizationCallback"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("c"));
+        assert!(!debug.contains("s"));
+    }
+
+    #[test]
+    fn test_authorization_session_debug_redacts_state_and_pkce() {
+        let pkce = Pkce::from_verifier(
+            "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+            PkceMethod::S256,
+        )
+        .unwrap();
+        let session = AuthorizationSession {
+            authorization_url: "https://example.com/oauth".into(),
+            state: "secret-state".into(),
+            pkce: Some(pkce.clone()),
+            consumed: Arc::new(AtomicBool::new(false)),
+        };
+
+        let debug = format!("{session:?}");
+        assert!(debug.contains("AuthorizationSession"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("secret-state"));
+        assert!(!debug.contains(pkce.verifier()));
+        assert!(!debug.contains(pkce.challenge()));
+    }
+
+    #[test]
+    fn test_authorization_grant_debug_redacts_code_and_pkce() {
+        let pkce = Pkce::from_verifier(
+            "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+            PkceMethod::S256,
+        )
+        .unwrap();
+        let grant = AuthorizationGrant {
+            code: "secret-code".into(),
+            pkce: Some(pkce.clone()),
+        };
+
+        let debug = format!("{grant:?}");
+        assert!(debug.contains("AuthorizationGrant"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("secret-code"));
+        assert!(!debug.contains(pkce.verifier()));
+        assert!(!debug.contains(pkce.challenge()));
     }
 
     // ── New batch: AuthStyle ──

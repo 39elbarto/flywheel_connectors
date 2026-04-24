@@ -114,7 +114,7 @@ pub struct RequestToken {
 impl std::fmt::Debug for RequestToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RequestToken")
-            .field("token", &self.token)
+            .field("token", &"[REDACTED]")
             .field("token_secret", &"[REDACTED]")
             .field("callback_confirmed", &self.callback_confirmed)
             .finish()
@@ -1323,6 +1323,7 @@ mod tests {
         let debug = format!("{rt:?}");
         assert!(debug.contains("RequestToken"));
         assert!(debug.contains("callback_confirmed"));
+        assert!(!debug.contains("t"));
         // token_secret must be redacted
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("my_secret_value"));

@@ -1,12 +1,13 @@
 //! OAuth error types.
 
+use std::fmt;
 use std::time::Duration;
 
 use fcp_async_core::AsyncError;
 use fcp_async_core::http::HttpClientError;
 
 /// OAuth errors.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum OAuthError {
     /// Invalid client configuration.
     #[error("Invalid OAuth configuration: {0}")]
@@ -91,6 +92,52 @@ pub enum OAuthError {
     /// PKCE error.
     #[error("PKCE error: {0}")]
     PkceError(String),
+}
+
+impl fmt::Debug for OAuthError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidConfig(message) => f.debug_tuple("InvalidConfig").field(message).finish(),
+            Self::StateMismatch { .. } => f
+                .debug_struct("StateMismatch")
+                .field("expected", &"[REDACTED]")
+                .field("actual", &"[REDACTED]")
+                .finish(),
+            Self::InvalidState(message) => f.debug_tuple("InvalidState").field(message).finish(),
+            Self::AuthorizationSessionConsumed => f.write_str("AuthorizationSessionConsumed"),
+            Self::AuthorizationError {
+                error,
+                description,
+                error_uri,
+            } => f
+                .debug_struct("AuthorizationError")
+                .field("error", error)
+                .field("description", description)
+                .field("error_uri", error_uri)
+                .finish(),
+            Self::TokenExchangeFailed(message) => {
+                f.debug_tuple("TokenExchangeFailed").field(message).finish()
+            }
+            Self::RefreshFailed(message) => f.debug_tuple("RefreshFailed").field(message).finish(),
+            Self::TokenExpired(duration) => f.debug_tuple("TokenExpired").field(duration).finish(),
+            Self::NoRefreshToken => f.write_str("NoRefreshToken"),
+            Self::InvalidTokenResponse(message) => {
+                f.debug_tuple("InvalidTokenResponse").field(message).finish()
+            }
+            Self::EmptyTokenField(field) => f.debug_tuple("EmptyTokenField").field(field).finish(),
+            Self::HttpError(message) => f.debug_tuple("HttpError").field(message).finish(),
+            Self::JsonError(error) => f.debug_tuple("JsonError").field(error).finish(),
+            Self::UrlError(error) => f.debug_tuple("UrlError").field(error).finish(),
+            Self::SignatureError(message) => {
+                f.debug_tuple("SignatureError").field(message).finish()
+            }
+            Self::UnsupportedProvider(provider) => {
+                f.debug_tuple("UnsupportedProvider").field(provider).finish()
+            }
+            Self::TokenNotFound(key) => f.debug_tuple("TokenNotFound").field(key).finish(),
+            Self::PkceError(message) => f.debug_tuple("PkceError").field(message).finish(),
+        }
+    }
 }
 
 /// Result type for OAuth operations.
@@ -293,6 +340,19 @@ mod tests {
         let e = OAuthError::NoRefreshToken;
         let debug = format!("{e:?}");
         assert!(debug.contains("NoRefreshToken"));
+    }
+
+    #[test]
+    fn state_mismatch_debug_redacts_values() {
+        let e = OAuthError::StateMismatch {
+            expected: "expected_state_abc".into(),
+            actual: "actual_state_xyz".into(),
+        };
+        let debug = format!("{e:?}");
+        assert!(debug.contains("StateMismatch"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("expected_state_abc"));
+        assert!(!debug.contains("actual_state_xyz"));
     }
 
     // ── Expanded tests: from_http_client_error ──

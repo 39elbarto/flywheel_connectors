@@ -3,6 +3,8 @@
 //! PKCE is an extension to OAuth 2.0 that prevents authorization code
 //! interception attacks.
 
+use std::fmt;
+
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
 
@@ -28,7 +30,7 @@ impl std::fmt::Display for PkceMethod {
 }
 
 /// PKCE verifier and challenge pair.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Pkce {
     /// The code verifier (secret, sent during token exchange).
     verifier: String,
@@ -36,6 +38,16 @@ pub struct Pkce {
     challenge: String,
     /// The challenge method used.
     method: PkceMethod,
+}
+
+impl fmt::Debug for Pkce {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Pkce")
+            .field("verifier", &"[REDACTED]")
+            .field("challenge", &"[REDACTED]")
+            .field("method", &self.method)
+            .finish()
+    }
 }
 
 impl Pkce {
@@ -342,6 +354,9 @@ mod tests {
         let pkce = Pkce::new();
         let debug = format!("{pkce:?}");
         assert!(debug.contains("Pkce"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(pkce.verifier()));
+        assert!(!debug.contains(pkce.challenge()));
     }
 
     #[test]

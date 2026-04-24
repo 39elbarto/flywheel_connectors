@@ -3959,21 +3959,27 @@ async fn connector_config_rollback_handler(
 
 async fn preflight_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(request): Json<HostPreflightRequest>,
 ) -> Json<PreflightResponse> {
     let connector_id = request.connector_id.clone();
     let operation = request.operation.clone();
+    let asserted_principal = extract_principal_header(&headers).or_else(|| request.principal.clone());
     let started_at = Instant::now();
     let response = match invoke_request_from_preflight(&request) {
-        Ok(invoke_request) => {
-            evaluate_live_preflight(&state, &invoke_request, request.principal.as_deref()).await
-        }
+        Ok(invoke_request) => evaluate_live_preflight(
+            &state,
+            &invoke_request,
+            asserted_principal.as_deref(),
+        )
+        .await,
         Err(error) => preflight_response_from_error(error),
     };
     tracing::info!(
         event = "preflight_check",
         connector_id = %connector_id,
         operation = %operation,
+        asserted_principal = asserted_principal.as_deref(),
         allowed = response.allowed,
         reason = ?response.reason,
         duration_ms = started_at.elapsed().as_millis() as u64,
@@ -3984,11 +3990,13 @@ async fn preflight_handler(
 
 async fn simulate_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(request): Json<HostSimulateRequest>,
 ) -> Result<Json<HostSimulateResponse>, (StatusCode, String)> {
     let connector_id = request.connector_id.clone();
     let operation = request.operation.clone();
     let request_id = request.request_id.clone();
+    let asserted_principal = extract_principal_header(&headers).or_else(|| request.principal.clone());
     let started_at = Instant::now();
 
     tracing::debug!(
@@ -3996,6 +4004,7 @@ async fn simulate_handler(
         connector_id = %connector_id,
         operation = %operation,
         request_id = %request_id,
+        asserted_principal = asserted_principal.as_deref(),
         estimate_cost = request.estimate_cost,
         check_availability = request.check_availability,
         deadline_ms = request.deadline_ms,
@@ -4045,7 +4054,7 @@ async fn simulate_handler(
     };
 
     let preflight =
-        evaluate_live_preflight(&state, &preflight_request, request.principal.as_deref()).await;
+        evaluate_live_preflight(&state, &preflight_request, asserted_principal.as_deref()).await;
     if !preflight.allowed {
         let input = request.input.clone().unwrap_or(serde_json::Value::Null);
         let duration_ms = elapsed_millis(started_at);
@@ -6361,6 +6370,128 @@ mod tests {
                 .is_some_and(|error| error.message.contains("request principal `user:other`")),
             "expected principal mismatch denial, got: {:?}",
             response.results[0].error
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn preflight_handler_rejects_principal_header_mismatch() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!(
+                "compiled fcp-test-connector missing; skipping preflight principal mismatch test"
+            );
+            return;
+        }
+
+        let connector_id = "fcp.test.preflight-principal-mismatch:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![subprocess_test_connector_config(connector_id)],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            ..(*base_state).clone()
+        });
+
+        let request = HostPreflightRequest {
+            request_id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: "test.echo".to_string(),
+            params: Some(json!({ "message": "principal mismatch should fail" })),
+            principal: Some("user:test".to_string()),
+            zone_id: Some(ZoneId::work()),
+            capability_token: Some(test_capability_token(
+                &signing_key,
+                "cap.test.echo",
+                "test.echo",
+                ZoneId::work().as_str(),
+            )),
+            approval_tokens: Vec::new(),
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(PRINCIPAL_HEADER, HeaderValue::from_static("user:other"));
+
+        let response = preflight_handler(State(state), headers, Json(request)).await.0;
+        assert!(!response.allowed, "{response:?}");
+        assert!(
+            response
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("request principal `user:other`")),
+            "expected principal mismatch denial, got: {:?}",
+            response.reason
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn simulate_handler_rejects_principal_header_mismatch() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!(
+                "compiled fcp-test-connector missing; skipping simulate principal mismatch test"
+            );
+            return;
+        }
+
+        let connector_id = "fcp.test.simulate-principal-mismatch:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![subprocess_test_connector_config(connector_id)],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            ..(*base_state).clone()
+        });
+
+        let request = HostSimulateRequest {
+            request_id: "simulate-principal-mismatch".to_string(),
+            connector_id: connector_id.to_string(),
+            operation: "test.echo".to_string(),
+            input: Some(json!({ "message": "principal mismatch should fail" })),
+            zone_id: Some(ZoneId::work().to_string()),
+            principal: Some("user:test".to_string()),
+            capability_token: Some(test_capability_token(
+                &signing_key,
+                "cap.test.echo",
+                "test.echo",
+                ZoneId::work().as_str(),
+            )),
+            approval_tokens: Vec::new(),
+            estimate_cost: false,
+            check_availability: false,
+            deadline_ms: 5_000,
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(PRINCIPAL_HEADER, HeaderValue::from_static("user:other"));
+
+        let response = simulate_handler(State(state), headers, Json(request))
+            .await
+            .expect("simulate handler should return structured denial")
+            .0;
+        assert!(!response.preflight_allowed, "{response:?}");
+        assert!(!response.would_succeed, "{response:?}");
+        assert_eq!(response.phase, SimulatePhase::PreflightOnly);
+        assert!(
+            response
+                .failure_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("request principal `user:other`")),
+            "expected principal mismatch denial, got: {:?}",
+            response.failure_reason
         );
     }
 

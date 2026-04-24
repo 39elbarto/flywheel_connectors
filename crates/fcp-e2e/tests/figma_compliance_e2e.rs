@@ -244,8 +244,13 @@ fn build_token(
     let mut constraints_cbor = Vec::new();
     ciborium::into_writer(&constraints, &mut constraints_cbor)
         .expect("serialize test constraints");
+    let resolved_capability = match capability {
+        "figma.get_file" => "figma.read",
+        "figma.delete_webhook" => "figma.delete",
+        _ => capability,
+    };
     let cose = CapabilityTokenBuilder::new()
-        .capability_id(capability)
+        .capability_id(resolved_capability)
         .zone_id("z:work")
         .principal("user:test")
         .operations(operations)

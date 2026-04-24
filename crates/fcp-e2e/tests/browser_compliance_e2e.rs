@@ -4,7 +4,7 @@
 //! - Default deny behavior for capability mismatch
 //! - Allow path with valid capability token
 //! - Network guard allow/deny checks via manifest constraints
-//! - Dangerous operation approval gating for execute_js / form submit
+//! - Dangerous operation approval gating for evaluate_js / form submit
 //!
 //! All tests are deterministic with mock servers only.
 //! Run: `cargo test --package fcp-e2e --features browser`
@@ -229,8 +229,13 @@ fn build_token(
     let mut constraints_cbor = Vec::new();
     ciborium::into_writer(&constraints, &mut constraints_cbor)
         .expect("serialize test constraints");
+    let resolved_capability = match capability {
+        "browser.evaluate_js" => "browser.execute",
+        "browser.extract_text" => "browser.extract",
+        _ => capability,
+    };
     let cose = CapabilityTokenBuilder::new()
-        .capability_id(capability)
+        .capability_id(resolved_capability)
         .zone_id("z:work")
         .principal("user:test")
         .operations(operations)
@@ -540,7 +545,7 @@ async fn browser_dangerous_operations_require_approval_tokens() {
     adapter
         .handshake(handshake_request(
             signing_key.verifying_key().to_bytes(),
-            &["browser.evaluate_js", "browser.fill_form"],
+            &["browser.execute", "browser.interact"],
         ))
         .await
         .expect("handshake");
@@ -548,22 +553,24 @@ async fn browser_dangerous_operations_require_approval_tokens() {
     let cases = [
         (
             "browser.evaluate_js",
+            "browser.execute",
             json!({ "expression": "document.title" }),
         ),
         (
             "browser.fill_form",
+            "browser.interact",
             json!({ "fields": { "#email": "alice@example.com" } }),
         ),
     ];
 
-    for (operation, input) in cases {
-        let token = build_token(&signing_key, operation, &[operation]);
+    for (operation, expected_capability, input) in cases {
+        let token = build_token(&signing_key, expected_capability, &[operation]);
         let req = invoke_request(operation, input, token, Vec::new());
         let result = adapter.invoke(req).await;
         assert!(result.is_err(), "{operation} should require approval token");
         match result.expect_err("dangerous operation should fail without approval") {
             FcpError::CapabilityDenied { capability, reason } => {
-                assert_eq!(capability, operation);
+                assert_eq!(capability, expected_capability);
                 assert!(reason.contains("ApprovalToken"));
             }
             err => panic!("expected capability denial, got {err:?}"),
@@ -592,14 +599,14 @@ async fn browser_dangerous_operation_allows_with_approval_token() {
     adapter
         .handshake(handshake_request(
             signing_key.verifying_key().to_bytes(),
-            &["browser.evaluate_js"],
+            &["browser.execute"],
         ))
         .await
         .expect("handshake");
 
     let token = build_token(
         &signing_key,
-        "browser.evaluate_js",
+        "browser.execute",
         &["browser.evaluate_js"],
     );
     let approval = build_execution_approval("browser.evaluate_js");

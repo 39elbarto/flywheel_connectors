@@ -3744,6 +3744,49 @@ mod tests {
         assert_eq!(material.pair.certificate.label, "slightly-future-leaf");
     }
 
+    /// REVIEW fresh-eyes pin (cc_1): the accept-within-skew test at
+    /// `select_cert_accepts_leaf_and_ca_not_before_within_bootstrap_skew`
+    /// would silently keep passing if a future commit widened
+    /// `BOOTSTRAP_CERT_NOT_BEFORE_SKEW_SECS` to a large value (e.g.
+    /// a day). This test pins the upper bound so any accidental
+    /// widening trips a failure.
+    ///
+    /// A cert with `not_before = now + 600s` is 10× the 60-second
+    /// tolerance and must be rejected. If the constant is widened
+    /// beyond 600s this test needs updating — the failure surfaces
+    /// the decision.
+    #[test]
+    fn select_cert_rejects_leaf_not_before_far_beyond_bootstrap_skew() {
+        let now = OffsetDateTime::now_utc();
+        let (leaf, ca) = test_x509_leaf_signed_by_ca(
+            "far-future-leaf",
+            &[11],
+            &[13],
+            "Far Future CA",
+            now + TimeDuration::seconds(600),
+            now + TimeDuration::days(30),
+            now - TimeDuration::days(1),
+            now + TimeDuration::days(60),
+        );
+        let driver = MockSessionDriver::with_certs_and_keys(
+            vec![leaf, ca],
+            vec![test_key("far-future-key", &[11], TokenKeyType::Ed25519)],
+        );
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+
+        let err = select_certificate_for_provisioning(&token, &pin, &driver).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                TokenError::CertificateSelectionFailed(
+                    CertificateSelectionRefusal::NoVerifiedIssuerChain { .. }
+                )
+            ),
+            "expected NoVerifiedIssuerChain for leaf with not_before 10× beyond skew, got {err:?}"
+        );
+    }
+
     #[test]
     fn select_cert_expired_x509_ca_returns_refusal() {
         let now = OffsetDateTime::now_utc();

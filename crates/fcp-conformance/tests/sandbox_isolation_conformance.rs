@@ -254,7 +254,10 @@ fn wasi_symlinked_preopens_fail_closed() {
         ..WasiConfig::default()
     })
     .unwrap();
-    let readonly_err = readonly_runtime.create_store().unwrap_err().to_string();
+    let readonly_err = match readonly_runtime.create_store() {
+        Ok(_) => panic!("expected readonly symlinked preopen to be rejected"),
+        Err(err) => err.to_string(),
+    };
     assert!(
         readonly_err.contains("symlinked ancestor"),
         "readonly symlinked preopen must fail closed: {readonly_err}"
@@ -266,7 +269,10 @@ fn wasi_symlinked_preopens_fail_closed() {
         ..WasiConfig::default()
     })
     .unwrap();
-    let writable_err = writable_runtime.create_store().unwrap_err().to_string();
+    let writable_err = match writable_runtime.create_store() {
+        Ok(_) => panic!("expected writable symlinked preopen to be rejected"),
+        Err(err) => err.to_string(),
+    };
     assert!(
         writable_err.contains("symlinked ancestor"),
         "writable symlinked preopen must fail closed: {writable_err}"
@@ -286,7 +292,10 @@ fn wasi_file_preopens_fail_closed() {
         ..WasiConfig::default()
     })
     .unwrap();
-    let readonly_err = readonly_runtime.create_store().unwrap_err().to_string();
+    let readonly_err = match readonly_runtime.create_store() {
+        Ok(_) => panic!("expected readonly file preopen to be rejected"),
+        Err(err) => err.to_string(),
+    };
     assert!(
         readonly_err.contains("must be directories"),
         "readonly file preopen must fail closed: {readonly_err}"
@@ -297,7 +306,10 @@ fn wasi_file_preopens_fail_closed() {
         ..WasiConfig::default()
     })
     .unwrap();
-    let writable_err = writable_runtime.create_store().unwrap_err().to_string();
+    let writable_err = match writable_runtime.create_store() {
+        Ok(_) => panic!("expected writable file preopen to be rejected"),
+        Err(err) => err.to_string(),
+    };
     assert!(
         writable_err.contains("must be directories"),
         "writable file preopen must fail closed: {writable_err}"

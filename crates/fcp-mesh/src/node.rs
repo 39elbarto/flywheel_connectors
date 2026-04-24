@@ -257,6 +257,10 @@ pub enum MeshNodeError {
     /// Failed to decode a gossip payload received from the transport layer.
     #[error("gossip payload decode error: {0}")]
     GossipDecode(String),
+
+    /// Gossip payload exceeded the pre-deserialize raw byte budget.
+    #[error("gossip payload too large: {len} bytes exceeds max {max}")]
+    GossipPayloadTooLarge { len: usize, max: usize },
 }
 
 /// Enforcement errors for control-plane requests.
@@ -1680,7 +1684,9 @@ impl MeshNode {
     ///
     /// # Errors
     ///
-    /// Returns [`MeshNodeError::GossipDecode`] if the payload does not
+    /// Returns [`MeshNodeError::GossipPayloadTooLarge`] if the raw
+    /// transport body exceeds the configured byte budget,
+    /// [`MeshNodeError::GossipDecode`] if the payload does not
     /// deserialize to a [`GossipMessage`], or propagates any verification
     /// error surfaced by the underlying gossip handlers.
     pub fn dispatch_gossip_payload(
@@ -1688,6 +1694,14 @@ impl MeshNode {
         payload: &[u8],
         now_secs: u64,
     ) -> Result<Option<VerifiedRevocationPush>, MeshNodeError> {
+        let max_payload = self.gossip.max_wire_payload_bytes();
+        if payload.len() > max_payload {
+            return Err(MeshNodeError::GossipPayloadTooLarge {
+                len: payload.len(),
+                max: max_payload,
+            });
+        }
+
         let message: GossipMessage = serde_json::from_slice(payload)
             .map_err(|e| MeshNodeError::GossipDecode(e.to_string()))?;
         self.handle_gossip_message(message, now_secs)
@@ -3750,6 +3764,41 @@ mod tests {
             .dispatch_gossip_payload(b"not a gossip message", 0)
             .expect_err("garbage bytes must not decode as a gossip message");
         assert!(matches!(err, MeshNodeError::GossipDecode(_)));
+    }
+
+    #[test]
+    fn dispatch_gossip_payload_rejects_oversized_raw_json_before_deserialize() {
+        let mut node = test_node("node-1");
+        let max_payload = node.gossip.max_wire_payload_bytes();
+        let iblt_len = max_payload / 4 + 8;
+        let summary = GossipSummary {
+            from: TailscaleNodeId::new("peer-1"),
+            zone_id: ZoneId::work(),
+            epoch_id: EpochId::new("epoch-too-large"),
+            object_filter_digest: [0x11; 32],
+            symbol_filter_digest: [0x22; 32],
+            object_count: 0,
+            symbol_count: 0,
+            iblt: vec![255; iblt_len],
+            timestamp: 1_000,
+            signature: None,
+        };
+
+        let payload =
+            serde_json::to_vec(&GossipMessage::Summary(summary)).expect("payload should encode");
+        assert!(
+            payload.len() > max_payload,
+            "test payload must exceed the raw gossip cap"
+        );
+
+        let err = node
+            .dispatch_gossip_payload(&payload, 1_000)
+            .expect_err("oversized payload must fail before JSON decode");
+        assert!(matches!(
+            err,
+            MeshNodeError::GossipPayloadTooLarge { len, max }
+            if len == payload.len() && max == max_payload
+        ));
     }
 
     #[test]

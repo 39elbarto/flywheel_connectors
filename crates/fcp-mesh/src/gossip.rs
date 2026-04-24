@@ -1391,6 +1391,38 @@ impl GossipConfig {
             derived
         }
     }
+
+    /// Derived raw wire budget for a JSON-encoded gossip payload.
+    ///
+    /// `dispatch_gossip_payload` receives attacker-controlled transport
+    /// bytes and must reject absurdly large bodies BEFORE
+    /// `serde_json::from_slice` allocates and parses them. The dominant
+    /// variable-length field on legitimate summary traffic is `iblt:
+    /// Vec<u8>`, which JSON encodes as an array of decimal bytes. In
+    /// compact JSON each byte contributes at most 4 characters
+    /// (`255,`) plus the surrounding `[]`, so `4 * max_iblt_bytes()`
+    /// covers the hottest legitimate case. Add a small fixed cushion
+    /// for the remaining fields and clamp to keep pathological
+    /// operator-chosen reconciliation budgets from turning this
+    /// pre-parse gate into a no-op.
+    #[must_use]
+    pub const fn max_wire_payload_bytes(&self) -> usize {
+        const MIN_WIRE_PAYLOAD_BYTES: usize = 64 * 1024;
+        const MAX_WIRE_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+        const FIXED_JSON_OVERHEAD_BYTES: usize = 16 * 1024;
+
+        let derived = self
+            .max_iblt_bytes()
+            .saturating_mul(4)
+            .saturating_add(FIXED_JSON_OVERHEAD_BYTES);
+        if derived < MIN_WIRE_PAYLOAD_BYTES {
+            MIN_WIRE_PAYLOAD_BYTES
+        } else if derived > MAX_WIRE_PAYLOAD_BYTES {
+            MAX_WIRE_PAYLOAD_BYTES
+        } else {
+            derived
+        }
+    }
 }
 
 impl MeshGossip {
@@ -1415,6 +1447,12 @@ impl MeshGossip {
     #[must_use]
     pub const fn summary_ttl_secs(&self) -> u64 {
         self.config.summary_ttl_secs
+    }
+
+    /// Maximum raw transport bytes accepted by the JSON gossip decoder.
+    #[must_use]
+    pub const fn max_wire_payload_bytes(&self) -> usize {
+        self.config.max_wire_payload_bytes()
     }
 
     /// Get or create zone state.

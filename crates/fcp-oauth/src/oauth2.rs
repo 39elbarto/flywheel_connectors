@@ -300,7 +300,10 @@ impl AuthorizationSession {
 impl fmt::Debug for AuthorizationSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AuthorizationSession")
-            .field("authorization_url", &self.authorization_url)
+            .field(
+                "authorization_url",
+                &redacted_authorization_debug_url(&self.authorization_url),
+            )
             .field("state", &"[REDACTED]")
             .field("pkce", &self.pkce)
             .field("consumed", &self.consumed.load(Ordering::Acquire))
@@ -807,10 +810,22 @@ impl fmt::Debug for AuthorizationCallback {
             .field("code", &self.code.as_ref().map(|_| "[REDACTED]"))
             .field("state", &self.state.as_ref().map(|_| "[REDACTED]"))
             .field("error", &self.error)
-            .field("error_description", &self.error_description)
-            .field("error_uri", &self.error_uri)
+            .field(
+                "error_description",
+                &self.error_description.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("error_uri", &self.error_uri.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
+}
+
+fn redacted_authorization_debug_url(url: &str) -> String {
+    let Ok(mut parsed) = Url::parse(url) else {
+        return "[REDACTED]".to_string();
+    };
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.to_string()
 }
 
 impl AuthorizationCallback {
@@ -2170,18 +2185,38 @@ mod tests {
 
     #[test]
     fn test_callback_debug() {
+        // br-8i1x4: use distinctive multi-char sentinel values for
+        // `code` and `state` so the `!contains(...)` assertions aren't
+        // satisfied by coincidental single-letter overlap with other
+        // fields (e.g., `error: access_denied` contains "c" and "s",
+        // which defeated the old single-letter test values).
         let callback = AuthorizationCallback {
-            code: Some("c".into()),
-            state: Some("s".into()),
-            error: None,
-            error_description: None,
-            error_uri: None,
+            code: Some("SECRET_CODE_7f4a".into()),
+            state: Some("SECRET_STATE_b19c".into()),
+            error: Some("access_denied".into()),
+            error_description: Some("leaked description".into()),
+            error_uri: Some("https://attacker.example/debug".into()),
         };
         let debug = format!("{callback:?}");
         assert!(debug.contains("AuthorizationCallback"));
+        // `error` is the bounded RFC 6749 §4.1.2.1 enum-like token;
+        // intentionally shown verbatim in Debug (matches the
+        // AuthorizationError redaction policy pinned in 19487b91).
+        assert!(debug.contains("access_denied"));
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("c"));
-        assert!(!debug.contains("s"));
+        // Raw code + state must never reach Debug output.
+        assert!(
+            !debug.contains("SECRET_CODE_7f4a"),
+            "authorization code leaked: {debug}"
+        );
+        assert!(
+            !debug.contains("SECRET_STATE_b19c"),
+            "authorization state leaked: {debug}"
+        );
+        // Attacker-controlled callback error fields (description + uri)
+        // must not reach Debug either.
+        assert!(!debug.contains("leaked description"));
+        assert!(!debug.contains("attacker.example"));
     }
 
     #[test]
@@ -2192,7 +2227,10 @@ mod tests {
         )
         .unwrap();
         let session = AuthorizationSession {
-            authorization_url: "https://example.com/oauth".into(),
+            authorization_url: format!(
+                "https://example.com/oauth?client_id=demo&state=secret-state&code_challenge={}&redirect_uri=https%3A%2F%2Fapp.example%2Fcb#callback-fragment",
+                pkce.challenge()
+            ),
             state: "secret-state".into(),
             pkce: Some(pkce.clone()),
             consumed: Arc::new(AtomicBool::new(false)),
@@ -2200,10 +2238,13 @@ mod tests {
 
         let debug = format!("{session:?}");
         assert!(debug.contains("AuthorizationSession"));
+        assert!(debug.contains("https://example.com/oauth"));
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("secret-state"));
         assert!(!debug.contains(pkce.verifier()));
         assert!(!debug.contains(pkce.challenge()));
+        assert!(!debug.contains("client_id=demo"));
+        assert!(!debug.contains("callback-fragment"));
     }
 
     #[test]

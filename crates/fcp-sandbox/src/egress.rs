@@ -501,6 +501,19 @@ impl EgressGuard {
         let url = url::Url::parse(&request.url)
             .map_err(|e| EgressError::InvalidUrl(format!("{}: {e}", request.url)))?;
 
+        let scheme = url.scheme();
+        if scheme != "http" && scheme != "https" {
+            return Err(EgressError::InvalidUrl(format!(
+                "HTTP egress URL scheme must be http or https, got {scheme}"
+            )));
+        }
+
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(EgressError::InvalidUrl(
+                "HTTP egress URL must not include embedded credentials".into(),
+            ));
+        }
+
         // Extract host
         let host = url
             .host_str()
@@ -515,7 +528,7 @@ impl EgressGuard {
         })?;
 
         // Determine if TLS is required
-        let tls_required = url.scheme() == "https";
+        let tls_required = scheme == "https";
 
         // Evaluate common constraints
         self.evaluate_host_port(host, port, tls_required, constraints)
@@ -2836,10 +2849,11 @@ mod tests {
     // ── URL scheme edge cases ────────────────────────────────────────
 
     #[test]
-    fn test_evaluate_http_custom_scheme_no_default_port() {
+    fn test_evaluate_http_rejects_non_http_scheme_even_when_port_allowed() {
         let guard = EgressGuard::new();
         let mut constraints = test_constraints();
         constraints.host_allow = vec!["*".into()];
+        constraints.port_allow = vec![21];
 
         let request = EgressRequest::Http(EgressHttpRequest {
             url: "ftp://files.example.com/data".into(),
@@ -2848,9 +2862,25 @@ mod tests {
             body: None,
             credential_id: None,
         });
-        // ftp has port 21 as default, but it should be denied since 21 not in port_allow
         let result = guard.evaluate(&request, &constraints);
-        assert!(result.is_err());
+        assert!(matches!(result, Err(EgressError::InvalidUrl(_))));
+    }
+
+    #[test]
+    fn test_evaluate_http_rejects_embedded_credentials() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.host_allow = vec!["api.example.com".into()];
+
+        let request = EgressRequest::Http(EgressHttpRequest {
+            url: "https://user:pass@api.example.com/data".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: None,
+        });
+        let result = guard.evaluate(&request, &constraints);
+        assert!(matches!(result, Err(EgressError::InvalidUrl(_))));
     }
 
     #[test]
@@ -4917,7 +4947,10 @@ mod tests {
         match err {
             EgressError::Denied { reason, code } => {
                 assert_eq!(code, DenyReason::IpNotAllowed);
-                assert!(reason.contains("8.8.8.8"), "reason must name offending IP: {reason}");
+                assert!(
+                    reason.contains("8.8.8.8"),
+                    "reason must name offending IP: {reason}"
+                );
             }
             other => panic!("expected Denied{{IpNotAllowed}}, got {other:?}"),
         }
@@ -4927,7 +4960,10 @@ mod tests {
     fn validate_dns_resolution_accepts_every_ip_when_ip_allow_is_empty() {
         let guard = EgressGuard::new();
         let mut constraints = test_constraints();
-        assert!(constraints.ip_allow.is_empty(), "baseline: allow-list empty");
+        assert!(
+            constraints.ip_allow.is_empty(),
+            "baseline: allow-list empty"
+        );
         // Any public IPv4 that is not localhost / private / tailnet
         // must pass when ip_allow is unset — no regression on the open
         // default.
@@ -4971,7 +5007,13 @@ mod tests {
         let err = guard
             .validate_dns_resolution(&ips, &constraints)
             .expect_err("IPv4-mapped IPv6 for an unlisted address must fail closed");
-        assert!(matches!(err, EgressError::Denied { code: DenyReason::IpNotAllowed, .. }));
+        assert!(matches!(
+            err,
+            EgressError::Denied {
+                code: DenyReason::IpNotAllowed,
+                ..
+            }
+        ));
     }
 
     #[test]

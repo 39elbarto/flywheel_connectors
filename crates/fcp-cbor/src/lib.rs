@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
+use std::io;
 
 use ciborium::de::from_reader_with_recursion_limit;
 use ciborium::ser::into_writer;
@@ -450,9 +451,17 @@ fn canonicalize_map(
     entries: &mut Vec<(Value, Value)>,
     depth: usize,
 ) -> Result<(), SerializationError> {
+    canonicalize_map_with_limit(entries, depth, MAX_CANONICAL_OBJECT_BYTES)
+}
+
+fn canonicalize_map_with_limit(
+    entries: &mut Vec<(Value, Value)>,
+    depth: usize,
+    byte_limit: usize,
+) -> Result<(), SerializationError> {
     // Pre-allocate scratch buffer. Typical CBOR map keys are 10-50 bytes each.
     // Cap allocation to prevent memory amplification from maps with many tiny entries.
-    let scratch_cap = canonicalize_map_scratch_capacity(entries.len());
+    let scratch_cap = canonicalize_map_scratch_capacity_with_limit(entries.len(), byte_limit);
     let mut scratch = Vec::with_capacity(scratch_cap);
     let mut with_keys = Vec::with_capacity(entries.len());
 
@@ -461,7 +470,7 @@ fn canonicalize_map(
         canonicalize_value_in_place(&mut value, depth)?;
 
         let start = scratch.len();
-        into_writer(&key, &mut scratch)?;
+        append_canonical_map_key_bytes(&key, &mut scratch, byte_limit)?;
         let end = scratch.len();
 
         with_keys.push((start..end, key, value));
@@ -495,9 +504,139 @@ fn canonicalize_map(
 }
 
 fn canonicalize_map_scratch_capacity(entry_count: usize) -> usize {
+    canonicalize_map_scratch_capacity_with_limit(entry_count, MAX_CANONICAL_OBJECT_BYTES)
+}
+
+fn canonicalize_map_scratch_capacity_with_limit(entry_count: usize, byte_limit: usize) -> usize {
     entry_count
         .saturating_mul(32)
-        .min(MAX_CANONICAL_OBJECT_BYTES)
+        .min(byte_limit)
+}
+
+fn append_canonical_map_key_bytes(
+    key: &Value,
+    scratch: &mut Vec<u8>,
+    byte_limit: usize,
+) -> Result<(), SerializationError> {
+    let available = byte_limit.saturating_sub(scratch.len());
+    let required = measured_cbor_len_with_limit(key, available)?;
+    let new_len = scratch
+        .len()
+        .checked_add(required)
+        .ok_or(SerializationError::PayloadTooLarge {
+            len: usize::MAX,
+            max: byte_limit,
+        })?;
+
+    if new_len > byte_limit {
+        return Err(SerializationError::PayloadTooLarge {
+            len: new_len,
+            max: byte_limit,
+        });
+    }
+
+    let mut writer = LimitedVecWriter::new(scratch, byte_limit);
+    into_writer(key, &mut writer).map_err(map_cbor_serialize_error)?;
+    Ok(())
+}
+
+fn measured_cbor_len_with_limit(value: &Value, max_len: usize) -> Result<usize, SerializationError> {
+    let mut writer = CountingWriter::new(max_len);
+    into_writer(value, &mut writer).map_err(map_cbor_serialize_error)?;
+    Ok(writer.len())
+}
+
+fn map_cbor_serialize_error(err: ciborium::ser::Error<std::io::Error>) -> SerializationError {
+    match err.into_inner() {
+        Some(inner) if inner.kind() == io::ErrorKind::OutOfMemory => {
+            SerializationError::PayloadTooLarge {
+                len: usize::MAX,
+                max: inner
+                    .get_ref()
+                    .and_then(|payload| payload.downcast_ref::<PayloadTooLargeContext>())
+                    .map_or(MAX_CANONICAL_OBJECT_BYTES, |ctx| ctx.max),
+            }
+        }
+        Some(inner) => SerializationError::CborSerialize(ciborium::ser::Error::Io(inner)),
+        None => SerializationError::CborSerialize(ciborium::ser::Error::Value(format!(
+            "{err}"
+        ))),
+    }
+}
+
+#[derive(Debug)]
+struct PayloadTooLargeContext {
+    max: usize,
+}
+
+struct CountingWriter {
+    len: usize,
+    max: usize,
+}
+
+impl CountingWriter {
+    fn new(max: usize) -> Self {
+        Self { len: 0, max }
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl io::Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let next = self
+            .len
+            .checked_add(buf.len())
+            .ok_or_else(|| payload_too_large_io_error(self.max))?;
+        if next > self.max {
+            return Err(payload_too_large_io_error(self.max));
+        }
+        self.len = next;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct LimitedVecWriter<'a> {
+    buf: &'a mut Vec<u8>,
+    max: usize,
+}
+
+impl<'a> LimitedVecWriter<'a> {
+    fn new(buf: &'a mut Vec<u8>, max: usize) -> Self {
+        Self { buf, max }
+    }
+}
+
+impl io::Write for LimitedVecWriter<'_> {
+    fn write(&mut self, chunk: &[u8]) -> io::Result<usize> {
+        let next = self
+            .buf
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| payload_too_large_io_error(self.max))?;
+        if next > self.max {
+            return Err(payload_too_large_io_error(self.max));
+        }
+        self.buf.extend_from_slice(chunk);
+        Ok(chunk.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn payload_too_large_io_error(max: usize) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::OutOfMemory,
+        PayloadTooLargeContext { max },
+    )
 }
 
 #[cfg(test)]

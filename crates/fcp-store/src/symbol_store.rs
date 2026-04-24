@@ -3,6 +3,8 @@
 //! Provides storage for `RaptorQ` symbols to enable partial object availability.
 
 use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -234,9 +236,11 @@ struct ObjectSymbols {
 
 /// In-memory symbol store implementation.
 pub struct MemorySymbolStore {
-    objects: RwLock<HashMap<ObjectId, ObjectSymbols>>,
+    objects: RwLock<HashMap<ObjectId, RwLock<ObjectSymbols>>>,
     config: MemorySymbolStoreConfig,
     used_bytes: RwLock<u64>,
+    #[cfg(test)]
+    coverage_scan_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl MemorySymbolStore {
@@ -247,6 +251,8 @@ impl MemorySymbolStore {
             objects: RwLock::new(HashMap::new()),
             config,
             used_bytes: RwLock::new(0),
+            #[cfg(test)]
+            coverage_scan_hook: Mutex::new(None),
         }
     }
 
@@ -290,10 +296,11 @@ impl MemorySymbolStore {
     /// `used_bytes` via `delete_object`.
     fn scrub_one_object(&self, object_id: &ObjectId) {
         let removed_bytes = {
-            let mut objects = self.objects.write();
-            let Some(obj) = objects.get_mut(object_id) else {
+            let objects = self.objects.read();
+            let Some(obj_lock) = objects.get(object_id) else {
                 return;
             };
+            let mut obj = obj_lock.write();
             Self::scrub_corrupt_symbols_locked(obj)
         };
 
@@ -302,15 +309,45 @@ impl MemorySymbolStore {
             *used = used.saturating_sub(removed_bytes);
         }
     }
+
+    #[cfg(test)]
+    fn run_coverage_scan_hook(&self) {
+        if let Some(hook) = self
+            .coverage_scan_hook
+            .lock()
+            .expect("coverage scan hook mutex poisoned")
+            .as_ref()
+            .map(Arc::clone)
+        {
+            hook();
+        }
+    }
+
+    #[cfg(test)]
+    fn set_coverage_scan_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .coverage_scan_hook
+            .lock()
+            .expect("coverage scan hook mutex poisoned") = Some(hook);
+    }
+
+    #[cfg(test)]
+    fn clear_coverage_scan_hook(&self) {
+        *self
+            .coverage_scan_hook
+            .lock()
+            .expect("coverage scan hook mutex poisoned") = None;
+    }
 }
 
 #[async_trait]
 impl SymbolStore for MemorySymbolStore {
     async fn put_symbol(&self, symbol: StoredSymbol) -> Result<(), SymbolStoreError> {
-        let mut objects = self.objects.write();
-        let obj = objects
-            .get_mut(&symbol.meta.object_id)
+        let objects = self.objects.read();
+        let obj_lock = objects
+            .get(&symbol.meta.object_id)
             .ok_or(SymbolStoreError::ObjectNotFound(symbol.meta.object_id))?;
+        let mut obj = obj_lock.write();
 
         // Check symbol size against OTI
         let expected_size = obj.meta.oti.symbol_size as usize;
@@ -389,7 +426,8 @@ impl SymbolStore for MemorySymbolStore {
         let mut objects = self.objects.write();
 
         // If already exists, check consistency
-        if let Some(obj) = objects.get(&meta.object_id) {
+        if let Some(obj_lock) = objects.get(&meta.object_id) {
+            let obj = obj_lock.read();
             if obj.meta != meta {
                 return Err(SymbolStoreError::InvalidSymbol {
                     reason: format!("Metadata mismatch for object {}", meta.object_id),
@@ -405,10 +443,10 @@ impl SymbolStore for MemorySymbolStore {
         let capacity = (meta.source_symbols as usize).min(MAX_SOURCE_SYMBOLS as usize);
         objects.insert(
             meta.object_id,
-            ObjectSymbols {
+            RwLock::new(ObjectSymbols {
                 meta,
                 symbols: HashMap::with_capacity(capacity),
-            },
+            }),
         );
 
         Ok(())
@@ -433,9 +471,10 @@ impl SymbolStore for MemorySymbolStore {
         // case in a well-behaved store.
         {
             let objects = self.objects.read();
-            let obj = objects
+            let obj_lock = objects
                 .get(object_id)
                 .ok_or(SymbolStoreError::ObjectNotFound(*object_id))?;
+            let obj = obj_lock.read();
             match obj.symbols.get(&esi) {
                 Some(symbol) if Self::symbol_matches_meta(&obj.meta, symbol) => {
                     return Ok(symbol.clone());
@@ -453,14 +492,16 @@ impl SymbolStore for MemorySymbolStore {
         }
 
         // Slow path: only reached when the fast path observed a
-        // mismatched symbol at `esi`. Upgrade to the write lock to
-        // prune and re-check.
-        let mut objects = self.objects.write();
-        let obj = objects
-            .get_mut(object_id)
+        // mismatched symbol at `esi`. Upgrade only the target object's
+        // lock to prune and re-check.
+        let objects = self.objects.read();
+        let obj_lock = objects
+            .get(object_id)
             .ok_or(SymbolStoreError::ObjectNotFound(*object_id))?;
+        let mut obj = obj_lock.write();
         let removed_bytes = Self::scrub_corrupt_symbols_locked(obj);
         let symbol = obj.symbols.get(&esi).cloned();
+        drop(obj);
         drop(objects);
 
         if removed_bytes > 0 {
@@ -481,7 +522,7 @@ impl SymbolStore for MemorySymbolStore {
         self.objects
             .read()
             .get(object_id)
-            .map(|obj| obj.meta.clone())
+            .map(|obj_lock| obj_lock.read().meta.clone())
             .ok_or_else(|| SymbolStoreError::ObjectNotFound(*object_id))
     }
 
@@ -497,9 +538,10 @@ impl SymbolStore for MemorySymbolStore {
         // indefinitely and `used_bytes` would drift permanently.
         let (mut symbols, any_corrupt) = {
             let objects = self.objects.read();
-            let Some(obj) = objects.get(object_id) else {
+            let Some(obj_lock) = objects.get(object_id) else {
                 return Vec::new();
             };
+            let obj = obj_lock.read();
             let mut matching: Vec<StoredSymbol> = Vec::with_capacity(obj.symbols.len());
             let mut any_corrupt = false;
             for symbol in obj.symbols.values() {
@@ -527,9 +569,10 @@ impl SymbolStore for MemorySymbolStore {
         // accumulating stale entries forever.
         let (matching, any_corrupt) = {
             let objects = self.objects.read();
-            let Some(obj) = objects.get(object_id) else {
+            let Some(obj_lock) = objects.get(object_id) else {
                 return 0;
             };
+            let obj = obj_lock.read();
             let mut matching = 0_usize;
             let mut any_corrupt = false;
             for symbol in obj.symbols.values() {
@@ -553,7 +596,8 @@ impl SymbolStore for MemorySymbolStore {
         let mut objects = self.objects.write();
         let obj = objects
             .remove(object_id)
-            .ok_or(SymbolStoreError::ObjectNotFound(*object_id))?;
+            .ok_or(SymbolStoreError::ObjectNotFound(*object_id))?
+            .into_inner();
 
         let total_size: u64 = obj.symbols.values().map(Self::symbol_size).sum();
         let mut used = self.used_bytes.write();
@@ -563,10 +607,11 @@ impl SymbolStore for MemorySymbolStore {
     }
 
     async fn delete_symbol(&self, object_id: &ObjectId, esi: u32) -> Result<(), SymbolStoreError> {
-        let mut objects = self.objects.write();
-        let obj = objects
-            .get_mut(object_id)
+        let objects = self.objects.read();
+        let obj_lock = objects
+            .get(object_id)
             .ok_or(SymbolStoreError::ObjectNotFound(*object_id))?;
+        let mut obj = obj_lock.write();
 
         let symbol = obj.symbols.remove(&esi).ok_or(SymbolStoreError::NotFound {
             object_id: *object_id,
@@ -581,23 +626,30 @@ impl SymbolStore for MemorySymbolStore {
     }
 
     async fn get_distribution(&self, object_id: &ObjectId) -> Option<SymbolDistribution> {
-        let mut objects = self.objects.write();
-        let obj = objects.get_mut(object_id)?;
-        let removed_bytes = Self::scrub_corrupt_symbols_locked(obj);
+        let (dist, any_corrupt) = {
+            let objects = self.objects.read();
+            let obj_lock = objects.get(object_id)?;
+            let obj = obj_lock.read();
+            #[cfg(test)]
+            self.run_coverage_scan_hook();
 
-        let mut dist = SymbolDistribution::new(obj.meta.source_symbols);
+            let mut dist = SymbolDistribution::new(obj.meta.source_symbols);
+            let mut any_corrupt = false;
+            for symbol in obj.symbols.values() {
+                if Self::symbol_matches_meta(&obj.meta, symbol) {
+                    let node_id = symbol.meta.source_node.unwrap_or(self.config.local_node_id);
+                    #[allow(clippy::cast_possible_truncation)]
+                    let size = symbol.data.len() as u64;
+                    dist.add_symbol(node_id, size);
+                } else {
+                    any_corrupt = true;
+                }
+            }
+            (dist, any_corrupt)
+        };
 
-        for symbol in obj.symbols.values() {
-            let node_id = symbol.meta.source_node.unwrap_or(self.config.local_node_id);
-            #[allow(clippy::cast_possible_truncation)]
-            let size = symbol.data.len() as u64;
-            dist.add_symbol(node_id, size);
-        }
-        drop(objects);
-
-        if removed_bytes > 0 {
-            let mut used = self.used_bytes.write();
-            *used = used.saturating_sub(removed_bytes);
+        if any_corrupt {
+            self.scrub_one_object(object_id);
         }
 
         Some(dist)
@@ -607,8 +659,10 @@ impl SymbolStore for MemorySymbolStore {
         self.objects
             .read()
             .values()
-            .filter(|obj| &obj.meta.zone_id == zone_id)
-            .map(|obj| obj.meta.object_id)
+            .filter_map(|obj_lock| {
+                let obj = obj_lock.read();
+                (&obj.meta.zone_id == zone_id).then_some(obj.meta.object_id)
+            })
             .collect()
     }
 
@@ -621,18 +675,31 @@ impl SymbolStore for MemorySymbolStore {
     }
 
     async fn can_reconstruct(&self, object_id: &ObjectId) -> bool {
-        let mut objects = self.objects.write();
-        let Some(obj) = objects.get_mut(object_id) else {
-            return false;
+        let (reconstructable, any_corrupt) = {
+            let objects = self.objects.read();
+            let Some(obj_lock) = objects.get(object_id) else {
+                return false;
+            };
+            let obj = obj_lock.read();
+            #[cfg(test)]
+            self.run_coverage_scan_hook();
+            let mut matching = 0_usize;
+            let mut any_corrupt = false;
+            for symbol in obj.symbols.values() {
+                if Self::symbol_matches_meta(&obj.meta, symbol) {
+                    matching += 1;
+                } else {
+                    any_corrupt = true;
+                }
+            }
+            (
+                Self::has_required_symbols(matching, obj.meta.source_symbols),
+                any_corrupt,
+            )
         };
-        let removed_bytes = Self::scrub_corrupt_symbols_locked(obj);
-        let reconstructable =
-            Self::has_required_symbols(obj.symbols.len(), obj.meta.source_symbols);
-        drop(objects);
 
-        if removed_bytes > 0 {
-            let mut used = self.used_bytes.write();
-            *used = used.saturating_sub(removed_bytes);
+        if any_corrupt {
+            self.scrub_one_object(object_id);
         }
 
         reconstructable
@@ -656,6 +723,7 @@ impl SymbolStore for MemorySymbolStore {
 #[cfg(test)]
 mod tests {
     use std::panic::{self, AssertUnwindSafe};
+    use std::sync::{mpsc, Arc, Barrier};
     use std::time::Instant;
 
     use super::*;
@@ -1312,6 +1380,87 @@ mod tests {
     }
 
     #[test]
+    fn get_distribution_on_one_object_does_not_block_put_symbol_on_another() {
+        run_store_test(
+            "get_distribution_does_not_block_other_object_write",
+            "verify",
+            "placement",
+            4,
+            || async {
+                let store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig::default()));
+
+                let object_a = test_object_meta();
+                store.put_object_meta(object_a.clone()).await.unwrap();
+                for esi in 0_u32..8 {
+                    store.put_symbol(test_symbol(esi)).await.unwrap();
+                }
+
+                let mut object_b = test_object_meta();
+                object_b.object_id = ObjectId::from_bytes([2_u8; 32]);
+                store.put_object_meta(object_b.clone()).await.unwrap();
+
+                let entered = Arc::new(Barrier::new(2));
+                let release = Arc::new(Barrier::new(2));
+                let hook_entered = Arc::clone(&entered);
+                let hook_release = Arc::clone(&release);
+                store.set_coverage_scan_hook(Arc::new(move || {
+                    hook_entered.wait();
+                    hook_release.wait();
+                }));
+
+                let scan_store = Arc::clone(&store);
+                let scan_object_id = object_a.object_id;
+                let scan_handle = std::thread::spawn(move || {
+                    fcp_async_core::runtime::block_on_sync(
+                        scan_store.get_distribution(&scan_object_id),
+                    )
+                    .expect("runtime")
+                });
+
+                entered.wait();
+
+                let writer_store = Arc::clone(&store);
+                let (tx, rx) = mpsc::channel();
+                let object_b_id = object_b.object_id;
+                let object_b_zone = object_b.zone_id.clone();
+                let writer_handle = std::thread::spawn(move || {
+                    let mut symbol = test_symbol(0);
+                    symbol.meta.object_id = object_b_id;
+                    symbol.meta.zone_id = object_b_zone;
+                    tx.send(
+                        fcp_async_core::runtime::block_on_sync(writer_store.put_symbol(symbol))
+                            .expect("runtime"),
+                    )
+                    .expect("send writer result");
+                });
+
+                rx.recv_timeout(std::time::Duration::from_secs(1))
+                    .expect("writer blocked behind unrelated coverage scan")
+                    .expect("writer result");
+
+                release.wait();
+                let dist = scan_handle.join().expect("scan thread panicked");
+                writer_handle.join().expect("writer thread panicked");
+                store.clear_coverage_scan_hook();
+
+                let dist = dist.expect("distribution");
+                assert_eq!(dist.total_symbols, 8);
+                assert_eq!(store.symbol_count(&object_b.object_id).await, 1);
+
+                StoreLogData {
+                    object_id: Some(object_a.object_id),
+                    symbol_count: Some(dist.total_symbols),
+                    details: Some(json!({
+                        "writer_object": object_b.object_id,
+                        "writer_completed_during_scan": true,
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
     fn delete_symbol() {
         run_store_test("delete_symbol", "verify", "delete", 1, || async {
             let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
@@ -1400,7 +1549,7 @@ mod tests {
 
                 {
                     let mut objects = store.objects.write();
-                    let obj = objects.get_mut(&meta.object_id).unwrap();
+                    let obj = objects.get(&meta.object_id).unwrap().get_mut();
                     obj.symbols.insert(
                         0,
                         StoredSymbol {

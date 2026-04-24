@@ -504,9 +504,7 @@ fn canonicalize_map_with_limit(
 }
 
 fn canonicalize_map_scratch_capacity_with_limit(entry_count: usize, byte_limit: usize) -> usize {
-    entry_count
-        .saturating_mul(32)
-        .min(byte_limit)
+    entry_count.saturating_mul(32).min(byte_limit)
 }
 
 fn append_canonical_map_key_bytes(
@@ -516,13 +514,14 @@ fn append_canonical_map_key_bytes(
 ) -> Result<(), SerializationError> {
     let available = byte_limit.saturating_sub(scratch.len());
     let required = measured_cbor_len_with_limit(key, available, byte_limit)?;
-    let new_len = scratch
-        .len()
-        .checked_add(required)
-        .ok_or(SerializationError::PayloadTooLarge {
-            len: usize::MAX,
-            max: byte_limit,
-        })?;
+    let new_len =
+        scratch
+            .len()
+            .checked_add(required)
+            .ok_or(SerializationError::PayloadTooLarge {
+                len: usize::MAX,
+                max: byte_limit,
+            })?;
 
     if new_len > byte_limit {
         return Err(SerializationError::PayloadTooLarge {
@@ -567,11 +566,11 @@ struct CountingWriter {
 }
 
 impl CountingWriter {
-    fn new(max: usize) -> Self {
+    const fn new(max: usize) -> Self {
         Self { len: 0, max }
     }
 
-    fn len(&self) -> usize {
+    const fn len(&self) -> usize {
         self.len
     }
 }
@@ -600,7 +599,7 @@ struct LimitedVecWriter<'a> {
 }
 
 impl<'a> LimitedVecWriter<'a> {
-    fn new(buf: &'a mut Vec<u8>, max: usize) -> Self {
+    const fn new(buf: &'a mut Vec<u8>, max: usize) -> Self {
         Self { buf, max }
     }
 }
@@ -625,7 +624,10 @@ impl io::Write for LimitedVecWriter<'_> {
 }
 
 fn payload_too_large_io_error(max: usize) -> io::Error {
-    io::Error::new(io::ErrorKind::OutOfMemory, format!("payload exceeds {max} bytes"))
+    io::Error::new(
+        io::ErrorKind::OutOfMemory,
+        format!("payload exceeds {max} bytes"),
+    )
 }
 
 #[cfg(test)]
@@ -906,18 +908,9 @@ mod tests {
     #[test]
     fn canonicalize_map_rejects_cumulative_key_bytes_over_limit() {
         let mut entries = vec![
-            (
-                Value::Text("a".repeat(15)),
-                Value::Integer(1.into()),
-            ),
-            (
-                Value::Text("b".repeat(15)),
-                Value::Integer(2.into()),
-            ),
-            (
-                Value::Text("c".repeat(15)),
-                Value::Integer(3.into()),
-            ),
+            (Value::Text("a".repeat(15)), Value::Integer(1.into())),
+            (Value::Text("b".repeat(15)), Value::Integer(2.into())),
+            (Value::Text("c".repeat(15)), Value::Integer(3.into())),
         ];
 
         let err = canonicalize_map_with_limit(&mut entries, 0, 40).unwrap_err();

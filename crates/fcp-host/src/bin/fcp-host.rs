@@ -5647,6 +5647,7 @@ mod tests {
             .issue_capability_token(
                 &fcp_host::CapabilityIssuanceRequest {
                     connector_id: connector_id.to_string(),
+                    capability_id: "cap.test.echo".to_string(),
                     zone_id: ZoneId::work().to_string(),
                     principal_id: "user:test".to_string(),
                     operations: vec!["test.echo".to_string()],
@@ -6061,6 +6062,7 @@ mod tests {
             .issue_capability_token(
                 &fcp_host::CapabilityIssuanceRequest {
                     connector_id: connector_id.to_string(),
+                    capability_id: "cap.test.echo".to_string(),
                     zone_id: ZoneId::work().to_string(),
                     principal_id: "user:test".to_string(),
                     operations: vec!["test.echo".to_string()],
@@ -6161,6 +6163,7 @@ mod tests {
             .issue_capability_token(
                 &fcp_host::CapabilityIssuanceRequest {
                     connector_id: connector_id.to_string(),
+                    capability_id: "cap.test.echo".to_string(),
                     zone_id: ZoneId::work().to_string(),
                     principal_id: "user:test".to_string(),
                     operations: vec!["test.echo".to_string()],

@@ -13,7 +13,8 @@ use blake3::hash;
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_core::{
-    ApprovalToken, CapabilityConstraints, CapabilityToken, CredentialId, ObjectPlacementPolicy,
+    ApprovalToken, CapabilityConstraints, CapabilityGrant, CapabilityId, CapabilityToken,
+    CredentialId, ObjectPlacementPolicy, OperationId,
 };
 use fcp_kernel::{
     ConnectorHealth, ConnectorId, LifecycleError, LifecycleManager, LifecycleRecord,
@@ -650,6 +651,12 @@ pub struct OperationSimulateMetadata {
 pub struct CapabilityIssuanceRequest {
     /// Target connector for which capabilities are being granted.
     pub connector_id: String,
+    /// Capability granted by the token.
+    ///
+    /// The live invoke verifier checks the operation's declared capability,
+    /// not just the operation id. Issuance therefore must stamp canonical
+    /// grants that pair this capability with each requested operation.
+    pub capability_id: String,
     /// Zone within which the token is valid.
     pub zone_id: String,
     /// Principal receiving the capability.
@@ -715,22 +722,59 @@ fn validated_not_before_delay_secs(delay_secs: u64) -> Result<i64, LifecycleErro
 
 fn capability_constraints_from_request(
     request: &CapabilityIssuanceRequest,
-) -> Option<CapabilityConstraints> {
-    let constraints = CapabilityConstraints {
-        resource_allow: request.resource_allow.clone(),
+) -> CapabilityConstraints {
+    let resource_allow = if request.resource_allow.is_empty() {
+        vec!["*".to_string()]
+    } else {
+        request.resource_allow.clone()
+    };
+
+    CapabilityConstraints {
+        resource_allow,
         resource_deny: request.resource_deny.clone(),
         max_calls: request.max_calls,
         max_bytes: request.max_bytes,
         idempotency_key: None,
         credential_allow: request.credential_allow.clone(),
-    };
+    }
+}
 
-    (!constraints.resource_allow.is_empty()
-        || !constraints.resource_deny.is_empty()
-        || constraints.max_calls.is_some()
-        || constraints.max_bytes.is_some()
-        || !constraints.credential_allow.is_empty())
-    .then_some(constraints)
+fn capability_grants_from_request(
+    request: &CapabilityIssuanceRequest,
+) -> Result<Vec<CapabilityGrant>, LifecycleError> {
+    let capability = CapabilityId::new(request.capability_id.as_str()).map_err(|error| {
+        LifecycleError::Persistence {
+            reason: format!(
+                "invalid capability issuance request: capability_id '{}' is not canonical: {error}",
+                request.capability_id
+            ),
+        }
+    })?;
+
+    if request.operations.is_empty() {
+        return Ok(vec![CapabilityGrant {
+            capability,
+            operation: None,
+        }]);
+    }
+
+    request
+        .operations
+        .iter()
+        .map(|operation| {
+            let operation = OperationId::new(operation.as_str()).map_err(|error| {
+                LifecycleError::Persistence {
+                    reason: format!(
+                        "invalid capability issuance request: operation '{operation}' is not canonical: {error}"
+                    ),
+                }
+            })?;
+            Ok(CapabilityGrant {
+                capability: capability.clone(),
+                operation: Some(operation),
+            })
+        })
+        .collect()
 }
 
 fn serialize_capability_constraints(
@@ -744,6 +788,18 @@ fn serialize_capability_constraints(
     })?;
     ciborium::from_reader(&bytes[..]).map_err(|error| LifecycleError::Persistence {
         reason: format!("failed to encode capability constraints claim: {error}"),
+    })
+}
+
+fn serialize_capability_grants(
+    grants: &[CapabilityGrant],
+) -> Result<ciborium::Value, LifecycleError> {
+    let mut bytes = Vec::new();
+    ciborium::into_writer(grants, &mut bytes).map_err(|error| LifecycleError::Persistence {
+        reason: format!("failed to serialize capability grants: {error}"),
+    })?;
+    ciborium::from_reader(&bytes[..]).map_err(|error| LifecycleError::Persistence {
+        reason: format!("failed to encode capability grants claim: {error}"),
     })
 }
 
@@ -3743,6 +3799,8 @@ impl HostAdminStateStore {
             .map(validated_not_before_delay_secs)
             .transpose()?
             .map(|delay| now + chrono::Duration::seconds(delay));
+        let grants = capability_grants_from_request(request)?;
+        let constraints = capability_constraints_from_request(request);
 
         // Generate token ID from timestamp + hash of request fields.
         let token_id_bytes: [u8; 16] = {
@@ -3766,6 +3824,7 @@ impl HostAdminStateStore {
             .subject(&request.principal_id)
             .audience(&request.connector_id)
             .zone_id(&request.zone_id)
+            .capability_id(&request.capability_id)
             .issued_at(now)
             .expiration(expires)
             .token_id(&token_id_bytes)
@@ -3788,12 +3847,14 @@ impl HostAdminStateStore {
             fcp_crypto::cose::fcp2_claims::DELEGATION_DEPTH,
             ciborium::Value::Integer(request.max_delegation_depth.into()),
         );
-        if let Some(constraints) = capability_constraints_from_request(request) {
-            claims = claims.custom(
-                fcp_crypto::cose::fcp2_claims::CONSTRAINTS,
-                serialize_capability_constraints(&constraints)?,
-            );
-        }
+        claims = claims.custom(
+            fcp_crypto::cose::fcp2_claims::GRANTS,
+            serialize_capability_grants(&grants)?,
+        );
+        claims = claims.custom(
+            fcp_crypto::cose::fcp2_claims::CONSTRAINTS,
+            serialize_capability_constraints(&constraints)?,
+        );
 
         // Build redaction-safe inspection.
         let inspection = CapabilityTokenInspection {
@@ -3802,7 +3863,7 @@ impl HostAdminStateStore {
             subject: request.principal_id.clone(),
             audience: Some(request.connector_id.clone()),
             zone_id: request.zone_id.clone(),
-            capability_id: None,
+            capability_id: Some(request.capability_id.clone()),
             operations: request.operations.clone(),
             holder_node: request.holder_node.clone(),
             delegation_depth: request.max_delegation_depth,
@@ -3811,11 +3872,11 @@ impl HostAdminStateStore {
             expires_at: expires,
             currently_valid: not_before.is_none_or(|nbf| now >= nbf) && now < expires,
             seconds_remaining: u64::try_from((expires - now).num_seconds().max(0)).unwrap_or(0),
-            resource_allow: request.resource_allow.clone(),
-            resource_deny: request.resource_deny.clone(),
-            max_calls: request.max_calls,
-            max_bytes: request.max_bytes,
-            credential_allow: request.credential_allow.clone(),
+            resource_allow: constraints.resource_allow.clone(),
+            resource_deny: constraints.resource_deny.clone(),
+            max_calls: constraints.max_calls,
+            max_bytes: constraints.max_bytes,
+            credential_allow: constraints.credential_allow.clone(),
         };
 
         // Sign the token (unless dry run).
@@ -6631,6 +6692,7 @@ mod tests {
     fn basic_issuance_request() -> CapabilityIssuanceRequest {
         CapabilityIssuanceRequest {
             connector_id: "github:saas:1.0.0".to_string(),
+            capability_id: "github.repo".to_string(),
             zone_id: "z:work".to_string(),
             principal_id: "agent:test-agent".to_string(),
             operations: vec!["list_repos".to_string(), "create_issue".to_string()],
@@ -6661,12 +6723,45 @@ mod tests {
         assert_eq!(response.inspection.subject, "agent:test-agent");
         assert_eq!(response.inspection.zone_id, "z:work");
         assert_eq!(
+            response.inspection.capability_id.as_deref(),
+            Some("github.repo")
+        );
+        assert_eq!(
             response.inspection.operations,
             vec!["list_repos", "create_issue"]
         );
+        assert_eq!(response.inspection.resource_allow, vec!["*"]);
         assert!(response.inspection.currently_valid);
         assert!(response.inspection.seconds_remaining > 0);
         assert_eq!(response.inspection.delegation_depth, 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn issued_token_verifies_with_core_live_capability_verifier() {
+        let store = HostAdminStateStore::new();
+        let key = test_signing_key();
+        let request = basic_issuance_request();
+
+        let response = store.issue_capability_token(&request, &key).await.unwrap();
+        let token_b64 = response.token_cbor_b64.expect("non-dry-run token");
+        let token_bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, token_b64).unwrap();
+        let token = CapabilityToken::from_raw(CoseToken::from_cbor(&token_bytes).unwrap());
+        let verifier = fcp_core::CapabilityVerifier::without_instance_binding(
+            key.verifying_key().to_bytes(),
+            fcp_core::ZoneId::try_from("z:work".to_string()).unwrap(),
+        );
+
+        let verified = verifier
+            .verify_unbound(
+                token,
+                &CapabilityId::new("github.repo").unwrap(),
+                &OperationId::new("list_repos").unwrap(),
+                &[],
+            )
+            .expect("host-issued token must satisfy live core verifier");
+
+        assert_eq!(verified.claims().get_capability_id(), Some("github.repo"));
     }
 
     #[fcp_async_core::runtime::test]
@@ -7961,6 +8056,7 @@ mod tests {
 
         let request = CapabilityIssuanceRequest {
             connector_id: "test:saas:1.0.0".to_owned(),
+            capability_id: "test.read".to_owned(),
             zone_id: "zone-test".to_owned(),
             principal_id: "agent-1".to_owned(),
             operations: vec!["read".to_owned(), "write".to_owned()],
@@ -8007,6 +8103,7 @@ mod tests {
 
         let request = CapabilityIssuanceRequest {
             connector_id: "test:saas:1.0.0".to_owned(),
+            capability_id: "test.read".to_owned(),
             zone_id: "zone-test".to_owned(),
             principal_id: "agent-1".to_owned(),
             operations: vec!["read".to_owned()],
@@ -8051,6 +8148,7 @@ mod tests {
 
         let issue_request = CapabilityIssuanceRequest {
             connector_id: "test:saas:1.0.0".to_owned(),
+            capability_id: "test.read".to_owned(),
             zone_id: "zone-test".to_owned(),
             principal_id: "agent-1".to_owned(),
             operations: vec!["read".to_owned()],
@@ -8107,6 +8205,7 @@ mod tests {
 
         let request = CapabilityIssuanceRequest {
             connector_id: "test:saas:1.0.0".to_owned(),
+            capability_id: "test.read".to_owned(),
             zone_id: "zone-test".to_owned(),
             principal_id: "agent-1".to_owned(),
             operations: vec!["read".to_owned()],
@@ -8149,6 +8248,7 @@ mod tests {
 
         let request = CapabilityIssuanceRequest {
             connector_id: "test:saas:1.0.0".to_owned(),
+            capability_id: "test.read".to_owned(),
             zone_id: "zone-test".to_owned(),
             principal_id: "agent-1".to_owned(),
             operations: vec!["read".to_owned()],
@@ -8208,6 +8308,7 @@ mod tests {
 
         let request = CapabilityIssuanceRequest {
             connector_id: "test:saas:1.0.0".to_owned(),
+            capability_id: "test.read".to_owned(),
             zone_id: "zone-test".to_owned(),
             principal_id: "agent-1".to_owned(),
             operations: vec!["read".to_owned()],

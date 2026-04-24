@@ -613,7 +613,7 @@ impl GoogleCalendarConnector {
                             "calendars": { "type": "array", "items": { "type": "object" } }
                         }
                     }),
-                    "gcal.calendars.read",
+                    "gcal.read",
                     RiskLevel::Low,
                     SafetyTier::Safe,
                     IdempotencyClass::Strict,
@@ -637,7 +637,7 @@ impl GoogleCalendarConnector {
                         }
                     }),
                     json!({ "type": "object", "properties": { "event": { "type": "object" } } }),
-                    "gcal.events.read",
+                    "gcal.read",
                     RiskLevel::Low,
                     SafetyTier::Safe,
                     IdempotencyClass::Strict,
@@ -677,7 +677,7 @@ impl GoogleCalendarConnector {
                             "summary": { "type": "string" }
                         }
                     }),
-                    "gcal.events.read",
+                    "gcal.read",
                     RiskLevel::Low,
                     SafetyTier::Safe,
                     IdempotencyClass::Strict,
@@ -711,7 +711,7 @@ impl GoogleCalendarConnector {
                         }
                     }),
                     json!({ "type": "object", "properties": { "event": { "type": "object" } } }),
-                    "gcal.events.write",
+                    "gcal.write",
                     RiskLevel::Medium,
                     SafetyTier::Risky,
                     IdempotencyClass::None,
@@ -747,7 +747,7 @@ impl GoogleCalendarConnector {
                         }
                     }),
                     json!({ "type": "object", "properties": { "event": { "type": "object" } } }),
-                    "gcal.events.write",
+                    "gcal.write",
                     RiskLevel::Medium,
                     SafetyTier::Risky,
                     IdempotencyClass::BestEffort,
@@ -777,7 +777,7 @@ impl GoogleCalendarConnector {
                         }
                     }),
                     json!({ "type": "object", "properties": { "status": { "type": "string" } } }),
-                    "gcal.events.write",
+                    "gcal.delete",
                     RiskLevel::High,
                     SafetyTier::Risky,
                     IdempotencyClass::None,
@@ -805,7 +805,7 @@ impl GoogleCalendarConnector {
                         }
                     }),
                     json!({ "type": "object", "properties": { "event": { "type": "object" } } }),
-                    "gcal.events.write",
+                    "gcal.write",
                     RiskLevel::Medium,
                     SafetyTier::Risky,
                     IdempotencyClass::None,
@@ -1494,11 +1494,9 @@ mod tests {
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
         let cap = match op {
-            "gcal.list_calendars" => "gcal.calendars.read",
-            "gcal.get_event" | "gcal.list_events" => "gcal.events.read",
-            "gcal.create_event" | "gcal.update_event" | "gcal.delete_event" | "gcal.quick_add" => {
-                "gcal.events.write"
-            }
+            "gcal.list_calendars" | "gcal.get_event" | "gcal.list_events" => "gcal.read",
+            "gcal.create_event" | "gcal.update_event" | "gcal.quick_add" => "gcal.write",
+            "gcal.delete_event" => "gcal.delete",
             _ => "gcal.read",
         };
         let now = Utc::now();
@@ -1531,7 +1529,7 @@ mod tests {
                 "zone": "z:work",
                 "host_public_key": vec![0u8; 32],
                 "nonce": vec![0u8; 32],
-                "capabilities_requested": ["gcal.calendars.read"]
+                "capabilities_requested": ["gcal.read"]
             }))
             .await
             .unwrap();
@@ -1598,7 +1596,7 @@ mod tests {
                 "zone": "z:work",
                 "host_public_key": verifying_key.to_bytes(),
                 "nonce": vec![0u8; 32],
-                "capabilities_requested": ["gcal.get_event"]
+                "capabilities_requested": ["gcal.read"]
             }))
             .await
             .unwrap();

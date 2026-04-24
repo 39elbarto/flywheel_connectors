@@ -831,6 +831,16 @@ fn test_state(
     })
 }
 
+async fn deny_test_capability_in_work_zone(state: &Arc<TestAppState>) {
+    let mut policies = state.zone_policies.write().await;
+    let policy = policies
+        .get_mut(&ZoneId::work())
+        .expect("work zone policy should be present in test state");
+    policy.capability_deny = vec![fcp_core::PolicyPattern {
+        pattern: TEST_CAPABILITY_ID.to_string(),
+    }];
+}
+
 #[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn conformance_preflight_surface_covers_allow_missing_capability_and_principal_mismatch(
 ) -> TestResult<()> {
@@ -966,6 +976,73 @@ async fn conformance_simulate_surface_covers_allow_missing_capability_and_princi
     );
     assert_eq!(forged_principal.receipt.phase, SimulatePhase::PreflightOnly);
     assert!(!forged_principal.receipt.would_succeed);
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn conformance_host_surfaces_fail_closed_on_zone_policy_capability_deny() -> TestResult<()> {
+    let connector_id = route_test_connector_id("policy-denied-surface");
+    let signing_key = Ed25519SigningKey::generate();
+    let state = test_state(connector_id.clone(), &signing_key);
+    let valid_token = issue_live_capability_token(
+        state.lifecycle.as_ref(),
+        &signing_key,
+        &connector_id,
+        TEST_CAPABILITY_ID,
+        TEST_PRINCIPAL,
+        TEST_OPERATION,
+        &ZoneId::work(),
+    )
+    .await?;
+    deny_test_capability_in_work_zone(&state).await;
+    let app = test_router(state);
+
+    let (_, preflight_denied): (_, PreflightResponse) = post_json_response(
+        &app,
+        "/rpc/preflight",
+        preflight_request(connector_id.clone(), Some(valid_token.clone())),
+        None,
+    )
+    .await?;
+    assert!(!preflight_denied.allowed, "{preflight_denied:?}");
+    assert!(
+        preflight_denied
+            .reason
+            .as_deref()
+            .is_some_and(|reason| {
+                reason.contains("policy denied live request")
+                    && reason.contains("zone_policy.capability_denied")
+            }),
+        "{preflight_denied:?}"
+    );
+
+    let (_, simulate_denied): (_, HostSimulateResponse) = post_json_response(
+        &app,
+        "/rpc/simulate",
+        simulate_request(
+            &connector_id,
+            Some(valid_token),
+            "simulate-zone-policy-capability-denied",
+        ),
+        None,
+    )
+    .await?;
+    assert!(!simulate_denied.preflight_allowed, "{simulate_denied:?}");
+    assert!(!simulate_denied.would_succeed, "{simulate_denied:?}");
+    assert_eq!(simulate_denied.phase, SimulatePhase::PreflightOnly);
+    assert!(
+        simulate_denied
+            .failure_reason
+            .as_deref()
+            .is_some_and(|reason| {
+                reason.contains("policy denied live request")
+                    && reason.contains("zone_policy.capability_denied")
+            }),
+        "{simulate_denied:?}"
+    );
+    assert_eq!(simulate_denied.receipt.phase, SimulatePhase::PreflightOnly);
+    assert!(!simulate_denied.receipt.would_succeed);
 
     Ok(())
 }

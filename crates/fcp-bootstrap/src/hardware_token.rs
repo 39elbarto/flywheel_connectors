@@ -1229,6 +1229,9 @@ fn certificate_has_x509_issuer_chain(
     };
 
     if parsed_is_ca && parsed.subject() == parsed.issuer() {
+        if x509_cert_signing_allowed(&parsed) != Some(true) {
+            return false;
+        }
         return parsed.verify_signature(None).is_ok();
     }
 
@@ -1246,7 +1249,7 @@ fn certificate_has_x509_issuer_chain(
             if !issuer_parsed.validity().is_valid() {
                 return false;
             }
-            if x509_basic_constraints_ca(&issuer_parsed) != Some(true) {
+            if x509_cert_signing_allowed(&issuer_parsed) != Some(true) {
                 return false;
             }
             if issuer_parsed.subject() != parsed.issuer() {
@@ -1275,6 +1278,18 @@ fn x509_basic_constraints_ca(certificate: &X509Certificate<'_>) -> Option<bool> 
         .basic_constraints()
         .ok()
         .map(|constraints| constraints.is_some_and(|extension| extension.value.ca))
+}
+
+fn x509_cert_signing_allowed(certificate: &X509Certificate<'_>) -> Option<bool> {
+    if x509_basic_constraints_ca(certificate) != Some(true) {
+        return Some(false);
+    }
+
+    match certificate.key_usage() {
+        Ok(Some(usage)) => Some(usage.value.key_cert_sign()),
+        Ok(None) => Some(true),
+        Err(_) => None,
+    }
 }
 
 /// Select the best certificate–key pair for FCP provisioning.
@@ -1913,7 +1928,10 @@ pub mod mock {
 mod tests {
     use super::*;
     use ed25519_dalek::{SigningKey, pkcs8::EncodePrivateKey};
-    use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, DnType, IsCa, KeyPair};
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, DnType, IsCa, KeyPair,
+        KeyUsagePurpose,
+    };
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -3254,6 +3272,47 @@ mod tests {
         (leaf, issuer_cert)
     }
 
+    fn test_x509_leaf_signed_by_ca_without_key_cert_sign(
+        label: &str,
+        id: &[u8],
+        issuer_id: &[u8],
+        issuer_label: &str,
+        not_before: OffsetDateTime,
+        not_after: OffsetDateTime,
+    ) -> (TokenCertificate, TokenCertificate) {
+        let mut issuer_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        issuer_params.not_before = not_before;
+        issuer_params.not_after = not_after;
+        issuer_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        issuer_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        issuer_params
+            .distinguished_name
+            .push(DnType::CommonName, issuer_label);
+        let issuer_key = KeyPair::generate().unwrap();
+        let issuer = CertifiedIssuer::self_signed(issuer_params, issuer_key).unwrap();
+
+        let leaf = test_x509_certificate(
+            label,
+            id,
+            issuer_label,
+            false,
+            not_before,
+            not_after,
+            Some(&issuer),
+        );
+
+        let issuer_cert = TokenCertificate {
+            label: issuer_label.to_string(),
+            id: issuer_id.to_vec(),
+            der_bytes: issuer.der().to_vec(),
+            subject: format!("CN={issuer_label}"),
+            issuer: format!("CN={issuer_label}"),
+            is_ca: true,
+        };
+
+        (leaf, issuer_cert)
+    }
+
     // ── Certificate/key type tests ──────────────────────────────────────
 
     #[test]
@@ -3716,6 +3775,33 @@ mod tests {
         let driver = MockSessionDriver::with_certs_and_keys(
             vec![ca_leaf],
             vec![test_key("ca-key", &[5], TokenKeyType::Ed25519)],
+        );
+        let token = test_token();
+        let pin = HardwareTokenPin::new("123456");
+
+        let err = select_certificate_for_provisioning(&token, &pin, &driver).unwrap_err();
+        assert!(matches!(
+            err,
+            TokenError::CertificateSelectionFailed(
+                CertificateSelectionRefusal::NoVerifiedIssuerChain
+            )
+        ));
+    }
+
+    #[test]
+    fn select_cert_ca_issuer_without_key_cert_sign_returns_refusal() {
+        let now = OffsetDateTime::now_utc();
+        let (leaf, ca_without_cert_sign) = test_x509_leaf_signed_by_ca_without_key_cert_sign(
+            "leaf-with-ku-limited-ca",
+            &[6],
+            &[10],
+            "CA Without Cert Sign",
+            now - TimeDuration::days(7),
+            now + TimeDuration::days(7),
+        );
+        let driver = MockSessionDriver::with_certs_and_keys(
+            vec![leaf, ca_without_cert_sign],
+            vec![test_key("leaf-key", &[6], TokenKeyType::Ed25519)],
         );
         let token = test_token();
         let pin = HardwareTokenPin::new("123456");

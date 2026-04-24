@@ -63,6 +63,13 @@ impl SheetsClient {
         })
     }
 
+    /// Override the API base URL, primarily for deterministic tests.
+    #[must_use]
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = base_url.into().trim_end_matches('/').to_string();
+        self
+    }
+
     /// Get current auth.
     #[must_use]
     pub const fn auth(&self) -> &GoogleMaterializedAuth {

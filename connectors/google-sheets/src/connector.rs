@@ -3,15 +3,106 @@
 use std::sync::Arc;
 
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
-    EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass,
-    Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
+    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
 };
 use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
+use reqwest::Url;
 use serde_json::json;
 use tracing::info;
 
 use crate::client::SheetsClient;
+
+fn is_local_test_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "[::1]"
+}
+
+fn host_is_googleapis(host: &str) -> bool {
+    let lower = host.to_ascii_lowercase();
+    lower == "googleapis.com" || lower.ends_with(".googleapis.com")
+}
+
+/// Validate a google-sheets `base_url` override.
+///
+/// The Sheets client concatenates this string into downstream request URLs, so
+/// only Google API hosts are accepted outside local test listeners.
+fn validate_sheets_base_url(raw: &str) -> FcpResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not be empty".into(),
+        });
+    }
+    let parsed = Url::parse(trimmed).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("base_url could not be parsed: {error}"),
+    })?;
+    if !matches!(parsed.scheme(), "https" | "http") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must use http or https".into(),
+        });
+    }
+    let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "base_url must include a host".into(),
+    })?;
+    let local = is_local_test_host(host);
+    if parsed.scheme() == "http" && !local {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
+                .into(),
+        });
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
+    if !local && !host_is_googleapis(host) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "base_url host must target googleapis.com (localhost/127.0.0.1/::1 allowed for tests): {host}"
+            ),
+        });
+    }
+    Ok(trimmed.trim_end_matches('/').to_string())
+}
+
+fn sheets_spreadsheet_resource_uri(spreadsheet_id: &str) -> String {
+    format!("google-sheets:spreadsheet:{spreadsheet_id}")
+}
+
+fn resource_uris_for_operation(
+    operation: &str,
+    input: &serde_json::Value,
+) -> FcpResult<Vec<String>> {
+    match operation {
+        "sheets.get_spreadsheet"
+        | "sheets.get_values"
+        | "sheets.update_values"
+        | "sheets.append_values"
+        | "sheets.clear_values" => {
+            let spreadsheet_id = require_str(input, "spreadsheet_id")?;
+            Ok(vec![sheets_spreadsheet_resource_uri(spreadsheet_id)])
+        }
+        _ => Ok(Vec::new()),
+    }
+}
 
 /// FCP Google Sheets Connector.
 pub struct SheetsConnector {
@@ -67,15 +158,22 @@ impl SheetsConnector {
             GoogleMaterializedAuth::BearerToken { .. } => "configured",
         };
 
-        let client = SheetsClient::new_with_auth(materialized).map_err(|e| FcpError::Internal {
-            message: format!("Failed to create Sheets client: {e}"),
-        })?;
+        let mut client =
+            SheetsClient::new_with_auth(materialized).map_err(|e| FcpError::Internal {
+                message: format!("Failed to create Sheets client: {e}"),
+            })?;
+        if let Some(base_url) = params
+            .get("base_url")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            client = client.with_base_url(validate_sheets_base_url(base_url)?);
+        }
 
         let auth_label = client.auth_redacted_label();
         self.client = Some(client);
-        self.base
-            .configured
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.base.set_configured(true);
         info!(auth = %auth_label, status, "Google Sheets connector configured");
 
         Ok(json!({ "status": status }))
@@ -370,7 +468,42 @@ impl SheetsConnector {
             })?;
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
+        let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1002,
+            message: format!("Invalid operation ID: {operation}"),
+        })?;
+        let intro = self.handle_introspect().await?;
+        let cap_str = intro
+            .get("operations")
+            .and_then(|ops| ops.as_array())
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|op| op.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
+            .and_then(|op| op.get("capability"))
+            .and_then(|cap| cap.as_str())
+            .ok_or_else(|| FcpError::OperationNotGranted {
+                operation: operation.into(),
+            })?;
+        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1002,
+            message: format!("Invalid capability ID for operation {operation}"),
+        })?;
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotConfigured)?;
+        let token_value = params
+            .get("capability_token")
+            .ok_or(FcpError::InvalidRequest {
+                code: 1001,
+                message: "Missing 'capability_token' field".into(),
+            })?;
+        let token: CapabilityToken =
+            serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
+                code: 1001,
+                message: format!("Invalid capability_token format: {e}"),
+            })?;
+        let resource_uris = resource_uris_for_operation(operation, &input)?;
+        verifier.verify_bound(token, &cap_id, &op_id, &resource_uris)?;
 
         match operation {
             "sheets.get_spreadsheet" => {
@@ -586,6 +719,96 @@ mod tests {
     }
 
     #[test]
+    fn validate_sheets_base_url_accepts_googleapis() {
+        let out = validate_sheets_base_url("https://sheets.googleapis.com/v4/").unwrap();
+        assert_eq!(out, "https://sheets.googleapis.com/v4");
+    }
+
+    #[test]
+    fn validate_sheets_base_url_allows_localhost_http() {
+        validate_sheets_base_url("http://localhost:9999/v4").unwrap();
+        validate_sheets_base_url("http://127.0.0.1/sheets").unwrap();
+        validate_sheets_base_url("http://[::1]:9999/v4").unwrap();
+    }
+
+    #[test]
+    fn validate_sheets_base_url_rejects_foreign_host() {
+        let err = validate_sheets_base_url("https://evil.example.com/v4").unwrap_err();
+        assert!(
+            matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("googleapis.com")),
+            "expected InvalidRequest mentioning googleapis.com, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_sheets_base_url_rejects_substring_smuggle() {
+        let err =
+            validate_sheets_base_url("https://evil.com/sheets.googleapis.com/v4").unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_sheets_base_url_rejects_query_fragment_userinfo() {
+        assert!(matches!(
+            validate_sheets_base_url("https://sheets.googleapis.com/v4?leak=x").unwrap_err(),
+            FcpError::InvalidRequest { .. }
+        ));
+        assert!(matches!(
+            validate_sheets_base_url("https://sheets.googleapis.com/v4#frag").unwrap_err(),
+            FcpError::InvalidRequest { .. }
+        ));
+        let err =
+            validate_sheets_base_url("https://attacker:pw@sheets.googleapis.com/v4").unwrap_err();
+        assert!(
+            matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("userinfo")),
+            "expected InvalidRequest mentioning userinfo, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_sheets_base_url_rejects_plain_http_on_public_host() {
+        let err = validate_sheets_base_url("http://sheets.googleapis.com/v4").unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_sheets_base_url_rejects_empty_and_malformed() {
+        assert!(matches!(
+            validate_sheets_base_url("   ").unwrap_err(),
+            FcpError::InvalidRequest { .. }
+        ));
+        assert!(matches!(
+            validate_sheets_base_url("not a url").unwrap_err(),
+            FcpError::InvalidRequest { .. }
+        ));
+    }
+
+    #[test]
+    fn host_is_googleapis_rejects_lookalikes() {
+        assert!(host_is_googleapis("googleapis.com"));
+        assert!(host_is_googleapis("sheets.googleapis.com"));
+        assert!(!host_is_googleapis("googleapis.com.evil.com"));
+        assert!(!host_is_googleapis("evil-googleapis.com"));
+    }
+
+    #[test]
+    fn resource_uris_bind_sheets_targets() {
+        let get = resource_uris_for_operation(
+            "sheets.get_spreadsheet",
+            &json!({ "spreadsheet_id": "sheet_123" }),
+        )
+        .unwrap();
+        assert_eq!(get, vec!["google-sheets:spreadsheet:sheet_123"]);
+
+        let update = resource_uris_for_operation(
+            "sheets.update_values",
+            &json!({ "spreadsheet_id": "sheet_123", "range": "Sheet1!A1:B2" }),
+        )
+        .unwrap();
+        assert_eq!(update, vec!["google-sheets:spreadsheet:sheet_123"]);
+    }
+
+    #[test]
     fn introspect_has_all_operations() {
         let connector = SheetsConnector::new();
         let result = run_async_test(connector.handle_introspect()).unwrap();
@@ -624,13 +847,9 @@ mod tests {
     }
 
     #[test]
-    fn invoke_unknown_operation() {
+    fn invoke_unknown_operation_is_denied_before_token_validation() {
         let result = run_async_test(async {
             let mut connector = SheetsConnector::new();
-            connector
-                .handle_configure(json!({ "access_token": "test" }))
-                .await
-                .unwrap();
             connector
                 .handle_invoke(json!({
                     "operation": "sheets.nonexistent",
@@ -638,10 +857,7 @@ mod tests {
                 }))
                 .await
         });
-        assert!(matches!(
-            result,
-            Err(FcpError::InvalidRequest { code: 1002, .. })
-        ));
+        assert!(matches!(result, Err(FcpError::OperationNotGranted { .. })));
     }
 
     #[test]

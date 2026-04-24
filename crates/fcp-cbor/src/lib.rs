@@ -519,7 +519,7 @@ fn append_canonical_map_key_bytes(
     byte_limit: usize,
 ) -> Result<(), SerializationError> {
     let available = byte_limit.saturating_sub(scratch.len());
-    let required = measured_cbor_len_with_limit(key, available)?;
+    let required = measured_cbor_len_with_limit(key, available, byte_limit)?;
     let new_len = scratch
         .len()
         .checked_add(required)
@@ -536,37 +536,33 @@ fn append_canonical_map_key_bytes(
     }
 
     let mut writer = LimitedVecWriter::new(scratch, byte_limit);
-    into_writer(key, &mut writer).map_err(map_cbor_serialize_error)?;
+    into_writer(key, &mut writer).map_err(|err| map_capped_writer_error(err, byte_limit))?;
     Ok(())
 }
 
-fn measured_cbor_len_with_limit(value: &Value, max_len: usize) -> Result<usize, SerializationError> {
+fn measured_cbor_len_with_limit(
+    value: &Value,
+    max_len: usize,
+    byte_limit: usize,
+) -> Result<usize, SerializationError> {
     let mut writer = CountingWriter::new(max_len);
-    into_writer(value, &mut writer).map_err(map_cbor_serialize_error)?;
+    into_writer(value, &mut writer).map_err(|err| map_capped_writer_error(err, byte_limit))?;
     Ok(writer.len())
 }
 
-fn map_cbor_serialize_error(err: ciborium::ser::Error<std::io::Error>) -> SerializationError {
-    match err.into_inner() {
-        Some(inner) if inner.kind() == io::ErrorKind::OutOfMemory => {
+fn map_capped_writer_error(
+    err: ciborium::ser::Error<std::io::Error>,
+    byte_limit: usize,
+) -> SerializationError {
+    match &err {
+        ciborium::ser::Error::Io(inner) if inner.kind() == io::ErrorKind::OutOfMemory => {
             SerializationError::PayloadTooLarge {
-                len: usize::MAX,
-                max: inner
-                    .get_ref()
-                    .and_then(|payload| payload.downcast_ref::<PayloadTooLargeContext>())
-                    .map_or(MAX_CANONICAL_OBJECT_BYTES, |ctx| ctx.max),
+                len: byte_limit.saturating_add(1),
+                max: byte_limit,
             }
         }
-        Some(inner) => SerializationError::CborSerialize(ciborium::ser::Error::Io(inner)),
-        None => SerializationError::CborSerialize(ciborium::ser::Error::Value(format!(
-            "{err}"
-        ))),
+        _ => SerializationError::CborSerialize(err),
     }
-}
-
-#[derive(Debug)]
-struct PayloadTooLargeContext {
-    max: usize,
 }
 
 struct CountingWriter {
@@ -633,10 +629,7 @@ impl io::Write for LimitedVecWriter<'_> {
 }
 
 fn payload_too_large_io_error(max: usize) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::OutOfMemory,
-        PayloadTooLargeContext { max },
-    )
+    io::Error::new(io::ErrorKind::OutOfMemory, format!("payload exceeds {max} bytes"))
 }
 
 #[cfg(test)]
@@ -912,6 +905,30 @@ mod tests {
         let bytes2 = CanonicalSerializer::serialize(&value, &schema).unwrap();
 
         assert_eq!(bytes1, bytes2);
+    }
+
+    #[test]
+    fn canonicalize_map_rejects_cumulative_key_bytes_over_limit() {
+        let mut entries = vec![
+            (
+                Value::Text("a".repeat(15)),
+                Value::Integer(1.into()),
+            ),
+            (
+                Value::Text("b".repeat(15)),
+                Value::Integer(2.into()),
+            ),
+            (
+                Value::Text("c".repeat(15)),
+                Value::Integer(3.into()),
+            ),
+        ];
+
+        let err = canonicalize_map_with_limit(&mut entries, 0, 40).unwrap_err();
+        assert!(matches!(
+            err,
+            SerializationError::PayloadTooLarge { max: 40, .. }
+        ));
     }
 
     // ============================================================================

@@ -9,6 +9,7 @@ use fcp_core::{
     FcpResult, IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -1817,22 +1818,35 @@ fn is_local_test_host(host: &str) -> bool {
 }
 
 fn base_url_policy(base_url: &str) -> (bool, String) {
-    let lower = base_url.to_ascii_lowercase();
-    let Some(scheme_end) = lower.find("://") else {
-        return (false, "base_url must include a scheme (https://)".into());
+    let parsed = match Url::parse(base_url) {
+        Ok(url) => url,
+        Err(_) => {
+            return (
+                false,
+                "base_url must be an absolute URL with a scheme and host".into(),
+            );
+        }
     };
-    let scheme = &lower[..scheme_end];
-    let after_scheme = &base_url[scheme_end + 3..];
-    let host_part = after_scheme
-        .split('/')
-        .next()
-        .unwrap_or(after_scheme)
-        .split(':')
-        .next()
-        .unwrap_or(after_scheme);
 
-    if host_part.is_empty() {
+    let Some(host_part) = parsed.host_str() else {
         return (false, "base_url must include a host".into());
+    };
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return (false, "base_url must not include userinfo".into());
+    }
+
+    if parsed.query().is_some() {
+        return (false, "base_url must not include query parameters".into());
+    }
+
+    if parsed.fragment().is_some() {
+        return (false, "base_url must not include a fragment".into());
+    }
+
+    let scheme = parsed.scheme();
+    if scheme != "https" && scheme != "http" {
+        return (false, "base_url scheme must be http or https".into());
     }
 
     let host_lower = host_part.to_ascii_lowercase();
@@ -1846,7 +1860,10 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
     if !secure_or_local {
         return (
             false,
-            format!("base_url must use https for non-local hosts (got {scheme}://{host_part})"),
+            format!(
+                "base_url must use https for non-local hosts (got {}://{host_part})",
+                scheme
+            ),
         );
     }
 
@@ -3113,10 +3130,11 @@ mod tests {
     fn config_trims_bearer_token() {
         let config =
             KubernetesConfig::from_params(&json!({"bearer_token": "  my-token  "})).unwrap();
-        match &config.auth {
-            KubernetesAuth::BearerToken(t) => assert_eq!(t, "my-token"),
-            KubernetesAuth::CredentialId(_) => panic!("expected BearerToken"),
-        }
+        let token = match &config.auth {
+            KubernetesAuth::BearerToken(t) => Some(t.as_str()),
+            KubernetesAuth::CredentialId(_) => None,
+        };
+        assert_eq!(token, Some("my-token"));
     }
 
     #[test]
@@ -3835,6 +3853,41 @@ mod tests {
         assert!(message.contains("accepted"));
     }
 
+    #[test]
+    fn base_url_policy_accepts_custom_proxy_path() {
+        let (ok, message) = base_url_policy("https://proxy.example.com/k8s/api");
+        assert!(ok);
+        assert!(message.contains("custom host"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_userinfo() {
+        let (ok, message) = base_url_policy("https://kubernetes.default.svc@evil.example.com");
+        assert!(!ok);
+        assert!(message.contains("userinfo"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_query_parameters() {
+        let (ok, message) = base_url_policy("https://k8s.example.com?prefix=/api/v1");
+        assert!(!ok);
+        assert!(message.contains("query"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_fragments() {
+        let (ok, message) = base_url_policy("https://k8s.example.com#fragment");
+        assert!(!ok);
+        assert!(message.contains("fragment"));
+    }
+
+    #[test]
+    fn base_url_policy_rejects_non_http_scheme_for_localhost() {
+        let (ok, message) = base_url_policy("ftp://localhost:6443");
+        assert!(!ok);
+        assert!(message.contains("http or https"));
+    }
+
     // ── new operations: create_pod, apply_deployment, delete_deployment, list_services ──
 
     #[test]
@@ -4185,13 +4238,12 @@ mod tests {
             "kubernetes.secret.create",
             "kubernetes.secret.delete",
         ] {
-            let op = ops
+            let has_ai_hints = ops
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|o| o["id"].as_str() == Some(id))
-                .unwrap_or_else(|| panic!("missing op: {id}"));
-            assert!(op.get("ai_hints").is_some(), "op {id} missing ai_hints");
+                .any(|op| op["id"].as_str() == Some(id) && op.get("ai_hints").is_some());
+            assert!(has_ai_hints, "op {id} missing ai_hints");
         }
     }
 

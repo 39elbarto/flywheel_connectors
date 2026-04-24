@@ -361,6 +361,58 @@ fn invoke_request(
     }
 }
 
+fn assert_endpoint_listing_schema(endpoint: &serde_json::Value) {
+    assert!(
+        endpoint
+            .get("endpoint_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.is_empty()),
+        "endpoint_id should be a non-empty string: {endpoint:#?}"
+    );
+    assert_eq!(endpoint.get("path"), Some(&json!("/hooks/github")));
+    assert_eq!(
+        endpoint.get("url"),
+        Some(&json!("http://localhost:8080/hooks/github"))
+    );
+    assert_eq!(endpoint.get("provider"), Some(&json!("github")));
+    assert_eq!(
+        endpoint.get("signature_header"),
+        Some(&json!("X-Hub-Signature-256"))
+    );
+    assert_eq!(
+        endpoint.get("signature_algorithm"),
+        Some(&json!("hmac-sha256"))
+    );
+    assert_eq!(
+        endpoint.get("allowed_sources"),
+        Some(&json!(["192.168.1.0/24"]))
+    );
+    assert_eq!(
+        endpoint.get("signing_secret_configured"),
+        Some(&json!(true))
+    );
+    assert_eq!(endpoint.get("active"), Some(&json!(true)));
+    assert_eq!(endpoint.get("event_count"), Some(&json!(0)));
+    assert!(
+        endpoint.get("signing_secret").is_none(),
+        "list output should not expose the raw signing secret: {endpoint:#?}"
+    );
+
+    let secret_last_rotated_at = endpoint
+        .get("secret_last_rotated_at")
+        .and_then(serde_json::Value::as_str)
+        .expect("secret_last_rotated_at should be present");
+    chrono::DateTime::parse_from_rfc3339(secret_last_rotated_at)
+        .expect("secret_last_rotated_at should be RFC3339");
+
+    let created_at = endpoint
+        .get("created_at")
+        .and_then(serde_json::Value::as_str)
+        .expect("created_at should be present");
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .expect("created_at should be RFC3339");
+}
+
 fn operation_network_constraints<'a>(
     manifest: &'a toml::Value,
     operation_name: &str,
@@ -454,6 +506,39 @@ async fn webhook_receiver_default_deny_compliance_suite_passes() {
 async fn webhook_receiver_happy_path_connector_suite_passes() {
     let mut connector = WebhookReceiverConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
+    let seed_handshake = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        &["webhook.endpoints.read", "webhook.endpoints.write"],
+    );
+    connector
+        .configure(webhook_receiver_config())
+        .await
+        .expect("seed configure");
+    connector
+        .handshake(seed_handshake)
+        .await
+        .expect("seed handshake");
+
+    let seed_token = build_token(
+        &signing_key,
+        "webhook.endpoints.write",
+        &["webhook.endpoints.create"],
+    );
+    let seed_create = invoke_request(
+        "webhook.endpoints.create",
+        json!({
+            "path": "/hooks/github",
+            "provider": "github",
+            "allowed_sources": ["192.168.1.0/24"],
+        }),
+        seed_token,
+    );
+    let seed_response = connector
+        .invoke(seed_create)
+        .await
+        .expect("seed endpoint create");
+    assert_eq!(seed_response.status, InvokeStatus::Ok);
+
     let handshake = handshake_request(
         signing_key.verifying_key().to_bytes(),
         &["webhook.endpoints.read"],
@@ -497,6 +582,32 @@ async fn webhook_receiver_happy_path_connector_suite_passes() {
         invoke_entry.context.get("invoke_status"),
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
     );
+
+    let list_response = connector
+        .invoke(invoke_request(
+            "webhook.endpoints.list",
+            json!({}),
+            build_token(
+                &signing_key,
+                "webhook.endpoints.read",
+                &["webhook.endpoints.list"],
+            ),
+        ))
+        .await
+        .expect("list endpoints after suite");
+    assert_eq!(list_response.status, InvokeStatus::Ok);
+
+    let list_result = list_response.result.expect("list result payload");
+    let endpoints = list_result
+        .get("endpoints")
+        .and_then(serde_json::Value::as_array)
+        .expect("list response should include endpoints array");
+    assert_eq!(
+        endpoints.len(),
+        1,
+        "seeded endpoint should appear in list result: {list_result:#?}"
+    );
+    assert_endpoint_listing_schema(&endpoints[0]);
 }
 
 #[test]

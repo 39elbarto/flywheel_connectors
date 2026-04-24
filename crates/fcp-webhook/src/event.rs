@@ -1,6 +1,7 @@
 //! Webhook event types and processing.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use chrono::{DateTime, Utc};
 use fcp_core::{TaintFlag, TaintFlags};
@@ -8,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Webhook event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct WebhookEvent {
     /// Unique event ID (for deduplication).
     pub id: String,
@@ -32,6 +33,26 @@ pub struct WebhookEvent {
     /// Delivery metadata.
     #[serde(default)]
     pub metadata: EventMetadata,
+}
+
+impl fmt::Debug for WebhookEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let redacted_headers: HashMap<&str, &str> = self
+            .headers
+            .keys()
+            .map(|key| (key.as_str(), "[REDACTED]"))
+            .collect();
+
+        f.debug_struct("WebhookEvent")
+            .field("id", &self.id)
+            .field("event_type", &self.event_type)
+            .field("timestamp", &self.timestamp)
+            .field("provider", &self.provider)
+            .field("payload", &self.payload)
+            .field("headers", &redacted_headers)
+            .field("metadata", &self.metadata)
+            .finish()
+    }
 }
 
 impl WebhookEvent {
@@ -610,6 +631,28 @@ mod tests {
             .with_headers(h2);
         assert!(event.header("key1").is_none());
         assert_eq!(event.header("key2"), Some("val2"));
+    }
+
+    #[test]
+    fn test_event_debug_redacts_header_values() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "authorization".to_string(),
+            "Bearer webhook-secret".to_string(),
+        );
+        headers.insert(
+            "x-hub-signature-256".to_string(),
+            "sha256=super-secret-signature".to_string(),
+        );
+
+        let event = WebhookEvent::new("e1", "push", "github").with_headers(headers);
+        let debug = format!("{event:?}");
+
+        assert!(debug.contains("authorization"));
+        assert!(debug.contains("x-hub-signature-256"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("Bearer webhook-secret"));
+        assert!(!debug.contains("super-secret-signature"));
     }
 
     #[test]

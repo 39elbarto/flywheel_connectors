@@ -4,6 +4,7 @@
 //! library crate exposes the subset of modules needed by criterion
 //! benchmarks and integration tests without restructuring the CLI.
 
+pub mod access_cmd;
 pub mod pipe;
 pub mod readiness;
 pub mod recovery;

@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -998,6 +999,131 @@ pub fn generate_handle(prefix: &str, connector: &str, operation: &str) -> String
     format!("{prefix}-{short}")
 }
 
+/// File-backed access-bundle store.
+pub struct AccessBundleStore {
+    dir: PathBuf,
+}
+
+impl AccessBundleStore {
+    /// Create a store at the default location.
+    pub fn default_path() -> Self {
+        if let Ok(dir) = std::env::var("FWC_ACCESS_BUNDLE_DIR")
+            && !dir.trim().is_empty()
+        {
+            return Self {
+                dir: PathBuf::from(dir),
+            };
+        }
+
+        if let Some(override_dir) = std::env::var_os("FWC_STATE_DIR") {
+            return Self {
+                dir: PathBuf::from(override_dir).join("access").join("bundles"),
+            };
+        }
+
+        #[cfg(test)]
+        if let Some(tmpdir) = std::env::var_os("CARGO_TARGET_TMPDIR") {
+            return Self {
+                dir: PathBuf::from(tmpdir)
+                    .join(format!("fwc-access-bundles-{}", std::process::id())),
+            };
+        }
+
+        if let Some(state_home) = std::env::var_os("XDG_STATE_HOME") {
+            return Self {
+                dir: PathBuf::from(state_home)
+                    .join("fwc")
+                    .join("access")
+                    .join("bundles"),
+            };
+        }
+
+        if let Some(home) = std::env::var_os("HOME") {
+            return Self {
+                dir: PathBuf::from(home)
+                    .join(".local")
+                    .join("state")
+                    .join("fwc")
+                    .join("access")
+                    .join("bundles"),
+            };
+        }
+
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self {
+            dir: cwd.join(".fwc-state").join("access").join("bundles"),
+        }
+    }
+
+    /// Create a store at a custom path.
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self { dir: dir.into() }
+    }
+
+    /// Save a bundle to disk.
+    pub fn save(&self, bundle: &AccessBundle) -> Result<(), String> {
+        std::fs::create_dir_all(&self.dir).map_err(|err| {
+            format!(
+                "failed to create access bundle store '{}': {err}",
+                self.dir.display()
+            )
+        })?;
+        let path = self.bundle_path(&bundle.handle);
+        let json = serde_json::to_string_pretty(bundle)
+            .map_err(|err| format!("failed to serialize access bundle '{}': {err}", bundle.handle))?;
+        std::fs::write(&path, json).map_err(|err| {
+            format!(
+                "failed to write access bundle '{}' to '{}': {err}",
+                bundle.handle,
+                path.display()
+            )
+        })?;
+        Ok(())
+    }
+
+    /// Load a bundle by handle.
+    pub fn load(&self, handle: &str) -> Result<Option<AccessBundle>, String> {
+        let path = self.bundle_path(handle);
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let json = std::fs::read_to_string(&path).map_err(|err| {
+            format!(
+                "failed to read access bundle '{}' from '{}': {err}",
+                handle,
+                path.display()
+            )
+        })?;
+        let bundle: AccessBundle = serde_json::from_str(&json).map_err(|err| {
+            format!(
+                "failed to parse access bundle '{}' from '{}': {err}",
+                handle,
+                path.display()
+            )
+        })?;
+        if bundle.handle != handle {
+            return Err(format!(
+                "access bundle '{}' contained mismatched handle '{}'",
+                path.display(),
+                bundle.handle
+            ));
+        }
+
+        Ok(Some(bundle))
+    }
+
+    /// The root directory used for persisted bundles.
+    #[must_use]
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    fn bundle_path(&self, handle: &str) -> PathBuf {
+        self.dir.join(format!("{handle}.json"))
+    }
+}
+
 // ── Core functions ───────────────────────────────────────────────────
 
 /// Perform a read-only access check.
@@ -1106,6 +1232,15 @@ pub fn plan_access(args: &AccessPlanArgs) -> Result<AccessPlan, String> {
 
 /// Request access (side-effecting) — returns a bundle handle.
 pub fn request_access(args: &AccessRequestArgs) -> Result<AccessBundle, String> {
+    let store = AccessBundleStore::default_path();
+    request_access_with_store(args, &store)
+}
+
+/// Request access and persist the resulting bundle in the provided store.
+pub fn request_access_with_store(
+    args: &AccessRequestArgs,
+    store: &AccessBundleStore,
+) -> Result<AccessBundle, String> {
     let errors = args.validate();
     if !errors.is_empty() {
         return Err(errors.join("; "));
@@ -1126,23 +1261,29 @@ pub fn request_access(args: &AccessRequestArgs) -> Result<AccessBundle, String> 
         .with_status(BundleStatus::Pending)
         .with_justification(&args.justification);
 
+    store.save(&bundle)?;
     Ok(bundle)
 }
 
 /// Attach a bundle or approval handle to the current session.
 pub fn attach_bundle(args: &AccessAttachArgs) -> Result<AccessBundle, String> {
+    let store = AccessBundleStore::default_path();
+    attach_bundle_with_store(args, &store)
+}
+
+/// Attach a persisted bundle from the provided store.
+pub fn attach_bundle_with_store(
+    args: &AccessAttachArgs,
+    store: &AccessBundleStore,
+) -> Result<AccessBundle, String> {
     let errors = args.validate();
     if !errors.is_empty() {
         return Err(errors.join("; "));
     }
 
-    // In a real implementation, this would look up the bundle from storage.
-    // Return a synthetic active bundle for the handle.
-    let bundle = AccessBundle::new(&args.handle)
-        .with_status(BundleStatus::Active)
-        .with_receipt(format!("attached-{}", &args.handle));
-
-    Ok(bundle)
+    store
+        .load(&args.handle)?
+        .ok_or_else(|| format!("unknown bundle handle: {}", args.handle))
 }
 
 /// Resume a previous access session from a handle.
@@ -2977,7 +3118,11 @@ mod tests {
     #[test]
     fn request_access_basic() {
         let args = AccessRequestArgs::new("jira", "create_issue", "sprint planning");
-        let bundle = request_access(&args).unwrap();
+        let store = AccessBundleStore::new(std::env::temp_dir().join(format!(
+            "fwc-access-test-{}",
+            uuid::Uuid::new_v4().simple()
+        )));
+        let bundle = request_access_with_store(&args, &store).unwrap();
         assert!(bundle.handle.starts_with("bnd-"));
         assert_eq!(bundle.status, BundleStatus::Pending);
         assert_eq!(bundle.grant_count(), 1);
@@ -2987,7 +3132,11 @@ mod tests {
     #[test]
     fn request_access_grant_handle() {
         let args = AccessRequestArgs::new("jira", "create_issue", "reason");
-        let bundle = request_access(&args).unwrap();
+        let store = AccessBundleStore::new(std::env::temp_dir().join(format!(
+            "fwc-access-test-{}",
+            uuid::Uuid::new_v4().simple()
+        )));
+        let bundle = request_access_with_store(&args, &store).unwrap();
         let grant = &bundle.grants[0];
         assert!(grant.handle.starts_with("grt-"));
         assert_eq!(grant.connector, "jira");
@@ -2997,40 +3146,66 @@ mod tests {
     #[test]
     fn request_access_validation_error() {
         let args = AccessRequestArgs::new("", "", "");
-        let err = request_access(&args).unwrap_err();
+        let store = AccessBundleStore::new(std::env::temp_dir().join(format!(
+            "fwc-access-test-{}",
+            uuid::Uuid::new_v4().simple()
+        )));
+        let err = request_access_with_store(&args, &store).unwrap_err();
         assert!(err.contains("connector"));
     }
 
     #[test]
     fn request_access_grant_scope() {
         let args = AccessRequestArgs::new("jira", "create_issue", "reason");
-        let bundle = request_access(&args).unwrap();
+        let store = AccessBundleStore::new(std::env::temp_dir().join(format!(
+            "fwc-access-test-{}",
+            uuid::Uuid::new_v4().simple()
+        )));
+        let bundle = request_access_with_store(&args, &store).unwrap();
         assert_eq!(bundle.grants[0].scope, GrantScope::Operation);
     }
 
     #[test]
     fn request_access_grant_expiry() {
         let args = AccessRequestArgs::new("jira", "create_issue", "reason");
-        let bundle = request_access(&args).unwrap();
+        let store = AccessBundleStore::new(std::env::temp_dir().join(format!(
+            "fwc-access-test-{}",
+            uuid::Uuid::new_v4().simple()
+        )));
+        let bundle = request_access_with_store(&args, &store).unwrap();
         assert!(bundle.grants[0].is_active());
     }
 
     // ── attach_bundle ────────────────────────────────────────────
 
     #[test]
-    fn attach_bundle_basic() {
+    fn attach_bundle_loads_persisted_bundle() {
+        let store = AccessBundleStore::new(std::env::temp_dir().join(format!(
+            "fwc-access-test-{}",
+            uuid::Uuid::new_v4().simple()
+        )));
+        let persisted = AccessBundle::new("bnd-abc123")
+            .with_status(BundleStatus::Partial)
+            .with_receipt("stored-receipt")
+            .with_justification("saved on disk");
+        store.save(&persisted).unwrap();
         let args = AccessAttachArgs::new("bnd-abc123");
-        let bundle = attach_bundle(&args).unwrap();
+        let bundle = attach_bundle_with_store(&args, &store).unwrap();
         assert_eq!(bundle.handle, "bnd-abc123");
-        assert_eq!(bundle.status, BundleStatus::Active);
-        assert!(bundle.receipt.is_some());
+        assert_eq!(bundle.status, BundleStatus::Partial);
+        assert_eq!(bundle.receipt.as_deref(), Some("stored-receipt"));
+        assert_eq!(bundle.justification.as_deref(), Some("saved on disk"));
     }
 
     #[test]
-    fn attach_bundle_receipt_format() {
+    fn attach_bundle_errors_for_unknown_handle() {
+        let store = AccessBundleStore::new(std::env::temp_dir().join(format!(
+            "fwc-access-test-{}",
+            uuid::Uuid::new_v4().simple()
+        )));
         let args = AccessAttachArgs::new("bnd-abc123");
-        let bundle = attach_bundle(&args).unwrap();
-        assert!(bundle.receipt.unwrap().starts_with("attached-"));
+        let err = attach_bundle_with_store(&args, &store).unwrap_err();
+        assert!(err.contains("unknown bundle handle: bnd-abc123"));
     }
 
     #[test]

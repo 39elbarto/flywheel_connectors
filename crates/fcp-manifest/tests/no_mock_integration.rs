@@ -196,6 +196,31 @@ fn zones_with_sources_and_targets() {
 }
 
 #[test]
+fn zones_allow_project_wildcard_policy_selector() {
+    let toml = base_manifest().replace(
+        "home = \"z:work\"",
+        "home = \"z:work\"\nallowed_sources = [\"z:work\", \"z:project:*\"]\nallowed_targets = [\"z:project:*\"]",
+    );
+    let manifest = parse_valid(&toml);
+    let project_zone = "z:project:alpha".parse().expect("project zone");
+
+    assert_eq!(manifest.zones.allowed_sources[1].as_str(), "z:project:*");
+    assert!(manifest.zones.allowed_sources[1].matches(&project_zone));
+    assert!(!manifest.zones.allowed_targets[0].matches(&manifest.zones.home));
+}
+
+#[test]
+fn zones_reject_unsupported_wildcard_policy_selector() {
+    let toml = base_manifest().replace(
+        "home = \"z:work\"",
+        "home = \"z:work\"\nallowed_sources = [\"z:*\"]",
+    );
+    let err = ConnectorManifest::parse_str_unchecked(&toml).unwrap_err();
+
+    assert!(err.to_string().contains("unsupported zone wildcard"));
+}
+
+#[test]
 fn zones_forbidden_not_containing_home_ok() {
     let toml = base_manifest().replace(
         "home = \"z:work\"",

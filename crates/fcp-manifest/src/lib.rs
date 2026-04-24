@@ -396,6 +396,16 @@ pub enum ManifestError {
     RateLimitDeclaration(#[from] RateLimitDeclarationError),
 }
 
+/// Errors returned while parsing a manifest zone policy selector.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ZonePatternError {
+    #[error("unsupported zone wildcard pattern `{pattern}` (only `z:project:*` is allowed)")]
+    UnsupportedWildcard { pattern: String },
+
+    #[error("invalid zone id: {0}")]
+    ZoneId(#[from] ZoneIdError),
+}
+
 impl ManifestError {
     /// Return actionable guidance when this error is the capability-ID
     /// lint that rejects embedded hostnames, ports, URLs, or IP addresses.
@@ -1228,9 +1238,9 @@ enum EffectiveStateModel<'a> {
 pub struct ZonesSection {
     pub home: ZoneId,
     #[serde(default)]
-    pub allowed_sources: Vec<ZoneId>,
+    pub allowed_sources: Vec<ZonePattern>,
     #[serde(default)]
-    pub allowed_targets: Vec<ZoneId>,
+    pub allowed_targets: Vec<ZonePattern>,
     #[serde(default)]
     pub forbidden: Vec<ZoneId>,
 }
@@ -1244,6 +1254,104 @@ impl ZonesSection {
             });
         }
         Ok(())
+    }
+}
+
+/// A manifest zone policy selector.
+///
+/// `home` and `forbidden` zones are concrete [`ZoneId`]s. Allowlist entries
+/// may also use the documented `z:project:*` selector to grant all concrete
+/// project zones without weakening the `ZoneId` grammar.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ZonePattern(std::sync::Arc<str>);
+
+impl ZonePattern {
+    pub const PROJECT_WILDCARD: &str = "z:project:*";
+
+    /// Create a validated zone policy selector.
+    ///
+    /// # Errors
+    /// Returns an error if the selector is neither a concrete [`ZoneId`] nor
+    /// the documented `z:project:*` project-zone wildcard.
+    pub fn new(pattern: impl Into<String>) -> Result<Self, ZonePatternError> {
+        Self::try_from(pattern.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn is_project_wildcard(&self) -> bool {
+        self.as_str() == Self::PROJECT_WILDCARD
+    }
+
+    #[must_use]
+    pub fn matches(&self, zone: &ZoneId) -> bool {
+        self.as_str() == zone.as_str()
+            || (self.is_project_wildcard() && zone.as_str().starts_with("z:project:"))
+    }
+}
+
+impl TryFrom<String> for ZonePattern {
+    type Error = ZonePatternError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.contains('*') {
+            if value == Self::PROJECT_WILDCARD {
+                return Ok(Self(value.into()));
+            }
+            return Err(ZonePatternError::UnsupportedWildcard { pattern: value });
+        }
+
+        ZoneId::try_from(value.clone())?;
+        Ok(Self(value.into()))
+    }
+}
+
+impl From<ZonePattern> for String {
+    fn from(value: ZonePattern) -> Self {
+        value.0.to_string()
+    }
+}
+
+impl From<ZoneId> for ZonePattern {
+    fn from(value: ZoneId) -> Self {
+        Self(value.as_str().into())
+    }
+}
+
+impl std::str::FromStr for ZonePattern {
+    type Err = ZonePatternError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_from(s.to_owned())
+    }
+}
+
+impl fmt::Display for ZonePattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl AsRef<str> for ZonePattern {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl PartialEq<ZoneId> for ZonePattern {
+    fn eq(&self, other: &ZoneId) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl PartialEq<ZonePattern> for ZoneId {
+    fn eq(&self, other: &ZonePattern) -> bool {
+        self.as_str() == other.as_str()
     }
 }
 
@@ -2434,7 +2542,7 @@ pub struct PolicySection {
     /// `enforce_supply_chain_policy`, which lets a stale or revoked-but-
     /// still-cacheable attestation pass policy indefinitely. Operators
     /// who depend on Sigstore/TUF verifiers (which always populate
-    /// expires_at) should set this to `true` to fail-closed against
+    /// `expires_at`) should set this to `true` to fail-closed against
     /// unset-expiry adapters.
     #[serde(default)]
     pub require_attestation_expiry: bool,

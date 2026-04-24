@@ -412,8 +412,16 @@ impl McpToolDefinition {
             || self
                 .supported_zones
                 .iter()
-                .any(|candidate| candidate == zone)
+                .any(|candidate| zone_selector_matches(candidate, zone))
     }
+}
+
+fn zone_selector_matches(selector: &str, zone: &str) -> bool {
+    selector == zone
+        || (selector == fcp_manifest::ZonePattern::PROJECT_WILDCARD
+            && zone
+                .parse::<fcp_core::ZoneId>()
+                .is_ok_and(|zone| zone.as_str().starts_with("z:project:")))
 }
 
 // ── MCP Resource Entry ──────────────────────────────────────────────────
@@ -828,7 +836,12 @@ fn zone_registry_for_tools(tools: &[McpToolDefinition], default_zone: &str) -> Z
             scoped = scoped.with_zone(ZoneId::new(default_zone.to_owned()));
         } else {
             for zone in &tool.supported_zones {
-                scoped = scoped.with_zone(ZoneId::new(zone.clone()));
+                let scoped_zone = if zone_selector_matches(zone, default_zone) {
+                    default_zone
+                } else {
+                    zone
+                };
+                scoped = scoped.with_zone(ZoneId::new(scoped_zone.to_owned()));
             }
         }
         registry.register_tool(scoped);
@@ -2007,6 +2020,22 @@ mod tests {
         .with_supported_zones(vec!["z:private".to_owned()])
     }
 
+    fn sample_project_tool() -> McpToolDefinition {
+        McpToolDefinition::new(
+            "github.project_issue",
+            "Read a project issue",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string" }
+                }
+            }),
+            "github",
+            "project_issue",
+        )
+        .with_supported_zones(vec!["z:project:*".to_owned()])
+    }
+
     fn sample_live_tool() -> McpToolDefinition {
         sample_tool()
             .with_annotations(Some(export_tools::McpToolAnnotations {
@@ -2903,6 +2932,21 @@ mod tests {
         assert_eq!(tools[0]["name"], "github.list_issues");
     }
 
+    #[test]
+    fn handle_tools_list_respects_project_wildcard_zone_filter() {
+        let state = McpServerState::builder()
+            .with_config(McpServerConfig::new().with_zone_filter("z:project:alpha"))
+            .with_tool(sample_project_tool())
+            .with_tool(sample_private_tool())
+            .build();
+        let req = make_request("tools/list", None);
+        let resp = handle_request(&state, &req);
+        let result = resp.result().unwrap();
+        let tools = result["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "github.project_issue");
+    }
+
     // ── handle_request: tools/call ──────────────────────────────────
 
     #[test]
@@ -2974,6 +3018,27 @@ mod tests {
         let data = error.data.as_ref().unwrap();
         assert_eq!(data["tool"], "github.list_issues");
         assert!(data["arguments"].is_null());
+    }
+
+    #[test]
+    fn handle_tools_call_accepts_project_wildcard_supported_zone() {
+        let state = McpServerState::builder()
+            .with_config(McpServerConfig::new().with_zone_filter("z:project:alpha"))
+            .with_tool(sample_project_tool())
+            .build();
+        let req = make_request(
+            "tools/call",
+            Some(json!({
+                "name": "github.project_issue",
+                "arguments": {"project": "alpha"},
+                "capabilityToken": sample_token("z:project:alpha"),
+            })),
+        );
+        let resp = handle_request(&state, &req);
+        assert!(resp.is_error());
+        let error = resp.error.as_ref().unwrap();
+        assert_eq!(error.code(), INTERNAL_ERROR);
+        assert!(error.message().contains("transport-bound tool handler"));
     }
 
     #[test]

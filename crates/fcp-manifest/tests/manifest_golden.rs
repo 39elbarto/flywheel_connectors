@@ -5,7 +5,7 @@
 //!
 //!   (a) minimal — single capability, single zone, no optional sections
 //!   (b) full    — multi-capability, multi-zone, every optional section
-//!                 populated (connector.state, rate_limits, policy)
+//!                 populated (`connector.state`, `rate_limits`, policy)
 //!   (c) signed  — publisher signatures + threshold + registry signature
 //!   (d) unsigned-accepted — `[signatures]` block omitted entirely; the
 //!                 manifest must still parse+validate, establishing that

@@ -1841,16 +1841,15 @@ impl DiscoveredConnector {
             .as_ref()
             .is_some_and(|caps| caps.streaming || caps.replay)
             || !manifest.provides.events.is_empty();
-        let supported_zones = manifest
+        let mut supported_zone_set = manifest
             .zones
             .allowed_sources
             .iter()
             .chain(manifest.zones.allowed_targets.iter())
-            .chain(std::iter::once(&manifest.zones.home))
             .map(|zone| zone.as_str().to_owned())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
+            .collect::<BTreeSet<_>>();
+        supported_zone_set.insert(manifest.zones.home.as_str().to_owned());
+        let supported_zones = supported_zone_set.into_iter().collect::<Vec<_>>();
         let connector_rate_limits = manifest.rate_limits.as_ref().map(|rate_limits| {
             rate_limits
                 .pools
@@ -2055,7 +2054,7 @@ impl DiscoveredConnector {
     pub fn matches_zone(&self, zone: &str) -> bool {
         self.supported_zones
             .iter()
-            .any(|candidate| candidate == zone)
+            .any(|candidate| zone_selector_matches(candidate, zone))
     }
 
     #[must_use]
@@ -3096,6 +3095,14 @@ fn normalize_category_selector(selector: &str) -> String {
 
 fn normalize_zone_selector(selector: &str) -> String {
     selector.trim().to_lowercase()
+}
+
+fn zone_selector_matches(selector: &str, zone: &str) -> bool {
+    selector == zone
+        || (selector == fcp_manifest::ZonePattern::PROJECT_WILDCARD
+            && zone
+                .parse::<fcp_core::ZoneId>()
+                .is_ok_and(|zone| zone.as_str().starts_with("z:project:")))
 }
 
 #[must_use]
@@ -7606,7 +7613,7 @@ migration_hint = "init"
 
 [zones]
 home = "z:work"
-allowed_sources = ["z:work"]
+allowed_sources = ["z:work", "z:project:*"]
 allowed_targets = ["z:work"]
 forbidden = []
 
@@ -7779,6 +7786,13 @@ deny_ptrace = true
         assert_eq!(discovered.detail.rate_limits.status_tag(), "unknown");
         assert_eq!(discovered.manifest_status, Some(ConnectorStatus::Ready));
         assert!(!discovered.hidden_by_default);
+        assert_eq!(discovered.search_name_lower, "truthful connector");
+        assert_eq!(
+            discovered.supported_zones,
+            vec!["z:project:*".to_owned(), "z:work".to_owned()]
+        );
+        assert!(discovered.matches_zone("z:project:alpha"));
+        assert!(!discovered.matches_zone("z:private"));
         assert_eq!(
             discovered.connector_schema["connector"]["archetypes"],
             serde_json::json!(["operational"])

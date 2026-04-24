@@ -164,6 +164,25 @@ async fn write_preopened_file(
         .unwrap()
 }
 
+async fn assert_tcp_connect_denied(
+    store: &mut Store<WasiHostState>,
+    addr: SocketAddr,
+    context: &str,
+) {
+    let mut sockets = store.data_mut().sockets();
+    let network = instance_network::Host::instance_network(&mut sockets).unwrap();
+    let denied = sockets
+        .table
+        .get(&network)
+        .unwrap()
+        .check_socket_addr(addr, SocketAddrUse::TcpConnect)
+        .await;
+    assert!(
+        denied.is_err(),
+        "{context}: raw TCP hostcall unexpectedly allowed for {addr}"
+    );
+}
+
 #[fcp_async_core::runtime::test]
 async fn wasi_preopened_filesystem_conformance_blocks_writes_and_escape() {
     let readonly_dir = unique_temp_dir("fcp-conformance-sandbox-readonly");
@@ -213,6 +232,47 @@ async fn wasi_preopened_filesystem_conformance_blocks_writes_and_escape() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn wasi_symlinked_preopens_fail_closed() {
+    use std::os::unix::fs::symlink;
+
+    let root = unique_temp_dir("fcp-conformance-sandbox-symlink-root");
+    let readonly_target = unique_temp_dir("fcp-conformance-sandbox-symlink-readonly-target");
+    let writable_target = unique_temp_dir("fcp-conformance-sandbox-symlink-writable-target");
+
+    let readonly_link = root.join("readonly-link");
+    let writable_link = root.join("writable-link");
+    symlink(&readonly_target, &readonly_link).unwrap();
+    symlink(&writable_target, &writable_link).unwrap();
+
+    let readonly_declared = readonly_link.join("mounted-readonly");
+    std::fs::create_dir_all(&readonly_target.join("mounted-readonly")).unwrap();
+
+    let readonly_runtime = WasiRuntime::new(WasiConfig {
+        readonly_paths: vec![readonly_declared.clone()],
+        ..WasiConfig::default()
+    })
+    .unwrap();
+    let readonly_err = readonly_runtime.create_store().unwrap_err().to_string();
+    assert!(
+        readonly_err.contains("symlinked ancestor"),
+        "readonly symlinked preopen must fail closed: {readonly_err}"
+    );
+
+    let writable_declared = writable_link.join("mounted-writable");
+    let writable_runtime = WasiRuntime::new(WasiConfig {
+        writable_paths: vec![writable_declared.clone()],
+        ..WasiConfig::default()
+    })
+    .unwrap();
+    let writable_err = writable_runtime.create_store().unwrap_err().to_string();
+    assert!(
+        writable_err.contains("symlinked ancestor"),
+        "writable symlinked preopen must fail closed: {writable_err}"
+    );
+}
+
 #[fcp_async_core::runtime::test]
 async fn wasi_raw_socket_hostcalls_fail_closed_when_mediation_is_required() {
     let default_runtime = WasiRuntime::new(WasiConfig::default()).unwrap();
@@ -238,6 +298,18 @@ async fn wasi_raw_socket_hostcalls_fail_closed_when_mediation_is_required() {
                 .unwrap_err();
         assert!(err.to_string().contains("resolver-failure"));
     }
+    assert_tcp_connect_denied(
+        &mut strict_store,
+        SocketAddr::from(([93, 184, 216, 34], 443)),
+        "strict store must deny policy-shaped public TCP endpoints when mediation is required",
+    )
+    .await;
+    assert_tcp_connect_denied(
+        &mut strict_store,
+        SocketAddr::from(([1, 1, 1, 1], 80)),
+        "strict store must deny generic public TCP endpoints when mediation is required",
+    )
+    .await;
 
     let permissive_runtime = WasiRuntime::new(WasiConfig {
         block_direct_network: false,
@@ -290,6 +362,18 @@ async fn wasi_raw_socket_hostcalls_fail_closed_when_mediation_is_required() {
             "strict mediated profiles must still disable raw DNS hostcalls"
         );
     }
+    assert_tcp_connect_denied(
+        &mut mediated_store,
+        SocketAddr::from(([93, 184, 216, 34], 443)),
+        "mediated store must deny policy-shaped TCP endpoints until Network Guard mediation runs",
+    )
+    .await;
+    assert_tcp_connect_denied(
+        &mut mediated_store,
+        SocketAddr::from(([93, 184, 216, 34], 8443)),
+        "mediated store must deny generic public TCP endpoints until Network Guard mediation runs",
+    )
+    .await;
 }
 
 #[test]

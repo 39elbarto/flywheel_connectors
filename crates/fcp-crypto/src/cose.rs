@@ -449,7 +449,7 @@ impl CwtClaims {
             // interop split is what bead flywheel_connectors-8azf9
             // documents: keep the two crates in lockstep so any
             // non-canonical shape is refused at the earliest layer.
-            reject_cbor_tags(&v)?;
+            reject_cbor_tags(v)?;
             if claims.insert(key, v.clone()).is_some() {
                 return Err(CryptoError::SerializationError(format!(
                     "duplicate claim key: {key}"
@@ -1030,7 +1030,9 @@ fn synthesize_grants_from_legacy_operations(claims: &mut CwtClaims) {
     if grants.is_empty() {
         return;
     }
-    *claims = claims.clone().custom(fcp2_claims::GRANTS, ciborium::Value::Array(grants));
+    *claims = claims
+        .clone()
+        .custom(fcp2_claims::GRANTS, ciborium::Value::Array(grants));
 }
 
 /// Stamp the current auth-claim schema version when the caller did not
@@ -1153,10 +1155,17 @@ mod tests {
 
         let claims = cose.verify(&signing_key.verifying_key()).expect("verify");
         let grants = claims.get(fcp2_claims::GRANTS).expect("grants");
-        let ciborium::Value::Array(arr) = grants else { panic!() };
+        let ciborium::Value::Array(arr) = grants else {
+            panic!()
+        };
         assert_eq!(arr.len(), 1, "must not overwrite pre-set GRANTS");
-        let ciborium::Value::Map(map) = &arr[0] else { panic!() };
-        let (_, cap) = map.iter().find(|(k, _)| matches!(k, ciborium::Value::Text(s) if s == "capability")).unwrap();
+        let ciborium::Value::Map(map) = &arr[0] else {
+            panic!()
+        };
+        let (_, cap) = map
+            .iter()
+            .find(|(k, _)| matches!(k, ciborium::Value::Text(s) if s == "capability"))
+            .unwrap();
         assert!(matches!(cap, ciborium::Value::Text(s) if s == "cap:prewritten"));
     }
 
@@ -1217,10 +1226,7 @@ mod tests {
         };
         let builder = CapabilityTokenBuilder::with_claims(&claims).expect("build");
         // Must expose the same labels
-        assert_eq!(
-            builder.claims.get_capability_id(),
-            Some("cap:test")
-        );
+        assert_eq!(builder.claims.get_capability_id(), Some("cap:test"));
         assert_eq!(builder.claims.get_zone_id(), Some("z:work"));
     }
 
@@ -1240,10 +1246,7 @@ mod tests {
             fcp2_claims::INSTANCE_ID,
             fcp_auth_schema::labels::fcp2_claims::INSTANCE_ID
         );
-        assert_eq!(
-            cwt_claims::EXP,
-            fcp_auth_schema::labels::cwt_claims::EXP
-        );
+        assert_eq!(cwt_claims::EXP, fcp_auth_schema::labels::cwt_claims::EXP);
     }
 
     #[test]
@@ -1340,8 +1343,8 @@ mod tests {
         let mut bytes = Vec::new();
         ciborium::into_writer(&ciborium::Value::Map(map), &mut bytes)
             .expect("serialize tagged claim");
-        let err = CwtClaims::from_cbor(&bytes)
-            .expect_err("direct tagged claim value must be rejected");
+        let err =
+            CwtClaims::from_cbor(&bytes).expect_err("direct tagged claim value must be rejected");
         assert!(
             matches!(err, CryptoError::InvalidCborTag { tag: 24 }),
             "expected InvalidCborTag{{tag:24}}, got {err:?}"
@@ -1357,8 +1360,8 @@ mod tests {
         let mut bytes = Vec::new();
         ciborium::into_writer(&ciborium::Value::Map(map), &mut bytes)
             .expect("serialize nested tagged claim");
-        let err = CwtClaims::from_cbor(&bytes)
-            .expect_err("nested tagged claim value must be rejected");
+        let err =
+            CwtClaims::from_cbor(&bytes).expect_err("nested tagged claim value must be rejected");
         assert!(
             matches!(err, CryptoError::InvalidCborTag { tag: 1 }),
             "expected InvalidCborTag{{tag:1}} for nested tag, got {err:?}"
@@ -1374,8 +1377,7 @@ mod tests {
         let mut bytes = Vec::new();
         ciborium::into_writer(&ciborium::Value::Map(map), &mut bytes)
             .expect("serialize nested-map tagged claim");
-        let err = CwtClaims::from_cbor(&bytes)
-            .expect_err("tag inside nested map must be rejected");
+        let err = CwtClaims::from_cbor(&bytes).expect_err("tag inside nested map must be rejected");
         assert!(
             matches!(err, CryptoError::InvalidCborTag { tag: 42 }),
             "expected InvalidCborTag{{tag:42}} for map-nested tag, got {err:?}"
@@ -1403,7 +1405,10 @@ mod tests {
                 ciborium::Value::Integer(3.into()),
                 ciborium::Value::Bytes(vec![0xAA, 0xBB]),
             ),
-            (ciborium::Value::Integer(4.into()), ciborium::Value::Bool(true)),
+            (
+                ciborium::Value::Integer(4.into()),
+                ciborium::Value::Bool(true),
+            ),
             (ciborium::Value::Integer(5.into()), ciborium::Value::Null),
             (
                 ciborium::Value::Integer(6.into()),
@@ -1953,9 +1958,15 @@ mod tests {
     #[test]
     fn cwt_claims_to_cbor_uses_rfc8949_integer_key_order() {
         let claims = CwtClaims::new()
-            .custom(fcp2_claims::SCHEMA_VERSION, ciborium::Value::Integer(1.into()))
+            .custom(
+                fcp2_claims::SCHEMA_VERSION,
+                ciborium::Value::Integer(1.into()),
+            )
             .custom(fcp2_claims::ZONE_ID, ciborium::Value::Text("z:work".into()))
-            .custom(fcp2_claims::CAPABILITY_ID, ciborium::Value::Text("cap:test".into()))
+            .custom(
+                fcp2_claims::CAPABILITY_ID,
+                ciborium::Value::Text("cap:test".into()),
+            )
             .issuer("issuer-x")
             .issued_at(Utc::now());
 
@@ -2013,9 +2024,15 @@ mod tests {
     #[test]
     fn cwt_claims_roundtrip_reserialize_is_byte_identical() {
         let claims = CwtClaims::new()
-            .custom(fcp2_claims::SCHEMA_VERSION, ciborium::Value::Integer(1.into()))
+            .custom(
+                fcp2_claims::SCHEMA_VERSION,
+                ciborium::Value::Integer(1.into()),
+            )
             .custom(fcp2_claims::ZONE_ID, ciborium::Value::Text("z:work".into()))
-            .custom(fcp2_claims::CAPABILITY_ID, ciborium::Value::Text("cap:test".into()))
+            .custom(
+                fcp2_claims::CAPABILITY_ID,
+                ciborium::Value::Text("cap:test".into()),
+            )
             .issuer("issuer-x")
             .issued_at(Utc::now());
 
@@ -2540,7 +2557,10 @@ mod tests {
                     msg.contains("constraints_cbor"),
                     "error must name the field: {msg}"
                 );
-                assert!(msg.contains("invalid CBOR"), "error must describe cause: {msg}");
+                assert!(
+                    msg.contains("invalid CBOR"),
+                    "error must describe cause: {msg}"
+                );
             }
             other => panic!("expected SerializationError, got {other:?}"),
         }
@@ -2573,7 +2593,10 @@ mod tests {
         match result {
             Ok(_) => panic!("builder wrapper must fail closed on malformed CBOR"),
             Err(CryptoError::SerializationError(msg)) => {
-                assert!(msg.contains("invalid CBOR"), "error must describe cause: {msg}");
+                assert!(
+                    msg.contains("invalid CBOR"),
+                    "error must describe cause: {msg}"
+                );
             }
             Err(other) => panic!("expected SerializationError, got {other:?}"),
         }

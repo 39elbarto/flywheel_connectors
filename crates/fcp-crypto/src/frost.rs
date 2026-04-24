@@ -581,8 +581,7 @@ impl FrostKeyPackage {
     /// Returns an error if any consistency check fails.
     pub fn validate(&self) -> CryptoResult<()> {
         let key_package = self.to_frost()?;
-        let derived_verifying: frost::keys::VerifyingShare =
-            (*key_package.signing_share()).into();
+        let derived_verifying: frost::keys::VerifyingShare = (*key_package.signing_share()).into();
         if derived_verifying != *key_package.verifying_share() {
             return Err(CryptoError::FrostFailed(
                 "signing share does not match verifying share".to_string(),
@@ -734,7 +733,11 @@ impl FrostPublicKeyPackage {
         let take_count = usize::from(self.min_signers);
         let mut id_scalars: Vec<Scalar> = Vec::with_capacity(take_count);
         let mut id_elements: Vec<Element> = Vec::with_capacity(take_count);
-        for (id, vshare) in public_key_package.verifying_shares().iter().take(take_count) {
+        for (id, vshare) in public_key_package
+            .verifying_shares()
+            .iter()
+            .take(take_count)
+        {
             let id_bytes_vec = id.serialize();
             let id_bytes: [u8; 32] = id_bytes_vec.as_slice().try_into().map_err(|_| {
                 CryptoError::FrostFailed("frost identifier serialization length".to_string())
@@ -756,23 +759,21 @@ impl FrostPublicKeyPackage {
         }
 
         let mut accum: Element = GroupT::identity();
-        for i in 0..id_scalars.len() {
-            let x_i = id_scalars[i];
+        for (i, x_i) in id_scalars.iter().copied().enumerate() {
             let mut num = FieldT::one();
             let mut den = FieldT::one();
-            for j in 0..id_scalars.len() {
+            for (j, x_j) in id_scalars.iter().copied().enumerate() {
                 if i == j {
                     continue;
                 }
-                let x_j = id_scalars[j];
-                num = num * x_j;
-                den = den * (x_j - x_i);
+                num *= x_j;
+                den *= x_j - x_i;
             }
             let den_inv = FieldT::invert(&den).map_err(|e| {
                 CryptoError::FrostFailed(format!("lagrange denominator inverse: {e:?}"))
             })?;
             let lambda = num * den_inv;
-            accum = accum + (id_elements[i] * lambda);
+            accum += id_elements[i] * lambda;
         }
 
         let stored_bytes = self.group_public_key.to_bytes();

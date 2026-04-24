@@ -577,6 +577,18 @@ fn normalize_base_url(
         code: 1003,
         message: "base_url must include a host".into(),
     })?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include query or fragment components".into(),
+        });
+    }
     let is_localhost = matches!(host, "127.0.0.1" | "localhost");
     let valid_scheme = parsed.scheme() == "https" || (parsed.scheme() == "http" && is_localhost);
     if !valid_scheme {
@@ -589,7 +601,7 @@ fn normalize_base_url(
     if !is_localhost
         && !allowed_suffixes
             .iter()
-            .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")))
+            .any(|allowed_host| host == *allowed_host)
     {
         return Err(FcpError::InvalidRequest {
             code: 1003,
@@ -687,6 +699,20 @@ mod tests {
         )
         .expect_err("expected host validation failure");
         assert!(error.to_string().contains("not allowed"));
+    }
+
+    #[test]
+    fn base_url_rejects_ambiguous_authority_components() {
+        for base_url in [
+            "https://user:secret@openrouter.ai/api/v1",
+            "https://openrouter.ai/api/v1?proxy=evil",
+            "https://openrouter.ai/api/v1#fragment",
+            "https://api.openrouter.ai/api/v1",
+        ] {
+            let error = normalize_base_url(Some(base_url), DEFAULT_BASE_URL, &["openrouter.ai"])
+                .expect_err("ambiguous or non-manifest host must be rejected");
+            assert!(error.to_string().contains("base_url"));
+        }
     }
 
     #[test]

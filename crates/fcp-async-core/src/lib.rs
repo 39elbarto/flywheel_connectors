@@ -1249,6 +1249,9 @@ pub mod channel {
             ///
             /// # Errors
             /// Returns `RecvError` when the value is not yet available or the sender was dropped.
+            ///
+            /// # Panics
+            /// Panics if the internal one-shot state mutex is poisoned.
             pub fn try_recv(&mut self) -> Result<T, error::RecvError> {
                 if self.completed {
                     return Err(error::RecvError);
@@ -2525,12 +2528,7 @@ impl TaskGroup {
                 Err(AsyncError::Timeout { .. }) => {
                     return Err(first_error.unwrap_or(AsyncError::Timeout { timeout_ms }));
                 }
-                Err(err) => {
-                    if first_error.is_none() {
-                        first_error = Some(err);
-                    }
-                    return Err(first_error.expect("first error just assigned"));
-                }
+                Err(err) => return Err(first_error.unwrap_or(err)),
             }
         }
 

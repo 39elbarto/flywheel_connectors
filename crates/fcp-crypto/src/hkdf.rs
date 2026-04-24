@@ -191,7 +191,9 @@ impl Fcp2KeyDerivation {
         );
         info.extend_from_slice(label);
         for part in parts {
-            info.extend_from_slice(&(part.len() as u32).to_be_bytes());
+            let part_len =
+                u32::try_from(part.len()).expect("HKDF info part length exceeds u32::MAX");
+            info.extend_from_slice(&part_len.to_be_bytes());
             info.extend_from_slice(part);
         }
         info
@@ -704,8 +706,7 @@ mod tests {
         let mut derived = Vec::new();
         for dir in directions {
             for sid in session_ids {
-                let key =
-                    Fcp2KeyDerivation::derive_session_key(&shared, sid, dir).unwrap();
+                let key = Fcp2KeyDerivation::derive_session_key(&shared, sid, dir).unwrap();
                 derived.push(*key.as_bytes());
             }
         }
@@ -735,7 +736,11 @@ mod tests {
 
         let keys: Vec<[u8; 32]> = purposes
             .iter()
-            .map(|p| *Fcp2KeyDerivation::derive_mac_key(&session_key, *p).unwrap().as_bytes())
+            .map(|p| {
+                *Fcp2KeyDerivation::derive_mac_key(&session_key, *p)
+                    .unwrap()
+                    .as_bytes()
+            })
             .collect();
 
         for i in 0..keys.len() {

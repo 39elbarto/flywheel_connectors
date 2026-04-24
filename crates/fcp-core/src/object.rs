@@ -263,7 +263,7 @@ impl StoredObject {
     /// `self.object_id == derive_id(self.header, self.body, key)` without
     /// access to the zone keys (which live in `ZoneKeyMaterial`, outside
     /// the store). Full content-ID verification is the runtime-API layer's
-    /// responsibility (e.g., MeshNode at the put boundary).
+    /// responsibility (e.g., `MeshNode` at the put boundary).
     ///
     /// This method provides the strongest *key-free* check available:
     /// run the canonical encoding pipeline that `derive_id` would run, so

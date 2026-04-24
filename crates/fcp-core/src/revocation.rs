@@ -504,7 +504,7 @@ impl RevocationRegistry {
     /// Add a revocation to the registry.
     ///
     /// An incoming revocation only replaces an existing one when it **strictly
-    /// dominates** it in the 2-D (effective_at ↓, expires_at ↑) poset: the new
+    /// dominates** it in the 2-D (`effective_at` ↓, `expires_at` ↑) poset: the new
     /// window must be weakly wider on both axes (starts no later *and* ends no
     /// sooner) AND strictly wider on at least one axis. Identical windows are
     /// ties — first-writer wins, so replays cannot churn metadata. This closes
@@ -527,27 +527,23 @@ impl RevocationRegistry {
     /// `None` for `expires_at` represents +∞ for the "ends no sooner" check.
     pub fn add_revocation(&mut self, revocation: &RevocationObject) {
         for object_id in &revocation.revoked {
-            let should_replace = match self.revocations.get(object_id) {
-                None => true,
-                Some(existing) => {
-                    let starts_no_later = revocation.effective_at <= existing.effective_at;
-                    let ends_no_sooner = match (revocation.expires_at, existing.expires_at) {
-                        (None, _) => true, // new never expires ⇒ dominates any finite expiry
-                        (Some(_), None) => false, // existing never expires ⇒ nothing dominates it
-                        (Some(new_exp), Some(old_exp)) => new_exp >= old_exp,
-                    };
-                    let ends_strictly_later = match (revocation.expires_at, existing.expires_at) {
-                        (None, Some(_)) => true, // +∞ > finite
-                        (Some(new_exp), Some(old_exp)) => new_exp > old_exp,
-                        _ => false,
-                    };
-                    let starts_strictly_earlier =
-                        revocation.effective_at < existing.effective_at;
-                    starts_no_later
-                        && ends_no_sooner
-                        && (starts_strictly_earlier || ends_strictly_later)
-                }
-            };
+            let should_replace = self.revocations.get(object_id).is_none_or(|existing| {
+                let starts_no_later = revocation.effective_at <= existing.effective_at;
+                let ends_no_sooner = match (revocation.expires_at, existing.expires_at) {
+                    (None, _) => true,        // new never expires ⇒ dominates any finite expiry
+                    (Some(_), None) => false, // existing never expires ⇒ nothing dominates it
+                    (Some(new_exp), Some(old_exp)) => new_exp >= old_exp,
+                };
+                let ends_strictly_later = match (revocation.expires_at, existing.expires_at) {
+                    (None, Some(_)) => true, // +∞ > finite
+                    (Some(new_exp), Some(old_exp)) => new_exp > old_exp,
+                    _ => false,
+                };
+                let starts_strictly_earlier = revocation.effective_at < existing.effective_at;
+                starts_no_later
+                    && ends_no_sooner
+                    && (starts_strictly_earlier || ends_strictly_later)
+            });
             if should_replace {
                 self.revocations.insert(*object_id, revocation.clone());
             }
@@ -555,7 +551,7 @@ impl RevocationRegistry {
     }
 
     /// Update the head pointer and sequence.
-    pub fn update_head(&mut self, head: ObjectId, seq: u64, updated_at: u64) {
+    pub const fn update_head(&mut self, head: ObjectId, seq: u64, updated_at: u64) {
         // Enforce sequence monotonicity (C1.3)
         if seq <= self.head_seq && self.head.is_some() {
             return;

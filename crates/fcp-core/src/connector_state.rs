@@ -53,7 +53,7 @@ pub const MAX_CURSOR_STATE_BYTES: usize = 64 * 1024;
 /// realistic multi-thousand-entry `LwwMap`/`OrSet` states while still
 /// rejecting pathological branches crafted to force unbounded allocation
 /// during `ciborium::from_reader` — each merge deserializes both branches,
-/// so unbounded branches are a two-sided DoS surface.
+/// so unbounded branches are a two-sided `DoS` surface.
 pub const MAX_CRDT_STATE_BYTES: usize = 4 * 1024 * 1024;
 
 // ─────────────────────────────────────────────────────────────────────────────

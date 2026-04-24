@@ -11,6 +11,7 @@ use fcp_core::{
 };
 use serde_json::json;
 use tracing::{info, instrument};
+use url::Url;
 
 use crate::error::RouterError;
 use crate::routing;
@@ -69,7 +70,12 @@ impl LlmRouterConnector {
         })
     }
 
-    fn verify_capability(&self, params: &serde_json::Value, required_cap: &str) -> FcpResult<()> {
+    fn verify_capability(
+        &self,
+        params: &serde_json::Value,
+        required_cap: &str,
+        operation: &str,
+    ) -> FcpResult<()> {
         let token_value = params
             .get("capability_token")
             .ok_or(FcpError::Unauthorized {
@@ -87,11 +93,11 @@ impl LlmRouterConnector {
                         message: "Invalid capability ID format".into(),
                     })?;
                 let op_id: OperationId =
-                    required_cap.parse().map_err(|_| FcpError::InvalidRequest {
+                    operation.parse().map_err(|_| FcpError::InvalidRequest {
                         code: 1003,
                         message: "Invalid operation ID format".into(),
                     })?;
-                verifier.verify(token, &cap_id, &op_id, &[])?;
+                verifier.verify_bound(token, &cap_id, &op_id, &[])?;
             }
             return Ok(());
         }
@@ -702,23 +708,23 @@ impl LlmRouterConnector {
 
         let result = match operation {
             "llm-router.route" => {
-                self.verify_capability(&params, "llm-router.route")?;
+                self.verify_capability(&params, "llm-router.route", operation)?;
                 self.invoke_route(input).await
             }
             "llm-router.estimate_cost" => {
-                self.verify_capability(&params, "llm-router.route")?;
+                self.verify_capability(&params, "llm-router.route", operation)?;
                 self.invoke_estimate_cost(input).await
             }
             "llm-router.list_providers" => {
-                self.verify_capability(&params, "llm-router.admin")?;
+                self.verify_capability(&params, "llm-router.admin", operation)?;
                 self.invoke_list_providers(input).await
             }
             "llm-router.get_usage" => {
-                self.verify_capability(&params, "llm-router.admin")?;
+                self.verify_capability(&params, "llm-router.admin", operation)?;
                 self.invoke_get_usage(input).await
             }
             "llm-router.get_budget" => {
-                self.verify_capability(&params, "llm-router.admin")?;
+                self.verify_capability(&params, "llm-router.admin", operation)?;
                 self.invoke_get_budget(input).await
             }
             _ => Err(FcpError::InvalidRequest {
@@ -1233,28 +1239,33 @@ impl LlmRouterConnector {
             "generativelanguage.googleapis.com",
         ];
 
-        let host = base_url
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .split('/')
-            .next()
-            .unwrap_or("")
-            .split(':')
-            .next()
-            .unwrap_or("");
-
-        if ALLOWED_HOSTS.contains(&host) {
-            return true;
-        }
-
-        // Allow localhost for test infrastructure
-        if (cfg!(test) || cfg!(feature = "testing"))
-            && (host == "localhost" || host == "127.0.0.1" || host == "::1")
+        let Ok(parsed) = Url::parse(base_url.trim()) else {
+            return false;
+        };
+        if !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
         {
-            return true;
+            return false;
         }
 
-        false
+        let Some(host) = parsed
+            .host_str()
+            .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
+        else {
+            return false;
+        };
+        let is_localhost = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "[::1]");
+
+        // Allow localhost for test infrastructure.
+        if (cfg!(test) || cfg!(feature = "testing")) && is_localhost {
+            return matches!(parsed.scheme(), "http" | "https");
+        }
+
+        parsed.scheme() == "https"
+            && parsed.port_or_known_default() == Some(443)
+            && ALLOWED_HOSTS.contains(&host.as_str())
     }
 
     /// Build per-provider provisioning readiness.
@@ -1305,6 +1316,10 @@ impl LlmRouterConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
+    use fcp_core::CapabilityConstraints;
+    use fcp_crypto::cose::CapabilityTokenBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
 
     fn test_config_params() -> serde_json::Value {
         json!({
@@ -1347,6 +1362,32 @@ mod tests {
                 "period": "session"
             }
         })
+    }
+
+    fn signed_token(
+        signing_key: &Ed25519SigningKey,
+        capability: &str,
+        operation: &str,
+    ) -> CapabilityToken {
+        let now = chrono::Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+        let raw = CapabilityTokenBuilder::new()
+            .capability_id(capability)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&[operation])
+            .issuer("node:test")
+            .validity(now, now + Duration::hours(1))
+            .try_constraints_cbor(&cbor)
+            .expect("test constraints CBOR should be valid")
+            .sign(signing_key)
+            .expect("test token signing should succeed");
+        CapabilityToken::from_raw(raw)
     }
 
     #[fcp_async_core::runtime::test]
@@ -1425,6 +1466,39 @@ mod tests {
         assert_eq!(providers.len(), 2);
         assert_eq!(providers[0]["name"], "anthropic");
         assert!(providers[0]["models"].as_array().is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_with_real_token_checks_actual_operation_id() {
+        let mut connector = LlmRouterConnector::new();
+        connector
+            .handle_configure(test_config_params())
+            .await
+            .expect("configure should succeed");
+
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["llm-router.admin"]
+            }))
+            .await
+            .expect("handshake should succeed");
+
+        let token = signed_token(&signing_key, "llm-router.admin", "llm-router.get_budget");
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "llm-router.get_budget",
+                "capability_token": token,
+                "input": {}
+            }))
+            .await
+            .expect("operation-specific admin token should be accepted");
+
+        assert_eq!(result["enforcement"], "hard");
     }
 
     #[fcp_async_core::runtime::test]
@@ -1872,6 +1946,19 @@ mod tests {
         assert!(!LlmRouterConnector::host_allowed(
             "https://phishing-openai.com"
         ));
+        assert!(!LlmRouterConnector::host_allowed("http://api.openai.com"));
+        assert!(!LlmRouterConnector::host_allowed(
+            "https://api.openai.com:444"
+        ));
+        assert!(!LlmRouterConnector::host_allowed(
+            "https://api.openai.com:443@evil.example.com/v1"
+        ));
+        assert!(!LlmRouterConnector::host_allowed(
+            "https://api.openai.com/v1?proxy=evil"
+        ));
+        assert!(!LlmRouterConnector::host_allowed(
+            "https://api.openai.com/v1#fragment"
+        ));
         assert!(!LlmRouterConnector::host_allowed(""));
     }
 
@@ -1880,6 +1967,7 @@ mod tests {
         // In #[cfg(test)], localhost should be allowed
         assert!(LlmRouterConnector::host_allowed("http://localhost:8080"));
         assert!(LlmRouterConnector::host_allowed("http://127.0.0.1:3000"));
+        assert!(LlmRouterConnector::host_allowed("http://[::1]:3000"));
     }
 
     #[fcp_async_core::runtime::test]

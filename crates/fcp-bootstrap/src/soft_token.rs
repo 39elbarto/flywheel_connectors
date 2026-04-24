@@ -7,10 +7,10 @@
 //!
 //! # Determinism
 //!
-//! All key material is derived from a fixed seed via `ChaCha20Rng`, so repeated
-//! runs produce identical tokens, certificates, and keys.  Each identity gets a
-//! unique sub-seed derived by HKDF from the master seed and an identity index,
-//! ensuring stable material even when the identity count changes.
+//! All key material is derived from a fixed seed via HKDF, so repeated runs
+//! produce identical tokens, certificates, and keys for the same soft-token
+//! configuration. Each identity gets a unique sub-seed derived from the token
+//! identity, the identity specification, and its index.
 //!
 //! # Usage
 //!
@@ -206,8 +206,8 @@ impl SoftTokenDriver {
             mechanisms: config.mechanisms.clone(),
         };
 
-        let identities = materialize_identities(&config.identities);
-        let extra_certificates = implicit_ca_certificates(&config.identities);
+        let identities = materialize_identities(&config);
+        let extra_certificates = implicit_ca_certificates(&config);
 
         Self {
             pin: HardwareTokenPin::new(config.pin),
@@ -326,11 +326,13 @@ impl HardwareTokenSessionDriver for SoftTokenDriver {
 }
 
 /// Derive deterministic identity material from the master seed.
-fn materialize_identities(specs: &[SoftTokenIdentitySpec]) -> Vec<MaterializedIdentity> {
-    let derived_identities = specs
+fn materialize_identities(config: &SoftTokenConfig) -> Vec<MaterializedIdentity> {
+    let token_context = soft_token_derivation_context(config);
+    let derived_identities = config
+        .identities
         .iter()
         .enumerate()
-        .map(|(index, spec)| derive_identity(index, spec))
+        .map(|(index, spec)| derive_identity(&token_context, index, spec))
         .collect::<Vec<_>>();
     let default_ca = derived_identities
         .iter()
@@ -363,7 +365,7 @@ fn materialize_identities(specs: &[SoftTokenIdentitySpec]) -> Vec<MaterializedId
                     &identity.spec.subject_cn,
                     "FCP SoftToken CA",
                     &identity.signing_key_bytes,
-                    &implicit_ca_signing_key_bytes(),
+                    &implicit_ca_signing_key_bytes(&token_context),
                 )
             };
 
@@ -377,23 +379,28 @@ fn materialize_identities(specs: &[SoftTokenIdentitySpec]) -> Vec<MaterializedId
         .collect()
 }
 
-fn implicit_ca_certificates(specs: &[SoftTokenIdentitySpec]) -> Vec<TokenCertificate> {
-    let has_leaf = specs.iter().any(|spec| !spec.is_ca);
-    let has_explicit_ca = specs.iter().any(|spec| spec.is_ca);
+fn implicit_ca_certificates(config: &SoftTokenConfig) -> Vec<TokenCertificate> {
+    let has_leaf = config.identities.iter().any(|spec| !spec.is_ca);
+    let has_explicit_ca = config.identities.iter().any(|spec| spec.is_ca);
     if !has_leaf || has_explicit_ca {
         return Vec::new();
     }
 
-    vec![implicit_ca_certificate()]
+    let token_context = soft_token_derivation_context(config);
+    vec![implicit_ca_certificate(&token_context)]
 }
 
-fn derive_identity(index: usize, spec: &SoftTokenIdentitySpec) -> DerivedIdentity {
-    // Derive a per-identity signing key using HKDF from the master seed + index.
+fn derive_identity(
+    token_context: &[u8],
+    index: usize,
+    spec: &SoftTokenIdentitySpec,
+) -> DerivedIdentity {
+    // Derive a per-identity signing key using HKDF from token + identity context.
     // No RNG needed — the key material is fully deterministic.
     let mut signing_key_bytes = [0u8; 32];
-    let hk =
-        hkdf::Hkdf::<sha2::Sha256>::new(Some(&DEFAULT_MASTER_SEED), &(index as u64).to_le_bytes());
-    hk.expand(b"fcp-soft-token-identity", &mut signing_key_bytes)
+    let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(&DEFAULT_MASTER_SEED), token_context);
+    let info = identity_derivation_info(index, spec);
+    hk.expand(&info, &mut signing_key_bytes)
         .expect("32 bytes is a valid HKDF-SHA256 output length");
 
     let signing_key = SigningKey::from_bytes(&signing_key_bytes);
@@ -417,6 +424,53 @@ fn derive_identity(index: usize, spec: &SoftTokenIdentitySpec) -> DerivedIdentit
         key_info,
         signing_key_bytes,
     }
+}
+
+fn push_len_prefixed(buf: &mut Vec<u8>, value: &[u8]) {
+    let len = u64::try_from(value.len()).unwrap_or(u64::MAX);
+    buf.extend_from_slice(&len.to_le_bytes());
+    buf.extend_from_slice(value);
+}
+
+fn push_bool(buf: &mut Vec<u8>, value: bool) {
+    buf.push(u8::from(value));
+}
+
+fn soft_token_derivation_context(config: &SoftTokenConfig) -> Vec<u8> {
+    let mut context = Vec::new();
+    push_len_prefixed(&mut context, b"FCP-SOFT-TOKEN-CONTEXT-V2");
+    context.extend_from_slice(&config.slot.to_le_bytes());
+    push_len_prefixed(&mut context, config.token_label.as_bytes());
+    push_len_prefixed(&mut context, config.manufacturer.as_bytes());
+    push_len_prefixed(&mut context, config.serial.as_bytes());
+    context
+}
+
+fn push_key_type(buf: &mut Vec<u8>, key_type: TokenKeyType) {
+    match key_type {
+        TokenKeyType::Ed25519 => push_len_prefixed(buf, b"Ed25519"),
+        TokenKeyType::X25519 => push_len_prefixed(buf, b"X25519"),
+        TokenKeyType::EcdsaP256 => push_len_prefixed(buf, b"EcdsaP256"),
+        TokenKeyType::EcdsaP384 => push_len_prefixed(buf, b"EcdsaP384"),
+        TokenKeyType::Rsa => push_len_prefixed(buf, b"Rsa"),
+        TokenKeyType::Other(value) => {
+            push_len_prefixed(buf, b"Other");
+            buf.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
+fn identity_derivation_info(index: usize, spec: &SoftTokenIdentitySpec) -> Vec<u8> {
+    let mut info = Vec::new();
+    push_len_prefixed(&mut info, b"FCP-SOFT-TOKEN-IDENTITY-V2");
+    info.extend_from_slice(&u64::try_from(index).unwrap_or(u64::MAX).to_le_bytes());
+    push_len_prefixed(&mut info, spec.label.as_bytes());
+    push_len_prefixed(&mut info, spec.subject_cn.as_bytes());
+    push_key_type(&mut info, spec.key_type);
+    push_bool(&mut info, spec.can_sign);
+    push_bool(&mut info, spec.can_derive);
+    push_bool(&mut info, spec.is_ca);
+    info
 }
 
 fn build_certificate_params(common_name: &str, is_ca: bool) -> CertificateParams {
@@ -490,21 +544,23 @@ fn build_signed_certificate(
     }
 }
 
-fn implicit_ca_signing_key_bytes() -> [u8; 32] {
+fn implicit_ca_signing_key_bytes(token_context: &[u8]) -> [u8; 32] {
     let mut signing_key_bytes = [0u8; 32];
-    let hk =
-        hkdf::Hkdf::<sha2::Sha256>::new(Some(&DEFAULT_MASTER_SEED), b"fcp-soft-token-implicit-ca");
+    let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(&DEFAULT_MASTER_SEED), token_context);
     hk.expand(b"fcp-soft-token-ca", &mut signing_key_bytes)
         .expect("32 bytes is a valid HKDF-SHA256 output length");
     signing_key_bytes
 }
 
-fn implicit_ca_certificate() -> TokenCertificate {
+fn implicit_ca_certificate(token_context: &[u8]) -> TokenCertificate {
     let ca_label = "soft-token-ca";
     let subject_cn = "FCP SoftToken CA";
-    let id_hash = blake3::hash(b"fcp-soft-token-ca");
+    let mut id_material = Vec::new();
+    push_len_prefixed(&mut id_material, b"FCP-SOFT-TOKEN-IMPLICIT-CA-ID-V2");
+    push_len_prefixed(&mut id_material, token_context);
+    let id_hash = blake3::hash(&id_material);
     let cka_id = id_hash.as_bytes()[..20].to_vec();
-    let signing_key_bytes = implicit_ca_signing_key_bytes();
+    let signing_key_bytes = implicit_ca_signing_key_bytes(token_context);
 
     build_self_signed_certificate(ca_label, &cka_id, subject_cn, &signing_key_bytes, true)
 }
@@ -600,6 +656,27 @@ mod tests {
         assert_ne!(
             driver.identities[0].id, driver.identities[1].id,
             "different identities must have different CKA_IDs"
+        );
+    }
+
+    #[test]
+    fn identity_spec_changes_key_material_at_same_index() {
+        let first = SoftTokenDriver::deterministic(SoftTokenConfig {
+            identities: vec![SoftTokenIdentitySpec::ed25519("key-a", "Subject A")],
+            ..SoftTokenConfig::default()
+        });
+        let second = SoftTokenDriver::deterministic(SoftTokenConfig {
+            identities: vec![SoftTokenIdentitySpec::ed25519("key-b", "Subject A")],
+            ..SoftTokenConfig::default()
+        });
+
+        assert_ne!(
+            first.identities[0].signing_key_bytes, second.identities[0].signing_key_bytes,
+            "identity label must be part of deterministic key derivation"
+        );
+        assert_ne!(
+            first.identities[0].id, second.identities[0].id,
+            "identity label must be part of CKA_ID derivation"
         );
     }
 
@@ -845,6 +922,40 @@ mod tests {
         let tokens = harness.all_tokens();
         assert_eq!(tokens[0].label, "Token-A");
         assert_eq!(tokens[1].label, "Token-B");
+    }
+
+    #[test]
+    fn multi_token_harness_assigns_distinct_identity_material_per_token() {
+        let harness = SoftTokenHarness::new(vec![
+            SoftTokenConfig {
+                slot: 0,
+                token_label: "Token-A".into(),
+                serial: "A001".into(),
+                ..SoftTokenConfig::default()
+            },
+            SoftTokenConfig {
+                slot: 1,
+                token_label: "Token-B".into(),
+                serial: "B001".into(),
+                ..SoftTokenConfig::default()
+            },
+        ]);
+
+        let first = harness.drivers.get(&0).expect("slot 0 driver");
+        let second = harness.drivers.get(&1).expect("slot 1 driver");
+
+        assert_ne!(
+            first.identities[0].id, second.identities[0].id,
+            "different soft tokens must not expose colliding CKA_IDs"
+        );
+        assert_ne!(
+            first.identities[0].certificate.der_bytes, second.identities[0].certificate.der_bytes,
+            "different soft tokens must not expose identical certificates"
+        );
+        assert_ne!(
+            first.extra_certificates[0].id, second.extra_certificates[0].id,
+            "implicit CA objects must be token-specific"
+        );
     }
 
     // ── Full pipeline: select_and_authenticate through soft token ──────

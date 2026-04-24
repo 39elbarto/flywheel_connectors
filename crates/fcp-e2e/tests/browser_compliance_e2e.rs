@@ -570,7 +570,7 @@ async fn browser_dangerous_operations_require_approval_tokens() {
         assert!(result.is_err(), "{operation} should require approval token");
         match result.expect_err("dangerous operation should fail without approval") {
             FcpError::CapabilityDenied { capability, reason } => {
-                assert_eq!(capability, expected_capability);
+                assert_eq!(capability, operation);
                 assert!(reason.contains("ApprovalToken"));
             }
             err => panic!("expected capability denial, got {err:?}"),

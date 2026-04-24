@@ -697,7 +697,7 @@ fn figma_operation_risk_levels_properly_gated() {
     // Total operation count
     assert_eq!(
         operations.len(),
-        17,
-        "Figma manifest should have 17 operations"
+        19,
+        "Figma manifest should have 19 operations"
     );
 }

@@ -436,6 +436,9 @@ pub enum ZoneIdError {
     #[error("tailscale tag must start with `tag:fcp-`")]
     InvalidTailscaleTagPrefix,
 
+    #[error("zone id prefix `{prefix}` is reserved")]
+    ReservedPrefix { prefix: &'static str },
+
     #[error("zone id has invalid character '{ch}' at byte {index}")]
     InvalidChar { ch: char, index: usize },
 }
@@ -505,11 +508,14 @@ impl ZoneId {
     /// Map to Tailscale ACL tag.
     #[must_use]
     pub fn to_tailscale_tag(&self) -> String {
-        let suffix = self
-            .as_str()
-            .strip_prefix("z:")
-            .unwrap_or(self.as_str())
-            .replace(['_', ':'], "-");
+        let raw = self.as_str();
+        let suffix = raw
+            .strip_prefix("z:project:")
+            .map_or_else(
+                || raw.strip_prefix("z:").unwrap_or(raw).replace('_', "-"),
+                |project| format!("proj-{}", project.replace('_', "-")),
+            )
+            .replace(':', "-");
         format!("tag:fcp-{suffix}")
     }
 
@@ -521,7 +527,10 @@ impl ZoneId {
         let Some(suffix) = tag.strip_prefix("tag:fcp-") else {
             return Err(ZoneIdError::InvalidTailscaleTagPrefix);
         };
-        let zone = format!("z:{suffix}");
+        let zone = suffix.strip_prefix("proj-").map_or_else(
+            || format!("z:{suffix}"),
+            |project| format!("z:project:{project}"),
+        );
         zone.parse()
     }
 }
@@ -556,11 +565,48 @@ impl ZoneId {
             segment_start += segment.len() + 1;
         }
 
+        if zone_id[2..].starts_with("proj-") {
+            return Err(ZoneIdError::ReservedPrefix { prefix: "z:proj-" });
+        }
+
+        if let Some(project) = zone_id.strip_prefix("z:project:") {
+            Self::validate_project_zone_name(project)?;
+        }
+
         for (index, ch) in zone_id.char_indices() {
             let ok =
                 ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, ':' | '_' | '-');
             if !ok {
                 return Err(ZoneIdError::InvalidChar { ch, index });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_project_zone_name(project: &str) -> Result<(), ZoneIdError> {
+        let project_start = "z:project:".len();
+
+        if project.starts_with('-') {
+            return Err(ZoneIdError::InvalidChar {
+                ch: '-',
+                index: project_start,
+            });
+        }
+
+        if project.ends_with('-') {
+            return Err(ZoneIdError::InvalidChar {
+                ch: '-',
+                index: project_start + project.len() - 1,
+            });
+        }
+
+        for (offset, ch) in project.char_indices() {
+            if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-') {
+                return Err(ZoneIdError::InvalidChar {
+                    ch,
+                    index: project_start + offset,
+                });
             }
         }
 
@@ -1021,7 +1067,10 @@ pub type UnverifiedToken = CapabilityToken<Unverified>;
 /// **Deprecated (br-jkcka.8):** ambiguous — prefer the typed variants
 /// `CapabilityToken<BoundVerified>` or `CapabilityToken<UnboundVerified>`.
 #[allow(deprecated)]
-#[deprecated(since = "0.1.1", note = "ambiguous; prefer BoundVerified / UnboundVerified")]
+#[deprecated(
+    since = "0.1.1",
+    note = "ambiguous; prefer BoundVerified / UnboundVerified"
+)]
 pub type VerifiedToken = CapabilityToken<CryptographicallyVerified>;
 
 /// Flywheel Capability Token (FCT) - cryptographically signed authorization.
@@ -1236,9 +1285,12 @@ impl CapabilityToken<UnboundVerified> {
         self,
         expected: &InstanceId,
     ) -> FcpResult<CapabilityToken<BoundVerified>> {
-        let claims = self.verified_claims.as_ref().ok_or_else(|| FcpError::Internal {
-            message: "UnboundVerified token missing claims (invariant violation)".into(),
-        })?;
+        let claims = self
+            .verified_claims
+            .as_ref()
+            .ok_or_else(|| FcpError::Internal {
+                message: "UnboundVerified token missing claims (invariant violation)".into(),
+            })?;
 
         // Instance-agnostic tokens (no INSTANCE_ID claim) promote
         // unconditionally — matches verify_bound semantics in
@@ -1705,7 +1757,10 @@ impl CapabilityVerifier {
         })
     }
 
-    fn validate_timing_with_clock_skew(claims: &CwtClaims, now: chrono::DateTime<Utc>) -> FcpResult<()> {
+    fn validate_timing_with_clock_skew(
+        claims: &CwtClaims,
+        now: chrono::DateTime<Utc>,
+    ) -> FcpResult<()> {
         let now_ts = now.timestamp();
 
         if let Some(exp) = claims.get_expiration() {
@@ -2773,9 +2828,7 @@ mod tests {
                     "expected error to mention non-wildcard intent, got: {resource}"
                 );
             }
-            other => panic!(
-                "expected ResourceNotAllowed for non-wildcard+empty, got {other:?}"
-            ),
+            other => panic!("expected ResourceNotAllowed for non-wildcard+empty, got {other:?}"),
         }
     }
 
@@ -3310,8 +3363,7 @@ mod tests {
             .issued_at(now)
             .expiration(now + Duration::hours(1))
             .constraints_cbor(&test_constraints_cbor());
-        let cose_token =
-            fcp_crypto::cose::CoseToken::sign(&signing_key, &claims).unwrap();
+        let cose_token = fcp_crypto::cose::CoseToken::sign(&signing_key, &claims).unwrap();
         let token = CapabilityToken::from_raw(cose_token);
 
         let verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
@@ -3400,7 +3452,13 @@ mod tests {
             .unwrap();
         let cap = CapabilityId::new("cap.test").unwrap();
         let op = OperationId::new("op.test").unwrap();
-        (CapabilityToken::from_raw(cose), pub_bytes, instance, cap, op)
+        (
+            CapabilityToken::from_raw(cose),
+            pub_bytes,
+            instance,
+            cap,
+            op,
+        )
     }
 
     #[test]
@@ -3476,7 +3534,11 @@ mod tests {
         let unbound = verifier.verify_unbound(token, &cap, &op, &[]).unwrap();
         let err = unbound.promote_with_instance(&wrong_instance).unwrap_err();
         match err {
-            FcpError::ZoneViolation { source_zone, target_zone, message } => {
+            FcpError::ZoneViolation {
+                source_zone,
+                target_zone,
+                message,
+            } => {
                 // br-jkcka.8 fresh-eyes fix: zone fields MUST be populated
                 // from the claims (not empty strings) so the error is
                 // informative for debuggers.
@@ -3564,7 +3626,8 @@ mod tests {
             .expect("direct verify_bound must accept instance-agnostic token");
 
         // Unbound verify + promote
-        let unbound_verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
+        let unbound_verifier =
+            CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
         let via_promote = unbound_verifier
             .verify_unbound(CapabilityToken::from_raw(cose), &cap, &op, &[])
             .expect("verify_unbound must accept instance-agnostic token")
@@ -3983,6 +4046,29 @@ mod tests {
     }
 
     #[test]
+    fn zone_id_rejects_reserved_project_tag_alias() {
+        assert!(matches!(
+            "z:proj-foo".parse::<ZoneId>(),
+            Err(ZoneIdError::ReservedPrefix { prefix: "z:proj-" })
+        ));
+    }
+
+    #[test]
+    fn zone_id_rejects_project_names_that_do_not_roundtrip_through_tailscale() {
+        for zone in [
+            "z:project:-foo",
+            "z:project:foo-",
+            "z:project:foo_bar",
+            "z:project:foo:bar",
+        ] {
+            assert!(
+                matches!(zone.parse::<ZoneId>(), Err(ZoneIdError::InvalidChar { .. })),
+                "{zone} should not be accepted as a Tailscale-project zone"
+            );
+        }
+    }
+
+    #[test]
     fn zone_id_hash_deterministic() {
         let z1 = ZoneId::work();
         let z2 = ZoneId::work();
@@ -4001,12 +4087,17 @@ mod tests {
     fn zone_id_to_tailscale_tag() {
         assert_eq!(ZoneId::work().to_tailscale_tag(), "tag:fcp-work");
         assert_eq!(ZoneId::owner().to_tailscale_tag(), "tag:fcp-owner");
+        let project: ZoneId = "z:project:foo".parse().unwrap();
+        assert_eq!(project.to_tailscale_tag(), "tag:fcp-proj-foo");
     }
 
     #[test]
     fn zone_id_from_tailscale_tag() {
         let z = ZoneId::from_tailscale_tag("tag:fcp-work").unwrap();
         assert_eq!(z.as_str(), "z:work");
+
+        let project = ZoneId::from_tailscale_tag("tag:fcp-proj-foo").unwrap();
+        assert_eq!(project.as_str(), "z:project:foo");
     }
 
     #[test]
@@ -4785,6 +4876,8 @@ mod tests {
             ZoneId::work(),
             ZoneId::community(),
             ZoneId::public(),
+            "z:project:foo".parse().unwrap(),
+            "z:project:foo-bar".parse().unwrap(),
         ] {
             let tag = zone.to_tailscale_tag();
             let recovered = ZoneId::from_tailscale_tag(&tag).unwrap();
@@ -4805,7 +4898,10 @@ mod tests {
     #[test]
     fn zone_id_error_display_empty_segment() {
         let err = ZoneIdError::EmptySegment { index: 10 };
-        assert_eq!(err.to_string(), "zone id contains an empty segment at byte 10");
+        assert_eq!(
+            err.to_string(),
+            "zone id contains an empty segment at byte 10"
+        );
     }
 
     #[test]
@@ -4830,6 +4926,12 @@ mod tests {
     fn zone_id_error_display_invalid_tailscale_tag() {
         let err = ZoneIdError::InvalidTailscaleTagPrefix;
         assert_eq!(err.to_string(), "tailscale tag must start with `tag:fcp-`");
+    }
+
+    #[test]
+    fn zone_id_error_display_reserved_prefix() {
+        let err = ZoneIdError::ReservedPrefix { prefix: "z:proj-" };
+        assert_eq!(err.to_string(), "zone id prefix `z:proj-` is reserved");
     }
 
     #[test]
@@ -5420,7 +5522,9 @@ mod tests {
             display: None,
         };
 
-        let err = principal.verify_zone_access(&ZoneId::private()).unwrap_err();
+        let err = principal
+            .verify_zone_access(&ZoneId::private())
+            .unwrap_err();
         assert!(matches!(
             &err,
             FcpError::Unauthorized { code, message }
@@ -6118,7 +6222,10 @@ mod tests {
     #[test]
     fn phantom_type_verified_has_zero_runtime_overhead() {
         // PhantomData<S> is zero-sized — verify this at compile time.
-        assert_eq!(std::mem::size_of::<std::marker::PhantomData<CryptographicallyVerified>>(), 0);
+        assert_eq!(
+            std::mem::size_of::<std::marker::PhantomData<CryptographicallyVerified>>(),
+            0
+        );
         assert_eq!(
             std::mem::size_of::<std::marker::PhantomData<Unverified>>(),
             0

@@ -10,6 +10,7 @@
 //! | `z:owner`    | `tag:fcp-owner`   |
 //! | `z:private`  | `tag:fcp-private` |
 //! | `z:work`     | `tag:fcp-work`    |
+//! | `z:project:<name>` | `tag:fcp-proj-<name>` |
 //! | `z:community`| `tag:fcp-community`|
 //! | `z:public`   | `tag:fcp-public`  |
 
@@ -123,8 +124,8 @@ impl FromStr for TailscaleTag {
 ///
 /// # Zone ID Format
 ///
-/// Zone IDs have the format `z:<name>` where `<name>` is a lowercase
-/// alphanumeric string with optional hyphens.
+/// Zone IDs have the format `z:<name>` or `z:project:<name>`, where
+/// `<name>` is a lowercase alphanumeric string with optional hyphens.
 ///
 /// # Example
 ///
@@ -162,10 +163,15 @@ impl ZoneTagMapping {
     /// Returns an error if the zone ID format is invalid.
     pub fn try_zone_to_tag(zone_id: &str) -> TailscaleResult<TailscaleTag> {
         let zone_id = Self::validate_zone_id(zone_id)?;
-        let suffix = zone_id
-            .strip_prefix(Self::ZONE_PREFIX)
-            .ok_or_else(|| TailscaleError::InvalidZoneId(zone_id.to_string()))?;
-        Ok(TailscaleTag::fcp_tag(suffix))
+        let suffix = if let Some(project) = zone_id.strip_prefix("z:project:") {
+            format!("proj-{project}")
+        } else {
+            zone_id
+                .strip_prefix(Self::ZONE_PREFIX)
+                .ok_or_else(|| TailscaleError::InvalidZoneId(zone_id.to_string()))?
+                .to_string()
+        };
+        Ok(TailscaleTag::fcp_tag(&suffix))
     }
 
     /// Convert a Tailscale FCP tag to its zone ID.
@@ -187,7 +193,10 @@ impl ZoneTagMapping {
     #[must_use]
     pub fn tag_to_zone(tag: &TailscaleTag) -> Option<String> {
         let suffix = tag.fcp_suffix()?;
-        let zone = format!("{}{suffix}", Self::ZONE_PREFIX);
+        let zone = suffix.strip_prefix("proj-").map_or_else(
+            || format!("{}{suffix}", Self::ZONE_PREFIX),
+            |project| format!("z:project:{project}"),
+        );
         Self::is_valid_zone_id(&zone).then_some(zone)
     }
 
@@ -205,24 +214,28 @@ impl ZoneTagMapping {
     /// Valid zone IDs:
     /// - Start with `z:`
     /// - Followed by 1+ lowercase alphanumeric characters or hyphens
-    /// - Cannot start or end with a hyphen
+    /// - `z:project:<name>` is accepted for the FCP3 project-zone family
+    /// - Zone suffixes cannot start or end with a hyphen
     #[must_use]
     pub fn is_valid_zone_id(zone_id: &str) -> bool {
         let Some(suffix) = zone_id.strip_prefix(Self::ZONE_PREFIX) else {
             return false;
         };
 
-        if suffix.is_empty() {
-            return false;
+        if let Some(project) = suffix.strip_prefix("project:") {
+            return Self::is_valid_tag_suffix(project);
         }
 
-        if suffix.starts_with('-') || suffix.ends_with('-') {
-            return false;
-        }
+        !suffix.contains(':') && !suffix.starts_with("proj-") && Self::is_valid_tag_suffix(suffix)
+    }
 
-        suffix
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    fn is_valid_tag_suffix(suffix: &str) -> bool {
+        !suffix.is_empty()
+            && !suffix.starts_with('-')
+            && !suffix.ends_with('-')
+            && suffix
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     }
 
     /// Validate a zone ID and return it if valid.
@@ -365,6 +378,9 @@ mod tests {
 
         let tag = ZoneTagMapping::zone_to_tag("z:owner").unwrap();
         assert_eq!(tag.as_str(), "tag:fcp-owner");
+
+        let tag = ZoneTagMapping::zone_to_tag("z:project:alpha").unwrap();
+        assert_eq!(tag.as_str(), "tag:fcp-proj-alpha");
     }
 
     #[test]
@@ -382,6 +398,10 @@ mod tests {
         let tag = TailscaleTag::new("tag:fcp-private").unwrap();
         let zone = ZoneTagMapping::tag_to_zone(&tag).unwrap();
         assert_eq!(zone, "z:private");
+
+        let tag = TailscaleTag::new("tag:fcp-proj-alpha").unwrap();
+        let zone = ZoneTagMapping::tag_to_zone(&tag).unwrap();
+        assert_eq!(zone, "z:project:alpha");
 
         // Non-FCP tag returns None
         let tag = TailscaleTag::new("tag:server").unwrap();
@@ -405,6 +425,8 @@ mod tests {
         assert!(ZoneTagMapping::is_valid_zone_id("z:work"));
         assert!(ZoneTagMapping::is_valid_zone_id("z:my-zone"));
         assert!(ZoneTagMapping::is_valid_zone_id("z:zone123"));
+        assert!(ZoneTagMapping::is_valid_zone_id("z:project:alpha"));
+        assert!(ZoneTagMapping::is_valid_zone_id("z:project:alpha-1"));
 
         // Invalid cases
         assert!(!ZoneTagMapping::is_valid_zone_id("work")); // Missing prefix
@@ -413,6 +435,11 @@ mod tests {
         assert!(!ZoneTagMapping::is_valid_zone_id("z:work-")); // Ends with hyphen
         assert!(!ZoneTagMapping::is_valid_zone_id("z:Work")); // Uppercase
         assert!(!ZoneTagMapping::is_valid_zone_id("z:my_zone")); // Underscore
+        assert!(!ZoneTagMapping::is_valid_zone_id("z:proj-alpha")); // Reserved project tag family
+        assert!(!ZoneTagMapping::is_valid_zone_id("z:project:")); // Empty project name
+        assert!(!ZoneTagMapping::is_valid_zone_id("z:project:-alpha")); // Starts with hyphen
+        assert!(!ZoneTagMapping::is_valid_zone_id("z:project:alpha-")); // Ends with hyphen
+        assert!(!ZoneTagMapping::is_valid_zone_id("z:project:alpha_beta")); // Underscore
     }
 
     #[test]
@@ -428,10 +455,14 @@ mod tests {
 
     #[test]
     fn test_roundtrip_zone_tag() {
-        for zone in ZoneTagMapping::standard_zones() {
+        for zone in ZoneTagMapping::standard_zones()
+            .iter()
+            .copied()
+            .chain(["z:project:alpha", "z:project:alpha-1"])
+        {
             let tag = ZoneTagMapping::zone_to_tag(zone).unwrap();
             let recovered_zone = ZoneTagMapping::tag_to_zone(&tag).unwrap();
-            assert_eq!(&recovered_zone, zone);
+            assert_eq!(recovered_zone, zone);
         }
     }
 
@@ -911,7 +942,8 @@ mod tests {
                 )
             });
             assert_eq!(
-                recovered, zone,
+                recovered,
+                zone,
                 "round-trip drift: {zone} -> {} -> {recovered}",
                 tag.as_str(),
             );
@@ -1314,7 +1346,7 @@ mod tests {
 
     #[test]
     fn test_zone_to_tag_with_special_chars() {
-        // zone_to_tag only validates prefix, not suffix content
+        // Hyphenated numeric suffixes are valid Tailscale zone suffixes.
         let tag = ZoneTagMapping::zone_to_tag("z:123-abc").unwrap();
         assert_eq!(tag.as_str(), "tag:fcp-123-abc");
     }

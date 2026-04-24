@@ -689,7 +689,10 @@ mod tests {
 
     #[test]
     fn zone_id_tailscale_tag_roundtrip_for_all_canonical_zones() {
-        for zone in all_canonical_zones() {
+        for zone in all_canonical_zones()
+            .into_iter()
+            .chain(["z:project:foo".parse().unwrap()])
+        {
             let tag = zone.to_tailscale_tag();
             assert!(
                 tag.starts_with("tag:fcp-"),
@@ -701,6 +704,34 @@ mod tests {
                 zone.as_str(),
                 back.as_str(),
                 "roundtrip lost canonical name"
+            );
+        }
+    }
+
+    #[test]
+    fn project_zone_uses_project_tag_family() {
+        let zone: ZoneId = "z:project:foo".parse().expect("valid project zone");
+        assert_eq!(zone.to_tailscale_tag(), "tag:fcp-proj-foo");
+
+        let back =
+            ZoneId::from_tailscale_tag("tag:fcp-proj-foo").expect("project tag should decode");
+        assert_eq!(back.as_str(), "z:project:foo");
+    }
+
+    #[test]
+    fn abbreviated_project_zone_alias_is_rejected() {
+        assert!(
+            "z:proj-foo".parse::<ZoneId>().is_err(),
+            "z:proj-* would collide with the reserved tag:fcp-proj-* project-zone family"
+        );
+    }
+
+    #[test]
+    fn project_zone_names_are_tailscale_tag_safe() {
+        for zone in ["z:project:foo_bar", "z:project:foo:bar"] {
+            assert!(
+                zone.parse::<ZoneId>().is_err(),
+                "{zone} would flatten to an ambiguous Tailscale tag"
             );
         }
     }

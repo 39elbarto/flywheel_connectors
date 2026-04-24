@@ -301,7 +301,9 @@ impl MemorySymbolStore {
                 return;
             };
             let mut obj = obj_lock.write();
-            Self::scrub_corrupt_symbols_locked(obj)
+            // `&mut *obj` deref-coerces the RwLockWriteGuard to &mut ObjectSymbols;
+            // scrub_corrupt_symbols_locked takes &mut ObjectSymbols (br-tlspb follow-up).
+            Self::scrub_corrupt_symbols_locked(&mut obj)
         };
 
         if removed_bytes > 0 {
@@ -499,7 +501,7 @@ impl SymbolStore for MemorySymbolStore {
             .get(object_id)
             .ok_or(SymbolStoreError::ObjectNotFound(*object_id))?;
         let mut obj = obj_lock.write();
-        let removed_bytes = Self::scrub_corrupt_symbols_locked(obj);
+        let removed_bytes = Self::scrub_corrupt_symbols_locked(&mut obj);
         let symbol = obj.symbols.get(&esi).cloned();
         drop(obj);
         drop(objects);

@@ -448,10 +448,7 @@ fn expect_bytes(label: i64, v: ciborium::Value) -> Result<Vec<u8>, SchemaError> 
     }
 }
 
-fn expect_array(
-    label: i64,
-    v: ciborium::Value,
-) -> Result<Vec<ciborium::Value>, SchemaError> {
+fn expect_array(label: i64, v: ciborium::Value) -> Result<Vec<ciborium::Value>, SchemaError> {
     match v {
         ciborium::Value::Array(a) => Ok(a),
         other => Err(SchemaError::UnexpectedType {
@@ -541,7 +538,9 @@ mod tests {
     use super::*;
 
     fn utc(year: i32, month: u32, day: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(year, month, day, 0, 0, 0).single().unwrap()
+        Utc.with_ymd_and_hms(year, month, day, 0, 0, 0)
+            .single()
+            .unwrap()
     }
 
     #[test]
@@ -743,7 +742,11 @@ mod tests {
             panic!("expected map");
         };
         // Only schema_version is present.
-        assert_eq!(entries.len(), 1, "empty() must emit only schema_version, got {entries:?}");
+        assert_eq!(
+            entries.len(),
+            1,
+            "empty() must emit only schema_version, got {entries:?}"
+        );
     }
 
     #[test]
@@ -862,7 +865,8 @@ mod tests {
             SchemaError::InvalidTimestamp { label, value } => {
                 assert_eq!(label, cwt_claims::EXP);
                 assert_eq!(
-                    value, i64::MAX,
+                    value,
+                    i64::MAX,
                     "value must be the actual out-of-range timestamp, not 0"
                 );
             }
@@ -884,7 +888,9 @@ mod tests {
             schema_version: 999,
             ..AuthClaims::default()
         };
-        let err = c.check_schema_version(&[CURRENT_SCHEMA_VERSION]).unwrap_err();
+        let err = c
+            .check_schema_version(&[CURRENT_SCHEMA_VERSION])
+            .unwrap_err();
         assert!(
             matches!(
                 err,

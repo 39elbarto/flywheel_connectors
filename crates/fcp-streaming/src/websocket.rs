@@ -1341,18 +1341,41 @@ mod tests {
 
     #[test]
     fn ws_connection_recv_times_out_when_peer_blackholes_after_handshake() {
-        let (url, server) = spawn_blackhole_websocket_server(Duration::from_millis(250));
-        let timeout_duration = Duration::from_millis(50);
+        // Server blackholes for 500ms then drops TCP. We want recv() to
+        // observe the blackhole as a timeout BEFORE TCP close, so the
+        // test must:
+        //
+        //   - Drive the steady-state I/O budget (`io_timeout()`) below
+        //     500ms. That budget is `connect_timeout.max(ping_interval +
+        //     pong_timeout)` — both inputs need to be smaller than the
+        //     server stall.
+        //   - Disable client-side keepalive pings so the budget collapses
+        //     to `pong_timeout`. Otherwise the default
+        //     `ping_interval = Some(30s)` swamps `pong_timeout`.
+        //   - Pin `connect_timeout` close to `pong_timeout` so the
+        //     `.max()` floor doesn't accidentally resurrect the longer
+        //     window. We use 100ms here; the actual recv timeout will
+        //     equal that (max of 100ms and pong_timeout=50ms).
+        let (url, server) = spawn_blackhole_websocket_server(Duration::from_millis(500));
+        let connect_timeout = Duration::from_millis(100);
+        let pong_timeout = Duration::from_millis(50);
 
         block_on(async {
-            let mut config = WsConfig::new().with_connect_timeout(Duration::from_secs(1));
-            config.pong_timeout = timeout_duration;
+            let mut config = WsConfig::new().with_connect_timeout(connect_timeout);
+            config.pong_timeout = pong_timeout;
+            config.ping_interval = None;
             config.auto_reconnect = false;
 
             let client = WsClient::with_config(url, config);
             let mut connection = client.connect().await.expect("connect websocket");
             let err = connection.recv().await.expect_err("recv should time out");
-            assert!(matches!(err, StreamError::Timeout(t) if t == timeout_duration));
+            // Effective timeout is `connect_timeout.max(pong_timeout)`
+            // when `ping_interval = None`, i.e. 100ms here.
+            let expected_timeout = connect_timeout.max(pong_timeout);
+            assert!(
+                matches!(err, StreamError::Timeout(t) if t == expected_timeout),
+                "expected Timeout({expected_timeout:?}), got {err:?}"
+            );
             assert!(connection.is_closed());
         });
 

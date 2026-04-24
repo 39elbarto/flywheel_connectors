@@ -728,10 +728,24 @@ mod tests {
             };
             let store = QuarantineStore::new(policy);
 
+            // `quarantine()` triggers an in-band sweep at `obj.received_at`
+            // (added in commit 0f1f4478a). Pack the first two `received_at`s
+            // within the TTL window of each other so neither is expired at
+            // the moment the third is quarantined; otherwise the in-band
+            // sweep would silently pre-empt what the explicit
+            // `evict_expired` call below is meant to count.
+            //
+            // ttl=100, packing within 100s of each other:
+            //   id=1 received_at=1000
+            //   id=2 received_at=1050   (1050-1000=50 ≤ 100, id=1 not yet expired)
+            //   id=3 received_at=1100   (1100-1000=100  ≤ 100, id=1 not yet expired)
             store.quarantine(test_object(1, 100, 1000)).unwrap();
             store.quarantine(test_object(2, 100, 1050)).unwrap();
-            store.quarantine(test_object(3, 100, 1150)).unwrap();
+            store.quarantine(test_object(3, 100, 1100)).unwrap();
 
+            // Advance to a time at which id=1 and id=2 are expired
+            // (1200-1000=200 > ttl=100, 1200-1050=150 > 100) but id=3 is
+            // not (1200-1100=100, NOT strictly > 100).
             let evicted = store.evict_expired(1200);
             assert_eq!(evicted, 2);
 
@@ -1819,11 +1833,17 @@ mod tests {
             };
             let store = QuarantineStore::new(policy);
 
+            // Pack `received_at`s within the TTL window so the in-band
+            // sweep performed by `quarantine()` (commit 0f1f4478a) cannot
+            // expire any prior object before the next is admitted —
+            // otherwise the explicit `evict_expired(500)` below sees a
+            // smaller residual than expected.
             store.quarantine(test_object(1, 100, 100)).unwrap();
-            store.quarantine(test_object(2, 100, 200)).unwrap();
-            store.quarantine(test_object(3, 100, 300)).unwrap();
+            store.quarantine(test_object(2, 100, 150)).unwrap();
+            store.quarantine(test_object(3, 100, 200)).unwrap();
 
-            // All older than TTL
+            // All three older than TTL at current_time=500:
+            //   500-100=400 > 100, 500-150=350 > 100, 500-200=300 > 100.
             let evicted = store.evict_expired(500);
             assert_eq!(evicted, 3);
 

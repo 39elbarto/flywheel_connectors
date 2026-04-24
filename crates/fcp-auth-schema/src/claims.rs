@@ -214,8 +214,16 @@ impl AuthClaims {
     /// Propagates CBOR decoder errors and per-label type mismatches.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, SchemaError> {
         let mut cursor = Cursor::new(bytes);
-        let value: ciborium::Value =
-            ciborium::from_reader(&mut cursor).map_err(|e| SchemaError::Decode(e.to_string()))?;
+        // Reject over-deep input at parse time rather than letting ciborium's
+        // library default (256) walk further than `fcp_cbor::to_canonical_cbor`
+        // would accept (`MAX_CANONICALIZATION_DEPTH = 128`). Without this cap an
+        // adversarial issuer could make us allocate a 129..=256-deep Value tree
+        // only to reject it after the fact.
+        let value: ciborium::Value = ciborium::de::from_reader_with_recursion_limit(
+            &mut cursor,
+            fcp_cbor::MAX_DESERIALIZATION_RECURSION_LIMIT,
+        )
+        .map_err(|e| SchemaError::Decode(e.to_string()))?;
         #[allow(clippy::cast_possible_truncation)] // cursor position is bounded by bytes.len()
         if cursor.position() as usize != bytes.len() {
             return Err(SchemaError::Decode(
@@ -685,6 +693,28 @@ mod tests {
         assert!(
             matches!(&err, SchemaError::Decode(msg) if msg.contains("non-canonical")),
             "expected non-canonical decode error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_overdeep_claim_value_before_canonical_reencode() {
+        let mut overdeep = ciborium::Value::Integer(0.into());
+        for _ in 0..=fcp_cbor::MAX_CANONICALIZATION_DEPTH {
+            overdeep = ciborium::Value::Array(vec![overdeep]);
+        }
+
+        let entries = vec![(
+            ciborium::Value::Integer(fcp2_claims::CONSTRAINTS.into()),
+            overdeep,
+        )];
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&ciborium::Value::Map(entries), &mut bytes)
+            .expect("serialize overdeep claim fixture");
+
+        let err = AuthClaims::from_canonical_cbor(&bytes).unwrap_err();
+        assert!(
+            matches!(&err, SchemaError::Decode(msg) if msg.contains("recursion limit")),
+            "expected decoder recursion-limit failure before canonical re-encode, got {err:?}"
         );
     }
 

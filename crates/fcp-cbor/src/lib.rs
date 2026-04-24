@@ -352,13 +352,24 @@ fn write_canonical_cbor<T: Serialize>(
     Ok(())
 }
 
-const MAX_CANONICALIZATION_DEPTH: usize = 128;
-const MAX_DESERIALIZATION_RECURSION_LIMIT: usize = MAX_CANONICALIZATION_DEPTH + 1;
+/// Maximum nesting depth the canonicalizer will descend into.
+///
+/// Values deeper than this are rejected so an attacker cannot force
+/// unbounded recursion via an arbitrarily-nested CBOR tree.
+pub const MAX_CANONICALIZATION_DEPTH: usize = 128;
+
+/// Recursion limit for `ciborium` deserializers.
+///
+/// Exposed so downstream crates that parse untrusted CBOR can use the
+/// same bound (via `ciborium::de::from_reader_with_recursion_limit`)
+/// and fail early instead of spending memory on input the canonicalizer
+/// would later reject for depth.
+pub const MAX_DESERIALIZATION_RECURSION_LIMIT: usize = MAX_CANONICALIZATION_DEPTH;
 
 fn map_cbor_deserialize_error(err: ciborium::de::Error<std::io::Error>) -> SerializationError {
     match err {
         ciborium::de::Error::RecursionLimitExceeded => SerializationError::DepthExceeded {
-            depth: MAX_DESERIALIZATION_RECURSION_LIMIT,
+            depth: MAX_DESERIALIZATION_RECURSION_LIMIT + 1,
             max: MAX_CANONICALIZATION_DEPTH,
         },
         other => SerializationError::CborDeserialize(other),
@@ -1213,10 +1224,38 @@ mod tests {
         assert!(matches!(
             err,
             SerializationError::DepthExceeded {
-                depth: MAX_DESERIALIZATION_RECURSION_LIMIT,
+                depth,
                 max: MAX_CANONICALIZATION_DEPTH
-            }
+            } if depth == MAX_CANONICALIZATION_DEPTH + 1
         ));
+    }
+
+    #[test]
+    fn decoder_limit_matches_canonical_depth_boundary() {
+        let mut at_limit = Vec::new();
+        for _ in 0..MAX_CANONICALIZATION_DEPTH {
+            at_limit.push(0x81); // array(1)
+        }
+        at_limit.push(0x00);
+        decode_cbor_body_as_value(&at_limit).expect("depth at canonical limit must decode");
+
+        let mut over_limit = Vec::new();
+        for _ in 0..=MAX_CANONICALIZATION_DEPTH {
+            over_limit.push(0x81); // array(1)
+        }
+        over_limit.push(0x00);
+
+        let err = decode_cbor_body_as_value(&over_limit).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SerializationError::DepthExceeded {
+                    depth,
+                    max: MAX_CANONICALIZATION_DEPTH
+                } if depth == MAX_CANONICALIZATION_DEPTH + 1
+            ),
+            "expected parser-level DepthExceeded at one past the canonical limit, got {err:?}"
+        );
     }
 
     // ============================================================================

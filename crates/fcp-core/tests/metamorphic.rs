@@ -3,7 +3,7 @@
 //! These tests pin algebraic properties of the exported capability, zone, and
 //! revocation APIs so future refactors cannot quietly weaken the security model.
 
-use chrono::{Duration, TimeZone, Utc};
+use chrono::{TimeZone, Utc};
 use fcp_cbor::SchemaId;
 use fcp_core::{
     CapabilityConstraints, CapabilityId, CapabilityToken, CapabilityVerifier, FcpError,
@@ -53,7 +53,8 @@ fn build_test_token(
         .audience("connector:metamorphic")
         .token_id(b"metamorphic-token")
         .validity(not_before, expires)
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("test constraints CBOR should be valid")
         .sign(signing_key)
         .expect("fixed-input token signing must succeed");
     CapabilityToken::from_raw(raw)
@@ -90,6 +91,7 @@ fn test_revocation(
 }
 
 #[test]
+#[allow(deprecated)]
 fn metamorphic_mr1_capability_verification_stabilizes_under_reverify() {
     let signing_key = Ed25519SigningKey::from_bytes(&[7u8; 32]).expect("fixed key must parse");
     let verifier = CapabilityVerifier::without_instance_binding(
@@ -145,6 +147,7 @@ fn metamorphic_mr1_capability_verification_stabilizes_under_reverify() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn metamorphic_mr2_zone_scoping_is_exact_not_parent_derived() {
     let parent_zone = ZoneId::work();
     let child_zone: ZoneId = "z:work:child".parse().expect("child zone must parse");

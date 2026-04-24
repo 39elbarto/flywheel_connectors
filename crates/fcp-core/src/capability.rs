@@ -1334,7 +1334,8 @@ impl CapabilityToken<Unverified> {
     ///
     /// # Panics
     ///
-    /// Panics if token signing fails during test token construction.
+    /// Panics if test constraint attachment or token signing fails during test
+    /// token construction.
     #[must_use]
     pub fn test_token() -> Self {
         use fcp_crypto::cose::CapabilityTokenBuilder;
@@ -1359,7 +1360,8 @@ impl CapabilityToken<Unverified> {
             .principal("test-principal")
             .issuer("node:test")
             .validity(now, expires)
-            .constraints_cbor(&cbor)
+            .try_constraints_cbor(&cbor)
+            .expect("test constraints CBOR should be valid")
             .sign(&signing_key)
             .expect("Failed to create test token");
 
@@ -2550,6 +2552,10 @@ impl Provenance {
 
 #[cfg(test)]
 mod tests {
+    #![allow(deprecated)]
+    // This module still covers legacy `verify` / `CryptographicallyVerified`
+    // behavior alongside the newer bound/unbound typestate tests.
+
     use super::*;
     use chrono::Duration;
     use fcp_crypto::cose::CapabilityTokenBuilder;

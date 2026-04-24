@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
+#[cfg(any(test, feature = "test-mocks"))]
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,7 +18,9 @@ use crate::error::{TailscaleError, TailscaleResult};
 use crate::identity::NodeId;
 use crate::tag::TailscaleTag;
 use fcp_async_core::http::{HttpClient, HttpClientBuilder, Method};
-use fcp_async_core::{compatibility_cx, sync::RwLock, time};
+#[cfg(any(test, feature = "test-mocks"))]
+use fcp_async_core::sync::RwLock;
+use fcp_async_core::{compatibility_cx, time};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);

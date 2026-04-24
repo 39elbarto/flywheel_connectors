@@ -35,11 +35,12 @@ use fcp_async_core::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_async_core::task::{self, JoinHandle};
 use fcp_core::{
-    ApprovalToken, CapabilityVerifier, CostEstimateConfidence, Decision, DecisionReceiptPolicy,
-    ObjectHeader, PolicySimulationInput, Provenance, ResourceAvailability, RolloutPolicy,
-    SafetyTier, TransportMode, UsageMetric, UsageMetricKind, ZoneId, ZonePolicyObject,
-    ZoneTransportPolicy, simulate_policy_decision,
+    ApprovalToken, CapabilityVerifier, CostEstimateConfidence, Decision, PolicySimulationInput,
+    ResourceAvailability, RolloutPolicy, SafetyTier, TransportMode, UsageMetric, UsageMetricKind,
+    ZoneId, ZonePolicyObject, simulate_policy_decision,
 };
+#[cfg(test)]
+use fcp_core::{DecisionReceiptPolicy, ObjectHeader, Provenance, ZoneTransportPolicy};
 use fcp_crypto::{
     canonicalize::to_deterministic_cbor,
     cose::fcp2_claims,
@@ -1071,11 +1072,8 @@ struct AppState {
     /// Per-zone policy override map (br-flywheel_connectors-d4cij).
     ///
     /// `verify_live_request` looks the request's zone up here before
-    /// invoking `simulate_policy_decision`. Without an entry, the gate
-    /// falls back to `host_runtime_policy()` — which is structurally a
-    /// no-op for rule-based denial because every pattern list is empty
-    /// and every transport allowed. The fallback emits a `warn!` so
-    /// operators notice the missing configuration.
+    /// invoking `simulate_policy_decision`. Missing entries fail closed so
+    /// live preflight cannot bypass deny rules under an implicit empty policy.
     ///
     /// Entries are populated either at startup from
     /// `FCP_HOST_ZONE_POLICIES_FILE` (a JSON map keyed by ZoneId string)
@@ -1389,6 +1387,7 @@ fn resolve_verifying_key_from_sources(
     Ok(None)
 }
 
+#[cfg(test)]
 fn host_runtime_policy(zone_id: ZoneId) -> ZonePolicyObject {
     ZonePolicyObject {
         header: ObjectHeader {

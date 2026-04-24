@@ -76,6 +76,20 @@ fn validate_base_url_for_auth(base_url: &str, auth: &GitHubAuth) -> FcpResult<St
     })?;
     let canonical = parsed.to_string().trim_end_matches('/').to_string();
 
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include query or fragment components".into(),
+        });
+    }
+
     match auth {
         GitHubAuth::Token(_) => {
             let (allowed, message) = base_url_policy(&canonical);
@@ -941,7 +955,7 @@ impl GitHubConnector {
 
         let resource_uris = resource_uris_for_operation(operation, &input)?;
         if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &resource_uris)?;
+            verifier.verify_bound(token, &cap_id, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -1716,7 +1730,8 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&cbor)
+            .try_constraints_cbor(&cbor)
+            .expect("test constraints CBOR should be valid")
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
@@ -2148,6 +2163,37 @@ mod tests {
             }))
             .await;
         assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_ambiguous_base_url_components() {
+        let cid = uuid::Uuid::new_v4().to_string();
+        let cases = [
+            json!({
+                "token": "ghp_test",
+                "base_url": "https://user:secret@api.github.com"
+            }),
+            json!({
+                "token": "ghp_test",
+                "base_url": "https://api.github.com?trace=1"
+            }),
+            json!({
+                "credential_id": cid,
+                "base_url": "https://github.example.com/api/v3#fragment"
+            }),
+        ];
+
+        for params in cases {
+            let mut connector = GitHubConnector::new();
+            let error = connector
+                .handle_configure(params)
+                .await
+                .expect_err("ambiguous base_url components must be rejected");
+            assert!(
+                matches!(&error, FcpError::InvalidRequest { message, .. } if message.contains("base_url")),
+                "expected base_url validation error, got: {error:?}"
+            );
+        }
     }
 
     #[fcp_async_core::runtime::test]

@@ -576,7 +576,8 @@ fn build_live_capability_token(
         .operations(&[operation])
         .issuer("node:test")
         .validity(now, now + chrono::Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("test constraints CBOR should be valid")
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)
@@ -599,7 +600,8 @@ fn build_live_capability_token_with_validity(
         .operations(&[operation])
         .issuer("node:test")
         .validity(not_before, expires)
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("test constraints CBOR should be valid")
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)

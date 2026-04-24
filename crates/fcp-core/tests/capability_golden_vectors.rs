@@ -318,7 +318,8 @@ mod token_field_validation {
             .operations(&["op.read", "op.write", "op.delete"])
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&constraints_cbor)
+            .try_constraints_cbor(&constraints_cbor)
+            .expect("test constraints CBOR should be valid")
             .sign(&sk)
             .unwrap();
 

@@ -55,7 +55,8 @@ fn mk_signed_token(
         .operations(&["op.read"])
         .issuer("node:gateway")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&test_constraints_cbor())
+        .try_constraints_cbor(&test_constraints_cbor())
+        .expect("test constraints CBOR should be valid")
         .target_instance(instance.as_str())
         .sign(signing_key)
         .expect("sign");

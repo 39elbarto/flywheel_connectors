@@ -4207,13 +4207,21 @@ async fn simulate_handler(
 
 async fn cancel_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(request): Json<CancellationRequest>,
 ) -> Result<Json<CancellationResponse>, (StatusCode, String)> {
     let operation_id = request.operation_id.clone();
+    // br-jdaro: extract the asserted principal from the same header
+    // invoke_handler writes (`X-Principal`). When the tracked operation
+    // has an owner, CancellationController::cancel enforces match and
+    // returns HostError::PreflightFailed (→ 403) on mismatch. Operations
+    // tracked without an owner stay permissive for backward compat.
+    let asserted_principal = extract_principal_header(&headers);
     let started_at = Instant::now();
     tracing::debug!(
         event = "cancel_request",
         operation_id = %operation_id,
+        asserted_principal = asserted_principal.as_deref(),
         reason = %request.reason.label(),
         cleanup = ?request.cleanup,
         return_partial = request.return_partial,
@@ -4222,7 +4230,7 @@ async fn cancel_handler(
 
     let response = state
         .cancellation
-        .cancel(&request, Utc::now())
+        .cancel(&request, asserted_principal.as_deref(), Utc::now())
         .map_err(map_host_error)?;
 
     tracing::info!(
@@ -4300,7 +4308,13 @@ async fn invoke_handler(
         return Err(map_host_error(HostError::PreflightFailed(reason)));
     }
 
-    state.cancellation.track(&operation_id);
+    // br-jdaro: record the asserted principal as the operation owner so
+    // cancel_handler can authorize cancellation. When asserted_principal
+    // is None (no X-Principal header), the operation is tracked
+    // owner-less — any caller may cancel, matching legacy behavior.
+    state
+        .cancellation
+        .track_with_owner(&operation_id, asserted_principal.as_deref());
     let invoke_result = state.registry.invoke(request).await;
     state.cancellation.complete(&operation_id);
 

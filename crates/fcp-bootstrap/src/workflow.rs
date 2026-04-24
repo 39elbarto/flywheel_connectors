@@ -14,8 +14,7 @@ use crate::hardware_token::{
     select_certificate_for_provisioning,
 };
 use crate::phase::{
-    BootstrapPhase, detect_partial_state, detect_partial_state_even_with_genesis,
-    remove_phase_lock, write_phase_lock,
+    BootstrapPhase, detect_partial_state_even_with_genesis, remove_phase_lock, write_phase_lock,
 };
 use crate::recovery_phrase::RecoveryPhrase;
 use crate::time_validation::{TimeValidation, TimeValidationResult};
@@ -178,6 +177,68 @@ impl BootstrapConfigBuilder {
     }
 }
 
+/// The outcome of a successful bootstrap run.
+///
+/// Carries the genesis state that every mode produces and, for the
+/// `SingleDevice` mode only, the freshly-generated recovery phrase
+/// the caller MUST display to the operator for out-of-band storage
+/// (br-sy5ks). The phrase is the single in-memory copy — it is NOT
+/// persisted by the library. Callers that need durable storage
+/// should use `fcp_crypto::shamir` to split-and-distribute rather
+/// than writing plaintext to disk (AGENTS.md: "Secrets never touch
+/// disk").
+///
+/// `#[must_use]` so a caller that drops this struct without
+/// reading `recovery_phrase` (and therefore fails to deliver it to
+/// the operator in single-device mode) trips a compiler warning.
+#[must_use]
+#[derive(Debug)]
+pub struct BootstrapOutcome {
+    /// Canonical genesis state for every bootstrap mode.
+    pub genesis: GenesisState,
+
+    // (Note: `Deref<Target = GenesisState>` is deliberately NOT
+    // implemented on this struct — Deref on non-pointer types
+    // encourages silent phrase-drop. Test callers use
+    // `.into_genesis()` or `outcome.genesis.method()` explicitly so
+    // the discard of `recovery_phrase` is visible in the code.)
+
+    /// Freshly-generated recovery phrase for single-device bootstrap
+    /// mode. `None` for every other mode:
+    ///
+    /// - `MultiDevice`: the owner key is threshold-split across
+    ///   devices via FROST; there is no single phrase to display.
+    /// - `HardwareToken`: the owner key lives on the token; recovery
+    ///   goes through hardware-token enrollment, not mnemonic.
+    /// - `Import`: the caller already possesses the phrase they
+    ///   handed in; re-displaying would be a leak, not a feature.
+    ///
+    /// The caller is responsible for the
+    /// display-and-acknowledge-then-drop lifecycle in single-device
+    /// mode. Dropping the outcome without reading this field wipes
+    /// the phrase via `ZeroizeOnDrop` — safe default, but leaves
+    /// the operator without a recovery path.
+    pub recovery_phrase: Option<RecoveryPhrase>,
+}
+
+impl BootstrapOutcome {
+    /// Consume the outcome and return just the genesis state.
+    ///
+    /// Convenience for callers that don't need the recovery phrase
+    /// (tests, multi-device/hardware-token/import modes where
+    /// `recovery_phrase` is always None). Using this explicitly
+    /// instead of `outcome.genesis` makes the discard of
+    /// `recovery_phrase` visible in code review — a single-device
+    /// caller that writes `.into_genesis()` is saying "I deliberately
+    /// chose not to show the phrase to the operator".
+    #[must_use]
+    pub fn into_genesis(self) -> GenesisState {
+        // `recovery_phrase: Option<RecoveryPhrase>` drops here with
+        // ZeroizeOnDrop if it was Some. Safe default; bad UX.
+        self.genesis
+    }
+}
+
 /// The main bootstrap workflow.
 pub struct BootstrapWorkflow {
     config: BootstrapConfig,
@@ -291,7 +352,7 @@ impl BootstrapWorkflow {
     /// # Errors
     ///
     /// Returns an error if any bootstrap phase fails.
-    pub fn run(mut self) -> BootstrapResult<GenesisState> {
+    pub fn run(mut self) -> BootstrapResult<BootstrapOutcome> {
         // Phase 1: Time validation (skipped on resume if already past).
         if self.needs_time_validation() && !self.config.skip_time_validation {
             self.run_time_validation()?;
@@ -300,19 +361,30 @@ impl BootstrapWorkflow {
         // Phase 2: Key generation based on mode
         // Clone mode to avoid borrow conflicts
         let mode = self.config.mode.clone();
-        let genesis = match mode {
-            BootstrapMode::SingleDevice => self.run_single_device_bootstrap()?,
+        let (genesis, recovery_phrase) = match mode {
+            BootstrapMode::SingleDevice => {
+                let (genesis, phrase) = self.run_single_device_bootstrap()?;
+                (genesis, Some(phrase))
+            }
             BootstrapMode::MultiDevice {
                 device_count,
                 threshold,
-            } => self.run_multi_device_bootstrap(threshold, device_count)?,
-            BootstrapMode::HardwareToken { token } => self.run_hardware_token_bootstrap(&token)?,
-            BootstrapMode::Import { phrase } => self.run_import_bootstrap(&phrase)?,
+            } => (
+                self.run_multi_device_bootstrap(threshold, device_count)?,
+                None,
+            ),
+            BootstrapMode::HardwareToken { token } => {
+                (self.run_hardware_token_bootstrap(&token)?, None)
+            }
+            BootstrapMode::Import { phrase } => (self.run_import_bootstrap(&phrase)?, None),
         };
 
         self.finalize_bootstrap(&genesis)?;
 
-        Ok(genesis)
+        Ok(BootstrapOutcome {
+            genesis,
+            recovery_phrase,
+        })
     }
 
     fn finalize_bootstrap(&mut self, genesis: &GenesisState) -> BootstrapResult<()> {
@@ -387,7 +459,34 @@ impl BootstrapWorkflow {
     }
 
     /// Run single-device bootstrap (generate new key locally).
-    fn run_single_device_bootstrap(&mut self) -> BootstrapResult<GenesisState> {
+    ///
+    /// Returns both the genesis and the freshly-generated recovery
+    /// phrase so the caller (CLI) can display it to the operator for
+    /// out-of-band storage (br-sy5ks). The phrase MUST reach the
+    /// operator; the previous implementation logged only
+    /// `"Recovery phrase generated. Store it securely!"` without the
+    /// actual words, and the sibling `save_recovery_phrase` was a
+    /// tracing::debug no-op — a successful bootstrap left the
+    /// operator with no recovery phrase in-hand and no persisted
+    /// copy, so total loss of the device = total loss of owner
+    /// identity with no recovery path.
+    ///
+    /// AGENTS.md "Secrets never touch disk" rules out plaintext
+    /// persistence, so this crate deliberately does NOT save the
+    /// phrase. It is the caller's responsibility to display the
+    /// phrase to the operator exactly once and require acknowledgment
+    /// (e.g., "Type the first and last word back to confirm") before
+    /// proceeding. The `RecoveryPhrase` in the returned outcome is
+    /// the single in-memory copy; when the CLI drops it after
+    /// displaying, ZeroizeOnDrop wipes the bytes. If the CLI never
+    /// reads the phrase out of `BootstrapOutcome`, it still gets
+    /// zeroized on drop — safe default, bad UX (no recovery path),
+    /// which the regression test at
+    /// `single_device_bootstrap_outcome_carries_recovery_phrase`
+    /// pins against accidental regression.
+    fn run_single_device_bootstrap(
+        &mut self,
+    ) -> BootstrapResult<(GenesisState, RecoveryPhrase)> {
         self.phase = BootstrapPhase::KeyGeneration;
         write_phase_lock(&self.config.data_dir, &self.phase)?;
 
@@ -397,21 +496,23 @@ impl BootstrapWorkflow {
         let phrase =
             RecoveryPhrase::generate().map_err(|e| BootstrapError::Crypto(e.to_string()))?;
 
-        // Display recovery phrase (in real implementation, this would be a secure display)
-        tracing::info!("Recovery phrase generated. Store it securely!");
-        // phrase.words() would be displayed to user
-
         // Derive keypair and create genesis
         let keypair = phrase.derive_owner_keypair();
         let genesis = GenesisState::create(&keypair.public());
 
-        // Save recovery phrase (encrypted with device key in real implementation)
-        Self::save_recovery_phrase(&phrase);
+        // NO plaintext disk persistence (AGENTS.md). The phrase flows
+        // back to the caller via BootstrapOutcome; the caller is
+        // responsible for the display-and-acknowledge cycle. This
+        // tracing::info is intentionally word-free — the real phrase
+        // must never reach the tracing sink.
+        tracing::info!(
+            "Recovery phrase generated and handed to caller for out-of-band storage"
+        );
 
         self.phase = BootstrapPhase::GenesisCreate;
         write_phase_lock(&self.config.data_dir, &self.phase)?;
 
-        Ok(genesis)
+        Ok((genesis, phrase))
     }
 
     /// Run multi-device bootstrap with threshold ceremony.
@@ -520,14 +621,14 @@ impl BootstrapWorkflow {
         detection_report: &TokenDetectionReport,
         driver: &D,
     ) -> BootstrapResult<GenesisState> {
-        self.phase = BootstrapPhase::KeyGeneration;
-        write_phase_lock(&self.config.data_dir, &self.phase)?;
-
         let pin = self
             .config
             .hardware_token_pin
             .as_ref()
             .ok_or(BootstrapError::HardwareTokenPinRequired)?;
+
+        self.phase = BootstrapPhase::KeyGeneration;
+        write_phase_lock(&self.config.data_dir, &self.phase)?;
 
         let outcome = select_and_authenticate(token, pin, detection_report, driver, None)
             .map_err(|err| map_hardware_token_error(detection_report, err))?;
@@ -586,8 +687,10 @@ impl BootstrapWorkflow {
         // Create deterministic genesis (so fingerprint matches)
         let genesis = GenesisState::create_deterministic(&keypair.public());
 
-        // Save the recovery phrase
-        Self::save_recovery_phrase(phrase);
+        // br-sy5ks: import mode re-derives the owner key from a phrase
+        // the caller already possesses. The library deliberately does
+        // NOT persist, re-display, or re-emit the phrase — the caller
+        // brought it in and holds the canonical copy.
 
         self.phase = BootstrapPhase::GenesisCreate;
         write_phase_lock(&self.config.data_dir, &self.phase)?;
@@ -617,16 +720,17 @@ impl BootstrapWorkflow {
         write_result
     }
 
-    /// Save the recovery phrase (in a real implementation, this would be encrypted).
-    fn save_recovery_phrase(_phrase: &RecoveryPhrase) {
-        // In a real implementation, we would:
-        // 1. Encrypt the phrase with a device-specific key
-        // 2. Store it in a secure location
-        // 3. Optionally split it with Shamir's secret sharing
-
-        // For now, we just log that we would save it
-        tracing::debug!("Recovery phrase would be saved (encrypted) to secure storage");
-    }
+    // save_recovery_phrase was removed in br-sy5ks. It had been a
+    // tracing::debug no-op ("Recovery phrase would be saved (encrypted)
+    // to secure storage") — misleading both the operator and the
+    // security audit trail. AGENTS.md forbids plaintext secrets on
+    // disk; the phrase now flows back to the caller exactly once via
+    // BootstrapOutcome::recovery_phrase and the caller owns the
+    // display / acknowledge / zeroize-on-drop lifecycle. Do NOT
+    // reintroduce this function — if persistence is ever needed, the
+    // workspace already has fcp_crypto::shamir for split-and-distribute
+    // (each shard is one X25519-sealed HPKE envelope under the
+    // secret_share purpose binding) and that is the correct primitive.
 
     /// Get the current phase.
     #[must_use]
@@ -908,10 +1012,107 @@ mod tests {
             .unwrap();
 
         let workflow = BootstrapWorkflow::new(config).unwrap();
-        let genesis = workflow.run().unwrap();
+        let genesis = workflow.run().unwrap().into_genesis();
 
         assert!(genesis.validate().is_ok());
         assert!(dir.path().join("genesis.cbor").exists());
+    }
+
+    /// Regression for br-sy5ks: a successful single-device bootstrap
+    /// MUST hand the recovery phrase back to the caller. Before this
+    /// fix the phrase was generated, logged as "generated" without
+    /// words, fed to a tracing::debug no-op `save_recovery_phrase`,
+    /// then silently dropped — total device loss = total owner
+    /// identity loss with no recovery path.
+    #[fcp_async_core::runtime::test]
+    async fn single_device_bootstrap_outcome_carries_recovery_phrase() {
+        let dir = tempdir().unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::SingleDevice)
+            .skip_time_validation(true)
+            .build()
+            .unwrap();
+
+        let workflow = BootstrapWorkflow::new(config).unwrap();
+        let outcome = workflow.run().unwrap();
+
+        // Single-device mode MUST carry the phrase back.
+        let phrase = outcome
+            .recovery_phrase
+            .as_ref()
+            .expect("single-device bootstrap MUST hand back a recovery phrase");
+
+        // BIP-39 contract: 24-word English mnemonic.
+        let words = phrase.words();
+        assert_eq!(
+            words.len(),
+            24,
+            "BIP-39 recovery phrase must be exactly 24 words"
+        );
+
+        // Phrase must deterministically derive to the same owner key
+        // captured in the genesis fingerprint — proves the phrase
+        // handed to the caller is the one that was actually used to
+        // create the genesis, not a decoy.
+        let derived = phrase.derive_owner_keypair();
+        let derived_bytes = derived.public().to_bytes();
+        assert_eq!(
+            outcome.genesis.owner_public_key, derived_bytes,
+            "recovery phrase must derive the genesis's owner_public_key"
+        );
+    }
+
+    /// Regression for br-sy5ks: multi-device bootstrap uses FROST
+    /// threshold sharing and has no single recovery phrase; the
+    /// outcome MUST carry `recovery_phrase == None` so callers don't
+    /// display a spurious "phrase" that would only be a decoy.
+    #[fcp_async_core::runtime::test]
+    async fn multi_device_bootstrap_outcome_carries_no_recovery_phrase() {
+        let dir = tempdir().unwrap();
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::MultiDevice {
+                device_count: 3,
+                threshold: 2,
+            })
+            .skip_time_validation(true)
+            .build()
+            .unwrap();
+
+        let workflow = BootstrapWorkflow::new(config).unwrap();
+        let outcome = workflow.run().unwrap();
+
+        assert!(
+            outcome.recovery_phrase.is_none(),
+            "multi-device bootstrap must NOT synthesize a recovery phrase (FROST shards ARE the recovery)"
+        );
+    }
+
+    /// Regression for br-sy5ks: import-mode bootstrap takes a phrase
+    /// from the caller and re-derives the owner key. The outcome MUST
+    /// carry `recovery_phrase == None` — the caller already possesses
+    /// the canonical copy; re-emitting it would be a leak, not a
+    /// feature.
+    #[fcp_async_core::runtime::test]
+    async fn import_bootstrap_outcome_does_not_re_emit_phrase() {
+        let dir = tempdir().unwrap();
+        let phrase = RecoveryPhrase::generate().unwrap();
+
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::Import { phrase })
+            .skip_time_validation(true)
+            .build()
+            .unwrap();
+
+        let workflow = BootstrapWorkflow::new(config).unwrap();
+        let outcome = workflow.run().unwrap();
+
+        assert!(
+            outcome.recovery_phrase.is_none(),
+            "import bootstrap must NOT re-emit the caller-supplied phrase"
+        );
     }
 
     // ---- BootstrapMode Display ----
@@ -993,7 +1194,7 @@ mod tests {
             .unwrap();
 
         let workflow = BootstrapWorkflow::new(config).unwrap();
-        let genesis = workflow.run().unwrap();
+        let genesis = workflow.run().unwrap().into_genesis();
         assert!(genesis.validate().is_ok());
         assert!(dir.path().join("genesis.cbor").exists());
     }
@@ -1012,7 +1213,7 @@ mod tests {
             .unwrap();
 
         let workflow = BootstrapWorkflow::new(config).unwrap();
-        let genesis = workflow.run().unwrap();
+        let genesis = workflow.run().unwrap().into_genesis();
         assert!(genesis.validate().is_ok());
         assert!(dir.path().join("genesis.cbor").exists());
     }
@@ -1039,7 +1240,7 @@ mod tests {
             .unwrap();
 
         let workflow = BootstrapWorkflow::new(config).unwrap();
-        let genesis = workflow.run().unwrap();
+        let genesis = workflow.run().unwrap().into_genesis();
         assert!(genesis.validate().is_ok());
     }
 
@@ -1598,7 +1799,11 @@ mod tests {
             .skip_time_validation(true)
             .build()
             .unwrap();
-        let genesis1 = BootstrapWorkflow::new(config1).unwrap().run().unwrap();
+        let genesis1 = BootstrapWorkflow::new(config1)
+            .unwrap()
+            .run()
+            .unwrap()
+            .into_genesis();
 
         let dir2 = tempdir().unwrap();
         let phrase2 = RecoveryPhrase::from_mnemonic(test_phrase).unwrap();
@@ -1608,7 +1813,11 @@ mod tests {
             .skip_time_validation(true)
             .build()
             .unwrap();
-        let genesis2 = BootstrapWorkflow::new(config2).unwrap().run().unwrap();
+        let genesis2 = BootstrapWorkflow::new(config2)
+            .unwrap()
+            .run()
+            .unwrap()
+            .into_genesis();
 
         assert_eq!(genesis1.fingerprint(), genesis2.fingerprint());
     }
@@ -1625,7 +1834,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let genesis = BootstrapWorkflow::new(config).unwrap().run().unwrap();
+        let genesis = BootstrapWorkflow::new(config).unwrap().run().unwrap().into_genesis();
 
         // Read back the saved genesis and verify
         let cbor = std::fs::read(dir.path().join("genesis.cbor")).unwrap();
@@ -1647,7 +1856,7 @@ mod tests {
             .build()
             .unwrap();
 
-        BootstrapWorkflow::new(config).unwrap().run().unwrap();
+        BootstrapWorkflow::new(config).unwrap().run().unwrap().into_genesis();
 
         let dir_mode = std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700);
@@ -1675,7 +1884,9 @@ mod tests {
         };
         let config = BootstrapConfig::builder()
             .data_dir(dir.path())
-            .mode(BootstrapMode::HardwareToken { token })
+            .mode(BootstrapMode::HardwareToken {
+                token: token.clone(),
+            })
             .skip_time_validation(true)
             .build()
             .unwrap();
@@ -1686,6 +1897,21 @@ mod tests {
             result,
             Err(BootstrapError::HardwareTokenPinRequired)
         ));
+        assert!(
+            crate::phase::detect_partial_state(dir.path()).is_none(),
+            "missing PIN should not leave a partial-state marker behind"
+        );
+
+        let retry_config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::HardwareToken { token })
+            .skip_time_validation(true)
+            .build()
+            .unwrap();
+        assert!(
+            BootstrapWorkflow::new(retry_config).is_ok(),
+            "a missing-PIN refusal should allow a fresh retry without resume"
+        );
     }
 
     #[test]
@@ -1756,7 +1982,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let genesis2 = BootstrapWorkflow::new(config).unwrap().run().unwrap();
+        let genesis2 = BootstrapWorkflow::new(config).unwrap().run().unwrap().into_genesis();
         // New genesis should have a different fingerprint (different key)
         assert_ne!(fp1, genesis2.fingerprint());
     }

@@ -460,7 +460,8 @@ fn test_bootstrap_workflow_single_device() {
     let result = workflow.run();
 
     match result {
-        Ok(genesis) => {
+        Ok(outcome) => {
+            let genesis = outcome.into_genesis();
             log = log
                 .with_genesis_objects(vec!["genesis_state", "owner_key"])
                 .with_fingerprint(&genesis.fingerprint())
@@ -493,7 +494,10 @@ fn test_bootstrap_workflow_detects_existing_genesis() {
         .expect("build config");
 
     let workflow1 = BootstrapWorkflow::new(config1).expect("create workflow 1");
-    let genesis1 = workflow1.run().expect("first bootstrap succeeds");
+    let genesis1 = workflow1
+        .run()
+        .expect("first bootstrap succeeds")
+        .into_genesis();
 
     // Second bootstrap attempt should detect existing genesis
     let config2 = BootstrapConfig::builder()
@@ -540,7 +544,10 @@ fn test_bootstrap_workflow_import_mode() {
         .expect("build config");
 
     let workflow = BootstrapWorkflow::new(config).expect("create workflow");
-    let genesis = workflow.run().expect("import bootstrap succeeds");
+    let genesis = workflow
+        .run()
+        .expect("import bootstrap succeeds")
+        .into_genesis();
 
     let expected = GenesisState::create_deterministic(&phrase.derive_owner_keypair().public());
 
@@ -589,7 +596,10 @@ fn test_bootstrap_workflow_multi_device_produces_threshold_genesis() {
         .expect("build config");
 
     let workflow = BootstrapWorkflow::new(config).expect("create workflow");
-    let genesis = workflow.run().expect("multi-device bootstrap succeeds");
+    let genesis = workflow
+        .run()
+        .expect("multi-device bootstrap succeeds")
+        .into_genesis();
     let owner_key = genesis
         .owner_verifying_key()
         .expect("threshold bootstrap emits a valid owner key");

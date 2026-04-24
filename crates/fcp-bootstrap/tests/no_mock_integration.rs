@@ -985,7 +985,7 @@ fn single_device_bootstrap_workflow() {
         .unwrap();
 
     let workflow = fcp_bootstrap::BootstrapWorkflow::new(config).unwrap();
-    let genesis = workflow.run().unwrap();
+    let genesis = workflow.run().unwrap().into_genesis();
 
     genesis.validate().unwrap();
     assert_eq!(genesis.schema_version, GENESIS_SCHEMA_VERSION);

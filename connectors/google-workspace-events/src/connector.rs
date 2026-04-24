@@ -13,6 +13,7 @@ use fcp_google_discovery::{
     auth::{GoogleAuthError, GoogleAuthSelection, GoogleMaterializedAuth},
     provisioning::load_default_google_provisioning_bundle,
 };
+use reqwest::Url;
 use serde_json::json;
 use tracing::info;
 
@@ -24,6 +25,75 @@ struct WorkspaceEventsConfig {
     events_base_url: String,
     pubsub_base_url: String,
     required_scopes: Vec<String>,
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "[::1]"
+}
+
+fn validate_google_api_base_url(raw: &str, field: &str, expected_host: &str) -> FcpResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("`{field}` must not be empty"),
+        });
+    }
+    let parsed = Url::parse(trimmed).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("`{field}` could not be parsed: {error}"),
+    })?;
+    if !matches!(parsed.scheme(), "https" | "http") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("`{field}` must use http or https"),
+        });
+    }
+    let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("`{field}` must include a host"),
+    })?;
+    let local = is_local_test_host(host);
+    if parsed.scheme() == "http" && !local {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "`{field}` must use https unless targeting localhost/127.0.0.1/::1 for tests"
+            ),
+        });
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("`{field}` must not include userinfo"),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("`{field}` must not include a query string or fragment"),
+        });
+    }
+    if !local && !host.eq_ignore_ascii_case(expected_host) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "`{field}` host must target {expected_host} (localhost/127.0.0.1/::1 allowed for tests): {host}"
+            ),
+        });
+    }
+    Ok(trimmed.trim_end_matches('/').to_string())
+}
+
+fn validate_events_base_url(raw: &str) -> FcpResult<String> {
+    validate_google_api_base_url(raw, "events_base_url", "workspaceevents.googleapis.com")
+}
+
+fn validate_pubsub_base_url(raw: &str) -> FcpResult<String> {
+    validate_google_api_base_url(raw, "pubsub_base_url", "pubsub.googleapis.com")
 }
 
 impl WorkspaceEventsConfig {
@@ -53,16 +123,24 @@ impl WorkspaceEventsConfig {
 
         Ok(Self {
             auth,
-            events_base_url: params
-                .get("events_base_url")
-                .and_then(|value| value.as_str())
-                .unwrap_or(DEFAULT_EVENTS_BASE_URL)
-                .to_string(),
-            pubsub_base_url: params
-                .get("pubsub_base_url")
-                .and_then(|value| value.as_str())
-                .unwrap_or(DEFAULT_PUBSUB_BASE_URL)
-                .to_string(),
+            events_base_url: match params.get("events_base_url") {
+                Some(value) => {
+                    validate_events_base_url(value.as_str().ok_or(FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "`events_base_url` must be a string".into(),
+                    })?)?
+                }
+                None => DEFAULT_EVENTS_BASE_URL.to_string(),
+            },
+            pubsub_base_url: match params.get("pubsub_base_url") {
+                Some(value) => {
+                    validate_pubsub_base_url(value.as_str().ok_or(FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "`pubsub_base_url` must be a string".into(),
+                    })?)?
+                }
+                None => DEFAULT_PUBSUB_BASE_URL.to_string(),
+            },
             required_scopes,
         })
     }
@@ -913,6 +991,66 @@ mod tests {
     }
 
     #[test]
+    fn validate_workspace_events_base_urls_accept_exact_hosts_and_local_tests() {
+        assert_eq!(
+            validate_events_base_url("https://workspaceevents.googleapis.com/v1/").unwrap(),
+            "https://workspaceevents.googleapis.com/v1"
+        );
+        assert_eq!(
+            validate_pubsub_base_url("https://pubsub.googleapis.com/v1/").unwrap(),
+            "https://pubsub.googleapis.com/v1"
+        );
+        validate_events_base_url("http://localhost:9999/v1").unwrap();
+        validate_pubsub_base_url("http://127.0.0.1:9999/v1").unwrap();
+        validate_events_base_url("http://[::1]:9999/v1").unwrap();
+        validate_pubsub_base_url("http://[::1]:9999/v1").unwrap();
+    }
+
+    #[test]
+    fn validate_workspace_events_base_urls_reject_wrong_hosts() {
+        let events_err = validate_events_base_url("https://pubsub.googleapis.com/v1").unwrap_err();
+        assert!(
+            matches!(&events_err, FcpError::InvalidRequest { message, .. } if message.contains("workspaceevents.googleapis.com")),
+            "expected events host error, got {events_err:?}"
+        );
+
+        let pubsub_err =
+            validate_pubsub_base_url("https://workspaceevents.googleapis.com/v1").unwrap_err();
+        assert!(
+            matches!(&pubsub_err, FcpError::InvalidRequest { message, .. } if message.contains("pubsub.googleapis.com")),
+            "expected pubsub host error, got {pubsub_err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_workspace_events_base_urls_reject_smuggled_components() {
+        assert!(matches!(
+            validate_events_base_url("https://evil.com/workspaceevents.googleapis.com/v1")
+                .unwrap_err(),
+            FcpError::InvalidRequest { .. }
+        ));
+        assert!(matches!(
+            validate_pubsub_base_url("http://pubsub.googleapis.com/v1").unwrap_err(),
+            FcpError::InvalidRequest { .. }
+        ));
+        assert!(matches!(
+            validate_events_base_url("https://workspaceevents.googleapis.com/v1?leak=x")
+                .unwrap_err(),
+            FcpError::InvalidRequest { .. }
+        ));
+        assert!(matches!(
+            validate_pubsub_base_url("https://pubsub.googleapis.com/v1#frag").unwrap_err(),
+            FcpError::InvalidRequest { .. }
+        ));
+        let err = validate_events_base_url("https://attacker:pw@workspaceevents.googleapis.com/v1")
+            .unwrap_err();
+        assert!(
+            matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("userinfo")),
+            "expected userinfo error, got {err:?}"
+        );
+    }
+
+    #[test]
     fn health_unconfigured() {
         let connector = WorkspaceEventsConnector::new();
         let result = run_async_test(connector.handle_health()).unwrap();
@@ -931,6 +1069,39 @@ mod tests {
             assert_eq!(
                 result["required_scopes"][0],
                 "https://www.googleapis.com/auth/chat.messages.readonly"
+            );
+        });
+    }
+
+    #[test]
+    fn configure_rejects_invalid_base_url_overrides() {
+        run_async_test(async {
+            let mut connector = WorkspaceEventsConnector::new();
+            let err = connector
+                .handle_configure(json!({
+                    "access_token": "test-token",
+                    "events_base_url": 123,
+                    "pubsub_base_url": "https://pubsub.googleapis.com/v1"
+                }))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("events_base_url")),
+                "expected events_base_url validation error, got {err:?}"
+            );
+
+            let mut connector = WorkspaceEventsConnector::new();
+            let err = connector
+                .handle_configure(json!({
+                    "access_token": "test-token",
+                    "events_base_url": "https://workspaceevents.googleapis.com/v1",
+                    "pubsub_base_url": ""
+                }))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("empty")),
+                "expected empty pubsub_base_url validation error, got {err:?}"
             );
         });
     }

@@ -465,14 +465,10 @@ async fn gcal_happy_path_connector_suite_passes() {
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
     );
     let received = mock.received_requests().await;
-    let hits = received
-        .iter()
-        .filter(|request| request.url.path() == "/calendars/primary/events/event_e2e_123")
-        .count();
     assert_eq!(
-        hits,
+        received.len(),
         1,
-        "expected exactly one GET to /calendars/primary/events/event_e2e_123"
+        "expected exactly one Google Calendar API request"
     );
 }
 

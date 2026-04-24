@@ -4,8 +4,8 @@ use chrono::{Duration as ChronoDuration, Utc};
 use fcp_core::{
     AgentHint, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics, FcpConnector,
     FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId,
-    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId,
-    RiskLevel, SafetyTier, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
+    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RequestId, RiskLevel,
+    SafetyTier, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
     SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
@@ -186,7 +186,10 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
 #[fcp_async_core::runtime::test]
 async fn connector_suite_happy_path_lists_files() {
     init_json_test_logging();
-    info!(test = "google_drive_connector_suite_happy_path", phase = "setup");
+    info!(
+        test = "google_drive_connector_suite_happy_path",
+        phase = "setup"
+    );
 
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -244,7 +247,10 @@ async fn connector_suite_happy_path_lists_files() {
         .expect("connector suite run");
 
     for entry in &report.logs {
-        println!("{}", serde_json::to_string(entry).expect("serialize report log"));
+        println!(
+            "{}",
+            serde_json::to_string(entry).expect("serialize report log")
+        );
     }
 
     info!(

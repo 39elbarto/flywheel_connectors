@@ -14,22 +14,22 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 fn is_local_test_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "[::1]"
 }
 
-fn host_is_googleapis(host: &str) -> bool {
-    let lower = host.to_ascii_lowercase();
-    lower == "googleapis.com" || lower.ends_with(".googleapis.com")
+fn host_is_drive_googleapis(host: &str) -> bool {
+    host.eq_ignore_ascii_case("www.googleapis.com")
 }
 
 /// Validate a google-drive `base_url` override.
 ///
-/// Pins the host to `*.googleapis.com` (localhost permitted for tests),
+/// Pins the host to Drive's API host (localhost permitted for tests),
 /// requires https on any non-local host, and rejects userinfo / query /
 /// fragment components because DriveClient concatenates the returned
-/// string into downstream request URLs via `format!("{base_url}/...",
-/// ...)`. Same hygiene as the google-calendar patch already shipped
-/// this session.
+/// string into downstream request URLs via `format!("{base_url}/...", ...)`.
 fn validate_drive_base_url(raw: &str) -> FcpResult<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -56,9 +56,8 @@ fn validate_drive_base_url(raw: &str) -> FcpResult<String> {
     if parsed.scheme() == "http" && !local {
         return Err(FcpError::InvalidRequest {
             code: 1003,
-            message:
-                "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
-                    .into(),
+            message: "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
+                .into(),
         });
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
@@ -73,11 +72,11 @@ fn validate_drive_base_url(raw: &str) -> FcpResult<String> {
             message: "base_url must not include a query string or fragment".into(),
         });
     }
-    if !local && !host_is_googleapis(host) {
+    if !local && !host_is_drive_googleapis(host) {
         return Err(FcpError::InvalidRequest {
             code: 1003,
             message: format!(
-                "base_url must target googleapis.com (localhost/127.0.0.1/::1 allowed for tests): {trimmed}"
+                "base_url must target www.googleapis.com (localhost/127.0.0.1/::1 allowed for tests): {host}"
             ),
         });
     }
@@ -137,13 +136,13 @@ impl DriveConnector {
             GoogleMaterializedAuth::BearerToken { .. } => "configured",
         };
 
-        let base_url = match params
-            .get("base_url")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            Some(raw) => validate_drive_base_url(raw)?,
+        let base_url = match params.get("base_url") {
+            Some(value) => {
+                validate_drive_base_url(value.as_str().ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "`base_url` must be a string".into(),
+                })?)?
+            }
             None => DEFAULT_BASE_URL.to_string(),
         };
 
@@ -821,6 +820,7 @@ mod tests {
     fn validate_drive_base_url_allows_localhost_http() {
         validate_drive_base_url("http://localhost:9999").unwrap();
         validate_drive_base_url("http://127.0.0.1/drive").unwrap();
+        validate_drive_base_url("http://[::1]:9999/drive").unwrap();
     }
 
     #[test]
@@ -828,7 +828,7 @@ mod tests {
         let err = validate_drive_base_url("https://evil.example.com/drive/v3").unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("googleapis.com"), "got: {message}");
+                assert!(message.contains("www.googleapis.com"), "got: {message}");
             }
             other => panic!("expected InvalidRequest, got {other:?}"),
         }
@@ -836,8 +836,7 @@ mod tests {
 
     #[test]
     fn validate_drive_base_url_rejects_substring_smuggle() {
-        let err =
-            validate_drive_base_url("https://evil.com/drive.googleapis.com/v3").unwrap_err();
+        let err = validate_drive_base_url("https://evil.com/drive.googleapis.com/v3").unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
@@ -851,10 +850,8 @@ mod tests {
             validate_drive_base_url("https://www.googleapis.com/drive/v3#frag").unwrap_err(),
             FcpError::InvalidRequest { .. }
         ));
-        let err = validate_drive_base_url(
-            "https://attacker:pw@www.googleapis.com/drive/v3",
-        )
-        .unwrap_err();
+        let err =
+            validate_drive_base_url("https://attacker:pw@www.googleapis.com/drive/v3").unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("userinfo"), "got: {message}");
@@ -870,11 +867,12 @@ mod tests {
     }
 
     #[test]
-    fn host_is_googleapis_rejects_lookalikes() {
-        assert!(host_is_googleapis("googleapis.com"));
-        assert!(host_is_googleapis("www.googleapis.com"));
-        assert!(!host_is_googleapis("googleapis.com.evil.com"));
-        assert!(!host_is_googleapis("evil-googleapis.com"));
+    fn host_is_drive_googleapis_rejects_wrong_hosts_and_lookalikes() {
+        assert!(host_is_drive_googleapis("www.googleapis.com"));
+        assert!(!host_is_drive_googleapis("googleapis.com"));
+        assert!(!host_is_drive_googleapis("drive.googleapis.com"));
+        assert!(!host_is_drive_googleapis("googleapis.com.evil.com"));
+        assert!(!host_is_drive_googleapis("evil-googleapis.com"));
     }
 
     #[fcp_async_core::runtime::test]
@@ -920,6 +918,35 @@ mod tests {
         let mut connector = DriveConnector::new();
         let result = connector.handle_configure(json!({})).await;
         assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_invalid_base_url_override() {
+        let mut connector = DriveConnector::new();
+        let err = connector
+            .handle_configure(json!({
+                "access_token": "ya29.test",
+                "base_url": 123
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("base_url")),
+            "expected base_url validation error, got {err:?}"
+        );
+
+        let mut connector = DriveConnector::new();
+        let err = connector
+            .handle_configure(json!({
+                "access_token": "ya29.test",
+                "base_url": ""
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("empty")),
+            "expected empty base_url validation error, got {err:?}"
+        );
     }
 
     #[fcp_async_core::runtime::test]

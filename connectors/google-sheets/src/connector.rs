@@ -21,15 +21,14 @@ fn is_local_test_host(host: &str) -> bool {
         || host == "[::1]"
 }
 
-fn host_is_googleapis(host: &str) -> bool {
-    let lower = host.to_ascii_lowercase();
-    lower == "googleapis.com" || lower.ends_with(".googleapis.com")
+fn host_is_sheets_googleapis(host: &str) -> bool {
+    host.eq_ignore_ascii_case("sheets.googleapis.com")
 }
 
 /// Validate a google-sheets `base_url` override.
 ///
 /// The Sheets client concatenates this string into downstream request URLs, so
-/// only Google API hosts are accepted outside local test listeners.
+/// only the Sheets API host is accepted outside local test listeners.
 fn validate_sheets_base_url(raw: &str) -> FcpResult<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -72,11 +71,11 @@ fn validate_sheets_base_url(raw: &str) -> FcpResult<String> {
             message: "base_url must not include a query string or fragment".into(),
         });
     }
-    if !local && !host_is_googleapis(host) {
+    if !local && !host_is_sheets_googleapis(host) {
         return Err(FcpError::InvalidRequest {
             code: 1003,
             message: format!(
-                "base_url host must target googleapis.com (localhost/127.0.0.1/::1 allowed for tests): {host}"
+                "base_url host must target sheets.googleapis.com (localhost/127.0.0.1/::1 allowed for tests): {host}"
             ),
         });
     }
@@ -162,12 +161,11 @@ impl SheetsConnector {
             SheetsClient::new_with_auth(materialized).map_err(|e| FcpError::Internal {
                 message: format!("Failed to create Sheets client: {e}"),
             })?;
-        if let Some(base_url) = params
-            .get("base_url")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
+        if let Some(value) = params.get("base_url") {
+            let base_url = value.as_str().ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "`base_url` must be a string".into(),
+            })?;
             client = client.with_base_url(validate_sheets_base_url(base_url)?);
         }
 
@@ -694,6 +692,37 @@ mod tests {
     }
 
     #[test]
+    fn configure_rejects_invalid_base_url_override() {
+        run_async_test(async {
+            let mut connector = SheetsConnector::new();
+            let err = connector
+                .handle_configure(json!({
+                    "access_token": "test-token",
+                    "base_url": 123
+                }))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("base_url")),
+                "expected base_url validation error, got {err:?}"
+            );
+
+            let mut connector = SheetsConnector::new();
+            let err = connector
+                .handle_configure(json!({
+                    "access_token": "test-token",
+                    "base_url": ""
+                }))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("empty")),
+                "expected empty base_url validation error, got {err:?}"
+            );
+        });
+    }
+
+    #[test]
     fn configure_with_access_token() {
         run_async_test(async {
             let mut connector = SheetsConnector::new();
@@ -735,7 +764,7 @@ mod tests {
     fn validate_sheets_base_url_rejects_foreign_host() {
         let err = validate_sheets_base_url("https://evil.example.com/v4").unwrap_err();
         assert!(
-            matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("googleapis.com")),
+            matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("sheets.googleapis.com")),
             "expected InvalidRequest mentioning googleapis.com, got {err:?}"
         );
     }
@@ -784,11 +813,12 @@ mod tests {
     }
 
     #[test]
-    fn host_is_googleapis_rejects_lookalikes() {
-        assert!(host_is_googleapis("googleapis.com"));
-        assert!(host_is_googleapis("sheets.googleapis.com"));
-        assert!(!host_is_googleapis("googleapis.com.evil.com"));
-        assert!(!host_is_googleapis("evil-googleapis.com"));
+    fn host_is_sheets_googleapis_rejects_wrong_hosts_and_lookalikes() {
+        assert!(host_is_sheets_googleapis("sheets.googleapis.com"));
+        assert!(!host_is_sheets_googleapis("googleapis.com"));
+        assert!(!host_is_sheets_googleapis("www.googleapis.com"));
+        assert!(!host_is_sheets_googleapis("googleapis.com.evil.com"));
+        assert!(!host_is_sheets_googleapis("evil-googleapis.com"));
     }
 
     #[test]

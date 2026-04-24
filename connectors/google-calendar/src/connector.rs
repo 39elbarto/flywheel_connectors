@@ -20,17 +20,19 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 fn is_local_test_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "[::1]"
 }
 
-fn host_is_googleapis(host: &str) -> bool {
-    let lower = host.to_ascii_lowercase();
-    lower == "googleapis.com" || lower.ends_with(".googleapis.com")
+fn host_is_calendar_googleapis(host: &str) -> bool {
+    host.eq_ignore_ascii_case("www.googleapis.com")
 }
 
 /// Validate a google-calendar `base_url` override.
 ///
-/// Rejects any non-googleapis.com host unless the override targets a
+/// Rejects any non-Calendar API host unless the override targets a
 /// local test listener. Rejects non-https except for local tests.
 /// Parses the URL host properly so substring-smuggle payloads like
 /// `https://evil.com/calendar.googleapis.com` are rejected.
@@ -60,16 +62,27 @@ fn validate_calendar_base_url(raw: &str) -> FcpResult<String> {
     if parsed.scheme() == "http" && !local {
         return Err(FcpError::InvalidRequest {
             code: 1003,
-            message:
-                "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
-                    .into(),
+            message: "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
+                .into(),
         });
     }
-    if !local && !host_is_googleapis(host) {
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
+    if !local && !host_is_calendar_googleapis(host) {
         return Err(FcpError::InvalidRequest {
             code: 1003,
             message: format!(
-                "base_url must target googleapis.com (localhost/127.0.0.1/::1 allowed for tests): {trimmed}"
+                "base_url must target www.googleapis.com (localhost/127.0.0.1/::1 allowed for tests): {host}"
             ),
         });
     }
@@ -141,13 +154,13 @@ impl GoogleCalendarConfig {
                 message: format!("Failed to materialize Google auth source: {error}"),
             })?;
 
-        let base_url = match params
-            .get("base_url")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            Some(raw) => validate_calendar_base_url(raw)?,
+        let base_url = match params.get("base_url") {
+            Some(value) => {
+                validate_calendar_base_url(value.as_str().ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "`base_url` must be a string".into(),
+                })?)?
+            }
             None => DEFAULT_BASE_URL.to_string(),
         };
 
@@ -1430,27 +1443,23 @@ mod tests {
 
     #[test]
     fn validate_calendar_base_url_accepts_googleapis_hosts() {
-        let a =
-            validate_calendar_base_url("https://www.googleapis.com/calendar/v3").unwrap();
+        let a = validate_calendar_base_url("https://www.googleapis.com/calendar/v3").unwrap();
         assert_eq!(a, "https://www.googleapis.com/calendar/v3");
-        let b =
-            validate_calendar_base_url("https://calendar.googleapis.com/v3/").unwrap();
-        assert_eq!(b, "https://calendar.googleapis.com/v3");
     }
 
     #[test]
     fn validate_calendar_base_url_allows_local_http() {
         validate_calendar_base_url("http://localhost:9999").unwrap();
         validate_calendar_base_url("http://127.0.0.1/cal").unwrap();
+        validate_calendar_base_url("http://[::1]:9999/cal").unwrap();
     }
 
     #[test]
     fn validate_calendar_base_url_rejects_foreign_host() {
-        let err =
-            validate_calendar_base_url("https://evil.example.com/calendar/v3").unwrap_err();
+        let err = validate_calendar_base_url("https://evil.example.com/calendar/v3").unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("googleapis.com"), "got: {message}");
+                assert!(message.contains("www.googleapis.com"), "got: {message}");
             }
             other => panic!("expected InvalidRequest, got {other:?}"),
         }
@@ -1458,18 +1467,34 @@ mod tests {
 
     #[test]
     fn validate_calendar_base_url_rejects_substring_smuggle() {
-        let err = validate_calendar_base_url(
-            "https://evil.com/calendar.googleapis.com/v3",
-        )
-        .unwrap_err();
+        let err =
+            validate_calendar_base_url("https://evil.com/calendar.googleapis.com/v3").unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
     #[test]
     fn validate_calendar_base_url_rejects_plain_http_on_public_host() {
-        let err =
-            validate_calendar_base_url("http://calendar.googleapis.com/v3").unwrap_err();
+        let err = validate_calendar_base_url("http://calendar.googleapis.com/v3").unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_calendar_base_url_rejects_query_fragment_userinfo() {
+        assert!(matches!(
+            validate_calendar_base_url("https://www.googleapis.com/calendar/v3?leak=x")
+                .unwrap_err(),
+            FcpError::InvalidRequest { .. }
+        ));
+        assert!(matches!(
+            validate_calendar_base_url("https://www.googleapis.com/calendar/v3#frag").unwrap_err(),
+            FcpError::InvalidRequest { .. }
+        ));
+        let err = validate_calendar_base_url("https://attacker:pw@www.googleapis.com/calendar/v3")
+            .unwrap_err();
+        assert!(
+            matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("userinfo")),
+            "expected InvalidRequest mentioning userinfo, got {err:?}"
+        );
     }
 
     #[test]
@@ -1485,11 +1510,12 @@ mod tests {
     }
 
     #[test]
-    fn host_is_googleapis_rejects_lookalikes() {
-        assert!(host_is_googleapis("googleapis.com"));
-        assert!(host_is_googleapis("calendar.googleapis.com"));
-        assert!(!host_is_googleapis("googleapis.com.evil.com"));
-        assert!(!host_is_googleapis("evil-googleapis.com"));
+    fn host_is_calendar_googleapis_rejects_wrong_hosts_and_lookalikes() {
+        assert!(host_is_calendar_googleapis("www.googleapis.com"));
+        assert!(!host_is_calendar_googleapis("googleapis.com"));
+        assert!(!host_is_calendar_googleapis("calendar.googleapis.com"));
+        assert!(!host_is_calendar_googleapis("googleapis.com.evil.com"));
+        assert!(!host_is_calendar_googleapis("evil-googleapis.com"));
     }
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
@@ -1777,6 +1803,35 @@ mod tests {
             .unwrap();
         let config = connector.config.as_ref().unwrap();
         assert_eq!(config.base_url, "http://localhost:8080");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_invalid_base_url_override() {
+        let mut connector = GoogleCalendarConnector::new();
+        let err = connector
+            .handle_configure(json!({
+                "token": "tok",
+                "base_url": 123
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("base_url")),
+            "expected base_url validation error, got {err:?}"
+        );
+
+        let mut connector = GoogleCalendarConnector::new();
+        let err = connector
+            .handle_configure(json!({
+                "token": "tok",
+                "base_url": ""
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("empty")),
+            "expected empty base_url validation error, got {err:?}"
+        );
     }
 
     #[fcp_async_core::runtime::test]

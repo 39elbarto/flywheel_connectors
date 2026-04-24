@@ -9,13 +9,13 @@ use fcp_core::{
     HandshakeResponse, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
     SafetyTier, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
-use reqwest::Url;
 use fcp_google_discovery::{
     ServiceAliasRegistry,
     auth::{GoogleAuthError, GoogleAuthSelection, GoogleMaterializedAuth},
     policy::{GooglePolicyCatalog, PolicyApprovalMode, PolicyRiskLevel, PolicySafetyTier},
     provisioning::load_default_google_provisioning_bundle,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{info, instrument};
@@ -81,13 +81,13 @@ impl AdminReportsConfig {
                 message: format!("Failed to materialize Google auth: {error}"),
             })?;
 
-        let base_url = match params
-            .get("base_url")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            Some(raw) => validate_admin_reports_base_url(raw)?,
+        let base_url = match params.get("base_url") {
+            Some(value) => validate_admin_reports_base_url(value.as_str().ok_or(
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "`base_url` must be a string".into(),
+                },
+            )?)?,
             None => DEFAULT_BASE_URL.to_string(),
         };
 
@@ -101,21 +101,22 @@ impl AdminReportsConfig {
 }
 
 fn is_local_test_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "[::1]"
 }
 
-fn host_is_googleapis(host: &str) -> bool {
-    let lower = host.to_ascii_lowercase();
-    lower == "googleapis.com" || lower.ends_with(".googleapis.com")
+fn host_is_admin_reports_googleapis(host: &str) -> bool {
+    host.eq_ignore_ascii_case("admin.googleapis.com")
 }
 
 /// Validate a google-admin-reports `base_url` override.
 ///
-/// Pins the host to `*.googleapis.com` (localhost permitted for tests),
+/// Pins the host to the Admin Reports API host (localhost permitted for tests),
 /// requires https on non-local hosts, and rejects userinfo / query /
 /// fragment because AdminReportsClient concatenates the returned
-/// string into downstream request URLs. Matches the hygiene of
-/// google-calendar (ac44d18c) and google-drive (c9c141c2).
+/// string into downstream request URLs.
 fn validate_admin_reports_base_url(raw: &str) -> FcpResult<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -142,9 +143,8 @@ fn validate_admin_reports_base_url(raw: &str) -> FcpResult<String> {
     if parsed.scheme() == "http" && !local {
         return Err(FcpError::InvalidRequest {
             code: 1003,
-            message:
-                "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
-                    .into(),
+            message: "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
+                .into(),
         });
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
@@ -159,11 +159,11 @@ fn validate_admin_reports_base_url(raw: &str) -> FcpResult<String> {
             message: "base_url must not include a query string or fragment".into(),
         });
     }
-    if !local && !host_is_googleapis(host) {
+    if !local && !host_is_admin_reports_googleapis(host) {
         return Err(FcpError::InvalidRequest {
             code: 1003,
             message: format!(
-                "base_url must target googleapis.com (localhost/127.0.0.1/::1 allowed for tests): {trimmed}"
+                "base_url must target admin.googleapis.com (localhost/127.0.0.1/::1 allowed for tests): {host}"
             ),
         });
     }
@@ -1041,6 +1041,7 @@ mod tests {
     fn validate_admin_reports_base_url_allows_localhost_http() {
         validate_admin_reports_base_url("http://localhost:9999").unwrap();
         validate_admin_reports_base_url("http://127.0.0.1/admin").unwrap();
+        validate_admin_reports_base_url("http://[::1]:9999/admin").unwrap();
     }
 
     #[test]
@@ -1049,7 +1050,7 @@ mod tests {
             .unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("googleapis.com"), "got: {message}");
+                assert!(message.contains("admin.googleapis.com"), "got: {message}");
             }
             other => panic!("expected InvalidRequest, got {other:?}"),
         }
@@ -1057,10 +1058,9 @@ mod tests {
 
     #[test]
     fn validate_admin_reports_base_url_rejects_substring_smuggle() {
-        let err = validate_admin_reports_base_url(
-            "https://evil.com/admin.googleapis.com/reports/v1",
-        )
-        .unwrap_err();
+        let err =
+            validate_admin_reports_base_url("https://evil.com/admin.googleapis.com/reports/v1")
+                .unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
@@ -1090,18 +1090,18 @@ mod tests {
 
     #[test]
     fn validate_admin_reports_base_url_rejects_plain_http_on_public_host() {
-        let err =
-            validate_admin_reports_base_url("http://admin.googleapis.com/admin/reports/v1")
-                .unwrap_err();
+        let err = validate_admin_reports_base_url("http://admin.googleapis.com/admin/reports/v1")
+            .unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
     #[test]
-    fn host_is_googleapis_rejects_lookalikes_admin() {
-        assert!(host_is_googleapis("googleapis.com"));
-        assert!(host_is_googleapis("admin.googleapis.com"));
-        assert!(!host_is_googleapis("googleapis.com.evil.com"));
-        assert!(!host_is_googleapis("evil-googleapis.com"));
+    fn host_is_admin_reports_googleapis_rejects_wrong_hosts_and_lookalikes() {
+        assert!(host_is_admin_reports_googleapis("admin.googleapis.com"));
+        assert!(!host_is_admin_reports_googleapis("googleapis.com"));
+        assert!(!host_is_admin_reports_googleapis("www.googleapis.com"));
+        assert!(!host_is_admin_reports_googleapis("googleapis.com.evil.com"));
+        assert!(!host_is_admin_reports_googleapis("evil-googleapis.com"));
     }
 
     #[test]
@@ -1171,6 +1171,35 @@ mod tests {
     async fn configure_no_auth_fails() {
         let mut connector = AdminReportsConnector::new();
         assert!(connector.handle_configure(json!({})).await.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_invalid_base_url_override() {
+        let mut connector = AdminReportsConnector::new();
+        let err = connector
+            .handle_configure(json!({
+                "access_token": "ya29.test",
+                "base_url": 123
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("base_url")),
+            "expected base_url validation error, got {err:?}"
+        );
+
+        let mut connector = AdminReportsConnector::new();
+        let err = connector
+            .handle_configure(json!({
+                "access_token": "ya29.test",
+                "base_url": ""
+            }))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("empty")),
+            "expected empty base_url validation error, got {err:?}"
+        );
     }
 
     #[fcp_async_core::runtime::test]

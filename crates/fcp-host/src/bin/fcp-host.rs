@@ -4535,6 +4535,7 @@ fn build_batch_response(
 async fn execute_batch_operation(
     state: Arc<AppState>,
     operation: HttpBatchOperation,
+    principal_override: Option<Arc<str>>,
 ) -> OperationResult {
     let started_at = Instant::now();
     let request = operation.request;
@@ -4555,7 +4556,7 @@ async fn execute_batch_operation(
         };
     }
 
-    let preflight = evaluate_live_preflight(&state, &request, None).await;
+    let preflight = evaluate_live_preflight(&state, &request, principal_override.as_deref()).await;
 
     if !preflight.allowed {
         let reason = preflight
@@ -4625,15 +4626,18 @@ async fn execute_batch_operation(
 
 async fn batch_invoke_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(request): Json<HttpBatchInvokeRequest>,
 ) -> Result<Json<BatchInvokeResponse>, (StatusCode, String)> {
     let started_at = Instant::now();
+    let asserted_principal = extract_principal_header(&headers).map(Arc::<str>::from);
     tracing::debug!(
         event = "batch_invoke_request",
         operation_count = request.operations.len(),
         max_parallelism = request.options.max_parallelism,
         stop_on_first_error = request.options.stop_on_first_error,
         timeout_ms = request.options.timeout_ms,
+        asserted_principal = asserted_principal.as_deref(),
         "processing batch invoke request"
     );
 
@@ -4698,11 +4702,9 @@ async fn batch_invoke_handler(
                 continue;
             }
 
-            let chunk_results = join_all(
-                ready
-                    .into_iter()
-                    .map(|operation| execute_batch_operation(Arc::clone(&state), operation)),
-            )
+            let chunk_results = join_all(ready.into_iter().map(|operation| {
+                execute_batch_operation(Arc::clone(&state), operation, asserted_principal.clone())
+            }))
             .await;
 
             let chunk_failed = chunk_results
@@ -6283,6 +6285,83 @@ mod tests {
         assert!(message.contains("preflight failed"));
         assert!(message.contains("capability token rejected by host state"));
         assert!(message.contains("revoked"));
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn batch_invoke_handler_rejects_principal_header_mismatch() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!(
+                "compiled fcp-test-connector missing; skipping batch principal mismatch test"
+            );
+            return;
+        }
+
+        let connector_id = "fcp.test.batch-principal-mismatch:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![subprocess_test_connector_config(connector_id)],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            ..(*base_state).clone()
+        });
+
+        let request = HttpBatchInvokeRequest {
+            operations: vec![HttpBatchOperation {
+                id: "op-1".to_string(),
+                request: InvokeRequest {
+                    r#type: "invoke".to_string(),
+                    id: RequestId::random(),
+                    connector_id: connector_id.parse().expect("connector id"),
+                    operation: OperationId::from_static("test.echo"),
+                    zone_id: ZoneId::work(),
+                    input: json!({ "message": "principal mismatch should fail" }),
+                    capability_token: test_capability_token(
+                        &signing_key,
+                        "cap.test.echo",
+                        "test.echo",
+                        ZoneId::work().as_str(),
+                    ),
+                    holder_proof: None,
+                    context: None,
+                    idempotency_key: None,
+                    lease_seq: None,
+                    deadline_ms: None,
+                    correlation_id: None,
+                    provenance: None,
+                    approval_tokens: Vec::new(),
+                },
+                depends_on: Vec::new(),
+            }],
+            options: BatchOptions::default(),
+        };
+
+        let mut headers = HeaderMap::new();
+        headers.insert(PRINCIPAL_HEADER, HeaderValue::from_static("user:other"));
+
+        let response = batch_invoke_handler(State(state), headers, Json(request))
+            .await
+            .expect("batch handler should return structured result")
+            .0;
+        assert_eq!(response.failed, 1);
+        assert_eq!(response.completed, 0);
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].status, OperationResultStatus::Error);
+        assert!(
+            response.results[0]
+                .error
+                .as_ref()
+                .is_some_and(|error| error.message.contains("request principal `user:other`")),
+            "expected principal mismatch denial, got: {:?}",
+            response.results[0].error
+        );
     }
 
     fn rollout_handler_test_policy() -> RolloutPolicy {

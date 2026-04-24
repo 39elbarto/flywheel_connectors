@@ -808,7 +808,7 @@ impl EgressGuard {
 /// canonicalization and wildcard rules.
 #[must_use]
 pub fn host_matches_allow_list(host: &str, host_allow: &[String]) -> bool {
-    let Some(canonical_host) = canonicalize_host(host) else {
+    let Ok(canonical_host) = canonicalize_hostname(host) else {
         return false;
     };
     let is_ip_literal = canonical_host.parse::<IpAddr>().is_ok();

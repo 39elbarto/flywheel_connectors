@@ -401,9 +401,8 @@ fn deserialize_cbor_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, Serializ
 }
 
 fn validate_decoded_body(body: &[u8]) -> Result<(), SerializationError> {
-    let value = decode_cbor_body_as_value(body)?;
-    let mut canonical = value.clone();
-    canonicalize_value_in_place(&mut canonical, 0)?;
+    let mut value = decode_cbor_body_as_value(body)?;
+    canonicalize_value_in_place(&mut value, 0)?;
     Ok(())
 }
 

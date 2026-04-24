@@ -223,7 +223,16 @@ impl AuthClaims {
             &mut cursor,
             fcp_cbor::MAX_DESERIALIZATION_RECURSION_LIMIT,
         )
-        .map_err(|e| SchemaError::Decode(e.to_string()))?;
+        .map_err(|error| match error {
+            // ciborium's Display renders `RecursionLimitExceeded` as the
+            // bare variant name; give callers a readable message that also
+            // states the canonical bound so this branch is stable to match on.
+            ciborium::de::Error::RecursionLimitExceeded => SchemaError::Decode(format!(
+                "CBOR recursion limit exceeded (max {} levels)",
+                fcp_cbor::MAX_DESERIALIZATION_RECURSION_LIMIT
+            )),
+            other => SchemaError::Decode(other.to_string()),
+        })?;
         #[allow(clippy::cast_possible_truncation)] // cursor position is bounded by bytes.len()
         if cursor.position() as usize != bytes.len() {
             return Err(SchemaError::Decode(

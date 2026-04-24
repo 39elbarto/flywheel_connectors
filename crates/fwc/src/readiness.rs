@@ -1937,7 +1937,7 @@ impl DiscoveredConnector {
         });
 
         let search_slug_lower = slug.to_lowercase();
-        let search_name_lower = summary.description.to_lowercase();
+        let search_name_lower = summary.name.to_lowercase();
         let search_cohort_lower = cohort.to_lowercase();
 
         Ok(Self {

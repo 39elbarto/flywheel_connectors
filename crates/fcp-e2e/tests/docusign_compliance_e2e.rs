@@ -207,6 +207,24 @@ impl FcpConnector for DocuSignConnectorAdapter {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> fcp_core::FcpResult<SimulateResponse> {
+        // Mirror the invoke path: verify the capability token before
+        // delegating to the connector. The 17 sibling compliance-e2e
+        // suites all verify in BOTH invoke and simulate; docusign was
+        // the lone outlier that verified in invoke but skipped simulate.
+        // Compliance tests currently set `simulate: None` so this path
+        // is not exercised today, but a future test that enables simulate
+        // must not observe a weaker auth posture than invoke.
+        let cap_id: CapabilityId = required_capability_for_operation(req.operation.as_str())
+            .parse()
+            .map_err(|_| FcpError::Internal {
+                message: "invalid capability id".into(),
+            })?;
+        if let Some(verifier) = &self.verifier {
+            verifier.verify(req.capability_token.clone(), &cap_id, &req.operation, &[])?;
+        } else {
+            return Err(FcpError::NotConfigured);
+        }
+
         let request = serde_json::to_value(req).map_err(|err| FcpError::Internal {
             message: format!("failed to serialize simulate request: {err}"),
         })?;

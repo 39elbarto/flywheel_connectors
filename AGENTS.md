@@ -401,14 +401,17 @@ z:public         -> Public/untrusted inputs
 
 ### Performance Targets
 
-Connectors must be "unbelievably fast and reliable":
+Connectors must be "unbelievably fast and reliable". Canonical targets live in
+[README.md](README.md#performance-targets); reproduced here for quick reference:
 
-| Metric | Target |
-|--------|--------|
-| Cold start | < 50ms |
-| Request latency overhead | < 1ms |
-| Memory footprint | < 10MB idle |
-| Binary size | < 20MB (compressed) |
+| Metric | Target (p50/p99) | How Measured |
+|--------|------------------|--------------|
+| Cold start (connector activate) | < 100ms / < 500ms | Host-backed connector activation benchmark harness |
+| Local invoke latency (same node) | < 2ms / < 10ms | Host-backed local invoke scenario |
+| Tailnet invoke latency (LAN) | < 20ms / < 100ms | Mesh invoke benchmark on direct path |
+| Tailnet invoke latency (DERP) | < 150ms / < 500ms | Mesh invoke benchmark on DERP path |
+| Memory overhead | < 10MB per connector | Sandbox limits |
+| CPU overhead | < 1% idle | Event-driven architecture |
 
 Achieve this through:
 - Zero-copy parsing where possible

@@ -63,20 +63,81 @@ impl FcpConnector for HomeAssistantConnectorAdapter {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
-        // Call the raw connector handshake to set internal state (session_id, handshaken flag).
         let session_id = SessionId::new();
-        self.connector
-            .handle_handshake(json!({
-                "session_id": session_id.to_string(),
-            }))
-            .await?;
+        let mut params = serde_json::to_value(&req).map_err(|err| FcpError::Internal {
+            message: format!("failed to serialize handshake request: {err}"),
+        })?;
+        let params_obj = params.as_object_mut().ok_or_else(|| FcpError::Internal {
+            message: "homeassistant handshake request did not serialize to an object".into(),
+        })?;
+        params_obj.insert(
+            "session_id".to_string(),
+            serde_json::Value::String(session_id.0.to_string()),
+        );
 
-        // Build a proper HandshakeResponse expected by the E2E harness.
+        let response = self.connector.handle_handshake(params).await?;
+
+        let protocol_version = response
+            .get("protocol_version")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FcpError::Internal {
+                message: "homeassistant handshake response missing protocol_version".into(),
+            })?;
+        if protocol_version != "2.0" {
+            return Err(FcpError::Internal {
+                message: format!(
+                    "homeassistant handshake protocol_version expected 2.0, got {protocol_version}"
+                ),
+            });
+        }
+        let connector_id = response
+            .get("connector_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FcpError::Internal {
+                message: "homeassistant handshake response missing connector_id".into(),
+            })?;
+        if connector_id != "fcp.homeassistant" {
+            return Err(FcpError::Internal {
+                message: format!(
+                    "homeassistant handshake connector_id expected fcp.homeassistant, got {connector_id}"
+                ),
+            });
+        }
+        let _connector_version = response
+            .get("connector_version")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FcpError::Internal {
+                message: "homeassistant handshake response missing connector_version".into(),
+            })?;
+        let connector_caps: std::collections::BTreeSet<String> = response
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| FcpError::Internal {
+                message: "homeassistant handshake response missing capabilities array".into(),
+            })?
+            .into_iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect();
+        let expected_caps = std::collections::BTreeSet::from([
+            "homeassistant.read".to_string(),
+            "homeassistant.write".to_string(),
+            "homeassistant.control".to_string(),
+        ]);
+        if connector_caps != expected_caps {
+            return Err(FcpError::Internal {
+                message: format!(
+                    "homeassistant handshake capabilities mismatch: expected {expected_caps:?}, got {connector_caps:?}"
+                ),
+            });
+        }
+
         let capabilities_granted: Vec<CapabilityGrant> = req
             .capabilities_requested
-            .into_iter()
-            .map(|cap| CapabilityGrant {
-                capability: cap,
+            .iter()
+            .filter(|capability| connector_caps.contains(capability.as_str()))
+            .cloned()
+            .map(|capability| CapabilityGrant {
+                capability,
                 operation: None,
             })
             .collect();
@@ -240,7 +301,8 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("test constraints CBOR should be valid")
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -390,7 +452,7 @@ async fn homeassistant_allow_valid_token_connector_suite_passes() {
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(
         signing_key.verifying_key().to_bytes(),
-        &["homeassistant.list_states"],
+        &["homeassistant.read"],
     );
     let token = build_token(
         &signing_key,

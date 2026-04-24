@@ -15,12 +15,11 @@ use chrono::{Duration as ChronoDuration, Utc};
 use fcp_async_core::sync::Mutex;
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
-    AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
-    ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
-    IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus,
-    OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, SessionId, ShutdownRequest,
-    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
-    ZoneId,
+    AgentHint, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId, ConnectorMetrics,
+    FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
+    InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -69,35 +68,74 @@ impl FcpConnector for LlmRouterConnectorAdapter {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
+        // br-ab8sb: drive the REAL HandshakeRequest into the connector
+        // and return the connector's own HandshakeResponse instead of
+        // fabricating one at the adapter layer. Previously the adapter
+        // called `handle_handshake(params).await?` then discarded the
+        // response entirely and synthesized a locally-built
+        // HandshakeResponse with a fresh SessionId, a hardcoded
+        // manifest_hash, and capabilities copied straight from the
+        // request — so any drift in the connector's handshake semantics
+        // (status, granted capabilities, nonce echo, session_id) passed
+        // silently.
+        //
+        // Unlike the spotify / segment harnesses (where the connector
+        // returns an ad-hoc JSON envelope and the adapter re-assembles
+        // a HandshakeResponse from its fields), llm-router serializes
+        // the full HandshakeResponse struct. We parse it back with
+        // serde and assert the contract on the way through.
+        let nonce = req.nonce;
+        let expected_zone = req.zone.clone();
+        let expected_host_key = req.host_public_key;
+
         let params = serde_json::to_value(&req).map_err(|e| FcpError::Internal {
             message: format!("failed to serialize handshake request: {e}"),
         })?;
-        self.connector.lock().await.handle_handshake(params).await?;
+        let raw = self.connector.lock().await.handle_handshake(params).await?;
+
+        let response: HandshakeResponse =
+            serde_json::from_value(raw.clone()).map_err(|e| FcpError::Internal {
+                message: format!(
+                    "llm-router handshake response did not match HandshakeResponse contract: {e}"
+                ),
+            })?;
+
+        // Minimum contract assertions the adapter enforces on the way
+        // through. Any drift here surfaces as a named adapter-side
+        // error instead of a silent pass.
+        if response.status != "accepted" {
+            return Err(FcpError::Internal {
+                message: format!(
+                    "llm-router handshake expected status=accepted, got {}",
+                    response.status
+                ),
+            });
+        }
+        if response.nonce != nonce {
+            return Err(FcpError::Internal {
+                message: "llm-router handshake did not echo request nonce".into(),
+            });
+        }
+        // Every granted capability MUST have been in the request — the
+        // connector cannot widen the grant set.
+        for grant in &response.capabilities_granted {
+            if !req.capabilities_requested.contains(&grant.capability) {
+                return Err(FcpError::Internal {
+                    message: format!(
+                        "llm-router handshake granted unrequested capability: {:?}",
+                        grant.capability
+                    ),
+                });
+            }
+        }
 
         self.verifier = Some(CapabilityVerifier::new(
-            req.host_public_key,
-            req.zone.clone(),
+            expected_host_key,
+            expected_zone,
             self.instance_id.clone(),
         ));
 
-        Ok(HandshakeResponse {
-            status: "accepted".to_string(),
-            capabilities_granted: req
-                .capabilities_requested
-                .iter()
-                .cloned()
-                .map(|capability| CapabilityGrant {
-                    capability,
-                    operation: None,
-                })
-                .collect(),
-            session_id: SessionId::new(),
-            manifest_hash: "sha256:llm-router-e2e".to_string(),
-            nonce: req.nonce,
-            event_caps: None,
-            auth_caps: None,
-            op_catalog_hash: None,
-        })
+        Ok(response)
     }
 
     async fn health(&self) -> HealthSnapshot {

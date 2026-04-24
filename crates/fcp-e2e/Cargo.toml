@@ -301,3 +301,9 @@ ciborium = { workspace = true }
 base64 = { workspace = true }
 fcp-host = { workspace = true }
 fcp-store = { workspace = true }
+# br-ab8sb: llm_router_compliance_e2e.rs references
+# `fcp_sandbox::host_matches_allow_list` at test body scope; without this
+# dev-dep the test binary does not compile (pre-existing baseline error,
+# unrelated to ab8sb's handshake assertion fix but blocks verification of
+# that fix via `cargo test -p fcp-e2e --test llm_router_compliance_e2e`).
+fcp-sandbox = { workspace = true }

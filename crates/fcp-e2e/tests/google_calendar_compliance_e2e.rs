@@ -124,7 +124,7 @@ impl FcpConnector for GoogleCalendarConnectorAdapter {
                         "event": { "type": "object" }
                     }
                 }),
-                capability: CapabilityId::from_static("gcal.events.read"),
+                capability: CapabilityId::from_static("gcal.read"),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
                 idempotency: IdempotencyClass::Strict,
@@ -361,8 +361,8 @@ fn gcal_get_event_response() -> serde_json::Value {
 // ============================================================================
 
 /// Default deny: invoke without matching capability triggers error.
-/// Token grants "gcal.events.write" but invoke targets "gcal.get_event"
-/// (which requires "gcal.events.read").
+/// Token grants "gcal.write" but invoke targets "gcal.get_event"
+/// (which requires "gcal.read").
 #[fcp_async_core::runtime::test]
 async fn gcal_default_deny_compliance_suite_passes() {
     let mock = MockApiServer::start().await;
@@ -371,10 +371,10 @@ async fn gcal_default_deny_compliance_suite_passes() {
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(
         signing_key.verifying_key().to_bytes(),
-        &["gcal.events.write"],
+        &["gcal.write"],
     );
-    // Token grants "gcal.events.write" but invoke targets "gcal.get_event" -> denial
-    let token = build_token(&signing_key, "gcal.events.write", &["gcal.events.write"]);
+    // Token grants "gcal.write" but invoke targets "gcal.get_event" -> denial
+    let token = build_token(&signing_key, "gcal.write", &["gcal.write"]);
     let invoke = invoke_request(
         "gcal.get_event",
         json!({ "calendar_id": "primary", "event_id": "event_e2e_123" }),
@@ -424,8 +424,8 @@ async fn gcal_happy_path_connector_suite_passes() {
 
     let mut connector = GoogleCalendarConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["gcal.get_event"]);
-    let token = build_token(&signing_key, "gcal.get_event", &["gcal.get_event"]);
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["gcal.read"]);
+    let token = build_token(&signing_key, "gcal.read", &["gcal.get_event"]);
     let invoke = invoke_request(
         "gcal.get_event",
         json!({ "calendar_id": "primary", "event_id": "event_e2e_123" }),

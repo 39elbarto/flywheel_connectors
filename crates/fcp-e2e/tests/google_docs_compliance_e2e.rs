@@ -65,7 +65,12 @@ impl FcpConnector for GoogleDocsConnectorAdapter {
         let request = serde_json::to_value(req).map_err(|err| FcpError::Internal {
             message: format!("failed to serialize handshake request: {err}"),
         })?;
-        let response = self.connector.lock().await.handle_handshake(request).await?;
+        let response = self
+            .connector
+            .lock()
+            .await
+            .handle_handshake(request)
+            .await?;
         serde_json::from_value(response).map_err(|err| FcpError::Internal {
             message: format!("failed to deserialize handshake response: {err}"),
         })
@@ -171,12 +176,22 @@ impl FcpConnector for GoogleDocsConnectorAdapter {
 }
 
 fn docs_manifest_with_hash() -> String {
-    const PLACEHOLDER_HASH: &str =
-        "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
+    const PLACEHOLDER_HASH: &str = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
     let raw = include_str!("../../../connectors/google-docs/manifest.toml");
-    let normalized = raw.replace(
-        "blake3-256:fcp.interface.v2:google_docs_v1",
-        PLACEHOLDER_HASH,
+    let current_manifest: toml::Value = toml::from_str(raw).expect("google-docs manifest TOML");
+    let current_hash = current_manifest
+        .get("manifest")
+        .and_then(|manifest| manifest.get("interface_hash"))
+        .and_then(toml::Value::as_str)
+        .expect("manifest.interface_hash");
+    assert!(
+        !current_hash.is_empty(),
+        "manifest.interface_hash must not be empty"
+    );
+    let normalized = raw.replacen(current_hash, PLACEHOLDER_HASH, 1);
+    assert!(
+        normalized.contains(PLACEHOLDER_HASH),
+        "manifest interface_hash placeholder was not inserted"
     );
     let unchecked =
         ConnectorManifest::parse_str_unchecked(&normalized).expect("unchecked manifest parse");
@@ -228,8 +243,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let cose = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -237,7 +251,8 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("attach token constraints")
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -324,11 +339,7 @@ async fn google_docs_default_deny_compliance_suite_passes() {
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["docs.write"]);
     let token = build_token(&signing_key, "docs.write", &["docs.create"]);
-    let invoke = invoke_request(
-        "docs.get",
-        json!({ "document_id": "doc_123" }),
-        token,
-    );
+    let invoke = invoke_request("docs.get", json!({ "document_id": "doc_123" }), token);
 
     let dynamic = DynamicSuite {
         config: docs_config(&mock.base_url()),
@@ -373,11 +384,7 @@ async fn google_docs_happy_path_connector_suite_passes() {
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["docs.read"]);
     let token = build_token(&signing_key, "docs.read", &["docs.get"]);
-    let invoke = invoke_request(
-        "docs.get",
-        json!({ "document_id": "doc_123" }),
-        token,
-    );
+    let invoke = invoke_request("docs.get", json!({ "document_id": "doc_123" }), token);
 
     let suite = ConnectorSuite {
         test_name: "google_docs_happy_path".to_string(),

@@ -65,7 +65,12 @@ impl FcpConnector for GoogleSheetsConnectorAdapter {
         let request = serde_json::to_value(req).map_err(|err| FcpError::Internal {
             message: format!("failed to serialize handshake request: {err}"),
         })?;
-        let response = self.connector.lock().await.handle_handshake(request).await?;
+        let response = self
+            .connector
+            .lock()
+            .await
+            .handle_handshake(request)
+            .await?;
         serde_json::from_value(response).map_err(|err| FcpError::Internal {
             message: format!("failed to deserialize handshake response: {err}"),
         })
@@ -171,15 +176,29 @@ impl FcpConnector for GoogleSheetsConnectorAdapter {
 }
 
 fn sheets_manifest_with_hash() -> String {
+    const PLACEHOLDER_HASH: &str = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
     let raw = include_str!("../../../connectors/google-sheets/manifest.toml");
-    let unchecked = ConnectorManifest::parse_str_unchecked(raw).expect("unchecked manifest parse");
+    let current_manifest: toml::Value = toml::from_str(raw).expect("google-sheets manifest TOML");
+    let current_hash = current_manifest
+        .get("manifest")
+        .and_then(|manifest| manifest.get("interface_hash"))
+        .and_then(toml::Value::as_str)
+        .expect("manifest.interface_hash");
+    assert!(
+        !current_hash.is_empty(),
+        "manifest.interface_hash must not be empty"
+    );
+    let normalized = raw.replacen(current_hash, PLACEHOLDER_HASH, 1);
+    assert!(
+        normalized.contains(PLACEHOLDER_HASH),
+        "manifest interface_hash placeholder was not inserted"
+    );
+    let unchecked =
+        ConnectorManifest::parse_str_unchecked(&normalized).expect("unchecked manifest parse");
     let computed = unchecked
         .compute_interface_hash()
         .expect("compute interface hash");
-    raw.replace(
-        &unchecked.manifest.interface_hash.to_string(),
-        &computed.to_string(),
-    )
+    normalized.replace(PLACEHOLDER_HASH, &computed.to_string())
 }
 
 fn sheets_manifest_toml() -> toml::Value {
@@ -224,8 +243,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let cose = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -233,7 +251,8 @@ fn build_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + ChronoDuration::hours(1))
-        .constraints_cbor(&constraints_cbor)
+        .try_constraints_cbor(&constraints_cbor)
+        .expect("attach token constraints")
         .sign(signing_key)
         .expect("capability token sign");
     CapabilityToken::from_raw(cose)
@@ -367,11 +386,7 @@ async fn google_sheets_happy_path_connector_suite_passes() {
     let mut connector = GoogleSheetsConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["sheets.read"]);
-    let token = build_token(
-        &signing_key,
-        "sheets.read",
-        &["sheets.get_spreadsheet"],
-    );
+    let token = build_token(&signing_key, "sheets.read", &["sheets.get_spreadsheet"]);
     let invoke = invoke_request(
         "sheets.get_spreadsheet",
         json!({ "spreadsheet_id": "sheet_123" }),
@@ -415,7 +430,10 @@ async fn google_sheets_happy_path_connector_suite_passes() {
         .iter()
         .filter(|request| request.url.path() == "/v4/spreadsheets/sheet_123")
         .count();
-    assert_eq!(hits, 1, "expected exactly one GET to /v4/spreadsheets/sheet_123");
+    assert_eq!(
+        hits, 1,
+        "expected exactly one GET to /v4/spreadsheets/sheet_123"
+    );
 }
 
 #[test]

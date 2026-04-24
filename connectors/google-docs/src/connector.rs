@@ -65,9 +65,18 @@ impl DocsConnector {
             GoogleMaterializedAuth::BearerToken { .. } => "configured",
         };
 
-        let client = DocsClient::new_with_auth(materialized).map_err(|e| FcpError::Internal {
-            message: format!("Failed to create Docs client: {e}"),
-        })?;
+        let mut client =
+            DocsClient::new_with_auth(materialized).map_err(|e| FcpError::Internal {
+                message: format!("Failed to create Docs client: {e}"),
+            })?;
+        if let Some(base_url) = params
+            .get("base_url")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            client = client.with_base_url(base_url);
+        }
 
         let auth_label = client.auth_redacted_label();
         self.client = Some(client);

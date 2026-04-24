@@ -3822,7 +3822,7 @@ impl HostAdminStateStore {
         let mut claims = fcp_crypto::cose::CwtClaims::new()
             .issuer(&issuer_id)
             .subject(&request.principal_id)
-            .audience(&request.connector_id)
+            .audience(&request.zone_id)
             .zone_id(&request.zone_id)
             .capability_id(&request.capability_id)
             .issued_at(now)
@@ -3861,7 +3861,7 @@ impl HostAdminStateStore {
             token_id: token_id_hex.clone(),
             issuer: issuer_id.clone(),
             subject: request.principal_id.clone(),
-            audience: Some(request.connector_id.clone()),
+            audience: Some(request.zone_id.clone()),
             zone_id: request.zone_id.clone(),
             capability_id: Some(request.capability_id.clone()),
             operations: request.operations.clone(),
@@ -4152,12 +4152,20 @@ impl HostAdminStateStore {
         }
 
         // 3. Scope validity
-        let scope_valid = Self::check_scope_validity(
+        let operation_scope_valid = Self::check_scope_validity(
             &inspection,
             request.operation_id.as_deref(),
-            request.connector_id.as_deref(),
+            None,
             &mut rejection_reasons,
         );
+        let connector_scope_valid = self
+            .check_connector_scope_validity(
+                &inspection,
+                request.connector_id.as_deref(),
+                &mut rejection_reasons,
+            )
+            .await;
+        let scope_valid = operation_scope_valid && connector_scope_valid;
 
         // 4. Revocation check
         let revoked = self.is_token_revoked(&inspection.token_id).await;
@@ -4238,6 +4246,44 @@ impl HostAdminStateStore {
         }
 
         scope_ok
+    }
+
+    async fn check_connector_scope_validity(
+        &self,
+        inspection: &CapabilityTokenInspection,
+        connector_id: Option<&str>,
+        rejection_reasons: &mut Vec<String>,
+    ) -> bool {
+        let Some(cid) = connector_id else {
+            return true;
+        };
+
+        let audience_match = inspection
+            .audience
+            .as_deref()
+            .is_some_and(|aud| aud == cid || aud == "*");
+        let subject_match = inspection.subject == cid || inspection.subject == "*";
+        if audience_match || subject_match {
+            return true;
+        }
+
+        let state = self.state.read().await;
+        let issued_connector = state
+            .issued_tokens
+            .iter()
+            .find(|token| token.token_id == inspection.token_id)
+            .map(|token| token.connector_id.as_str());
+        if issued_connector.is_some_and(|scoped_connector| scoped_connector == cid) {
+            return true;
+        }
+
+        rejection_reasons.push(format!(
+            "Token not scoped for connector '{cid}'. Subject: '{}', Audience: {:?}, Issued connector: {}",
+            inspection.subject,
+            inspection.audience,
+            issued_connector.unwrap_or("<unknown>")
+        ));
+        false
     }
 
     /// Check whether a token has been revoked in the host's ledger.
@@ -6721,6 +6767,7 @@ mod tests {
         assert!(!response.token_id.is_empty());
         assert!(response.token_cbor_b64.is_some());
         assert_eq!(response.inspection.subject, "agent:test-agent");
+        assert_eq!(response.inspection.audience.as_deref(), Some("z:work"));
         assert_eq!(response.inspection.zone_id, "z:work");
         assert_eq!(
             response.inspection.capability_id.as_deref(),
@@ -8081,7 +8128,7 @@ mod tests {
         let verify_request = CapabilityTokenVerifyRequest {
             token_cbor_b64: issued.token_cbor_b64.expect("non-dry-run token"),
             operation_id: Some("read".to_owned()),
-            connector_id: None,
+            connector_id: Some("test:saas:1.0.0".to_owned()),
         };
 
         let result = store
@@ -8093,7 +8140,59 @@ mod tests {
         assert!(result.temporally_valid);
         assert!(result.scope_valid);
         assert!(result.valid);
+        assert_eq!(result.inspection.audience.as_deref(), Some("zone-test"));
         assert!(result.rejection_reasons.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn verify_issued_token_wrong_connector_fails_scope() {
+        let store = HostAdminStateStore::new();
+        let signing_key = fcp_crypto::Ed25519SigningKey::generate();
+
+        let request = CapabilityIssuanceRequest {
+            connector_id: "test:saas:1.0.0".to_owned(),
+            capability_id: "test.read".to_owned(),
+            zone_id: "zone-test".to_owned(),
+            principal_id: "agent-1".to_owned(),
+            operations: vec!["read".to_owned()],
+            ttl_secs: 3600,
+            not_before_delay_secs: None,
+            holder_node: None,
+            max_delegation_depth: 0,
+            resource_allow: vec![],
+            resource_deny: vec![],
+            max_calls: None,
+            max_bytes: None,
+            credential_allow: vec![],
+            dry_run: false,
+        };
+
+        let issued = store
+            .issue_capability_token(&request, &signing_key)
+            .await
+            .expect("issue token");
+
+        let verify_request = CapabilityTokenVerifyRequest {
+            token_cbor_b64: issued.token_cbor_b64.expect("non-dry-run token"),
+            operation_id: Some("read".to_owned()),
+            connector_id: Some("wrong:saas:1.0.0".to_owned()),
+        };
+
+        let result = store
+            .verify_capability_token(&verify_request)
+            .await
+            .expect("verify token");
+
+        assert!(result.signature_valid);
+        assert!(result.temporally_valid);
+        assert!(!result.scope_valid);
+        assert!(!result.valid);
+        assert!(
+            result
+                .rejection_reasons
+                .iter()
+                .any(|reason| reason.contains("wrong:saas:1.0.0"))
+        );
     }
 
     #[fcp_async_core::runtime::test]

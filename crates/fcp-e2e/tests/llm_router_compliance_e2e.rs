@@ -171,7 +171,7 @@ impl FcpConnector for LlmRouterConnectorAdapter {
             message: "LLM Router verifier not initialized; handshake required".into(),
         })?;
         let cap = required_capability(req.operation.as_str())?;
-        verifier.verify(&req.capability_token, &cap, &req.operation, &[])?;
+        verifier.verify(req.capability_token.clone(), &cap, &req.operation, &[])?;
 
         let request_id = req.id.clone();
         let params = json!({
@@ -188,7 +188,7 @@ impl FcpConnector for LlmRouterConnectorAdapter {
             message: "LLM Router verifier not initialized; handshake required".into(),
         })?;
         let cap = required_capability(req.operation.as_str())?;
-        verifier.verify(&req.capability_token, &cap, &req.operation, &[])?;
+        verifier.verify(req.capability_token.clone(), &cap, &req.operation, &[])?;
 
         let value = self
             .connector
@@ -327,8 +327,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let token = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")

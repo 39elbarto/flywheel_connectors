@@ -2811,7 +2811,9 @@ name = "fcp-conformance"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum 0.8.9",
  "base64 0.22.1",
+ "blake3",
  "chrono",
  "ciborium",
  "clap",
@@ -2842,6 +2844,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tower",
  "url",
  "uuid",
  "wasmtime",
@@ -3190,6 +3193,7 @@ dependencies = [
  "fcp-roam",
  "fcp-s3",
  "fcp-salesforce",
+ "fcp-sandbox",
  "fcp-segment",
  "fcp-semanticscholar",
  "fcp-sendgrid",

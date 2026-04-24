@@ -212,7 +212,7 @@ mod meshnode {
         LeaseHandoff, LeaseParams, LeasePurpose as CoreLeasePurpose, MigratableComputation,
         MigratableComputationState, MigrationCapabilityContext, ObjectHeader, Provenance,
         RetentionClass as ObjectRetentionClass, SignatureSet, StorageMeta, StoredObject, Uuid,
-        ZoneKeyId, current_timestamp,
+        ZoneKey, ZoneKeyAlgorithm, ZoneKeyId, current_timestamp,
     };
     use fcp_mesh::admission::AdmissionError;
     use fcp_mesh::admission::ObjectAdmissionClass;
@@ -283,6 +283,14 @@ mod meshnode {
             symbol_store,
             quarantine_store,
         )
+    }
+
+    const fn test_zone_key() -> ZoneKey {
+        ZoneKey::from_bytes([0xA5; 32])
+    }
+
+    const fn test_zone_key_algorithm() -> ZoneKeyAlgorithm {
+        ZoneKeyAlgorithm::ChaCha20Poly1305
     }
 
     fn build_mesh_node_with_trace(
@@ -1453,15 +1461,25 @@ mod meshnode {
             42,
             RetentionClass::Required,
         );
+        let zone_key = test_zone_key();
+        let algorithm = test_zone_key_algorithm();
 
         let frames = node
-            .encode_control_plane(&envelope, 42)
+            .encode_control_plane(&envelope, 42, &zone_key, algorithm)
             .expect("encode control plane");
 
         let mut decoded = None;
         for frame in frames {
             if let Some(result) = node
-                .decode_control_plane(&NodeId::new("node-1"), &frame, &zone_id, RetentionClass::Required, 42)
+                .decode_control_plane(
+                    &NodeId::new("node-1"),
+                    &frame,
+                    &zone_id,
+                    RetentionClass::Required,
+                    &zone_key,
+                    algorithm,
+                    42,
+                )
                 .expect("decode control plane")
             {
                 decoded = Some(result);
@@ -1510,15 +1528,26 @@ mod meshnode {
             77,
             RetentionClass::Required,
         );
+        let zone_key = test_zone_key();
+        let algorithm = test_zone_key_algorithm();
 
         let frames = node
-            .encode_control_plane(&envelope, 77)
+            .encode_control_plane(&envelope, 77, &zone_key, algorithm)
             .expect("encode control plane");
 
         let handler = InMemoryControlPlaneHandler::new();
         for frame in frames {
             let _ = node
-                .process_control_plane_frame(&NodeId::new("node-1"), &frame, &zone_id, RetentionClass::Required, 77, &handler)
+                .process_control_plane_frame(
+                    &NodeId::new("node-1"),
+                    &frame,
+                    &zone_id,
+                    RetentionClass::Required,
+                    &zone_key,
+                    algorithm,
+                    77,
+                    &handler,
+                )
                 .expect("process control plane");
         }
 
@@ -1657,15 +1686,26 @@ mod meshnode {
             99,
             RetentionClass::Required,
         );
+        let zone_key = test_zone_key();
+        let algorithm = test_zone_key_algorithm();
 
         let frames = node_a
-            .encode_control_plane(&envelope, 99)
+            .encode_control_plane(&envelope, 99, &zone_key, algorithm)
             .expect("encode control plane");
 
         let handler = InMemoryControlPlaneHandler::new();
         for frame in frames {
             let _ = node_b
-                .process_control_plane_frame(&NodeId::new("node-a"), &frame, &zone_id, RetentionClass::Required, 99, &handler)
+                .process_control_plane_frame(
+                    &NodeId::new("node-a"),
+                    &frame,
+                    &zone_id,
+                    RetentionClass::Required,
+                    &zone_key,
+                    algorithm,
+                    99,
+                    &handler,
+                )
                 .expect("process control plane");
         }
 

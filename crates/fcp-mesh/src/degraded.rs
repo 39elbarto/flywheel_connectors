@@ -20,10 +20,15 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use fcp_core::{ObjectId, TailscaleNodeId, ZoneId, ZoneIdHash, ZoneKeyId};
-use fcp_crypto::{Ed25519SigningKey, Ed25519VerifyingKey};
+use fcp_core::{
+    ObjectId, TailscaleNodeId, ZoneId, ZoneIdHash, ZoneKey, ZoneKeyAlgorithm as CoreZoneKeyAlgorithm,
+    ZoneKeyId,
+};
+use fcp_crypto::{AeadKey, Ed25519SigningKey, Ed25519VerifyingKey};
 use fcp_protocol::{
-    FCPS_VERSION, FcpsFrame, FcpsFrameHeader, FrameError, FrameFlags, SignedFcpsFrame, SymbolRecord,
+    decrypt_symbol, encrypt_symbol, FCPS_VERSION, FcpsFrame, FcpsFrameHeader, FrameError,
+    FrameFlags, SignedFcpsFrame, SymbolContext, SymbolEnvelopeError, SymbolRecord,
+    ZoneKeyAlgorithm as SymbolZoneKeyAlgorithm,
 };
 use fcp_raptorq::{DecodeError, EncodeError, RaptorQConfig, RaptorQDecoder, RaptorQEncoder};
 use thiserror::Error;
@@ -81,6 +86,26 @@ pub enum DegradedTransportError {
     /// Signature verification failed.
     #[error("signature verification failed")]
     SignatureVerificationFailed,
+
+    /// Symbol encryption failed before a CONTROL_PLANE frame could be emitted.
+    #[error("symbol encryption failed for esi {esi}: {source}")]
+    SymbolEncryptFailed {
+        esi: u32,
+        #[source]
+        source: SymbolEnvelopeError,
+    },
+
+    /// Symbol decryption/authentication failed before decode.
+    #[error("symbol decryption failed for esi {esi}: {source}")]
+    SymbolDecryptFailed {
+        esi: u32,
+        #[source]
+        source: SymbolEnvelopeError,
+    },
+
+    /// Authenticated symbol crypto context is required for degraded transport.
+    #[error("authenticated symbol crypto context required for degraded transport")]
+    SymbolCryptoUnavailable,
 
     /// Too many concurrent pending reconstructions.
     #[error(
@@ -173,10 +198,13 @@ impl DegradedModeEncoder {
     /// # Errors
     ///
     /// Returns `DegradedTransportError::Encode` if RaptorQ encoding fails.
-    pub fn encode(
+    pub fn encode_authenticated(
         &mut self,
         envelope: &ControlPlaneEnvelope,
         epoch_id: u64,
+        zone_key: &ZoneKey,
+        algorithm: CoreZoneKeyAlgorithm,
+        source_id: &TailscaleNodeId,
     ) -> Result<Vec<FcpsFrame>, DegradedTransportError> {
         info!(
             object_id = %envelope.object_id,
@@ -205,19 +233,34 @@ impl DegradedModeEncoder {
 
         // For simplicity, pack all symbols into a single frame
         // (production would batch based on MTU)
-        let symbol_records: Vec<SymbolRecord> = symbols
+        let frame_seq = self.next_frame_seq;
+        let zone_key = aead_key(zone_key);
+        let algorithm = protocol_zone_key_algorithm(algorithm);
+        let symbol_records: Result<Vec<_>, _> = symbols
             .into_iter()
             .map(|(esi, data)| {
-                let _data_len = data.len();
-                SymbolRecord {
+                let context = symbol_context(
+                    envelope.object_id.clone(),
+                    esi,
+                    k,
+                    zone_id_hash,
+                    envelope.zone_key_id,
+                    epoch_id,
+                    source_id.clone(),
+                    self.sender_instance_id,
+                    frame_seq,
+                );
+                let (data, auth_tag) = encrypt_symbol(&zone_key, algorithm, &context, &data)
+                    .map_err(|source| DegradedTransportError::SymbolEncryptFailed { esi, source })?;
+                Ok::<SymbolRecord, DegradedTransportError>(SymbolRecord {
                     esi,
                     k,
                     data,
-                    // Placeholder auth tag - real implementation would encrypt
-                    auth_tag: [0u8; 16],
-                }
+                    auth_tag,
+                })
             })
             .collect();
+        let symbol_records = symbol_records?;
 
         let symbol_size = self.config.symbol_size;
         let total_payload_len: u32 = symbol_records
@@ -236,7 +279,7 @@ impl DegradedModeEncoder {
             zone_id_hash,
             epoch_id,
             sender_instance_id: self.sender_instance_id,
-            frame_seq: self.next_frame_seq,
+            frame_seq,
         };
 
         self.next_frame_seq += 1;
@@ -254,6 +297,30 @@ impl DegradedModeEncoder {
         }])
     }
 
+    #[cfg(test)]
+    pub fn encode(
+        &mut self,
+        envelope: &ControlPlaneEnvelope,
+        epoch_id: u64,
+    ) -> Result<Vec<FcpsFrame>, DegradedTransportError> {
+        self.encode_authenticated(
+            envelope,
+            epoch_id,
+            &ZoneKey::from_bytes([0x44; 32]),
+            CoreZoneKeyAlgorithm::ChaCha20Poly1305,
+            &TailscaleNodeId::new("mesh-test-sender"),
+        )
+    }
+
+    #[cfg(not(test))]
+    pub fn encode(
+        &mut self,
+        _envelope: &ControlPlaneEnvelope,
+        _epoch_id: u64,
+    ) -> Result<Vec<FcpsFrame>, DegradedTransportError> {
+        Err(DegradedTransportError::SymbolCryptoUnavailable)
+    }
+
     /// Encode and sign a control-plane object for degraded/bootstrap mode.
     ///
     /// Use when session MACs are unavailable. The provided `epoch_id` is the
@@ -262,6 +329,27 @@ impl DegradedModeEncoder {
     /// # Errors
     ///
     /// Returns `DegradedTransportError::Encode` if encoding fails.
+    pub fn encode_signed_authenticated(
+        &mut self,
+        envelope: &ControlPlaneEnvelope,
+        epoch_id: u64,
+        zone_key: &ZoneKey,
+        algorithm: CoreZoneKeyAlgorithm,
+        source_id: &TailscaleNodeId,
+        timestamp: u64,
+        signing_key: &Ed25519SigningKey,
+    ) -> Result<Vec<SignedFcpsFrame>, DegradedTransportError> {
+        let frames =
+            self.encode_authenticated(envelope, epoch_id, zone_key, algorithm, source_id)?;
+
+        let signed: Result<Vec<_>, _> = frames
+            .into_iter()
+            .map(|frame| SignedFcpsFrame::new(frame, source_id.clone(), timestamp, signing_key))
+            .collect();
+        Ok(signed?)
+    }
+
+    #[cfg(test)]
     pub fn encode_signed(
         &mut self,
         envelope: &ControlPlaneEnvelope,
@@ -270,13 +358,27 @@ impl DegradedModeEncoder {
         timestamp: u64,
         signing_key: &Ed25519SigningKey,
     ) -> Result<Vec<SignedFcpsFrame>, DegradedTransportError> {
-        let frames = self.encode(envelope, epoch_id)?;
+        self.encode_signed_authenticated(
+            envelope,
+            epoch_id,
+            &ZoneKey::from_bytes([0x44; 32]),
+            CoreZoneKeyAlgorithm::ChaCha20Poly1305,
+            source_id,
+            timestamp,
+            signing_key,
+        )
+    }
 
-        let signed: Result<Vec<_>, _> = frames
-            .into_iter()
-            .map(|frame| SignedFcpsFrame::new(frame, source_id.clone(), timestamp, signing_key))
-            .collect();
-        Ok(signed?)
+    #[cfg(not(test))]
+    pub fn encode_signed(
+        &mut self,
+        _envelope: &ControlPlaneEnvelope,
+        _epoch_id: u64,
+        _source_id: &TailscaleNodeId,
+        _timestamp: u64,
+        _signing_key: &Ed25519SigningKey,
+    ) -> Result<Vec<SignedFcpsFrame>, DegradedTransportError> {
+        Err(DegradedTransportError::SymbolCryptoUnavailable)
     }
 }
 
@@ -375,11 +477,14 @@ impl DegradedModeDecoder {
     ///
     /// This function should not panic under normal operation. Internal map state
     /// is guaranteed consistent when reconstruction completes.
-    pub fn process_frame(
+    pub fn process_frame_authenticated(
         &mut self,
         frame: &FcpsFrame,
         expected_zone_id: &ZoneId,
         retention: RetentionClass,
+        zone_key: &ZoneKey,
+        algorithm: CoreZoneKeyAlgorithm,
+        source_id: &TailscaleNodeId,
     ) -> Result<Option<ControlPlaneEnvelope>, DegradedTransportError> {
         self.validate_control_plane_frame(frame, expected_zone_id)?;
         debug!(
@@ -416,12 +521,45 @@ impl DegradedModeDecoder {
             let pending = self.pending.entry(pending_key.clone()).or_insert_with(|| {
                 Self::new_pending_reconstruction(frame, expected_zone_id, retention, &self.config)
             });
-            Self::decode_symbols(&mut pending.decoder, &frame.symbols)?
+            Self::decode_symbols(
+                &mut pending.decoder,
+                frame,
+                &aead_key(zone_key),
+                protocol_zone_key_algorithm(algorithm),
+                source_id,
+            )?
         };
 
         completed_payload.map_or(Ok(None), |payload| {
             self.finish_reconstruction(&pending_key, &object_id, frame, &payload)
         })
+    }
+
+    #[cfg(test)]
+    pub fn process_frame(
+        &mut self,
+        frame: &FcpsFrame,
+        expected_zone_id: &ZoneId,
+        retention: RetentionClass,
+    ) -> Result<Option<ControlPlaneEnvelope>, DegradedTransportError> {
+        self.process_frame_authenticated(
+            frame,
+            expected_zone_id,
+            retention,
+            &ZoneKey::from_bytes([0x44; 32]),
+            CoreZoneKeyAlgorithm::ChaCha20Poly1305,
+            &TailscaleNodeId::new("mesh-test-sender"),
+        )
+    }
+
+    #[cfg(not(test))]
+    pub fn process_frame(
+        &mut self,
+        _frame: &FcpsFrame,
+        _expected_zone_id: &ZoneId,
+        _retention: RetentionClass,
+    ) -> Result<Option<ControlPlaneEnvelope>, DegradedTransportError> {
+        Err(DegradedTransportError::SymbolCryptoUnavailable)
     }
 
     /// Process a signed FCPS frame for degraded/bootstrap mode.
@@ -431,12 +569,14 @@ impl DegradedModeDecoder {
     /// # Errors
     ///
     /// Returns error if signature verification fails or frame processing fails.
-    pub fn process_signed_frame(
+    pub fn process_signed_frame_authenticated(
         &mut self,
         signed_frame: &SignedFcpsFrame,
         verifying_key: &Ed25519VerifyingKey,
         expected_zone_id: &ZoneId,
         retention: RetentionClass,
+        zone_key: &ZoneKey,
+        algorithm: CoreZoneKeyAlgorithm,
     ) -> Result<Option<ControlPlaneEnvelope>, DegradedTransportError> {
         // Verify signature
         if signed_frame.verify(verifying_key).is_err() {
@@ -455,7 +595,43 @@ impl DegradedModeDecoder {
             "degraded_mode: signature verified for signed FCPS frame"
         );
 
-        self.process_frame(&signed_frame.frame, expected_zone_id, retention)
+        self.process_frame_authenticated(
+            &signed_frame.frame,
+            expected_zone_id,
+            retention,
+            zone_key,
+            algorithm,
+            &signed_frame.source_id,
+        )
+    }
+
+    #[cfg(test)]
+    pub fn process_signed_frame(
+        &mut self,
+        signed_frame: &SignedFcpsFrame,
+        verifying_key: &Ed25519VerifyingKey,
+        expected_zone_id: &ZoneId,
+        retention: RetentionClass,
+    ) -> Result<Option<ControlPlaneEnvelope>, DegradedTransportError> {
+        self.process_signed_frame_authenticated(
+            signed_frame,
+            verifying_key,
+            expected_zone_id,
+            retention,
+            &ZoneKey::from_bytes([0x44; 32]),
+            CoreZoneKeyAlgorithm::ChaCha20Poly1305,
+        )
+    }
+
+    #[cfg(not(test))]
+    pub fn process_signed_frame(
+        &mut self,
+        _signed_frame: &SignedFcpsFrame,
+        _verifying_key: &Ed25519VerifyingKey,
+        _expected_zone_id: &ZoneId,
+        _retention: RetentionClass,
+    ) -> Result<Option<ControlPlaneEnvelope>, DegradedTransportError> {
+        Err(DegradedTransportError::SymbolCryptoUnavailable)
     }
 
     /// Get decode status for a pending object.
@@ -579,11 +755,35 @@ impl DegradedModeDecoder {
 
     fn decode_symbols(
         decoder: &mut RaptorQDecoder,
-        symbols: &[SymbolRecord],
+        frame: &FcpsFrame,
+        zone_key: &AeadKey,
+        algorithm: SymbolZoneKeyAlgorithm,
+        source_id: &TailscaleNodeId,
     ) -> Result<Option<Vec<u8>>, DegradedTransportError> {
-        for symbol in symbols {
-            // In production, would verify auth_tag here after AEAD decryption.
-            if let Some(payload) = decoder.add_symbol(symbol.esi, symbol.data.clone())? {
+        for symbol in &frame.symbols {
+            let context = symbol_context(
+                frame.header.object_id.clone(),
+                symbol.esi,
+                symbol.k,
+                frame.header.zone_id_hash,
+                frame.header.zone_key_id,
+                frame.header.epoch_id,
+                source_id.clone(),
+                frame.header.sender_instance_id,
+                frame.header.frame_seq,
+            );
+            let plaintext = decrypt_symbol(
+                zone_key,
+                algorithm,
+                &context,
+                &symbol.data,
+                &symbol.auth_tag,
+            )
+            .map_err(|source| DegradedTransportError::SymbolDecryptFailed {
+                esi: symbol.esi,
+                source,
+            })?;
+            if let Some(payload) = decoder.add_symbol(symbol.esi, plaintext)? {
                 return Ok(Some(payload));
             }
         }
@@ -660,6 +860,41 @@ impl DegradedModeDecoder {
         }
 
         Some((schema_hash, payload[36..36 + payload_len].to_vec()))
+    }
+}
+
+fn aead_key(zone_key: &ZoneKey) -> AeadKey {
+    AeadKey::from_bytes(*zone_key.as_bytes())
+}
+
+fn protocol_zone_key_algorithm(algorithm: CoreZoneKeyAlgorithm) -> SymbolZoneKeyAlgorithm {
+    match algorithm {
+        CoreZoneKeyAlgorithm::ChaCha20Poly1305 => SymbolZoneKeyAlgorithm::ChaCha20Poly1305,
+        CoreZoneKeyAlgorithm::XChaCha20Poly1305 => SymbolZoneKeyAlgorithm::XChaCha20Poly1305,
+    }
+}
+
+fn symbol_context(
+    object_id: ObjectId,
+    esi: u32,
+    k: u16,
+    zone_id_hash: ZoneIdHash,
+    zone_key_id: ZoneKeyId,
+    epoch_id: u64,
+    sender_node_id: TailscaleNodeId,
+    sender_instance_id: u64,
+    frame_seq: u64,
+) -> SymbolContext {
+    SymbolContext {
+        object_id,
+        esi,
+        k,
+        zone_id_hash,
+        zone_key_id,
+        epoch_id,
+        sender_node_id,
+        sender_instance_id,
+        frame_seq,
     }
 }
 
@@ -845,6 +1080,18 @@ mod tests {
         "z:test".parse().expect("valid zone id")
     }
 
+    fn test_zone_key() -> ZoneKey {
+        ZoneKey::from_bytes([0x44; 32])
+    }
+
+    const fn test_zone_algorithm() -> CoreZoneKeyAlgorithm {
+        CoreZoneKeyAlgorithm::ChaCha20Poly1305
+    }
+
+    fn test_source_id() -> TailscaleNodeId {
+        TailscaleNodeId::new("mesh-test-sender")
+    }
+
     fn test_envelope() -> ControlPlaneEnvelope {
         ControlPlaneEnvelope {
             payload: vec![0x42; 256],
@@ -873,6 +1120,37 @@ mod tests {
         header.total_payload_len = total_payload_len;
 
         FcpsFrame { header, symbols }
+    }
+
+    fn seal_frame_symbols(frame: &FcpsFrame, source_id: &TailscaleNodeId) -> FcpsFrame {
+        let zone_key = aead_key(&test_zone_key());
+        let algorithm = protocol_zone_key_algorithm(test_zone_algorithm());
+        let symbols = frame
+            .symbols
+            .iter()
+            .map(|symbol| {
+                let context = symbol_context(
+                    frame.header.object_id.clone(),
+                    symbol.esi,
+                    symbol.k,
+                    frame.header.zone_id_hash,
+                    frame.header.zone_key_id,
+                    frame.header.epoch_id,
+                    source_id.clone(),
+                    frame.header.sender_instance_id,
+                    frame.header.frame_seq,
+                );
+                let (data, auth_tag) = encrypt_symbol(&zone_key, algorithm, &context, &symbol.data)
+                    .expect("test symbol encryption should succeed");
+                SymbolRecord {
+                    esi: symbol.esi,
+                    k: symbol.k,
+                    data,
+                    auth_tag,
+                }
+            })
+            .collect();
+        frame_with_symbols(frame, symbols)
     }
 
     #[test]
@@ -1232,9 +1510,9 @@ mod tests {
             }
         };
 
-        let frame_a = make_frame(0xA0);
-        let frame_b = make_frame(0xB0);
-        let frame_c = make_frame(0xC0);
+        let frame_a = seal_frame_symbols(&make_frame(0xA0), &test_source_id());
+        let frame_b = seal_frame_symbols(&make_frame(0xB0), &test_source_id());
+        let frame_c = seal_frame_symbols(&make_frame(0xC0), &test_source_id());
 
         // First two distinct object_ids: accepted (new pending entries).
         assert!(
@@ -1300,10 +1578,11 @@ mod tests {
         malformed_payload[..4].copy_from_slice(&512u32.to_be_bytes());
         malformed_payload[4..36].copy_from_slice(&[0xCD; 32]);
 
-        let frame = FcpsFrame {
-            header: FcpsFrameHeader {
-                version: FCPS_VERSION,
-                flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE,
+        let frame = seal_frame_symbols(
+            &FcpsFrame {
+                header: FcpsFrameHeader {
+                    version: FCPS_VERSION,
+                    flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE,
                 symbol_count: 1,
                 total_payload_len: u32::try_from(
                     SymbolRecord {
@@ -1323,13 +1602,15 @@ mod tests {
                 sender_instance_id: 1,
                 frame_seq: 0,
             },
-            symbols: vec![SymbolRecord {
-                esi: 0,
-                k: 1,
-                data: malformed_payload,
-                auth_tag: [0u8; 16],
-            }],
-        };
+                symbols: vec![SymbolRecord {
+                    esi: 0,
+                    k: 1,
+                    data: malformed_payload,
+                    auth_tag: [0u8; 16],
+                }],
+            },
+            &test_source_id(),
+        );
 
         let result = decoder
             .process_frame(&frame, &zone_id, RetentionClass::Required)
@@ -1351,10 +1632,11 @@ mod tests {
         let mut decoder = DegradedModeDecoder::new(config);
         let zone_id = test_zone_id();
 
-        let frame = FcpsFrame {
-            header: FcpsFrameHeader {
-                version: FCPS_VERSION,
-                flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE,
+        let frame = seal_frame_symbols(
+            &FcpsFrame {
+                header: FcpsFrameHeader {
+                    version: FCPS_VERSION,
+                    flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE,
                 symbol_count: 2,
                 total_payload_len: u32::try_from(
                     SymbolRecord {
@@ -1395,7 +1677,9 @@ mod tests {
                     auth_tag: [0u8; 16],
                 },
             ],
-        };
+            },
+            &test_source_id(),
+        );
 
         let err = decoder
             .process_frame(&frame, &zone_id, RetentionClass::Required)
@@ -1418,10 +1702,11 @@ mod tests {
         let object_id = ObjectId::from_bytes([0x88; 32]);
         let zone_key_id = ZoneKeyId::from_bytes([0x44; 8]);
 
-        let frame_k2 = FcpsFrame {
-            header: FcpsFrameHeader {
-                version: FCPS_VERSION,
-                flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE,
+        let frame_k2 = seal_frame_symbols(
+            &FcpsFrame {
+                header: FcpsFrameHeader {
+                    version: FCPS_VERSION,
+                    flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE,
                 symbol_count: 1,
                 total_payload_len: u32::try_from(
                     SymbolRecord {
@@ -1447,7 +1732,9 @@ mod tests {
                 data: vec![0xAA; 64],
                 auth_tag: [0u8; 16],
             }],
-        };
+            },
+            &test_source_id(),
+        );
         let frame_k3 = frame_with_symbols(
             &FcpsFrame {
                 header: FcpsFrameHeader {
@@ -1463,6 +1750,7 @@ mod tests {
                 auth_tag: [0u8; 16],
             }],
         );
+        let frame_k3 = seal_frame_symbols(&frame_k3, &test_source_id());
 
         let result_k2 = decoder
             .process_frame(&frame_k2, &zone_id, RetentionClass::Required)
@@ -1779,27 +2067,30 @@ mod tests {
         let zone_id = test_zone_id();
 
         // Manually create a frame with a single symbol (insufficient for decode)
-        let frame = FcpsFrame {
-            header: FcpsFrameHeader {
-                version: FCPS_VERSION,
-                flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE,
-                symbol_count: 1,
-                total_payload_len: 100,
-                object_id: ObjectId::from_bytes([0x55; 32]),
-                symbol_size: 64,
-                zone_key_id: ZoneKeyId::from_bytes([0; 8]),
-                zone_id_hash: zone_id.hash(),
-                epoch_id: 0,
-                sender_instance_id: 0,
-                frame_seq: 0,
+        let frame = seal_frame_symbols(
+            &FcpsFrame {
+                header: FcpsFrameHeader {
+                    version: FCPS_VERSION,
+                    flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE,
+                    symbol_count: 1,
+                    total_payload_len: 100,
+                    object_id: ObjectId::from_bytes([0x55; 32]),
+                    symbol_size: 64,
+                    zone_key_id: ZoneKeyId::from_bytes([0; 8]),
+                    zone_id_hash: zone_id.hash(),
+                    epoch_id: 0,
+                    sender_instance_id: 0,
+                    frame_seq: 0,
+                },
+                symbols: vec![SymbolRecord {
+                    esi: 0,
+                    k: 10, // claim 10 source symbols needed
+                    data: vec![0u8; 64],
+                    auth_tag: [0u8; 16],
+                }],
             },
-            symbols: vec![SymbolRecord {
-                esi: 0,
-                k: 10, // claim 10 source symbols needed
-                data: vec![0u8; 64],
-                auth_tag: [0u8; 16],
-            }],
-        };
+            &test_source_id(),
+        );
 
         let result = decoder.process_frame(&frame, &zone_id, RetentionClass::Required);
         // Should be Ok(None) - incomplete

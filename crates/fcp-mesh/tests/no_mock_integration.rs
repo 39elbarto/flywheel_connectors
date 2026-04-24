@@ -6,7 +6,8 @@
 use std::collections::HashSet;
 
 use fcp_core::{
-    ConnectorId, EpochId, ObjectId, TailscaleNodeId, ZoneId, ZoneKeyId, ZoneTransportPolicy,
+    ConnectorId, EpochId, ObjectId, TailscaleNodeId, ZoneId, ZoneKey, ZoneKeyAlgorithm,
+    ZoneKeyId, ZoneTransportPolicy,
 };
 use fcp_crypto::Ed25519SigningKey;
 use fcp_mesh::degraded::{
@@ -68,6 +69,14 @@ fn test_zone() -> ZoneId {
 
 const fn test_zone_key_id() -> ZoneKeyId {
     ZoneKeyId::from_bytes([0xBB; 8])
+}
+
+const fn test_zone_key() -> ZoneKey {
+    ZoneKey::from_bytes([0xA5; 32])
+}
+
+const fn test_zone_key_algorithm() -> ZoneKeyAlgorithm {
+    ZoneKeyAlgorithm::ChaCha20Poly1305
 }
 
 fn test_connector_id(name: &str) -> ConnectorId {
@@ -1358,7 +1367,17 @@ fn degraded_encoder_decoder_roundtrip() {
     let config = test_raptorq_config();
     let mut encoder = DegradedModeEncoder::new(config.clone(), 12345);
     let envelope = test_envelope(&[0x42; 256], 1, 0, RetentionClass::Required);
-    let frames = encoder.encode(&envelope, 0).expect("encode should succeed");
+    let zone_key = test_zone_key();
+    let algorithm = test_zone_key_algorithm();
+    let frames = encoder
+        .encode_authenticated(
+            &envelope,
+            0,
+            &zone_key,
+            algorithm,
+            &test_ts_node("mesh-test-sender"),
+        )
+        .expect("encode should succeed");
     assert!(!frames.is_empty());
 
     let mut decoder = DegradedModeDecoder::new(config);
@@ -1366,7 +1385,14 @@ fn degraded_encoder_decoder_roundtrip() {
     let mut result = None;
     for frame in &frames {
         if let Some(decoded) = decoder
-            .process_frame(frame, &zone, RetentionClass::Required)
+            .process_frame_authenticated(
+                frame,
+                &zone,
+                RetentionClass::Required,
+                &zone_key,
+                algorithm,
+                &test_ts_node("mesh-test-sender"),
+            )
             .expect("decode should succeed")
         {
             result = Some(decoded);
@@ -1383,9 +1409,16 @@ fn degraded_encoder_frame_seq_increments() {
     let config = test_raptorq_config();
     let mut encoder = DegradedModeEncoder::new(config, 99);
     let envelope = test_envelope(&[0x10; 64], 2, 0, RetentionClass::Required);
+    let zone_key = test_zone_key();
+    let algorithm = test_zone_key_algorithm();
+    let source_id = test_ts_node("mesh-test-sender");
 
-    let frames1 = encoder.encode(&envelope, 0).unwrap();
-    let frames2 = encoder.encode(&envelope, 1).unwrap();
+    let frames1 = encoder
+        .encode_authenticated(&envelope, 0, &zone_key, algorithm, &source_id)
+        .unwrap();
+    let frames2 = encoder
+        .encode_authenticated(&envelope, 1, &zone_key, algorithm, &source_id)
+        .unwrap();
     assert_eq!(frames1[0].header.frame_seq, 0);
     assert_eq!(frames2[0].header.frame_seq, 1);
 }
@@ -1395,7 +1428,12 @@ fn degraded_encoder_small_payload() {
     let config = test_raptorq_config();
     let mut encoder = DegradedModeEncoder::new(config.clone(), 1);
     let envelope = test_envelope(&[0x01; 8], 3, 0, RetentionClass::Ephemeral);
-    let frames = encoder.encode(&envelope, 0).unwrap();
+    let zone_key = test_zone_key();
+    let algorithm = test_zone_key_algorithm();
+    let source_id = test_ts_node("mesh-test-sender");
+    let frames = encoder
+        .encode_authenticated(&envelope, 0, &zone_key, algorithm, &source_id)
+        .unwrap();
     assert!(!frames.is_empty());
 
     let mut decoder = DegradedModeDecoder::new(config);
@@ -1403,7 +1441,14 @@ fn degraded_encoder_small_payload() {
     let mut result = None;
     for frame in &frames {
         result = decoder
-            .process_frame(frame, &zone, RetentionClass::Ephemeral)
+            .process_frame_authenticated(
+                frame,
+                &zone,
+                RetentionClass::Ephemeral,
+                &zone_key,
+                algorithm,
+                &source_id,
+            )
             .unwrap();
     }
     let reconstructed = result.expect("small payload roundtrip");
@@ -1418,9 +1463,19 @@ fn degraded_encoder_signed_roundtrip() {
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
     let source_id = test_ts_node("sender-node");
+    let zone_key = test_zone_key();
+    let algorithm = test_zone_key_algorithm();
 
     let signed_frames = encoder
-        .encode_signed(&envelope, 5, &source_id, 1000, &signing_key)
+        .encode_signed_authenticated(
+            &envelope,
+            5,
+            &zone_key,
+            algorithm,
+            &source_id,
+            1000,
+            &signing_key,
+        )
         .expect("encode_signed should succeed");
     assert!(!signed_frames.is_empty());
 
@@ -1429,7 +1484,14 @@ fn degraded_encoder_signed_roundtrip() {
     let mut result = None;
     for sf in &signed_frames {
         if let Some(decoded) = decoder
-            .process_signed_frame(sf, &verifying_key, &zone, RetentionClass::Required)
+            .process_signed_frame_authenticated(
+                sf,
+                &verifying_key,
+                &zone,
+                RetentionClass::Required,
+                &zone_key,
+                algorithm,
+            )
             .expect("signed decode should succeed")
         {
             result = Some(decoded);
@@ -1448,19 +1510,31 @@ fn degraded_decoder_wrong_signing_key_rejected() {
     let wrong_key = Ed25519SigningKey::generate();
     let wrong_verifying = wrong_key.verifying_key();
     let source_id = test_ts_node("bad-sender");
+    let zone_key = test_zone_key();
+    let algorithm = test_zone_key_algorithm();
 
     let signed_frames = encoder
-        .encode_signed(&envelope, 0, &source_id, 1000, &signing_key)
+        .encode_signed_authenticated(
+            &envelope,
+            0,
+            &zone_key,
+            algorithm,
+            &source_id,
+            1000,
+            &signing_key,
+        )
         .unwrap();
 
     let mut decoder = DegradedModeDecoder::new(config);
     let zone = test_zone();
     let err = decoder
-        .process_signed_frame(
+        .process_signed_frame_authenticated(
             &signed_frames[0],
             &wrong_verifying,
             &zone,
             RetentionClass::Required,
+            &zone_key,
+            algorithm,
         )
         .unwrap_err();
     assert!(matches!(
@@ -1474,14 +1548,59 @@ fn degraded_decoder_zone_mismatch_rejected() {
     let config = test_raptorq_config();
     let mut encoder = DegradedModeEncoder::new(config.clone(), 555);
     let envelope = test_envelope(&[0xDD; 64], 6, 0, RetentionClass::Required);
-    let frames = encoder.encode(&envelope, 0).unwrap();
+    let zone_key = test_zone_key();
+    let algorithm = test_zone_key_algorithm();
+    let source_id = test_ts_node("mesh-test-sender");
+    let frames = encoder
+        .encode_authenticated(&envelope, 0, &zone_key, algorithm, &source_id)
+        .unwrap();
 
     let mut decoder = DegradedModeDecoder::new(config);
     let wrong_zone = ZoneId::owner();
     let err = decoder
-        .process_frame(&frames[0], &wrong_zone, RetentionClass::Required)
+        .process_frame_authenticated(
+            &frames[0],
+            &wrong_zone,
+            RetentionClass::Required,
+            &zone_key,
+            algorithm,
+            &source_id,
+        )
         .unwrap_err();
     assert!(matches!(err, DegradedTransportError::ZoneMismatch { .. }));
+}
+
+#[test]
+fn degraded_decoder_rejects_tampered_symbol_data() {
+    let config = test_raptorq_config();
+    let mut encoder = DegradedModeEncoder::new(config.clone(), 4242);
+    let mut decoder = DegradedModeDecoder::new(config);
+    let zone = test_zone();
+    let zone_key = test_zone_key();
+    let algorithm = test_zone_key_algorithm();
+    let source_id = test_ts_node("mesh-test-sender");
+    let envelope = test_envelope(&[0x5A; 128], 7, 0, RetentionClass::Required);
+
+    let mut frame = encoder
+        .encode_authenticated(&envelope, 0, &zone_key, algorithm, &source_id)
+        .unwrap()
+        .remove(0);
+    frame.symbols[0].data[0] ^= 0x01;
+
+    let err = decoder
+        .process_frame_authenticated(
+            &frame,
+            &zone,
+            RetentionClass::Required,
+            &zone_key,
+            algorithm,
+            &source_id,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        DegradedTransportError::SymbolDecryptFailed { .. }
+    ));
 }
 
 #[test]
@@ -2040,15 +2159,27 @@ fn mesh_node_control_plane_encode_decode() {
 
     let envelope = test_envelope(&[0xEE; 128], 70, 1, RetentionClass::Required);
     let zone = test_zone();
+    let zone_key = test_zone_key();
+    let algorithm = test_zone_key_algorithm();
 
-    let frames = node.encode_control_plane(&envelope, 1).expect("encode");
+    let frames = node
+        .encode_control_plane(&envelope, 1, &zone_key, algorithm)
+        .expect("encode");
     assert!(!frames.is_empty());
 
-    let peer = NodeId::new("cp-peer");
+    let peer = NodeId::new("cp-node");
     let mut result = None;
     for frame in &frames {
         if let Some(decoded) = node
-            .decode_control_plane(&peer, frame, &zone, RetentionClass::Required, 1_000)
+            .decode_control_plane(
+                &peer,
+                frame,
+                &zone,
+                RetentionClass::Required,
+                &zone_key,
+                algorithm,
+                1_000,
+            )
             .expect("decode")
         {
             result = Some(decoded);
@@ -2069,16 +2200,22 @@ fn mesh_node_process_control_plane_with_handler() {
 
     let envelope = test_envelope(&[0xFF; 64], 80, 2, RetentionClass::Required);
     let zone = test_zone();
+    let zone_key = test_zone_key();
+    let algorithm = test_zone_key_algorithm();
     let handler = InMemoryControlPlaneHandler::new();
 
-    let frames = node.encode_control_plane(&envelope, 2).expect("encode");
-    let peer = NodeId::new("handler-peer");
+    let frames = node
+        .encode_control_plane(&envelope, 2, &zone_key, algorithm)
+        .expect("encode");
+    let peer = NodeId::new("handler-node");
     for frame in &frames {
         node.process_control_plane_frame(
             &peer,
             frame,
             &zone,
             RetentionClass::Required,
+            &zone_key,
+            algorithm,
             2_000,
             &handler,
         )
@@ -2087,6 +2224,43 @@ fn mesh_node_process_control_plane_with_handler() {
     assert_eq!(handler.count(), 1);
     let stored = handler.get(&test_object_id(80)).expect("stored");
     assert_eq!(stored.payload, vec![0xFF; 64]);
+}
+
+#[test]
+fn mesh_node_control_plane_rejects_tampered_symbol_data() {
+    let config = test_raptorq_config();
+    let mesh_config = MeshNodeConfig::new("tamper-node")
+        .with_raptorq_config(config)
+        .with_sender_instance_id(77);
+    let (obj, sym, quar) = create_test_stores();
+    let mut node = MeshNode::new(mesh_config, obj, sym, quar);
+
+    let envelope = test_envelope(&[0xAC; 128], 81, 3, RetentionClass::Required);
+    let zone = test_zone();
+    let zone_key = test_zone_key();
+    let algorithm = test_zone_key_algorithm();
+
+    let mut frame = node
+        .encode_control_plane(&envelope, 3, &zone_key, algorithm)
+        .expect("encode")
+        .remove(0);
+    frame.symbols[0].data[0] ^= 0x01;
+
+    let err = node
+        .decode_control_plane(
+            &NodeId::new("tamper-node"),
+            &frame,
+            &zone,
+            RetentionClass::Required,
+            &zone_key,
+            algorithm,
+            3_000,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        MeshNodeError::DegradedTransport(DegradedTransportError::SymbolDecryptFailed { .. })
+    ));
 }
 
 #[test]
@@ -2419,6 +2593,9 @@ fn cross_multi_peer_score_ordering() {
 fn cross_degraded_encode_to_handler_store() {
     let mut encoder = DegradedModeEncoder::new(test_raptorq_config(), 42);
     let zone = test_zone();
+    let zone_key = test_zone_key();
+    let algorithm = test_zone_key_algorithm();
+    let source_id = test_ts_node("mesh-test-sender");
     let envelope = test_envelope(
         b"cross-module-test-payload",
         0x77,
@@ -2426,13 +2603,22 @@ fn cross_degraded_encode_to_handler_store() {
         RetentionClass::Required,
     );
 
-    let frames = encoder.encode(&envelope, 10).unwrap();
+    let frames = encoder
+        .encode_authenticated(&envelope, 10, &zone_key, algorithm, &source_id)
+        .unwrap();
     assert!(!frames.is_empty());
 
     let mut decoder = DegradedModeDecoder::new(test_raptorq_config());
     let mut recovered = None;
     for frame in &frames {
-        if let Ok(Some(env)) = decoder.process_frame(frame, &zone, RetentionClass::Required) {
+        if let Ok(Some(env)) = decoder.process_frame_authenticated(
+            frame,
+            &zone,
+            RetentionClass::Required,
+            &zone_key,
+            algorithm,
+            &source_id,
+        ) {
             recovered = Some(env);
             break;
         }

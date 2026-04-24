@@ -15,7 +15,8 @@ use std::sync::Arc;
 
 use fcp_core::{
     CapabilityVerifier, FcpError, InvokeRequest, InvokeValidationError, ObjectId, OperationIntent,
-    OperationReceipt, RevocationRegistry, TailscaleNodeId, ZoneId, ZoneTransportPolicy,
+    OperationReceipt, RevocationRegistry, TailscaleNodeId, ZoneId, ZoneKey,
+    ZoneKeyAlgorithm, ZoneTransportPolicy,
 };
 use fcp_crypto::{CwtClaims, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_protocol::{DecodeStatus, SymbolAck, SymbolRequest};
@@ -1824,8 +1825,12 @@ impl MeshNode {
         &mut self,
         envelope: &ControlPlaneEnvelope,
         epoch_id: u64,
+        zone_key: &ZoneKey,
+        algorithm: ZoneKeyAlgorithm,
     ) -> Result<Vec<fcp_protocol::FcpsFrame>, MeshNodeError> {
-        Ok(self.degraded_encoder.encode(envelope, epoch_id)?)
+        Ok(self
+            .degraded_encoder
+            .encode_authenticated(envelope, epoch_id, zone_key, algorithm, &self.local_node_ts)?)
     }
 
     /// Decode a control-plane frame in degraded mode.
@@ -1839,14 +1844,24 @@ impl MeshNode {
         frame: &fcp_protocol::FcpsFrame,
         expected_zone_id: &ZoneId,
         retention: RetentionClass,
+        zone_key: &ZoneKey,
+        algorithm: ZoneKeyAlgorithm,
         now_ms: u64,
     ) -> Result<Option<ControlPlaneEnvelope>, MeshNodeError> {
         // Enforce per-peer concurrent decode limits (Admission Control)
         self.admission.try_acquire_decode(peer, now_ms)?;
 
+        let sender_node_id = TailscaleNodeId::new(peer.as_str());
         let result = self
             .degraded_decoder
-            .process_frame(frame, expected_zone_id, retention);
+            .process_frame_authenticated(
+                frame,
+                expected_zone_id,
+                retention,
+                zone_key,
+                algorithm,
+                &sender_node_id,
+            );
 
         // Release the decode slot immediately after processing the frame.
         // This bounds the active CPU time spent decoding for this peer.
@@ -1867,11 +1882,20 @@ impl MeshNode {
         frame: &fcp_protocol::FcpsFrame,
         expected_zone_id: &ZoneId,
         retention: RetentionClass,
+        zone_key: &ZoneKey,
+        algorithm: ZoneKeyAlgorithm,
         now_ms: u64,
         handler: &dyn ControlPlaneHandler,
     ) -> Result<Option<ControlPlaneEnvelope>, MeshNodeError> {
-        let envelope =
-            self.decode_control_plane(peer, frame, expected_zone_id, retention, now_ms)?;
+        let envelope = self.decode_control_plane(
+            peer,
+            frame,
+            expected_zone_id,
+            retention,
+            zone_key,
+            algorithm,
+            now_ms,
+        )?;
         if let Some(ref env) = envelope {
             handler.handle(env.clone())?;
         }

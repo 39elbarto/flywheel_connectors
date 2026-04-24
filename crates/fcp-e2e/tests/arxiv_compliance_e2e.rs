@@ -165,7 +165,7 @@ impl FcpConnector for ArxivConnectorAdapter {
         })?;
         let required_capability = required_capability(req.operation.as_str())?;
         verifier.verify(
-            &req.capability_token,
+            req.capability_token.clone(),
             &required_capability,
             &req.operation,
             &[],
@@ -188,7 +188,7 @@ impl FcpConnector for ArxivConnectorAdapter {
         })?;
         let required_capability = required_capability(req.operation.as_str())?;
         verifier.verify(
-            &req.capability_token,
+            req.capability_token.clone(),
             &required_capability,
             &req.operation,
             &[],

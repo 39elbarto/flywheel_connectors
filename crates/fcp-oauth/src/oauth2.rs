@@ -322,9 +322,8 @@ fn validate_oauth2_config(mut config: OAuth2Config) -> OAuthResult<OAuth2Config>
     Url::parse(&config.authorization_url)?;
     Url::parse(&config.token_url)?;
     if let Some(redirect_uri) = config.redirect_uri.as_deref() {
-        config.redirect_uri = Some(
-            normalize_registered_redirect_uri(redirect_uri, "redirect_uri")?.into(),
-        );
+        config.redirect_uri =
+            Some(normalize_registered_redirect_uri(redirect_uri, "redirect_uri")?.into());
     }
     if config.extra_token_params.contains_key("code_verifier") {
         return Err(OAuthError::InvalidConfig(
@@ -672,18 +671,7 @@ impl OAuth2Client {
             .await?;
 
         if !response.is_success() {
-            let error: TokenErrorResponse =
-                response.json().unwrap_or_else(|_| TokenErrorResponse {
-                    error: "unknown_error".to_string(),
-                    error_description: None,
-                    error_uri: None,
-                });
-
-            return Err(OAuthError::TokenExchangeFailed(format!(
-                "{}: {}",
-                error.error,
-                error.error_description.unwrap_or_default()
-            )));
+            return Err(token_endpoint_unsuccessful_error(response.status));
         }
 
         let token_response: TokenResponse = response.json()?;
@@ -731,13 +719,10 @@ impl OAuth2Client {
     }
 }
 
-/// OAuth 2.0 error response.
-#[derive(Debug, Deserialize)]
-struct TokenErrorResponse {
-    error: String,
-    error_description: Option<String>,
-    #[allow(dead_code)] // Part of OAuth spec, kept for debugging/future use
-    error_uri: Option<String>,
+fn token_endpoint_unsuccessful_error(status: u16) -> OAuthError {
+    OAuthError::TokenExchangeFailed(format!(
+        "token endpoint returned an unsuccessful response (status {status})"
+    ))
 }
 
 /// Authorization callback parameters.
@@ -1222,7 +1207,7 @@ mod tests {
                         "unexpected message: {msg}"
                     );
                 }
-                other => panic!("expected InvalidTokenResponse, got {other:?}"),
+                other => assert!(false, "expected InvalidTokenResponse, got {other:?}"),
             }
         });
     }
@@ -1577,14 +1562,14 @@ mod tests {
     }
 
     #[test]
-    fn test_exchange_code_maps_error_response() {
+    fn test_exchange_code_redacts_token_error_response() {
         run_with_test_runtime(async {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/token"))
                 .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
                     "error": "invalid_grant",
-                    "error_description": "authorization code expired"
+                    "error_description": "authorization code expired\nleaked_secret=abc123"
                 })))
                 .mount(&server)
                 .await;
@@ -1600,11 +1585,20 @@ mod tests {
             let client = OAuth2Client::new(config).unwrap();
 
             let error = client.exchange_code("expired-code").await.unwrap_err();
+            assert!(
+                matches!(&error, OAuthError::TokenExchangeFailed(_)),
+                "expected token exchange error"
+            );
             let OAuthError::TokenExchangeFailed(message) = error else {
-                panic!("expected token exchange error")
+                return;
             };
-            assert!(message.contains("invalid_grant"));
-            assert!(message.contains("authorization code expired"));
+            assert_eq!(
+                message,
+                "token endpoint returned an unsuccessful response (status 400)"
+            );
+            assert!(!message.contains("invalid_grant"));
+            assert!(!message.contains("authorization code expired"));
+            assert!(!message.contains("leaked_secret"));
         });
     }
 
@@ -2019,7 +2013,7 @@ mod tests {
                     Some("https://provider.com/errors/500".to_string())
                 );
             }
-            other => panic!("expected AuthorizationError, got {other:?}"),
+            other => assert!(false, "expected AuthorizationError, got {other:?}"),
         }
     }
 
@@ -2202,9 +2196,19 @@ mod tests {
             )
             .with_pkce(false);
             let client = OAuth2Client::new(config).unwrap();
-            let result = client.exchange_code("code").await;
-            // Should get a TokenExchangeFailed with fallback error parsing
-            assert!(matches!(result, Err(OAuthError::TokenExchangeFailed(_))));
+            let error = client.exchange_code("code").await.unwrap_err();
+            assert!(
+                matches!(&error, OAuthError::TokenExchangeFailed(_)),
+                "expected token exchange error"
+            );
+            let OAuthError::TokenExchangeFailed(message) = error else {
+                return;
+            };
+            assert_eq!(
+                message,
+                "token endpoint returned an unsuccessful response (status 500)"
+            );
+            assert!(!message.contains("Internal Server Error"));
         });
     }
 
@@ -2484,7 +2488,7 @@ mod tests {
         if let OAuthError::AuthorizationError { description, .. } = err {
             assert!(description.is_empty());
         } else {
-            panic!("wrong variant");
+            assert!(false, "wrong variant");
         }
     }
 
@@ -2942,7 +2946,7 @@ mod tests {
                 Some("https://docs.example.com/scopes".to_string())
             );
         } else {
-            panic!("Expected AuthorizationError");
+            assert!(false, "expected AuthorizationError");
         }
     }
 

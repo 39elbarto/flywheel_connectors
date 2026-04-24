@@ -339,6 +339,34 @@ impl std::fmt::Debug for OAuth2Client {
     }
 }
 
+fn reserved_extra_auth_param(key: &str) -> bool {
+    matches!(
+        key,
+        "response_type"
+            | "client_id"
+            | "state"
+            | "redirect_uri"
+            | "scope"
+            | "code_challenge"
+            | "code_challenge_method"
+            | "response_mode"
+    )
+}
+
+fn reserved_extra_token_param(key: &str) -> bool {
+    matches!(
+        key,
+        "grant_type"
+            | "code"
+            | "redirect_uri"
+            | "refresh_token"
+            | "scope"
+            | "client_id"
+            | "client_secret"
+            | "code_verifier"
+    )
+}
+
 fn validate_oauth2_config(mut config: OAuth2Config) -> OAuthResult<OAuth2Config> {
     Url::parse(&config.authorization_url)?;
     Url::parse(&config.token_url)?;
@@ -346,10 +374,22 @@ fn validate_oauth2_config(mut config: OAuth2Config) -> OAuthResult<OAuth2Config>
         config.redirect_uri =
             Some(normalize_registered_redirect_uri(redirect_uri, "redirect_uri")?.into());
     }
-    if config.extra_token_params.contains_key("code_verifier") {
+    if let Some(key) = config
+        .extra_auth_params
+        .keys()
+        .find(|key| reserved_extra_auth_param(key))
+    {
         return Err(OAuthError::InvalidConfig(
-            "static code_verifier is forbidden; generate PKCE per flow via authorization_session[_with_pkce]() and exchange_code_with_pkce()"
-                .into(),
+            format!("extra auth param `{key}` is reserved by the OAuth 2.0 flow").into(),
+        ));
+    }
+    if let Some(key) = config
+        .extra_token_params
+        .keys()
+        .find(|key| reserved_extra_token_param(key))
+    {
+        return Err(OAuthError::InvalidConfig(
+            format!("extra token param `{key}` is reserved by the OAuth 2.0 flow").into(),
         ));
     }
     Ok(config)
@@ -1854,7 +1894,42 @@ mod tests {
         let err = OAuth2Client::new(config).unwrap_err();
         assert!(matches!(
             err,
-            OAuthError::InvalidConfig(ref m) if m.contains("static code_verifier is forbidden")
+            OAuthError::InvalidConfig(ref m)
+                if m.contains("extra token param `code_verifier` is reserved")
+        ));
+    }
+
+    #[test]
+    fn test_client_rejects_reserved_extra_auth_state_param() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        )
+        .with_auth_param("state", "attacker-controlled");
+        let err = OAuth2Client::new(config).unwrap_err();
+        assert!(matches!(
+            err,
+            OAuthError::InvalidConfig(ref m)
+                if m.contains("extra auth param `state` is reserved")
+        ));
+    }
+
+    #[test]
+    fn test_client_rejects_reserved_extra_token_grant_type_param() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        )
+        .with_token_param("grant_type", "refresh_token");
+        let err = OAuth2Client::new(config).unwrap_err();
+        assert!(matches!(
+            err,
+            OAuthError::InvalidConfig(ref m)
+                if m.contains("extra token param `grant_type` is reserved")
         ));
     }
 
@@ -2845,7 +2920,8 @@ mod tests {
         let err = OAuth2Client::new(config).unwrap_err();
         assert!(matches!(
             err,
-            OAuthError::InvalidConfig(ref m) if m.contains("static code_verifier is forbidden")
+            OAuthError::InvalidConfig(ref m)
+                if m.contains("extra token param `code_verifier` is reserved")
         ));
     }
 

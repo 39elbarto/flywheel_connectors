@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use fcp_google_discovery::auth::GoogleMaterializedAuth;
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder};
 use serde::de::DeserializeOwned;
 use tracing::{instrument, warn};
 
@@ -179,20 +179,19 @@ impl SheetsClient {
         self.runtime.shutdown();
     }
 
-    fn bearer_token(&self) -> Option<&str> {
-        match &self.auth {
-            GoogleMaterializedAuth::BearerToken { access_token, .. } => Some(access_token),
-            GoogleMaterializedAuth::CredentialReference { .. } => None,
+    fn apply_auth_headers(&self, mut builder: RequestBuilder) -> RequestBuilder {
+        let mut headers = Vec::new();
+        self.auth.apply_headers(&mut headers);
+        for (name, value) in headers {
+            builder = builder.header(name, value);
         }
+        builder
     }
 
     async fn get_json<T: DeserializeOwned>(&self, url: &str) -> SheetsResult<T> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let token = self.bearer_token().ok_or(SheetsError::Unauthorized)?;
         let resp = self
-            .client
-            .get(url)
-            .bearer_auth(token)
+            .apply_auth_headers(self.client.get(url))
             .send()
             .await
             .map_err(SheetsError::Http)?;
@@ -205,11 +204,8 @@ impl SheetsClient {
         body: &B,
     ) -> SheetsResult<T> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let token = self.bearer_token().ok_or(SheetsError::Unauthorized)?;
         let resp = self
-            .client
-            .put(url)
-            .bearer_auth(token)
+            .apply_auth_headers(self.client.put(url))
             .json(body)
             .send()
             .await
@@ -223,11 +219,8 @@ impl SheetsClient {
         body: &B,
     ) -> SheetsResult<T> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let token = self.bearer_token().ok_or(SheetsError::Unauthorized)?;
         let resp = self
-            .client
-            .post(url)
-            .bearer_auth(token)
+            .apply_auth_headers(self.client.post(url))
             .json(body)
             .send()
             .await
@@ -315,6 +308,19 @@ fn encode_range(range: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_google_discovery::auth::{
+        FCP_CREDENTIAL_ID_HEADER, GOOGLE_AUTHORIZATION_HEADER, GoogleAuthSourceKind,
+    };
+    use std::future::Future;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn run_async_test<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        fcp_async_core::runtime::block_on_sync(future).expect("test runtime")
+    }
 
     #[test]
     fn encode_range_basic() {
@@ -427,5 +433,64 @@ mod tests {
         })
         .unwrap();
         assert_eq!(client.auth_redacted_label(), label);
+    }
+
+    #[test]
+    fn bearer_token_requests_use_authorization_header() {
+        run_async_test(async {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v4/spreadsheets/sheet123"))
+                .and(header(GOOGLE_AUTHORIZATION_HEADER, "Bearer test-token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "spreadsheetId": "sheet123",
+                    "properties": { "title": "Auth Header" },
+                    "sheets": [],
+                    "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/sheet123"
+                })))
+                .mount(&server)
+                .await;
+
+            let client = SheetsClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
+                access_token: "test-token".into(),
+                source: GoogleAuthSourceKind::AccessToken,
+                granted_scopes: Vec::new(),
+                quota_project_id: None,
+            })
+            .unwrap()
+            .with_base_url(format!("{}/v4", server.uri()));
+
+            let spreadsheet = client.get_spreadsheet("sheet123").await.unwrap();
+            assert_eq!(spreadsheet.spreadsheet_id, "sheet123");
+        });
+    }
+
+    #[test]
+    fn credential_reference_requests_use_fcp_credential_header() {
+        run_async_test(async {
+            let server = MockServer::start().await;
+            let credential_id = fcp_core::CredentialId::new();
+            Mock::given(method("GET"))
+                .and(path("/v4/spreadsheets/sheet123"))
+                .and(header(FCP_CREDENTIAL_ID_HEADER, credential_id.to_string()))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "spreadsheetId": "sheet123",
+                    "properties": { "title": "Credential Header" },
+                    "sheets": [],
+                    "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/sheet123"
+                })))
+                .mount(&server)
+                .await;
+
+            let client = SheetsClient::new_with_auth(GoogleMaterializedAuth::CredentialReference {
+                credential_id,
+                quota_project_id: None,
+            })
+            .unwrap()
+            .with_base_url(format!("{}/v4", server.uri()));
+
+            let spreadsheet = client.get_spreadsheet("sheet123").await.unwrap();
+            assert_eq!(spreadsheet.spreadsheet_id, "sheet123");
+        });
     }
 }

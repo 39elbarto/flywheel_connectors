@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use fcp_google_discovery::auth::GoogleMaterializedAuth;
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder};
 use serde::de::DeserializeOwned;
 use tracing::{instrument, warn};
 
@@ -80,8 +80,8 @@ impl WorkspaceEventsClient {
         events_base_url: impl Into<String>,
         pubsub_base_url: impl Into<String>,
     ) -> Self {
-        self.events_base_url = events_base_url.into();
-        self.pubsub_base_url = pubsub_base_url.into();
+        self.events_base_url = events_base_url.into().trim_end_matches('/').to_string();
+        self.pubsub_base_url = pubsub_base_url.into().trim_end_matches('/').to_string();
         self
     }
 
@@ -250,11 +250,13 @@ impl WorkspaceEventsClient {
             .await
     }
 
-    fn bearer_token(&self) -> Option<&str> {
-        match &self.auth {
-            GoogleMaterializedAuth::BearerToken { access_token, .. } => Some(access_token),
-            GoogleMaterializedAuth::CredentialReference { .. } => None,
+    fn apply_auth_headers(&self, mut builder: RequestBuilder) -> RequestBuilder {
+        let mut headers = Vec::new();
+        self.auth.apply_headers(&mut headers);
+        for (name, value) in headers {
+            builder = builder.header(name, value);
         }
+        builder
     }
 
     async fn get_json<T: DeserializeOwned + Default>(
@@ -263,13 +265,8 @@ impl WorkspaceEventsClient {
         missing_kind: MissingResourceKind,
     ) -> WorkspaceEventsResult<T> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let token = self
-            .bearer_token()
-            .ok_or(WorkspaceEventsError::Unauthorized)?;
         let resp = self
-            .client
-            .get(url)
-            .bearer_auth(token)
+            .apply_auth_headers(self.client.get(url))
             .send()
             .await
             .map_err(WorkspaceEventsError::Http)?;
@@ -283,13 +280,8 @@ impl WorkspaceEventsClient {
         missing_kind: MissingResourceKind,
     ) -> WorkspaceEventsResult<T> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let token = self
-            .bearer_token()
-            .ok_or(WorkspaceEventsError::Unauthorized)?;
         let resp = self
-            .client
-            .post(url)
-            .bearer_auth(token)
+            .apply_auth_headers(self.client.post(url))
             .json(body)
             .send()
             .await
@@ -303,13 +295,8 @@ impl WorkspaceEventsClient {
         missing_kind: MissingResourceKind,
     ) -> WorkspaceEventsResult<T> {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        let token = self
-            .bearer_token()
-            .ok_or(WorkspaceEventsError::Unauthorized)?;
         let resp = self
-            .client
-            .delete(url)
-            .bearer_auth(token)
+            .apply_auth_headers(self.client.delete(url))
             .send()
             .await
             .map_err(WorkspaceEventsError::Http)?;
@@ -389,6 +376,19 @@ fn map_api_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_google_discovery::auth::{
+        FCP_CREDENTIAL_ID_HEADER, GOOGLE_AUTHORIZATION_HEADER, GoogleAuthSourceKind,
+    };
+    use std::future::Future;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn run_async_test<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        fcp_async_core::runtime::block_on_sync(future).expect("test runtime")
+    }
 
     #[test]
     fn auth_redacted_label_credential_ref() {
@@ -412,5 +412,90 @@ mod tests {
             })
             .unwrap();
         assert_eq!(client.total_requests(), 0);
+    }
+
+    #[test]
+    fn with_base_urls_trims_trailing_slashes() {
+        let client =
+            WorkspaceEventsClient::new_with_auth(GoogleMaterializedAuth::CredentialReference {
+                credential_id: fcp_core::CredentialId::new(),
+                quota_project_id: None,
+            })
+            .unwrap()
+            .with_base_urls("http://localhost:9999/v1/", "http://localhost:9998/v1/");
+
+        assert_eq!(client.events_base_url, "http://localhost:9999/v1");
+        assert_eq!(client.pubsub_base_url, "http://localhost:9998/v1");
+    }
+
+    #[test]
+    fn bearer_token_requests_use_authorization_header() {
+        run_async_test(async {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/v1/subscriptions"))
+                .and(header(GOOGLE_AUTHORIZATION_HEADER, "Bearer test-token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "subscriptions": [
+                        { "name": "subscriptions/auth-header", "state": "ACTIVE" }
+                    ]
+                })))
+                .mount(&server)
+                .await;
+
+            let client =
+                WorkspaceEventsClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
+                    access_token: "test-token".into(),
+                    source: GoogleAuthSourceKind::AccessToken,
+                    granted_scopes: Vec::new(),
+                    quota_project_id: None,
+                })
+                .unwrap()
+                .with_base_urls(
+                    format!("{}/v1", server.uri()),
+                    format!("{}/v1", server.uri()),
+                );
+
+            let subscriptions = client.list_subscriptions(None, None).await.unwrap();
+            assert_eq!(
+                subscriptions.subscriptions[0].name,
+                "subscriptions/auth-header"
+            );
+        });
+    }
+
+    #[test]
+    fn credential_reference_requests_use_fcp_credential_header() {
+        run_async_test(async {
+            let server = MockServer::start().await;
+            let credential_id = fcp_core::CredentialId::new();
+            Mock::given(method("GET"))
+                .and(path("/v1/subscriptions"))
+                .and(header(FCP_CREDENTIAL_ID_HEADER, credential_id.to_string()))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "subscriptions": [
+                        { "name": "subscriptions/credential-header", "state": "ACTIVE" }
+                    ]
+                })))
+                .mount(&server)
+                .await;
+
+            let client =
+                WorkspaceEventsClient::new_with_auth(GoogleMaterializedAuth::CredentialReference {
+                    credential_id,
+                    quota_project_id: None,
+                })
+                .unwrap()
+                .with_base_urls(
+                    format!("{}/v1", server.uri()),
+                    format!("{}/v1", server.uri()),
+                );
+
+            let subscriptions = client.list_subscriptions(None, None).await.unwrap();
+            assert_eq!(
+                subscriptions.subscriptions[0].name,
+                "subscriptions/credential-header"
+            );
+        });
     }
 }

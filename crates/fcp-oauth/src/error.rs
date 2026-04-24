@@ -13,7 +13,7 @@ pub enum OAuthError {
     InvalidConfig(String),
 
     /// State mismatch (potential CSRF attack).
-    #[error("OAuth state mismatch: expected {expected}, got {actual}")]
+    #[error("OAuth state mismatch")]
     StateMismatch {
         /// Expected state value.
         expected: String,
@@ -136,7 +136,7 @@ mod tests {
             expected: "abc".into(),
             actual: "xyz".into(),
         };
-        assert_eq!(e.to_string(), "OAuth state mismatch: expected abc, got xyz");
+        assert_eq!(e.to_string(), "OAuth state mismatch");
     }
 
     #[test]
@@ -656,8 +656,7 @@ mod tests {
             actual: "\u{00e9}tat_re\u{00e7}u".into(),
         };
         let display = e.to_string();
-        assert!(display.contains("\u{00e9}tat_attendu"));
-        assert!(display.contains("\u{00e9}tat_re\u{00e7}u"));
+        assert_eq!(display, "OAuth state mismatch");
     }
 
     #[test]

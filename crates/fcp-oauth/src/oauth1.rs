@@ -184,10 +184,7 @@ impl OAuth1Client {
             .await?;
 
         if !response.is_success() {
-            let text = response_text(&response);
-            return Err(OAuthError::TokenExchangeFailed(format!(
-                "Request token failed: {text}"
-            )));
+            return Err(token_exchange_error("request token"));
         }
 
         let body = response_text(&response);
@@ -254,10 +251,7 @@ impl OAuth1Client {
             .await?;
 
         if !response.is_success() {
-            let text = response_text(&response);
-            return Err(OAuthError::TokenExchangeFailed(format!(
-                "Access token failed: {text}"
-            )));
+            return Err(token_exchange_error("access token"));
         }
 
         let body = response_text(&response);
@@ -446,6 +440,12 @@ fn should_include_port(scheme: &str, port: u16) -> bool {
 
 fn response_text(response: &HttpResponse) -> String {
     String::from_utf8_lossy(&response.body).into_owned()
+}
+
+fn token_exchange_error(step: &str) -> OAuthError {
+    OAuthError::TokenExchangeFailed(format!(
+        "{step} endpoint returned an unsuccessful response"
+    ))
 }
 
 /// Parse request token response.
@@ -670,6 +670,17 @@ mod tests {
         assert_eq!(tokens.token_secret, "secret789");
         assert!(tokens.user_id.is_none());
         assert!(tokens.screen_name.is_none());
+    }
+
+    #[test]
+    fn test_token_exchange_error_redacts_response_body() {
+        let OAuthError::TokenExchangeFailed(message) = token_exchange_error("request token") else {
+            panic!("expected token exchange failure");
+        };
+        assert_eq!(
+            message,
+            "request token endpoint returned an unsuccessful response"
+        );
     }
 
     #[test]

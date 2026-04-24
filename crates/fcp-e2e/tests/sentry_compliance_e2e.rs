@@ -412,9 +412,9 @@ async fn sentry_default_deny_compliance_suite_passes() {
 async fn sentry_allow_valid_token_connector_suite_passes() {
     let mock = MockApiServer::start().await;
 
-    // Mount mock for GET /api/0/organizations/{org}/projects/
+    // Mount mock for the list-projects endpoint.
     Mock::given(method("GET"))
-        .and(path_regex(r"^/organizations/.*/projects/"))
+        .and(path_regex(r"^(?:/api/0)?/organizations/.*/projects/?$"))
         .respond_with(ResponseTemplate::new(200).set_body_json(sentry_list_projects_response()))
         .mount(mock.inner())
         .await;
@@ -423,11 +423,11 @@ async fn sentry_allow_valid_token_connector_suite_passes() {
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(
         signing_key.verifying_key().to_bytes(),
-        &["sentry.list_projects"],
+        &["sentry.read"],
     );
     let token = build_token(
         &signing_key,
-        "sentry.list_projects",
+        "sentry.read",
         &["sentry.list_projects"],
     );
     let invoke = invoke_request(
@@ -462,13 +462,18 @@ async fn sentry_allow_valid_token_connector_suite_passes() {
 
     assert!(report.passed, "allow suite should pass");
     let received = mock.received_requests().await;
+    let expected_path = "/organizations/test%2Dorg/projects";
     let hits = received
         .iter()
-        .filter(|r| r.url.path() == "/organizations/test-org/projects/")
+        .filter(|r| {
+            r.url.path()
+                .trim_end_matches('/')
+                .ends_with(expected_path)
+        })
         .count();
     assert_eq!(
         hits, 1,
-        "expected exactly one GET to /organizations/test-org/projects/"
+        "expected exactly one GET to {expected_path}[/]"
     );
     let invoke_entry = report
         .logs

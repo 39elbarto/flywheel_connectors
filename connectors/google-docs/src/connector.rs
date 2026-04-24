@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
-    EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass,
-    Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
+    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
 };
 use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use serde_json::json;
@@ -337,6 +337,43 @@ impl DocsConnector {
             })?;
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
+        let token_value = params
+            .get("capability_token")
+            .ok_or(FcpError::InvalidRequest {
+                code: 1001,
+                message: "Missing 'capability_token' field".into(),
+            })?;
+        let token: CapabilityToken =
+            serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
+                code: 1001,
+                message: format!("Invalid capability_token format: {e}"),
+            })?;
+        let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1002,
+            message: format!("Invalid operation ID: {operation}"),
+        })?;
+        let intro = self.handle_introspect().await?;
+        let cap_str = intro
+            .get("operations")
+            .and_then(|ops| ops.as_array())
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|op| op.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
+            .and_then(|op| op.get("capability"))
+            .and_then(|cap| cap.as_str())
+            .ok_or_else(|| FcpError::OperationNotGranted {
+                operation: operation.into(),
+            })?;
+        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1002,
+            message: format!("Invalid capability ID for operation {operation}"),
+        })?;
+        if let Some(verifier) = &self.verifier {
+            verifier.verify(token, &cap_id, &op_id, &[])?;
+        } else {
+            return Err(FcpError::NotConfigured);
+        }
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
         match operation {

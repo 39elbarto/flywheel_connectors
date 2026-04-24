@@ -68,11 +68,76 @@ impl FcpConnector for TerraformConnectorAdapter {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
-        self.connector
-            .handle_handshake(json!({
-                "session_id": "terraform-e2e-session",
-            }))
-            .await?;
+        // br-619oy: serialize the REAL HandshakeRequest into the
+        // connector and assert on the connector-returned payload
+        // instead of fabricating a compliant HandshakeResponse in the
+        // adapter. The previous implementation discarded the
+        // connector's reply and synthesized a fresh response that
+        // would pass even if the connector's handshake contract drifted
+        // (e.g., protocol_version change, capability list regression).
+        let session_id = SessionId::new();
+        let mut params = serde_json::to_value(&req).map_err(|err| FcpError::Internal {
+            message: format!("failed to serialize handshake request: {err}"),
+        })?;
+        // The terraform connector tracks a session_id internally; inject
+        // ours into the params bag so the connector's session state
+        // matches the adapter-level session reported back to the host.
+        if let Some(obj) = params.as_object_mut() {
+            obj.insert(
+                "session_id".to_string(),
+                serde_json::Value::String(session_id.0.to_string()),
+            );
+        }
+
+        let response = self.connector.handle_handshake(params).await?;
+
+        // Assert the connector-returned contract shape (protocol
+        // version, connector identity, capabilities list). Any drift
+        // in these must surface as a handshake failure at the adapter
+        // boundary, not silently pass.
+        let protocol_version = response
+            .get("protocol_version")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FcpError::Internal {
+                message: "terraform handshake response missing protocol_version".into(),
+            })?;
+        if protocol_version != "2.0" {
+            return Err(FcpError::Internal {
+                message: format!(
+                    "terraform handshake protocol_version expected 2.0, got {protocol_version}"
+                ),
+            });
+        }
+        let _connector_id = response
+            .get("connector_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FcpError::Internal {
+                message: "terraform handshake response missing connector_id".into(),
+            })?;
+        let connector_caps: std::collections::BTreeSet<String> = response
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| FcpError::Internal {
+                message: "terraform handshake response missing capabilities array".into(),
+            })?
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+
+        // Only grant capabilities the connector actually declared. A
+        // request for a capability the connector does not publish is
+        // silently dropped from `capabilities_granted` — matching the
+        // production host's expected behavior.
+        let capabilities_granted: Vec<CapabilityGrant> = req
+            .capabilities_requested
+            .iter()
+            .filter(|cap| connector_caps.contains(cap.as_str()))
+            .cloned()
+            .map(|capability| CapabilityGrant {
+                capability,
+                operation: None,
+            })
+            .collect();
 
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -82,16 +147,8 @@ impl FcpConnector for TerraformConnectorAdapter {
 
         Ok(HandshakeResponse {
             status: "accepted".to_string(),
-            capabilities_granted: req
-                .capabilities_requested
-                .iter()
-                .cloned()
-                .map(|capability| CapabilityGrant {
-                    capability,
-                    operation: None,
-                })
-                .collect(),
-            session_id: SessionId::new(),
+            capabilities_granted,
+            session_id,
             manifest_hash: "sha256:terraform-e2e".to_string(),
             nonce: req.nonce,
             event_caps: None,

@@ -63,11 +63,56 @@ impl FcpConnector for TodoistConnectorAdapter {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
-        self.connector
-            .handle_handshake(json!({
-                "session_id": "todoist-e2e-session",
-            }))
-            .await?;
+        let session_id = SessionId::new();
+        let mut params = serde_json::to_value(&req).map_err(|err| FcpError::Internal {
+            message: format!("failed to serialize handshake request: {err}"),
+        })?;
+        if let Some(obj) = params.as_object_mut() {
+            obj.insert(
+                "session_id".to_string(),
+                serde_json::Value::String(session_id.0.to_string()),
+            );
+        }
+
+        let response = self.connector.handle_handshake(params).await?;
+        let protocol_version = response
+            .get("protocol_version")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FcpError::Internal {
+                message: "todoist handshake response missing protocol_version".into(),
+            })?;
+        if protocol_version != "2.0" {
+            return Err(FcpError::Internal {
+                message: format!(
+                    "todoist handshake protocol_version expected 2.0, got {protocol_version}"
+                ),
+            });
+        }
+        let _connector_id = response
+            .get("connector_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FcpError::Internal {
+                message: "todoist handshake response missing connector_id".into(),
+            })?;
+        let connector_caps: std::collections::BTreeSet<String> = response
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| FcpError::Internal {
+                message: "todoist handshake response missing capabilities array".into(),
+            })?
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        let capabilities_granted: Vec<CapabilityGrant> = req
+            .capabilities_requested
+            .iter()
+            .filter(|cap| connector_caps.contains(cap.as_str()))
+            .cloned()
+            .map(|capability| CapabilityGrant {
+                capability,
+                operation: None,
+            })
+            .collect();
 
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -77,16 +122,8 @@ impl FcpConnector for TodoistConnectorAdapter {
 
         Ok(HandshakeResponse {
             status: "accepted".to_string(),
-            capabilities_granted: req
-                .capabilities_requested
-                .iter()
-                .cloned()
-                .map(|capability| CapabilityGrant {
-                    capability,
-                    operation: None,
-                })
-                .collect(),
-            session_id: SessionId::new(),
+            capabilities_granted,
+            session_id,
             manifest_hash: "sha256:todoist-e2e".to_string(),
             nonce: req.nonce,
             event_caps: None,

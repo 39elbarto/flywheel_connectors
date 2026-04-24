@@ -5528,6 +5528,42 @@ mod tests {
         config
     }
 
+    fn dispatcher_test_connector(
+        connector_id: &'static str,
+        runner_tx: mpsc::Sender<ConnectorRpcRequest>,
+        runner_task: JoinHandle<()>,
+    ) -> Arc<SubprocessConnector> {
+        let connector_id = ConnectorId::from_static(connector_id);
+        let connector = Arc::new(SubprocessConnector {
+            summary: ConnectorSummary {
+                id: connector_id.clone(),
+                name: connector_id.to_string(),
+                description: None,
+                version: semver::Version::new(1, 0, 0),
+                categories: Vec::new(),
+                tool_count: 0,
+                max_safety_tier: SafetyTier::Safe,
+                enabled: true,
+                health: ConnectorHealth::healthy(),
+                last_health_check: None,
+            },
+            runner_tx,
+            _runner_task: runner_task,
+            resilience: Arc::new(ResilienceLayer::default()),
+            capability_verifying_key: None,
+            handshaken_zone: Mutex::new(None),
+        });
+        connector.resilience.ensure_connector(&connector.summary.id);
+        connector
+    }
+
+    fn dispatcher_health_result() -> serde_json::Value {
+        json!({
+            "status": { "state": "ready" },
+            "uptime_ms": 0,
+        })
+    }
+
     fn test_capability_token(
         signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
         capability_id: &str,
@@ -6641,6 +6677,174 @@ mod tests {
                 .to_string()
                 .contains("connector dispatcher queue timed out"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn subprocess_connector_dispatcher_allows_fast_response_before_slow_response() {
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(4);
+        let (slow_seen_tx, slow_seen_rx) = oneshot::channel();
+        let (release_slow_tx, release_slow_rx) = oneshot::channel::<()>();
+        let runner_task = task::spawn(async move {
+            let mut slow_seen_tx = Some(slow_seen_tx);
+            let mut release_slow_rx = Some(release_slow_rx);
+            while let Some(request) = runner_rx.recv().await {
+                match request.method.as_str() {
+                    "health" => {
+                        if let Some(tx) = slow_seen_tx.take() {
+                            let _ = tx.send(());
+                        }
+                        let release = release_slow_rx
+                            .take()
+                            .expect("test sends exactly one slow health request");
+                        task::spawn_detached(async move {
+                            let _ = release.await;
+                            let _ = request.response_tx.send(Ok(json!({
+                                "result": dispatcher_health_result(),
+                            })));
+                        });
+                    }
+                    "configure" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": { "status": "ok" },
+                        })));
+                    }
+                    method => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": { "message": format!("unexpected method {method}") },
+                        })));
+                    }
+                }
+            }
+        });
+        let connector = dispatcher_test_connector(
+            "fcp.test.dispatch-fast-response:utility:1.0.0",
+            runner_tx,
+            runner_task,
+        );
+
+        let slow_health = {
+            let connector = Arc::clone(&connector);
+            task::spawn(async move { connector.health().await })
+        };
+        slow_seen_rx
+            .await
+            .expect("slow health request should reach dispatcher");
+
+        fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            connector.configure(json!({ "mode": "fast" })),
+        )
+        .await
+        .expect("fast configure should complete before slow health is released")
+        .expect("fast configure should succeed");
+        assert!(
+            !slow_health.is_finished(),
+            "slow health should still be waiting for its release signal"
+        );
+
+        let _ = release_slow_tx.send(());
+        let health = slow_health
+            .await
+            .expect("slow health task should join")
+            .expect("slow health should succeed after release");
+        assert!(matches!(health.status, HealthState::Ready));
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn subprocess_connector_dropped_response_receiver_does_not_stop_dispatcher() {
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(4);
+        let (first_seen_tx, first_seen_rx) = oneshot::channel();
+        let (release_first_tx, release_first_rx) = oneshot::channel::<()>();
+        let runner_task = task::spawn(async move {
+            let mut first_seen_tx = Some(first_seen_tx);
+            let mut release_first_rx = Some(release_first_rx);
+            while let Some(request) = runner_rx.recv().await {
+                if first_seen_tx.is_some() {
+                    let tx = first_seen_tx
+                        .take()
+                        .expect("first-seen sender should exist");
+                    let release = release_first_rx
+                        .take()
+                        .expect("first release receiver should exist");
+                    task::spawn_detached(async move {
+                        let _ = tx.send(());
+                        let _ = release.await;
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": dispatcher_health_result(),
+                        })));
+                    });
+                } else {
+                    let _ = request.response_tx.send(Ok(json!({
+                        "result": { "status": "ok" },
+                    })));
+                }
+            }
+        });
+        let connector = dispatcher_test_connector(
+            "fcp.test.dispatch-dropped-receiver:utility:1.0.0",
+            runner_tx,
+            runner_task,
+        );
+
+        let cancelled_health = {
+            let connector = Arc::clone(&connector);
+            task::spawn(async move { connector.health().await })
+        };
+        first_seen_rx
+            .await
+            .expect("first request should reach dispatcher");
+        cancelled_health.abort();
+        let join_error = cancelled_health
+            .await
+            .expect_err("aborted health task should report cancellation");
+        assert!(join_error.is_cancelled());
+
+        let _ = release_first_tx.send(());
+        fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            connector.configure(json!({ "after": "cancelled-receiver" })),
+        )
+        .await
+        .expect("dispatcher should continue after a failed oneshot send")
+        .expect("later configure should succeed");
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn subprocess_connector_closed_dispatcher_prevents_reuse_after_task_exit() {
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(4);
+        let runner_task = task::spawn(async move {
+            if let Some(request) = runner_rx.recv().await {
+                drop(request);
+            }
+        });
+        let connector = dispatcher_test_connector(
+            "fcp.test.dispatcher-task-exit:utility:1.0.0",
+            runner_tx,
+            runner_task,
+        );
+
+        let first_error = fcp_async_core::time::timeout(Duration::from_secs(2), connector.health())
+            .await
+            .expect("closed dispatcher response should not hang")
+            .expect_err("dropped dispatcher response should fail");
+        assert!(
+            first_error
+                .to_string()
+                .contains("connector dispatcher stopped before replying"),
+            "unexpected first error: {first_error}"
+        );
+
+        let retry_error =
+            fcp_async_core::time::timeout(Duration::from_secs(2), connector.configure(json!({})))
+                .await
+                .expect("closed dispatcher send should not hang")
+                .expect_err("closed dispatcher should reject reuse");
+        assert!(
+            retry_error
+                .to_string()
+                .contains("connector dispatcher unavailable"),
+            "unexpected retry error: {retry_error}"
         );
     }
 

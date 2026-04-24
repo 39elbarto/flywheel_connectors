@@ -63,24 +63,63 @@ impl FcpConnector for PulumiConnectorAdapter {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> fcp_core::FcpResult<HandshakeResponse> {
-        let nonce = req.nonce;
-        let caps = req.capabilities_requested.clone();
-        let request = serde_json::to_value(&req).map_err(|err| FcpError::Internal {
+        let session_id = SessionId::new();
+        let mut request = serde_json::to_value(&req).map_err(|err| FcpError::Internal {
             message: format!("failed to serialize handshake request: {err}"),
         })?;
-        let _response = self.connector.handle_handshake(request).await?;
+        if let Some(obj) = request.as_object_mut() {
+            obj.insert(
+                "session_id".to_string(),
+                serde_json::Value::String(session_id.0.to_string()),
+            );
+        }
+
+        let response = self.connector.handle_handshake(request).await?;
+        let protocol_version = response
+            .get("protocol_version")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FcpError::Internal {
+                message: "pulumi handshake response missing protocol_version".into(),
+            })?;
+        if protocol_version != "2.0" {
+            return Err(FcpError::Internal {
+                message: format!(
+                    "pulumi handshake protocol_version expected 2.0, got {protocol_version}"
+                ),
+            });
+        }
+        let _connector_id = response
+            .get("connector_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| FcpError::Internal {
+                message: "pulumi handshake response missing connector_id".into(),
+            })?;
+        let connector_caps: std::collections::BTreeSet<String> = response
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| FcpError::Internal {
+                message: "pulumi handshake response missing capabilities array".into(),
+            })?
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        let capabilities_granted: Vec<CapabilityGrant> = req
+            .capabilities_requested
+            .iter()
+            .filter(|cap| connector_caps.contains(cap.as_str()))
+            .cloned()
+            .map(|capability| CapabilityGrant {
+                capability,
+                operation: None,
+            })
+            .collect();
+
         Ok(HandshakeResponse {
             status: "accepted".into(),
-            capabilities_granted: caps
-                .into_iter()
-                .map(|cap| CapabilityGrant {
-                    capability: cap,
-                    operation: None,
-                })
-                .collect(),
-            session_id: SessionId::new(),
+            capabilities_granted,
+            session_id,
             manifest_hash: "sha256:e2e-test".into(),
-            nonce,
+            nonce: req.nonce,
             event_caps: None,
             auth_caps: None,
             op_catalog_hash: None,

@@ -567,13 +567,17 @@ mod tests {
 
     #[test]
     fn state_mismatch_empty_strings() {
+        // Display redacts both `expected` and `actual` (commit 8c60d086);
+        // the surface text is a constant regardless of the values so an
+        // attacker who can trigger StateMismatch cannot leak the expected
+        // CSRF/anti-replay state via error logs. Empty strings still
+        // produce the same redacted constant — no truncation, no panic,
+        // no accidental byte-length oracle.
         let e = OAuthError::StateMismatch {
             expected: String::new(),
             actual: String::new(),
         };
-        let display = e.to_string();
-        assert!(display.contains("expected"));
-        assert!(display.contains("got"));
+        assert_eq!(e.to_string(), "OAuth state mismatch");
     }
 
     #[test]

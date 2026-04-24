@@ -1315,18 +1315,23 @@ mod tests {
 
     #[test]
     fn test_request_token_debug() {
+        // Use distinctive multi-character sentinel values so the
+        // `!contains(...)` checks below cannot be coincidentally
+        // satisfied by overlap with field names like `token` /
+        // `RequestToken` (which both contain "t" — the prior single-
+        // letter sentinel made `!debug.contains("t")` always fail).
         let rt = RequestToken {
-            token: "t".to_string(),
-            token_secret: "my_secret_value".to_string(),
+            token: "request_token_sentinel_value_zzz".to_string(),
+            token_secret: "request_token_secret_sentinel_zzz".to_string(),
             callback_confirmed: false,
         };
         let debug = format!("{rt:?}");
         assert!(debug.contains("RequestToken"));
         assert!(debug.contains("callback_confirmed"));
-        assert!(!debug.contains("t"));
-        // token_secret must be redacted
+        // Both fields must be redacted.
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("my_secret_value"));
+        assert!(!debug.contains("request_token_sentinel_value_zzz"));
+        assert!(!debug.contains("request_token_secret_sentinel_zzz"));
     }
 
     // ── Expanded tests: OAuth1Client debug ──

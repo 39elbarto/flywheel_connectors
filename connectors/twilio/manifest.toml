@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:22cff6c8b1213cbf0800cec3a71bd92216183ab59b110da0bfbe20a5a22a1b29"
+interface_hash = "blake3-256:fcp.interface.v2:6296fd0f664d3408a8297f6c3328bcf35a07c3143acc11306b9c1e0094105db7"
 
 [connector]
 id = "fcp.twilio"

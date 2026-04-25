@@ -28,6 +28,8 @@ const OP_S3_DELETE_OBJECT: &str = "aws.s3.delete_object";
 const OP_EC2_TERMINATE: &str = "aws.ec2.terminate_instance";
 const OP_LAMBDA_LIST: &str = "aws.lambda.list_functions";
 const OP_STS_IDENTITY: &str = "aws.sts.get_caller_identity";
+const TEST_ACCESS_KEY_ID: &str = "fcp-test-access-key";
+const TEST_SIGNING_MATERIAL: &str = "fcp-test-signing-material";
 
 fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
     HandshakeRequest {
@@ -54,8 +56,15 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         OP_EC2_TERMINATE => "aws.ec2.write",
         OP_LAMBDA_LIST => "aws.lambda.read",
         OP_STS_IDENTITY => "aws.iam.read",
-        _ => panic!("unsupported test operation: {op}"),
+        _ => "aws.s3.read",
     };
+    assert!(
+        matches!(
+            op,
+            OP_S3_DELETE_OBJECT | OP_EC2_TERMINATE | OP_LAMBDA_LIST | OP_STS_IDENTITY
+        ),
+        "unsupported test operation: {op}"
+    );
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -71,7 +80,8 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)
@@ -106,8 +116,8 @@ async fn setup_connector(mock_url: &str) -> (AwsConnector, Ed25519SigningKey) {
     let signing_key = Ed25519SigningKey::generate();
     connector
         .configure(json!({
-            "access_key_id": "AKIAIOSFODNN7EXAMPLE",
-            "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "access_key_id": TEST_ACCESS_KEY_ID,
+            "secret_access_key": TEST_SIGNING_MATERIAL,
             "region": "us-east-1",
             "s3_base_url": mock_url,
             "ec2_base_url": mock_url,
@@ -131,7 +141,9 @@ fn assert_sigv4_headers(request: &wiremock::Request) {
         .and_then(|value| value.to_str().ok())
         .expect("authorization header should be present");
     assert!(
-        authorization.starts_with("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/"),
+        authorization.starts_with(&format!(
+            "AWS4-HMAC-SHA256 Credential={TEST_ACCESS_KEY_ID}/"
+        )),
         "unexpected authorization header: {authorization}"
     );
     assert!(authorization.contains("SignedHeaders="));

@@ -67,7 +67,8 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .unwrap();
     fcp_core::CapabilityToken::from_raw(cose)
@@ -89,6 +90,23 @@ async fn setup_handshake(connector: &mut TwilioConnector, caps: &[&str]) -> Ed25
         .expect("handshake should succeed");
 
     signing_key
+}
+
+fn assert_invalid_request_contains(error: &fcp_core::FcpError, expected: &str) {
+    assert!(matches!(
+        error,
+        fcp_core::FcpError::InvalidRequest { message, .. } if message.contains(expected)
+    ));
+}
+
+fn assert_invalid_request_any_contains(error: &fcp_core::FcpError, expected: &[&str]) {
+    assert!(matches!(error, fcp_core::FcpError::InvalidRequest { .. }));
+    if let fcp_core::FcpError::InvalidRequest { message, .. } = error {
+        assert!(
+            expected.iter().any(|needle| message.contains(needle)),
+            "got: {message}"
+        );
+    }
 }
 
 /// Account SID used in integration tests.
@@ -177,7 +195,7 @@ async fn send_message_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.send_message"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.send_message");
+    let capability = generate_valid_token(&signing_key, "twilio.send_message");
 
     let result = connector
         .handle_invoke(json!({
@@ -187,7 +205,7 @@ async fn send_message_happy_path() {
                 "from": "+15559876543",
                 "body": "Hello from FCP!"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("send_message should succeed");
@@ -214,13 +232,13 @@ async fn get_message_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.get_message"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.get_message");
+    let capability = generate_valid_token(&signing_key, "twilio.get_message");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "twilio.get_message",
             "input": { "message_sid": "SMtest001" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("get_message should succeed");
@@ -250,13 +268,13 @@ async fn list_messages_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.list_messages"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.list_messages");
+    let capability = generate_valid_token(&signing_key, "twilio.list_messages");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "twilio.list_messages",
             "input": { "page_size": 20 },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("list_messages should succeed");
@@ -285,7 +303,7 @@ async fn create_call_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.create_call"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.create_call");
+    let capability = generate_valid_token(&signing_key, "twilio.create_call");
 
     let result = connector
         .handle_invoke(json!({
@@ -295,7 +313,7 @@ async fn create_call_happy_path() {
                 "from": "+15559876543",
                 "url": "https://example.com/twiml"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("create_call should succeed");
@@ -322,13 +340,13 @@ async fn get_call_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.get_call"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.get_call");
+    let capability = generate_valid_token(&signing_key, "twilio.get_call");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "twilio.get_call",
             "input": { "call_sid": "CAtest001" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("get_call should succeed");
@@ -366,13 +384,13 @@ async fn list_recordings_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.list_recordings"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.list_recordings");
+    let capability = generate_valid_token(&signing_key, "twilio.list_recordings");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "twilio.list_recordings",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("list_recordings should succeed");
@@ -401,13 +419,13 @@ async fn get_account_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.get_account"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.get_account");
+    let capability = generate_valid_token(&signing_key, "twilio.get_account");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "twilio.get_account",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("get_account should succeed");
@@ -439,13 +457,13 @@ async fn list_phone_numbers_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.list_phone_numbers"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.list_phone_numbers");
+    let capability = generate_valid_token(&signing_key, "twilio.list_phone_numbers");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "twilio.list_phone_numbers",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("list_phone_numbers should succeed");
@@ -603,19 +621,15 @@ async fn error_500_maps_to_external() {
         .expect_err("should fail with 500");
 
     let fcp_err = err.to_fcp_error();
-    match &fcp_err {
+    assert!(matches!(
+        &fcp_err,
         fcp_core::FcpError::External {
             service,
-            retryable,
-            status_code,
+            retryable: true,
+            status_code: Some(500),
             ..
-        } => {
-            assert_eq!(service, "twilio");
-            assert!(retryable, "500 should be retryable");
-            assert_eq!(*status_code, Some(500));
-        }
-        other => panic!("expected FcpError::External, got: {other:?}"),
-    }
+        } if service == "twilio"
+    ));
 }
 
 /// Error `is_retryable` classification is correct.
@@ -701,20 +715,20 @@ async fn capability_no_handshake_fails() {
     setup_configure(&mut connector, &mock_server.uri()).await;
 
     let signing_key = Ed25519SigningKey::generate();
-    let token = generate_valid_token(&signing_key, "twilio.get_message");
+    let capability = generate_valid_token(&signing_key, "twilio.get_message");
 
     let err = connector
         .handle_invoke(json!({
             "operation": "twilio.get_message",
             "input": { "message_sid": "SMtest001" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect_err("invoke without handshake should fail");
 
     assert!(
-        matches!(err, fcp_core::FcpError::NotConfigured),
-        "expected NotConfigured, got: {err:?}"
+        matches!(err, fcp_core::FcpError::NotHandshaken),
+        "expected NotHandshaken, got: {err:?}"
     );
 }
 
@@ -724,14 +738,14 @@ async fn capability_no_configure_fails() {
     let _ctx = AsyncTestContext::for_scenario("twilio.capability.no_configure");
 
     let mut connector = TwilioConnector::new();
-    let signing_key = setup_handshake(&mut connector, &["twilio.get_message"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.get_message");
+    let signing_key = Ed25519SigningKey::generate();
+    let capability = generate_valid_token(&signing_key, "twilio.get_message");
 
     let err = connector
         .handle_invoke(json!({
             "operation": "twilio.get_message",
             "input": { "message_sid": "SMtest001" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect_err("invoke without configure should fail");
@@ -756,13 +770,13 @@ async fn capability_wrong_operation_fails() {
     )
     .await;
 
-    let wrong_token = generate_valid_token(&signing_key, "twilio.send_message");
+    let wrong_capability = generate_valid_token(&signing_key, "twilio.send_message");
 
     let err = connector
         .handle_invoke(json!({
             "operation": "twilio.get_message",
             "input": { "message_sid": "SMtest001" },
-            "capability_token": wrong_token
+            "capability_token": wrong_capability
         }))
         .await
         .expect_err("wrong capability should fail");
@@ -787,13 +801,13 @@ async fn capability_unknown_operation_fails() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.nonexistent"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.nonexistent");
+    let capability = generate_valid_token(&signing_key, "twilio.nonexistent");
 
     let err = connector
         .handle_invoke(json!({
             "operation": "twilio.nonexistent",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect_err("unknown operation should fail");
@@ -836,7 +850,9 @@ async fn lifecycle_health_after_configure() {
 /// Handshake returns accepted with capabilities granted.
 #[fcp_async_core::runtime::test]
 async fn lifecycle_handshake_grants_capabilities() {
+    let mock_server = MockServer::start().await;
     let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
 
@@ -859,7 +875,7 @@ async fn lifecycle_handshake_grants_capabilities() {
 /// Shutdown returns clean status.
 #[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown_clean() {
-    let connector = TwilioConnector::new();
+    let mut connector = TwilioConnector::new();
     let result = connector
         .handle_shutdown(json!({}))
         .await
@@ -955,26 +971,18 @@ async fn validation_send_message_missing_to() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.send_message"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.send_message");
+    let capability = generate_valid_token(&signing_key, "twilio.send_message");
 
     let err = connector
         .handle_invoke(json!({
             "operation": "twilio.send_message",
             "input": { "from": "+15559876543", "body": "Hi" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect_err("missing 'to' should fail");
 
-    match &err {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(
-                message.contains("to"),
-                "error should mention 'to': {message}"
-            );
-        }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
-    }
+    assert_invalid_request_contains(&err, "to");
 }
 
 /// Missing `body` in `send_message` fails.
@@ -984,26 +992,18 @@ async fn validation_send_message_missing_body() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.send_message"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.send_message");
+    let capability = generate_valid_token(&signing_key, "twilio.send_message");
 
     let err = connector
         .handle_invoke(json!({
             "operation": "twilio.send_message",
             "input": { "to": "+15551234567", "from": "+15559876543" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect_err("missing 'body' should fail");
 
-    match &err {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(
-                message.contains("body"),
-                "error should mention 'body': {message}"
-            );
-        }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
-    }
+    assert_invalid_request_contains(&err, "body");
 }
 
 /// Missing `message_sid` in `get_message` fails.
@@ -1013,26 +1013,18 @@ async fn validation_get_message_missing_sid() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.get_message"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.get_message");
+    let capability = generate_valid_token(&signing_key, "twilio.get_message");
 
     let err = connector
         .handle_invoke(json!({
             "operation": "twilio.get_message",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect_err("missing message_sid should fail");
 
-    match &err {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(
-                message.contains("message_sid"),
-                "error should mention message_sid: {message}"
-            );
-        }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
-    }
+    assert_invalid_request_contains(&err, "message_sid");
 }
 
 /// Missing `call_sid` in `get_call` fails.
@@ -1042,26 +1034,18 @@ async fn validation_get_call_missing_sid() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.get_call"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.get_call");
+    let capability = generate_valid_token(&signing_key, "twilio.get_call");
 
     let err = connector
         .handle_invoke(json!({
             "operation": "twilio.get_call",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect_err("missing call_sid should fail");
 
-    match &err {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(
-                message.contains("call_sid"),
-                "error should mention call_sid: {message}"
-            );
-        }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
-    }
+    assert_invalid_request_contains(&err, "call_sid");
 }
 
 /// Missing `url` in `create_call` fails.
@@ -1071,26 +1055,18 @@ async fn validation_create_call_missing_url() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.create_call"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.create_call");
+    let capability = generate_valid_token(&signing_key, "twilio.create_call");
 
     let err = connector
         .handle_invoke(json!({
             "operation": "twilio.create_call",
             "input": { "to": "+15551234567", "from": "+15559876543" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect_err("missing url should fail");
 
-    match &err {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(
-                message.contains("url"),
-                "error should mention url: {message}"
-            );
-        }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
-    }
+    assert_invalid_request_contains(&err, "url");
 }
 
 // ============================================================================
@@ -1134,13 +1110,13 @@ async fn list_media_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.list_media"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.list_media");
+    let capability = generate_valid_token(&signing_key, "twilio.list_media");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "twilio.list_media",
             "input": { "message_sid": "SMtest001" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("list_media should succeed");
@@ -1174,13 +1150,13 @@ async fn get_media_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.get_media"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.get_media");
+    let capability = generate_valid_token(&signing_key, "twilio.get_media");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "twilio.get_media",
             "input": { "message_sid": "SMtest001", "media_sid": "MEtest001" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("get_media should succeed");
@@ -1208,13 +1184,13 @@ async fn list_media_empty_result() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.list_media"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.list_media");
+    let capability = generate_valid_token(&signing_key, "twilio.list_media");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "twilio.list_media",
             "input": { "message_sid": "SMtest999" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("list_media with empty result should succeed");
@@ -1229,26 +1205,18 @@ async fn validation_list_media_missing_message_sid() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.list_media"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.list_media");
+    let capability = generate_valid_token(&signing_key, "twilio.list_media");
 
     let err = connector
         .handle_invoke(json!({
             "operation": "twilio.list_media",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect_err("missing message_sid should fail");
 
-    match &err {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(
-                message.contains("message_sid"),
-                "error should mention message_sid: {message}"
-            );
-        }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
-    }
+    assert_invalid_request_contains(&err, "message_sid");
 }
 
 /// Missing `media_sid` in `get_media` fails.
@@ -1258,26 +1226,18 @@ async fn validation_get_media_missing_media_sid() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.get_media"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.get_media");
+    let capability = generate_valid_token(&signing_key, "twilio.get_media");
 
     let err = connector
         .handle_invoke(json!({
             "operation": "twilio.get_media",
             "input": { "message_sid": "SMtest001" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect_err("missing media_sid should fail");
 
-    match &err {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(
-                message.contains("media_sid"),
-                "error should mention media_sid: {message}"
-            );
-        }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
-    }
+    assert_invalid_request_contains(&err, "media_sid");
 }
 
 /// Missing `recording_sid` in `download_recording` fails.
@@ -1287,26 +1247,18 @@ async fn validation_download_recording_missing_sid() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.download_recording"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.download_recording");
+    let capability = generate_valid_token(&signing_key, "twilio.download_recording");
 
     let err = connector
         .handle_invoke(json!({
             "operation": "twilio.download_recording",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect_err("missing recording_sid should fail");
 
-    match &err {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(
-                message.contains("recording_sid"),
-                "error should mention recording_sid: {message}"
-            );
-        }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
-    }
+    assert_invalid_request_contains(&err, "recording_sid");
 }
 
 // ============================================================================
@@ -1322,7 +1274,7 @@ async fn webhook_parse_sms_event_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_sms_event"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_sms_event");
+    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_sms_event");
 
     let result = connector
         .handle_invoke(json!({
@@ -1339,7 +1291,7 @@ async fn webhook_parse_sms_event_happy_path() {
                     "NumSegments": "1"
                 }
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("parse_sms_event should succeed");
@@ -1364,7 +1316,7 @@ async fn webhook_parse_sms_event_missing_message_sid() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_sms_event"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_sms_event");
+    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_sms_event");
 
     let err = connector
         .handle_invoke(json!({
@@ -1375,20 +1327,12 @@ async fn webhook_parse_sms_event_missing_message_sid() {
                     "To": "+15559876543"
                 }
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect_err("should fail without MessageSid");
 
-    match &err {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(
-                message.contains("MessageSid"),
-                "error should mention MessageSid: {message}"
-            );
-        }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
-    }
+    assert_invalid_request_contains(&err, "MessageSid");
 }
 
 /// Parse SMS webhook event — minimal fields (no optional fields).
@@ -1400,7 +1344,7 @@ async fn webhook_parse_sms_event_minimal() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_sms_event"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_sms_event");
+    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_sms_event");
 
     let result = connector
         .handle_invoke(json!({
@@ -1412,7 +1356,7 @@ async fn webhook_parse_sms_event_minimal() {
                     "To": "+15552223333"
                 }
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("parse_sms_event should succeed with minimal fields");
@@ -1435,7 +1379,7 @@ async fn webhook_parse_status_callback_message_delivered() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &["twilio.webhook.parse_status_callback"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_status_callback");
+    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_status_callback");
 
     let result = connector
         .handle_invoke(json!({
@@ -1447,7 +1391,7 @@ async fn webhook_parse_status_callback_message_delivered() {
                     "Timestamp": "2026-01-15T10:00:00Z"
                 }
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("parse_status_callback should succeed");
@@ -1471,7 +1415,7 @@ async fn webhook_parse_status_callback_call_completed() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &["twilio.webhook.parse_status_callback"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_status_callback");
+    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_status_callback");
 
     let result = connector
         .handle_invoke(json!({
@@ -1482,7 +1426,7 @@ async fn webhook_parse_status_callback_call_completed() {
                     "CallStatus": "completed"
                 }
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("parse_status_callback for call should succeed");
@@ -1504,7 +1448,7 @@ async fn webhook_parse_status_callback_with_error() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &["twilio.webhook.parse_status_callback"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_status_callback");
+    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_status_callback");
 
     let result = connector
         .handle_invoke(json!({
@@ -1517,7 +1461,7 @@ async fn webhook_parse_status_callback_with_error() {
                     "ErrorMessage": "Landline or unreachable carrier"
                 }
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("parse_status_callback with error should succeed");
@@ -1537,7 +1481,7 @@ async fn webhook_parse_status_callback_missing_sid() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &["twilio.webhook.parse_status_callback"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_status_callback");
+    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_status_callback");
 
     let err = connector
         .handle_invoke(json!({
@@ -1547,20 +1491,12 @@ async fn webhook_parse_status_callback_missing_sid() {
                     "SomeOtherField": "value"
                 }
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect_err("should fail without MessageSid or CallSid");
 
-    match &err {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(
-                message.contains("MessageSid") || message.contains("CallSid"),
-                "error should mention SID: {message}"
-            );
-        }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
-    }
+    assert_invalid_request_any_contains(&err, &["MessageSid", "CallSid"]);
 }
 
 /// Parse voice webhook event — happy path.
@@ -1572,7 +1508,7 @@ async fn webhook_parse_voice_event_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_voice_event"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_voice_event");
+    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_voice_event");
 
     let result = connector
         .handle_invoke(json!({
@@ -1590,7 +1526,7 @@ async fn webhook_parse_voice_event_happy_path() {
                     "CallerCountry": "US"
                 }
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("parse_voice_event should succeed");
@@ -1615,7 +1551,7 @@ async fn webhook_parse_voice_event_missing_call_sid() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_voice_event"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_voice_event");
+    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_voice_event");
 
     let err = connector
         .handle_invoke(json!({
@@ -1626,20 +1562,12 @@ async fn webhook_parse_voice_event_missing_call_sid() {
                     "To": "+15553334444"
                 }
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect_err("should fail without CallSid");
 
-    match &err {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(
-                message.contains("CallSid"),
-                "error should mention CallSid: {message}"
-            );
-        }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
-    }
+    assert_invalid_request_contains(&err, "CallSid");
 }
 
 /// Validate signature — empty signature.
@@ -1651,7 +1579,7 @@ async fn webhook_validate_signature_empty() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.validate_signature"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
+    let capability = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
 
     let result = connector
         .handle_invoke(json!({
@@ -1661,7 +1589,7 @@ async fn webhook_validate_signature_empty() {
                 "params": {"Body": "Hello"},
                 "signature": ""
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("validate_signature should succeed (returns valid=false)");
@@ -1679,7 +1607,7 @@ async fn webhook_validate_signature_invalid_base64() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.validate_signature"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
+    let capability = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
 
     let result = connector
         .handle_invoke(json!({
@@ -1689,7 +1617,7 @@ async fn webhook_validate_signature_invalid_base64() {
                 "params": {"Body": "Hello"},
                 "signature": "not-valid-base64!!!@@@"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("validate_signature should succeed (returns valid=false)");
@@ -1707,7 +1635,7 @@ async fn webhook_validate_signature_no_auth_token() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.validate_signature"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
+    let capability = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
 
     let result = connector
         .handle_invoke(json!({
@@ -1717,7 +1645,7 @@ async fn webhook_validate_signature_no_auth_token() {
                 "params": {"Body": "Hello"},
                 "signature": "dGVzdA=="
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("validate_signature should succeed (returns valid=false)");
@@ -1735,7 +1663,7 @@ async fn webhook_validate_signature_with_auth_token() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.validate_signature"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
+    let capability = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
 
     let result = connector
         .handle_invoke(json!({
@@ -1746,7 +1674,7 @@ async fn webhook_validate_signature_with_auth_token() {
                 "signature": "dGVzdA==",
                 "auth_token": "my_auth_token_123"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("validate_signature should succeed");
@@ -1763,7 +1691,7 @@ async fn webhook_validate_signature_missing_params() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.validate_signature"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
+    let capability = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
 
     let err = connector
         .handle_invoke(json!({
@@ -1772,20 +1700,12 @@ async fn webhook_validate_signature_missing_params() {
                 "url": "https://example.com/webhook",
                 "signature": "dGVzdA=="
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect_err("should fail without params");
 
-    match &err {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(
-                message.contains("params"),
-                "error should mention params: {message}"
-            );
-        }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
-    }
+    assert_invalid_request_contains(&err, "params");
 }
 
 /// Parse SMS event — missing body field.
@@ -1797,24 +1717,16 @@ async fn webhook_parse_sms_event_missing_body() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_sms_event"]).await;
-    let token = generate_valid_token(&signing_key, "twilio.webhook.parse_sms_event");
+    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_sms_event");
 
     let err = connector
         .handle_invoke(json!({
             "operation": "twilio.webhook.parse_sms_event",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect_err("should fail without body");
 
-    match &err {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(
-                message.contains("body"),
-                "error should mention body: {message}"
-            );
-        }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
-    }
+    assert_invalid_request_contains(&err, "body");
 }

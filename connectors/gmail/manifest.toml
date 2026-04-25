@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:9378e22b2943b56d55d5cc5e179dcdb6cd77f14899ad3f4cd46d21322bb0399d"
+interface_hash = "blake3-256:fcp.interface.v2:5fd0fb8f2869c930f3ec6bc4fd77ad9bfd7a190653ed7e65f656fe66d3a4c5a9"
 
 [connector]
 id = "fcp.gmail"
@@ -51,8 +51,10 @@ idempotency = "none"
 revocation_freshness = "critical"
 
 [provides.operations."gmail.send_message".input_schema]
-required = ["to", "subject", "body"]
 type = "object"
+anyOf = [{ required = ["raw"] }, { required = ["to", "subject", "body"] }]
+[provides.operations."gmail.send_message".input_schema.properties.raw]
+type = "string"
 [provides.operations."gmail.send_message".input_schema.properties.to]
 type = "string"
 [provides.operations."gmail.send_message".input_schema.properties.subject]
@@ -377,7 +379,60 @@ max_response_bytes = 1048576
 when_to_use = "Retrieve a saved email draft."
 common_mistakes = []
 examples = ['{"draft_id": "r1234567890"}']
-related = ["gmail.send_draft"]
+related = ["gmail.create_draft", "gmail.send_draft"]
+
+# ────────────────────────────────────────────────────────────────
+
+[provides.operations."gmail.create_draft"]
+description = "Create a saved Gmail draft"
+capability = "gmail.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."gmail.create_draft".input_schema]
+type = "object"
+anyOf = [{ required = ["raw"] }, { required = ["to", "subject", "body"] }]
+[provides.operations."gmail.create_draft".input_schema.properties.raw]
+type = "string"
+[provides.operations."gmail.create_draft".input_schema.properties.to]
+type = "string"
+[provides.operations."gmail.create_draft".input_schema.properties.subject]
+type = "string"
+[provides.operations."gmail.create_draft".input_schema.properties.body]
+type = "string"
+
+[provides.operations."gmail.create_draft".output_schema]
+required = ["draft"]
+type = "object"
+[provides.operations."gmail.create_draft".output_schema.properties.draft]
+type = "object"
+
+[provides.operations."gmail.create_draft".network_constraints]
+host_allow = ["gmail.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmail.create_draft".ai_hints]
+when_to_use = "Create a saved draft without sending it."
+common_mistakes = [
+    "This creates an unsent draft; use gmail.send_draft to send it later",
+    "Using standard base64 instead of base64url encoding for raw payloads",
+]
+examples = ['{"to": "user@example.com", "subject": "Draft", "body": "Message body"}']
+related = ["gmail.get_draft", "gmail.send_draft"]
 
 # ────────────────────────────────────────────────────────────────
 
@@ -538,6 +593,13 @@ burst = 25
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "gmail.history.read"
+requests = 250
+window_ms = 1000
+burst = 25
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "gmail.write"
 requests = 250
 window_ms = 1000
@@ -562,10 +624,11 @@ scope = "instance"
 "gmail.send_message" = ["gmail.send"]
 "gmail.get_message" = ["gmail.read"]
 "gmail.list_messages" = ["gmail.read"]
-"gmail.sync_history" = ["gmail.read"]
+"gmail.sync_history" = ["gmail.history.read"]
 "gmail.modify_message" = ["gmail.write"]
 "gmail.list_labels" = ["gmail.read"]
 "gmail.trash_message" = ["gmail.delete"]
 "gmail.get_thread" = ["gmail.read"]
 "gmail.get_draft" = ["gmail.write"]
+"gmail.create_draft" = ["gmail.write"]
 "gmail.send_draft" = ["gmail.send"]

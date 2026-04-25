@@ -980,8 +980,8 @@ async fn capability_no_handshake_fails() {
         .expect_err("invoke without handshake should fail");
 
     assert!(
-        matches!(err, fcp_core::FcpError::NotConfigured),
-        "expected NotConfigured, got: {err:?}"
+        matches!(err, fcp_core::FcpError::NotHandshaken),
+        "expected NotHandshaken, got: {err:?}"
     );
 }
 
@@ -1840,9 +1840,11 @@ async fn self_check_connectivity_failed() {
 #[fcp_async_core::test]
 async fn simulate_returns_allowed() {
     let _ctx = AsyncTestContext::for_scenario("github.simulate.allowed");
-    let connector = GitHubConnector::new();
+    let mock_server = MockServer::start().await;
+    let mut connector = GitHubConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["github.read"]).await;
 
-    let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
     let token = generate_valid_token(&signing_key, "github.get_repo");
 
     let result = connector
@@ -1926,8 +1928,7 @@ async fn health_auth_mode_field() {
     assert_eq!(result2["auth_mode"], "credential_id");
 }
 
-/// Shutdown then re-invoke: connector can still respond after shutdown.
-/// (GitHub connector does not tear down resources on shutdown.)
+/// Shutdown transitions the connector out of the invokable lifecycle state.
 #[fcp_async_core::test]
 async fn shutdown_then_reinvoke() {
     let _ctx = AsyncTestContext::for_scenario("github.lifecycle.shutdown_reinvoke");
@@ -1966,24 +1967,27 @@ async fn shutdown_then_reinvoke() {
         .expect("shutdown should succeed");
     assert_eq!(shutdown_result["status"], "shutdown");
 
-    // Verify that health still returns (connector is not destroyed)
+    // Verify that health reports the lifecycle transition.
     let health_result = connector
         .handle_health()
         .await
         .expect("health after shutdown should still work");
-    assert_eq!(health_result["status"], "healthy");
+    assert_eq!(health_result["status"], "shutdown");
 
-    // Invoke should still work (no teardown in current impl)
+    // Invoke fails at the connector lifecycle gate instead of leaking a cancelled HTTP request.
     let token = generate_valid_token(&signing_key, "github.get_repo");
-    let invoke_result = connector
+    let err = connector
         .handle_invoke(json!({
             "operation": "github.get_repo",
             "input": { "owner": "octocat", "repo": "hello-world" },
             "capability_token": token
         }))
         .await
-        .expect("invoke after shutdown should still work");
-    assert_eq!(invoke_result["repository"]["name"], "hello-world");
+        .expect_err("invoke after shutdown should fail");
+    assert!(
+        matches!(err, fcp_core::FcpError::NotConfigured),
+        "expected NotConfigured after shutdown, got: {err:?}"
+    );
 }
 
 // ============================================================================

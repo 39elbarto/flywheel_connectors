@@ -277,6 +277,20 @@ impl TelegramClient {
     pub fn file_download_url(&self, file_path: &str) -> Result<String, TelegramError> {
         use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 
+        // Encode everything except unreserved chars and forward slash (path separator).
+        const PATH_SEGMENT: &AsciiSet = &CONTROLS
+            .add(b' ')
+            .add(b'"')
+            .add(b'#')
+            .add(b'<')
+            .add(b'>')
+            .add(b'?')
+            .add(b'`')
+            .add(b'{')
+            .add(b'}')
+            .add(b'%')
+            .add(b'\\');
+
         if file_path.is_empty() {
             return Err(TelegramError::InvalidFilePath(
                 "path must not be empty".into(),
@@ -295,20 +309,6 @@ impl TelegramClient {
                 "path traversal segments are not allowed".into(),
             ));
         }
-
-        // Encode everything except unreserved chars and forward slash (path separator).
-        const PATH_SEGMENT: &AsciiSet = &CONTROLS
-            .add(b' ')
-            .add(b'"')
-            .add(b'#')
-            .add(b'<')
-            .add(b'>')
-            .add(b'?')
-            .add(b'`')
-            .add(b'{')
-            .add(b'}')
-            .add(b'%')
-            .add(b'\\');
 
         let encoded_path = utf8_percent_encode(file_path, PATH_SEGMENT).to_string();
         Ok(format!(
@@ -565,7 +565,7 @@ mod tests {
     }
 
     impl StructuredHttpResponse {
-        fn json(status: u16, body: serde_json::Value) -> Self {
+        fn json(status: u16, body: &serde_json::Value) -> Self {
             Self {
                 status,
                 headers: vec![("content-type".into(), "application/json".into())],
@@ -671,6 +671,8 @@ mod tests {
         stream: &mut std::net::TcpStream,
         response: StructuredHttpResponse,
     ) {
+        use std::fmt::Write as _;
+
         let reason = match response.status {
             200 => "OK",
             401 => "Unauthorized",
@@ -684,7 +686,7 @@ mod tests {
             response.body.len()
         );
         for (name, value) in response.headers {
-            raw.push_str(&format!("{name}: {value}\r\n"));
+            write!(&mut raw, "{name}: {value}\r\n").expect("write response header to string");
         }
         raw.push_str("\r\n");
         stream
@@ -701,12 +703,12 @@ mod tests {
             assert_eq!(request.method, "GET");
             assert_eq!(request.path, "/bottest_token_12345/getMe");
             assert!(
-                request.headers.get("content-type").is_none(),
+                !request.headers.contains_key("content-type"),
                 "GET getMe should not send a content-type header"
             );
             StructuredHttpResponse::json(
                 200,
-                serde_json::json!({
+                &serde_json::json!({
                     "ok": true,
                     "result": {
                         "id": 123456789,
@@ -735,7 +737,7 @@ mod tests {
             assert_eq!(request.path, "/bottest_token_12345/getMe");
             StructuredHttpResponse::json(
                 401,
-                serde_json::json!({
+                &serde_json::json!({
                     "ok": false,
                     "error_code": 401,
                     "description": "Unauthorized"
@@ -771,7 +773,7 @@ mod tests {
             assert_eq!(body["text"], "Hello, World!");
             StructuredHttpResponse::json(
                 200,
-                serde_json::json!({
+                &serde_json::json!({
                     "ok": true,
                     "result": {
                         "message_id": 42,
@@ -875,25 +877,22 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_send_message_rate_limited() {
-        let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
-            assert_eq!(request.method, "POST");
-            assert_eq!(request.path, "/bottest_token_12345/sendMessage");
-            StructuredHttpResponse {
-                status: 429,
-                headers: vec![("retry-after".into(), "1".into())],
-                body: serde_json::json!({
-                    "ok": false,
-                    "error_code": 429,
-                    "description": "Too Many Requests: retry after 1",
-                    "parameters": {"retry_after": 1}
-                })
-                .to_string()
-                .into_bytes(),
-            }
-        });
-        let client = TelegramClient::new("test_token_12345")
-            .unwrap()
-            .with_base_url(fake_server.uri());
+        let (mock_server, client) = setup_mock_client().await;
+
+        Mock::given(method("POST"))
+            .and(path("/bottest_token_12345/sendMessage"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "0")
+                    .set_body_json(serde_json::json!({
+                        "ok": false,
+                        "error_code": 429,
+                        "description": "Too Many Requests: retry after 0",
+                        "parameters": {"retry_after": 0}
+                    })),
+            )
+            .mount(&mock_server)
+            .await;
 
         let result = client
             .send_message("123456", "Test", SendMessageOptions::default())
@@ -1279,20 +1278,30 @@ mod tests {
     fn test_normalize_empty_string() {
         let result = normalize_chat_id("");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            TelegramError::InvalidChatId(msg) => assert!(msg.contains("Empty")),
-            other => panic!("expected InvalidChatId, got {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, TelegramError::InvalidChatId(_)),
+            "expected InvalidChatId, got {err:?}"
+        );
+        let TelegramError::InvalidChatId(msg) = err else {
+            return;
+        };
+        assert!(msg.contains("Empty"));
     }
 
     #[test]
     fn test_normalize_whitespace_only() {
         let result = normalize_chat_id("   ");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            TelegramError::InvalidChatId(msg) => assert!(msg.contains("Empty")),
-            other => panic!("expected InvalidChatId, got {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, TelegramError::InvalidChatId(_)),
+            "expected InvalidChatId, got {err:?}"
+        );
+        let TelegramError::InvalidChatId(msg) = err else {
+            return;
+        };
+        assert!(msg.contains("Empty"));
     }
 
     #[test]
@@ -1400,10 +1409,15 @@ mod tests {
     fn test_normalize_tme_invite_link_rejected() {
         let result = normalize_chat_id("https://t.me/+abc123");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            TelegramError::InvalidChatId(msg) => assert!(msg.contains("invite")),
-            other => panic!("expected InvalidChatId about invite links, got {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, TelegramError::InvalidChatId(_)),
+            "expected InvalidChatId about invite links, got {err:?}"
+        );
+        let TelegramError::InvalidChatId(msg) = err else {
+            return;
+        };
+        assert!(msg.contains("invite"));
     }
 
     #[test]
@@ -1820,19 +1834,23 @@ mod tests {
             code: 500,
             description: "internal error".into(),
         };
-        match err.to_fcp_error() {
-            FcpError::External {
-                service,
-                retryable,
-                status_code,
-                ..
-            } => {
-                assert_eq!(service, "telegram");
-                assert!(retryable);
-                assert_eq!(status_code, Some(500));
-            }
-            other => panic!("expected External, got {other:?}"),
-        }
+        let fcp_error = err.to_fcp_error();
+        assert!(
+            matches!(fcp_error, FcpError::External { .. }),
+            "expected External, got {fcp_error:?}"
+        );
+        let FcpError::External {
+            service,
+            retryable,
+            status_code,
+            ..
+        } = fcp_error
+        else {
+            return;
+        };
+        assert_eq!(service, "telegram");
+        assert!(retryable);
+        assert_eq!(status_code, Some(500));
     }
 
     #[test]

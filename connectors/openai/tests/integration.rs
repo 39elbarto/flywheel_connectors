@@ -63,7 +63,8 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .unwrap();
     fcp_core::CapabilityToken::from_raw(cose)
@@ -894,7 +895,7 @@ async fn capability_no_handshake_fails() {
     // no handshake
 
     let signing_key = Ed25519SigningKey::generate();
-    let token = generate_valid_token(&signing_key, "openai.chat");
+    let capability = generate_valid_token(&signing_key, "openai.chat");
 
     let result = connector
         .handle_invoke(json!({
@@ -902,14 +903,14 @@ async fn capability_no_handshake_fails() {
             "input": {
                 "messages": [{"role": "user", "content": "Hi"}]
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
     assert!(result.is_err());
     assert!(
-        matches!(result.unwrap_err(), fcp_core::FcpError::NotConfigured),
-        "should get NotConfigured without handshake"
+        matches!(result.unwrap_err(), fcp_core::FcpError::NotHandshaken),
+        "should get NotHandshaken without handshake"
     );
 }
 

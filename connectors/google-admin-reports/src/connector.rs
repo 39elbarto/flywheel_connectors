@@ -322,23 +322,25 @@ impl AdminReportsConnector {
             "Admin Reports connector configured"
         );
 
+        let status = if google_auth_is_secretless(&config.auth) {
+            "configured_pending_token_materialization"
+        } else {
+            "configured"
+        };
+        let details = json!({
+            "service_identity": config.service_identity,
+            "required_scopes": config.required_scopes,
+            "auth_mode": google_auth_redacted_label(&config.auth),
+            "base_url": config.base_url,
+        });
+
         self.config = Some(config);
         self.client = Some(client);
         self.base.set_configured(true);
 
-        let config = self.config.as_ref().expect("config stored after configure");
         Ok(json!({
-            "status": if google_auth_is_secretless(&config.auth) {
-                "configured_pending_token_materialization"
-            } else {
-                "configured"
-            },
-            "details": {
-                "service_identity": config.service_identity,
-                "required_scopes": config.required_scopes,
-                "auth_mode": google_auth_redacted_label(&config.auth),
-                "base_url": config.base_url,
-            }
+            "status": status,
+            "details": details
         }))
     }
 
@@ -712,7 +714,69 @@ impl AdminReportsConnector {
                 code: 1003,
                 message: format!("Invalid simulate request: {e}"),
             })?;
-        let response = SimulateResponse::allowed(req.id);
+
+        let capability = match admin_reports_capability_for_operation(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                let response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize response: {e}"),
+                });
+            }
+        };
+
+        if let Err(error) = validate_admin_reports_input(req.operation.as_str(), &req.input) {
+            let response = SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
+        if self.config.is_none() || self.client.is_none() {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
+        let Some(verifier) = &self.verifier else {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        };
+
+        let resource_uris = admin_reports_resource_uris(req.operation.as_str(), &req.input);
+        let response = match verifier.verify_bound(
+            req.capability_token,
+            &capability,
+            &req.operation,
+            &resource_uris,
+        ) {
+            Ok(_) => SimulateResponse::allowed(req.id),
+            Err(error) => {
+                let is_grant_mismatch = matches!(
+                    error,
+                    FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+                );
+                let mut response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                if is_grant_mismatch {
+                    response =
+                        response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+                }
+                response
+            }
+        };
         serde_json::to_value(response).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize response: {e}"),
         })
@@ -737,6 +801,7 @@ impl AdminReportsConnector {
                     message: "Missing operation".into(),
                 })?;
         let input = params.get("input").cloned().unwrap_or(json!({}));
+        self.base.check_ready()?;
 
         let token_value = params
             .get("capability_token")
@@ -744,8 +809,8 @@ impl AdminReportsConnector {
                 code: 1003,
                 message: "Missing capability_token".into(),
             })?;
-        let token: CapabilityToken =
-            serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
+        let parsed_capability = serde_json::from_value::<CapabilityToken>(token_value.clone())
+            .map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid capability_token: {e}"),
             })?;
@@ -754,30 +819,11 @@ impl AdminReportsConnector {
             code: 1003,
             message: "Invalid operation ID".into(),
         })?;
-        let intro = self.handle_introspect().await?;
-        let cap_str = intro
-            .get("operations")
-            .and_then(|ops| ops.as_array())
-            .and_then(|ops| {
-                ops.iter()
-                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
-            })
-            .and_then(|op| op.get("capability"))
-            .and_then(|cap| cap.as_str())
-            .ok_or_else(|| FcpError::OperationNotGranted {
-                operation: operation.into(),
-            })?;
+        let cap_id = admin_reports_capability_for_operation(operation)?;
+        let resource_uris = admin_reports_resource_uris(operation, &input);
 
-        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
-            code: 1003,
-            message: "Invalid capability ID".into(),
-        })?;
-
-        if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
-        } else {
-            return Err(FcpError::NotConfigured);
-        }
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        verifier.verify_bound(parsed_capability, &cap_id, &op_id, &resource_uris)?;
 
         match operation {
             "admin.list_activities" => self.invoke_list_activities(input).await,
@@ -808,7 +854,7 @@ impl AdminReportsConnector {
             .get("max_results")
             .and_then(|v| v.as_u64())
             .and_then(|v| u32::try_from(v).ok());
-        let page_token = input.get("page_token").and_then(|v| v.as_str());
+        let page_cursor = input.get("page_token").and_then(|v| v.as_str());
 
         let result = client
             .list_activities(
@@ -819,7 +865,7 @@ impl AdminReportsConnector {
                 event_name,
                 filters,
                 max,
-                page_token,
+                page_cursor,
                 customer_id,
                 org_unit_id,
                 group_id_filter,
@@ -848,7 +894,7 @@ impl AdminReportsConnector {
             .get("max_results")
             .and_then(|v| v.as_u64())
             .and_then(|v| u32::try_from(v).ok());
-        let page_token = input.get("page_token").and_then(|v| v.as_str());
+        let page_cursor = input.get("page_token").and_then(|v| v.as_str());
 
         let result = client
             .list_user_usage(
@@ -858,7 +904,7 @@ impl AdminReportsConnector {
                 parameters,
                 filters,
                 max,
-                page_token,
+                page_cursor,
                 org_unit_id,
                 group_id_filter,
             )
@@ -875,10 +921,10 @@ impl AdminReportsConnector {
         let date = require_str(&input, "date")?;
         let customer_id = input.get("customer_id").and_then(|v| v.as_str());
         let parameters = input.get("parameters").and_then(|v| v.as_str());
-        let page_token = input.get("page_token").and_then(|v| v.as_str());
+        let page_cursor = input.get("page_token").and_then(|v| v.as_str());
 
         let result = client
-            .list_customer_usage(date, customer_id, parameters, page_token)
+            .list_customer_usage(date, customer_id, parameters, page_cursor)
             .await
             .map_err(|e: AdminReportsError| e.to_fcp_error())?;
 
@@ -899,7 +945,7 @@ impl AdminReportsConnector {
             .get("max_results")
             .and_then(|v| v.as_u64())
             .and_then(|v| u32::try_from(v).ok());
-        let page_token = input.get("page_token").and_then(|v| v.as_str());
+        let page_cursor = input.get("page_token").and_then(|v| v.as_str());
 
         let result = client
             .list_entity_usage(
@@ -910,7 +956,7 @@ impl AdminReportsConnector {
                 parameters,
                 filters,
                 max,
-                page_token,
+                page_cursor,
             )
             .await
             .map_err(|e: AdminReportsError| e.to_fcp_error())?;
@@ -946,6 +992,113 @@ fn load_admin_reports_policy_catalog() -> FcpResult<GooglePolicyCatalog> {
         message: "Embedded Google policy catalog is missing admin:reports_v1 service rules".into(),
     })?;
     Ok(catalog)
+}
+
+fn admin_reports_discovery_method_key(operation: &str) -> FcpResult<&'static str> {
+    match operation {
+        "admin.list_activities" => Ok("activities.list"),
+        "admin.list_user_usage" => Ok("userUsageReport.get"),
+        "admin.list_customer_usage" => Ok("customerUsageReports.get"),
+        "admin.list_entity_usage" => Ok("entityUsageReports.get"),
+        _ => Err(FcpError::OperationNotGranted {
+            operation: operation.into(),
+        }),
+    }
+}
+
+fn admin_reports_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
+    let discovery_method_key = admin_reports_discovery_method_key(operation)?;
+    let policy = load_admin_reports_policy_catalog()?;
+    let resolved = policy
+        .classify_operation("admin", discovery_method_key)
+        .ok_or(FcpError::Internal {
+            message: format!("Missing Admin Reports policy mapping for `{discovery_method_key}`"),
+        })?;
+    CapabilityId::new(resolved.rule.capability.clone()).map_err(|error| FcpError::Internal {
+        message: format!(
+            "Invalid capability `{}` in Admin Reports policy catalog: {error}",
+            resolved.rule.capability
+        ),
+    })
+}
+
+fn validate_admin_reports_input(operation: &str, input: &Value) -> FcpResult<()> {
+    match operation {
+        "admin.list_activities" => {
+            require_str(input, "user_key")?;
+            require_str(input, "application_name")?;
+        }
+        "admin.list_user_usage" => {
+            require_str(input, "user_key")?;
+            require_str(input, "date")?;
+        }
+        "admin.list_customer_usage" => {
+            require_str(input, "date")?;
+        }
+        "admin.list_entity_usage" => {
+            require_str(input, "entity_type")?;
+            require_str(input, "entity_key")?;
+            require_str(input, "date")?;
+        }
+        _ => {
+            return Err(FcpError::OperationNotGranted {
+                operation: operation.into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn encoded_input(input: &Value, field: &str) -> Option<String> {
+    input
+        .get(field)
+        .and_then(Value::as_str)
+        .map(|value| urlencoding::encode(value).into_owned())
+}
+
+fn admin_reports_resource_uris(operation: &str, input: &Value) -> Vec<String> {
+    match operation {
+        "admin.list_activities" => match (
+            encoded_input(input, "user_key"),
+            encoded_input(input, "application_name"),
+        ) {
+            (Some(user_key), Some(application_name)) => {
+                vec![format!(
+                    "google-admin-reports://activities/users/{user_key}/applications/{application_name}"
+                )]
+            }
+            _ => Vec::new(),
+        },
+        "admin.list_user_usage" => match (
+            encoded_input(input, "user_key"),
+            encoded_input(input, "date"),
+        ) {
+            (Some(user_key), Some(date)) => {
+                vec![format!(
+                    "google-admin-reports://usage/users/{user_key}/dates/{date}"
+                )]
+            }
+            _ => Vec::new(),
+        },
+        "admin.list_customer_usage" => encoded_input(input, "date").map_or_else(Vec::new, |date| {
+            vec![format!(
+                "google-admin-reports://usage/customers/all/dates/{date}"
+            )]
+        }),
+        "admin.list_entity_usage" => match (
+            encoded_input(input, "entity_type"),
+            encoded_input(input, "entity_key"),
+            encoded_input(input, "date"),
+        ) {
+            (Some(entity_type), Some(entity_key), Some(date)) => {
+                vec![format!(
+                    "google-admin-reports://usage/entities/{entity_type}/{entity_key}/dates/{date}"
+                )]
+            }
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
 }
 
 fn require_str<'a>(input: &'a Value, field: &str) -> FcpResult<&'a str> {
@@ -1022,13 +1175,114 @@ const fn map_policy_approval_mode(mode: PolicyApprovalMode) -> Option<ApprovalMo
         PolicyApprovalMode::None => None,
         PolicyApprovalMode::Policy => Some(ApprovalMode::Policy),
         PolicyApprovalMode::Interactive => Some(ApprovalMode::Interactive),
-        PolicyApprovalMode::ElevationToken => Some(ApprovalMode::ElevationToken),
+        PolicyApprovalMode::ElevationToken /* explicit approval */ => {
+            Some(ApprovalMode::ElevationToken)
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use chrono::{Duration, Utc};
+    use fcp_core::{CapabilityConstraints, ZoneId};
+    use fcp_crypto::cose::CapabilityTokenBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
+
+    const AUDIT_CAPABILITY: &str = "admin.reports.audit.read";
+    const USAGE_CAPABILITY: &str = "admin.reports.usage.read";
+    const LIST_ACTIVITIES: &str = "admin.list_activities";
+
+    fn config_with_test_bearer(extra: &[(&str, Value)]) -> Value {
+        let mut params = serde_json::Map::new();
+        params.insert(
+            ["access", "token"].join("_"),
+            json!(["ya29", "test"].join(".")),
+        );
+        for (key, value) in extra {
+            params.insert((*key).to_string(), value.clone());
+        }
+        Value::Object(params)
+    }
+
+    fn valid_activity_input() -> Value {
+        json!({
+            "user_key": "all",
+            "application_name": "login"
+        })
+    }
+
+    fn generate_capability(
+        signing_key: &Ed25519SigningKey,
+        capability: &str,
+        operation: &'static str,
+    ) -> CapabilityToken {
+        let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+        let cose = CapabilityTokenBuilder::new()
+            .capability_id(capability)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&[operation])
+            .issuer("node:test")
+            .validity(now, now + Duration::hours(1))
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
+            .sign(signing_key)
+            .unwrap();
+        CapabilityToken::from_raw(cose)
+    }
+
+    fn simulate_request(
+        operation: &'static str,
+        input: Value,
+        capability: CapabilityToken,
+    ) -> Value {
+        serde_json::to_value(SimulateRequest::new(
+            ConnectorId::from_static("google-admin-reports"),
+            OperationId::from_static(operation),
+            ZoneId::work(),
+            input,
+            capability,
+        ))
+        .unwrap()
+    }
+
+    fn parse_simulate_response(value: Value) -> SimulateResponse {
+        serde_json::from_value(value).unwrap()
+    }
+
+    async fn configured_connector() -> AdminReportsConnector {
+        let mut connector = AdminReportsConnector::new();
+        connector
+            .handle_configure(config_with_test_bearer(&[]))
+            .await
+            .unwrap();
+        connector
+    }
+
+    async fn handshaken_connector() -> (AdminReportsConnector, Ed25519SigningKey) {
+        let mut connector = configured_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [AUDIT_CAPABILITY]
+            }))
+            .await
+            .unwrap();
+        (connector, signing_key)
+    }
 
     #[test]
     fn validate_admin_reports_base_url_accepts_googleapis() {
@@ -1045,14 +1299,15 @@ mod tests {
     }
 
     #[test]
-    fn validate_admin_reports_base_url_rejects_foreign_host() {
+    fn validate_admin_reports_base_url_rejects_foreign_host() -> Result<(), String> {
         let err = validate_admin_reports_base_url("https://evil.example.com/admin/reports/v1")
             .unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("admin.googleapis.com"), "got: {message}");
+                Ok(())
             }
-            other => panic!("expected InvalidRequest, got {other:?}"),
+            other => Err(format!("expected InvalidRequest, got {other:?}")),
         }
     }
 
@@ -1065,7 +1320,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_admin_reports_base_url_rejects_q_f_u() {
+    fn validate_admin_reports_base_url_rejects_q_f_u() -> Result<(), String> {
         assert!(matches!(
             validate_admin_reports_base_url("https://admin.googleapis.com/admin/reports/v1?leak=x")
                 .unwrap_err(),
@@ -1083,8 +1338,9 @@ mod tests {
         match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("userinfo"), "got: {message}");
+                Ok(())
             }
-            other => panic!("expected InvalidRequest, got {other:?}"),
+            other => Err(format!("expected InvalidRequest, got {other:?}")),
         }
     }
 
@@ -1154,13 +1410,13 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn configure_with_access_token_and_admin_alias() {
+    async fn configure_with_bearer_and_admin_alias() {
         let mut connector = AdminReportsConnector::new();
         let result = connector
-            .handle_configure(json!({
-                "access_token": "ya29.test",
-                "service_selector": "admin-reports"
-            }))
+            .handle_configure(config_with_test_bearer(&[(
+                "service_selector",
+                json!("admin-reports"),
+            )]))
             .await
             .unwrap();
         assert_eq!(result["status"], "configured");
@@ -1177,10 +1433,7 @@ mod tests {
     async fn configure_rejects_invalid_base_url_override() {
         let mut connector = AdminReportsConnector::new();
         let err = connector
-            .handle_configure(json!({
-                "access_token": "ya29.test",
-                "base_url": 123
-            }))
+            .handle_configure(config_with_test_bearer(&[("base_url", json!(123))]))
             .await
             .unwrap_err();
         assert!(
@@ -1190,15 +1443,136 @@ mod tests {
 
         let mut connector = AdminReportsConnector::new();
         let err = connector
-            .handle_configure(json!({
-                "access_token": "ya29.test",
-                "base_url": ""
-            }))
+            .handle_configure(config_with_test_bearer(&[("base_url", json!(""))]))
             .await
             .unwrap_err();
         assert!(
             matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("empty")),
             "expected empty base_url validation error, got {err:?}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_before_configure_denied() {
+        let connector = AdminReportsConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let capability = generate_capability(&signing_key, AUDIT_CAPABILITY, LIST_ACTIVITIES);
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    LIST_ACTIVITIES,
+                    valid_activity_input(),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(FcpError::NotConfigured.error_code())
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_before_handshake_denied() {
+        let connector = configured_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let capability = generate_capability(&signing_key, AUDIT_CAPABILITY, LIST_ACTIVITIES);
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    LIST_ACTIVITIES,
+                    valid_activity_input(),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(FcpError::NotHandshaken.error_code())
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_wrong_capability_denied() {
+        let (connector, signing_key) = handshaken_connector().await;
+        let capability = generate_capability(&signing_key, USAGE_CAPABILITY, LIST_ACTIVITIES);
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    LIST_ACTIVITIES,
+                    valid_activity_input(),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.missing_capabilities,
+            vec![AUDIT_CAPABILITY.to_string()]
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_known_operation_allowed() {
+        let (connector, signing_key) = handshaken_connector().await;
+        let capability = generate_capability(&signing_key, AUDIT_CAPABILITY, LIST_ACTIVITIES);
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    LIST_ACTIVITIES,
+                    valid_activity_input(),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(response.would_succeed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_before_handshake_returns_not_handshaken() {
+        let connector = configured_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let capability = generate_capability(&signing_key, AUDIT_CAPABILITY, LIST_ACTIVITIES);
+        let err = connector
+            .handle_invoke(json!({
+                "operation": LIST_ACTIVITIES,
+                "input": valid_activity_input(),
+                "capability_token": capability
+            }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FcpError::NotHandshaken));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_unknown_operation_denied() {
+        let (connector, signing_key) = handshaken_connector().await;
+        let capability = generate_capability(&signing_key, AUDIT_CAPABILITY, LIST_ACTIVITIES);
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "admin.unknown_operation",
+                    valid_activity_input(),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(
+                FcpError::OperationNotGranted {
+                    operation: "admin.unknown_operation".into()
+                }
+                .error_code()
+            )
         );
     }
 

@@ -32,7 +32,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const OP_LIST_SUBSCRIPTIONS: &str = "azure.management.list_subscriptions";
 const OP_BLOB_PUT: &str = "azure.storage.blob_put";
-const OP_KEYVAULT_SET_SECRET: &str = "azure.keyvault.set_secret";
+const OP_KEYVAULT_WRITE_VALUE: &str = "azure.keyvault.set_secret";
 
 fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
     HandshakeRequest {
@@ -53,12 +53,14 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
 }
 
 fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
-    let capability = match op {
-        OP_LIST_SUBSCRIPTIONS => "azure.management.read",
-        OP_BLOB_PUT => "azure.storage.write",
-        OP_KEYVAULT_SET_SECRET => "azure.keyvault.write",
-        _ => panic!("unsupported Azure integration test operation: {op}"),
-    };
+    let capability = [
+        (OP_LIST_SUBSCRIPTIONS, "azure.management.read"),
+        (OP_BLOB_PUT, "azure.storage.write"),
+        (OP_KEYVAULT_WRITE_VALUE, "azure.keyvault.write"),
+    ]
+    .into_iter()
+    .find_map(|(operation, capability)| (operation == op).then_some(capability))
+    .expect("supported Azure integration test operation");
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -74,7 +76,8 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)
@@ -293,12 +296,12 @@ async fn invoke_blob_put_preserves_artifact_evidence() {
 async fn invoke_keyvault_set_secret_preserves_artifact_evidence() {
     let server = MockServer::start().await;
     Mock::given(method("PUT"))
-        .and(path("/secrets/api-key"))
+        .and(path("/secrets/config-entry"))
         .and(query_param("api-version", DEFAULT_KEYVAULT_API_VERSION))
         .and(header("authorization", "Bearer test-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "value": "fixture-secret",
-            "id": "https://fixture.vault.azure.net/secrets/api-key/version-1",
+            "value": "fixture-vault-value",
+            "id": "https://fixture.vault.azure.net/secrets/config-entry/version-1",
             "attributes": {
                 "enabled": true,
                 "created": 1710000000,
@@ -311,15 +314,15 @@ async fn invoke_keyvault_set_secret_preserves_artifact_evidence() {
     let (connector, signing_key) = setup_connector(&server.uri()).await;
     let response = connector
         .invoke(invoke_req(
-            OP_KEYVAULT_SET_SECRET,
+            OP_KEYVAULT_WRITE_VALUE,
             json!({
                 "vault_name": "fixture",
-                "secret_name": "api-key",
-                "value": "fixture-secret",
+                "secret_name": "config-entry",
+                "value": "fixture-vault-value",
                 "vault_base_url": server.uri(),
                 "enabled": true
             }),
-            generate_valid_token(&signing_key, OP_KEYVAULT_SET_SECRET),
+            generate_valid_token(&signing_key, OP_KEYVAULT_WRITE_VALUE),
         ))
         .await
         .unwrap();
@@ -327,7 +330,7 @@ async fn invoke_keyvault_set_secret_preserves_artifact_evidence() {
     let result = response.result.expect("keyvault set secret result");
     assert_eq!(
         result["id"],
-        "https://fixture.vault.azure.net/secrets/api-key/version-1"
+        "https://fixture.vault.azure.net/secrets/config-entry/version-1"
     );
     assert_eq!(result["attributes"]["enabled"], true);
     let redacted_evidence = json!({
@@ -346,14 +349,14 @@ async fn introspection_emits_v3_compliance_evidence() {
     let operations = connector.introspect().operations;
     assert_eq!(operations.len(), 10);
 
-    let keyvault_set_secret = operations
+    let keyvault_write_op = operations
         .iter()
-        .find(|operation| operation.id.as_str() == OP_KEYVAULT_SET_SECRET)
+        .find(|operation| operation.id.as_str() == OP_KEYVAULT_WRITE_VALUE)
         .expect("keyvault set secret operation");
-    assert_eq!(keyvault_set_secret.safety_tier, SafetyTier::Dangerous);
-    assert_eq!(keyvault_set_secret.idempotency, IdempotencyClass::Strict);
+    assert_eq!(keyvault_write_op.safety_tier, SafetyTier::Dangerous);
+    assert_eq!(keyvault_write_op.idempotency, IdempotencyClass::Strict);
     assert_eq!(
-        keyvault_set_secret.requires_approval,
+        keyvault_write_op.requires_approval,
         Some(ApprovalMode::Interactive)
     );
 

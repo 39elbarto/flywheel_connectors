@@ -455,7 +455,10 @@ mod tests {
         let content: MessageContent = "hello".into();
         match content {
             MessageContent::Text(s) => assert_eq!(s, "hello"),
-            MessageContent::Blocks(_) => panic!("expected Text variant"),
+            other @ MessageContent::Blocks(_) => assert!(
+                matches!(other, MessageContent::Text(_)),
+                "expected Text variant"
+            ),
         }
     }
 
@@ -464,7 +467,10 @@ mod tests {
         let content: MessageContent = String::from("world").into();
         match content {
             MessageContent::Text(s) => assert_eq!(s, "world"),
-            MessageContent::Blocks(_) => panic!("expected Text variant"),
+            other @ MessageContent::Blocks(_) => assert!(
+                matches!(other, MessageContent::Text(_)),
+                "expected Text variant"
+            ),
         }
     }
 
@@ -480,7 +486,7 @@ mod tests {
         let back: ContentBlock = serde_json::from_str(&json).unwrap();
         match back {
             ContentBlock::Text { text } => assert_eq!(text, "hello"),
-            _ => panic!("expected Text"),
+            other => assert!(matches!(other, ContentBlock::Text { .. }), "expected Text"),
         }
     }
 
@@ -499,7 +505,10 @@ mod tests {
                 assert_eq!(id, "t1");
                 assert_eq!(name, "calc");
             }
-            _ => panic!("expected ToolUse"),
+            other => assert!(
+                matches!(other, ContentBlock::ToolUse { .. }),
+                "expected ToolUse"
+            ),
         }
     }
 
@@ -522,7 +531,10 @@ mod tests {
                 assert_eq!(content, "42");
                 assert_eq!(is_error, Some(false));
             }
-            _ => panic!("expected ToolResult"),
+            other => assert!(
+                matches!(other, ContentBlock::ToolResult { .. }),
+                "expected ToolResult"
+            ),
         }
     }
 
@@ -788,7 +800,9 @@ mod tests {
         let back: MessageContent = serde_json::from_str(&json).unwrap();
         match back {
             MessageContent::Text(s) => assert_eq!(s, "test message"),
-            MessageContent::Blocks(_) => panic!("expected Text"),
+            other @ MessageContent::Blocks(_) => {
+                assert!(matches!(other, MessageContent::Text(_)), "expected Text");
+            }
         }
     }
 
@@ -799,7 +813,9 @@ mod tests {
         drop(original);
         match cloned {
             MessageContent::Text(s) => assert_eq!(s, "clone_test"),
-            MessageContent::Blocks(_) => panic!("expected Text"),
+            other @ MessageContent::Blocks(_) => {
+                assert!(matches!(other, MessageContent::Text(_)), "expected Text");
+            }
         }
     }
 
@@ -822,9 +838,15 @@ mod tests {
                     assert_eq!(media_type, "image/png");
                     assert_eq!(data, "abc123");
                 }
-                ImageSource::Url { .. } => panic!("expected Base64"),
+                other @ ImageSource::Url { .. } => assert!(
+                    matches!(other, ImageSource::Base64 { .. }),
+                    "expected Base64"
+                ),
             },
-            other => panic!("expected Image, got {other:?}"),
+            other => assert!(
+                matches!(other, ContentBlock::Image { .. }),
+                "expected Image, got {other:?}"
+            ),
         }
     }
 
@@ -848,7 +870,7 @@ mod tests {
         drop(original);
         match cloned {
             ContentBlock::Text { text } => assert_eq!(text, "clone_me"),
-            _ => panic!("expected Text"),
+            other => assert!(matches!(other, ContentBlock::Text { .. }), "expected Text"),
         }
     }
 
@@ -899,7 +921,10 @@ mod tests {
         let back: ToolChoice = serde_json::from_str(&json).unwrap();
         match back {
             ToolChoice::Tool { name } => assert_eq!(name, "my_tool"),
-            _ => panic!("expected Tool variant"),
+            other => assert!(
+                matches!(other, ToolChoice::Tool { .. }),
+                "expected Tool variant"
+            ),
         }
     }
 
@@ -1108,7 +1133,10 @@ mod tests {
         let event: StreamEvent = serde_json::from_str(json).unwrap();
         match event {
             StreamEvent::ContentBlockStop { index } => assert_eq!(index, 0),
-            _ => panic!("expected ContentBlockStop"),
+            other => assert!(
+                matches!(other, StreamEvent::ContentBlockStop { .. }),
+                "expected ContentBlockStop"
+            ),
         }
     }
 
@@ -1121,7 +1149,7 @@ mod tests {
                 assert_eq!(error.error_type, "overloaded_error");
                 assert_eq!(error.message, "Overloaded");
             }
-            _ => panic!("expected Error"),
+            other => assert!(matches!(other, StreamEvent::Error { .. }), "expected Error"),
         }
     }
 
@@ -1141,7 +1169,10 @@ mod tests {
         let delta: ContentDelta = serde_json::from_str(json).unwrap();
         match delta {
             ContentDelta::TextDelta { text } => assert_eq!(text, "hello"),
-            ContentDelta::InputJsonDelta { .. } => panic!("expected TextDelta"),
+            other @ ContentDelta::InputJsonDelta { .. } => assert!(
+                matches!(other, ContentDelta::TextDelta { .. }),
+                "expected TextDelta"
+            ),
         }
     }
 
@@ -1153,7 +1184,10 @@ mod tests {
             ContentDelta::InputJsonDelta { partial_json } => {
                 assert!(partial_json.contains("\"x\":"));
             }
-            ContentDelta::TextDelta { .. } => panic!("expected InputJsonDelta"),
+            other @ ContentDelta::TextDelta { .. } => assert!(
+                matches!(other, ContentDelta::InputJsonDelta { .. }),
+                "expected InputJsonDelta"
+            ),
         }
     }
 
@@ -1165,7 +1199,10 @@ mod tests {
         let data: ContentBlockStartData = serde_json::from_str(json).unwrap();
         match data {
             ContentBlockStartData::Text { text } => assert!(text.is_empty()),
-            ContentBlockStartData::ToolUse { .. } => panic!("expected Text"),
+            other @ ContentBlockStartData::ToolUse { .. } => assert!(
+                matches!(other, ContentBlockStartData::Text { .. }),
+                "expected Text"
+            ),
         }
     }
 
@@ -1178,7 +1215,10 @@ mod tests {
                 assert_eq!(id, "t1");
                 assert_eq!(name, "calc");
             }
-            ContentBlockStartData::Text { .. } => panic!("expected ToolUse"),
+            other @ ContentBlockStartData::Text { .. } => assert!(
+                matches!(other, ContentBlockStartData::ToolUse { .. }),
+                "expected ToolUse"
+            ),
         }
     }
 
@@ -1211,7 +1251,9 @@ mod tests {
         drop(original);
         match cloned {
             ImageSource::Url { url } => assert_eq!(url, "https://example.com/img.png"),
-            ImageSource::Base64 { .. } => panic!("expected Url"),
+            other @ ImageSource::Base64 { .. } => {
+                assert!(matches!(other, ImageSource::Url { .. }), "expected Url");
+            }
         }
     }
 
@@ -1360,7 +1402,10 @@ mod tests {
         drop(original);
         match cloned {
             ContentDelta::TextDelta { text } => assert_eq!(text, "delta_text"),
-            ContentDelta::InputJsonDelta { .. } => panic!("expected TextDelta"),
+            other @ ContentDelta::InputJsonDelta { .. } => assert!(
+                matches!(other, ContentDelta::TextDelta { .. }),
+                "expected TextDelta"
+            ),
         }
     }
 

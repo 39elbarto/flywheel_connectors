@@ -1,7 +1,10 @@
 //! FCP GitHub Connector implementation.
 
 use std::collections::{HashSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
@@ -186,6 +189,7 @@ pub struct GitHubConnector {
     session_id: Option<SessionId>,
     seen_webhook_deliveries: Mutex<HashSet<String>>,
     webhook_delivery_order: Mutex<VecDeque<String>>,
+    shutdown: AtomicBool,
 }
 
 impl GitHubConnector {
@@ -200,31 +204,36 @@ impl GitHubConnector {
             session_id: None,
             seen_webhook_deliveries: Mutex::new(HashSet::new()),
             webhook_delivery_order: Mutex::new(VecDeque::new()),
+            shutdown: AtomicBool::new(false),
         }
     }
 
     fn claim_webhook_delivery(&self, delivery_id: &str) -> FcpResult<()> {
-        let mut seen = self
-            .seen_webhook_deliveries
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if seen.contains(delivery_id) {
-            return Err(FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("duplicate webhook delivery_id: {delivery_id}"),
-            });
-        }
-
-        let mut order = self
-            .webhook_delivery_order
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        seen.insert(delivery_id.to_string());
-        order.push_back(delivery_id.to_string());
-        while order.len() > WEBHOOK_DELIVERY_CACHE_LIMIT {
-            if let Some(evicted) = order.pop_front() {
-                seen.remove(&evicted);
+        {
+            let mut seen = self
+                .seen_webhook_deliveries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if seen.contains(delivery_id) {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("duplicate webhook delivery_id: {delivery_id}"),
+                });
             }
+
+            let mut order = self
+                .webhook_delivery_order
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            seen.insert(delivery_id.to_string());
+            order.push_back(delivery_id.to_string());
+            while order.len() > WEBHOOK_DELIVERY_CACHE_LIMIT {
+                if let Some(evicted) = order.pop_front() {
+                    seen.remove(&evicted);
+                }
+            }
+            drop(order);
+            drop(seen);
         }
         Ok(())
     }
@@ -248,6 +257,7 @@ impl GitHubConnector {
 
         self.client = Some(client);
         self.config = Some(cfg);
+        self.shutdown.store(false, Ordering::Release);
         self.base.set_configured(true);
         info!("GitHub connector configured");
 
@@ -313,7 +323,8 @@ impl GitHubConnector {
     /// # Errors
     /// Returns [`FcpError`] if the health status cannot be determined.
     pub async fn handle_health(&self) -> FcpResult<serde_json::Value> {
-        let configured = self.client.is_some();
+        let shutdown = self.shutdown.load(Ordering::Acquire);
+        let configured = self.client.is_some() && !shutdown;
         let metrics = self.base.metrics();
         let auth_mode = self
             .config
@@ -324,7 +335,13 @@ impl GitHubConnector {
             .as_ref()
             .map_or("not_configured", |c| c.base_url.as_str());
         Ok(json!({
-            "status": if configured { "healthy" } else { "not_configured" },
+            "status": if shutdown {
+                "shutdown"
+            } else if configured {
+                "healthy"
+            } else {
+                "not_configured"
+            },
             "auth_mode": auth_mode,
             "api_url": api_url,
             "metrics": {
@@ -884,7 +901,77 @@ impl GitHubConnector {
                 message: format!("Invalid simulate request: {e}"),
             })?;
 
-        let response = SimulateResponse::allowed(req.id);
+        let capability = match github_capability_for_operation(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                let response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize response: {e}"),
+                });
+            }
+        };
+
+        if let Err(error) = validate_github_input(req.operation.as_str(), &req.input) {
+            let response = SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
+        if self.config.is_none() || self.client.is_none() {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
+        let Some(verifier) = &self.verifier else {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        };
+
+        let resource_uris = match resource_uris_for_operation(req.operation.as_str(), &req.input) {
+            Ok(resource_uris) => resource_uris,
+            Err(error) => {
+                let response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize response: {e}"),
+                });
+            }
+        };
+
+        let response = match verifier.verify_bound(
+            req.capability_token,
+            &capability,
+            &req.operation,
+            &resource_uris,
+        ) {
+            Ok(_) => SimulateResponse::allowed(req.id),
+            Err(error) => {
+                let is_grant_mismatch = matches!(
+                    error,
+                    FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+                );
+                let mut response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                if is_grant_mismatch {
+                    response = response.with_missing_capabilities(vec![capability.as_str().into()]);
+                }
+                response
+            }
+        };
         serde_json::to_value(response).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize response: {e}"),
         })
@@ -923,10 +1010,12 @@ impl GitHubConnector {
                 message: "Missing capability_token".into(),
             })?;
 
-        let token: CapabilityToken =
-            serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("Invalid capability_token format: {e}"),
+        let token =
+            serde_json::from_value::<CapabilityToken>(token_value.clone()).map_err(|e| {
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid capability_token format: {e}"),
+                }
             })?;
 
         let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
@@ -934,31 +1023,12 @@ impl GitHubConnector {
             message: "Invalid operation ID format".into(),
         })?;
 
-        let intro = self.handle_introspect().await?;
-        let cap_str = intro
-            .get("operations")
-            .and_then(|ops| ops.as_array())
-            .and_then(|ops| {
-                ops.iter()
-                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
-            })
-            .and_then(|op| op.get("capability"))
-            .and_then(|cap| cap.as_str())
-            .ok_or_else(|| FcpError::OperationNotGranted {
-                operation: operation.into(),
-            })?;
-
-        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
-            code: 1003,
-            message: "Invalid capability ID format".into(),
-        })?;
-
+        let cap_id = github_capability_for_operation(operation)?;
         let resource_uris = resource_uris_for_operation(operation, &input)?;
-        if let Some(verifier) = &self.verifier {
-            verifier.verify_bound(token, &cap_id, &op_id, &resource_uris)?;
-        } else {
-            return Err(FcpError::NotConfigured);
-        }
+        self.base.check_ready()?;
+
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        verifier.verify_bound(token, &cap_id, &op_id, &resource_uris)?;
 
         match operation {
             "github.create_issue" => self.invoke_create_issue(input).await,
@@ -1409,6 +1479,9 @@ impl GitHubConnector {
         if let Some(client) = &self.client {
             client.shutdown();
         }
+        self.shutdown.store(true, Ordering::Release);
+        self.base.set_handshaken(false);
+        self.base.set_configured(false);
         Ok(json!({ "status": "shutdown" }))
     }
 }
@@ -1440,6 +1513,97 @@ fn require_u32(input: &serde_json::Value, field: &str) -> FcpResult<u32> {
             code: 1003,
             message: format!("Missing required field: {field}"),
         })
+}
+
+fn github_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
+    match operation {
+        "github.create_issue" | "github.create_pull_request" => {
+            Ok(CapabilityId::from_static("github.write"))
+        }
+        "github.merge_pull_request" | "github.trigger_workflow" => {
+            Ok(CapabilityId::from_static("github.admin"))
+        }
+        "github.process_webhook" => Ok(CapabilityId::from_static("github.process_webhook")),
+        "github.get_issue"
+        | "github.search_issues"
+        | "github.get_pull_request"
+        | "github.get_repo"
+        | "github.search_repos"
+        | "github.list_workflows"
+        | "github.get_file_content"
+        | "github.search_code" => Ok(CapabilityId::from_static("github.read")),
+        _ => Err(FcpError::OperationNotGranted {
+            operation: operation.into(),
+        }),
+    }
+}
+
+fn validate_github_input(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+    match operation {
+        "github.create_issue" => {
+            require_str(input, "owner")?;
+            require_str(input, "repo")?;
+            require_str(input, "title")?;
+        }
+        "github.get_issue" => {
+            require_str(input, "owner")?;
+            require_str(input, "repo")?;
+            require_u32(input, "issue_number")?;
+        }
+        "github.search_issues" | "github.search_repos" | "github.search_code" => {
+            require_str(input, "query")?;
+        }
+        "github.create_pull_request" => {
+            require_str(input, "owner")?;
+            require_str(input, "repo")?;
+            require_str(input, "title")?;
+            require_str(input, "head")?;
+            require_str(input, "base")?;
+        }
+        "github.get_pull_request" | "github.merge_pull_request" => {
+            require_str(input, "owner")?;
+            require_str(input, "repo")?;
+            require_u32(input, "pull_number")?;
+        }
+        "github.get_repo" | "github.list_workflows" => {
+            require_str(input, "owner")?;
+            require_str(input, "repo")?;
+        }
+        "github.trigger_workflow" => {
+            require_str(input, "owner")?;
+            require_str(input, "repo")?;
+            require_str(input, "workflow_id")?;
+            require_str(input, "ref")?;
+        }
+        "github.get_file_content" => {
+            require_str(input, "owner")?;
+            require_str(input, "repo")?;
+            require_str(input, "path")?;
+        }
+        "github.process_webhook" => {
+            let signature_validated = input
+                .get("signature_validated")
+                .and_then(|value| value.as_bool())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "signature_validated must be a boolean".into(),
+                })?;
+            if !signature_validated {
+                return Err(FcpError::Unauthorized {
+                    code: 2001,
+                    message: "signature_validated must be true before processing webhook payloads"
+                        .into(),
+                });
+            }
+            resource_uris_for_operation(operation, input)?;
+        }
+        _ => {
+            return Err(FcpError::OperationNotGranted {
+                operation: operation.into(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn resource_uris_for_operation(
@@ -1649,7 +1813,7 @@ fn map_oauth_error_to_fcp(error: OAuthError) -> FcpError {
         },
         OAuthError::TokenExpired(duration) => FcpError::InvalidRequest {
             code: 1003,
-            message: format!("GitHub OAuth token expired {:?} ago", duration),
+            message: format!("GitHub OAuth token expired {duration:?} ago"),
         },
         OAuthError::NoRefreshToken => FcpError::InvalidRequest {
             code: 1003,
@@ -1708,15 +1872,13 @@ mod tests {
     use fcp_manifest::ConnectorManifest;
     use std::path::PathBuf;
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
-        let cap = match op {
-            "github.create_issue" | "github.create_pull_request" => "github.write",
-            "github.merge_pull_request" | "github.trigger_workflow" => "github.admin",
-            "github.process_webhook" => "github.process_webhook",
-            _ => "github.read",
-        };
+    fn generate_token_with_cap(
+        signing_key: &Ed25519SigningKey,
+        connector: &GitHubConnector,
+        cap: &str,
+        operations: &[&str],
+    ) -> CapabilityToken {
         let now = Utc::now();
-        // C3.4: tokens MUST include constraints (default-deny)
         let constraints = CapabilityConstraints {
             resource_allow: vec!["*".into()],
             ..Default::default()
@@ -1727,14 +1889,77 @@ mod tests {
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
-            .operations(&[op])
+            .operations(operations)
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
+            .target_instance(connector.base.instance_id.as_str())
             .try_constraints_cbor(&cbor)
             .expect("test constraints CBOR should be valid")
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
+    }
+
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        connector: &GitHubConnector,
+        op: &str,
+    ) -> CapabilityToken {
+        let cap = github_capability_for_operation(op).unwrap();
+        generate_token_with_cap(signing_key, connector, cap.as_str(), &[op])
+    }
+
+    fn simulate_request(
+        operation: &'static str,
+        input: serde_json::Value,
+        capability: CapabilityToken,
+    ) -> serde_json::Value {
+        serde_json::to_value(SimulateRequest::new(
+            ConnectorId::from_static("github"),
+            OperationId::from_static(operation),
+            fcp_core::ZoneId::work(),
+            input,
+            capability,
+        ))
+        .unwrap()
+    }
+
+    fn parse_simulate_response(value: serde_json::Value) -> SimulateResponse {
+        serde_json::from_value(value).unwrap()
+    }
+
+    async fn configured_connector() -> GitHubConnector {
+        let mut connector = GitHubConnector::new();
+        connector
+            .handle_configure(json!({
+                "token": "fake_key",
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
+        connector
+    }
+
+    async fn handshaken_connector() -> (GitHubConnector, Ed25519SigningKey) {
+        let mut connector = configured_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [
+                    "github.read",
+                    "github.write",
+                    "github.admin",
+                    "github.process_webhook"
+                ]
+            }))
+            .await
+            .unwrap();
+        (connector, signing_key)
     }
 
     #[fcp_async_core::runtime::test]
@@ -1779,7 +2004,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "github.get_repo");
+        let token = generate_valid_token(&signing_key, &connector, "github.get_repo");
 
         let result = connector
             .handle_invoke(json!({
@@ -1818,7 +2043,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "github.get_issue");
+        let token = generate_valid_token(&signing_key, &connector, "github.get_issue");
 
         let result = connector
             .handle_invoke(json!({
@@ -1835,6 +2060,164 @@ mod tests {
             }
             e => panic!("Expected InvalidRequest, got: {e:?}"),
         }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_before_configure_denies() {
+        let connector = GitHubConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let capability = generate_valid_token(&signing_key, &connector, "github.get_repo");
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "github.get_repo",
+                    json!({ "owner": "octocat", "repo": "hello-world" }),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(FcpError::NotConfigured.error_code())
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_before_handshake_denies() {
+        let connector = configured_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let capability = generate_valid_token(&signing_key, &connector, "github.get_repo");
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "github.get_repo",
+                    json!({ "owner": "octocat", "repo": "hello-world" }),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(FcpError::NotHandshaken.error_code())
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_known_operation_allows_valid_token() {
+        let (connector, signing_key) = handshaken_connector().await;
+        let capability = generate_valid_token(&signing_key, &connector, "github.get_repo");
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "github.get_repo",
+                    json!({ "owner": "octocat", "repo": "hello-world" }),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(response.would_succeed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_wrong_capability_denies() {
+        let (connector, signing_key) = handshaken_connector().await;
+        let capability = generate_token_with_cap(
+            &signing_key,
+            &connector,
+            "github.write",
+            &["github.get_repo"],
+        );
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "github.get_repo",
+                    json!({ "owner": "octocat", "repo": "hello-world" }),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(response.missing_capabilities, vec!["github.read"]);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_missing_required_input_denies() {
+        let (connector, signing_key) = handshaken_connector().await;
+        let capability = generate_valid_token(&signing_key, &connector, "github.search_issues");
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "github.search_issues",
+                    json!({}),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: String::new()
+                }
+                .error_code()
+            )
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_unknown_operation_denies() {
+        let (connector, signing_key) = handshaken_connector().await;
+        let capability = generate_token_with_cap(
+            &signing_key,
+            &connector,
+            "github.read",
+            &["github.unknown_operation"],
+        );
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "github.unknown_operation",
+                    json!({}),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(
+                FcpError::OperationNotGranted {
+                    operation: "github.unknown_operation".into()
+                }
+                .error_code()
+            )
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_before_handshake_returns_not_handshaken() {
+        let connector = configured_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let capability = generate_valid_token(&signing_key, &connector, "github.get_repo");
+        let error = connector
+            .handle_invoke(json!({
+                "operation": "github.get_repo",
+                "input": { "owner": "octocat", "repo": "hello-world" },
+                "capability_token": capability
+            }))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, FcpError::NotHandshaken));
     }
 
     #[fcp_async_core::runtime::test]

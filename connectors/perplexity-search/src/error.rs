@@ -164,20 +164,21 @@ mod tests {
     }
 
     #[test]
-    fn invalid_input_maps_to_invalid_request() {
+    fn invalid_input_maps_to_invalid_request() -> Result<(), String> {
         let err = PerplexityError::InvalidInput("missing query".into());
         let fcp = err.to_fcp_error();
         match fcp {
             FcpError::InvalidRequest { code, message } => {
                 assert_eq!(code, 1005);
                 assert!(message.contains("missing query"));
+                Ok(())
             }
-            other => panic!("Expected InvalidRequest, got {other:?}"),
+            other => Err(format!("Expected InvalidRequest, got {other:?}")),
         }
     }
 
     #[test]
-    fn rate_limited_maps_to_fcp_rate_limited() {
+    fn rate_limited_maps_to_fcp_rate_limited() -> Result<(), String> {
         let err = PerplexityError::RateLimited {
             retry_after_ms: 2_000,
         };
@@ -189,26 +190,28 @@ mod tests {
             } => {
                 assert_eq!(retry_after_ms, 2_000);
                 assert!(violation.is_none());
+                Ok(())
             }
-            other => panic!("Expected RateLimited, got {other:?}"),
+            other => Err(format!("Expected RateLimited, got {other:?}")),
         }
     }
 
     #[test]
-    fn unauthorized_maps_to_fcp_unauthorized() {
+    fn unauthorized_maps_to_fcp_unauthorized() -> Result<(), String> {
         let err = PerplexityError::Unauthorized("Invalid API key".into());
         let fcp = err.to_fcp_error();
         match fcp {
             FcpError::Unauthorized { code, message } => {
                 assert_eq!(code, 2001);
                 assert!(message.contains("Invalid API key"));
+                Ok(())
             }
-            other => panic!("Expected Unauthorized, got {other:?}"),
+            other => Err(format!("Expected Unauthorized, got {other:?}")),
         }
     }
 
     #[test]
-    fn api_error_includes_error_type_in_message() {
+    fn api_error_includes_error_type_in_message() -> Result<(), String> {
         let err = PerplexityError::Api {
             status: 422,
             message: "Model not found".into(),
@@ -220,8 +223,9 @@ mod tests {
                 assert!(message.contains("422"));
                 assert!(message.contains("invalid_request_error"));
                 assert!(message.contains("Model not found"));
+                Ok(())
             }
-            other => panic!("Expected External, got {other:?}"),
+            other => Err(format!("Expected External, got {other:?}")),
         }
     }
 

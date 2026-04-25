@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:74df7253255390d3053affde3ff400cbde3629c53025afa7953aa8bbab81c5a8"
+interface_hash = "blake3-256:fcp.interface.v2:08898c2d611f91db9d5d8d20f232a7a35fa3dc76b1ccf5fe29b9d48157e5993e"
 
 [connector]
 id = "fcp.jira"

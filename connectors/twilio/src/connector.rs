@@ -35,7 +35,7 @@ impl TwilioConfig {
                 message: "Missing account_sid in configuration".into(),
             })?;
 
-        let auth_token = params
+        let auth_material = params
             .get("auth_token")
             .and_then(|v| v.as_str())
             .map(str::trim)
@@ -44,7 +44,7 @@ impl TwilioConfig {
         let credential_id = params.get("credential_id").and_then(|v| v.as_str());
         let base_url = params.get("base_url").and_then(|v| v.as_str());
 
-        let auth = match (auth_token.as_deref(), credential_id) {
+        let auth = match (auth_material.as_deref(), credential_id) {
             (Some(_), Some(_)) => {
                 return Err(FcpError::InvalidRequest {
                     code: 1003,
@@ -212,9 +212,15 @@ impl TwilioConnector {
             })?;
         let client = client.with_base_url(&cfg.base_url);
 
+        if let Some(client) = self.client.take() {
+            client.shutdown();
+        }
         self.client = Some(client);
         self.config = Some(cfg);
+        self.verifier = None;
+        self.session_id = None;
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
         info!("Twilio connector configured");
 
         Ok(json!({ "status": "configured" }))
@@ -230,6 +236,10 @@ impl TwilioConnector {
                 code: 1003,
                 message: format!("Invalid handshake request: {e}"),
             })?;
+
+        if self.client.is_none() {
+            return Err(FcpError::NotConfigured);
+        }
 
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -1914,10 +1924,48 @@ impl TwilioConnector {
                 message: format!("Invalid simulate request: {e}"),
             })?;
 
-        let response = SimulateResponse::allowed(req.id);
-        serde_json::to_value(response).map_err(|e| FcpError::Internal {
-            message: format!("Failed to serialize response: {e}"),
-        })
+        let (capability, input_schema) = match self.operation_metadata(req.operation.as_str()).await
+        {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                let response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                return Self::serialize_simulate_response(response);
+            }
+        };
+
+        if let Err(error) = Self::validate_required_input(&input_schema, &req.input) {
+            let response = SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            return Self::serialize_simulate_response(response);
+        }
+
+        let Some(verifier) = &self.verifier else {
+            let error = if self.client.is_some() {
+                FcpError::NotHandshaken
+            } else {
+                FcpError::NotConfigured
+            };
+            let response = SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            return Self::serialize_simulate_response(response);
+        };
+
+        let response =
+            match verifier.verify_bound(req.capability_token, &capability, &req.operation, &[]) {
+                Ok(_) => SimulateResponse::allowed(req.id),
+                Err(error) => {
+                    let mut response =
+                        SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                    if matches!(
+                        error,
+                        FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+                    ) {
+                        response = response
+                            .with_missing_capabilities(vec![capability.as_str().to_string()]);
+                    }
+                    response
+                }
+            };
+        Self::serialize_simulate_response(response)
     }
 
     /// Handle invoke method.
@@ -1952,8 +2000,8 @@ impl TwilioConnector {
                 message: "Missing capability_token".into(),
             })?;
 
-        let token: CapabilityToken =
-            serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
+        let parsed_capability = serde_json::from_value::<CapabilityToken>(token_value.clone())
+            .map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid capability_token format: {e}"),
             })?;
@@ -1962,29 +2010,16 @@ impl TwilioConnector {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
-        let intro = self.handle_introspect().await?;
-        let cap_str = intro
-            .get("operations")
-            .and_then(|ops| ops.as_array())
-            .and_then(|ops| {
-                ops.iter()
-                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
-            })
-            .and_then(|op| op.get("capability"))
-            .and_then(|cap| cap.as_str())
-            .ok_or_else(|| FcpError::OperationNotGranted {
-                operation: operation.into(),
-            })?;
-
-        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
-            code: 1003,
-            message: "Invalid capability ID format".into(),
-        })?;
+        let (cap_id, _) = self.operation_metadata(operation).await?;
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
+            verifier.verify_bound(parsed_capability, &cap_id, &op_id, &[])?;
         } else {
-            return Err(FcpError::NotConfigured);
+            return if self.client.is_some() {
+                Err(FcpError::NotHandshaken)
+            } else {
+                Err(FcpError::NotConfigured)
+            };
         }
 
         match operation {
@@ -2736,8 +2771,8 @@ impl TwilioConnector {
 
         // HMAC-SHA1 validation requires auth_token.
         // Check if auth_token was provided for full validation.
-        let auth_token = input.get("auth_token").and_then(|v| v.as_str());
-        if auth_token.is_none() {
+        let auth_material = input.get("auth_token").and_then(|v| v.as_str());
+        if auth_material.is_none() {
             let result = SignatureValidationResult {
                 valid: false,
                 reason: "Signature format is valid base64, but auth_token is required for HMAC-SHA1 verification. Provide auth_token for full validation.".into(),
@@ -2974,14 +3009,82 @@ impl TwilioConnector {
 
     /// Handle shutdown.
     pub async fn handle_shutdown(
-        &self,
+        &mut self,
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        if let Some(client) = &self.client {
+        if let Some(client) = self.client.take() {
             client.shutdown();
         }
+        self.config = None;
+        self.verifier = None;
+        self.session_id = None;
+        self.base.set_configured(false);
+        self.base.set_handshaken(false);
         info!("Twilio connector shutting down");
         Ok(json!({ "status": "shutdown" }))
+    }
+
+    async fn operation_metadata(
+        &self,
+        operation: &str,
+    ) -> FcpResult<(CapabilityId, serde_json::Value)> {
+        let intro = self.handle_introspect().await?;
+        let op = intro
+            .get("operations")
+            .and_then(|ops| ops.as_array())
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
+            .ok_or_else(|| FcpError::OperationNotGranted {
+                operation: operation.into(),
+            })?;
+
+        let cap_str = op
+            .get("capability")
+            .and_then(|cap| cap.as_str())
+            .ok_or_else(|| FcpError::OperationNotGranted {
+                operation: operation.into(),
+            })?;
+        let capability = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid capability ID format".into(),
+        })?;
+        let input_schema = op.get("input_schema").cloned().unwrap_or_else(|| json!({}));
+
+        Ok((capability, input_schema))
+    }
+
+    fn validate_required_input(
+        input_schema: &serde_json::Value,
+        input: &serde_json::Value,
+    ) -> FcpResult<()> {
+        let Some(required) = input_schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return Ok(());
+        };
+
+        for field in required {
+            let Some(field) = field.as_str() else {
+                continue;
+            };
+            if input.get(field).is_none_or(serde_json::Value::is_null) {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Missing required field: {field}"),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn serialize_simulate_response(response: SimulateResponse) -> FcpResult<serde_json::Value> {
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
     }
 }
 
@@ -3033,7 +3136,7 @@ fn op_info(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_core::CapabilityConstraints;
+    use fcp_core::{CapabilityConstraints, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
@@ -3078,15 +3181,75 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&cbor)
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
     }
 
+    fn assert_invalid_request_contains(error: FcpError, expected: &str) {
+        assert!(matches!(&error, FcpError::InvalidRequest { .. }));
+        if let FcpError::InvalidRequest { message, .. } = error {
+            assert!(message.contains(expected), "got: {message}");
+        }
+    }
+
+    fn assert_invalid_request_any_contains(error: FcpError, expected: &[&str]) {
+        assert!(matches!(&error, FcpError::InvalidRequest { .. }));
+        if let FcpError::InvalidRequest { message, .. } = error {
+            assert!(
+                expected.iter().any(|needle| message.contains(needle)),
+                "got: {message}"
+            );
+        }
+    }
+
+    async fn configure_for_tests(connector: &mut TwilioConnector) {
+        connector
+            .handle_configure(json!({
+                "account_sid": "ACtest123",
+                "auth_token": "test_token",
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
+    }
+
+    async fn handshake_for_tests(connector: &mut TwilioConnector) -> Ed25519SigningKey {
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["twilio.read", "twilio.message", "twilio.voice"]
+            }))
+            .await
+            .unwrap();
+        signing_key
+    }
+
+    fn simulate_params(
+        operation: &'static str,
+        input: serde_json::Value,
+        token: CapabilityToken,
+    ) -> serde_json::Value {
+        serde_json::to_value(SimulateRequest::new(
+            ConnectorId::from_static("twilio"),
+            OperationId::from_static(operation),
+            ZoneId::work(),
+            input,
+            token,
+        ))
+        .unwrap()
+    }
+
     #[fcp_async_core::runtime::test]
     async fn test_handshake() {
         let mut connector = TwilioConnector::new();
+        configure_for_tests(&mut connector).await;
         let result = connector
             .handle_handshake(json!({
                 "protocol_version": "1.0.0",
@@ -3101,6 +3264,22 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_handshake_requires_configure() {
+        let mut connector = TwilioConnector::new();
+        let result = connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": vec![0u8; 32],
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["twilio.read"]
+            }))
+            .await;
+
+        assert!(matches!(result, Err(FcpError::NotConfigured)));
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_health_not_configured() {
         let connector = TwilioConnector::new();
         let result = connector.handle_health().await.unwrap();
@@ -3111,25 +3290,13 @@ mod tests {
     async fn test_invoke_without_config() {
         let mut connector = TwilioConnector::new();
         let signing_key = Ed25519SigningKey::generate();
-        let verifying_key = signing_key.verifying_key();
 
-        connector
-            .handle_handshake(json!({
-                "protocol_version": "1.0.0",
-                "zone": "z:work",
-                "host_public_key": verifying_key.to_bytes(),
-                "nonce": vec![0u8; 32],
-                "capabilities_requested": ["twilio.get_message"]
-            }))
-            .await
-            .unwrap();
-
-        let token = generate_valid_token(&signing_key, "twilio.get_message");
+        let capability = generate_valid_token(&signing_key, "twilio.get_message");
         let result = connector
             .handle_invoke(json!({
                 "operation": "twilio.get_message",
                 "input": { "message_sid": "SMtest" },
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
         assert!(result.is_err());
@@ -3139,14 +3306,7 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_missing_field() {
         let mut connector = TwilioConnector::new();
-        connector
-            .handle_configure(json!({
-                "account_sid": "ACtest123",
-                "auth_token": "test_token",
-                "base_url": "http://localhost:9999"
-            }))
-            .await
-            .unwrap();
+        configure_for_tests(&mut connector).await;
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -3162,19 +3322,151 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "twilio.send_message");
+        let capability = generate_valid_token(&signing_key, "twilio.send_message");
         let result = connector
             .handle_invoke(json!({
                 "operation": "twilio.send_message",
                 "input": { "to": "+15551234567", "from": "+15559876543" },
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => assert!(message.contains("body")),
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), "body");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_denies_when_not_configured() {
+        let connector = TwilioConnector::new();
+        let result = connector
+            .handle_simulate(simulate_params(
+                "twilio.get_message",
+                json!({ "message_sid": "SMtest" }),
+                CapabilityToken::test_token(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result["would_succeed"], false);
+        assert_eq!(result["denial_code"], FcpError::NotConfigured.error_code());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_denies_when_not_handshaken() {
+        let mut connector = TwilioConnector::new();
+        configure_for_tests(&mut connector).await;
+
+        let result = connector
+            .handle_simulate(simulate_params(
+                "twilio.get_message",
+                json!({ "message_sid": "SMtest" }),
+                CapabilityToken::test_token(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result["would_succeed"], false);
+        assert_eq!(result["denial_code"], FcpError::NotHandshaken.error_code());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_verifies_bound_capability() {
+        let mut connector = TwilioConnector::new();
+        configure_for_tests(&mut connector).await;
+        let signing_key = handshake_for_tests(&mut connector).await;
+
+        let result = connector
+            .handle_simulate(simulate_params(
+                "twilio.get_message",
+                json!({ "message_sid": "SMtest" }),
+                generate_valid_token(&signing_key, "twilio.get_message"),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result["would_succeed"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_rejects_wrong_capability() {
+        let mut connector = TwilioConnector::new();
+        configure_for_tests(&mut connector).await;
+        let signing_key = handshake_for_tests(&mut connector).await;
+
+        let result = connector
+            .handle_simulate(simulate_params(
+                "twilio.get_message",
+                json!({ "message_sid": "SMtest" }),
+                generate_valid_token(&signing_key, "twilio.send_message"),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result["would_succeed"], false);
+        assert_eq!(result["missing_capabilities"][0], "twilio.read");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_rejects_missing_required_input() {
+        let mut connector = TwilioConnector::new();
+        configure_for_tests(&mut connector).await;
+        let signing_key = handshake_for_tests(&mut connector).await;
+
+        let result = connector
+            .handle_simulate(simulate_params(
+                "twilio.get_message",
+                json!({}),
+                generate_valid_token(&signing_key, "twilio.get_message"),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result["would_succeed"], false);
+        assert!(
+            result["failure_reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("message_sid"))
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_reconfigure_clears_handshake_state() {
+        let mut connector = TwilioConnector::new();
+        configure_for_tests(&mut connector).await;
+        handshake_for_tests(&mut connector).await;
+
+        connector
+            .handle_configure(json!({
+                "account_sid": "ACtest456",
+                "auth_token": "test_token_2",
+                "base_url": "http://localhost:9998"
+            }))
+            .await
+            .unwrap();
+
+        assert!(connector.verifier.is_none());
+        assert!(connector.session_id.is_none());
+        assert!(matches!(
+            connector.base.check_ready(),
+            Err(FcpError::NotHandshaken)
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_shutdown_clears_connector_state() {
+        let mut connector = TwilioConnector::new();
+        configure_for_tests(&mut connector).await;
+        handshake_for_tests(&mut connector).await;
+
+        connector.handle_shutdown(json!({})).await.unwrap();
+
+        assert!(connector.client.is_none());
+        assert!(connector.config.is_none());
+        assert!(connector.verifier.is_none());
+        assert!(connector.session_id.is_none());
+        assert!(matches!(
+            connector.base.check_ready(),
+            Err(FcpError::NotConfigured)
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -3277,12 +3569,7 @@ mod tests {
             }))
             .await;
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("not both"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), "not both");
     }
 
     #[fcp_async_core::runtime::test]
@@ -3292,12 +3579,7 @@ mod tests {
             .handle_configure(json!({ "account_sid": "ACtest123" }))
             .await;
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("auth_token") || message.contains("credential_id"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert_invalid_request_any_contains(result.unwrap_err(), &["auth_token", "credential_id"]);
     }
 
     #[fcp_async_core::runtime::test]
@@ -3309,12 +3591,7 @@ mod tests {
                 "auth_token": "test_token"
             }))
             .await;
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("account_sid"), "got: {message}");
-            }
-            other => panic!("Expected InvalidRequest, got: {other:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), "account_sid");
     }
 
     #[fcp_async_core::runtime::test]
@@ -3326,15 +3603,7 @@ mod tests {
                 "auth_token": "   "
             }))
             .await;
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(
-                    message.contains("auth_token") || message.contains("credential_id"),
-                    "got: {message}"
-                );
-            }
-            other => panic!("Expected InvalidRequest, got: {other:?}"),
-        }
+        assert_invalid_request_any_contains(result.unwrap_err(), &["auth_token", "credential_id"]);
     }
 
     #[fcp_async_core::runtime::test]
@@ -3364,12 +3633,7 @@ mod tests {
                 "base_url": "https://evil.example.com"
             }))
             .await;
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("api.twilio.com"), "got: {message}");
-            }
-            other => panic!("Expected InvalidRequest, got: {other:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), "api.twilio.com");
     }
 
     #[fcp_async_core::runtime::test]
@@ -3382,12 +3646,7 @@ mod tests {
                 "base_url": "https://user:pass@api.twilio.com/2010-04-01/Accounts/ACtest123"
             }))
             .await;
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("userinfo"), "got: {message}");
-            }
-            other => panic!("Expected InvalidRequest, got: {other:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), "userinfo");
     }
 
     #[fcp_async_core::runtime::test]
@@ -3944,7 +4203,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_shutdown() {
-        let connector = TwilioConnector::new();
+        let mut connector = TwilioConnector::new();
         let result = connector.handle_shutdown(json!({})).await.unwrap();
         assert_eq!(result["status"], "shutdown");
     }

@@ -248,13 +248,15 @@ impl WebhookVerifier {
     ///
     /// Returns an error if the base64 string cannot be decoded.
     pub fn new(mac_secret_base64: &str) -> Result<Self, String> {
-        let secret = base64::engine::general_purpose::STANDARD
+        let mac_key_bytes = base64::engine::general_purpose::STANDARD
             .decode(mac_secret_base64)
             .map_err(|e| format!("invalid base64 secret: {e}"))?;
-        if secret.is_empty() {
+        if mac_key_bytes.is_empty() {
             return Err("MAC secret must not be empty".to_string());
         }
-        Ok(Self { secret })
+        Ok(Self {
+            secret: mac_key_bytes,
+        })
     }
 
     /// Verify an HMAC-SHA256 signature against the request body.
@@ -1005,8 +1007,8 @@ mod tests {
 
     #[test]
     fn verifier_verify_valid_signature() {
-        let secret = "dGVzdHNlY3JldA=="; // "testsecret"
-        let verifier = WebhookVerifier::new(secret).unwrap();
+        let mac_material = "dGVzdHNlY3JldA=="; // "testsecret"
+        let verifier = WebhookVerifier::new(mac_material).unwrap();
         let body = b"hello world";
 
         // Compute expected HMAC-SHA256

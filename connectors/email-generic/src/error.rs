@@ -91,45 +91,40 @@ mod tests {
     #[test]
     fn config_error_maps_to_invalid_request() {
         let err = EmailGenericError::Config("bad config".into());
-        match err.to_fcp_error() {
-            FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1003);
-                assert!(message.contains("bad config"));
-            }
-            other => panic!("expected InvalidRequest, got {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::InvalidRequest {
+                code: 1003,
+                ref message
+            } if message.contains("bad config")
+        ));
     }
 
     #[test]
     fn imap_error_maps_to_external() {
         let err = EmailGenericError::Imap("connection refused".into());
-        match err.to_fcp_error() {
+        assert!(matches!(
+            err.to_fcp_error(),
             FcpError::External {
-                service,
-                message,
-                retryable,
+                ref service,
+                ref message,
+                retryable: false,
                 ..
-            } => {
-                assert_eq!(service, "email_generic");
-                assert!(message.contains("connection refused"));
-                assert!(!retryable);
-            }
-            other => panic!("expected External, got {other:?}"),
-        }
+            } if service == "email_generic" && message.contains("connection refused")
+        ));
     }
 
     #[test]
     fn smtp_error_maps_to_external() {
         let err = EmailGenericError::Smtp("auth failed".into());
-        match err.to_fcp_error() {
+        assert!(matches!(
+            err.to_fcp_error(),
             FcpError::External {
-                service, retryable, ..
-            } => {
-                assert_eq!(service, "email_generic");
-                assert!(!retryable);
-            }
-            other => panic!("expected External, got {other:?}"),
-        }
+                ref service,
+                retryable: false,
+                ..
+            } if service == "email_generic"
+        ));
     }
 
     #[test]
@@ -138,24 +133,25 @@ mod tests {
             std::io::ErrorKind::ConnectionReset,
             "reset",
         ));
-        match err.to_fcp_error() {
-            FcpError::External { retryable, .. } => {
-                assert!(retryable);
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::External {
+                retryable: true,
+                ..
             }
-            other => panic!("expected External, got {other:?}"),
-        }
+        ));
     }
 
     #[test]
     fn address_error_maps_to_invalid_request() {
         let err = EmailGenericError::Address("invalid email".into());
-        match err.to_fcp_error() {
-            FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1005);
-                assert!(message.contains("invalid email"));
-            }
-            other => panic!("expected InvalidRequest, got {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::InvalidRequest {
+                code: 1005,
+                ref message
+            } if message.contains("invalid email")
+        ));
     }
 
     #[test]

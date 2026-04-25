@@ -189,9 +189,15 @@ impl IrcSession {
     ///
     /// # Errors
     ///
-    /// Returns an error if sending the QUIT command fails.
+    /// Returns an error if sending the QUIT command or shutting down the
+    /// underlying writer fails.
     pub async fn quit(&mut self) -> FcpResult<()> {
-        self.send_line("QUIT :fcp").await
+        self.send_line("QUIT :fcp").await?;
+        self.stream
+            .get_mut()
+            .shutdown()
+            .await
+            .map_err(|ref e| IrcError::io("irc shutdown", e).to_fcp_error())
     }
 }
 

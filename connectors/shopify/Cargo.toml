@@ -15,6 +15,7 @@ name = "fcp_shopify"
 path = "src/lib.rs"
 
 [dependencies]
+chrono.workspace = true
 fcp-core.workspace = true
 fcp-sdk.workspace = true
 fcp-async-core.workspace = true
@@ -30,7 +31,7 @@ sha2.workspace = true
 hex.workspace = true
 
 [dev-dependencies]
-chrono.workspace = true
+ciborium.workspace = true
 fcp-crypto.workspace = true
 fcp-manifest.workspace = true
 fcp-testkit.workspace = true

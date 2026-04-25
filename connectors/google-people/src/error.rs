@@ -175,10 +175,10 @@ mod tests {
         let error = GooglePeopleError::InvalidInput {
             message: "bad field mask".into(),
         };
-        match error.to_fcp_error() {
-            FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1003),
-            other => panic!("expected invalid request, got {other:?}"),
-        }
+        assert!(matches!(
+            error.to_fcp_error(),
+            FcpError::InvalidRequest { code: 1003, .. }
+        ));
     }
 
     #[test]

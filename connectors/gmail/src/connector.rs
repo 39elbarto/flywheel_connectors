@@ -793,6 +793,43 @@ impl GmailConnector {
                     },
                 ),
                 op_info(
+                    "gmail.create_draft",
+                    "Create a saved Gmail draft",
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "raw": { "type": "string", "description": "Optional base64url-encoded RFC 2822 message" },
+                            "to": { "type": "string", "description": "Recipient email address when raw is omitted" },
+                            "subject": { "type": "string", "description": "Subject line when raw is omitted" },
+                            "body": { "type": "string", "description": "Plaintext body when raw is omitted" }
+                        },
+                        "anyOf": [
+                            { "required": ["raw"] },
+                            { "required": ["to", "subject", "body"] }
+                        ]
+                    }),
+                    json!({ "type": "object", "properties": { "draft": { "type": "object" } } }),
+                    "gmail.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::None,
+                    Some(ApprovalMode::Policy),
+                    AgentHint {
+                        when_to_use: "Create a saved draft without sending it. Provide either a prebuilt base64url MIME payload in raw or structured to/subject/body fields.".into(),
+                        common_mistakes: vec![
+                            "Assuming this sends mail; drafts remain unsent until gmail.send_draft is invoked".into(),
+                            "Using standard base64 instead of base64url encoding for raw payloads".into(),
+                        ],
+                        examples: vec![
+                            r#"{"to": "recipient@example.com", "subject": "Draft", "body": "Draft body"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("gmail.write"),
+                            CapabilityId::from_static("gmail.send"),
+                        ],
+                    },
+                ),
+                op_info(
                     "gmail.send_draft",
                     "Send a previously saved draft",
                     json!({
@@ -841,7 +878,67 @@ impl GmailConnector {
                 message: format!("Invalid simulate request: {e}"),
             })?;
 
-        let response = SimulateResponse::allowed(req.id);
+        let capability = match gmail_capability_for_operation(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                let response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize response: {e}"),
+                });
+            }
+        };
+
+        if let Err(error) = validate_gmail_input(req.operation.as_str(), &req.input) {
+            let response = SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
+        if self.config.is_none() || self.client.is_none() {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
+        let Some(verifier) = &self.verifier else {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        };
+
+        let resource_uris = gmail_resource_uris(req.operation.as_str(), &req.input);
+        let response = match verifier.verify_bound(
+            req.capability_token,
+            &capability,
+            &req.operation,
+            &resource_uris,
+        ) {
+            Ok(_) => SimulateResponse::allowed(req.id),
+            Err(error) => {
+                let is_grant_mismatch = matches!(
+                    error,
+                    FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+                );
+                let mut response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                if is_grant_mismatch {
+                    response = response.with_missing_capabilities(vec![capability.as_str().into()]);
+                }
+                response
+            }
+        };
         serde_json::to_value(response).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize response: {e}"),
         })
@@ -889,18 +986,13 @@ impl GmailConnector {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
-        let cap_str = required_capability_for_operation(operation).ok_or_else(|| {
-            FcpError::OperationNotGranted {
-                operation: operation.into(),
-            }
-        })?;
-        let cap_id = CapabilityId::from_static(cap_str);
+        let cap_id = gmail_capability_for_operation(operation)?;
+        validate_gmail_input(operation, &input)?;
+        self.base.check_ready()?;
 
-        if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
-        } else {
-            return Err(FcpError::NotConfigured);
-        }
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        let resource_uris = gmail_resource_uris(operation, &input);
+        verifier.verify_bound(token, &cap_id, &op_id, &resource_uris)?;
 
         match operation {
             "gmail.send_message" => self.invoke_send_message(input).await,
@@ -912,6 +1004,7 @@ impl GmailConnector {
             "gmail.get_thread" => self.invoke_get_thread(input).await,
             "gmail.list_labels" => self.invoke_list_labels().await,
             "gmail.get_draft" => self.invoke_get_draft(input).await,
+            "gmail.create_draft" => self.invoke_create_draft(input).await,
             "gmail.send_draft" => self.invoke_send_draft(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
@@ -1139,6 +1232,21 @@ impl GmailConnector {
         Ok(json!({ "draft": draft }))
     }
 
+    async fn invoke_create_draft(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let raw = match input.get("raw").and_then(|value| value.as_str()) {
+            Some(raw) => raw.to_owned(),
+            None => build_raw_message_from_fields(&input)?,
+        };
+
+        let draft = client
+            .create_draft(&raw)
+            .await
+            .map_err(|e: GmailError| e.to_fcp_error())?;
+
+        Ok(json!({ "draft": draft }))
+    }
+
     async fn invoke_send_draft(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let draft_id = require_str(&input, "draft_id")?;
@@ -1163,6 +1271,8 @@ impl GmailConnector {
         if let Some(client) = &self.client {
             client.shutdown();
         }
+        self.base.set_handshaken(false);
+        self.base.set_configured(false);
         Ok(json!({ "status": "shutdown" }))
     }
 }
@@ -1474,10 +1584,127 @@ fn required_capability_for_operation(operation: &str) -> Option<&'static str> {
             Some("gmail.read")
         }
         "gmail.sync_history" => Some("gmail.history.read"),
-        "gmail.modify_message" | "gmail.get_draft" => Some("gmail.write"),
+        "gmail.modify_message" | "gmail.get_draft" | "gmail.create_draft" => Some("gmail.write"),
         "gmail.trash_message" => Some("gmail.delete"),
         _ => None,
     }
+}
+
+fn gmail_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
+    required_capability_for_operation(operation)
+        .map(CapabilityId::from_static)
+        .ok_or_else(|| FcpError::OperationNotGranted {
+            operation: operation.into(),
+        })
+}
+
+fn validate_gmail_input(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+    match operation {
+        "gmail.send_message" | "gmail.create_draft" => {
+            if input.get("raw").and_then(|value| value.as_str()).is_some() {
+                Ok(())
+            } else {
+                build_raw_message_from_fields(input).map(|_| ())
+            }
+        }
+        "gmail.get_message" | "gmail.trash_message" => require_str(input, "message_id").map(|_| ()),
+        "gmail.list_messages" => {
+            validate_optional_string_field(input, "query")?;
+            validate_optional_u32_field(input, "max_results")?;
+            validate_optional_string_field(input, "page_token")
+        }
+        "gmail.sync_history" => {
+            parse_optional_string_field(input, "start_history_id")?;
+            validate_optional_u32_field(input, "max_results")?;
+            parse_history_types(input)?;
+            parse_optional_u64_field(input, "lease_seq")?.ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "lease_seq is required for singleton_writer cursor advancement".into(),
+            })?;
+            parse_optional_string_field(input, "lease_object_id").map(|_| ())
+        }
+        "gmail.modify_message" => {
+            require_str(input, "message_id")?;
+            validate_optional_string_array_field(input, "add_label_ids")?;
+            validate_optional_string_array_field(input, "remove_label_ids")
+        }
+        "gmail.get_thread" => require_str(input, "thread_id").map(|_| ()),
+        "gmail.list_labels" => Ok(()),
+        "gmail.get_draft" | "gmail.send_draft" => require_str(input, "draft_id").map(|_| ()),
+        _ => Err(FcpError::OperationNotGranted {
+            operation: operation.into(),
+        }),
+    }
+}
+
+fn gmail_resource_uris(operation: &str, input: &serde_json::Value) -> Vec<String> {
+    match operation {
+        "gmail.send_message" => vec!["gmail:messages:send".into()],
+        "gmail.get_message" | "gmail.modify_message" | "gmail.trash_message" => input
+            .get("message_id")
+            .and_then(|value| value.as_str())
+            .map(|message_id| vec![format!("gmail:message:{message_id}")])
+            .unwrap_or_default(),
+        "gmail.list_messages" => vec!["gmail:messages".into()],
+        "gmail.sync_history" => vec!["gmail:history".into()],
+        "gmail.get_thread" => input
+            .get("thread_id")
+            .and_then(|value| value.as_str())
+            .map(|thread_id| vec![format!("gmail:thread:{thread_id}")])
+            .unwrap_or_default(),
+        "gmail.list_labels" => vec!["gmail:labels".into()],
+        "gmail.get_draft" | "gmail.send_draft" => input
+            .get("draft_id")
+            .and_then(|value| value.as_str())
+            .map(|draft_id| vec![format!("gmail:draft:{draft_id}")])
+            .unwrap_or_default(),
+        "gmail.create_draft" => vec!["gmail:drafts:create".into()],
+        _ => Vec::new(),
+    }
+}
+
+fn validate_optional_string_field(input: &serde_json::Value, field: &str) -> FcpResult<()> {
+    if let Some(value) = input.get(field)
+        && value.as_str().is_none()
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must be a string"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_optional_u32_field(input: &serde_json::Value, field: &str) -> FcpResult<()> {
+    if let Some(value) = input.get(field) {
+        let number = value.as_u64().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must be an unsigned integer"),
+        })?;
+        u32::try_from(number).map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must fit in an unsigned 32-bit integer"),
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_optional_string_array_field(input: &serde_json::Value, field: &str) -> FcpResult<()> {
+    let Some(value) = input.get(field) else {
+        return Ok(());
+    };
+    let values: Vec<String> =
+        serde_json::from_value(value.clone()).map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must be an array of strings"),
+        })?;
+    if values.iter().any(|value| value.trim().is_empty()) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} entries must not be empty"),
+        });
+    }
+    Ok(())
 }
 
 fn granted_scopes_are_authoritative(config: &GmailConfig) -> bool {
@@ -1526,6 +1753,14 @@ fn missing_scope_limited_operations(config: &GmailConfig) -> Vec<&'static str> {
             &[
                 "https://mail.google.com/",
                 "https://www.googleapis.com/auth/gmail.compose",
+            ][..],
+        ),
+        (
+            "gmail.create_draft",
+            &[
+                "https://mail.google.com/",
+                "https://www.googleapis.com/auth/gmail.compose",
+                "https://www.googleapis.com/auth/gmail.modify",
             ][..],
         ),
     ]
@@ -1733,8 +1968,12 @@ mod tests {
         matchers::{method, path, query_param},
     };
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
-        let cap = required_capability_for_operation(op).unwrap_or("gmail.read");
+    fn generate_token_with_cap(
+        signing_key: &Ed25519SigningKey,
+        connector: &GmailConnector,
+        cap: &str,
+        operations: &[&str],
+    ) -> CapabilityToken {
         let now = Utc::now();
         // C3.4: tokens MUST include constraints (default-deny)
         let constraints = CapabilityConstraints {
@@ -1747,13 +1986,78 @@ mod tests {
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
-            .operations(&[op])
+            .operations(operations)
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&cbor)
+            .target_instance(connector.base.instance_id.as_str())
+            .try_constraints_cbor(&cbor)
+            .unwrap()
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
+    }
+
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        connector: &GmailConnector,
+        op: &str,
+    ) -> CapabilityToken {
+        let cap = gmail_capability_for_operation(op).unwrap();
+        generate_token_with_cap(signing_key, connector, cap.as_str(), &[op])
+    }
+
+    fn simulate_request(
+        operation: &'static str,
+        input: serde_json::Value,
+        capability: CapabilityToken,
+    ) -> serde_json::Value {
+        serde_json::to_value(SimulateRequest::new(
+            ConnectorId::from_static("gmail"),
+            OperationId::from_static(operation),
+            fcp_core::ZoneId::work(),
+            input,
+            capability,
+        ))
+        .unwrap()
+    }
+
+    fn parse_simulate_response(value: serde_json::Value) -> SimulateResponse {
+        serde_json::from_value(value).unwrap()
+    }
+
+    async fn configured_connector() -> GmailConnector {
+        let mut connector = GmailConnector::new();
+        connector
+            .handle_configure(json!({
+                "token": "ya29.test-token",
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
+        connector
+    }
+
+    async fn handshaken_connector() -> (GmailConnector, Ed25519SigningKey) {
+        let mut connector = configured_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [
+                    "gmail.read",
+                    "gmail.history.read",
+                    "gmail.write",
+                    "gmail.send",
+                    "gmail.delete"
+                ]
+            }))
+            .await
+            .unwrap();
+        (connector, signing_key)
     }
 
     // ── GoogleMaterializedAuth label ─────────────────────────────────
@@ -1856,23 +2160,21 @@ mod tests {
     #[test]
     fn parse_base_url_accepts_https_googleapis() {
         let result =
-            parse_base_url(&json!({"base_url": "https://gmail.googleapis.com/gmail/v1"}))
-                .unwrap();
+            parse_base_url(&json!({"base_url": "https://gmail.googleapis.com/gmail/v1"})).unwrap();
         assert_eq!(result, "https://gmail.googleapis.com/gmail/v1");
     }
 
     #[test]
     fn parse_base_url_strips_trailing_slash() {
         let result =
-            parse_base_url(&json!({"base_url": "https://gmail.googleapis.com/gmail/v1/"}))
-                .unwrap();
+            parse_base_url(&json!({"base_url": "https://gmail.googleapis.com/gmail/v1/"})).unwrap();
         assert_eq!(result, "https://gmail.googleapis.com/gmail/v1");
     }
 
     #[test]
     fn parse_base_url_rejects_non_googleapis_host() {
-        let err = parse_base_url(&json!({"base_url": "https://custom.example.com/api"}))
-            .unwrap_err();
+        let err =
+            parse_base_url(&json!({"base_url": "https://custom.example.com/api"})).unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("googleapis.com"), "got: {message}");
@@ -1885,9 +2187,8 @@ mod tests {
     fn parse_base_url_rejects_substring_smuggle() {
         // Path-based smuggle: host component is evil.com, not googleapis.com,
         // even though the full string contains "googleapis.com".
-        let err =
-            parse_base_url(&json!({"base_url": "https://evil.com/gmail.googleapis.com/v1"}))
-                .unwrap_err();
+        let err = parse_base_url(&json!({"base_url": "https://evil.com/gmail.googleapis.com/v1"}))
+            .unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
@@ -1901,10 +2202,9 @@ mod tests {
 
     #[test]
     fn parse_base_url_rejects_query_string() {
-        let err = parse_base_url(
-            &json!({"base_url": "https://gmail.googleapis.com/?leak=attacker.com"}),
-        )
-        .unwrap_err();
+        let err =
+            parse_base_url(&json!({"base_url": "https://gmail.googleapis.com/?leak=attacker.com"}))
+                .unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("query"), "got: {message}");
@@ -2425,7 +2725,7 @@ mod tests {
         let connector = GmailConnector::new();
         let result = connector.handle_introspect().await.unwrap();
         let ops = result["operations"].as_array().unwrap();
-        assert_eq!(ops.len(), 10);
+        assert_eq!(ops.len(), 11);
     }
 
     // ── Risk levels ────────────────────────────────────────────────
@@ -2483,6 +2783,7 @@ mod tests {
             "gmail.modify_message",
             "gmail.trash_message",
             "gmail.get_draft",
+            "gmail.create_draft",
         ];
         for op in ops {
             let id = op["id"].as_str().unwrap();
@@ -2523,22 +2824,113 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn simulate_returns_allowed() {
-        let connector = GmailConnector::new();
-        let signing_key = Ed25519SigningKey::generate();
-        let token = generate_valid_token(&signing_key, "gmail.get_message");
+        let (connector, signing_key) = handshaken_connector().await;
+        let token = generate_valid_token(&signing_key, &connector, "gmail.get_message");
         let result = connector
-            .handle_simulate(json!({
-                "type": "simulate",
-                "id": "sim-1",
-                "connector_id": "gmail",
-                "operation": "gmail.get_message",
-                "zone_id": "z:work",
-                "input": {"message_id": "msg-1"},
-                "capability_token": token
-            }))
+            .handle_simulate(simulate_request(
+                "gmail.get_message",
+                json!({"message_id": "msg-1"}),
+                token,
+            ))
             .await
             .unwrap();
-        assert_eq!(result["would_succeed"], true);
+        let response = parse_simulate_response(result);
+        assert!(response.would_succeed);
+        assert!(response.missing_capabilities.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_before_configure_is_denied() {
+        let connector = GmailConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let token = generate_valid_token(&signing_key, &connector, "gmail.get_message");
+        let result = connector
+            .handle_simulate(simulate_request(
+                "gmail.get_message",
+                json!({"message_id": "msg-1"}),
+                token,
+            ))
+            .await
+            .unwrap();
+        let response = parse_simulate_response(result);
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(FcpError::NotConfigured.error_code())
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_before_handshake_is_denied() {
+        let connector = configured_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let token = generate_valid_token(&signing_key, &connector, "gmail.get_message");
+        let result = connector
+            .handle_simulate(simulate_request(
+                "gmail.get_message",
+                json!({"message_id": "msg-1"}),
+                token,
+            ))
+            .await
+            .unwrap();
+        let response = parse_simulate_response(result);
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(FcpError::NotHandshaken.error_code())
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_wrong_capability_is_denied() {
+        let (connector, signing_key) = handshaken_connector().await;
+        let token = generate_token_with_cap(
+            &signing_key,
+            &connector,
+            "gmail.read",
+            &["gmail.send_message"],
+        );
+        let result = connector
+            .handle_simulate(simulate_request(
+                "gmail.send_message",
+                json!({"to": "recipient@example.com", "subject": "Test", "body": "Body"}),
+                token,
+            ))
+            .await
+            .unwrap();
+        let response = parse_simulate_response(result);
+        assert!(!response.would_succeed);
+        assert_eq!(response.missing_capabilities, vec!["gmail.send"]);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_missing_required_input_is_denied() {
+        let (connector, signing_key) = handshaken_connector().await;
+        let token = generate_valid_token(&signing_key, &connector, "gmail.get_message");
+        let result = connector
+            .handle_simulate(simulate_request("gmail.get_message", json!({}), token))
+            .await
+            .unwrap();
+        let response = parse_simulate_response(result);
+        assert!(!response.would_succeed);
+        assert!(response.failure_reason.unwrap().contains("message_id"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_sync_history_requires_lease_seq() {
+        let (connector, signing_key) = handshaken_connector().await;
+        let token = generate_valid_token(&signing_key, &connector, "gmail.sync_history");
+        let result = connector
+            .handle_simulate(simulate_request(
+                "gmail.sync_history",
+                json!({"start_history_id": "1000"}),
+                token,
+            ))
+            .await
+            .unwrap();
+        let response = parse_simulate_response(result);
+        assert!(!response.would_succeed);
+        assert!(response.failure_reason.unwrap().contains("lease_seq"));
     }
 
     // ── Invoke edge cases ──────────────────────────────────────────
@@ -2558,7 +2950,12 @@ mod tests {
         );
 
         let signing_key = Ed25519SigningKey::generate();
-        let token = generate_valid_token(&signing_key, "gmail.nonexistent");
+        let token = generate_token_with_cap(
+            &signing_key,
+            &connector,
+            "gmail.read",
+            &["gmail.nonexistent"],
+        );
 
         let result = connector
             .handle_invoke(json!({
@@ -2579,7 +2976,7 @@ mod tests {
     async fn invoke_missing_operation_field() {
         let connector = GmailConnector::new();
         let signing_key = Ed25519SigningKey::generate();
-        let token = generate_valid_token(&signing_key, "gmail.get_message");
+        let token = generate_valid_token(&signing_key, &connector, "gmail.get_message");
         let result = connector
             .handle_invoke(json!({
                 "input": {},
@@ -2616,21 +3013,10 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn invoke_without_handshake_returns_not_configured() {
-        let mut connector = GmailConnector::new();
-        connector.client = Some(
-            GmailClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
-                access_token: "fake_key".into(),
-                source: fcp_google_discovery::auth::GoogleAuthSourceKind::AccessToken,
-                granted_scopes: vec![],
-                quota_project_id: None,
-            })
-            .unwrap()
-            .with_base_url("http://localhost:9999"),
-        );
-
+    async fn invoke_without_handshake_returns_not_handshaken() {
+        let connector = configured_connector().await;
         let signing_key = Ed25519SigningKey::generate();
-        let token = generate_valid_token(&signing_key, "gmail.get_message");
+        let token = generate_valid_token(&signing_key, &connector, "gmail.get_message");
 
         let result = connector
             .handle_invoke(json!({
@@ -2641,7 +3027,7 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), FcpError::NotConfigured));
+        assert!(matches!(result.unwrap_err(), FcpError::NotHandshaken));
     }
 
     // ── Configure edge cases ───────────────────────────────────────
@@ -2950,7 +3336,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "gmail.list_labels");
+        let token = generate_valid_token(&signing_key, &connector, "gmail.list_labels");
 
         let result = connector
             .handle_invoke(json!({
@@ -2992,7 +3378,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "gmail.get_message");
+        let token = generate_valid_token(&signing_key, &connector, "gmail.get_message");
 
         let result = connector
             .handle_invoke(json!({
@@ -3156,7 +3542,8 @@ mod tests {
         assert!(op_ids.contains(&"gmail.list_labels"));
         assert!(op_ids.contains(&"gmail.sync_history"));
         assert!(op_ids.contains(&"gmail.get_draft"));
+        assert!(op_ids.contains(&"gmail.create_draft"));
         assert!(op_ids.contains(&"gmail.send_draft"));
-        assert_eq!(ops.len(), 10);
+        assert_eq!(ops.len(), 11);
     }
 }

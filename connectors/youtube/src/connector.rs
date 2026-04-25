@@ -50,7 +50,7 @@ impl YouTubeConfig {
             });
         }
 
-        let api_key = params
+        let api_key_value = params
             .get("api_key")
             .and_then(|v| v.as_str())
             .map(str::trim)
@@ -71,7 +71,7 @@ impl YouTubeConfig {
         .iter()
         .any(|field| params.get(*field).is_some());
 
-        let auth = if let Some(key) = api_key {
+        let auth = if let Some(key) = api_key_value {
             if shared_auth_fields_present {
                 return Err(FcpError::InvalidRequest {
                     code: 1003,
@@ -877,7 +877,67 @@ impl YouTubeConnector {
                 message: format!("Invalid simulate request: {e}"),
             })?;
 
-        let response = SimulateResponse::allowed(req.id);
+        let capability = match youtube_capability_for_operation(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                let response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize response: {e}"),
+                });
+            }
+        };
+
+        if let Err(error) = validate_youtube_input(req.operation.as_str(), &req.input) {
+            let response = SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
+        if self.config.is_none() || self.client.is_none() {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
+        let Some(verifier) = &self.verifier else {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        };
+
+        let resource_uris = youtube_resource_uris(req.operation.as_str(), &req.input);
+        let response = match verifier.verify_bound(
+            req.capability_token,
+            &capability,
+            &req.operation,
+            &resource_uris,
+        ) {
+            Ok(_) => SimulateResponse::allowed(req.id),
+            Err(error) => {
+                let is_grant_mismatch = matches!(
+                    error,
+                    FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+                );
+                let mut response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                if is_grant_mismatch {
+                    response = response.with_missing_capabilities(vec![capability.as_str().into()]);
+                }
+                response
+            }
+        };
         serde_json::to_value(response).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize response: {e}"),
         })
@@ -913,8 +973,8 @@ impl YouTubeConnector {
                 message: "Missing capability_token".into(),
             })?;
 
-        let token: CapabilityToken =
-            serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
+        let parsed_capability = serde_json::from_value::<CapabilityToken>(token_value.clone())
+            .map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid capability_token format: {e}"),
             })?;
@@ -923,30 +983,12 @@ impl YouTubeConnector {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
-        let intro = self.handle_introspect().await?;
-        let cap_str = intro
-            .get("operations")
-            .and_then(|ops| ops.as_array())
-            .and_then(|ops| {
-                ops.iter()
-                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
-            })
-            .and_then(|op| op.get("capability"))
-            .and_then(|cap| cap.as_str())
-            .ok_or_else(|| FcpError::OperationNotGranted {
-                operation: operation.into(),
-            })?;
+        let cap_id = youtube_capability_for_operation(operation)?;
+        let resource_uris = youtube_resource_uris(operation, &input);
+        self.base.check_ready()?;
 
-        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
-            code: 1003,
-            message: "Invalid capability ID format".into(),
-        })?;
-
-        if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
-        } else {
-            return Err(FcpError::NotConfigured);
-        }
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        verifier.verify_bound(parsed_capability, &cap_id, &op_id, &resource_uris)?;
 
         match operation {
             "youtube.search" => self.invoke_search(input).await,
@@ -1065,10 +1107,10 @@ impl YouTubeConnector {
             .get("max_results")
             .and_then(|v| v.as_u64())
             .and_then(|v| u32::try_from(v).ok());
-        let page_token = input.get("page_token").and_then(|v| v.as_str());
+        let page_cursor = input.get("page_token").and_then(|v| v.as_str());
 
         let results = client
-            .list_playlists(channel_id, max_results, page_token)
+            .list_playlists(channel_id, max_results, page_cursor)
             .await
             .map_err(|e: YouTubeError| e.to_fcp_error())?;
 
@@ -1088,10 +1130,10 @@ impl YouTubeConnector {
             .get("max_results")
             .and_then(|v| v.as_u64())
             .and_then(|v| u32::try_from(v).ok());
-        let page_token = input.get("page_token").and_then(|v| v.as_str());
+        let page_cursor = input.get("page_token").and_then(|v| v.as_str());
 
         let results = client
-            .list_playlist_items(playlist_id, max_results, page_token)
+            .list_playlist_items(playlist_id, max_results, page_cursor)
             .await
             .map_err(|e: YouTubeError| e.to_fcp_error())?;
 
@@ -1294,6 +1336,118 @@ fn require_str_array(input: &serde_json::Value, field: &str) -> FcpResult<Vec<St
         .collect()
 }
 
+fn youtube_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
+    match operation {
+        "youtube.post_comment" | "youtube.upload_caption" | "youtube.upload_video" => {
+            Ok(CapabilityId::from_static("youtube.write"))
+        }
+        "youtube.search"
+        | "youtube.get_video"
+        | "youtube.list_videos"
+        | "youtube.get_channel"
+        | "youtube.list_playlists"
+        | "youtube.list_playlist_items"
+        | "youtube.list_comments"
+        | "youtube.get_captions"
+        | "youtube.get_caption_transcript"
+        | "youtube.get_analytics" => Ok(CapabilityId::from_static("youtube.read")),
+        _ => Err(FcpError::OperationNotGranted {
+            operation: operation.into(),
+        }),
+    }
+}
+
+fn validate_youtube_input(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+    match operation {
+        "youtube.search" => {
+            require_str(input, "query")?;
+        }
+        "youtube.get_video" | "youtube.list_comments" | "youtube.get_captions" => {
+            require_str(input, "video_id")?;
+        }
+        "youtube.list_videos" => {
+            require_str_array(input, "video_ids")?;
+        }
+        "youtube.get_channel" | "youtube.list_playlists" | "youtube.get_analytics" => {
+            require_str(input, "channel_id")?;
+        }
+        "youtube.list_playlist_items" => {
+            require_str(input, "playlist_id")?;
+        }
+        "youtube.post_comment" => {
+            require_str(input, "video_id")?;
+            require_str(input, "text")?;
+        }
+        "youtube.get_caption_transcript" => {
+            require_str(input, "caption_id")?;
+        }
+        "youtube.upload_caption" => {
+            require_str(input, "video_id")?;
+            require_str(input, "language")?;
+            require_str(input, "transcript")?;
+        }
+        "youtube.upload_video" => {
+            require_str(input, "title")?;
+            require_str(input, "description")?;
+            require_str(input, "video_data_base64")?;
+        }
+        _ => {
+            return Err(FcpError::OperationNotGranted {
+                operation: operation.into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn youtube_resource_uris(operation: &str, input: &serde_json::Value) -> Vec<String> {
+    let mut resource_uris = Vec::new();
+    let mut push_unique = |uri: String| {
+        if !resource_uris.contains(&uri) {
+            resource_uris.push(uri);
+        }
+    };
+
+    match operation {
+        "youtube.search" => push_unique("youtube:search".to_string()),
+        "youtube.get_video"
+        | "youtube.list_comments"
+        | "youtube.post_comment"
+        | "youtube.get_captions"
+        | "youtube.upload_caption" => {
+            if let Some(video_id) = input.get("video_id").and_then(|value| value.as_str()) {
+                push_unique(format!("youtube:video:{video_id}"));
+            }
+        }
+        "youtube.list_videos" => {
+            if let Some(video_ids) = input.get("video_ids").and_then(|value| value.as_array()) {
+                for video_id in video_ids.iter().filter_map(|value| value.as_str()) {
+                    push_unique(format!("youtube:video:{video_id}"));
+                }
+            }
+        }
+        "youtube.get_channel" | "youtube.list_playlists" | "youtube.get_analytics" => {
+            if let Some(channel_id) = input.get("channel_id").and_then(|value| value.as_str()) {
+                push_unique(format!("youtube:channel:{channel_id}"));
+            }
+        }
+        "youtube.list_playlist_items" => {
+            if let Some(playlist_id) = input.get("playlist_id").and_then(|value| value.as_str()) {
+                push_unique(format!("youtube:playlist:{playlist_id}"));
+            }
+        }
+        "youtube.get_caption_transcript" => {
+            if let Some(caption_id) = input.get("caption_id").and_then(|value| value.as_str()) {
+                push_unique(format!("youtube:caption:{caption_id}"));
+            }
+        }
+        "youtube.upload_video" => push_unique("youtube:uploads".to_string()),
+        _ => {}
+    }
+
+    resource_uris
+}
+
 #[allow(clippy::fn_params_excessive_bools)]
 fn op_info(
     id: &'static str,
@@ -1331,13 +1485,12 @@ mod tests {
     use fcp_manifest::ConnectorManifest;
     use std::path::PathBuf;
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
-        let cap = match op {
-            "youtube.post_comment" | "youtube.upload_caption" | "youtube.upload_video" => {
-                "youtube.write"
-            }
-            _ => "youtube.read",
-        };
+    fn generate_token_with_cap(
+        signing_key: &Ed25519SigningKey,
+        connector: &YouTubeConnector,
+        cap: &str,
+        operations: &[&str],
+    ) -> CapabilityToken {
         let now = Utc::now();
         let constraints = fcp_core::CapabilityConstraints {
             resource_allow: vec!["*".into()],
@@ -1349,13 +1502,72 @@ mod tests {
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
-            .operations(&[op])
+            .operations(operations)
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&cbor)
+            .target_instance(connector.base.instance_id.as_str())
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
+    }
+
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        connector: &YouTubeConnector,
+        op: &str,
+    ) -> CapabilityToken {
+        let cap = youtube_capability_for_operation(op).unwrap();
+        generate_token_with_cap(signing_key, connector, cap.as_str(), &[op])
+    }
+
+    fn simulate_request(
+        operation: &'static str,
+        input: serde_json::Value,
+        capability: CapabilityToken,
+    ) -> serde_json::Value {
+        serde_json::to_value(SimulateRequest::new(
+            ConnectorId::from_static("youtube"),
+            OperationId::from_static(operation),
+            fcp_core::ZoneId::work(),
+            input,
+            capability,
+        ))
+        .unwrap()
+    }
+
+    fn parse_simulate_response(value: serde_json::Value) -> SimulateResponse {
+        serde_json::from_value(value).unwrap()
+    }
+
+    async fn configured_connector() -> YouTubeConnector {
+        let mut connector = YouTubeConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "fake_key",
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
+        connector
+    }
+
+    async fn handshaken_connector() -> (YouTubeConnector, Ed25519SigningKey) {
+        let mut connector = configured_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["youtube.read", "youtube.write"]
+            }))
+            .await
+            .unwrap();
+        (connector, signing_key)
     }
 
     #[fcp_async_core::runtime::test]
@@ -1400,13 +1612,13 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "youtube.get_video");
+        let capability = generate_valid_token(&signing_key, &connector, "youtube.get_video");
 
         let result = connector
             .handle_invoke(json!({
                 "operation": "youtube.get_video",
                 "input": { "video_id": "dQw4w9WgXcQ" },
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
 
@@ -1439,23 +1651,176 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "youtube.search");
+        let capability = generate_valid_token(&signing_key, &connector, "youtube.search");
 
         let result = connector
             .handle_invoke(json!({
                 "operation": "youtube.search",
                 "input": {},
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
 
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("query"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        let error = result.unwrap_err();
+        assert!(
+            matches!(&error, FcpError::InvalidRequest { message, .. } if message.contains("query")),
+            "Expected InvalidRequest, got: {error:?}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_before_configure_denies() {
+        let connector = YouTubeConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let capability = generate_valid_token(&signing_key, &connector, "youtube.search");
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "youtube.search",
+                    json!({ "query": "rust" }),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(FcpError::NotConfigured.error_code())
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_before_handshake_denies() {
+        let connector = configured_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let capability = generate_valid_token(&signing_key, &connector, "youtube.search");
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "youtube.search",
+                    json!({ "query": "rust" }),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(FcpError::NotHandshaken.error_code())
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_known_operation_allows_valid_token() {
+        let (connector, signing_key) = handshaken_connector().await;
+        let capability = generate_valid_token(&signing_key, &connector, "youtube.search");
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "youtube.search",
+                    json!({ "query": "rust" }),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(response.would_succeed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_wrong_capability_denies() {
+        let (connector, signing_key) = handshaken_connector().await;
+        let capability = generate_token_with_cap(
+            &signing_key,
+            &connector,
+            "youtube.write",
+            &["youtube.search"],
+        );
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "youtube.search",
+                    json!({ "query": "rust" }),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(response.missing_capabilities, vec!["youtube.read"]);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_missing_required_input_denies() {
+        let (connector, signing_key) = handshaken_connector().await;
+        let capability = generate_valid_token(&signing_key, &connector, "youtube.search");
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request("youtube.search", json!({}), capability))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: String::new()
+                }
+                .error_code()
+            )
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_unknown_operation_denies() {
+        let (connector, signing_key) = handshaken_connector().await;
+        let capability = generate_token_with_cap(
+            &signing_key,
+            &connector,
+            "youtube.read",
+            &["youtube.unknown_operation"],
+        );
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "youtube.unknown_operation",
+                    json!({}),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(
+                FcpError::OperationNotGranted {
+                    operation: "youtube.unknown_operation".into()
+                }
+                .error_code()
+            )
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_before_handshake_returns_not_handshaken() {
+        let connector = configured_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let capability = generate_valid_token(&signing_key, &connector, "youtube.search");
+        let error = connector
+            .handle_invoke(json!({
+                "operation": "youtube.search",
+                "input": { "query": "rust" },
+                "capability_token": capability
+            }))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, FcpError::NotHandshaken));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1480,6 +1845,43 @@ mod tests {
         assert!(op_ids.contains(&"youtube.get_analytics"));
         assert!(op_ids.contains(&"youtube.upload_video"));
         assert_eq!(ops.len(), 13);
+    }
+
+    #[test]
+    fn youtube_resource_uris_bind_operation_targets() {
+        assert_eq!(
+            youtube_resource_uris("youtube.search", &json!({ "query": "rust" })),
+            vec!["youtube:search"]
+        );
+        assert_eq!(
+            youtube_resource_uris(
+                "youtube.list_videos",
+                &json!({ "video_ids": ["v1", "v2", "v1"] })
+            ),
+            vec!["youtube:video:v1", "youtube:video:v2"]
+        );
+        assert_eq!(
+            youtube_resource_uris("youtube.list_playlists", &json!({ "channel_id": "c1" })),
+            vec!["youtube:channel:c1"]
+        );
+        assert_eq!(
+            youtube_resource_uris(
+                "youtube.list_playlist_items",
+                &json!({ "playlist_id": "pl1" })
+            ),
+            vec!["youtube:playlist:pl1"]
+        );
+        assert_eq!(
+            youtube_resource_uris(
+                "youtube.get_caption_transcript",
+                &json!({ "caption_id": "cap1" })
+            ),
+            vec!["youtube:caption:cap1"]
+        );
+        assert_eq!(
+            youtube_resource_uris("youtube.upload_video", &json!({})),
+            vec!["youtube:uploads"]
+        );
     }
 
     // ── Provisioning / doctor / self_check tests ──────────────
@@ -1523,12 +1925,11 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("exactly one"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        let error = result.unwrap_err();
+        assert!(
+            matches!(&error, FcpError::InvalidRequest { message, .. } if message.contains("exactly one")),
+            "Expected InvalidRequest, got: {error:?}"
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -1537,15 +1938,11 @@ mod tests {
         let result = connector.handle_configure(json!({})).await;
 
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(
-                    message.contains("auth"),
-                    "expected auth error, got: {message}"
-                );
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        let error = result.unwrap_err();
+        assert!(
+            matches!(&error, FcpError::InvalidRequest { message, .. } if message.contains("auth")),
+            "Expected InvalidRequest, got: {error:?}"
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -1687,10 +2084,10 @@ mod tests {
     fn require_str_missing_field() {
         let input = json!({"video_id": "abc"});
         let err = require_str(&input, "query").unwrap_err();
-        match err {
-            FcpError::InvalidRequest { message, .. } => assert!(message.contains("query")),
-            e => panic!("expected InvalidRequest, got {e:?}"),
-        }
+        assert!(
+            matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("query")),
+            "expected InvalidRequest, got {err:?}"
+        );
     }
 
     #[test]
@@ -1744,10 +2141,10 @@ mod tests {
     #[test]
     fn require_str_error_code_is_1003() {
         let input = json!({});
-        match require_str(&input, "x").unwrap_err() {
-            FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1003),
-            e => panic!("expected InvalidRequest, got {e:?}"),
-        }
+        assert!(matches!(
+            require_str(&input, "x").unwrap_err(),
+            FcpError::InvalidRequest { code: 1003, .. }
+        ));
     }
 
     // ── require_str_array sync tests ────────────────────────────────
@@ -1769,24 +2166,20 @@ mod tests {
     fn require_str_array_empty_array_rejected() {
         let input = json!({"parts": []});
         let err = require_str_array(&input, "parts").unwrap_err();
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("must not be empty"));
-            }
-            e => panic!("expected InvalidRequest, got {e:?}"),
-        }
+        assert!(
+            matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("must not be empty")),
+            "expected InvalidRequest, got {err:?}"
+        );
     }
 
     #[test]
     fn require_str_array_non_string_element_rejected() {
         let input = json!({"parts": ["snippet", 42]});
         let err = require_str_array(&input, "parts").unwrap_err();
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("parts[1]"));
-            }
-            e => panic!("expected InvalidRequest, got {e:?}"),
-        }
+        assert!(
+            matches!(&err, FcpError::InvalidRequest { message, .. } if message.contains("parts[1]")),
+            "expected InvalidRequest, got {err:?}"
+        );
     }
 
     #[test]

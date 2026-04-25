@@ -350,18 +350,8 @@ impl SynologyChatConnector {
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         self.base.check_ready()?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
-        let required_cap = match req.operation.as_str() {
-            OP_SEND_MESSAGE | OP_SEND_PAYLOAD => CapabilityId::from_static(CAP_WRITE),
-            OP_INGEST_OUTGOING_WEBHOOK => CapabilityId::from_static(CAP_WEBHOOK),
-            OP_WEBHOOK_NORMALIZE | OP_HEALTH => CapabilityId::from_static(CAP_READ),
-            operation => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1004,
-                    message: format!("Unknown operation: {operation}"),
-                });
-            }
-        };
-        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
+        let required_cap = required_capability(req.operation.as_str())?;
+        verifier.verify_bound(req.capability_token, &required_cap, &req.operation, &[])?;
         let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
         let output = match req.operation.as_str() {
             OP_SEND_MESSAGE => {
@@ -413,7 +403,12 @@ impl SynologyChatConnector {
                 "reply_semantics": &state.model.reply_semantics,
                 "manifest_hash": Self::manifest_hash(),
             }),
-            _ => unreachable!(),
+            operation => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!("Unknown operation: {operation}"),
+                });
+            }
         };
         Ok(InvokeResponse::ok(req.id, output))
     }
@@ -463,7 +458,7 @@ fn optional_user_ids(input: &serde_json::Value) -> FcpResult<Vec<String>> {
 }
 
 fn normalize_outgoing_webhook(input: &Value, state: &SynologyChatState) -> FcpResult<Value> {
-    let configured_token =
+    let expected_webhook_key =
         state
             .outgoing_token
             .as_deref()
@@ -479,8 +474,8 @@ fn normalize_outgoing_webhook(input: &Value, state: &SynologyChatState) -> FcpRe
             message: "payload must be a JSON object".into(),
         })?;
 
-    let payload_token = required_payload_string(payload, "token")?;
-    if payload_token != configured_token {
+    let presented_webhook_key = required_payload_string(payload, "token")?;
+    if presented_webhook_key != expected_webhook_key {
         return Err(FcpError::Unauthorized {
             code: 2001,
             message: "Outgoing webhook token verification failed".into(),
@@ -788,7 +783,7 @@ impl FcpConnector for SynologyChatConnector {
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
         let config = SynologyChatConfig::from_value(config)?;
         let model = config.state_model();
-        let outgoing_token = config.outgoing_token().map(ToString::to_string);
+        let webhook_auth_value = config.outgoing_token().map(ToString::to_string);
         let runtime = ConnectorRuntime::new(
             ConnectorRuntimeConfig::default()
                 .with_request_timeout(Duration::from_millis(config.request_timeout_ms())),
@@ -799,7 +794,7 @@ impl FcpConnector for SynologyChatConnector {
             model,
             client,
             runtime,
-            outgoing_token,
+            outgoing_token: webhook_auth_value,
         });
         self.base.set_configured(true);
         self.base.set_handshaken(false);
@@ -934,7 +929,8 @@ impl FcpConnector for SynologyChatConnector {
                 FcpError::NotHandshaken.error_code(),
             ));
         };
-        if let Err(error) = verifier.verify(req.capability_token, &capability, &req.operation, &[])
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])
         {
             let mut response =
                 SimulateResponse::denied(req.id, error.to_string(), error.error_code());
@@ -1025,7 +1021,8 @@ mod tests {
             .operations(&[operation])
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
-            .constraints_cbor(&cbor)
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
             .expect("token should sign");
         CapabilityToken::from_raw(raw)
@@ -1072,6 +1069,43 @@ mod tests {
             "https://nas.example.com:443/webapi/..."
         );
         assert_eq!(result["reply_semantics"], "outbound_only");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_checks_capability_operation_grant() {
+        let mut connector = SynologyChatConnector::new();
+        connector
+            .configure(json!({
+                "incoming_url": "https://nas.example.com/webapi/entry.cgi"
+            }))
+            .await
+            .expect("configure should succeed");
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_request(signing_key.verifying_key().to_bytes()))
+            .await
+            .expect("handshake should succeed");
+
+        let response = connector
+            .simulate(SimulateRequest {
+                r#type: "simulate".into(),
+                id: RequestId::new("synology-simulate"),
+                connector_id: ConnectorId::from_static("fcp.synology-chat"),
+                operation: OperationId::from_static(OP_SEND_MESSAGE),
+                zone_id: ZoneId::work(),
+                input: json!({ "text": "hello" }),
+                capability_token: capability_token(&signing_key, CAP_READ, OP_SEND_MESSAGE),
+                estimate_cost: false,
+                check_availability: false,
+                context: None,
+                correlation_id: None,
+            })
+            .await
+            .expect("simulate should return a policy result");
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-3003"));
+        assert!(response.missing_capabilities.is_empty());
     }
 
     #[fcp_async_core::runtime::test]
@@ -1395,7 +1429,7 @@ mod tests {
                 assert_eq!(code, 1005);
                 assert!(message.contains("Missing payload"));
             }
-            other => panic!("expected InvalidRequest, got {other:?}"),
+            other => assert!(matches!(other, FcpError::InvalidRequest { .. })),
         }
     }
 

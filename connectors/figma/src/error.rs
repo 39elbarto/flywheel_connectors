@@ -696,7 +696,7 @@ mod tests {
                 assert_eq!(code, 2001);
                 assert!(message.contains("Figma token"));
             }
-            other => panic!("expected Unauthorized, got {other:?}"),
+            other => assert!(matches!(other, FcpError::Unauthorized { .. })),
         }
     }
 
@@ -711,7 +711,7 @@ mod tests {
                 assert_eq!(code, 2001);
                 assert!(message.contains("Figma token"));
             }
-            other => panic!("expected Unauthorized, got {other:?}"),
+            other => assert!(matches!(other, FcpError::Unauthorized { .. })),
         }
     }
 
@@ -729,7 +729,7 @@ mod tests {
                 assert_eq!(retry_after_ms, 60_000);
                 assert!(violation.is_none());
             }
-            other => panic!("expected RateLimited, got {other:?}"),
+            other => assert!(matches!(other, FcpError::RateLimited { .. })),
         }
     }
 
@@ -743,7 +743,7 @@ mod tests {
             FcpError::ResourceNotFound { resource } => {
                 assert_eq!(resource, "design not found");
             }
-            other => panic!("expected ResourceNotFound, got {other:?}"),
+            other => assert!(matches!(other, FcpError::ResourceNotFound { .. })),
         }
     }
 
@@ -767,7 +767,7 @@ mod tests {
                 assert!(retryable);
                 assert!(retry_after.is_none());
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(matches!(other, FcpError::External { .. })),
         }
     }
 
@@ -788,7 +788,7 @@ mod tests {
                 assert_eq!(status_code, Some(502));
                 assert!(retryable);
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(matches!(other, FcpError::External { .. })),
         }
     }
 
@@ -807,7 +807,7 @@ mod tests {
                 assert!(!retryable);
                 assert_eq!(status_code, Some(400));
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(matches!(other, FcpError::External { .. })),
         }
     }
 
@@ -824,7 +824,7 @@ mod tests {
                 assert_eq!(retry_after_ms, 10_000);
                 assert!(violation.is_none());
             }
-            other => panic!("expected RateLimited, got {other:?}"),
+            other => assert!(matches!(other, FcpError::RateLimited { .. })),
         }
     }
 
@@ -835,7 +835,7 @@ mod tests {
         };
         match err.to_fcp_error() {
             FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 0),
-            other => panic!("expected RateLimited, got {other:?}"),
+            other => assert!(matches!(other, FcpError::RateLimited { .. })),
         }
     }
 
@@ -846,7 +846,7 @@ mod tests {
         };
         match err.to_fcp_error() {
             FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 300_000),
-            other => panic!("expected RateLimited, got {other:?}"),
+            other => assert!(matches!(other, FcpError::RateLimited { .. })),
         }
     }
 
@@ -858,7 +858,7 @@ mod tests {
                 assert!(message.contains("expired"));
                 assert!(message.contains("Figma"));
             }
-            other => panic!("expected Unauthorized, got {other:?}"),
+            other => assert!(matches!(other, FcpError::Unauthorized { .. })),
         }
     }
 
@@ -871,7 +871,7 @@ mod tests {
             FcpError::ResourceNotFound { resource } => {
                 assert_eq!(resource, "file:abc");
             }
-            other => panic!("expected ResourceNotFound, got {other:?}"),
+            other => assert!(matches!(other, FcpError::ResourceNotFound { .. })),
         }
     }
 
@@ -884,7 +884,7 @@ mod tests {
             FcpError::ResourceNotFound { resource } => {
                 assert_eq!(resource, "file:");
             }
-            other => panic!("expected ResourceNotFound, got {other:?}"),
+            other => assert!(matches!(other, FcpError::ResourceNotFound { .. })),
         }
     }
 
@@ -897,7 +897,7 @@ mod tests {
             FcpError::ResourceNotFound { resource } => {
                 assert_eq!(resource, "comment:c_1");
             }
-            other => panic!("expected ResourceNotFound, got {other:?}"),
+            other => assert!(matches!(other, FcpError::ResourceNotFound { .. })),
         }
     }
 
@@ -910,7 +910,7 @@ mod tests {
             FcpError::ResourceNotFound { resource } => {
                 assert_eq!(resource, "webhook:wh_1");
             }
-            other => panic!("expected ResourceNotFound, got {other:?}"),
+            other => assert!(matches!(other, FcpError::ResourceNotFound { .. })),
         }
     }
 
@@ -922,7 +922,7 @@ mod tests {
             FcpError::Internal { message } => {
                 assert!(message.starts_with("JSON error:"), "got: {message}");
             }
-            other => panic!("expected Internal, got {other:?}"),
+            other => assert!(matches!(other, FcpError::Internal { .. })),
         }
     }
 
@@ -936,7 +936,7 @@ mod tests {
                 // serde_json error messages mention where the error happened
                 assert!(message.len() > "JSON error:".len());
             }
-            other => panic!("expected Internal, got {other:?}"),
+            other => assert!(matches!(other, FcpError::Internal { .. })),
         }
     }
 
@@ -958,7 +958,7 @@ mod tests {
         };
         match err.to_fcp_error() {
             FcpError::External { service, .. } => assert_eq!(service, "figma"),
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(matches!(other, FcpError::External { .. })),
         }
     }
 
@@ -1004,7 +1004,7 @@ mod tests {
         assert!(err.is_retryable());
         match err.to_fcp_error() {
             FcpError::External { retryable, .. } => assert!(retryable),
-            other => panic!("unexpected {other:?}"),
+            other => assert!(matches!(other, FcpError::External { .. })),
         }
     }
 
@@ -1017,7 +1017,7 @@ mod tests {
         assert!(!err.is_retryable());
         match err.to_fcp_error() {
             FcpError::External { retryable, .. } => assert!(!retryable),
-            other => panic!("unexpected {other:?}"),
+            other => assert!(matches!(other, FcpError::External { .. })),
         }
     }
 
@@ -1041,7 +1041,7 @@ mod tests {
                 assert!(retryable);
                 assert_eq!(status_code, Some(200));
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(matches!(other, FcpError::External { .. })),
         }
     }
 }

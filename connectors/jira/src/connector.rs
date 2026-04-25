@@ -11,13 +11,13 @@ use std::{
 
 use base64::Engine;
 use chrono::{DateTime, FixedOffset};
-use reqwest::Url;
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -80,17 +80,15 @@ fn validate_jira_endpoint_url(
             ),
         });
     }
-    if let JiraDeployment::Cloud = deployment {
-        if !local {
-            let expected = format!("{}.atlassian.net", domain.trim().to_ascii_lowercase());
-            if !host.eq_ignore_ascii_case(&expected) {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: format!(
-                        "{field} must target {expected} for cloud deployment (localhost allowed for tests): {trimmed}"
-                    ),
-                });
-            }
+    if deployment == JiraDeployment::Cloud && !local {
+        let expected = format!("{}.atlassian.net", domain.trim().to_ascii_lowercase());
+        if !host.eq_ignore_ascii_case(&expected) {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "{field} must target {expected} for cloud deployment (localhost allowed for tests): {trimmed}"
+                ),
+            });
         }
     }
     Ok(trimmed.trim_end_matches('/').to_string())
@@ -1566,10 +1564,43 @@ impl JiraConnector {
                 message: format!("Invalid simulate request: {e}"),
             })?;
 
-        let response = SimulateResponse::allowed(req.id);
-        serde_json::to_value(response).map_err(|e| FcpError::Internal {
-            message: format!("Failed to serialize response: {e}"),
-        })
+        let capability = match self.capability_for_operation(req.operation.as_ref()).await {
+            Ok(capability) => capability,
+            Err(error) => {
+                let response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                return Self::serialize_simulate_response(response);
+            }
+        };
+
+        let Some(verifier) = &self.verifier else {
+            let error = if self.client.is_some() {
+                FcpError::NotHandshaken
+            } else {
+                FcpError::NotConfigured
+            };
+            let response = SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            return Self::serialize_simulate_response(response);
+        };
+
+        let missing_capability = capability.as_str().to_string();
+        let response =
+            match verifier.verify_bound(req.capability_token, &capability, &req.operation, &[]) {
+                Ok(_) => SimulateResponse::allowed(req.id),
+                Err(error) => {
+                    let response =
+                        SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                    if matches!(
+                        error,
+                        FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+                    ) {
+                        response.with_missing_capabilities(vec![missing_capability])
+                    } else {
+                        response
+                    }
+                }
+            };
+        Self::serialize_simulate_response(response)
     }
 
     /// Handle invoke method.
@@ -1614,27 +1645,10 @@ impl JiraConnector {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
-        let intro = self.handle_introspect().await?;
-        let cap_str = intro
-            .get("operations")
-            .and_then(|ops| ops.as_array())
-            .and_then(|ops| {
-                ops.iter()
-                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
-            })
-            .and_then(|op| op.get("capability"))
-            .and_then(|cap| cap.as_str())
-            .ok_or_else(|| FcpError::OperationNotGranted {
-                operation: operation.into(),
-            })?;
-
-        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
-            code: 1003,
-            message: "Invalid capability ID format".into(),
-        })?;
+        let cap_id = self.capability_for_operation(operation).await?;
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
+            verifier.verify_bound(token, &cap_id, &op_id, &[])?;
         } else if self.client.is_some() {
             return Err(FcpError::NotHandshaken);
         } else {
@@ -1673,6 +1687,33 @@ impl JiraConnector {
                 operation: operation.into(),
             }),
         }
+    }
+
+    async fn capability_for_operation(&self, operation: &str) -> FcpResult<CapabilityId> {
+        let intro = self.handle_introspect().await?;
+        let cap_str = intro
+            .get("operations")
+            .and_then(|ops| ops.as_array())
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
+            .and_then(|op| op.get("capability"))
+            .and_then(|cap| cap.as_str())
+            .ok_or_else(|| FcpError::OperationNotGranted {
+                operation: operation.into(),
+            })?;
+
+        cap_str.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid capability ID format".into(),
+        })
+    }
+
+    fn serialize_simulate_response(response: SimulateResponse) -> FcpResult<serde_json::Value> {
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
     }
 
     // ── Operation implementations ─────────────────────────────────
@@ -3742,7 +3783,8 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&constraints_cbor)
+            .try_constraints_cbor(&constraints_cbor)
+            .unwrap()
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)

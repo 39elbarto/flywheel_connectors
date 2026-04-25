@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use reqwest::{Client, RequestBuilder};
+use chrono::{DateTime, Utc};
+use reqwest::{Client, RequestBuilder, header::HeaderMap};
 use tracing::debug;
 
 use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
@@ -34,8 +35,8 @@ pub struct DockerHubClient {
     client: Client,
     base_url: String,
     auth: DockerHubAuth,
-    /// JWT token obtained after login (for credentials-based auth).
-    jwt_token: Option<String>,
+    /// Session auth value obtained after login for credentials-based auth.
+    session_auth_value: Option<String>,
     retry_config: HttpRetryConfig,
 }
 
@@ -44,7 +45,7 @@ impl std::fmt::Debug for DockerHubClient {
         f.debug_struct("DockerHubClient")
             .field("base_url", &self.base_url)
             .field("auth", &self.auth)
-            .field("has_jwt", &self.jwt_token.is_some())
+            .field("has_session_auth", &self.session_auth_value.is_some())
             .finish()
     }
 }
@@ -64,7 +65,7 @@ impl DockerHubClient {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
             auth,
-            jwt_token: None,
+            session_auth_value: None,
             retry_config,
         })
     }
@@ -82,7 +83,7 @@ impl DockerHubClient {
             DockerHubAuth::Token { access_token } if !access_token.is_empty() => {
                 Some(access_token.as_str())
             }
-            DockerHubAuth::Credentials { .. } => self.jwt_token.as_deref(),
+            DockerHubAuth::Credentials { .. } => self.session_auth_value.as_deref(),
             _ => None,
         }
     }
@@ -114,7 +115,7 @@ impl DockerHubClient {
             })
             .await?;
 
-            self.jwt_token = Some(resp.token);
+            self.session_auth_value.replace(resp.token);
             let _ = base_url;
         }
         Ok(())
@@ -242,15 +243,15 @@ impl DockerHubClient {
         let url = url.to_string();
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
-        let token = self.bearer_token().map(String::from);
+        let auth_header_value = self.bearer_token().map(String::from);
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let token = token.clone();
+            let auth_header_value = auth_header_value.clone();
             async move {
                 debug!(attempt, url = %url, "GET paginated");
-                let req = authenticate_request(client.get(&url), token.as_deref());
+                let req = authenticate_request(client.get(&url), auth_header_value.as_deref());
                 handle_paginated_response::<T>(req, attempt).await
             }
         })
@@ -265,15 +266,15 @@ impl DockerHubClient {
         let url = url.to_string();
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
-        let token = self.bearer_token().map(String::from);
+        let auth_header_value = self.bearer_token().map(String::from);
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let token = token.clone();
+            let auth_header_value = auth_header_value.clone();
             async move {
                 debug!(attempt, url = %url, "GET single");
-                let req = authenticate_request(client.get(&url), token.as_deref());
+                let req = authenticate_request(client.get(&url), auth_header_value.as_deref());
                 handle_response::<T>(req, attempt).await
             }
         })
@@ -290,16 +291,17 @@ impl DockerHubClient {
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let body = body.clone();
-        let token = self.bearer_token().map(String::from);
+        let auth_header_value = self.bearer_token().map(String::from);
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let token = token.clone();
+            let auth_header_value = auth_header_value.clone();
             let body = body.clone();
             async move {
                 debug!(attempt, url = %url, "POST");
-                let req = authenticate_request(client.post(&url), token.as_deref()).json(&body);
+                let req = authenticate_request(client.post(&url), auth_header_value.as_deref())
+                    .json(&body);
                 handle_response::<T>(req, attempt).await
             }
         })
@@ -314,15 +316,15 @@ impl DockerHubClient {
         let url = url.to_string();
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
-        let token = self.bearer_token().map(String::from);
+        let auth_header_value = self.bearer_token().map(String::from);
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let token = token.clone();
+            let auth_header_value = auth_header_value.clone();
             async move {
                 debug!(attempt, url = %url, "DELETE");
-                let req = authenticate_request(client.delete(&url), token.as_deref());
+                let req = authenticate_request(client.delete(&url), auth_header_value.as_deref());
                 handle_response::<T>(req, attempt).await
             }
         })
@@ -336,6 +338,46 @@ fn authenticate_request(req: RequestBuilder, token: Option<&str>) -> RequestBuil
     match token {
         Some(t) if !t.is_empty() => req.bearer_auth(t),
         _ => req,
+    }
+}
+
+fn duration_millis_saturated(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u128>() {
+        return Some(Duration::from_secs(
+            u64::try_from(seconds).unwrap_or(u64::MAX),
+        ));
+    }
+
+    let retry_at = DateTime::parse_from_rfc2822(value).ok()?;
+    let wait = retry_at
+        .with_timezone(&Utc)
+        .signed_duration_since(Utc::now());
+    if wait <= chrono::Duration::zero() {
+        Some(Duration::ZERO)
+    } else {
+        Some(wait.to_std().unwrap_or(Duration::from_secs(u64::MAX)))
+    }
+}
+
+fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> {
+    headers
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_retry_after)
+}
+
+fn rate_limited_outcome<T>(headers: &HeaderMap) -> AttemptOutcome<T, DockerHubError> {
+    let retry_after = retry_after_from_headers(headers).unwrap_or(Duration::from_secs(30));
+    AttemptOutcome::Retryable {
+        error: DockerHubError::RateLimited {
+            retry_after_ms: duration_millis_saturated(retry_after),
+        },
+        retry_after: Some(retry_after),
     }
 }
 
@@ -356,18 +398,7 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
     let status = resp.status().as_u16();
 
     if status == 429 {
-        let retry_after = resp
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(Duration::from_secs);
-        return AttemptOutcome::Retryable {
-            error: DockerHubError::RateLimited {
-                retry_after_ms: retry_after.unwrap_or(Duration::from_secs(30)).as_millis() as u64,
-            },
-            retry_after,
-        };
+        return rate_limited_outcome(resp.headers());
     }
 
     if status == 401 || status == 403 {
@@ -438,18 +469,7 @@ async fn handle_paginated_response<T: serde::de::DeserializeOwned>(
     let status = resp.status().as_u16();
 
     if status == 429 {
-        let retry_after = resp
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(Duration::from_secs);
-        return AttemptOutcome::Retryable {
-            error: DockerHubError::RateLimited {
-                retry_after_ms: retry_after.unwrap_or(Duration::from_secs(30)).as_millis() as u64,
-            },
-            retry_after,
-        };
+        return rate_limited_outcome(resp.headers());
     }
 
     if status == 401 || status == 403 {
@@ -496,6 +516,91 @@ async fn handle_paginated_response<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::header::{HeaderName, HeaderValue};
+
+    #[test]
+    fn parse_retry_after_trims_delta_seconds() {
+        assert_eq!(parse_retry_after(" 7 "), Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn parse_retry_after_saturates_large_delta_seconds() {
+        assert_eq!(
+            parse_retry_after("340282366920938463463374607431768211455"),
+            Some(Duration::from_secs(u64::MAX))
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_http_date() {
+        let retry_at = (Utc::now() + chrono::Duration::seconds(120))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+
+        assert!(
+            matches!(
+                parse_retry_after(&retry_at),
+                Some(retry_after)
+                    if retry_after >= Duration::from_secs(118)
+                        && retry_after <= Duration::from_secs(121)
+            ),
+            "future HTTP-date should parse to a delay near 120 seconds"
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_past_http_date_is_zero() {
+        let retry_at = (Utc::now() - chrono::Duration::seconds(30))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+
+        assert_eq!(parse_retry_after(&retry_at), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn retry_after_from_headers_is_case_insensitive() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("retry-after"),
+            HeaderValue::from_static("4"),
+        );
+
+        assert_eq!(
+            retry_after_from_headers(&headers),
+            Some(Duration::from_secs(4))
+        );
+    }
+
+    #[test]
+    fn rate_limited_outcome_uses_retry_after_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Retry-After", HeaderValue::from_static("5"));
+
+        assert!(matches!(
+            rate_limited_outcome::<()>(&headers),
+            AttemptOutcome::Retryable {
+                error: DockerHubError::RateLimited {
+                    retry_after_ms: 5_000,
+                },
+                retry_after: Some(delay),
+            } if delay == Duration::from_secs(5)
+        ));
+    }
+
+    #[test]
+    fn rate_limited_outcome_uses_default_retry_after_when_header_missing() {
+        let headers = HeaderMap::new();
+
+        assert!(matches!(
+            rate_limited_outcome::<()>(&headers),
+            AttemptOutcome::Retryable {
+                error: DockerHubError::RateLimited {
+                    retry_after_ms: 30_000,
+                },
+                retry_after: Some(delay),
+            } if delay == Duration::from_secs(30)
+        ));
+    }
 
     #[test]
     fn client_debug_redacts_auth() {
@@ -503,7 +608,7 @@ mod tests {
             DockerHubClient::new(
                 "https://hub.docker.com",
                 DockerHubAuth::Token {
-                    access_token: "secret-token".into(),
+                    access_token: "redaction-fixture-value".into(),
                 },
                 HttpRetryConfig::default(),
             )
@@ -514,7 +619,7 @@ mod tests {
 
         let debug = format!("{rt:?}");
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("secret-token"));
+        assert!(!debug.contains("redaction-fixture-value"));
     }
 
     #[test]

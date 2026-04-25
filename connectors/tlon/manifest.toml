@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:e4a7a6eed25c30cd27fb27a316a6a56b09d88fa871be3f8f1b4f9f74f1a2588e"
+interface_hash = "blake3-256:fcp.interface.v2:2fa0fd7f3114fa56d0f944281e7724d773221175c7471471429a989e28145907"
 
 [connector]
 id = "fcp.tlon"
@@ -27,7 +27,7 @@ allowed_sources = ["z:owner", "z:work", "z:community"]
 allowed_targets = ["z:community"]
 
 [capabilities]
-required = ["network.dns", "network.egress", "network.tls.sni"]
+required = ["network.dns", "network.egress", "network.tls.sni", "tlon.dm", "tlon.channel"]
 optional = []
 forbidden = ["network.listen", "system.exec"]
 

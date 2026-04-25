@@ -1968,18 +1968,15 @@ mod tests {
         let client = test_client(&base);
         let result = client.list_messages(None, None, None, None, None).await;
         assert!(result.is_err());
-        match result.unwrap_err() {
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
             TwilioError::Api {
                 message,
-                status_code,
-                error_code,
-            } => {
-                assert_eq!(message, "Invalid 'To' Phone Number");
-                assert_eq!(status_code, Some(400));
-                assert_eq!(error_code, Some("21211".to_string()));
-            }
-            e => panic!("Expected Api error, got: {e:?}"),
-        }
+                status_code: Some(400),
+                error_code: Some(error_code),
+            } if message == "Invalid 'To' Phone Number" && error_code == "21211"
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1996,17 +1993,15 @@ mod tests {
         let client = test_client(&base);
         let result = client.get_account().await;
         assert!(result.is_err());
-        match result.unwrap_err() {
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
             TwilioError::Api {
-                status_code,
+                status_code: Some(503),
                 message,
                 ..
-            } => {
-                assert_eq!(status_code, Some(503));
-                assert!(message.contains("503"), "msg: {message}");
-            }
-            e => panic!("Expected Api error, got: {e:?}"),
-        }
+            } if message.contains("503")
+        ));
     }
 
     #[fcp_async_core::runtime::test]

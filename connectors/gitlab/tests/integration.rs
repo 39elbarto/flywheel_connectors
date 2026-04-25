@@ -12,21 +12,143 @@
     clippy::unused_async
 )]
 
+use std::ops::{Deref, DerefMut};
+
+use chrono::{Duration, Utc};
+use fcp_core::{CapabilityConstraints, CapabilityToken, FcpResult};
+use fcp_crypto::cose::CapabilityTokenBuilder;
+use fcp_crypto::ed25519::Ed25519SigningKey;
+use serde_json::Value;
 use serde_json::json;
 use wiremock::matchers::{header, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use fcp_gitlab::connector::GitLabConnector;
 
-async fn setup_connector(mock_url: &str) -> GitLabConnector {
+struct TestConnector {
+    connector: GitLabConnector,
+    signing_key: Ed25519SigningKey,
+}
+
+impl Deref for TestConnector {
+    type Target = GitLabConnector;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connector
+    }
+}
+
+impl DerefMut for TestConnector {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.connector
+    }
+}
+
+impl TestConnector {
+    async fn handle_invoke(&self, mut params: Value) -> FcpResult<Value> {
+        self.attach_capability_token(&mut params);
+        self.connector.handle_invoke(params).await
+    }
+
+    async fn handle_simulate(&self, mut params: Value) -> FcpResult<Value> {
+        self.attach_capability_token(&mut params);
+        self.connector.handle_simulate(params).await
+    }
+
+    fn attach_capability_token(&self, params: &mut Value) {
+        let Some(object) = params.as_object_mut() else {
+            return;
+        };
+        if object.contains_key("capability_token") {
+            return;
+        }
+        let Some(operation) = object.get("operation_id").and_then(|value| value.as_str()) else {
+            return;
+        };
+        let Some(capability) = capability_for_operation(operation) else {
+            return;
+        };
+        object.insert(
+            "capability_token".into(),
+            serde_json::to_value(generate_token_with_cap(
+                &self.signing_key,
+                capability,
+                &[operation],
+            ))
+            .unwrap(),
+        );
+    }
+}
+
+fn capability_for_operation(operation: &str) -> Option<&'static str> {
+    match operation {
+        "gitlab.projects.list" => Some("gitlab.projects.read"),
+        "gitlab.issues.list" => Some("gitlab.issues.read"),
+        "gitlab.issues.create" => Some("gitlab.issues.write"),
+        "gitlab.merge_requests.list" => Some("gitlab.merge_requests.read"),
+        "gitlab.pipelines.list" => Some("gitlab.pipelines.read"),
+        _ => None,
+    }
+}
+
+fn input_for_operation(operation: &str) -> Value {
+    match operation {
+        "gitlab.issues.create" => json!({"project_id": "123", "title": "New issue"}),
+        "gitlab.issues.list" | "gitlab.merge_requests.list" | "gitlab.pipelines.list" => {
+            json!({"project_id": "123"})
+        }
+        _ => json!({}),
+    }
+}
+
+fn generate_token_with_cap(
+    signing_key: &Ed25519SigningKey,
+    capability: &str,
+    operations: &[&str],
+) -> CapabilityToken {
+    let now = Utc::now();
+    let constraints = CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+    let cose = CapabilityTokenBuilder::new()
+        .capability_id(capability)
+        .zone_id("z:work")
+        .principal("user:test")
+        .operations(operations)
+        .issuer("node:test")
+        .validity(now, now + Duration::hours(1))
+        .try_constraints_cbor(&cbor)
+        .unwrap()
+        .sign(signing_key)
+        .unwrap();
+    CapabilityToken::from_raw(cose)
+}
+
+fn handshake_params(signing_key: &Ed25519SigningKey, session_id: &str) -> Value {
+    let verifying_key = signing_key.verifying_key();
+    json!({
+        "session_id": session_id,
+        "zone": "z:work",
+        "host_public_key": verifying_key.to_bytes()
+    })
+}
+
+async fn setup_connector(mock_url: &str) -> TestConnector {
     let mut c = GitLabConnector::new();
     c.handle_configure(json!({ "private_token": "glpat-test", "base_url": mock_url }))
         .await
         .unwrap();
-    c.handle_handshake(json!({"session_id": "test"}))
+    let signing_key = Ed25519SigningKey::generate();
+    c.handle_handshake(handshake_params(&signing_key, "test"))
         .await
         .unwrap();
-    c
+    TestConnector {
+        connector: c,
+        signing_key,
+    }
 }
 
 // ── Lifecycle ────────────────────────────────────────────────────────
@@ -57,7 +179,10 @@ async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
     c.handle_shutdown(json!({})).await.unwrap();
-    assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
+    let health = c.handle_health().await.unwrap();
+    assert_eq!(health["status"], "unconfigured");
+    assert_eq!(health["configured"], false);
+    assert_eq!(health["handshaken"], false);
 }
 
 #[fcp_async_core::test]
@@ -298,6 +423,46 @@ async fn unknown_operation() {
 }
 
 #[fcp_async_core::test]
+async fn invoke_missing_capability_token_fails() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .connector
+        .handle_invoke(json!({"operation_id": "gitlab.projects.list", "input": {}}))
+        .await;
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        fcp_core::FcpError::InvalidRequest { message, .. }
+            if message.contains("capability_token")
+    ));
+}
+
+#[fcp_async_core::test]
+async fn invoke_wrong_capability_is_rejected() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let token = generate_token_with_cap(
+        &c.signing_key,
+        "gitlab.projects.read",
+        &["gitlab.issues.create"],
+    );
+    let result = c
+        .connector
+        .handle_invoke(json!({
+            "operation_id": "gitlab.issues.create",
+            "input": {"project_id": "123", "title": "New issue"},
+            "capability_token": token
+        }))
+        .await;
+    assert!(matches!(
+        result.unwrap_err(),
+        fcp_core::FcpError::CapabilityDenied { .. }
+            | fcp_core::FcpError::OperationNotGranted { .. }
+    ));
+}
+
+#[fcp_async_core::test]
 async fn simulate_known() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
@@ -321,6 +486,28 @@ async fn simulate_unknown() {
             .as_bool()
             .unwrap()
     );
+}
+
+#[fcp_async_core::test]
+async fn simulate_wrong_capability_is_denied() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let token = generate_token_with_cap(
+        &c.signing_key,
+        "gitlab.projects.read",
+        &["gitlab.issues.create"],
+    );
+    let result = c
+        .connector
+        .handle_simulate(json!({
+            "operation_id": "gitlab.issues.create",
+            "input": {"project_id": "123", "title": "New issue"},
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+    assert!(!result["allowed"].as_bool().unwrap());
+    assert_eq!(result["missing_capabilities"][0], "gitlab.issues.write");
 }
 
 // ── Counters ─────────────────────────────────────────────────────────
@@ -414,9 +601,8 @@ async fn lifecycle_reconfigure_after_shutdown() {
     c.handle_configure(json!({ "private_token": "glpat-new", "base_url": server.uri() }))
         .await
         .unwrap();
-    c.handle_handshake(json!({"session_id": "new-session"}))
-        .await
-        .unwrap();
+    let handshake = handshake_params(&c.signing_key, "new-session");
+    c.handle_handshake(handshake).await.unwrap();
 
     let h = c.handle_health().await.unwrap();
     assert_eq!(h["status"], "healthy");
@@ -449,8 +635,9 @@ async fn lifecycle_handshake_returns_capabilities() {
     c.handle_configure(json!({ "private_token": "glpat-test", "base_url": server.uri() }))
         .await
         .unwrap();
+    let signing_key = Ed25519SigningKey::generate();
     let hs = c
-        .handle_handshake(json!({"session_id": "s1"}))
+        .handle_handshake(handshake_params(&signing_key, "s1"))
         .await
         .unwrap();
     assert_eq!(hs["protocol_version"], "2.0");
@@ -499,16 +686,7 @@ async fn configure_custom_base_url() {
         .mount(&server)
         .await;
 
-    let mut c = GitLabConnector::new();
-    c.handle_configure(json!({
-        "private_token": "glpat-test",
-        "base_url": server.uri()
-    }))
-    .await
-    .unwrap();
-    c.handle_handshake(json!({"session_id": "test"}))
-        .await
-        .unwrap();
+    let c = setup_connector(&server.uri()).await;
 
     let result = c
         .handle_invoke(json!({"operation_id": "gitlab.projects.list", "input": {}}))
@@ -966,7 +1144,7 @@ async fn simulate_all_known_operations() {
     ];
     for op in &known_ops {
         let result = c
-            .handle_simulate(json!({"operation_id": op}))
+            .handle_simulate(json!({"operation_id": op, "input": input_for_operation(op)}))
             .await
             .unwrap();
         assert!(

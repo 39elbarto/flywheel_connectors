@@ -34,8 +34,8 @@ const OP_BLOB_LIST_BLOBS: &str = "azure.storage.blob_list_blobs";
 const OP_BLOB_GET: &str = "azure.storage.blob_get";
 const OP_BLOB_PUT: &str = "azure.storage.blob_put";
 const OP_KEYVAULT_LIST_SECRETS: &str = "azure.keyvault.list_secrets";
-const OP_KEYVAULT_GET_SECRET: &str = "azure.keyvault.get_secret";
-const OP_KEYVAULT_SET_SECRET: &str = "azure.keyvault.set_secret";
+const OP_KEYVAULT_READ_VALUE: &str = "azure.keyvault.get_secret";
+const OP_KEYVAULT_WRITE_VALUE: &str = "azure.keyvault.set_secret";
 
 // Capability IDs
 const CAP_MANAGEMENT_READ: &str = "azure.management.read";
@@ -489,8 +489,8 @@ impl AzureConnector {
             }
             OP_BLOB_LIST_CONTAINERS | OP_BLOB_LIST_BLOBS | OP_BLOB_GET => CAP_STORAGE_READ,
             OP_BLOB_PUT => CAP_STORAGE_WRITE,
-            OP_KEYVAULT_LIST_SECRETS | OP_KEYVAULT_GET_SECRET => CAP_KEYVAULT_READ,
-            OP_KEYVAULT_SET_SECRET => CAP_KEYVAULT_WRITE,
+            OP_KEYVAULT_LIST_SECRETS | OP_KEYVAULT_READ_VALUE => CAP_KEYVAULT_READ,
+            OP_KEYVAULT_WRITE_VALUE => CAP_KEYVAULT_WRITE,
             _ => return None,
         };
         Some(CapabilityId::from_static(capability))
@@ -958,11 +958,11 @@ fn operations_info() -> Vec<OperationInfo> {
             }),
             "List secret names stored in an Azure Key Vault",
             &["Expecting this operation to return secret values; it only returns metadata."],
-            &[OP_KEYVAULT_GET_SECRET],
+            &[OP_KEYVAULT_READ_VALUE],
             None,
         ),
         op(
-            OP_KEYVAULT_GET_SECRET,
+            OP_KEYVAULT_READ_VALUE,
             "Get a Key Vault secret value",
             "Retrieve a secret value and metadata from Azure Key Vault.",
             CAP_KEYVAULT_READ,
@@ -981,11 +981,11 @@ fn operations_info() -> Vec<OperationInfo> {
             secret_bundle_schema(),
             "Retrieve the actual value of a specific secret from Azure Key Vault",
             &["Logging or pasting the returned secret value into shared transcripts."],
-            &[OP_KEYVAULT_LIST_SECRETS, OP_KEYVAULT_SET_SECRET],
+            &[OP_KEYVAULT_LIST_SECRETS, OP_KEYVAULT_WRITE_VALUE],
             None,
         ),
         op(
-            OP_KEYVAULT_SET_SECRET,
+            OP_KEYVAULT_WRITE_VALUE,
             "Set a Key Vault secret",
             "Create or update a secret value in Azure Key Vault.",
             CAP_KEYVAULT_WRITE,
@@ -1014,7 +1014,7 @@ fn operations_info() -> Vec<OperationInfo> {
                 "Using a production vault for verification writes.",
                 "Forgetting this mutates live secret material.",
             ],
-            &[OP_KEYVAULT_GET_SECRET, OP_KEYVAULT_LIST_SECRETS],
+            &[OP_KEYVAULT_READ_VALUE, OP_KEYVAULT_LIST_SECRETS],
             Some(ApprovalMode::Interactive),
         ),
     ]
@@ -1036,7 +1036,7 @@ impl AzureConnector {
                 message: format!("Unknown operation: {operation}"),
             });
         };
-        verifier.verify(req.capability_token, &capability, &req.operation, &[])?;
+        verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])?;
 
         let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
             message: "connector ready state missing Azure client".into(),
@@ -1173,7 +1173,7 @@ impl AzureConnector {
                 })?
             }
 
-            OP_KEYVAULT_GET_SECRET => {
+            OP_KEYVAULT_READ_VALUE => {
                 let vault_name = Self::require_str(&req.input, "vault_name")?;
                 let secret_name = Self::require_str(&req.input, "secret_name")?;
                 let vault_base_url = req.input.get("vault_base_url").and_then(|v| v.as_str());
@@ -1193,7 +1193,7 @@ impl AzureConnector {
                 })?
             }
 
-            OP_KEYVAULT_SET_SECRET => {
+            OP_KEYVAULT_WRITE_VALUE => {
                 let vault_name = Self::require_str(&req.input, "vault_name")?;
                 let secret_name = Self::require_str(&req.input, "secret_name")?;
                 let value = Self::require_str(&req.input, "value")?;
@@ -1495,10 +1495,7 @@ mod tests {
                 }))
                 .await
                 .unwrap_err();
-            match err {
-                FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1001),
-                other => panic!("expected invalid request, got {other:?}"),
-            }
+            assert!(matches!(err, FcpError::InvalidRequest { code: 1001, .. }));
         })
         .unwrap();
     }
@@ -1515,10 +1512,7 @@ mod tests {
                 }))
                 .await
                 .unwrap_err();
-            match err {
-                FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1001),
-                other => panic!("expected invalid request, got {other:?}"),
-            }
+            assert!(matches!(err, FcpError::InvalidRequest { code: 1001, .. }));
         })
         .unwrap();
     }
@@ -1537,13 +1531,13 @@ mod tests {
                 }))
                 .await
                 .unwrap_err();
-            match err {
-                FcpError::InvalidRequest { code, message } => {
-                    assert_eq!(code, 1001);
-                    assert!(message.contains("api_versions.keyvault"));
-                }
-                other => panic!("expected invalid request, got {other:?}"),
-            }
+            assert!(matches!(
+                err,
+                FcpError::InvalidRequest {
+                    code: 1001,
+                    ref message
+                } if message.contains("api_versions.keyvault")
+            ));
         })
         .unwrap();
     }
@@ -1560,13 +1554,13 @@ mod tests {
                 }))
                 .await
                 .unwrap_err();
-            match err {
-                FcpError::InvalidRequest { code, message } => {
-                    assert_eq!(code, 1001);
-                    assert!(message.contains("request_timeout_ms"));
-                }
-                other => panic!("expected invalid request, got {other:?}"),
-            }
+            assert!(matches!(
+                err,
+                FcpError::InvalidRequest {
+                    code: 1001,
+                    ref message
+                } if message.contains("request_timeout_ms")
+            ));
         })
         .unwrap();
     }
@@ -1827,8 +1821,8 @@ mod tests {
         assert!(op_ids.contains(&OP_BLOB_GET));
         assert!(op_ids.contains(&OP_BLOB_PUT));
         assert!(op_ids.contains(&OP_KEYVAULT_LIST_SECRETS));
-        assert!(op_ids.contains(&OP_KEYVAULT_GET_SECRET));
-        assert!(op_ids.contains(&OP_KEYVAULT_SET_SECRET));
+        assert!(op_ids.contains(&OP_KEYVAULT_READ_VALUE));
+        assert!(op_ids.contains(&OP_KEYVAULT_WRITE_VALUE));
     }
 
     #[test]
@@ -1889,7 +1883,7 @@ mod tests {
         let set_secret_op = introspection
             .operations
             .iter()
-            .find(|o| o.id.as_str() == OP_KEYVAULT_SET_SECRET)
+            .find(|o| o.id.as_str() == OP_KEYVAULT_WRITE_VALUE)
             .expect("keyvault_set_secret operation should exist");
         assert_eq!(
             set_secret_op.requires_approval,
@@ -1909,14 +1903,14 @@ mod tests {
             OP_BLOB_LIST_BLOBS,
             OP_BLOB_GET,
             OP_KEYVAULT_LIST_SECRETS,
-            OP_KEYVAULT_GET_SECRET,
+            OP_KEYVAULT_READ_VALUE,
         ];
         for op_id in read_ops {
             let operation = introspection
                 .operations
                 .iter()
                 .find(|o| o.id.as_str() == op_id)
-                .unwrap_or_else(|| panic!("{op_id} should exist"));
+                .expect("read operation should exist");
             assert_eq!(
                 operation.requires_approval, None,
                 "{op_id} should not require approval"
@@ -1935,8 +1929,8 @@ mod tests {
             OP_BLOB_GET,
             OP_BLOB_PUT,
             OP_KEYVAULT_LIST_SECRETS,
-            OP_KEYVAULT_GET_SECRET,
-            OP_KEYVAULT_SET_SECRET,
+            OP_KEYVAULT_READ_VALUE,
+            OP_KEYVAULT_WRITE_VALUE,
         ];
         for op_id in ops {
             assert!(

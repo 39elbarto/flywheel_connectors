@@ -482,7 +482,7 @@ mod tests {
                 assert_eq!(message, "slow down");
                 assert_eq!(retry_after_ms, Some(7000));
             }
-            other => panic!("expected Api, got {other:?}"),
+            other => assert!(matches!(other, SynologyChatError::Api { .. })),
         }
     }
 

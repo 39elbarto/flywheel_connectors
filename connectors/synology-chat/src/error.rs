@@ -150,7 +150,7 @@ mod tests {
                 assert_eq!(code, 1005);
                 assert!(message.contains("payload must be an object"));
             }
-            other => panic!("expected InvalidRequest, got {other:?}"),
+            other => assert!(matches!(other, FcpError::InvalidRequest { .. })),
         }
     }
 
@@ -169,7 +169,7 @@ mod tests {
                 assert_eq!(retry_after_ms, 7000);
                 assert!(violation.is_none());
             }
-            other => panic!("expected RateLimited, got {other:?}"),
+            other => assert!(matches!(other, FcpError::RateLimited { .. })),
         }
     }
 
@@ -181,7 +181,10 @@ mod tests {
             SynologyChatError::Async(AsyncError::Timeout { timeout_ms }) => {
                 assert_eq!(timeout_ms, 5000);
             }
-            other => panic!("expected Async timeout, got {other:?}"),
+            other => assert!(matches!(
+                other,
+                SynologyChatError::Async(AsyncError::Timeout { .. })
+            )),
         }
     }
 
@@ -195,7 +198,7 @@ mod tests {
                 assert!(message.contains("cancelled"));
                 assert!(!retryable);
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(matches!(other, FcpError::External { .. })),
         }
     }
 }

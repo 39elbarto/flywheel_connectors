@@ -11,8 +11,8 @@ pub const MAX_REQUEST_TIMEOUT_MS: u64 = 300_000;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SynologyChatConfig {
     incoming_url: String,
-    #[serde(default)]
-    outgoing_token: Option<String>,
+    #[serde(default, rename = "outgoing_token")]
+    outgoing_webhook_key: Option<String>,
     #[serde(default = "default_request_timeout_ms")]
     request_timeout_ms: u64,
     #[serde(default)]
@@ -66,7 +66,7 @@ impl std::fmt::Debug for SynologyChatConfig {
             .field("incoming_url", &self.incoming_url)
             .field(
                 "outgoing_token",
-                &self.outgoing_token.as_ref().map(|_| "[REDACTED]"),
+                &self.outgoing_webhook_key.as_ref().map(|_| "[REDACTED]"),
             )
             .field("request_timeout_ms", &self.request_timeout_ms)
             .field("allow_insecure_ssl", &self.allow_insecure_ssl)
@@ -92,8 +92,8 @@ impl SynologyChatConfig {
 
     fn normalize(&mut self) {
         self.incoming_url = self.incoming_url.trim().to_string();
-        let outgoing_token = self.outgoing_token.take();
-        self.outgoing_token = outgoing_token
+        let webhook_auth_value = self.outgoing_webhook_key.take();
+        self.outgoing_webhook_key = webhook_auth_value
             .as_deref()
             .and_then(normalize_optional_secret);
     }
@@ -149,12 +149,12 @@ impl SynologyChatConfig {
 
     #[must_use]
     pub fn outgoing_token(&self) -> Option<&str> {
-        self.outgoing_token.as_deref()
+        self.outgoing_webhook_key.as_deref()
     }
 
     #[must_use]
     pub const fn outgoing_token_configured(&self) -> bool {
-        self.outgoing_token.is_some()
+        self.outgoing_webhook_key.is_some()
     }
 
     #[must_use]
@@ -417,7 +417,7 @@ mod tests {
                 assert_eq!(code, 1003);
                 assert!(message.contains("must not include a fragment"));
             }
-            other => panic!("expected InvalidRequest, got {other:?}"),
+            other => assert!(matches!(other, FcpError::InvalidRequest { .. })),
         }
     }
 
@@ -433,7 +433,7 @@ mod tests {
                 assert_eq!(code, 1003);
                 assert!(message.contains("less than or equal"));
             }
-            other => panic!("expected InvalidRequest, got {other:?}"),
+            other => assert!(matches!(other, FcpError::InvalidRequest { .. })),
         }
     }
 

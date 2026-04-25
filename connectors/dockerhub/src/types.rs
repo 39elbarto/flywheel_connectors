@@ -272,23 +272,23 @@ mod tests {
     #[test]
     fn auth_debug_redacts_token() {
         let auth = DockerHubAuth::Token {
-            access_token: "dckr_pat_secret".into(),
+            access_token: "redaction-fixture-value".into(),
         };
         let debug = format!("{auth:?}");
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("dckr_pat_secret"));
+        assert!(!debug.contains("redaction-fixture-value"));
     }
 
     #[test]
     fn auth_debug_redacts_password() {
         let auth = DockerHubAuth::Credentials {
             username: "user".into(),
-            password: "secret-pass".into(),
+            password: "redaction-fixture-value".into(),
         };
         let debug = format!("{auth:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(debug.contains("user"));
-        assert!(!debug.contains("secret-pass"));
+        assert!(!debug.contains("redaction-fixture-value"));
     }
 
     #[test]
@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn auth_not_secretless_with_token() {
         let auth = DockerHubAuth::Token {
-            access_token: "dckr_pat_abc123".into(),
+            access_token: "fixture-pat-value".into(),
         };
         assert!(!auth.is_secretless());
     }
@@ -360,30 +360,30 @@ mod tests {
 
     #[test]
     fn deserialize_login_response() {
-        let json = serde_json::json!({"token": "jwt-abc-123"});
+        let json = serde_json::json!({"token": "login-response-value"});
         let resp: LoginResponse = serde_json::from_value(json).unwrap();
-        assert_eq!(resp.token, "jwt-abc-123");
+        assert_eq!(resp.token, "login-response-value");
     }
 
     #[test]
     fn login_request_debug_redacts_password() {
         let req = LoginRequest {
             username: "myuser".into(),
-            password: "secret_pass_123".into(),
+            password: "redaction-fixture-value".into(),
         };
         let dbg = format!("{req:?}");
         assert!(dbg.contains("[REDACTED]"));
         assert!(dbg.contains("myuser"));
-        assert!(!dbg.contains("secret_pass_123"));
+        assert!(!dbg.contains("redaction-fixture-value"));
     }
 
     #[test]
     fn login_response_debug_redacts_token() {
         let resp = LoginResponse {
-            token: "jwt-super-secret".into(),
+            token: "redaction-fixture-value".into(),
         };
         let dbg = format!("{resp:?}");
         assert!(dbg.contains("[REDACTED]"));
-        assert!(!dbg.contains("jwt-super-secret"));
+        assert!(!dbg.contains("redaction-fixture-value"));
     }
 }

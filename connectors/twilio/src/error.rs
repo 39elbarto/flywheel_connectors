@@ -332,12 +332,10 @@ mod tests {
         let json_err = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
         let err = TwilioError::Json(json_err);
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::Internal { message } => {
-                assert!(message.contains("JSON error"), "got: {message}");
-            }
-            other => panic!("expected Internal, got: {other:?}"),
-        }
+        assert!(matches!(
+            &fcp,
+            FcpError::Internal { message } if message.contains("JSON error")
+        ));
     }
 
     #[test]
@@ -348,13 +346,10 @@ mod tests {
             error_code: None,
         };
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::Unauthorized { code, message } => {
-                assert_eq!(code, 2001);
-                assert_eq!(message, "bad creds");
-            }
-            other => panic!("expected Unauthorized, got: {other:?}"),
-        }
+        assert!(matches!(
+            &fcp,
+            FcpError::Unauthorized { code: 2001, message } if message == "bad creds"
+        ));
     }
 
     #[test]
@@ -365,13 +360,10 @@ mod tests {
             error_code: None,
         };
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::Unauthorized { code, message } => {
-                assert_eq!(code, 2001);
-                assert_eq!(message, "forbidden");
-            }
-            other => panic!("expected Unauthorized, got: {other:?}"),
-        }
+        assert!(matches!(
+            &fcp,
+            FcpError::Unauthorized { code: 2001, message } if message == "forbidden"
+        ));
     }
 
     #[test]
@@ -382,16 +374,13 @@ mod tests {
             error_code: None,
         };
         let fcp = err.to_fcp_error();
-        match fcp {
+        assert!(matches!(
+            &fcp,
             FcpError::RateLimited {
-                retry_after_ms,
-                violation,
-            } => {
-                assert_eq!(retry_after_ms, 60_000);
-                assert!(violation.is_none());
+                retry_after_ms: 60_000,
+                violation: None,
             }
-            other => panic!("expected RateLimited, got: {other:?}"),
-        }
+        ));
     }
 
     #[test]
@@ -402,21 +391,16 @@ mod tests {
             error_code: None,
         };
         let fcp = err.to_fcp_error();
-        match fcp {
+        assert!(matches!(
+            &fcp,
             FcpError::External {
                 service,
                 message,
-                status_code,
-                retryable,
+                status_code: Some(500),
+                retryable: true,
                 ..
-            } => {
-                assert_eq!(service, "twilio");
-                assert_eq!(message, "server error");
-                assert_eq!(status_code, Some(500));
-                assert!(retryable);
-            }
-            other => panic!("expected External, got: {other:?}"),
-        }
+            } if service == "twilio" && message == "server error"
+        ));
     }
 
     #[test]
@@ -428,17 +412,14 @@ mod tests {
                 error_code: None,
             };
             let fcp = err.to_fcp_error();
-            match fcp {
+            assert!(matches!(
+                &fcp,
                 FcpError::External {
-                    retryable,
-                    status_code,
+                    retryable: true,
+                    status_code: Some(status_code),
                     ..
-                } => {
-                    assert!(retryable, "API {code} should map to retryable");
-                    assert_eq!(status_code, Some(code));
-                }
-                other => panic!("API {code}: expected External, got: {other:?}"),
-            }
+                } if *status_code == code
+            ));
         }
     }
 
@@ -450,21 +431,16 @@ mod tests {
             error_code: Some("20003".into()),
         };
         let fcp = err.to_fcp_error();
-        match fcp {
+        assert!(matches!(
+            &fcp,
             FcpError::External {
                 service,
                 message,
-                status_code,
-                retryable,
+                status_code: None,
+                retryable: false,
                 ..
-            } => {
-                assert_eq!(service, "twilio");
-                assert_eq!(message, "unknown");
-                assert_eq!(status_code, None);
-                assert!(!retryable);
-            }
-            other => panic!("expected External, got: {other:?}"),
-        }
+            } if service == "twilio" && message == "unknown"
+        ));
     }
 
     #[test]
@@ -475,17 +451,14 @@ mod tests {
             error_code: None,
         };
         let fcp = err.to_fcp_error();
-        match fcp {
+        assert!(matches!(
+            &fcp,
             FcpError::External {
-                retryable,
-                status_code,
+                retryable: false,
+                status_code: Some(400),
                 ..
-            } => {
-                assert!(!retryable);
-                assert_eq!(status_code, Some(400));
             }
-            other => panic!("expected External, got: {other:?}"),
-        }
+        ));
     }
 
     #[test]
@@ -494,16 +467,13 @@ mod tests {
             retry_after_ms: 5000,
         };
         let fcp = err.to_fcp_error();
-        match fcp {
+        assert!(matches!(
+            &fcp,
             FcpError::RateLimited {
-                retry_after_ms,
-                violation,
-            } => {
-                assert_eq!(retry_after_ms, 5000);
-                assert!(violation.is_none());
+                retry_after_ms: 5000,
+                violation: None,
             }
-            other => panic!("expected RateLimited, got: {other:?}"),
-        }
+        ));
     }
 
     #[test]
@@ -523,13 +493,11 @@ mod tests {
     fn fcp_unauthorized_variant() {
         let err = TwilioError::Unauthorized;
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::Unauthorized { code, message } => {
-                assert_eq!(code, 2001);
-                assert_eq!(message, "Twilio API authentication failed");
-            }
-            other => panic!("expected Unauthorized, got: {other:?}"),
-        }
+        assert!(matches!(
+            &fcp,
+            FcpError::Unauthorized { code: 2001, message }
+                if message == "Twilio API authentication failed"
+        ));
     }
 
     #[test]
@@ -538,12 +506,10 @@ mod tests {
             resource: "message:SM123".into(),
         };
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::ResourceNotFound { resource } => {
-                assert_eq!(resource, "message:SM123");
-            }
-            other => panic!("expected ResourceNotFound, got: {other:?}"),
-        }
+        assert!(matches!(
+            &fcp,
+            FcpError::ResourceNotFound { resource } if resource == "message:SM123"
+        ));
     }
 
     #[test]
@@ -552,12 +518,10 @@ mod tests {
             resource: String::new(),
         };
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::ResourceNotFound { resource } => {
-                assert!(resource.is_empty());
-            }
-            other => panic!("expected ResourceNotFound, got: {other:?}"),
-        }
+        assert!(matches!(
+            &fcp,
+            FcpError::ResourceNotFound { resource } if resource.is_empty()
+        ));
     }
 
     // ── Debug format tests ───────────────────────────────────────────────
@@ -662,10 +626,10 @@ mod tests {
         assert_eq!(format!("{err}"), "Twilio API error: ");
         assert!(err.is_retryable());
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::External { message, .. } => assert!(message.is_empty()),
-            other => panic!("expected External, got: {other:?}"),
-        }
+        assert!(matches!(
+            &fcp,
+            FcpError::External { message, .. } if message.is_empty()
+        ));
     }
 
     #[test]
@@ -706,12 +670,10 @@ mod tests {
             error_code: Some("20003".into()),
         };
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::Unauthorized { message, .. } => {
-                assert_eq!(message, "Custom auth failure message");
-            }
-            other => panic!("expected Unauthorized, got: {other:?}"),
-        }
+        assert!(matches!(
+            &fcp,
+            FcpError::Unauthorized { message, .. } if message == "Custom auth failure message"
+        ));
     }
 
     #[test]
@@ -738,12 +700,10 @@ mod tests {
             error_code: None,
         };
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::External { retry_after, .. } => {
-                assert!(retry_after.is_none());
-            }
-            other => panic!("expected External, got: {other:?}"),
-        }
+        assert!(matches!(
+            &fcp,
+            FcpError::External { retry_after, .. } if retry_after.is_none()
+        ));
     }
 
     // ── Additional edge cases ───────────────────────────────────────────
@@ -757,19 +717,15 @@ mod tests {
         };
         assert!(err.is_retryable());
         let fcp = err.to_fcp_error();
-        match fcp {
+        assert!(matches!(
+            &fcp,
             FcpError::External {
                 service,
                 message,
-                retryable,
+                retryable: true,
                 ..
-            } => {
-                assert_eq!(service, "twilio");
-                assert_eq!(message, "Queue overflow");
-                assert!(retryable);
-            }
-            other => panic!("expected External, got: {other:?}"),
-        }
+            } if service == "twilio" && message == "Queue overflow"
+        ));
     }
 
     #[test]
@@ -807,17 +763,14 @@ mod tests {
             error_code: None,
         };
         let fcp = err.to_fcp_error();
-        match fcp {
+        assert!(matches!(
+            &fcp,
             FcpError::External {
-                retryable,
-                status_code,
+                retryable: false,
+                status_code: Some(404),
                 ..
-            } => {
-                assert!(!retryable);
-                assert_eq!(status_code, Some(404));
             }
-            other => panic!("expected External, got: {other:?}"),
-        }
+        ));
     }
 
     #[test]
@@ -828,19 +781,15 @@ mod tests {
             error_code: Some("21611".into()),
         };
         let fcp = err.to_fcp_error();
-        match fcp {
+        assert!(matches!(
+            &fcp,
             FcpError::External {
-                retryable,
-                status_code,
+                retryable: false,
+                status_code: Some(422),
                 service,
                 ..
-            } => {
-                assert!(!retryable);
-                assert_eq!(status_code, Some(422));
-                assert_eq!(service, "twilio");
-            }
-            other => panic!("expected External, got: {other:?}"),
-        }
+            } if service == "twilio"
+        ));
     }
 
     #[test]

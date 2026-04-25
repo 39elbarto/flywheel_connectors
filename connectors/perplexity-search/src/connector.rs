@@ -203,10 +203,13 @@ impl PerplexitySearchConnector {
         DoctorResult::from_checks(checks)
     }
 
-    fn capability_for_operation(operation: &str) -> Option<CapabilityId> {
+    fn capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
         match operation {
-            OP_SEARCH => Some(CapabilityId::from_static(CAP_SEARCH)),
-            _ => None,
+            OP_SEARCH => Ok(CapabilityId::from_static(CAP_SEARCH)),
+            _ => Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: format!("Unknown operation: {operation}"),
+            }),
         }
     }
 
@@ -237,13 +240,8 @@ impl PerplexitySearchConnector {
                 message: "connector ready state missing capability verifier".into(),
             });
         };
-        let Some(capability) = Self::capability_for_operation(operation) else {
-            return Err(FcpError::InvalidRequest {
-                code: 1004,
-                message: format!("Unknown operation: {operation}"),
-            });
-        };
-        verifier.verify(req.capability_token, &capability, &req.operation, &[])?;
+        let capability = Self::capability_for_operation(operation)?;
+        verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])?;
 
         let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
             message: "connector ready state missing Perplexity client".into(),
@@ -580,6 +578,41 @@ impl FcpConnector for PerplexitySearchConnector {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+        let capability = match Self::capability_for_operation(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return Ok(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ));
+            }
+        };
+        if self.client.is_none() || self.config.is_none() {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ));
+        }
+        let Some(verifier) = self.verifier.as_ref() else {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            ));
+        };
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])
+        {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response =
+                    response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+            }
+            return Ok(response);
+        }
         Ok(SimulateResponse::allowed(req.id))
     }
 
@@ -628,7 +661,10 @@ mod tests {
         }
     }
 
-    fn generate_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+    fn generate_test_capability_with_operations(
+        signing_key: &Ed25519SigningKey,
+        operations: &[&'static str],
+    ) -> CapabilityToken {
         let now = Utc::now();
         // C3.4: tokens MUST include constraints (default-deny)
         let constraints = CapabilityConstraints {
@@ -641,16 +677,21 @@ mod tests {
             .capability_id(CAP_SEARCH)
             .zone_id("z:work")
             .principal("user:test")
-            .operations(&[OP_SEARCH])
+            .operations(operations)
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
-            .constraints_cbor(&cbor)
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
             .expect("capability token signing should succeed");
         CapabilityToken::from_raw(raw)
     }
 
-    fn invoke_req(input: serde_json::Value, token: CapabilityToken) -> InvokeRequest {
+    fn generate_test_capability(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+        generate_test_capability_with_operations(signing_key, &[OP_SEARCH])
+    }
+
+    fn invoke_req(input: serde_json::Value, capability: CapabilityToken) -> InvokeRequest {
         InvokeRequest {
             r#type: "invoke".into(),
             id: RequestId::new("pp-test-1"),
@@ -658,7 +699,7 @@ mod tests {
             operation: OperationId::from_static(OP_SEARCH),
             zone_id: ZoneId::work(),
             input,
-            capability_token: token,
+            capability_token: capability,
             holder_proof: None,
             context: None,
             idempotency_key: None,
@@ -667,6 +708,22 @@ mod tests {
             correlation_id: None,
             provenance: None,
             approval_tokens: vec![],
+        }
+    }
+
+    fn simulate_req(capability: CapabilityToken) -> SimulateRequest {
+        SimulateRequest {
+            r#type: "simulate".into(),
+            id: RequestId::new("pp-sim-1"),
+            connector_id: ConnectorId::from_static("fcp.perplexity-search"),
+            operation: OperationId::from_static(OP_SEARCH),
+            zone_id: ZoneId::work(),
+            input: json!({ "query": "rust async runtimes" }),
+            capability_token: capability,
+            estimate_cost: false,
+            check_availability: false,
+            context: None,
+            correlation_id: None,
         }
     }
 
@@ -705,10 +762,7 @@ mod tests {
                 }))
                 .await
                 .unwrap_err();
-            match err {
-                FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1001),
-                other => panic!("expected InvalidRequest, got {other:?}"),
-            }
+            assert!(matches!(err, FcpError::InvalidRequest { code: 1001, .. }));
         })
         .unwrap();
     }
@@ -724,10 +778,7 @@ mod tests {
                 }))
                 .await
                 .unwrap_err();
-            match err {
-                FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1001),
-                other => panic!("expected InvalidRequest, got {other:?}"),
-            }
+            assert!(matches!(err, FcpError::InvalidRequest { code: 1001, .. }));
         })
         .unwrap();
     }
@@ -825,6 +876,47 @@ mod tests {
     }
 
     #[test]
+    fn simulate_requires_configuration() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let (sk, _) = signing_key_and_pub();
+            let connector = PerplexitySearchConnector::new();
+            let response = connector
+                .simulate(simulate_req(generate_test_capability(&sk)))
+                .await
+                .unwrap();
+
+            assert!(!response.would_succeed);
+            assert_eq!(
+                response.denial_code,
+                Some(FcpError::NotConfigured.error_code())
+            );
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn simulate_checks_capability_grant() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let (sk, pk) = signing_key_and_pub();
+            let mut connector = PerplexitySearchConnector::new();
+            connector.configure(valid_config()).await.unwrap();
+            connector.handshake(handshake_req(pk)).await.unwrap();
+
+            let under_scoped_grant =
+                generate_test_capability_with_operations(&sk, &["perplexity-search.other"]);
+            let response = connector
+                .simulate(simulate_req(under_scoped_grant))
+                .await
+                .unwrap();
+
+            assert!(!response.would_succeed);
+            assert_eq!(response.denial_code.as_deref(), Some("FCP-3003"));
+            assert!(response.missing_capabilities.is_empty());
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn introspect_lists_search_operation() {
         let connector = PerplexitySearchConnector::new();
         let intro = connector.introspect();
@@ -863,7 +955,7 @@ mod tests {
             connector.configure(valid_config()).await.unwrap();
             connector.handshake(handshake_req(pk)).await.unwrap();
 
-            let token = generate_token(&sk);
+            let cap = generate_test_capability(&sk);
             let req = InvokeRequest {
                 r#type: "invoke".into(),
                 id: RequestId::new("pp-unknown-op"),
@@ -871,7 +963,7 @@ mod tests {
                 operation: OperationId::from_static("perplexity-search.nonexistent"),
                 zone_id: ZoneId::work(),
                 input: json!({}),
-                capability_token: token,
+                capability_token: cap,
                 holder_proof: None,
                 context: None,
                 idempotency_key: None,
@@ -882,10 +974,7 @@ mod tests {
                 approval_tokens: vec![],
             };
             let err = connector.invoke(req).await.unwrap_err();
-            match err {
-                FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1004),
-                other => panic!("expected InvalidRequest, got {other:?}"),
-            }
+            assert!(matches!(err, FcpError::InvalidRequest { code: 1004, .. }));
         })
         .unwrap();
     }
@@ -898,15 +987,18 @@ mod tests {
             connector.configure(valid_config()).await.unwrap();
             connector.handshake(handshake_req(pk)).await.unwrap();
 
-            let token = generate_token(&sk);
-            let req = invoke_req(json!({}), token);
+            let cap = generate_test_capability(&sk);
+            let req = invoke_req(json!({}), cap);
             let err = connector.invoke(req).await.unwrap_err();
             match err {
                 FcpError::InvalidRequest { code, message } => {
                     assert_eq!(code, 1005);
                     assert!(message.contains("query"));
                 }
-                other => panic!("expected InvalidRequest, got {other:?}"),
+                other => assert!(
+                    matches!(other, FcpError::InvalidRequest { .. }),
+                    "expected InvalidRequest"
+                ),
             }
         })
         .unwrap();
@@ -960,13 +1052,13 @@ mod tests {
             .unwrap();
         connector.handshake(handshake_req(pk)).await.unwrap();
 
-        let token = generate_token(&sk);
+        let cap = generate_test_capability(&sk);
         let req = invoke_req(
             json!({
                 "query": "What is Rust?",
                 "temperature": 0.5
             }),
-            token,
+            cap,
         );
 
         let resp = connector.invoke(req).await.unwrap();
@@ -1011,14 +1103,11 @@ mod tests {
             .unwrap();
         connector.handshake(handshake_req(pk)).await.unwrap();
 
-        let token = generate_token(&sk);
-        let req = invoke_req(json!({ "query": "test" }), token);
+        let cap = generate_test_capability(&sk);
+        let req = invoke_req(json!({ "query": "test" }), cap);
 
         let err = connector.invoke(req).await.unwrap_err();
-        match err {
-            FcpError::Unauthorized { .. } => {} // expected
-            other => panic!("expected Unauthorized, got {other:?}"),
-        }
+        assert!(matches!(err, FcpError::Unauthorized { .. }));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1051,14 +1140,11 @@ mod tests {
             .unwrap();
         connector.handshake(handshake_req(pk)).await.unwrap();
 
-        let token = generate_token(&sk);
-        let req = invoke_req(json!({ "query": "test" }), token);
+        let cap = generate_test_capability(&sk);
+        let req = invoke_req(json!({ "query": "test" }), cap);
 
         let err = connector.invoke(req).await.unwrap_err();
-        match err {
-            FcpError::RateLimited { .. } => {} // expected
-            other => panic!("expected RateLimited, got {other:?}"),
-        }
+        assert!(matches!(err, FcpError::RateLimited { .. }));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1100,13 +1186,13 @@ mod tests {
             .unwrap();
         connector.handshake(handshake_req(pk)).await.unwrap();
 
-        let token = generate_token(&sk);
+        let cap = generate_test_capability(&sk);
         let req = invoke_req(
             json!({
                 "query": "What is Rust?",
                 "system_prompt": "You are a concise technical writer."
             }),
-            token,
+            cap,
         );
 
         let resp = connector.invoke(req).await.unwrap();

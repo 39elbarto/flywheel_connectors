@@ -38,3 +38,4 @@ url.workspace = true
 wiremock.workspace = true
 fcp-crypto.workspace = true
 chrono = { workspace = true, features = ["serde"] }
+ciborium.workspace = true

@@ -63,7 +63,7 @@ impl From<DeploymentProfileObject> for DeploymentProfile {
 
 impl OpenAIConfig {
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
-        let api_key = params
+        let api_key_value = params
             .get("api_key")
             .and_then(|v| v.as_str())
             .map(str::trim)
@@ -86,7 +86,7 @@ impl OpenAIConfig {
             None => None,
         };
 
-        let auth = match (api_key, credential_id) {
+        let auth = match (api_key_value, credential_id) {
             (Some(key), None) => OpenAIAuth::ApiKey(key),
             (None, Some(cred_id)) => OpenAIAuth::CredentialId(cred_id),
             (Some(_), Some(_)) => {
@@ -213,6 +213,38 @@ fn normalize_base_url(base_url: &str) -> FcpResult<String> {
     Ok(trimmed.trim_end_matches('/').to_string())
 }
 
+fn capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
+    let capability = match operation {
+        "openai.chat" | "openai.simple_chat" | "openai.get_usage" => "openai.chat",
+        "openai.embeddings" => "openai.embeddings",
+        "openai.images.generate" => "openai.images",
+        "openai.audio.transcribe" => "openai.audio.transcribe",
+        "openai.audio.tts" => "openai.audio.tts",
+        "openai.finetune.create" => "openai.finetune.create",
+        "openai.finetune.list" => "openai.finetune.list",
+        "openai.finetune.get" => "openai.finetune.get",
+        "openai.finetune.cancel" => "openai.finetune.cancel",
+        "openai.finetune.events" => "openai.finetune.events",
+        "openai.assistants.create" => "openai.assistants.create",
+        "openai.assistants.list" => "openai.assistants.list",
+        "openai.assistants.get" => "openai.assistants.get",
+        "openai.assistants.delete" => "openai.assistants.delete",
+        "openai.threads.create" => "openai.threads.create",
+        "openai.threads.get" => "openai.threads.get",
+        "openai.threads.messages.create" => "openai.threads.messages.create",
+        "openai.threads.messages.list" => "openai.threads.messages.list",
+        "openai.threads.runs.create" => "openai.threads.runs.create",
+        "openai.threads.runs.get" => "openai.threads.runs.get",
+        "openai.threads.runs.cancel" => "openai.threads.runs.cancel",
+        _ => {
+            return Err(FcpError::OperationNotGranted {
+                operation: operation.into(),
+            });
+        }
+    };
+    Ok(CapabilityId::from_static(capability))
+}
+
 /// Doctor check result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DoctorResult {
@@ -311,6 +343,74 @@ impl OpenAIConnector {
         let cost = usage.calculate_cost(model);
         let cost_fixed = (cost * 1_000_000_000.0) as u64;
         self.total_cost.fetch_add(cost_fixed, Ordering::Relaxed);
+    }
+
+    fn resource_uris_for_operation(
+        &self,
+        operation: &str,
+        input: &serde_json::Value,
+    ) -> Vec<String> {
+        let mut resource_uris = Vec::new();
+        if operation == "openai.chat" || operation == "openai.simple_chat" {
+            let default_model = self
+                .config
+                .as_ref()
+                .map(|c| c.default_model.as_str())
+                .unwrap_or(Model::default().as_str());
+            let model = input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or(default_model);
+            resource_uris.push(format!("openai:model:{model}"));
+        } else if operation == "openai.embeddings" {
+            let model = input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or(EmbeddingModel::default().as_str());
+            resource_uris.push(format!("openai:model:{model}"));
+        } else if operation == "openai.images.generate" {
+            let model = input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or(ImageModel::default().as_str());
+            resource_uris.push(format!("openai:model:{model}"));
+        } else if operation == "openai.audio.transcribe" {
+            let model = input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or(WhisperModel::default().as_str());
+            resource_uris.push(format!("openai:model:{model}"));
+        } else if operation == "openai.audio.tts" {
+            let model = input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or(TtsModel::default().as_str());
+            resource_uris.push(format!("openai:model:{model}"));
+        } else if operation == "openai.finetune.create" {
+            let model = input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("gpt-4o-mini-2024-07-18");
+            resource_uris.push(format!("openai:model:{model}"));
+            resource_uris.push("openai:finetune".to_string());
+        } else if operation.starts_with("openai.finetune.") {
+            resource_uris.push("openai:finetune".to_string());
+        } else if operation == "openai.assistants.create" {
+            let model = input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("gpt-4o");
+            resource_uris.push(format!("openai:model:{model}"));
+            resource_uris.push("openai:assistants".to_string());
+        } else if operation.starts_with("openai.assistants.") {
+            resource_uris.push("openai:assistants".to_string());
+        } else if operation.starts_with("openai.threads.runs.create") {
+            resource_uris.push("openai:assistants".to_string());
+            resource_uris.push("openai:threads".to_string());
+        } else if operation.starts_with("openai.threads.") {
+            resource_uris.push("openai:threads".to_string());
+        }
+        resource_uris
     }
 
     /// Handle configure method.
@@ -1632,7 +1732,58 @@ impl OpenAIConnector {
                 message: format!("Invalid simulate request: {e}"),
             })?;
 
-        let response = SimulateResponse::allowed(req.id);
+        let capability = match capability_for_operation(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                let response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize response: {e}"),
+                });
+            }
+        };
+
+        if self.config.is_none() || self.client.is_none() {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
+        let Some(verifier) = &self.verifier else {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        };
+
+        let resource_uris = self.resource_uris_for_operation(req.operation.as_str(), &req.input);
+        let response = match verifier.verify_bound(
+            req.capability_token,
+            &capability,
+            &req.operation,
+            &resource_uris,
+        ) {
+            Ok(_) => SimulateResponse::allowed(req.id),
+            Err(error) => {
+                let mut response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                if error.error_code() == "FCP-3001" {
+                    response =
+                        response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+                }
+                response
+            }
+        };
+
         serde_json::to_value(response).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize response: {e}"),
         })
@@ -1664,6 +1815,7 @@ impl OpenAIConnector {
                 })?;
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
+        self.base.check_ready()?;
 
         // Extract and verify capability token
         let token_value = params
@@ -1673,10 +1825,12 @@ impl OpenAIConnector {
                 message: "Missing capability_token".into(),
             })?;
 
-        let token: CapabilityToken =
-            serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("Invalid capability_token format: {e}"),
+        let capability =
+            serde_json::from_value::<CapabilityToken>(token_value.clone()).map_err(|e| {
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid capability_token format: {e}"),
+                }
             })?;
 
         // Verify token
@@ -1684,91 +1838,11 @@ impl OpenAIConnector {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
-        let intro = self.handle_introspect().await?;
-        let cap_str = intro
-            .get("operations")
-            .and_then(|ops| ops.as_array())
-            .and_then(|ops| {
-                ops.iter()
-                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
-            })
-            .and_then(|op| op.get("capability"))
-            .and_then(|cap| cap.as_str())
-            .ok_or_else(|| FcpError::OperationNotGranted {
-                operation: operation.into(),
-            })?;
+        let cap_id = capability_for_operation(operation)?;
+        let resource_uris = self.resource_uris_for_operation(operation, &input);
 
-        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
-            code: 1003,
-            message: "Invalid capability ID format".into(),
-        })?;
-
-        let mut resource_uris = Vec::new();
-        if operation == "openai.chat" || operation == "openai.simple_chat" {
-            let default_model = self
-                .config
-                .as_ref()
-                .map(|c| c.default_model.as_str())
-                .unwrap_or(Model::default().as_str());
-            let model = input
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or(default_model);
-            resource_uris.push(format!("openai:model:{model}"));
-        } else if operation == "openai.embeddings" {
-            let model = input
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or(EmbeddingModel::default().as_str());
-            resource_uris.push(format!("openai:model:{model}"));
-        } else if operation == "openai.images.generate" {
-            let model = input
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or(ImageModel::default().as_str());
-            resource_uris.push(format!("openai:model:{model}"));
-        } else if operation == "openai.audio.transcribe" {
-            let model = input
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or(WhisperModel::default().as_str());
-            resource_uris.push(format!("openai:model:{model}"));
-        } else if operation == "openai.audio.tts" {
-            let model = input
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or(TtsModel::default().as_str());
-            resource_uris.push(format!("openai:model:{model}"));
-        } else if operation == "openai.finetune.create" {
-            let model = input
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or("gpt-4o-mini-2024-07-18");
-            resource_uris.push(format!("openai:model:{model}"));
-            resource_uris.push("openai:finetune".to_string());
-        } else if operation.starts_with("openai.finetune.") {
-            resource_uris.push("openai:finetune".to_string());
-        } else if operation == "openai.assistants.create" {
-            let model = input
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or("gpt-4o");
-            resource_uris.push(format!("openai:model:{model}"));
-            resource_uris.push("openai:assistants".to_string());
-        } else if operation.starts_with("openai.assistants.") {
-            resource_uris.push("openai:assistants".to_string());
-        } else if operation.starts_with("openai.threads.runs.create") {
-            resource_uris.push("openai:assistants".to_string());
-            resource_uris.push("openai:threads".to_string());
-        } else if operation.starts_with("openai.threads.") {
-            resource_uris.push("openai:threads".to_string());
-        }
-
-        if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &resource_uris)?;
-        } else {
-            return Err(FcpError::NotConfigured);
-        }
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        verifier.verify_bound(capability, &cap_id, &op_id, &resource_uris)?;
 
         match operation {
             "openai.chat" => self.invoke_chat(input).await,
@@ -3344,10 +3418,35 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&cbor)
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
+    }
+
+    async fn configure_and_handshake(
+        connector: &mut OpenAIConnector,
+        signing_key: &Ed25519SigningKey,
+        capabilities_requested: &[&str],
+    ) {
+        connector
+            .handle_configure(json!({
+                "api_key": "sk-test",
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .expect("configure should succeed");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": capabilities_requested
+            }))
+            .await
+            .expect("handshake should succeed");
     }
 
     #[fcp_async_core::runtime::test]
@@ -3522,7 +3621,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "openai.simple_chat");
+        let capability = generate_valid_token(&signing_key, "openai.simple_chat");
 
         let result = connector
             .handle_invoke(json!({
@@ -3530,7 +3629,7 @@ mod tests {
                 "input": {
                     "message": "Hello"
                 },
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
 
@@ -3541,34 +3640,16 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_missing_message() {
         let mut connector = OpenAIConnector::new();
-        // Configure with fake key
-        connector.client = Some(
-            OpenAIClient::new("fake_key")
-                .unwrap()
-                .with_base_url("http://localhost:9999"),
-        );
-
         let signing_key = Ed25519SigningKey::generate();
-        let verifying_key = signing_key.verifying_key();
+        configure_and_handshake(&mut connector, &signing_key, &["openai.chat"]).await;
 
-        connector
-            .handle_handshake(json!({
-                "protocol_version": "1.0.0",
-                "zone": "z:work",
-                "host_public_key": verifying_key.to_bytes(),
-                "nonce": vec![0u8; 32],
-                "capabilities_requested": ["openai.chat"]
-            }))
-            .await
-            .unwrap();
-
-        let token = generate_valid_token(&signing_key, "openai.chat");
+        let capability = generate_valid_token(&signing_key, "openai.chat");
 
         let result = connector
             .handle_invoke(json!({
                 "operation": "openai.chat",
                 "input": {},
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
 
@@ -3590,26 +3671,15 @@ mod tests {
         let mut connector = OpenAIConnector::new();
 
         let signing_key = Ed25519SigningKey::generate();
-        let verifying_key = signing_key.verifying_key();
+        configure_and_handshake(&mut connector, &signing_key, &["openai.chat"]).await;
 
-        connector
-            .handle_handshake(json!({
-                "protocol_version": "1.0.0",
-                "zone": "z:work",
-                "host_public_key": verifying_key.to_bytes(),
-                "nonce": vec![0u8; 32],
-                "capabilities_requested": ["openai.chat"]
-            }))
-            .await
-            .unwrap();
-
-        let token = generate_valid_token(&signing_key, "openai.get_usage");
+        let capability = generate_valid_token(&signing_key, "openai.get_usage");
 
         let result = connector
             .handle_invoke(json!({
                 "operation": "openai.get_usage",
                 "input": {},
-                "capability_token": token
+                "capability_token": capability
             }))
             .await
             .unwrap();
@@ -4343,10 +4413,11 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn simulate_returns_allowed() {
-        let connector = OpenAIConnector::new();
+        let mut connector = OpenAIConnector::new();
 
         let signing_key = Ed25519SigningKey::generate();
-        let token = generate_valid_token(&signing_key, "openai.chat");
+        configure_and_handshake(&mut connector, &signing_key, &["openai.chat"]).await;
+        let capability = generate_valid_token(&signing_key, "openai.chat");
 
         let result = connector
             .handle_simulate(json!({
@@ -4356,11 +4427,79 @@ mod tests {
                 "operation": "openai.chat",
                 "zone_id": "z:work",
                 "input": {},
-                "capability_token": token
+                "capability_token": capability
             }))
             .await
             .unwrap();
         assert_eq!(result["would_succeed"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_denies_before_configure() {
+        let connector = OpenAIConnector::new();
+        let result = connector
+            .handle_simulate(json!({
+                "type": "simulate",
+                "id": "sim-unconfigured",
+                "connector_id": "openai",
+                "operation": "openai.chat",
+                "zone_id": "z:work",
+                "input": {},
+                "capability_token": CapabilityToken::test_token()
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["would_succeed"], false);
+        assert_eq!(result["denial_code"], FcpError::NotConfigured.error_code());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_denies_before_handshake() {
+        let mut connector = OpenAIConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "sk-test",
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
+        let result = connector
+            .handle_simulate(json!({
+                "type": "simulate",
+                "id": "sim-unhandshaken",
+                "connector_id": "openai",
+                "operation": "openai.chat",
+                "zone_id": "z:work",
+                "input": {},
+                "capability_token": CapabilityToken::test_token()
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["would_succeed"], false);
+        assert_eq!(result["denial_code"], FcpError::NotHandshaken.error_code());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_denies_wrong_operation_token() {
+        let mut connector = OpenAIConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        configure_and_handshake(&mut connector, &signing_key, &["openai.chat"]).await;
+        let capability = generate_valid_token(&signing_key, "openai.simple_chat");
+
+        let result = connector
+            .handle_simulate(json!({
+                "type": "simulate",
+                "id": "sim-wrong-operation",
+                "connector_id": "openai",
+                "operation": "openai.chat",
+                "zone_id": "z:work",
+                "input": {},
+                "capability_token": capability
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["would_succeed"], false);
+        assert_eq!(result["denial_code"], "FCP-3003");
     }
 
     #[fcp_async_core::runtime::test]
@@ -4414,13 +4553,13 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "openai.nonexistent");
+        let capability = generate_valid_token(&signing_key, "openai.nonexistent");
 
         let result = connector
             .handle_invoke(json!({
                 "operation": "openai.nonexistent",
                 "input": {},
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
 
@@ -4462,10 +4601,8 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn invoke_missing_capability_token() {
         let mut connector = OpenAIConnector::new();
-        connector
-            .handle_configure(json!({ "api_key": "sk-test" }))
-            .await
-            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        configure_and_handshake(&mut connector, &signing_key, &["openai.chat"]).await;
 
         let result = connector
             .handle_invoke(json!({

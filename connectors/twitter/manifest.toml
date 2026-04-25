@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:ebd059ded9632c3497eb76dd0448805d1a4521f82b508a570afaf7209b3be62a"
+interface_hash = "blake3-256:fcp.interface.v2:aa0a15003cec9e17a0884ddfd46d1bed3649fd16694c046eee3e84fde1946f6c"
 
 [connector]
 id = "fcp.twitter"

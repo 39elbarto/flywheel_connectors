@@ -110,12 +110,10 @@ mod tests {
     #[test]
     fn async_timeout_maps_to_internal() {
         let err = GooglePlacesError::from_async_error(AsyncError::Timeout { timeout_ms: 5000 });
-        match &err {
-            GooglePlacesError::Internal(msg) => {
-                assert!(msg.contains("5000"), "should mention timeout duration");
-            }
-            other => panic!("expected Internal, got {other:?}"),
-        }
+        assert!(matches!(
+            err,
+            GooglePlacesError::Internal(ref msg) if msg.contains("5000")
+        ));
         // Should not be retryable (internal errors are not retryable)
         assert!(!err.is_retryable());
     }
@@ -123,21 +121,16 @@ mod tests {
     #[test]
     fn async_cancelled_maps_to_internal() {
         let err = GooglePlacesError::from_async_error(AsyncError::Cancelled);
-        match &err {
-            GooglePlacesError::Internal(msg) => {
-                assert!(msg.contains("cancelled"), "should mention cancellation");
-            }
-            other => panic!("expected Internal, got {other:?}"),
-        }
+        assert!(matches!(
+            err,
+            GooglePlacesError::Internal(ref msg) if msg.contains("cancelled")
+        ));
     }
 
     #[test]
     fn async_channel_closed_maps_to_internal() {
         let err = GooglePlacesError::from_async_error(AsyncError::ChannelClosed);
-        match &err {
-            GooglePlacesError::Internal(_) => {}
-            other => panic!("expected Internal, got {other:?}"),
-        }
+        assert!(matches!(err, GooglePlacesError::Internal(_)));
     }
 
     #[test]
@@ -178,11 +171,9 @@ mod tests {
     #[test]
     fn internal_to_fcp_error_maps_correctly() {
         let err = GooglePlacesError::Internal("something broke".into());
-        match err.to_fcp_error() {
-            FcpError::Internal { message } => {
-                assert_eq!(message, "something broke");
-            }
-            other => panic!("expected FcpError::Internal, got {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::Internal { ref message } if message == "something broke"
+        ));
     }
 }

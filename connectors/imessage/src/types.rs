@@ -17,8 +17,9 @@ pub struct BlueBubblesConfig {
     #[serde(default = "default_server_url")]
     pub server_url: String,
 
-    /// Server password for API authentication (passed as ?password= query param).
-    pub password: String,
+    /// Server passcode for API authentication.
+    #[serde(rename = "password")]
+    pub server_passcode: String,
 
     /// Polling interval in milliseconds for new messages.
     #[serde(default = "default_poll_interval_ms")]
@@ -59,7 +60,7 @@ impl BlueBubblesConfig {
     /// Returns an `InvalidRequest` error when the config is unusable.
     pub fn validate(mut self) -> Result<Self, FcpError> {
         self.server_url = self.server_url.trim().trim_end_matches('/').to_string();
-        self.password = self.password.trim().to_string();
+        self.server_passcode = self.server_passcode.trim().to_string();
         self.attachment_dir = self
             .attachment_dir
             .as_deref()
@@ -67,7 +68,7 @@ impl BlueBubblesConfig {
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
 
-        if self.password.is_empty() {
+        if self.server_passcode.is_empty() {
             return Err(invalid_config("password must not be empty"));
         }
 
@@ -109,7 +110,7 @@ impl std::fmt::Debug for BlueBubblesConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BlueBubblesConfig")
             .field("server_url", &self.server_url)
-            .field("password", &"[REDACTED]")
+            .field("server_passcode", &"[REDACTED]")
             .field("poll_interval_ms", &self.poll_interval_ms)
             .field("attachment_dir", &self.attachment_dir)
             .field("retry", &self.retry)
@@ -413,7 +414,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.server_url, "http://myhost:5555");
-        assert_eq!(config.password, "abc");
+        assert_eq!(config.server_passcode, "abc");
         assert_eq!(config.poll_interval_ms, 1000);
     }
 
@@ -429,7 +430,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.server_url, "https://example.com/bridge");
-        assert_eq!(config.password, "secret");
+        assert_eq!(config.server_passcode, "secret");
         assert_eq!(config.server_host().as_deref(), Some("example.com"));
         assert!(config.attachment_dir.is_none());
     }

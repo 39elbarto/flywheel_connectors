@@ -255,10 +255,17 @@ impl TwitterConnector {
 
         info!(auth = %fcp_cfg.auth.redacted_label(), "Twitter connector configured");
 
+        if let Some(client) = self.client.take() {
+            client.shutdown();
+        }
         self.config = Some(legacy_config);
         self.fcp_config = Some(fcp_cfg);
         self.client = Some(Arc::new(client));
+        self.authenticated_user = None;
+        self.verifier = None;
+        self.session_id = None;
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
 
         Ok(json!({
             "status": "configured"
@@ -510,10 +517,55 @@ impl TwitterConnector {
                 message: format!("Invalid simulate request: {e}"),
             })?;
 
-        let response = SimulateResponse::allowed(req.id);
-        serde_json::to_value(response).map_err(|e| FcpError::Internal {
-            message: format!("Failed to serialize response: {e}"),
-        })
+        let cap_id = match self.capability_for_operation(req.operation.as_str()).await {
+            Ok(capability) => capability,
+            Err(error) => {
+                let response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                return Self::serialize_simulate_response(response);
+            }
+        };
+
+        if let Err(error) = Self::validate_operation_input(req.operation.as_str(), &req.input) {
+            let response = SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            return Self::serialize_simulate_response(response);
+        }
+
+        if self.client.is_none() {
+            let error = FcpError::NotConfigured;
+            let response = SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            return Self::serialize_simulate_response(response);
+        }
+
+        let Some(verifier) = &self.verifier else {
+            let error = FcpError::NotHandshaken;
+            let response = SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            return Self::serialize_simulate_response(response);
+        };
+
+        let resource_uris = Self::resource_uris_for_args(&req.input);
+        let missing_capability = cap_id.as_str().to_string();
+        let response = match verifier.verify_bound(
+            req.capability_token,
+            &cap_id,
+            &req.operation,
+            &resource_uris,
+        ) {
+            Ok(_) => SimulateResponse::allowed(req.id),
+            Err(error) => {
+                let response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                if matches!(
+                    error,
+                    FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+                ) {
+                    response.with_missing_capabilities(vec![missing_capability])
+                } else {
+                    response
+                }
+            }
+        };
+        Self::serialize_simulate_response(response)
     }
 
     /// Handle the invoke method.
@@ -551,38 +603,17 @@ impl TwitterConnector {
                 code: 1003,
                 message: "Invalid operation ID format".into(),
             })?;
-        let intro = self.handle_introspect().await?;
-        let cap_str = intro
-            .get("operations")
-            .and_then(|ops| ops.as_array())
-            .and_then(|ops| {
-                ops.iter()
-                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
-            })
-            .and_then(|op| op.get("capability"))
-            .and_then(|cap| cap.as_str())
-            .ok_or_else(|| FcpError::OperationNotGranted {
-                operation: operation.into(),
-            })?;
-
-        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
-            code: 1003,
-            message: "Invalid capability ID format".into(),
-        })?;
-
-        // Extract resource URIs
-        let mut resource_uris = Vec::new();
-        if let Some(user_id) = args.get("user_id").and_then(|v| v.as_str()) {
-            resource_uris.push(format!("twitter:user:{user_id}"));
-        }
-        if let Some(tweet_id) = args.get("tweet_id").and_then(|v| v.as_str()) {
-            resource_uris.push(format!("twitter:tweet:{tweet_id}"));
-        }
+        let cap_id = self.capability_for_operation(operation).await?;
+        let resource_uris = Self::resource_uris_for_args(&args);
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &resource_uris)?;
+            verifier.verify_bound(token, &cap_id, &op_id, &resource_uris)?;
         } else {
-            return Err(FcpError::NotConfigured);
+            return if self.client.is_some() {
+                Err(FcpError::NotHandshaken)
+            } else {
+                Err(FcpError::NotConfigured)
+            };
         }
 
         let result = self.dispatch_operation(operation, args).await;
@@ -920,9 +951,15 @@ impl TwitterConnector {
             *stream_active = false;
         }
 
-        if let Some(client) = &self.client {
+        if let Some(client) = self.client.take() {
             client.shutdown();
         }
+        self.config = None;
+        self.fcp_config = None;
+        self.authenticated_user = None;
+        self.verifier = None;
+        self.session_id = None;
+        self.base.set_configured(false);
         self.base.set_handshaken(false);
 
         Ok(json!({
@@ -946,6 +983,164 @@ impl TwitterConnector {
                 code: 2001,
                 message: "No authenticated user — handshake required".into(),
             })
+    }
+
+    async fn capability_for_operation(&self, operation: &str) -> Result<CapabilityId, FcpError> {
+        let intro = self.handle_introspect().await?;
+        let cap_str = intro
+            .get("operations")
+            .and_then(|ops| ops.as_array())
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
+            .and_then(|op| op.get("capability"))
+            .and_then(|cap| cap.as_str())
+            .ok_or_else(|| FcpError::OperationNotGranted {
+                operation: operation.into(),
+            })?;
+
+        cap_str.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid capability ID format".into(),
+        })
+    }
+
+    fn resource_uris_for_args(args: &Value) -> Vec<String> {
+        let mut resource_uris = Vec::new();
+        if let Some(user_id) = args.get("user_id").and_then(|v| v.as_str()) {
+            resource_uris.push(format!("twitter:user:{user_id}"));
+        }
+        if let Some(tweet_id) = args.get("tweet_id").and_then(|v| v.as_str()) {
+            resource_uris.push(format!("twitter:tweet:{tweet_id}"));
+        }
+        resource_uris
+    }
+
+    fn serialize_simulate_response(response: SimulateResponse) -> Result<Value, FcpError> {
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
+    }
+
+    fn validate_operation_input(operation: &str, args: &Value) -> Result<(), FcpError> {
+        match operation {
+            "twitter.user.me" | "twitter.stream.rules.list" => {}
+            "twitter.user.get" | "twitter.user.timeline" => {
+                Self::require_string_arg(args, "user_id")?;
+            }
+            "twitter.user.by_username" => {
+                Self::require_string_arg(args, "username")?;
+            }
+            "twitter.tweet.get"
+            | "twitter.tweet.retweet"
+            | "twitter.tweet.unretweet"
+            | "twitter.tweet.like"
+            | "twitter.tweet.unlike"
+            | "twitter.tweet.delete" => {
+                Self::require_string_arg(args, "tweet_id")?;
+            }
+            "twitter.tweet.get_many" => {
+                Self::require_non_empty_string_array_arg(args, "tweet_ids")?;
+            }
+            "twitter.tweet.search" => {
+                Self::require_string_arg(args, "query")?;
+            }
+            "twitter.tweet.create" => {
+                Self::require_string_arg(args, "text")?;
+            }
+            "twitter.tweet.reply" => {
+                Self::require_string_arg(args, "text")?;
+                Self::require_string_arg(args, "reply_to")?;
+            }
+            "twitter.dm.send" => {
+                Self::require_string_arg(args, "text")?;
+                let has_conversation_id = args
+                    .get("conversation_id")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|value| !value.trim().is_empty());
+                let has_participant_id = args
+                    .get("participant_id")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|value| !value.trim().is_empty());
+                if !has_conversation_id && !has_participant_id {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1006,
+                        message: "Missing 'conversation_id' or 'participant_id' argument".into(),
+                    });
+                }
+            }
+            "twitter.dm.events" => {
+                Self::require_string_arg(args, "conversation_id")?;
+            }
+            "twitter.user.mentions" => {}
+            "twitter.trends.place" => {
+                args.get("woeid")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| FcpError::InvalidRequest {
+                        code: 1006,
+                        message: "Missing 'woeid' argument".into(),
+                    })?;
+            }
+            "twitter.stream.rules.add" => {
+                Self::require_non_empty_array_arg(args, "rules")?;
+            }
+            "twitter.stream.rules.delete" => {
+                Self::require_non_empty_string_array_arg(args, "rule_ids")?;
+            }
+            _ => {
+                return Err(FcpError::OperationNotGranted {
+                    operation: operation.into(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn require_string_arg(args: &Value, key: &str) -> Result<(), FcpError> {
+        args.get(key)
+            .and_then(|v| v.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .map(|_| ())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1006,
+                message: format!("Missing '{key}' argument"),
+            })
+    }
+
+    fn require_non_empty_array_arg(args: &Value, key: &str) -> Result<(), FcpError> {
+        args.get(key)
+            .and_then(|v| v.as_array())
+            .filter(|values| !values.is_empty())
+            .map(|_| ())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1006,
+                message: format!("Missing '{key}' argument"),
+            })
+    }
+
+    fn require_non_empty_string_array_arg(args: &Value, key: &str) -> Result<(), FcpError> {
+        let values = args
+            .get(key)
+            .and_then(|v| v.as_array())
+            .filter(|values| !values.is_empty())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1006,
+                message: format!("Missing '{key}' argument"),
+            })?;
+
+        if values
+            .iter()
+            .all(|value| value.as_str().is_some_and(|item| !item.trim().is_empty()))
+        {
+            Ok(())
+        } else {
+            Err(FcpError::InvalidRequest {
+                code: 1007,
+                message: format!("Invalid {key} format"),
+            })
+        }
     }
 
     async fn dispatch_operation(&self, operation: &str, args: Value) -> Result<Value, FcpError> {
@@ -1557,10 +1752,12 @@ impl TwitterConnector {
     async fn op_stream_rules_delete(&self, args: Value) -> Result<Value, FcpError> {
         let client = self.require_client()?;
 
-        let ids_value = args.get("ids").ok_or_else(|| FcpError::InvalidRequest {
-            code: 1006,
-            message: "Missing 'ids' argument".into(),
-        })?;
+        let ids_value = args
+            .get("rule_ids")
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1006,
+                message: "Missing 'rule_ids' argument".into(),
+            })?;
 
         let ids: Vec<String> =
             serde_json::from_value(ids_value.clone()).map_err(|e| FcpError::InvalidRequest {
@@ -1618,7 +1815,56 @@ fn tw_op(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::SelfCheckStatus;
+    use chrono::{Duration, Utc};
+    use fcp_core::{CapabilityConstraints, SelfCheckStatus, ZoneId};
+    use fcp_crypto::cose::CapabilityTokenBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
+
+    fn signed_token(
+        signing_key: &Ed25519SigningKey,
+        capability: &'static str,
+        operation: &'static str,
+    ) -> CapabilityToken {
+        let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut constraints_cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut constraints_cbor).unwrap();
+        let cose = CapabilityTokenBuilder::new()
+            .capability_id(capability)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&[operation])
+            .issuer("node:test")
+            .validity(now, now + Duration::hours(1))
+            .try_constraints_cbor(&constraints_cbor)
+            .unwrap()
+            .sign(signing_key)
+            .unwrap();
+        CapabilityToken::from_raw(cose)
+    }
+
+    fn simulate_params(operation: &'static str, input: Value, token: CapabilityToken) -> Value {
+        serde_json::to_value(SimulateRequest::new(
+            ConnectorId::from_static("twitter:social:v1"),
+            OperationId::from_static(operation),
+            ZoneId::work(),
+            input,
+            token,
+        ))
+        .unwrap()
+    }
+
+    fn install_test_verifier(connector: &mut TwitterConnector, signing_key: &Ed25519SigningKey) {
+        connector.verifier = Some(CapabilityVerifier::new(
+            signing_key.verifying_key().to_bytes(),
+            ZoneId::work(),
+            connector.base.instance_id.clone(),
+        ));
+        connector.base.set_handshaken(true);
+    }
 
     // ───────────────────────── Schema completeness tests ─────────────────────────
 
@@ -1797,6 +2043,153 @@ mod tests {
         assert_eq!(event_caps["replay"], false);
         assert_eq!(event_caps["min_buffer_events"], 100);
         assert_eq!(event_caps["requires_ack"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_denies_when_not_configured() {
+        let connector = TwitterConnector::new();
+        let result = connector
+            .handle_simulate(simulate_params(
+                "twitter.user.me",
+                json!({}),
+                CapabilityToken::test_token(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result["would_succeed"], false);
+        assert_eq!(result["denial_code"], FcpError::NotConfigured.error_code());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_denies_when_not_handshaken() {
+        let mut connector = TwitterConnector::new();
+        connector
+            .handle_configure(json!({
+                "consumer_key": "ck_test",
+                "consumer_secret": "cs_test",
+                "access_token": "at_test",
+                "access_token_secret": "ats_test"
+            }))
+            .await
+            .unwrap();
+
+        let result = connector
+            .handle_simulate(simulate_params(
+                "twitter.user.me",
+                json!({}),
+                CapabilityToken::test_token(),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result["would_succeed"], false);
+        assert_eq!(result["denial_code"], FcpError::NotHandshaken.error_code());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_verifies_bound_capability() {
+        let mut connector = TwitterConnector::new();
+        connector
+            .handle_configure(json!({
+                "consumer_key": "ck_test",
+                "consumer_secret": "cs_test",
+                "access_token": "at_test",
+                "access_token_secret": "ats_test"
+            }))
+            .await
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        install_test_verifier(&mut connector, &signing_key);
+
+        let result = connector
+            .handle_simulate(simulate_params(
+                "twitter.user.get",
+                json!({ "user_id": "123" }),
+                signed_token(&signing_key, "twitter.read.public", "twitter.user.get"),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result["would_succeed"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_rejects_wrong_capability() {
+        let mut connector = TwitterConnector::new();
+        connector
+            .handle_configure(json!({
+                "consumer_key": "ck_test",
+                "consumer_secret": "cs_test",
+                "access_token": "at_test",
+                "access_token_secret": "ats_test"
+            }))
+            .await
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        install_test_verifier(&mut connector, &signing_key);
+
+        let result = connector
+            .handle_simulate(simulate_params(
+                "twitter.tweet.create",
+                json!({ "text": "hello" }),
+                signed_token(&signing_key, "twitter.read.public", "twitter.user.get"),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result["would_succeed"], false);
+        assert_eq!(result["missing_capabilities"][0], "twitter.write.tweets");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_rejects_missing_input() {
+        let mut connector = TwitterConnector::new();
+        connector
+            .handle_configure(json!({
+                "consumer_key": "ck_test",
+                "consumer_secret": "cs_test",
+                "access_token": "at_test",
+                "access_token_secret": "ats_test"
+            }))
+            .await
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        install_test_verifier(&mut connector, &signing_key);
+
+        let result = connector
+            .handle_simulate(simulate_params(
+                "twitter.user.get",
+                json!({}),
+                signed_token(&signing_key, "twitter.read.public", "twitter.user.get"),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result["would_succeed"], false);
+        assert!(
+            result["failure_reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("user_id"))
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_stream_rules_delete_validates_rule_ids_contract() {
+        assert!(
+            TwitterConnector::validate_operation_input(
+                "twitter.stream.rules.delete",
+                &json!({ "rule_ids": ["123"] }),
+            )
+            .is_ok()
+        );
+        assert!(
+            TwitterConnector::validate_operation_input(
+                "twitter.stream.rules.delete",
+                &json!({ "ids": ["123"] }),
+            )
+            .is_err()
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -1998,6 +2391,69 @@ mod tests {
         assert_eq!(result["status"], "configured");
         assert!(connector.fcp_config.is_some());
         assert!(!connector.fcp_config.as_ref().unwrap().auth.is_secretless());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_reconfigure_clears_handshake_state() {
+        let mut connector = TwitterConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handle_configure(json!({
+                "consumer_key": "ck_test",
+                "consumer_secret": "cs_test",
+                "access_token": "at_test",
+                "access_token_secret": "ats_test"
+            }))
+            .await
+            .unwrap();
+        install_test_verifier(&mut connector, &signing_key);
+
+        connector
+            .handle_configure(json!({
+                "consumer_key": "ck_test_2",
+                "consumer_secret": "cs_test_2",
+                "access_token": "at_test_2",
+                "access_token_secret": "ats_test_2"
+            }))
+            .await
+            .unwrap();
+
+        assert!(connector.verifier.is_none());
+        assert!(connector.session_id.is_none());
+        assert!(connector.authenticated_user.is_none());
+        assert!(matches!(
+            connector.base.check_ready(),
+            Err(FcpError::NotHandshaken)
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_shutdown_clears_connector_state() {
+        let mut connector = TwitterConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handle_configure(json!({
+                "consumer_key": "ck_test",
+                "consumer_secret": "cs_test",
+                "access_token": "at_test",
+                "access_token_secret": "ats_test"
+            }))
+            .await
+            .unwrap();
+        install_test_verifier(&mut connector, &signing_key);
+
+        connector.handle_shutdown(json!({})).await.unwrap();
+
+        assert!(connector.config.is_none());
+        assert!(connector.fcp_config.is_none());
+        assert!(connector.client.is_none());
+        assert!(connector.verifier.is_none());
+        assert!(connector.session_id.is_none());
+        assert!(connector.authenticated_user.is_none());
+        assert!(matches!(
+            connector.base.check_ready(),
+            Err(FcpError::NotConfigured)
+        ));
     }
 
     #[fcp_async_core::runtime::test]

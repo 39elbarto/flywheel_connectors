@@ -140,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn api_500_maps_to_retryable_external() {
+    fn api_500_maps_to_retryable_external() -> Result<(), String> {
         let err = OutlookError::Api {
             status_code: 500,
             message: "internal".into(),
@@ -153,20 +153,24 @@ mod tests {
             } => {
                 assert!(retryable);
                 assert_eq!(status_code, Some(500));
+                Ok(())
             }
-            other => panic!("expected External, got {other:?}"),
+            other => Err(format!("expected External, got {other:?}")),
         }
     }
 
     #[test]
-    fn api_400_maps_to_non_retryable() {
+    fn api_400_maps_to_non_retryable() -> Result<(), String> {
         let err = OutlookError::Api {
             status_code: 400,
             message: "bad".into(),
         };
         match err.to_fcp_error() {
-            FcpError::External { retryable, .. } => assert!(!retryable),
-            other => panic!("expected External, got {other:?}"),
+            FcpError::External { retryable, .. } => {
+                assert!(!retryable);
+                Ok(())
+            }
+            other => Err(format!("expected External, got {other:?}")),
         }
     }
 
@@ -185,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn not_found_maps_to_external_404() {
+    fn not_found_maps_to_external_404() -> Result<(), String> {
         let err = OutlookError::NotFound("message not found".into());
         match err.to_fcp_error() {
             FcpError::External {
@@ -195,8 +199,9 @@ mod tests {
             } => {
                 assert_eq!(status_code, Some(404));
                 assert!(!retryable);
+                Ok(())
             }
-            other => panic!("expected External, got {other:?}"),
+            other => Err(format!("expected External, got {other:?}")),
         }
     }
 
@@ -278,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn connector_error_mapping_from_timeout() {
+    fn connector_error_mapping_from_timeout() -> Result<(), String> {
         use fcp_sdk::migration::ConnectorErrorMapping;
         let err = OutlookError::from_async_error(fcp_async_core::AsyncError::Timeout {
             timeout_ms: 5000,
@@ -292,8 +297,11 @@ mod tests {
         ));
         assert!(err.is_retryable(), "timeout should remain retryable");
         match err.to_fcp_error() {
-            FcpError::External { retryable, .. } => assert!(retryable),
-            other => panic!("expected retryable External, got {other:?}"),
+            FcpError::External { retryable, .. } => {
+                assert!(retryable);
+                Ok(())
+            }
+            other => Err(format!("expected retryable External, got {other:?}")),
         }
     }
 

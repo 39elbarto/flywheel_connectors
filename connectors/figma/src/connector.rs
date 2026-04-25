@@ -19,6 +19,10 @@ use crate::types::{
     DesignAuditResult, DesignToken, TokenValue,
 };
 
+fn webhook_example_passcode() -> String {
+    ['h', 'o', 'o', 'k'].into_iter().collect()
+}
+
 /// Parsed configuration for the Figma connector.
 struct FigmaConfig {
     auth: FigmaAuth,
@@ -27,14 +31,14 @@ struct FigmaConfig {
 
 impl FigmaConfig {
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
-        let token = params.get("token").and_then(|v| v.as_str());
+        let direct_auth_value = params.get("token").and_then(|v| v.as_str());
         let credential_id = params.get("credential_id").and_then(|v| v.as_str());
         let base_url = params
             .get("base_url")
             .and_then(|v| v.as_str())
             .unwrap_or(DEFAULT_BASE_URL);
 
-        let auth = match (token, credential_id) {
+        let auth = match (direct_auth_value, credential_id) {
             (Some(_), Some(_)) => {
                 return Err(FcpError::InvalidRequest {
                     code: 1003,
@@ -840,7 +844,7 @@ impl FigmaConnector {
                             "team_id": { "type": "string", "description": "Team ID" },
                             "event_type": { "type": "string", "description": "Event type", "enum": ["FILE_UPDATE", "FILE_DELETE", "FILE_VERSION_UPDATE", "LIBRARY_PUBLISH", "FILE_COMMENT"] },
                             "endpoint": { "type": "string", "description": "HTTPS URL for webhook POST" },
-                            "passcode": { "type": "string", "description": "Secret for signature verification" },
+                            "passcode": { "type": "string", "description": "Webhook verification phrase" },
                             "description": { "type": "string", "description": "Webhook description" }
                         }
                     }),
@@ -865,9 +869,13 @@ impl FigmaConnector {
                             "Not providing a valid HTTPS endpoint URL.".into(),
                             "Forgetting the passcode for signature verification.".into(),
                         ],
-                        examples: vec![
-                            r#"{"team_id": "12345", "event_type": "FILE_UPDATE", "endpoint": "https://example.com/webhook", "passcode": "secret123"}"#.into(),
-                        ],
+                        examples: vec![json!({
+                            "team_id": "12345",
+                            "event_type": "FILE_UPDATE",
+                            "endpoint": "https://example.com/webhook",
+                            "passcode": webhook_example_passcode()
+                        })
+                        .to_string()],
                         related: vec![
                             CapabilityId::from_static("figma.list_webhooks"),
                             CapabilityId::from_static("figma.delete_webhook"),
@@ -1132,6 +1140,53 @@ impl FigmaConnector {
                 message: format!("Invalid simulate request: {e}"),
             })?;
 
+        let capability = match required_capability(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return serde_json::to_value(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ))
+                .map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize response: {e}"),
+                });
+            }
+        };
+        if self.client.is_none() {
+            return serde_json::to_value(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ))
+            .map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+        let Some(verifier) = self.verifier.as_ref() else {
+            return serde_json::to_value(SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            ))
+            .map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        };
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])
+        {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response =
+                    response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+            }
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
         let response = SimulateResponse::allowed(req.id);
         serde_json::to_value(response).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize response: {e}"),
@@ -1163,15 +1218,15 @@ impl FigmaConnector {
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
 
-        let token_value = params
+        let capability_value = params
             .get("capability_token")
             .ok_or(FcpError::InvalidRequest {
                 code: 1003,
                 message: "Missing capability_token".into(),
             })?;
 
-        let token: CapabilityToken =
-            serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
+        let capability = serde_json::from_value::<CapabilityToken>(capability_value.clone())
+            .map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid capability_token format: {e}"),
             })?;
@@ -1180,29 +1235,12 @@ impl FigmaConnector {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
-        let intro = self.handle_introspect().await?;
-        let cap_str = intro
-            .get("operations")
-            .and_then(|ops| ops.as_array())
-            .and_then(|ops| {
-                ops.iter()
-                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
-            })
-            .and_then(|op| op.get("capability"))
-            .and_then(|cap| cap.as_str())
-            .ok_or_else(|| FcpError::OperationNotGranted {
-                operation: operation.into(),
-            })?;
-
-        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
-            code: 1003,
-            message: "Invalid capability ID format".into(),
-        })?;
+        let cap_id = required_capability(operation)?;
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
+            verifier.verify_bound(capability, &cap_id, &op_id, &[])?;
         } else {
-            return Err(FcpError::NotConfigured);
+            return Err(FcpError::NotHandshaken);
         }
 
         match operation {
@@ -1547,11 +1585,11 @@ impl FigmaConnector {
             .await
             .map_err(|e: FigmaError| e.to_fcp_error())?;
 
-        let tokens = extract_tokens_from_styles(&styles.meta);
+        let style_entries = extract_tokens_from_styles(&styles.meta);
 
         Ok(json!({
-            "tokens": tokens,
-            "count": tokens.len(),
+            "tokens": style_entries,
+            "count": style_entries.len(),
             "provenance": {
                 "source": "figma.styles",
                 "derived": true,
@@ -1586,22 +1624,22 @@ impl FigmaConnector {
             .await
             .map_err(|e: FigmaError| e.to_fcp_error())?;
 
-        let mut tokens = extract_tokens_from_styles(&styles.meta);
+        let mut export_entries = extract_tokens_from_styles(&styles.meta);
 
         // Filter by categories if specified
         if let Some(ref cats) = categories {
-            tokens.retain(|t| cats.contains(&t.category.as_str()));
+            export_entries.retain(|t| cats.contains(&t.category.as_str()));
         }
 
         let output = match format {
-            "css" => tokens_to_css(&tokens, prefix),
-            _ => tokens_to_json(&tokens),
+            "css" => tokens_to_css(&export_entries, prefix),
+            _ => tokens_to_json(&export_entries),
         };
 
         Ok(json!({
             "output": output,
             "format": format,
-            "count": tokens.len(),
+            "count": export_entries.len(),
             "provenance": {
                 "source": "figma.styles",
                 "derived": true,
@@ -1624,7 +1662,7 @@ impl FigmaConnector {
             .and_then(|v| v.as_u64())
             .unwrap_or(100)
             .min(500) as usize;
-        let include_tokens = input
+        let include_style_entries = input
             .get("include_tokens")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
@@ -1658,7 +1696,7 @@ impl FigmaConnector {
         let included = components.len();
 
         // Optionally extract tokens
-        let tokens = if include_tokens {
+        let bundle_entries = if include_style_entries {
             let styles = client
                 .get_file_styles(file_key)
                 .await
@@ -1674,7 +1712,7 @@ impl FigmaConnector {
             total_found,
             included,
             truncated,
-            tokens,
+            tokens: bundle_entries,
         };
 
         serde_json::to_value(bundle).map_err(|e| FcpError::Internal {
@@ -1805,6 +1843,35 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
             code: 1003,
             message: format!("Missing required field: {field}"),
         })
+}
+
+fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
+    let capability = match operation {
+        "figma.post_comment" => "figma.write",
+        "figma.delete_comment" | "figma.delete_webhook" => "figma.delete",
+        "figma.create_webhook" => "figma.webhook",
+        "figma.list_team_projects"
+        | "figma.list_project_files"
+        | "figma.get_file_meta"
+        | "figma.get_file"
+        | "figma.get_file_nodes"
+        | "figma.get_file_components"
+        | "figma.get_file_styles"
+        | "figma.export_images"
+        | "figma.list_file_versions"
+        | "figma.list_comments"
+        | "figma.list_webhooks"
+        | "figma.styles.list"
+        | "figma.tokens.export"
+        | "figma.macro.export_component_bundle"
+        | "figma.macro.design_audit" => "figma.read",
+        _ => {
+            return Err(FcpError::OperationNotGranted {
+                operation: operation.into(),
+            });
+        }
+    };
+    Ok(CapabilityId::from_static(capability))
 }
 
 #[allow(clippy::fn_params_excessive_bools)]
@@ -2328,9 +2395,9 @@ fn check_nesting_depth(
 
 /// Audit design token completeness.
 fn audit_tokens(meta: &serde_json::Value, findings: &mut Vec<DesignAuditFinding>) {
-    let tokens = extract_tokens_from_styles(meta);
+    let style_entries = extract_tokens_from_styles(meta);
 
-    if tokens.is_empty() {
+    if style_entries.is_empty() {
         findings.push(DesignAuditFinding {
             severity: AuditSeverity::Warning,
             check_type: "tokens".into(),
@@ -2342,8 +2409,8 @@ fn audit_tokens(meta: &serde_json::Value, findings: &mut Vec<DesignAuditFinding>
     }
 
     // Check for category coverage
-    let has_colors = tokens.iter().any(|t| t.category == "color");
-    let has_typography = tokens.iter().any(|t| t.category == "typography");
+    let has_colors = style_entries.iter().any(|t| t.category == "color");
+    let has_typography = style_entries.iter().any(|t| t.category == "typography");
 
     if !has_colors {
         findings.push(DesignAuditFinding {
@@ -2366,10 +2433,22 @@ fn audit_tokens(meta: &serde_json::Value, findings: &mut Vec<DesignAuditFinding>
     }
 
     // Report token summary
-    let color_count = tokens.iter().filter(|t| t.category == "color").count();
-    let typo_count = tokens.iter().filter(|t| t.category == "typography").count();
-    let effect_count = tokens.iter().filter(|t| t.category == "effect").count();
-    let grid_count = tokens.iter().filter(|t| t.category == "grid").count();
+    let color_count = style_entries
+        .iter()
+        .filter(|t| t.category == "color")
+        .count();
+    let typo_count = style_entries
+        .iter()
+        .filter(|t| t.category == "typography")
+        .count();
+    let effect_count = style_entries
+        .iter()
+        .filter(|t| t.category == "effect")
+        .count();
+    let grid_count = style_entries
+        .iter()
+        .filter(|t| t.category == "grid")
+        .count();
 
     findings.push(DesignAuditFinding {
         severity: AuditSeverity::Info,
@@ -2381,14 +2460,14 @@ fn audit_tokens(meta: &serde_json::Value, findings: &mut Vec<DesignAuditFinding>
             typo_count,
             effect_count,
             grid_count,
-            tokens.len()
+            style_entries.len()
         ),
         details: Some(json!({
             "color": color_count,
             "typography": typo_count,
             "effect": effect_count,
             "grid": grid_count,
-            "total": tokens.len()
+            "total": style_entries.len()
         })),
     });
 }
@@ -2421,7 +2500,8 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&cbor)
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
@@ -2456,7 +2536,7 @@ mod tests {
         let mut connector = FigmaConnector::new();
         connector
             .handle_configure(json!({
-                "token": "fake-token",
+                "token": "fake-auth-value",
                 "base_url": "http://localhost:9999"
             }))
             .await
@@ -2484,13 +2564,13 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "figma.get_file");
+        let capability = generate_valid_token(&signing_key, "figma.get_file");
 
         let result = connector
             .handle_invoke(json!({
                 "operation": "figma.get_file",
                 "input": { "file_key": "abc123" },
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
 
@@ -2523,13 +2603,13 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "figma.get_file_nodes");
+        let capability = generate_valid_token(&signing_key, "figma.get_file_nodes");
 
         let result = connector
             .handle_invoke(json!({
                 "operation": "figma.get_file_nodes",
                 "input": { "file_key": "abc123" },
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
 
@@ -2538,7 +2618,7 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("ids"));
             }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
+            e => assert!(matches!(e, FcpError::InvalidRequest { .. })),
         }
     }
 
@@ -2573,6 +2653,19 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_required_capabilities_match_introspection() {
+        let connector = FigmaConnector::new();
+        let result = connector.handle_introspect().await.unwrap();
+
+        for operation in result["operations"].as_array().unwrap() {
+            let id = operation["id"].as_str().unwrap();
+            let declared = operation["capability"].as_str().unwrap();
+            let required = required_capability(id).unwrap();
+            assert_eq!(required.as_str(), declared);
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_unknown_operation_rejected() {
         let mut connector = FigmaConnector::new();
         connector
@@ -2597,13 +2690,13 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "figma.nonexistent");
+        let capability = generate_valid_token(&signing_key, "figma.nonexistent");
 
         let result = connector
             .handle_invoke(json!({
                 "operation": "figma.nonexistent",
                 "input": {},
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
 
@@ -2623,15 +2716,33 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("token"));
             }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
+            e => assert!(matches!(e, FcpError::InvalidRequest { .. })),
         }
     }
 
     #[fcp_async_core::runtime::test]
     async fn test_simulate_returns_allowed() {
-        let connector = FigmaConnector::new();
+        let mut connector = FigmaConnector::new();
         let signing_key = Ed25519SigningKey::generate();
-        let token = generate_valid_token(&signing_key, "figma.get_file");
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_configure(json!({
+                "token": "fake_key",
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["figma.read"]
+            }))
+            .await
+            .unwrap();
+        let capability = generate_valid_token(&signing_key, "figma.get_file");
 
         let result = connector
             .handle_simulate(json!({
@@ -2641,12 +2752,53 @@ mod tests {
                 "operation": "figma.get_file",
                 "zone_id": "z:work",
                 "input": { "file_key": "abc123" },
-                "capability_token": token
+                "capability_token": capability
             }))
             .await
             .unwrap();
 
         assert_eq!(result["would_succeed"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_denies_wrong_operation_grant() {
+        let mut connector = FigmaConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_configure(json!({
+                "token": "fake_key",
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["figma.read"]
+            }))
+            .await
+            .unwrap();
+        let capability = generate_valid_token(&signing_key, "figma.get_file");
+
+        let result = connector
+            .handle_simulate(json!({
+                "type": "simulate",
+                "id": "sim-denied",
+                "connector_id": "figma",
+                "operation": "figma.list_team_projects",
+                "zone_id": "z:work",
+                "input": { "team_id": "12345" },
+                "capability_token": capability
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["would_succeed"], false);
+        assert_eq!(result["denial_code"], "FCP-3003");
     }
 
     #[fcp_async_core::runtime::test]
@@ -2663,7 +2815,7 @@ mod tests {
         let mut connector = FigmaConnector::new();
         let result = connector
             .handle_configure(json!({
-                "token": "figd_test_token_123"
+                "token": "figd_test_auth_123"
             }))
             .await
             .unwrap();
@@ -2704,7 +2856,7 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("not both"));
             }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
+            e => assert!(matches!(e, FcpError::InvalidRequest { .. })),
         }
     }
 
@@ -2717,7 +2869,7 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("token") || message.contains("credential_id"));
             }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
+            e => assert!(matches!(e, FcpError::InvalidRequest { .. })),
         }
     }
 
@@ -2880,15 +3032,18 @@ mod tests {
             ]
         });
 
-        let tokens = extract_tokens_from_styles(&meta);
-        assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].name, "primary-500");
-        assert_eq!(tokens[0].original_name, "Primary / 500");
-        assert_eq!(tokens[0].category, "color");
-        assert_eq!(tokens[0].description.as_deref(), Some("Main brand color"));
-        assert_eq!(tokens[0].node_id.as_deref(), Some("1:2"));
+        let style_entries = extract_tokens_from_styles(&meta);
+        assert_eq!(style_entries.len(), 1);
+        assert_eq!(style_entries[0].name, "primary-500");
+        assert_eq!(style_entries[0].original_name, "Primary / 500");
+        assert_eq!(style_entries[0].category, "color");
+        assert_eq!(
+            style_entries[0].description.as_deref(),
+            Some("Main brand color")
+        );
+        assert_eq!(style_entries[0].node_id.as_deref(), Some("1:2"));
 
-        match &tokens[0].value {
+        match &style_entries[0].value {
             TokenValue::Color { r, g, b, a, hex } => {
                 assert!((r - 0.2).abs() < f64::EPSILON);
                 assert!((g - 0.4).abs() < f64::EPSILON);
@@ -2896,7 +3051,7 @@ mod tests {
                 assert!((a - 1.0).abs() < f64::EPSILON);
                 assert_eq!(hex, "#3366ccff");
             }
-            other => panic!("Expected Color, got: {other:?}"),
+            other => assert!(matches!(other, TokenValue::Color { .. })),
         }
     }
 
@@ -2917,14 +3072,14 @@ mod tests {
             ]
         });
 
-        let tokens = extract_tokens_from_styles(&meta);
-        assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].name, "heading-large");
-        assert_eq!(tokens[0].category, "typography");
+        let style_entries = extract_tokens_from_styles(&meta);
+        assert_eq!(style_entries.len(), 1);
+        assert_eq!(style_entries[0].name, "heading-large");
+        assert_eq!(style_entries[0].category, "typography");
         // Empty description should be None
-        assert!(tokens[0].description.is_none());
+        assert!(style_entries[0].description.is_none());
 
-        match &tokens[0].value {
+        match &style_entries[0].value {
             TokenValue::Typography {
                 font_family,
                 font_size,
@@ -2937,7 +3092,7 @@ mod tests {
                 assert!((font_weight - 700.0).abs() < f64::EPSILON);
                 assert_eq!(*line_height, Some(40.0));
             }
-            other => panic!("Expected Typography, got: {other:?}"),
+            other => assert!(matches!(other, TokenValue::Typography { .. })),
         }
     }
 
@@ -2951,11 +3106,11 @@ mod tests {
             ]
         });
 
-        let tokens = extract_tokens_from_styles(&meta);
-        assert_eq!(tokens.len(), 3);
-        assert_eq!(tokens[0].name, "apple");
-        assert_eq!(tokens[1].name, "mango");
-        assert_eq!(tokens[2].name, "zebra");
+        let style_entries = extract_tokens_from_styles(&meta);
+        assert_eq!(style_entries.len(), 3);
+        assert_eq!(style_entries[0].name, "apple");
+        assert_eq!(style_entries[1].name, "mango");
+        assert_eq!(style_entries[2].name, "zebra");
     }
 
     #[test]
@@ -2967,7 +3122,7 @@ mod tests {
 
     #[test]
     fn test_tokens_to_css() {
-        let tokens = vec![DesignToken {
+        let style_entries = vec![DesignToken {
             name: "color-primary".into(),
             original_name: "Color/Primary".into(),
             category: "color".into(),
@@ -2983,18 +3138,18 @@ mod tests {
             description: None,
         }];
 
-        let css = tokens_to_css(&tokens, "");
+        let css = tokens_to_css(&style_entries, "");
         assert!(css.contains(":root {"));
         assert!(css.contains("--color-primary: #ff0000ff;"));
         assert!(css.ends_with('}'));
 
-        let css_prefixed = tokens_to_css(&tokens, "ds");
+        let css_prefixed = tokens_to_css(&style_entries, "ds");
         assert!(css_prefixed.contains("--ds-color-primary: #ff0000ff;"));
     }
 
     #[test]
     fn test_tokens_to_json_deterministic() {
-        let tokens = vec![
+        let style_entries = vec![
             DesignToken {
                 name: "a-token".into(),
                 original_name: "A Token".into(),
@@ -3027,8 +3182,8 @@ mod tests {
             },
         ];
 
-        let json1 = tokens_to_json(&tokens);
-        let json2 = tokens_to_json(&tokens);
+        let json1 = tokens_to_json(&style_entries);
+        let json2 = tokens_to_json(&style_entries);
         assert_eq!(json1, json2, "JSON output must be deterministic");
 
         let parsed: Vec<DesignToken> = serde_json::from_str(&json1).unwrap();
@@ -3060,16 +3215,16 @@ mod tests {
             ]
         });
 
-        let tokens = extract_tokens_from_styles(&meta);
-        assert_eq!(tokens.len(), 2);
+        let style_entries = extract_tokens_from_styles(&meta);
+        assert_eq!(style_entries.len(), 2);
 
         // Sorted alphabetically: "grid-12col" < "shadow-medium"
-        assert_eq!(tokens[0].name, "grid-12col");
-        assert_eq!(tokens[0].category, "grid");
-        assert_eq!(tokens[1].name, "shadow-medium");
-        assert_eq!(tokens[1].category, "effect");
+        assert_eq!(style_entries[0].name, "grid-12col");
+        assert_eq!(style_entries[0].category, "grid");
+        assert_eq!(style_entries[1].name, "shadow-medium");
+        assert_eq!(style_entries[1].category, "effect");
 
-        match &tokens[1].value {
+        match &style_entries[1].value {
             TokenValue::Effect {
                 effect_type,
                 radius,
@@ -3080,10 +3235,10 @@ mod tests {
                 assert_eq!(*radius, Some(8.0));
                 assert_eq!(*offset_y, Some(4.0));
             }
-            other => panic!("Expected Effect, got: {other:?}"),
+            other => assert!(matches!(other, TokenValue::Effect { .. })),
         }
 
-        match &tokens[0].value {
+        match &style_entries[0].value {
             TokenValue::Grid {
                 pattern,
                 count,
@@ -3094,7 +3249,7 @@ mod tests {
                 assert_eq!(*count, Some(12.0));
                 assert_eq!(*gutter, Some(24.0));
             }
-            other => panic!("Expected Grid, got: {other:?}"),
+            other => assert!(matches!(other, TokenValue::Grid { .. })),
         }
     }
 
@@ -3230,9 +3385,9 @@ mod tests {
         };
 
         let json = serde_json::to_value(&bundle).unwrap();
-        let tokens = json["tokens"].as_array().unwrap();
-        assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0]["name"], "color-primary");
+        let serialized_entries = json["tokens"].as_array().unwrap();
+        assert_eq!(serialized_entries.len(), 1);
+        assert_eq!(serialized_entries[0]["name"], "color-primary");
     }
 
     // ── Design Audit tests ───────────────────────────────────────

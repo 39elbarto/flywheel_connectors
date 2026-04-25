@@ -4,9 +4,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
-    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
+    AgentHint, BaseConnector, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
+    CredentialId, FcpError, FcpResult, IdempotencyClass, OperationId, OperationInfo,
+    ProvisioningRecipe, ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier,
+    SelfCheckReport, StepId, ZoneId,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -197,6 +198,7 @@ pub struct BitbucketConnector {
     base: Arc<BaseConnector>,
     config: Option<BitbucketConfig>,
     client: Option<Arc<BitbucketClient>>,
+    verifier: Option<CapabilityVerifier>,
     session_id: Option<String>,
     request_count: AtomicU64,
     error_count: AtomicU64,
@@ -209,6 +211,7 @@ impl BitbucketConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("bitbucket"))),
             config: None,
             client: None,
+            verifier: None,
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
@@ -234,9 +237,14 @@ impl BitbucketConnector {
         let client = BitbucketClient::new(config.auth.clone(), Some(&config.base_url))
             .map_err(|e| e.to_fcp_error())?;
 
-        self.client = Some(Arc::new(client));
+        if let Some(old_client) = self.client.replace(Arc::new(client)) {
+            old_client.shutdown();
+        }
         self.config = Some(config);
+        self.verifier = None;
+        self.session_id = None;
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
         Ok(json!({}))
     }
 
@@ -252,18 +260,27 @@ impl BitbucketConnector {
             });
         }
 
+        let host_public_key = parse_host_public_key(&params)?;
+        let zone = parse_handshake_zone(&params)?;
+        self.verifier = Some(CapabilityVerifier::new(
+            host_public_key,
+            zone,
+            self.base.instance_id.clone(),
+        ));
+
         let session_id = params
             .get("session_id")
             .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
+            .map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_string);
 
-        self.session_id = session_id;
+        self.session_id = Some(session_id.clone());
         self.base.set_handshaken(true);
 
         Ok(json!({
             "protocol_version": "2.0",
             "connector_id": "fcp.bitbucket",
             "connector_version": "0.1.0",
+            "session_id": session_id,
             "capabilities": [
                 "bitbucket.user.read",
                 "bitbucket.repositories.read",
@@ -404,6 +421,16 @@ impl BitbucketConnector {
             })?;
 
         let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
+        let cap_id = bitbucket_capability_for_operation(operation)?;
+        validate_bitbucket_input(operation, &input)?;
+        let token = parse_capability_token(&params)?;
+        let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid operation_id".into(),
+        })?;
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        let resource_uris = bitbucket_resource_uris(operation, &input);
+        verifier.verify_bound(token, &cap_id, &op_id, &resource_uris)?;
 
         self.request_count.fetch_add(1, Ordering::Relaxed);
 
@@ -440,17 +467,89 @@ impl BitbucketConnector {
 
     /// Handle the `simulate` method.
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let operation = params
+        let Some(operation) = params
             .get("operation_id")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
+        else {
+            let error = FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing operation_id".into(),
+            };
+            return Ok(bitbucket_simulate_denied(
+                error.to_string(),
+                error.error_code(),
+                None,
+            ));
+        };
+        let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
 
-        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
+        let capability = match bitbucket_capability_for_operation(operation) {
+            Ok(capability) => capability,
+            Err(error) => {
+                let reason = if matches!(error, FcpError::OperationNotGranted { .. }) {
+                    "Unknown operation".to_string()
+                } else {
+                    error.to_string()
+                };
+                return Ok(bitbucket_simulate_denied(reason, error.error_code(), None));
+            }
+        };
 
-        Ok(json!({
-            "allowed": allowed,
-            "reason": if allowed { "Operation supported" } else { "Unknown operation" },
-        }))
+        if let Err(error) = validate_bitbucket_input(operation, &input) {
+            return Ok(bitbucket_simulate_denied(
+                error.to_string(),
+                error.error_code(),
+                None,
+            ));
+        }
+
+        if self.config.is_none() || self.client.is_none() {
+            return Ok(bitbucket_simulate_denied(
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+                None,
+            ));
+        }
+
+        let Some(verifier) = &self.verifier else {
+            return Ok(bitbucket_simulate_denied(
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+                None,
+            ));
+        };
+
+        let token = match parse_capability_token(&params) {
+            Ok(token) => token,
+            Err(error) => {
+                return Ok(bitbucket_simulate_denied(
+                    error.to_string(),
+                    error.error_code(),
+                    None,
+                ));
+            }
+        };
+        let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid operation_id".into(),
+        })?;
+        let resource_uris = bitbucket_resource_uris(operation, &input);
+
+        match verifier.verify_bound(token, &capability, &op_id, &resource_uris) {
+            Ok(_) => Ok(json!({"allowed": true, "reason": "Operation supported"})),
+            Err(error) => {
+                let missing = matches!(
+                    error,
+                    FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+                )
+                .then(|| capability.as_str().to_string());
+                Ok(bitbucket_simulate_denied(
+                    error.to_string(),
+                    error.error_code(),
+                    missing,
+                ))
+            }
+        }
     }
 
     /// Handle the `shutdown` method.
@@ -464,6 +563,8 @@ impl BitbucketConnector {
         }
         self.client = None;
         self.config = None;
+        self.verifier = None;
+        self.session_id = None;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
         Ok(json!({}))
@@ -625,6 +726,170 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         .ok_or_else(|| BitbucketError::InvalidInput(format!("Missing required field: {field}")))
 }
 
+fn parse_host_public_key(params: &serde_json::Value) -> FcpResult<[u8; 32]> {
+    let value = params
+        .get("host_public_key")
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing host_public_key".into(),
+        })?;
+    let bytes: Vec<u8> =
+        serde_json::from_value(value.clone()).map_err(|error| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("host_public_key must be an array of 32 bytes: {error}"),
+        })?;
+    bytes.try_into().map_err(|_| FcpError::InvalidRequest {
+        code: 1003,
+        message: "host_public_key must contain exactly 32 bytes".into(),
+    })
+}
+
+fn parse_handshake_zone(params: &serde_json::Value) -> FcpResult<ZoneId> {
+    params
+        .get("zone")
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(
+            || Ok(ZoneId::work()),
+            |zone| {
+                zone.parse().map_err(|error| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid zone: {error}"),
+                })
+            },
+        )
+}
+
+fn parse_capability_token(params: &serde_json::Value) -> FcpResult<CapabilityToken> {
+    let token = params
+        .get("capability_token")
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing capability_token".into(),
+        })?;
+    serde_json::from_value(token.clone()).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Invalid capability_token format: {error}"),
+    })
+}
+
+fn bitbucket_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
+    operations_info()
+        .into_iter()
+        .find(|info| info.id.as_ref() == operation)
+        .map(|info| info.capability)
+        .ok_or_else(|| FcpError::OperationNotGranted {
+            operation: operation.into(),
+        })
+}
+
+fn validate_bitbucket_input(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+    match operation {
+        "bitbucket.user.get" | "bitbucket.workspaces.list" => Ok(()),
+        "bitbucket.repositories.list" => {
+            require_str(input, "workspace").map_err(|error| error.to_fcp_error())?;
+            Ok(())
+        }
+        "bitbucket.repositories.get" => {
+            require_str(input, "workspace").map_err(|error| error.to_fcp_error())?;
+            require_str(input, "repo_slug").map_err(|error| error.to_fcp_error())?;
+            Ok(())
+        }
+        "bitbucket.pull_requests.list"
+        | "bitbucket.branches.list"
+        | "bitbucket.commits.list"
+        | "bitbucket.pipelines.list" => {
+            require_str(input, "workspace").map_err(|error| error.to_fcp_error())?;
+            require_str(input, "repo_slug").map_err(|error| error.to_fcp_error())?;
+            Ok(())
+        }
+        "bitbucket.pull_requests.get" => {
+            require_str(input, "workspace").map_err(|error| error.to_fcp_error())?;
+            require_str(input, "repo_slug").map_err(|error| error.to_fcp_error())?;
+            require_str(input, "pr_id").map_err(|error| error.to_fcp_error())?;
+            Ok(())
+        }
+        "bitbucket.pull_requests.create" => {
+            require_str(input, "workspace").map_err(|error| error.to_fcp_error())?;
+            require_str(input, "repo_slug").map_err(|error| error.to_fcp_error())?;
+            require_str(input, "title").map_err(|error| error.to_fcp_error())?;
+            require_str(input, "source_branch").map_err(|error| error.to_fcp_error())?;
+            if let Some(destination_branch) = input.get("destination_branch")
+                && destination_branch.as_str().is_none()
+            {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "destination_branch must be a string".into(),
+                });
+            }
+            Ok(())
+        }
+        _ => Err(FcpError::OperationNotGranted {
+            operation: operation.into(),
+        }),
+    }
+}
+
+fn bitbucket_resource_uris(operation: &str, input: &serde_json::Value) -> Vec<String> {
+    match operation {
+        "bitbucket.user.get" => vec!["bitbucket:user".into()],
+        "bitbucket.workspaces.list" => vec!["bitbucket:workspaces".into()],
+        "bitbucket.repositories.list" => input
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .map(|workspace| vec![format!("bitbucket:workspace:{workspace}:repositories")])
+            .unwrap_or_default(),
+        "bitbucket.repositories.get" => repository_resource(input)
+            .map(|resource| vec![resource])
+            .unwrap_or_default(),
+        "bitbucket.pull_requests.list" | "bitbucket.pull_requests.create" => {
+            repository_resource(input)
+                .map(|resource| vec![format!("{resource}:pull_requests")])
+                .unwrap_or_default()
+        }
+        "bitbucket.pull_requests.get" => repository_resource(input)
+            .map(|resource| {
+                let pr_id = input
+                    .get("pr_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("*");
+                vec![format!("{resource}:pull_requests:{pr_id}")]
+            })
+            .unwrap_or_default(),
+        "bitbucket.branches.list" => repository_resource(input)
+            .map(|resource| vec![format!("{resource}:branches")])
+            .unwrap_or_default(),
+        "bitbucket.commits.list" => repository_resource(input)
+            .map(|resource| vec![format!("{resource}:commits")])
+            .unwrap_or_default(),
+        "bitbucket.pipelines.list" => repository_resource(input)
+            .map(|resource| vec![format!("{resource}:pipelines")])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn repository_resource(input: &serde_json::Value) -> Option<String> {
+    let workspace = input.get("workspace").and_then(serde_json::Value::as_str)?;
+    let repo_slug = input.get("repo_slug").and_then(serde_json::Value::as_str)?;
+    Some(format!("bitbucket:repo:{workspace}/{repo_slug}"))
+}
+
+fn bitbucket_simulate_denied(
+    reason: impl Into<String>,
+    denial_code: impl Into<String>,
+    missing_capability: Option<String>,
+) -> serde_json::Value {
+    let mut response = json!({
+        "allowed": false,
+        "reason": reason.into(),
+        "denial_code": denial_code.into(),
+    });
+    if let Some(capability) = missing_capability {
+        response["missing_capabilities"] = json!([capability]);
+    }
+    response
+}
+
 /// Build the provisioning recipe for the Bitbucket connector.
 ///
 /// Bitbucket uses app passwords for API access. The recipe walks the user through
@@ -670,10 +935,10 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
     )
 }
 
-/// Reject base_url overrides with userinfo, query, or fragment. The
-/// BitbucketClient concatenates via format!("{}{path}", self.base_url)
+/// Reject `base_url` overrides with userinfo, query, or fragment. The
+/// `BitbucketClient` concatenates via `format!("{}{path}", self.base_url)`
 /// in every request method (client.rs:196/211); without this check, a
-/// base_url like `https://api.bitbucket.org/2.0?leak=x` would leak
+/// `base_url` like `https://api.bitbucket.org/2.0?leak=x` would leak
 /// attacker-chosen query values on every request and put the endpoint
 /// path after the `?` boundary. Userinfo would bake into every request
 /// URL and silently override the Authorization header. Matches the

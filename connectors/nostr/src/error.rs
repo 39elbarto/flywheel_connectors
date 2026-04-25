@@ -170,7 +170,7 @@ mod tests {
                 assert_eq!(code, 1001);
                 assert!(message.contains("relay_urls empty"));
             }
-            other => panic!("Expected InvalidRequest, got {other:?}"),
+            other => assert!(matches!(other, FcpError::InvalidRequest { .. })),
         }
     }
 
@@ -183,7 +183,7 @@ mod tests {
                 assert_eq!(code, 1005);
                 assert_eq!(message, "content is required");
             }
-            other => panic!("Expected InvalidRequest, got {other:?}"),
+            other => assert!(matches!(other, FcpError::InvalidRequest { .. })),
         }
     }
 
@@ -198,7 +198,7 @@ mod tests {
                 assert_eq!(service, "nostr");
                 assert!(retryable);
             }
-            other => panic!("Expected External, got {other:?}"),
+            other => assert!(matches!(other, FcpError::External { .. })),
         }
     }
 
@@ -219,7 +219,7 @@ mod tests {
                 assert_eq!(service, "nostr");
                 assert!(retryable);
             }
-            other => panic!("Expected External, got {other:?}"),
+            other => assert!(matches!(other, FcpError::External { .. })),
         }
     }
 

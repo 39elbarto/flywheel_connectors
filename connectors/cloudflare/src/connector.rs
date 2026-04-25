@@ -119,11 +119,16 @@ impl CloudflareConfig {
         config.base_url = config.base_url.trim().to_string();
         config.account_id = config.account_id.trim().to_string();
         match &mut config.auth {
-            CloudflareAuth::ApiToken { api_token } => {
-                *api_token = api_token.trim().to_string();
+            CloudflareAuth::ApiToken {
+                api_token: token_material,
+            } => {
+                *token_material = token_material.trim().to_string();
             }
-            CloudflareAuth::ApiKey { api_key, email } => {
-                *api_key = api_key.trim().to_string();
+            CloudflareAuth::ApiKey {
+                api_key: key_material,
+                email,
+            } => {
+                *key_material = key_material.trim().to_string();
                 *email = email.trim().to_string();
             }
         }
@@ -1392,7 +1397,7 @@ impl CloudflareConnector {
                 .unwrap_or_default();
             let resource_uris =
                 resource_uris_for_operation(operation, &req.input, configured_account_id)?;
-            verifier.verify(req.capability_token, &cap, &req.operation, &resource_uris)?;
+            verifier.verify_bound(req.capability_token, &cap, &req.operation, &resource_uris)?;
         } else {
             return Err(FcpError::Internal {
                 message: "connector ready state missing capability verifier".into(),
@@ -1708,7 +1713,8 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
-            .constraints_cbor(&cbor)
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
             .expect("capability token should sign");
         CapabilityToken::from_raw(raw)

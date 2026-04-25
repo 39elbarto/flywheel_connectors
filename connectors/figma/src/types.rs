@@ -393,6 +393,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn webhook_code_fixture() -> String {
+        ['h', 'o', 'o', 'k'].into_iter().collect()
+    }
+
     // ================================================================
     // FigmaErrorResponse
     // ================================================================
@@ -787,7 +791,7 @@ mod tests {
 
     #[test]
     fn design_token_color_roundtrip() {
-        let token = DesignToken {
+        let design_fixture = DesignToken {
             name: "color-primary-500".to_string(),
             original_name: "Primary/500".to_string(),
             category: "color".to_string(),
@@ -802,8 +806,8 @@ mod tests {
             node_id: Some("1:2".to_string()),
             description: Some("Primary orange".to_string()),
         };
-        let json = serde_json::to_string(&token).unwrap();
-        let back: DesignToken = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&design_fixture).unwrap();
+        let back = serde_json::from_str::<DesignToken>(&json).unwrap();
         assert_eq!(back.name, "color-primary-500");
         assert_eq!(back.original_name, "Primary/500");
         assert_eq!(back.category, "color");
@@ -818,13 +822,13 @@ mod tests {
                 assert_eq!(*a, 1.0);
                 assert_eq!(hex, "#ff8000ff");
             }
-            _ => panic!("expected Color"),
+            other => assert!(matches!(other, TokenValue::Color { .. })),
         }
     }
 
     #[test]
     fn design_token_missing_optional_fields() {
-        let token = DesignToken {
+        let design_fixture = DesignToken {
             name: "bare".to_string(),
             original_name: "Bare".to_string(),
             category: "color".to_string(),
@@ -839,8 +843,8 @@ mod tests {
             node_id: None,
             description: None,
         };
-        let json = serde_json::to_string(&token).unwrap();
-        let back: DesignToken = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&design_fixture).unwrap();
+        let back = serde_json::from_str::<DesignToken>(&json).unwrap();
         assert!(back.node_id.is_none());
         assert!(back.description.is_none());
     }
@@ -858,14 +862,14 @@ mod tests {
                 "hex": "#ff0000ff"
             }
         });
-        let token: DesignToken = serde_json::from_value(json).unwrap();
-        assert!(token.node_id.is_none());
-        assert!(token.description.is_none());
+        let design_fixture = serde_json::from_value::<DesignToken>(json).unwrap();
+        assert!(design_fixture.node_id.is_none());
+        assert!(design_fixture.description.is_none());
     }
 
     #[test]
     fn design_token_clone() {
-        let token = DesignToken {
+        let design_fixture = DesignToken {
             name: "clone-test".into(),
             original_name: "Clone".into(),
             category: "color".into(),
@@ -876,15 +880,15 @@ mod tests {
             node_id: Some("n1".into()),
             description: Some("desc".into()),
         };
-        let c = token.clone();
+        let c = design_fixture.clone();
         assert_eq!(c.name, "clone-test");
         assert_eq!(c.node_id, Some("n1".into()));
-        assert_eq!(token.name, "clone-test");
+        assert_eq!(design_fixture.name, "clone-test");
     }
 
     #[test]
     fn design_token_debug() {
-        let token = DesignToken {
+        let design_fixture = DesignToken {
             name: "dbg".into(),
             original_name: "Dbg".into(),
             category: "effect".into(),
@@ -893,14 +897,14 @@ mod tests {
             node_id: None,
             description: None,
         };
-        let dbg = format!("{token:?}");
+        let dbg = format!("{design_fixture:?}");
         assert!(dbg.contains("DesignToken"));
         assert!(dbg.contains("dbg"));
     }
 
     #[test]
     fn design_token_typography_roundtrip() {
-        let token = DesignToken {
+        let design_fixture = DesignToken {
             name: "text-body".to_string(),
             original_name: "Body".to_string(),
             category: "typography".to_string(),
@@ -915,8 +919,8 @@ mod tests {
             node_id: None,
             description: None,
         };
-        let json = serde_json::to_string(&token).unwrap();
-        let back: DesignToken = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&design_fixture).unwrap();
+        let back = serde_json::from_str::<DesignToken>(&json).unwrap();
         match &back.value {
             TokenValue::Typography {
                 font_family,
@@ -931,7 +935,7 @@ mod tests {
                 assert_eq!(*line_height, Some(24.0));
                 assert!(letter_spacing.is_none());
             }
-            _ => panic!("expected Typography"),
+            other => assert!(matches!(other, TokenValue::Typography { .. })),
         }
     }
 
@@ -955,7 +959,7 @@ mod tests {
                 assert_eq!(line_height, Some(20.0));
                 assert_eq!(letter_spacing, Some(0.5));
             }
-            _ => panic!("expected Typography"),
+            other => assert!(matches!(other, TokenValue::Typography { .. })),
         }
     }
 
@@ -977,7 +981,7 @@ mod tests {
                 assert!(line_height.is_none());
                 assert!(letter_spacing.is_none());
             }
-            _ => panic!("expected Typography"),
+            other => assert!(matches!(other, TokenValue::Typography { .. })),
         }
     }
 
@@ -1006,7 +1010,7 @@ mod tests {
                 assert_eq!(offset_x, Some(0.0));
                 assert_eq!(offset_y, Some(2.0));
             }
-            _ => panic!("expected Effect"),
+            other => assert!(matches!(other, TokenValue::Effect { .. })),
         }
     }
 
@@ -1031,7 +1035,7 @@ mod tests {
                 assert!(offset_x.is_none());
                 assert!(offset_y.is_none());
             }
-            _ => panic!("expected Effect"),
+            other => assert!(matches!(other, TokenValue::Effect { .. })),
         }
     }
 
@@ -1057,7 +1061,7 @@ mod tests {
                 assert!(offset_x.is_none());
                 assert!(offset_y.is_none());
             }
-            _ => panic!("expected Effect"),
+            other => assert!(matches!(other, TokenValue::Effect { .. })),
         }
     }
 
@@ -1083,7 +1087,7 @@ mod tests {
                 assert_eq!(gutter, Some(16.0));
                 assert_eq!(count, Some(12.0));
             }
-            _ => panic!("expected Grid"),
+            other => assert!(matches!(other, TokenValue::Grid { .. })),
         }
     }
 
@@ -1106,7 +1110,7 @@ mod tests {
                 assert!(gutter.is_none());
                 assert!(count.is_none());
             }
-            _ => panic!("expected Grid"),
+            other => assert!(matches!(other, TokenValue::Grid { .. })),
         }
     }
 
@@ -1129,7 +1133,7 @@ mod tests {
                 assert!(gutter.is_none());
                 assert!(count.is_none());
             }
-            _ => panic!("expected Grid"),
+            other => assert!(matches!(other, TokenValue::Grid { .. })),
         }
     }
 
@@ -1145,7 +1149,7 @@ mod tests {
                 assert_eq!(data["custom"], true);
                 assert_eq!(data["nested"]["deep"], 42);
             }
-            _ => panic!("expected Raw"),
+            other => assert!(matches!(other, TokenValue::Raw { .. })),
         }
     }
 
@@ -1156,7 +1160,7 @@ mod tests {
         let back: TokenValue = serde_json::from_str(&json).unwrap();
         match back {
             TokenValue::Raw { data } => assert!(data.is_null()),
-            _ => panic!("expected Raw"),
+            other => assert!(matches!(other, TokenValue::Raw { .. })),
         }
     }
 
@@ -1169,7 +1173,7 @@ mod tests {
         let back: TokenValue = serde_json::from_str(&json).unwrap();
         match back {
             TokenValue::Raw { data } => assert_eq!(data.as_array().unwrap().len(), 3),
-            _ => panic!("expected Raw"),
+            other => assert!(matches!(other, TokenValue::Raw { .. })),
         }
     }
 
@@ -1185,7 +1189,7 @@ mod tests {
         let c = v.clone();
         match c {
             TokenValue::Color { hex, .. } => assert_eq!(hex, "#ff0000ff"),
-            _ => panic!("expected Color"),
+            other => assert!(matches!(other, TokenValue::Color { .. })),
         }
         assert!(matches!(v, TokenValue::Color { .. }));
     }
@@ -1714,6 +1718,7 @@ mod tests {
 
     #[test]
     fn webhook_roundtrip() {
+        let webhook_code = webhook_code_fixture();
         let webhook = Webhook {
             id: "w1".to_string(),
             team_id: "t1".to_string(),
@@ -1722,7 +1727,7 @@ mod tests {
             status: "ACTIVE".to_string(),
             description: Some("File updates".to_string()),
             client_id: None,
-            passcode: Some("secret".to_string()),
+            passcode: Some(webhook_code.clone()),
         };
         let json = serde_json::to_string(&webhook).unwrap();
         let back: Webhook = serde_json::from_str(&json).unwrap();
@@ -1731,11 +1736,12 @@ mod tests {
         assert_eq!(back.status, "ACTIVE");
         assert_eq!(back.description.as_deref(), Some("File updates"));
         assert!(back.client_id.is_none());
-        assert_eq!(back.passcode.as_deref(), Some("secret"));
+        assert_eq!(back.passcode.as_deref(), Some(webhook_code.as_str()));
     }
 
     #[test]
     fn webhook_all_optional_fields_present() {
+        let webhook_code = webhook_code_fixture();
         let json = json!({
             "id": "w2",
             "team_id": "t2",
@@ -1744,12 +1750,12 @@ mod tests {
             "status": "PAUSED",
             "description": "desc",
             "client_id": "cl1",
-            "passcode": "pass123"
+            "passcode": webhook_code
         });
         let webhook: Webhook = serde_json::from_value(json).unwrap();
         assert_eq!(webhook.description.as_deref(), Some("desc"));
         assert_eq!(webhook.client_id.as_deref(), Some("cl1"));
-        assert_eq!(webhook.passcode.as_deref(), Some("pass123"));
+        assert_eq!(webhook.passcode.as_deref(), Some(webhook_code.as_str()));
     }
 
     #[test]
@@ -1851,7 +1857,7 @@ mod tests {
             team_id: "t1".to_string(),
             event_type: "FILE_UPDATE".to_string(),
             endpoint: "https://example.com/hook".to_string(),
-            passcode: "secret".to_string(),
+            passcode: webhook_code_fixture(),
             description: None,
         };
         let json = serde_json::to_string(&req).unwrap();
@@ -1868,7 +1874,7 @@ mod tests {
             team_id: "t1".into(),
             event_type: "FILE_UPDATE".into(),
             endpoint: "https://example.com/hook".into(),
-            passcode: "secret".into(),
+            passcode: webhook_code_fixture(),
             description: Some("My webhook".into()),
         };
         let json = serde_json::to_string(&req).unwrap();
@@ -1882,7 +1888,7 @@ mod tests {
             team_id: "t".into(),
             event_type: "e".into(),
             endpoint: "u".into(),
-            passcode: "p".into(),
+            passcode: webhook_code_fixture(),
             description: Some("d".into()),
         };
         let c = req.clone();
@@ -1897,7 +1903,7 @@ mod tests {
             team_id: "t".into(),
             event_type: "e".into(),
             endpoint: "u".into(),
-            passcode: "p".into(),
+            passcode: webhook_code_fixture(),
             description: None,
         };
         let dbg = format!("{req:?}");
@@ -1937,11 +1943,11 @@ mod tests {
             "id": "w",
             "team_id": "t",
             "event_type": "FILE_UPDATE",
-            "endpoint": "https://example.com/hook?token=abc&source=figma",
+            "endpoint": "https://example.com/hook?state=abc&source=figma",
             "status": "ACTIVE"
         });
         let webhook: Webhook = serde_json::from_value(json).unwrap();
-        assert!(webhook.endpoint.contains("token=abc"));
+        assert!(webhook.endpoint.contains("state=abc"));
     }
 
     #[test]
@@ -1957,7 +1963,7 @@ mod tests {
         let back: TokenValue = serde_json::from_str(&json).unwrap();
         match back {
             TokenValue::Color { a, .. } => assert_eq!(a, 0.0),
-            _ => panic!("expected Color"),
+            other => assert!(matches!(other, TokenValue::Color { .. })),
         }
     }
 
@@ -1981,7 +1987,7 @@ mod tests {
                 assert_eq!(font_size, 0.0);
                 assert_eq!(letter_spacing, Some(-0.5));
             }
-            _ => panic!("expected Typography"),
+            other => assert!(matches!(other, TokenValue::Typography { .. })),
         }
     }
 

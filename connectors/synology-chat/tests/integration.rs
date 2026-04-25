@@ -59,7 +59,8 @@ fn capability_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .expect("token should sign");
     CapabilityToken::from_raw(raw)
@@ -170,7 +171,7 @@ async fn configure_rejects_invalid_incoming_url_scheme() {
             assert_eq!(code, 1003);
             assert!(message.contains("http or https"));
         }
-        other => panic!("unexpected error: {other:?}"),
+        other => assert!(matches!(other, FcpError::InvalidRequest { .. })),
     }
 }
 
@@ -190,7 +191,7 @@ async fn configure_rejects_zero_timeout() {
             assert_eq!(code, 1003);
             assert!(message.contains("greater than zero"));
         }
-        other => panic!("unexpected error: {other:?}"),
+        other => assert!(matches!(other, FcpError::InvalidRequest { .. })),
     }
 }
 
@@ -314,7 +315,7 @@ async fn send_payload_rejects_non_object_payloads() {
             assert_eq!(code, 1005);
             assert!(message.contains("payload must be a JSON object"));
         }
-        other => panic!("unexpected error: {other:?}"),
+        other => assert!(matches!(other, FcpError::InvalidRequest { .. })),
     }
 }
 
@@ -353,7 +354,7 @@ async fn send_message_surfaces_retryable_api_errors() {
             assert!(retryable);
             assert!(message.contains("temporarily unavailable"));
         }
-        other => panic!("unexpected error: {other:?}"),
+        other => assert!(matches!(other, FcpError::External { .. })),
     }
 }
 
@@ -469,7 +470,7 @@ async fn ingest_outgoing_webhook_rejects_token_mismatch() {
             assert_eq!(code, 2001);
             assert!(message.contains("token verification failed"));
         }
-        other => panic!("unexpected error: {other:?}"),
+        other => assert!(matches!(other, FcpError::Unauthorized { .. })),
     }
 }
 
@@ -510,7 +511,7 @@ async fn ingest_outgoing_webhook_rejects_non_string_token_values() {
             assert_eq!(code, 1005);
             assert!(message.contains("payload.token must be a non-empty string"));
         }
-        other => panic!("unexpected error: {other:?}"),
+        other => assert!(matches!(other, FcpError::InvalidRequest { .. })),
     }
 }
 
@@ -551,6 +552,6 @@ async fn ingest_outgoing_webhook_rejects_negative_timestamps() {
             assert_eq!(code, 1005);
             assert!(message.contains("payload.timestamp must be a non-negative integer timestamp"));
         }
-        other => panic!("unexpected error: {other:?}"),
+        other => assert!(matches!(other, FcpError::InvalidRequest { .. })),
     }
 }

@@ -37,7 +37,7 @@ fn capability_for_operation(op: &str) -> &str {
     match op {
         "gmail.send_message" | "gmail.send_draft" => "gmail.send",
         "gmail.sync_history" => "gmail.history.read",
-        "gmail.modify_message" | "gmail.get_draft" => "gmail.write",
+        "gmail.modify_message" | "gmail.get_draft" | "gmail.create_draft" => "gmail.write",
         "gmail.trash_message" => "gmail.delete",
         _ => "gmail.read",
     }
@@ -60,7 +60,8 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .unwrap()
         .sign(signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)
@@ -556,6 +557,30 @@ async fn get_draft_success() {
     assert!(draft.message.is_some());
 }
 
+/// `create_draft` creates a saved draft without sending it.
+#[fcp_async_core::runtime::test]
+async fn create_draft_success() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/users/me/drafts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "draft-created",
+            "message": message_response("draft-msg", "draft-thread")
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let client = GmailClient::new("test-token")
+        .unwrap()
+        .with_base_url(mock_server.uri());
+
+    let raw = "RnJvbTogdGVzdEBleGFtcGxlLmNvbQ==";
+    let draft = client.create_draft(raw).await.unwrap();
+    assert_eq!(draft.id, "draft-created");
+    assert!(draft.message.is_some());
+}
+
 /// `send_draft` sends a draft and returns the sent message.
 #[fcp_async_core::runtime::test]
 async fn send_draft_success() {
@@ -703,6 +728,42 @@ async fn invoke_send_message_accepts_structured_fields() {
 
     assert_eq!(result["message"]["id"], "msg-sent");
     assert_eq!(result["message"]["threadId"], "thread-sent");
+}
+
+/// Invoke `gmail.create_draft` through the connector with structured fields.
+#[fcp_async_core::runtime::test]
+async fn invoke_create_draft_accepts_structured_fields() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/users/me/drafts"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "draft-created",
+            "message": message_response("draft-msg", "draft-thread"),
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GmailConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["gmail.write"]).await;
+    let token = generate_valid_token(&signing_key, "gmail.create_draft");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "gmail.create_draft",
+            "input": {
+                "to": "recipient@example.com",
+                "subject": "Structured draft",
+                "body": "Hello draft!"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["draft"]["id"], "draft-created");
+    assert_eq!(result["draft"]["message"]["id"], "draft-msg");
 }
 
 /// Invoke `gmail.trash_message` through the connector.
@@ -960,12 +1021,12 @@ const fn manifest_approval_name(mode: ManifestApprovalMode) -> &'static str {
     }
 }
 
-/// Shared Gmail generation now matches the canonical list/send metadata surface.
+/// Shared Gmail generation now matches the canonical list/send/history metadata
+/// surface.
 ///
-/// The remaining drift is that `sync_history` is still connector-local rather
-/// than represented in the handwritten manifest, and it intentionally keeps a
-/// more granular `gmail.history.read` capability than the generated Discovery
-/// `gmail.users.messages.list_history` operation.
+/// `sync_history` is a connector-local operation over the generated Discovery
+/// history endpoint, and intentionally keeps a more granular
+/// `gmail.history.read` capability than `gmail.users.messages.list_history`.
 #[fcp_async_core::runtime::test]
 async fn shared_generation_overlap_matches_canonical_gmail_metadata() {
     let service = DiscoveryServiceId::new("gmail", "v1").expect("valid gmail service id");
@@ -1051,15 +1112,18 @@ async fn shared_generation_overlap_matches_canonical_gmail_metadata() {
         .iter()
         .find(|op| op["id"] == "gmail.sync_history")
         .expect("introspection history op");
+    let manifest_history = manifest
+        .provides
+        .operations
+        .get("gmail.sync_history")
+        .expect("manifest history op");
 
     assert_eq!(generated_history.capability, "gmail.read");
+    assert_eq!(manifest_history.capability.as_str(), "gmail.history.read");
+    assert_eq!(
+        manifest_approval_name(manifest_history.requires_approval),
+        "none"
+    );
     assert_eq!(introspection_history["capability"], "gmail.history.read");
     assert!(introspection_history["requires_approval"].is_null());
-    assert!(
-        !manifest
-            .provides
-            .operations
-            .contains_key("gmail.sync_history"),
-        "manifest still lacks the sync_history overlap row"
-    );
 }

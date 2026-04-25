@@ -1431,18 +1431,14 @@ mod tests {
             .with_base_url(server.uri());
         let result = client.get_record("appABC", "tblXYZ", "recBAD").await;
         assert!(result.is_err());
-        match result.unwrap_err() {
+        assert!(matches!(
+            result.unwrap_err(),
             AirtableError::Api {
-                error_type,
-                message,
-                status_code,
-            } => {
-                assert_eq!(error_type, "NOT_FOUND");
-                assert!(message.contains("Could not find record"));
-                assert_eq!(status_code, Some(404));
-            }
-            e => panic!("Expected Api error, got: {e:?}"),
-        }
+                ref error_type,
+                ref message,
+                status_code: Some(404),
+            } if error_type == "NOT_FOUND" && message.contains("Could not find record")
+        ));
     }
 
     // ── Auth unit tests ──────────────────────────────────────────

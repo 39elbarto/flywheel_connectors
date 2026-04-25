@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:3bc0a10ecf2d559efd130204115fdb7aa4652e4f00524cd24820caa07dac0426"
+interface_hash = "blake3-256:fcp.interface.v2:57f6eaa20db0cbb0ca6ba7678a4a7d2f6f44de3348e6214dcc20ad5138e3b0e6"
 
 [connector]
 id = "fcp.microsoft365"

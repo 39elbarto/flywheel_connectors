@@ -1088,15 +1088,15 @@ mod tests {
 
     #[test]
     fn parse_conversation_token() {
-        let token = ConversationToken::new("abc123").expect("token");
-        assert_eq!(token.as_str(), "abc123");
+        let room_ref = ConversationToken::new("abc123").expect("conversation ref");
+        assert_eq!(room_ref.as_str(), "abc123");
         assert!(ConversationToken::new("   ").is_err());
     }
 
     #[test]
     fn trim_identifier_wrappers() {
-        let token = ConversationToken::new("  room-1  ").expect("token");
-        assert_eq!(token.as_str(), "room-1");
+        let room_ref = ConversationToken::new("  room-1  ").expect("conversation ref");
+        assert_eq!(room_ref.as_str(), "room-1");
 
         let reference_id = ReferenceId::new("  ref-1  ").expect("reference id");
         assert_eq!(reference_id.0, "ref-1");

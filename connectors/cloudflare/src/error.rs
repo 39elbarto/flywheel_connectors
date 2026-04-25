@@ -165,12 +165,15 @@ mod tests {
     }
 
     #[test]
-    fn not_found_maps_to_resource_not_found() {
+    fn not_found_maps_to_resource_not_found() -> Result<(), String> {
         let err = CloudflareError::NotFound("zone abc".into());
         let fcp = err.to_fcp_error();
         match fcp {
-            FcpError::ResourceNotFound { resource } => assert_eq!(resource, "zone abc"),
-            other => panic!("Expected ResourceNotFound, got {other:?}"),
+            FcpError::ResourceNotFound { resource } => {
+                assert_eq!(resource, "zone abc");
+                Ok(())
+            }
+            other => Err(format!("Expected ResourceNotFound, got {other:?}")),
         }
     }
 
@@ -190,30 +193,34 @@ mod tests {
     }
 
     #[test]
-    fn config_error_maps_to_invalid_request() {
+    fn config_error_maps_to_invalid_request() -> Result<(), String> {
         let err = CloudflareError::Config("missing api_token".into());
         let fcp = err.to_fcp_error();
         match fcp {
             FcpError::InvalidRequest { code, message } => {
                 assert_eq!(code, 1001);
                 assert!(message.contains("missing api_token"));
+                Ok(())
             }
-            other => panic!("Expected InvalidRequest, got {other:?}"),
+            other => Err(format!("Expected InvalidRequest, got {other:?}")),
         }
     }
 
     #[test]
-    fn zone_required_maps_to_invalid_request() {
+    fn zone_required_maps_to_invalid_request() -> Result<(), String> {
         let err = CloudflareError::ZoneRequired("zone_id is required".into());
         let fcp = err.to_fcp_error();
         match fcp {
-            FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1003),
-            other => panic!("Expected InvalidRequest, got {other:?}"),
+            FcpError::InvalidRequest { code, .. } => {
+                assert_eq!(code, 1003);
+                Ok(())
+            }
+            other => Err(format!("Expected InvalidRequest, got {other:?}")),
         }
     }
 
     #[test]
-    fn rate_limited_maps_to_fcp_rate_limited() {
+    fn rate_limited_maps_to_fcp_rate_limited() -> Result<(), String> {
         let err = CloudflareError::RateLimited {
             retry_after_ms: 3_000,
         };
@@ -225,8 +232,9 @@ mod tests {
             } => {
                 assert_eq!(retry_after_ms, 3_000);
                 assert!(violation.is_none());
+                Ok(())
             }
-            other => panic!("Expected RateLimited, got {other:?}"),
+            other => Err(format!("Expected RateLimited, got {other:?}")),
         }
     }
 

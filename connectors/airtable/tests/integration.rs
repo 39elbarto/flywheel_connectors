@@ -50,7 +50,8 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + chrono::Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)
@@ -822,24 +823,23 @@ async fn invoke_download_attachment_rejects_disallowed_host() {
     .await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.download_attachment");
+    let capability = generate_valid_token(&signing_key, "airtable.download_attachment");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.download_attachment",
             "input": {
                 "url": "https://evil.example.com/file.txt?sig=super-secret-token"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
-    match result.unwrap_err() {
-        FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("evil.example.com"));
-            assert!(!message.contains("super-secret-token"));
-        }
-        other => panic!("Expected InvalidRequest, got {other:?}"),
-    }
+    assert!(matches!(
+        result.unwrap_err(),
+        FcpError::InvalidRequest { ref message, .. }
+            if message.contains("evil.example.com")
+                && !message.contains("super-secret-token")
+    ));
 }
 
 #[fcp_async_core::runtime::test]
@@ -859,12 +859,12 @@ async fn invoke_list_bases_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.list_bases"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.list_bases");
+    let capability = generate_valid_token(&signing_key, "airtable.list_bases");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_bases",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -904,7 +904,7 @@ async fn invoke_get_record_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.get_record"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.get_record");
+    let capability = generate_valid_token(&signing_key, "airtable.get_record");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.get_record",
@@ -913,7 +913,7 @@ async fn invoke_get_record_through_connector() {
                 "table_id": "Tasks",
                 "record_id": "rec001"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -990,7 +990,7 @@ async fn invoke_get_record_expands_linked_records_and_marks_missing_targets() {
     setup_handshake(&mut connector, &signing_key, &["airtable.get_record"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.get_record");
+    let capability = generate_valid_token(&signing_key, "airtable.get_record");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.get_record",
@@ -1003,7 +1003,7 @@ async fn invoke_get_record_expands_linked_records_and_marks_missing_targets() {
                 "linked_record_depth": 2,
                 "linked_record_limit": 5
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1051,12 +1051,12 @@ async fn invoke_list_tables_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.list_tables"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.list_tables");
+    let capability = generate_valid_token(&signing_key, "airtable.list_tables");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_tables",
             "input": { "base_id": "appABC123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1095,22 +1095,20 @@ async fn invoke_get_table_rejects_ambiguous_table_name() {
     setup_handshake(&mut connector, &signing_key, &["airtable.get_table"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.get_table");
+    let capability = generate_valid_token(&signing_key, "airtable.get_table");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.get_table",
             "input": { "base_id": "appABC123", "table_ref": "Tasks" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
     assert!(result.is_err());
-    match result.unwrap_err() {
-        FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("Ambiguous table_ref"));
-        }
-        other => panic!("Expected InvalidRequest, got {other:?}"),
-    }
+    assert!(matches!(
+        result.unwrap_err(),
+        FcpError::InvalidRequest { ref message, .. } if message.contains("Ambiguous table_ref")
+    ));
 }
 
 #[fcp_async_core::runtime::test]
@@ -1139,7 +1137,7 @@ async fn invoke_list_fields_resolves_ids_and_names() {
     setup_handshake(&mut connector, &signing_key, &["airtable.list_fields"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.list_fields");
+    let capability = generate_valid_token(&signing_key, "airtable.list_fields");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_fields",
@@ -1148,7 +1146,7 @@ async fn invoke_list_fields_resolves_ids_and_names() {
                 "table_ref": "tblTASK",
                 "field_refs": ["fldA", "Status"]
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1196,12 +1194,12 @@ async fn invoke_get_base_schema_marks_formula_and_system_fields_read_only() {
     setup_handshake(&mut connector, &signing_key, &["airtable.get_base_schema"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.get_base_schema");
+    let capability = generate_valid_token(&signing_key, "airtable.get_base_schema");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.get_base_schema",
             "input": { "base_id": "appABC123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1249,12 +1247,12 @@ async fn invoke_list_views_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.list_views"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.list_views");
+    let capability = generate_valid_token(&signing_key, "airtable.list_views");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_views",
             "input": { "base_id": "appABC123", "table_ref": "tblTASK" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1290,7 +1288,7 @@ async fn invoke_get_view_rejects_ambiguous_view_name() {
     setup_handshake(&mut connector, &signing_key, &["airtable.get_view"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.get_view");
+    let capability = generate_valid_token(&signing_key, "airtable.get_view");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.get_view",
@@ -1299,17 +1297,15 @@ async fn invoke_get_view_rejects_ambiguous_view_name() {
                 "table_ref": "tblTASK",
                 "view_ref": "Grid"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
     assert!(result.is_err());
-    match result.unwrap_err() {
-        FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("Ambiguous view_ref"));
-        }
-        other => panic!("Expected InvalidRequest, got {other:?}"),
-    }
+    assert!(matches!(
+        result.unwrap_err(),
+        FcpError::InvalidRequest { ref message, .. } if message.contains("Ambiguous view_ref")
+    ));
 }
 
 #[fcp_async_core::runtime::test]
@@ -1362,7 +1358,7 @@ async fn invoke_list_view_records_through_connector() {
     .await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.list_view_records");
+    let capability = generate_valid_token(&signing_key, "airtable.list_view_records");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_view_records",
@@ -1375,7 +1371,7 @@ async fn invoke_list_view_records_through_connector() {
                 "page_size": 2,
                 "offset": "itr123"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1414,7 +1410,7 @@ async fn invoke_list_view_records_requires_fields() {
     .await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.list_view_records");
+    let capability = generate_valid_token(&signing_key, "airtable.list_view_records");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_view_records",
@@ -1423,17 +1419,15 @@ async fn invoke_list_view_records_requires_fields() {
                 "table_ref": "tblTASK",
                 "view_ref": "viwOPEN"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
     assert!(result.is_err());
-    match result.unwrap_err() {
-        FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("fields"));
-        }
-        other => panic!("Expected InvalidRequest, got {other:?}"),
-    }
+    assert!(matches!(
+        result.unwrap_err(),
+        FcpError::InvalidRequest { ref message, .. } if message.contains("fields")
+    ));
 }
 
 #[fcp_async_core::runtime::test]
@@ -1459,7 +1453,7 @@ async fn invoke_list_records_rejects_control_chars_in_filter_formula() {
     setup_handshake(&mut connector, &signing_key, &["airtable.list_records"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.list_records");
+    let capability = generate_valid_token(&signing_key, "airtable.list_records");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_records",
@@ -1468,17 +1462,16 @@ async fn invoke_list_records_rejects_control_chars_in_filter_formula() {
                 "table_id": "tblTASK",
                 "filter_by_formula": "{Name} = \"Alpha\"\nOR(1,1)"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
     assert!(result.is_err());
-    match result.unwrap_err() {
-        FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("control characters"));
-        }
-        other => panic!("Expected InvalidRequest, got {other:?}"),
-    }
+    assert!(matches!(
+        result.unwrap_err(),
+        FcpError::InvalidRequest { ref message, .. }
+            if message.contains("control characters")
+    ));
 }
 
 #[fcp_async_core::runtime::test]
@@ -1520,7 +1513,7 @@ async fn invoke_list_records_marks_formula_field_metadata_and_maps_formula_error
     setup_handshake(&mut connector, &signing_key, &["airtable.list_records"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.list_records");
+    let capability = generate_valid_token(&signing_key, "airtable.list_records");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_records",
@@ -1530,7 +1523,7 @@ async fn invoke_list_records_marks_formula_field_metadata_and_maps_formula_error
                 "fields": ["Name", "Formula Score"],
                 "filter_by_formula": "{Formula Score} > 10"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1593,7 +1586,7 @@ async fn invoke_list_records_marks_formula_field_metadata_and_maps_formula_error
                 "table_id": "tblTASK",
                 "filter_by_formula": "{Missing Field} = \"Alpha\""
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -1658,7 +1651,7 @@ async fn invoke_list_records_expands_linked_cycles_without_refetching_root() {
     setup_handshake(&mut connector, &signing_key, &["airtable.list_records"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.list_records");
+    let capability = generate_valid_token(&signing_key, "airtable.list_records");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_records",
@@ -1669,7 +1662,7 @@ async fn invoke_list_records_expands_linked_cycles_without_refetching_root() {
                 "linked_field_refs": ["Parent Task"],
                 "linked_record_depth": 2
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1746,7 +1739,7 @@ async fn invoke_list_records_marks_truncated_linked_records_when_limit_is_exhaus
     setup_handshake(&mut connector, &signing_key, &["airtable.list_records"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.list_records");
+    let capability = generate_valid_token(&signing_key, "airtable.list_records");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_records",
@@ -1758,7 +1751,7 @@ async fn invoke_list_records_marks_truncated_linked_records_when_limit_is_exhaus
                 "linked_record_depth": 1,
                 "linked_record_limit": 1
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1812,22 +1805,22 @@ async fn discovery_ops_reuse_schema_cache_within_ttl() {
     .await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let list_tables_token = generate_valid_token(&signing_key, "airtable.list_tables");
+    let list_tables_capability = generate_valid_token(&signing_key, "airtable.list_tables");
     connector
         .handle_invoke(json!({
             "operation": "airtable.list_tables",
             "input": { "base_id": "appABC123" },
-            "capability_token": list_tables_token
+            "capability_token": list_tables_capability
         }))
         .await
         .unwrap();
 
-    let list_fields_token = generate_valid_token(&signing_key, "airtable.list_fields");
+    let list_fields_capability = generate_valid_token(&signing_key, "airtable.list_fields");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_fields",
             "input": { "base_id": "appABC123", "table_ref": "tblTASK" },
-            "capability_token": list_fields_token
+            "capability_token": list_fields_capability
         }))
         .await
         .unwrap();
@@ -1867,7 +1860,7 @@ async fn invoke_create_record_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.create_record"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.create_record");
+    let capability = generate_valid_token(&signing_key, "airtable.create_record");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.create_record",
@@ -1876,7 +1869,7 @@ async fn invoke_create_record_through_connector() {
                 "table_id": "Tasks",
                 "fields": { "Name": "Created" }
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1924,7 +1917,7 @@ async fn invoke_create_records_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.create_records"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.create_records");
+    let capability = generate_valid_token(&signing_key, "airtable.create_records");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.create_records",
@@ -1936,7 +1929,7 @@ async fn invoke_create_records_through_connector() {
                     { "fields": { "Name": "Created B" } }
                 ]
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1977,7 +1970,7 @@ async fn invoke_delete_record_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.delete_record"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.delete_record");
+    let capability = generate_valid_token(&signing_key, "airtable.delete_record");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.delete_record",
@@ -1986,7 +1979,7 @@ async fn invoke_delete_record_through_connector() {
                 "table_id": "Tasks",
                 "record_id": "recDEL"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -2027,7 +2020,7 @@ async fn invoke_update_records_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.update_records"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.update_records");
+    let capability = generate_valid_token(&signing_key, "airtable.update_records");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.update_records",
@@ -2040,7 +2033,7 @@ async fn invoke_update_records_through_connector() {
                 ],
                 "typecast": true
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -2094,7 +2087,7 @@ async fn invoke_upsert_records_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.upsert_records"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.upsert_records");
+    let capability = generate_valid_token(&signing_key, "airtable.upsert_records");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.upsert_records",
@@ -2107,7 +2100,7 @@ async fn invoke_upsert_records_through_connector() {
                 ],
                 "typecast": true
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -2151,7 +2144,7 @@ async fn invoke_delete_records_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.delete_records"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.delete_records");
+    let capability = generate_valid_token(&signing_key, "airtable.delete_records");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.delete_records",
@@ -2160,7 +2153,7 @@ async fn invoke_delete_records_through_connector() {
                 "table_id": "Tasks",
                 "record_ids": ["recDEL1", "recDEL2"]
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -2197,7 +2190,7 @@ async fn invoke_create_webhook_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.create_webhook"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.create_webhook");
+    let capability = generate_valid_token(&signing_key, "airtable.create_webhook");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.create_webhook",
@@ -2212,7 +2205,7 @@ async fn invoke_create_webhook_through_connector() {
                     }
                 }
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -2245,14 +2238,14 @@ async fn invoke_list_webhooks_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.list_webhooks"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.list_webhooks");
+    let capability = generate_valid_token(&signing_key, "airtable.list_webhooks");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_webhooks",
             "input": {
                 "base_id": "appABC123"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -2280,7 +2273,7 @@ async fn invoke_delete_webhook_through_connector() {
     setup_handshake(&mut connector, &signing_key, &["airtable.delete_webhook"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.delete_webhook");
+    let capability = generate_valid_token(&signing_key, "airtable.delete_webhook");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.delete_webhook",
@@ -2288,7 +2281,7 @@ async fn invoke_delete_webhook_through_connector() {
                 "base_id": "appABC123",
                 "webhook_id": "achDELETE"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -2326,7 +2319,7 @@ async fn invoke_list_webhook_payloads_through_connector() {
     .await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.list_webhook_payloads");
+    let capability = generate_valid_token(&signing_key, "airtable.list_webhook_payloads");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.list_webhook_payloads",
@@ -2335,7 +2328,7 @@ async fn invoke_list_webhook_payloads_through_connector() {
                 "webhook_id": "achPAYLOAD",
                 "cursor": 4
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -2368,7 +2361,7 @@ async fn invoke_upsert_records_requires_merge_fields() {
     setup_handshake(&mut connector, &signing_key, &["airtable.upsert_records"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.upsert_records");
+    let capability = generate_valid_token(&signing_key, "airtable.upsert_records");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.upsert_records",
@@ -2378,17 +2371,15 @@ async fn invoke_upsert_records_requires_merge_fields() {
                 "fields_to_merge_on": [],
                 "records": [{"fields": {"External ID": "ext-1"}}]
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
     assert!(result.is_err());
-    match result.unwrap_err() {
-        FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("fields_to_merge_on"));
-        }
-        other => panic!("Expected InvalidRequest, got {other:?}"),
-    }
+    assert!(matches!(
+        result.unwrap_err(),
+        FcpError::InvalidRequest { ref message, .. } if message.contains("fields_to_merge_on")
+    ));
 }
 
 #[fcp_async_core::runtime::test]
@@ -2400,7 +2391,7 @@ async fn invoke_wrong_capability_rejected() {
     setup_configure(&mut connector, "http://localhost:1").await;
 
     // Token is for airtable.read, but we're invoking a write operation
-    let token = generate_valid_token(&signing_key, "airtable.read");
+    let capability = generate_valid_token(&signing_key, "airtable.read");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.create_record",
@@ -2409,7 +2400,7 @@ async fn invoke_wrong_capability_rejected() {
                 "table_id": "tblXYZ",
                 "fields": { "Name": "Fail" }
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -2424,12 +2415,12 @@ async fn invoke_unknown_operation_rejected() {
     setup_handshake(&mut connector, &signing_key, &["airtable.nonexistent"]).await;
     setup_configure(&mut connector, "http://localhost:1").await;
 
-    let token = generate_valid_token(&signing_key, "airtable.nonexistent");
+    let capability = generate_valid_token(&signing_key, "airtable.nonexistent");
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.nonexistent",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -2450,21 +2441,19 @@ async fn invoke_missing_required_field_rejected() {
     setup_handshake(&mut connector, &signing_key, &["airtable.get_record"]).await;
     setup_configure(&mut connector, &server.uri()).await;
 
-    let token = generate_valid_token(&signing_key, "airtable.get_record");
+    let capability = generate_valid_token(&signing_key, "airtable.get_record");
     // Missing table_id and record_id
     let result = connector
         .handle_invoke(json!({
             "operation": "airtable.get_record",
             "input": { "base_id": "appABC" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
     assert!(result.is_err());
-    match result.unwrap_err() {
-        FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("table_id"));
-        }
-        e => panic!("Expected InvalidRequest, got: {e:?}"),
-    }
+    assert!(matches!(
+        result.unwrap_err(),
+        FcpError::InvalidRequest { ref message, .. } if message.contains("table_id")
+    ));
 }

@@ -19,6 +19,13 @@ pub const CAP_GATEWAY_READ: &str = "qq.gateway.read";
 pub const CAP_HEALTH_READ: &str = "qq.health.read";
 pub const CAP_EVENTS_READ: &str = "qq.events.read";
 
+fn trim_string(value: &mut String) {
+    let trimmed = value.trim();
+    if trimmed.len() != value.len() {
+        *value = trimmed.to_string();
+    }
+}
+
 #[derive(Clone, Deserialize)]
 pub struct QqConfig {
     #[serde(default = "default_base_url")]
@@ -34,10 +41,10 @@ pub struct QqConfig {
 impl QqConfig {
     #[must_use]
     pub fn normalized(mut self) -> Self {
-        self.base_url = self.base_url.trim().to_string();
-        self.token_base_url = self.token_base_url.trim().to_string();
-        self.app_id = self.app_id.trim().to_string();
-        self.client_secret = self.client_secret.trim().to_string();
+        trim_string(&mut self.base_url);
+        trim_string(&mut self.token_base_url);
+        trim_string(&mut self.app_id);
+        trim_string(&mut self.client_secret);
         self
     }
 }

@@ -44,7 +44,7 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
     let cap = match op {
         "gmail.send_message" | "gmail.send_draft" => "gmail.send",
         "gmail.sync_history" => "gmail.history.read",
-        "gmail.modify_message" | "gmail.get_draft" => "gmail.write",
+        "gmail.modify_message" | "gmail.get_draft" | "gmail.create_draft" => "gmail.write",
         "gmail.trash_message" => "gmail.delete",
         _ => "gmail.read",
     };
@@ -63,7 +63,8 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .operations(&[op])
         .issuer("node:live-test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .unwrap()
         .sign(signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)

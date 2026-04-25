@@ -246,10 +246,14 @@ mod tests {
             status_code: Some(429),
             error_type: None,
         };
-        match err.to_fcp_error() {
-            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 60_000),
-            other => panic!("expected RateLimited, got {other:?}"),
-        }
+        let converted = err.to_fcp_error();
+        assert!(matches!(
+            converted,
+            FcpError::RateLimited {
+                retry_after_ms: 60_000,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -259,14 +263,21 @@ mod tests {
             status_code: Some(500),
             error_type: None,
         };
-        match err.to_fcp_error() {
+        let converted = err.to_fcp_error();
+        assert!(matches!(
+            &converted,
             FcpError::External {
-                service, retryable, ..
-            } => {
-                assert_eq!(service, "stripe");
-                assert!(retryable);
-            }
-            other => panic!("expected External, got {other:?}"),
+                service,
+                retryable: true,
+                ..
+            } if service == "stripe"
+        ));
+        if let FcpError::External {
+            service, retryable, ..
+        } = converted
+        {
+            assert_eq!(service, "stripe");
+            assert!(retryable);
         }
     }
 
@@ -275,18 +286,23 @@ mod tests {
         let err = StripeError::RateLimited {
             retry_after_ms: 2000,
         };
-        match err.to_fcp_error() {
-            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 2000),
-            other => panic!("expected RateLimited, got {other:?}"),
-        }
+        let converted = err.to_fcp_error();
+        assert!(matches!(
+            converted,
+            FcpError::RateLimited {
+                retry_after_ms: 2000,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn to_fcp_error_unauthorized() {
-        match StripeError::Unauthorized.to_fcp_error() {
-            FcpError::Unauthorized { code, .. } => assert_eq!(code, 2001),
-            other => panic!("expected Unauthorized, got {other:?}"),
-        }
+        let converted = StripeError::Unauthorized.to_fcp_error();
+        assert!(matches!(
+            converted,
+            FcpError::Unauthorized { code: 2001, .. }
+        ));
     }
 
     #[test]
@@ -294,10 +310,11 @@ mod tests {
         let err = StripeError::NotFound {
             resource: "cus_abc".into(),
         };
-        match err.to_fcp_error() {
-            FcpError::ResourceNotFound { resource } => assert_eq!(resource, "cus_abc"),
-            other => panic!("expected ResourceNotFound, got {other:?}"),
-        }
+        let converted = err.to_fcp_error();
+        assert!(matches!(
+            converted,
+            FcpError::ResourceNotFound { ref resource } if resource == "cus_abc"
+        ));
     }
 
     #[test]
@@ -432,12 +449,14 @@ mod tests {
             status_code: Some(403),
             error_type: None,
         };
-        match err.to_fcp_error() {
-            FcpError::Unauthorized { code, message } => {
-                assert_eq!(code, 2001);
-                assert_eq!(message, "forbidden");
-            }
-            other => panic!("expected Unauthorized, got {other:?}"),
+        let converted = err.to_fcp_error();
+        assert!(matches!(
+            &converted,
+            FcpError::Unauthorized { code: 2001, message } if message == "forbidden"
+        ));
+        if let FcpError::Unauthorized { code, message } = converted {
+            assert_eq!(code, 2001);
+            assert_eq!(message, "forbidden");
         }
     }
 
@@ -448,20 +467,29 @@ mod tests {
             status_code: Some(400),
             error_type: Some("invalid_request_error".into()),
         };
-        match err.to_fcp_error() {
+        let converted = err.to_fcp_error();
+        assert!(matches!(
+            &converted,
             FcpError::External {
                 service,
                 message,
-                status_code,
-                retryable,
+                status_code: Some(400),
+                retryable: false,
                 ..
-            } => {
-                assert_eq!(service, "stripe");
-                assert_eq!(message, "bad request");
-                assert_eq!(status_code, Some(400));
-                assert!(!retryable);
-            }
-            other => panic!("expected External, got {other:?}"),
+            } if service == "stripe" && message == "bad request"
+        ));
+        if let FcpError::External {
+            service,
+            message,
+            status_code,
+            retryable,
+            ..
+        } = converted
+        {
+            assert_eq!(service, "stripe");
+            assert_eq!(message, "bad request");
+            assert_eq!(status_code, Some(400));
+            assert!(!retryable);
         }
     }
 
@@ -472,16 +500,23 @@ mod tests {
             status_code: None,
             error_type: None,
         };
-        match err.to_fcp_error() {
+        let converted = err.to_fcp_error();
+        assert!(matches!(
+            &converted,
             FcpError::External {
-                status_code,
-                retryable,
+                status_code: None,
+                retryable: false,
                 ..
-            } => {
-                assert_eq!(status_code, None);
-                assert!(!retryable);
             }
-            other => panic!("expected External, got {other:?}"),
+        ));
+        if let FcpError::External {
+            status_code,
+            retryable,
+            ..
+        } = converted
+        {
+            assert_eq!(status_code, None);
+            assert!(!retryable);
         }
     }
 
@@ -598,18 +633,16 @@ mod tests {
             status_code: Some(402),
             error_type: Some("card_error".into()),
         };
-        if let StripeError::Api {
-            error_type,
-            message,
-            status_code,
-        } = &err
-        {
-            assert_eq!(error_type.as_deref(), Some("card_error"));
-            assert_eq!(message, "card declined");
-            assert_eq!(*status_code, Some(402));
-        } else {
-            panic!("expected Api variant");
-        }
+        assert!(matches!(
+            &err,
+            StripeError::Api {
+                error_type,
+                message,
+                status_code,
+            } if error_type.as_deref() == Some("card_error")
+                && message == "card declined"
+                && *status_code == Some(402)
+        ));
     }
 
     #[test]
@@ -634,11 +667,14 @@ mod tests {
 
     #[test]
     fn to_fcp_error_unauthorized_message() {
-        match StripeError::Unauthorized.to_fcp_error() {
-            FcpError::Unauthorized { message, .. } => {
-                assert!(message.contains("Stripe API authentication failed"));
-            }
-            other => panic!("expected Unauthorized, got {other:?}"),
+        let converted = StripeError::Unauthorized.to_fcp_error();
+        assert!(matches!(
+            &converted,
+            FcpError::Unauthorized { message, .. }
+                if message.contains("Stripe API authentication failed")
+        ));
+        if let FcpError::Unauthorized { message, .. } = converted {
+            assert!(message.contains("Stripe API authentication failed"));
         }
     }
 
@@ -648,11 +684,13 @@ mod tests {
     fn to_fcp_error_json_message_contains_detail() {
         let json_err = serde_json::from_str::<serde_json::Value>("{bad}").unwrap_err();
         let err = StripeError::Json(json_err);
-        match err.to_fcp_error() {
-            FcpError::Internal { message } => {
-                assert!(message.starts_with("JSON error:"));
-            }
-            other => panic!("expected Internal, got {other:?}"),
+        let converted = err.to_fcp_error();
+        assert!(matches!(
+            &converted,
+            FcpError::Internal { message } if message.starts_with("JSON error:")
+        ));
+        if let FcpError::Internal { message } = converted {
+            assert!(message.starts_with("JSON error:"));
         }
     }
 
@@ -675,11 +713,16 @@ mod tests {
     #[test]
     fn to_fcp_error_rate_limited_zero() {
         let err = StripeError::RateLimited { retry_after_ms: 0 };
-        match err.to_fcp_error() {
-            FcpError::RateLimited { retry_after_ms, .. } => {
-                assert_eq!(retry_after_ms, 0);
+        let converted = err.to_fcp_error();
+        assert!(matches!(
+            &converted,
+            FcpError::RateLimited {
+                retry_after_ms: 0,
+                ..
             }
-            other => panic!("expected RateLimited, got {other:?}"),
+        ));
+        if let FcpError::RateLimited { retry_after_ms, .. } = converted {
+            assert_eq!(retry_after_ms, 0);
         }
     }
 
@@ -692,16 +735,23 @@ mod tests {
             status_code: Some(502),
             error_type: None,
         };
-        match err.to_fcp_error() {
+        let converted = err.to_fcp_error();
+        assert!(matches!(
+            &converted,
             FcpError::External {
-                retryable,
-                status_code,
+                retryable: true,
+                status_code: Some(502),
                 ..
-            } => {
-                assert!(retryable);
-                assert_eq!(status_code, Some(502));
             }
-            other => panic!("expected External, got {other:?}"),
+        ));
+        if let FcpError::External {
+            retryable,
+            status_code,
+            ..
+        } = converted
+        {
+            assert!(retryable);
+            assert_eq!(status_code, Some(502));
         }
     }
 
@@ -740,11 +790,13 @@ mod tests {
         let err = StripeError::NotFound {
             resource: "sub_xyz_123".into(),
         };
-        match err.to_fcp_error() {
-            FcpError::ResourceNotFound { resource } => {
-                assert_eq!(resource, "sub_xyz_123");
-            }
-            other => panic!("expected ResourceNotFound, got {other:?}"),
+        let converted = err.to_fcp_error();
+        assert!(matches!(
+            &converted,
+            FcpError::ResourceNotFound { resource } if resource == "sub_xyz_123"
+        ));
+        if let FcpError::ResourceNotFound { resource } = converted {
+            assert_eq!(resource, "sub_xyz_123");
         }
     }
 
@@ -757,20 +809,29 @@ mod tests {
             status_code: Some(402),
             error_type: Some("card_error".into()),
         };
-        match err.to_fcp_error() {
+        let converted = err.to_fcp_error();
+        assert!(matches!(
+            &converted,
             FcpError::External {
                 message,
-                status_code,
-                retryable,
+                status_code: Some(402),
+                retryable: false,
                 service,
                 ..
-            } => {
-                assert_eq!(service, "stripe");
-                assert_eq!(message, "expired card");
-                assert_eq!(status_code, Some(402));
-                assert!(!retryable);
-            }
-            other => panic!("expected External, got {other:?}"),
+            } if service == "stripe" && message == "expired card"
+        ));
+        if let FcpError::External {
+            message,
+            status_code,
+            retryable,
+            service,
+            ..
+        } = converted
+        {
+            assert_eq!(service, "stripe");
+            assert_eq!(message, "expired card");
+            assert_eq!(status_code, Some(402));
+            assert!(!retryable);
         }
     }
 

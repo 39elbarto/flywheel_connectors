@@ -154,12 +154,10 @@ mod tests {
     fn not_found_maps_to_resource_not_found() {
         let err = DockerHubError::NotFound("repo myuser/myrepo".into());
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::ResourceNotFound { resource } => {
-                assert_eq!(resource, "repo myuser/myrepo");
-            }
-            other => panic!("Expected ResourceNotFound, got {other:?}"),
-        }
+        assert!(matches!(
+            fcp,
+            FcpError::ResourceNotFound { ref resource } if resource == "repo myuser/myrepo"
+        ));
     }
 
     #[test]
@@ -181,13 +179,11 @@ mod tests {
     fn config_error_maps_to_invalid_request() {
         let err = DockerHubError::Config("missing credentials".into());
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1001);
-                assert!(message.contains("missing credentials"));
-            }
-            other => panic!("Expected InvalidRequest, got {other:?}"),
-        }
+        assert!(matches!(
+            fcp,
+            FcpError::InvalidRequest { code: 1001, ref message }
+                if message.contains("missing credentials")
+        ));
     }
 
     #[test]
@@ -196,16 +192,13 @@ mod tests {
             retry_after_ms: 3_000,
         };
         let fcp = err.to_fcp_error();
-        match fcp {
+        assert!(matches!(
+            fcp,
             FcpError::RateLimited {
-                retry_after_ms,
-                violation,
-            } => {
-                assert_eq!(retry_after_ms, 3_000);
-                assert!(violation.is_none());
+                retry_after_ms: 3_000,
+                violation: None,
             }
-            other => panic!("Expected RateLimited, got {other:?}"),
-        }
+        ));
     }
 
     #[test]
@@ -227,13 +220,11 @@ mod tests {
     fn invalid_input_maps_correctly() {
         let err = DockerHubError::InvalidInput("namespace required".into());
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1005);
-                assert_eq!(message, "namespace required");
-            }
-            other => panic!("Expected InvalidRequest, got {other:?}"),
-        }
+        assert!(matches!(
+            fcp,
+            FcpError::InvalidRequest { code: 1005, ref message }
+                if message == "namespace required"
+        ));
     }
 
     #[test]

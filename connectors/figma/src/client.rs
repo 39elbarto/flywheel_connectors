@@ -658,12 +658,12 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/files/abc123"))
-            .and(header("X-FIGMA-TOKEN", "test-token"))
+            .and(header("X-FIGMA-TOKEN", "test-auth-value"))
             .respond_with(ResponseTemplate::new(200).set_body_json(&file_response))
             .mount(&mock_server)
             .await;
 
-        let client = FigmaClient::new("test-token")
+        let client = FigmaClient::new("test-auth-value")
             .unwrap()
             .with_base_url(mock_server.uri());
 
@@ -680,14 +680,14 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/files/abc123/nodes"))
-            .and(header("X-FIGMA-TOKEN", "test-token"))
+            .and(header("X-FIGMA-TOKEN", "test-auth-value"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "nodes": { "1:2": { "document": { "id": "1:2" } } }
             })))
             .mount(&mock_server)
             .await;
 
-        let client = FigmaClient::new("test-token")
+        let client = FigmaClient::new("test-auth-value")
             .unwrap()
             .with_base_url(mock_server.uri());
 
@@ -701,7 +701,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/files/abc123/comments"))
-            .and(header("X-FIGMA-TOKEN", "test-token"))
+            .and(header("X-FIGMA-TOKEN", "test-auth-value"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "comments": [
                     {
@@ -714,7 +714,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = FigmaClient::new("test-token")
+        let client = FigmaClient::new("test-auth-value")
             .unwrap()
             .with_base_url(mock_server.uri());
 
@@ -731,7 +731,7 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/files/abc123/comments"))
-            .and(header("X-FIGMA-TOKEN", "test-token"))
+            .and(header("X-FIGMA-TOKEN", "test-auth-value"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": "c2",
                 "message": "New comment",
@@ -740,7 +740,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = FigmaClient::new("test-token")
+        let client = FigmaClient::new("test-auth-value")
             .unwrap()
             .with_base_url(mock_server.uri());
 
@@ -766,7 +766,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = FigmaClient::new("bad-token")
+        let client = FigmaClient::new("bad-auth-value")
             .unwrap()
             .with_base_url(mock_server.uri());
 
@@ -785,7 +785,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = FigmaClient::new("test-token")
+        let client = FigmaClient::new("test-auth-value")
             .unwrap()
             .with_base_url(mock_server.uri())
             .with_retry_config(0, 100, 200);
@@ -813,7 +813,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = FigmaClient::new("test-token")
+        let client = FigmaClient::new("test-auth-value")
             .unwrap()
             .with_base_url(mock_server.uri());
 
@@ -831,14 +831,14 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/images/abc123"))
-            .and(header("X-FIGMA-TOKEN", "test-token"))
+            .and(header("X-FIGMA-TOKEN", "test-auth-value"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "images": { "1:2": "https://figma-alpha.s3.amazonaws.com/img/abc.png" }
             })))
             .mount(&mock_server)
             .await;
 
-        let client = FigmaClient::new("test-token")
+        let client = FigmaClient::new("test-auth-value")
             .unwrap()
             .with_base_url(mock_server.uri());
 
@@ -854,12 +854,12 @@ mod tests {
 
         Mock::given(method("DELETE"))
             .and(path("/files/abc123/comments/c1"))
-            .and(header("X-FIGMA-TOKEN", "test-token"))
+            .and(header("X-FIGMA-TOKEN", "test-auth-value"))
             .respond_with(ResponseTemplate::new(200))
             .mount(&mock_server)
             .await;
 
-        let client = FigmaClient::new("test-token")
+        let client = FigmaClient::new("test-auth-value")
             .unwrap()
             .with_base_url(mock_server.uri());
 
@@ -878,7 +878,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = FigmaClient::new("test-token")
+        let client = FigmaClient::new("test-auth-value")
             .unwrap()
             .with_base_url(mock_server.uri())
             .with_retry_config(2, 10, 50); // max 2 retries, fast
@@ -904,7 +904,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = FigmaClient::new("test-token")
+        let client = FigmaClient::new("test-auth-value")
             .unwrap()
             .with_base_url(mock_server.uri())
             .with_retry_config(2, 10, 50); // max 2 retries, fast
@@ -929,7 +929,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let client = FigmaClient::new("test-token")
+        let client = FigmaClient::new("test-auth-value")
             .unwrap()
             .with_base_url(mock_server.uri());
 

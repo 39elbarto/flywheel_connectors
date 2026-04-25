@@ -253,19 +253,8 @@ impl SonosConnector {
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         self.base.check_ready()?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
-        let required_cap = match req.operation.as_str() {
-            OP_HEALTH | OP_GET_STATUS => CapabilityId::from_static(CAP_READ),
-            OP_PLAY | OP_PAUSE | OP_NEXT | OP_PREVIOUS | OP_SET_VOLUME => {
-                CapabilityId::from_static(CAP_WRITE)
-            }
-            operation => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1004,
-                    message: format!("Unknown operation: {operation}"),
-                });
-            }
-        };
-        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
+        let required_cap = required_capability(req.operation.as_str())?;
+        verifier.verify_bound(req.capability_token, &required_cap, &req.operation, &[])?;
         let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
         let output = match req.operation.as_str() {
             OP_HEALTH => json!({
@@ -320,7 +309,12 @@ impl SonosConnector {
                     .await
                     .map_err(|error| error.to_fcp_error())?
             }
-            _ => unreachable!(),
+            operation => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!("Unknown operation: {operation}"),
+                });
+            }
         };
         Ok(InvokeResponse::ok(req.id, output))
     }
@@ -480,7 +474,8 @@ impl FcpConnector for SonosConnector {
                 FcpError::NotHandshaken.error_code(),
             ));
         };
-        if let Err(error) = verifier.verify(req.capability_token, &capability, &req.operation, &[])
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])
         {
             let mut response =
                 SimulateResponse::denied(req.id, error.to_string(), error.error_code());
@@ -529,7 +524,7 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
 #[cfg(test)]
 mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
-    use fcp_core::{CapabilityToken, RequestId, ZoneId};
+    use fcp_core::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 
     use super::*;
@@ -557,6 +552,12 @@ mod tests {
         operation: &'static str,
     ) -> CapabilityToken {
         let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
         let raw = CapabilityTokenBuilder::new()
             .capability_id(capability)
             .zone_id("z:work")
@@ -564,9 +565,30 @@ mod tests {
             .operations(&[operation])
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
             .expect("token should sign");
         CapabilityToken::from_raw(raw)
+    }
+
+    fn simulate_request(
+        operation: &'static str,
+        capability_token: CapabilityToken,
+    ) -> SimulateRequest {
+        SimulateRequest {
+            r#type: "simulate".into(),
+            id: RequestId::new("sonos-simulate"),
+            connector_id: ConnectorId::from_static("fcp.sonos"),
+            operation: OperationId::from_static(operation),
+            zone_id: ZoneId::work(),
+            input: json!({}),
+            capability_token,
+            estimate_cost: false,
+            check_availability: false,
+            context: None,
+            correlation_id: None,
+        }
     }
 
     #[test]
@@ -620,5 +642,33 @@ mod tests {
             .await
             .expect("health should succeed");
         assert!(response.result.is_some());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_checks_capability_operation_grant() {
+        let mut connector = SonosConnector::new();
+        connector
+            .configure(json!({
+                "device_url": "http://speaker.local:1400"
+            }))
+            .await
+            .expect("configure should succeed");
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_request(signing_key.verifying_key().to_bytes()))
+            .await
+            .expect("handshake should succeed");
+
+        let response = connector
+            .simulate(simulate_request(
+                OP_PLAY,
+                capability_token(&signing_key, CAP_READ, OP_PLAY),
+            ))
+            .await
+            .expect("simulate should return a policy result");
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-3003"));
+        assert!(response.missing_capabilities.is_empty());
     }
 }

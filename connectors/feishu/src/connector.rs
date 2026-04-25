@@ -245,6 +245,92 @@ fn validate_chats_page_size(page_size: u64) -> FcpResult<u32> {
     Ok(page_size as u32)
 }
 
+fn required_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
+    let capability = match operation {
+        OP_MESSAGES_SEND | OP_MESSAGES_REPLY => CAP_MSG_WRITE,
+        OP_MESSAGES_GET => CAP_MSG_READ,
+        OP_CHATS_LIST | OP_CHATS_GET => CAP_CHATS_READ,
+        OP_USERS_GET | OP_HEALTH => CAP_USERS_READ,
+        OP_DOCS_GET | OP_SHEETS_GET => CAP_DOCS_READ,
+        OP_CALENDAR_EVENTS => CAP_CALENDAR_READ,
+        _ => {
+            return Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: format!("Unknown operation: {operation}"),
+            });
+        }
+    };
+    Ok(CapabilityId::from_static(capability))
+}
+
+fn required_string_input<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
+    input
+        .get(field)
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("Missing '{field}' field"),
+        })
+}
+
+fn validate_operation_input(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+    match operation {
+        OP_MESSAGES_SEND => {
+            required_string_input(input, "receive_id")?;
+            required_string_input(input, "msg_type")?;
+            required_string_input(input, "content")?;
+            let receive_id_type = input
+                .get("receive_id_type")
+                .and_then(|value| value.as_str())
+                .unwrap_or("open_id");
+            validate_receive_id_type(receive_id_type)?;
+        }
+        OP_MESSAGES_REPLY => {
+            required_string_input(input, "message_id")?;
+            required_string_input(input, "msg_type")?;
+            required_string_input(input, "content")?;
+        }
+        OP_MESSAGES_GET => {
+            required_string_input(input, "message_id")?;
+        }
+        OP_CHATS_LIST => {
+            if let Some(page_size) = input.get("page_size").and_then(|value| value.as_u64()) {
+                validate_chats_page_size(page_size)?;
+            }
+        }
+        OP_CHATS_GET => {
+            required_string_input(input, "chat_id")?;
+        }
+        OP_USERS_GET => {
+            required_string_input(input, "user_id")?;
+            let user_id_type = input
+                .get("user_id_type")
+                .and_then(|value| value.as_str())
+                .unwrap_or("open_id");
+            validate_user_id_type(user_id_type)?;
+        }
+        OP_DOCS_GET => {
+            required_string_input(input, "document_id")?;
+        }
+        OP_SHEETS_GET => {
+            required_string_input(input, "spreadsheet_token")?;
+        }
+        OP_CALENDAR_EVENTS => {
+            required_string_input(input, "calendar_id")?;
+        }
+        OP_HEALTH => {}
+        _ => {
+            return Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: format!("Unknown operation: {operation}"),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 // Doctor types
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorResult {
@@ -1074,11 +1160,10 @@ impl FcpConnector for FeishuConnector {
             })?;
         validate_config(&config)?;
 
-        self.retry_config = config.retry.clone();
         let request_timeout = Duration::from_millis(config.request_timeout_ms);
-        self.runtime = Some(ConnectorRuntime::new(
+        let runtime = ConnectorRuntime::new(
             ConnectorRuntimeConfig::default().with_request_timeout(request_timeout),
-        ));
+        );
 
         let client = FeishuClient::new(
             &config.base_url,
@@ -1103,6 +1188,11 @@ impl FcpConnector for FeishuConnector {
             );
         }
 
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown();
+        }
+        self.retry_config = config.retry.clone();
+        self.runtime = Some(runtime);
         self.client = Some(client);
         self.config = Some(config);
         self.verifier = None;
@@ -1112,6 +1202,10 @@ impl FcpConnector for FeishuConnector {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        if self.config.is_none() || self.client.is_none() || self.runtime.is_none() {
+            return Err(FcpError::NotConfigured);
+        }
+
         self.base.set_handshaken(true);
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -1245,7 +1339,62 @@ impl FcpConnector for FeishuConnector {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
-        Ok(SimulateResponse::allowed(req.id))
+        let required_cap = match required_capability_for_operation(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return Ok(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ));
+            }
+        };
+
+        if let Err(error) = validate_operation_input(req.operation.as_str(), &req.input) {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                error.to_string(),
+                error.error_code(),
+            ));
+        }
+
+        if let Err(error) = self.base.check_ready() {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                error.to_string(),
+                error.error_code(),
+            ));
+        }
+
+        let verifier = match self.verifier.as_ref() {
+            Some(verifier) => verifier,
+            None => {
+                let error = FcpError::Internal {
+                    message: "Capability verifier missing after successful handshake".into(),
+                };
+                return Ok(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ));
+            }
+        };
+
+        match verifier.verify_bound(req.capability_token, &required_cap, &req.operation, &[]) {
+            Ok(_) => Ok(SimulateResponse::allowed(req.id)),
+            Err(error) => {
+                let mut response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                if matches!(
+                    error,
+                    FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+                ) {
+                    response =
+                        response.with_missing_capabilities(vec![required_cap.as_str().to_string()]);
+                }
+                Ok(response)
+            }
+        }
     }
 
     fn metrics(&self) -> ConnectorMetrics {
@@ -1253,9 +1402,14 @@ impl FcpConnector for FeishuConnector {
     }
 
     async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
-        if let Some(runtime) = &self.runtime {
+        if let Some(runtime) = self.runtime.take() {
             runtime.shutdown();
         }
+        self.client = None;
+        self.config = None;
+        self.verifier = None;
+        self.base.set_configured(false);
+        self.base.set_handshaken(false);
         Ok(())
     }
 
@@ -1297,21 +1451,8 @@ impl FeishuConnector {
         let verifier = self.verifier.as_ref().ok_or(FcpError::Internal {
             message: "Capability verifier missing after successful handshake".into(),
         })?;
-        let required_cap = match operation {
-            OP_MESSAGES_SEND | OP_MESSAGES_REPLY => CapabilityId::from_static(CAP_MSG_WRITE),
-            OP_MESSAGES_GET => CapabilityId::from_static(CAP_MSG_READ),
-            OP_CHATS_LIST | OP_CHATS_GET => CapabilityId::from_static(CAP_CHATS_READ),
-            OP_USERS_GET | OP_HEALTH => CapabilityId::from_static(CAP_USERS_READ),
-            OP_DOCS_GET | OP_SHEETS_GET => CapabilityId::from_static(CAP_DOCS_READ),
-            OP_CALENDAR_EVENTS => CapabilityId::from_static(CAP_CALENDAR_READ),
-            _ => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1004,
-                    message: format!("Unknown operation: {operation}"),
-                });
-            }
-        };
-        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
+        let required_cap = required_capability_for_operation(operation)?;
+        verifier.verify_bound(req.capability_token, &required_cap, &req.operation, &[])?;
 
         let runtime = self.runtime.as_ref().ok_or(FcpError::Internal {
             message: "Connector runtime missing after configure".into(),
@@ -1530,6 +1671,70 @@ impl FeishuConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration as ChronoDuration, Utc};
+    use fcp_core::CapabilityConstraints;
+    use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+
+    fn signed_token(
+        signing_key: &Ed25519SigningKey,
+        capability: &'static str,
+        operation: &'static str,
+    ) -> CapabilityToken {
+        let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut constraints_cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut constraints_cbor).unwrap();
+        let raw = CapabilityTokenBuilder::new()
+            .capability_id(capability)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&[operation])
+            .issuer("node:test")
+            .validity(now, now + ChronoDuration::hours(1))
+            .try_constraints_cbor(&constraints_cbor)
+            .unwrap()
+            .sign(signing_key)
+            .unwrap();
+        CapabilityToken::from_raw(raw)
+    }
+
+    async fn configure_for_tests(connector: &mut FeishuConnector) {
+        connector
+            .configure(json!({
+                "base_url": "http://127.0.0.1:9",
+                "app_id": "cli_test",
+                "app_secret": "secret",
+                "request_timeout_ms": 100
+            }))
+            .await
+            .unwrap();
+    }
+
+    async fn handshake_for_tests(connector: &mut FeishuConnector) -> Ed25519SigningKey {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut request = base_handshake();
+        request.host_public_key = signing_key.verifying_key().to_bytes();
+        connector.handshake(request).await.unwrap();
+        signing_key
+    }
+
+    fn simulate_request(
+        connector: &FeishuConnector,
+        operation: &'static str,
+        input: serde_json::Value,
+        capability_token: CapabilityToken,
+    ) -> SimulateRequest {
+        SimulateRequest::new(
+            connector.id().clone(),
+            OperationId::from_static(operation),
+            ZoneId::work(),
+            input,
+            capability_token,
+        )
+    }
 
     fn base_handshake() -> HandshakeRequest {
         HandshakeRequest {
@@ -1575,10 +1780,18 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_handshake() {
         let mut connector = FeishuConnector::new();
+        configure_for_tests(&mut connector).await;
         let result = connector.handshake(base_handshake()).await;
         assert!(result.is_ok());
         let response = result.unwrap();
         assert_eq!(response.status, "accepted");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_handshake_requires_configure() {
+        let mut connector = FeishuConnector::new();
+        let result = connector.handshake(base_handshake()).await;
+        assert!(matches!(result, Err(FcpError::NotConfigured)));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1649,17 +1862,144 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_simulate() {
+    async fn test_simulate_denies_before_configure() {
         let connector = FeishuConnector::new();
-        let req = SimulateRequest::new(
-            connector.id().clone(),
-            OperationId::from_static(OP_MESSAGES_SEND),
-            ZoneId::work(),
-            json!({}),
+        let req = simulate_request(
+            &connector,
+            OP_MESSAGES_SEND,
+            json!({
+                "receive_id": "ou_test",
+                "msg_type": "text",
+                "content": "{\"text\":\"hello\"}"
+            }),
             CapabilityToken::test_token(),
         );
         let resp = connector.simulate(req).await.unwrap();
+        assert!(!resp.would_succeed);
+        assert_eq!(resp.denial_code, Some(FcpError::NotConfigured.error_code()));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_denies_before_handshake() {
+        let mut connector = FeishuConnector::new();
+        configure_for_tests(&mut connector).await;
+        let req = simulate_request(
+            &connector,
+            OP_MESSAGES_SEND,
+            json!({
+                "receive_id": "ou_test",
+                "msg_type": "text",
+                "content": "{\"text\":\"hello\"}"
+            }),
+            CapabilityToken::test_token(),
+        );
+        let resp = connector.simulate(req).await.unwrap();
+        assert!(!resp.would_succeed);
+        assert_eq!(resp.denial_code, Some(FcpError::NotHandshaken.error_code()));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_allows_valid_bound_capability() {
+        let mut connector = FeishuConnector::new();
+        configure_for_tests(&mut connector).await;
+        let signing_key = handshake_for_tests(&mut connector).await;
+        let req = simulate_request(
+            &connector,
+            OP_MESSAGES_SEND,
+            json!({
+                "receive_id": "ou_test",
+                "msg_type": "text",
+                "content": "{\"text\":\"hello\"}"
+            }),
+            signed_token(&signing_key, CAP_MSG_WRITE, OP_MESSAGES_SEND),
+        );
+        let resp = connector.simulate(req).await.unwrap();
         assert!(resp.would_succeed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_rejects_wrong_capability() {
+        let mut connector = FeishuConnector::new();
+        configure_for_tests(&mut connector).await;
+        let signing_key = handshake_for_tests(&mut connector).await;
+        let req = simulate_request(
+            &connector,
+            OP_MESSAGES_SEND,
+            json!({
+                "receive_id": "ou_test",
+                "msg_type": "text",
+                "content": "{\"text\":\"hello\"}"
+            }),
+            signed_token(&signing_key, CAP_CHATS_READ, OP_CHATS_LIST),
+        );
+        let resp = connector.simulate(req).await.unwrap();
+        assert!(!resp.would_succeed);
+        assert_eq!(resp.missing_capabilities, vec![CAP_MSG_WRITE.to_string()]);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_rejects_missing_required_input() {
+        let mut connector = FeishuConnector::new();
+        configure_for_tests(&mut connector).await;
+        let signing_key = handshake_for_tests(&mut connector).await;
+        let req = simulate_request(
+            &connector,
+            OP_MESSAGES_SEND,
+            json!({}),
+            signed_token(&signing_key, CAP_MSG_WRITE, OP_MESSAGES_SEND),
+        );
+        let resp = connector.simulate(req).await.unwrap();
+        assert!(!resp.would_succeed);
+        assert!(resp.failure_reason.unwrap().contains("receive_id"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_reconfigure_clears_handshake_state() {
+        let mut connector = FeishuConnector::new();
+        configure_for_tests(&mut connector).await;
+        handshake_for_tests(&mut connector).await;
+
+        connector
+            .configure(json!({
+                "base_url": "http://127.0.0.1:9",
+                "app_id": "cli_test_2",
+                "app_secret": "secret_2",
+                "request_timeout_ms": 100
+            }))
+            .await
+            .unwrap();
+
+        assert!(connector.verifier.is_none());
+        assert!(matches!(
+            connector.base.check_ready(),
+            Err(FcpError::NotHandshaken)
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_shutdown_clears_connector_state() {
+        let mut connector = FeishuConnector::new();
+        configure_for_tests(&mut connector).await;
+        handshake_for_tests(&mut connector).await;
+
+        connector
+            .shutdown(ShutdownRequest {
+                r#type: "shutdown".into(),
+                deadline_ms: 1000,
+                drain: false,
+                reason: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(connector.client.is_none());
+        assert!(connector.config.is_none());
+        assert!(connector.runtime.is_none());
+        assert!(connector.verifier.is_none());
+        assert!(matches!(
+            connector.base.check_ready(),
+            Err(FcpError::NotConfigured)
+        ));
     }
 
     #[test]

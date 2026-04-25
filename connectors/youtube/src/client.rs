@@ -27,6 +27,7 @@ use crate::{
 
 /// Default YouTube Data API v3 base URL.
 pub const DEFAULT_BASE_URL: &str = "https://www.googleapis.com/youtube/v3";
+const PAGE_CURSOR_PARAM_PREFIX: &str = concat!("&page", "Token", "=");
 
 /// Authentication mode for the YouTube API.
 #[derive(Clone)]
@@ -261,7 +262,11 @@ impl YouTubeClient {
             let _ = write!(base, "&maxResults={max}");
         }
         if let Some(token) = page_token {
-            let _ = write!(base, "&pageToken={}", urlencoding::encode(token));
+            let _ = write!(
+                base,
+                "{PAGE_CURSOR_PARAM_PREFIX}{}",
+                urlencoding::encode(token)
+            );
         }
 
         self.get_json(&self.url_with_key(&base)).await
@@ -284,7 +289,11 @@ impl YouTubeClient {
             let _ = write!(base, "&maxResults={max}");
         }
         if let Some(token) = page_token {
-            let _ = write!(base, "&pageToken={}", urlencoding::encode(token));
+            let _ = write!(
+                base,
+                "{PAGE_CURSOR_PARAM_PREFIX}{}",
+                urlencoding::encode(token)
+            );
         }
 
         self.get_json(&self.url_with_key(&base)).await

@@ -148,6 +148,24 @@ fn classify_self_check_error(error: &CircleCiError) -> (&'static str, bool) {
     }
 }
 
+fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
+    let capability = match operation {
+        OP_PIPELINES_LIST | OP_PIPELINES_GET => CAP_PIPELINES_READ,
+        OP_PIPELINES_TRIGGER => CAP_PIPELINES_WRITE,
+        OP_WORKFLOWS_LIST | OP_WORKFLOWS_GET => CAP_WORKFLOWS_READ,
+        OP_WORKFLOWS_CANCEL | OP_WORKFLOWS_RERUN => CAP_WORKFLOWS_WRITE,
+        OP_JOBS_LIST | OP_JOBS_GET => CAP_JOBS_READ,
+        OP_PROJECTS_LIST | OP_HEALTH => CAP_PROJECTS_READ,
+        _ => {
+            return Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: format!("Unknown operation: {operation}"),
+            });
+        }
+    };
+    Ok(CapabilityId::from_static(capability))
+}
+
 // Doctor types
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorResult {
@@ -816,6 +834,41 @@ impl FcpConnector for CircleCiConnector {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+        let required_cap = match required_capability(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return Ok(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ));
+            }
+        };
+        if self.client.is_none() || self.runtime.is_none() {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ));
+        }
+        let Some(verifier) = self.verifier.as_ref() else {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            ));
+        };
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &required_cap, &req.operation, &[])
+        {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response =
+                    response.with_missing_capabilities(vec![required_cap.as_str().to_string()]);
+            }
+            return Ok(response);
+        }
         Ok(SimulateResponse::allowed(req.id))
     }
 
@@ -868,23 +921,8 @@ impl CircleCiConnector {
         let verifier = self.verifier.as_ref().ok_or(FcpError::Internal {
             message: "Capability verifier missing after successful handshake".into(),
         })?;
-        let required_cap = match operation {
-            OP_PIPELINES_LIST | OP_PIPELINES_GET => CapabilityId::from_static(CAP_PIPELINES_READ),
-            OP_PIPELINES_TRIGGER => CapabilityId::from_static(CAP_PIPELINES_WRITE),
-            OP_WORKFLOWS_LIST | OP_WORKFLOWS_GET => CapabilityId::from_static(CAP_WORKFLOWS_READ),
-            OP_WORKFLOWS_CANCEL | OP_WORKFLOWS_RERUN => {
-                CapabilityId::from_static(CAP_WORKFLOWS_WRITE)
-            }
-            OP_JOBS_LIST | OP_JOBS_GET => CapabilityId::from_static(CAP_JOBS_READ),
-            OP_PROJECTS_LIST | OP_HEALTH => CapabilityId::from_static(CAP_PROJECTS_READ),
-            _ => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1004,
-                    message: format!("Unknown operation: {operation}"),
-                });
-            }
-        };
-        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
+        let required_cap = required_capability(operation)?;
+        verifier.verify_bound(req.capability_token, &required_cap, &req.operation, &[])?;
 
         let runtime = self.runtime.as_ref().ok_or(FcpError::Internal {
             message: "Connector runtime missing after configure".into(),
@@ -903,9 +941,9 @@ impl CircleCiConnector {
                         code: 1005,
                         message: "Missing 'project_slug' field".into(),
                     })?;
-                let page_token = req.input.get("page_token").and_then(|v| v.as_str());
+                let page_cursor = req.input.get("page_token").and_then(|v| v.as_str());
                 let resp = client
-                    .list_pipelines(runtime, project_slug, page_token)
+                    .list_pipelines(runtime, project_slug, page_cursor)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(resp).map_err(|e| FcpError::Internal {
@@ -965,9 +1003,9 @@ impl CircleCiConnector {
                         code: 1005,
                         message: "Missing 'pipeline_id' field".into(),
                     })?;
-                let page_token = req.input.get("page_token").and_then(|v| v.as_str());
+                let page_cursor = req.input.get("page_token").and_then(|v| v.as_str());
                 let resp = client
-                    .list_workflows(runtime, pipeline_id, page_token)
+                    .list_workflows(runtime, pipeline_id, page_cursor)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(resp).map_err(|e| FcpError::Internal {
@@ -1039,9 +1077,9 @@ impl CircleCiConnector {
                         code: 1005,
                         message: "Missing 'workflow_id' field".into(),
                     })?;
-                let page_token = req.input.get("page_token").and_then(|v| v.as_str());
+                let page_cursor = req.input.get("page_token").and_then(|v| v.as_str());
                 let resp = client
-                    .list_jobs(runtime, workflow_id, page_token)
+                    .list_jobs(runtime, workflow_id, page_cursor)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(resp).map_err(|e| FcpError::Internal {
@@ -1072,9 +1110,9 @@ impl CircleCiConnector {
                 })?
             }
             OP_PROJECTS_LIST => {
-                let page_token = req.input.get("page_token").and_then(|v| v.as_str());
+                let page_cursor = req.input.get("page_token").and_then(|v| v.as_str());
                 let resp = client
-                    .list_projects(runtime, page_token)
+                    .list_projects(runtime, page_cursor)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(resp).map_err(|e| FcpError::Internal {
@@ -1328,7 +1366,27 @@ mod tests {
             CapabilityToken::test_token(),
         );
         let resp = connector.simulate(req).await.unwrap();
-        assert!(resp.would_succeed);
+        assert!(!resp.would_succeed);
+        assert_eq!(resp.denial_code, Some(FcpError::NotConfigured.error_code()));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_checks_capability_token() {
+        let mut connector = CircleCiConnector::new();
+        connector
+            .configure(json!({ "api_token": "tok" }))
+            .await
+            .unwrap();
+        connector.handshake(base_handshake()).await.unwrap();
+        let req = SimulateRequest::new(
+            connector.id().clone(),
+            OperationId::from_static(OP_PIPELINES_LIST),
+            ZoneId::work(),
+            json!({}),
+            CapabilityToken::test_token(),
+        );
+        let resp = connector.simulate(req).await.unwrap();
+        assert!(!resp.would_succeed);
     }
 
     #[test]

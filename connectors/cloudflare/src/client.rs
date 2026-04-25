@@ -1,7 +1,8 @@
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-use reqwest::{Client, RequestBuilder};
+use reqwest::{Client, RequestBuilder, header::HeaderMap};
 use serde_json::json;
 use tracing::debug;
 
@@ -322,7 +323,7 @@ impl CloudflareClient {
                     }
                 };
                 let status = resp.status().as_u16();
-                if let Some(outcome) = check_error_status::<String>(status, &resp).await {
+                if let Some(outcome) = check_error_status::<String>(status, resp.headers()) {
                     return outcome;
                 }
                 match resp.text().await {
@@ -523,17 +524,12 @@ fn authenticate_request(req: RequestBuilder, auth: &CloudflareAuth) -> RequestBu
     }
 }
 
-async fn check_error_status<T>(
+fn check_error_status<T>(
     status: u16,
-    _resp: &reqwest::Response,
+    headers: &HeaderMap,
 ) -> Option<AttemptOutcome<T, CloudflareError>> {
     if status == 429 {
-        return Some(AttemptOutcome::Retryable {
-            error: CloudflareError::RateLimited {
-                retry_after_ms: 30_000,
-            },
-            retry_after: Some(Duration::from_secs(30)),
-        });
+        return Some(rate_limited_outcome(headers));
     }
     if status == 401 || status == 403 {
         return Some(AttemptOutcome::Terminal(CloudflareError::Unauthorized(
@@ -565,13 +561,7 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
     let status = resp.status().as_u16();
 
     if status == 429 {
-        let retry_after = parse_retry_after_header(resp.headers());
-        return AttemptOutcome::Retryable {
-            error: CloudflareError::RateLimited {
-                retry_after_ms: retry_after.unwrap_or(Duration::from_secs(30)).as_millis() as u64,
-            },
-            retry_after,
-        };
+        return rate_limited_outcome(resp.headers());
     }
 
     if status == 401 || status == 403 {
@@ -657,13 +647,7 @@ async fn handle_list_response<T: serde::de::DeserializeOwned>(
     let status = resp.status().as_u16();
 
     if status == 429 {
-        let retry_after = parse_retry_after_header(resp.headers());
-        return AttemptOutcome::Retryable {
-            error: CloudflareError::RateLimited {
-                retry_after_ms: retry_after.unwrap_or(Duration::from_secs(30)).as_millis() as u64,
-            },
-            retry_after,
-        };
+        return rate_limited_outcome(resp.headers());
     }
 
     if status == 401 || status == 403 {
@@ -714,12 +698,49 @@ async fn handle_list_response<T: serde::de::DeserializeOwned>(
     }
 }
 
-fn parse_retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+fn duration_millis_saturated(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn clamp_retry_after(duration: Duration) -> Duration {
+    duration.min(Duration::from_secs(MAX_RETRY_AFTER_SECS))
+}
+
+fn parse_retry_after_value(value: &str) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u128>() {
+        let duration = Duration::from_secs(u64::try_from(seconds).unwrap_or(u64::MAX));
+        return Some(clamp_retry_after(duration));
+    }
+
+    let retry_at = DateTime::parse_from_rfc2822(value).ok()?;
+    let wait = retry_at
+        .with_timezone(&Utc)
+        .signed_duration_since(Utc::now());
+    if wait <= chrono::Duration::zero() {
+        Some(Duration::ZERO)
+    } else {
+        Some(clamp_retry_after(
+            wait.to_std().unwrap_or(Duration::from_secs(u64::MAX)),
+        ))
+    }
+}
+
+fn parse_retry_after_header(headers: &HeaderMap) -> Option<Duration> {
     headers
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(|secs| Duration::from_secs(secs.min(MAX_RETRY_AFTER_SECS)))
+        .and_then(parse_retry_after_value)
+}
+
+fn rate_limited_outcome<T>(headers: &HeaderMap) -> AttemptOutcome<T, CloudflareError> {
+    let retry_after = parse_retry_after_header(headers).unwrap_or(Duration::from_secs(30));
+    AttemptOutcome::Retryable {
+        error: CloudflareError::RateLimited {
+            retry_after_ms: duration_millis_saturated(retry_after),
+        },
+        retry_after: Some(retry_after),
+    }
 }
 
 fn sanitize_error_message(message: &str) -> String {
@@ -884,6 +905,76 @@ mod tests {
             parse_retry_after_header(&headers),
             Some(Duration::from_secs(MAX_RETRY_AFTER_SECS))
         );
+    }
+
+    #[test]
+    fn retry_after_header_trims_delta_seconds() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Retry-After", " 7 ".parse().unwrap());
+
+        assert_eq!(
+            parse_retry_after_header(&headers),
+            Some(Duration::from_secs(7))
+        );
+    }
+
+    #[test]
+    fn retry_after_header_accepts_http_date() {
+        let retry_at = (Utc::now() + chrono::Duration::seconds(120))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        let mut headers = HeaderMap::new();
+        headers.insert("Retry-After", retry_at.parse().unwrap());
+
+        assert!(
+            matches!(
+                parse_retry_after_header(&headers),
+                Some(retry_after)
+                    if retry_after >= Duration::from_secs(118)
+                        && retry_after <= Duration::from_secs(121)
+            ),
+            "future HTTP-date should parse to a delay near 120 seconds"
+        );
+    }
+
+    #[test]
+    fn retry_after_header_clamps_http_date() {
+        let retry_at = (Utc::now() + chrono::Duration::seconds(600))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        let mut headers = HeaderMap::new();
+        headers.insert("Retry-After", retry_at.parse().unwrap());
+
+        assert_eq!(
+            parse_retry_after_header(&headers),
+            Some(Duration::from_secs(MAX_RETRY_AFTER_SECS))
+        );
+    }
+
+    #[test]
+    fn retry_after_header_past_http_date_is_zero() {
+        let retry_at = (Utc::now() - chrono::Duration::seconds(30))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        let mut headers = HeaderMap::new();
+        headers.insert("Retry-After", retry_at.parse().unwrap());
+
+        assert_eq!(parse_retry_after_header(&headers), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn rate_limited_outcome_uses_default_retry_after_when_header_missing() {
+        let headers = HeaderMap::new();
+
+        assert!(matches!(
+            rate_limited_outcome::<String>(&headers),
+            AttemptOutcome::Retryable {
+                error: CloudflareError::RateLimited {
+                    retry_after_ms: 30_000,
+                },
+                retry_after: Some(delay),
+            } if delay == Duration::from_secs(30)
+        ));
     }
 
     #[test]

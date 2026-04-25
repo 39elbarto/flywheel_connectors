@@ -399,7 +399,7 @@ impl<'a> NostrRelayClient<'a> {
         ws: &mut WsConnection,
         context: &'static str,
     ) -> FcpResult<Option<WsMessage>> {
-        fcp_async_core::time::timeout(self.timeout, ws.recv())
+        Box::pin(fcp_async_core::time::timeout(self.timeout, ws.recv()))
             .await
             .map_err(|_| relay_timeout(self.relay.as_str(), context))?
             .map_err(map_stream_error(context, self.relay.as_str()))
@@ -416,7 +416,7 @@ impl<'a> NostrRelayClient<'a> {
         ws.send_json(&json!(["EVENT", event]))
             .await
             .map_err(map_stream_error("nostr publish send", self.relay.as_str()))?;
-        let response = self.recv(&mut ws, "nostr publish recv").await?;
+        let response = Box::pin(self.recv(&mut ws, "nostr publish recv")).await?;
         let _ = ws.close().await;
         let response = response.ok_or_else(|| {
             relay_external_error(
@@ -458,7 +458,7 @@ impl<'a> NostrRelayClient<'a> {
         let mut query_state = RelayQueryState::default();
         let mut last_error = None;
         for attempt in 0..READ_ONLY_RECONNECT_ATTEMPTS {
-            match self.query_once(sub_id, filter, &mut query_state).await {
+            match Box::pin(self.query_once(sub_id, filter, &mut query_state)).await {
                 Ok(()) => return Ok(query_state.into_events()),
                 Err(error)
                     if attempt + 1 < READ_ONLY_RECONNECT_ATTEMPTS
@@ -486,7 +486,7 @@ impl<'a> NostrRelayClient<'a> {
             .map_err(map_stream_error("nostr query send", self.relay.as_str()))?;
 
         loop {
-            let Some(message) = self.recv(&mut ws, "nostr query recv").await? else {
+            let Some(message) = Box::pin(self.recv(&mut ws, "nostr query recv")).await? else {
                 let _ = ws.close().await;
                 return Err(relay_external_error(
                     self.relay.as_str(),
@@ -551,16 +551,14 @@ impl<'a> NostrRelayClient<'a> {
         // Probe NIP-04 support: REQ for kind=4, limit=1
         let sub_nip04 = format!("fcp-nip04-{}", Uuid::new_v4().simple());
         let nip04_filter = json!({"kinds": [4], "limit": 1});
-        let supports_nip04 = self
-            .probe_kind_support(&mut ws, &sub_nip04, &nip04_filter)
-            .await;
+        let supports_nip04 =
+            Box::pin(self.probe_kind_support(&mut ws, &sub_nip04, &nip04_filter)).await;
 
         // Probe NIP-44 support: REQ for kind=1059 (gift-wrapped), limit=1
         let sub_nip44 = format!("fcp-nip44-{}", Uuid::new_v4().simple());
         let nip44_filter = json!({"kinds": [1059], "limit": 1});
-        let supports_nip44 = self
-            .probe_kind_support(&mut ws, &sub_nip44, &nip44_filter)
-            .await;
+        let supports_nip44 =
+            Box::pin(self.probe_kind_support(&mut ws, &sub_nip44, &nip44_filter)).await;
 
         let _ = ws.close().await;
 
@@ -590,7 +588,7 @@ impl<'a> NostrRelayClient<'a> {
 
         // Read frames until EOSE or NOTICE (with timeout)
         loop {
-            let Ok(Some(message)) = self.recv(ws, "nostr probe recv").await else {
+            let Ok(Some(message)) = Box::pin(self.recv(ws, "nostr probe recv")).await else {
                 return false;
             };
             let Ok(frame) = parse_ws_message(&message, self.relay) else {
@@ -756,7 +754,7 @@ impl NostrClient {
         let mut accepted = Vec::new();
         let mut rejected = Vec::new();
         for relay in self.relay_clients() {
-            match relay.publish(&event).await {
+            match Box::pin(relay.publish(&event)).await {
                 Ok(result) => accepted.push(result),
                 Err(error) => rejected.push(json!({
                     "relay": relay.relay.as_str(),
@@ -782,7 +780,7 @@ impl NostrClient {
         let sub_id = format!("fcp-{}", Uuid::new_v4().simple());
         let mut per_relay = Vec::new();
         for relay in self.relay_clients() {
-            match relay.query(&sub_id, &filter).await {
+            match Box::pin(relay.query(&sub_id, &filter)).await {
                 Ok(events) => per_relay.push(json!({
                     "relay": relay.relay.as_str(),
                     "events": events,
@@ -807,7 +805,7 @@ impl NostrClient {
     pub async fn relay_health_scores(&self) -> Value {
         let mut scores = Vec::with_capacity(self.relay_count());
         for relay in self.relay_clients() {
-            scores.push(relay.score_relay_health().await);
+            scores.push(Box::pin(relay.score_relay_health()).await);
         }
         json!({
             "public_key_hex": self.public_key_hex(),

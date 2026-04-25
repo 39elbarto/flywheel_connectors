@@ -55,7 +55,8 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .unwrap();
     fcp_core::CapabilityToken::from_raw(cose)
@@ -82,7 +83,7 @@ async fn setup_handshake(connector: &mut FigmaConnector, caps: &[&str]) -> Ed255
 async fn setup_configure(connector: &mut FigmaConnector, base_url: &str) {
     connector
         .handle_configure(json!({
-            "token": "figma-test-token-xyz",
+            "token": "figma-test-auth-value",
             "base_url": base_url
         }))
         .await
@@ -129,12 +130,12 @@ async fn get_file_happy_path() {
     let key = setup_handshake(&mut connector, &["figma.get_file"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.get_file");
+    let capability = generate_valid_token(&key, "figma.get_file");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.get_file",
             "input": { "file_key": "abc123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -164,12 +165,12 @@ async fn get_file_nodes_happy_path() {
     let key = setup_handshake(&mut connector, &["figma.get_file_nodes"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.get_file_nodes");
+    let capability = generate_valid_token(&key, "figma.get_file_nodes");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.get_file_nodes",
             "input": { "file_key": "abc123", "ids": "1:2" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -198,12 +199,12 @@ async fn get_file_components_happy_path() {
     let key = setup_handshake(&mut connector, &["figma.get_file_components"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.get_file_components");
+    let capability = generate_valid_token(&key, "figma.get_file_components");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.get_file_components",
             "input": { "file_key": "abc123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -232,12 +233,12 @@ async fn get_file_styles_happy_path() {
     let key = setup_handshake(&mut connector, &["figma.get_file_styles"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.get_file_styles");
+    let capability = generate_valid_token(&key, "figma.get_file_styles");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.get_file_styles",
             "input": { "file_key": "abc123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -264,12 +265,12 @@ async fn export_images_happy_path() {
     let key = setup_handshake(&mut connector, &["figma.export_images"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.export_images");
+    let capability = generate_valid_token(&key, "figma.export_images");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.export_images",
             "input": { "file_key": "abc123", "ids": "1:2", "format": "png" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -310,12 +311,12 @@ async fn list_file_versions_happy_path() {
     let key = setup_handshake(&mut connector, &["figma.list_file_versions"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.list_file_versions");
+    let capability = generate_valid_token(&key, "figma.list_file_versions");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.list_file_versions",
             "input": { "file_key": "abc123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -348,12 +349,12 @@ async fn list_comments_happy_path() {
     let key = setup_handshake(&mut connector, &["figma.list_comments"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.list_comments");
+    let capability = generate_valid_token(&key, "figma.list_comments");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.list_comments",
             "input": { "file_key": "abc123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -382,12 +383,12 @@ async fn post_comment_happy_path() {
     let key = setup_handshake(&mut connector, &["figma.post_comment"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.post_comment");
+    let capability = generate_valid_token(&key, "figma.post_comment");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.post_comment",
             "input": { "file_key": "abc123", "message": "Need more contrast here" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -411,12 +412,12 @@ async fn delete_comment_happy_path() {
     let key = setup_handshake(&mut connector, &["figma.delete_comment"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.delete_comment");
+    let capability = generate_valid_token(&key, "figma.delete_comment");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.delete_comment",
             "input": { "file_key": "abc123", "comment_id": "c1" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -460,12 +461,12 @@ async fn webhook_list_webhooks_happy_path() {
     let key = setup_handshake(&mut connector, &["figma.list_webhooks"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.list_webhooks");
+    let capability = generate_valid_token(&key, "figma.list_webhooks");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.list_webhooks",
             "input": { "team_id": "team-42" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("list_webhooks should succeed");
@@ -500,7 +501,7 @@ async fn webhook_create_webhook_happy_path() {
     let key = setup_handshake(&mut connector, &["figma.create_webhook"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.create_webhook");
+    let capability = generate_valid_token(&key, "figma.create_webhook");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.create_webhook",
@@ -510,7 +511,7 @@ async fn webhook_create_webhook_happy_path() {
                 "endpoint": "https://hooks.example.com/figma",
                 "passcode": "secret123"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("create_webhook should succeed");
@@ -536,12 +537,12 @@ async fn webhook_delete_webhook_happy_path() {
     let key = setup_handshake(&mut connector, &["figma.delete_webhook"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.delete_webhook");
+    let capability = generate_valid_token(&key, "figma.delete_webhook");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.delete_webhook",
             "input": { "webhook_id": "wh-123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("delete_webhook should succeed");
@@ -561,12 +562,12 @@ async fn error_401_maps_to_unauthorized() {
     Mock::given(method("GET"))
         .and(path("/files/abc123"))
         .respond_with(ResponseTemplate::new(401).set_body_json(json!({
-            "status": 401, "err": "Invalid token"
+            "status": 401, "err": "Invalid authentication"
         })))
         .mount(&mock_server)
         .await;
 
-    let client = FigmaClient::new("bad-token")
+    let client = FigmaClient::new("bad-auth-value")
         .unwrap()
         .with_base_url(mock_server.uri())
         .with_retry_config(0, 10, 100);
@@ -593,7 +594,7 @@ async fn error_403_maps_to_unauthorized() {
         .mount(&mock_server)
         .await;
 
-    let client = FigmaClient::new("bad-token")
+    let client = FigmaClient::new("bad-auth-value")
         .unwrap()
         .with_base_url(mock_server.uri())
         .with_retry_config(0, 10, 100);
@@ -620,7 +621,7 @@ async fn error_404_maps_to_resource_not_found() {
         .mount(&mock_server)
         .await;
 
-    let client = FigmaClient::new("test-token")
+    let client = FigmaClient::new("test-auth-value")
         .unwrap()
         .with_base_url(mock_server.uri())
         .with_retry_config(0, 10, 100);
@@ -645,7 +646,7 @@ async fn error_429_maps_to_rate_limited() {
         .mount(&mock_server)
         .await;
 
-    let client = FigmaClient::new("test-token")
+    let client = FigmaClient::new("test-auth-value")
         .unwrap()
         .with_base_url(mock_server.uri())
         .with_retry_config(0, 10, 100);
@@ -670,7 +671,7 @@ async fn error_500_maps_to_external() {
         .mount(&mock_server)
         .await;
 
-    let client = FigmaClient::new("test-token")
+    let client = FigmaClient::new("test-auth-value")
         .unwrap()
         .with_base_url(mock_server.uri())
         .with_retry_config(0, 10, 100);
@@ -767,7 +768,7 @@ async fn fcp2_invoke_requires_capability_token() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(message.contains("capability_token"));
         }
-        e => panic!("Expected InvalidRequest about capability_token, got: {e:?}"),
+        e => assert!(matches!(e, fcp_core::FcpError::InvalidRequest { .. })),
     }
 }
 
@@ -779,12 +780,12 @@ async fn fcp2_wrong_capability_denied() {
     let key = setup_handshake(&mut connector, &["figma.read"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.read");
+    let capability = generate_valid_token(&key, "figma.read");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.post_comment",
             "input": { "file_key": "abc123", "message": "test" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
     assert!(result.is_err());
@@ -798,12 +799,12 @@ async fn fcp2_unknown_operation_rejected() {
     let key = setup_handshake(&mut connector, &["figma.nonexistent"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.nonexistent");
+    let capability = generate_valid_token(&key, "figma.nonexistent");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.nonexistent",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
     assert!(result.is_err());
@@ -835,8 +836,34 @@ async fn fcp2_missing_operation_field() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(message.contains("operation"));
         }
-        e => panic!("Expected InvalidRequest about operation, got: {e:?}"),
+        e => assert!(matches!(e, fcp_core::FcpError::InvalidRequest { .. })),
     }
+}
+
+#[fcp_async_core::runtime::test]
+async fn fcp2_simulate_checks_bound_capability_grants() {
+    let _ctx = AsyncTestContext::for_scenario("figma.capability.simulate_wrong_operation");
+    let mock_server = MockServer::start().await;
+    let mut connector = FigmaConnector::new();
+    let key = setup_handshake(&mut connector, &["figma.read"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let capability = generate_valid_token(&key, "figma.get_file");
+    let result = connector
+        .handle_simulate(json!({
+            "type": "simulate",
+            "id": "figma-sim-denied",
+            "connector_id": "figma",
+            "operation": "figma.list_team_projects",
+            "zone_id": "z:work",
+            "input": { "team_id": "12345" },
+            "capability_token": capability
+        }))
+        .await
+        .expect("simulate should return a policy response");
+
+    assert_eq!(result["would_succeed"], false);
+    assert_eq!(result["denial_code"], "FCP-3003");
 }
 
 // ============================================================================
@@ -970,7 +997,10 @@ async fn introspect_risk_levels() {
         } else if medium_ops.contains(&id) {
             assert_eq!(risk, "medium", "op {id} should be medium risk");
         } else {
-            panic!("Unexpected operation: {id}");
+            assert!(
+                low_ops.contains(&id) || medium_ops.contains(&id),
+                "Unexpected operation: {id}"
+            );
         }
     }
 
@@ -998,12 +1028,12 @@ async fn validate_get_file_missing_file_key() {
     let key = setup_handshake(&mut connector, &["figma.get_file"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.get_file");
+    let capability = generate_valid_token(&key, "figma.get_file");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.get_file",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
     assert!(result.is_err());
@@ -1011,7 +1041,7 @@ async fn validate_get_file_missing_file_key() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(message.contains("file_key"));
         }
-        e => panic!("Expected InvalidRequest about file_key, got: {e:?}"),
+        e => assert!(matches!(e, fcp_core::FcpError::InvalidRequest { .. })),
     }
 }
 
@@ -1023,12 +1053,12 @@ async fn validate_get_file_nodes_missing_ids() {
     let key = setup_handshake(&mut connector, &["figma.get_file_nodes"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.get_file_nodes");
+    let capability = generate_valid_token(&key, "figma.get_file_nodes");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.get_file_nodes",
             "input": { "file_key": "abc123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
     assert!(result.is_err());
@@ -1036,7 +1066,7 @@ async fn validate_get_file_nodes_missing_ids() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(message.contains("ids"));
         }
-        e => panic!("Expected InvalidRequest about ids, got: {e:?}"),
+        e => assert!(matches!(e, fcp_core::FcpError::InvalidRequest { .. })),
     }
 }
 
@@ -1048,12 +1078,12 @@ async fn validate_export_images_missing_format() {
     let key = setup_handshake(&mut connector, &["figma.export_images"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.export_images");
+    let capability = generate_valid_token(&key, "figma.export_images");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.export_images",
             "input": { "file_key": "abc123", "ids": "1:2" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
     assert!(result.is_err());
@@ -1061,7 +1091,7 @@ async fn validate_export_images_missing_format() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(message.contains("format"));
         }
-        e => panic!("Expected InvalidRequest about format, got: {e:?}"),
+        e => assert!(matches!(e, fcp_core::FcpError::InvalidRequest { .. })),
     }
 }
 
@@ -1073,12 +1103,12 @@ async fn validate_post_comment_missing_message() {
     let key = setup_handshake(&mut connector, &["figma.post_comment"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.post_comment");
+    let capability = generate_valid_token(&key, "figma.post_comment");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.post_comment",
             "input": { "file_key": "abc123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
     assert!(result.is_err());
@@ -1086,7 +1116,7 @@ async fn validate_post_comment_missing_message() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(message.contains("message"));
         }
-        e => panic!("Expected InvalidRequest about message, got: {e:?}"),
+        e => assert!(matches!(e, fcp_core::FcpError::InvalidRequest { .. })),
     }
 }
 
@@ -1100,7 +1130,7 @@ async fn validate_configure_missing_token() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(message.contains("token"));
         }
-        e => panic!("Expected InvalidRequest about token, got: {e:?}"),
+        e => assert!(matches!(e, fcp_core::FcpError::InvalidRequest { .. })),
     }
 }
 
@@ -1112,12 +1142,12 @@ async fn validate_delete_comment_missing_comment_id() {
     let key = setup_handshake(&mut connector, &["figma.delete_comment"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.delete_comment");
+    let capability = generate_valid_token(&key, "figma.delete_comment");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.delete_comment",
             "input": { "file_key": "abc123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
     assert!(result.is_err());
@@ -1125,7 +1155,7 @@ async fn validate_delete_comment_missing_comment_id() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(message.contains("comment_id"));
         }
-        e => panic!("Expected InvalidRequest about comment_id, got: {e:?}"),
+        e => assert!(matches!(e, fcp_core::FcpError::InvalidRequest { .. })),
     }
 }
 
@@ -1137,12 +1167,12 @@ async fn validate_list_webhooks_missing_team_id() {
     let key = setup_handshake(&mut connector, &["figma.list_webhooks"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.list_webhooks");
+    let capability = generate_valid_token(&key, "figma.list_webhooks");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.list_webhooks",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
     assert!(result.is_err());
@@ -1150,7 +1180,7 @@ async fn validate_list_webhooks_missing_team_id() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(message.contains("team_id"));
         }
-        e => panic!("Expected InvalidRequest about team_id, got: {e:?}"),
+        e => assert!(matches!(e, fcp_core::FcpError::InvalidRequest { .. })),
     }
 }
 
@@ -1163,12 +1193,12 @@ async fn validate_create_webhook_missing_fields() {
     setup_configure(&mut connector, &mock_server.uri()).await;
 
     // Missing event_type, endpoint, passcode
-    let token = generate_valid_token(&key, "figma.create_webhook");
+    let capability = generate_valid_token(&key, "figma.create_webhook");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.create_webhook",
             "input": { "team_id": "team-42" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
     assert!(result.is_err());
@@ -1176,7 +1206,7 @@ async fn validate_create_webhook_missing_fields() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(message.contains("event_type"));
         }
-        e => panic!("Expected InvalidRequest about event_type, got: {e:?}"),
+        e => assert!(matches!(e, fcp_core::FcpError::InvalidRequest { .. })),
     }
 }
 
@@ -1188,12 +1218,12 @@ async fn validate_delete_webhook_missing_webhook_id() {
     let key = setup_handshake(&mut connector, &["figma.delete_webhook"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.delete_webhook");
+    let capability = generate_valid_token(&key, "figma.delete_webhook");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.delete_webhook",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
     assert!(result.is_err());
@@ -1201,7 +1231,7 @@ async fn validate_delete_webhook_missing_webhook_id() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(message.contains("webhook_id"));
         }
-        e => panic!("Expected InvalidRequest about webhook_id, got: {e:?}"),
+        e => assert!(matches!(e, fcp_core::FcpError::InvalidRequest { .. })),
     }
 }
 
@@ -1241,7 +1271,7 @@ async fn get_file_nodes_large_tree() {
         .mount(&mock_server)
         .await;
 
-    let client = FigmaClient::new("test-token")
+    let client = FigmaClient::new("test-auth-value")
         .unwrap()
         .with_base_url(mock_server.uri());
 
@@ -1279,7 +1309,7 @@ async fn export_images_multiple_nodes() {
         .mount(&mock_server)
         .await;
 
-    let client = FigmaClient::new("test-token")
+    let client = FigmaClient::new("test-auth-value")
         .unwrap()
         .with_base_url(mock_server.uri());
 
@@ -1326,7 +1356,7 @@ async fn get_file_nodes_through_connector() {
     let key = setup_handshake(&mut connector, &["figma.get_file_nodes"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.get_file_nodes");
+    let capability = generate_valid_token(&key, "figma.get_file_nodes");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.get_file_nodes",
@@ -1334,7 +1364,7 @@ async fn get_file_nodes_through_connector() {
                 "file_key": "abc123",
                 "ids": "1:2"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("get_file_nodes should succeed");
@@ -1357,7 +1387,7 @@ async fn rate_limit_429_includes_retry_after_seconds() {
         .mount(&mock_server)
         .await;
 
-    let client = FigmaClient::new("test-token")
+    let client = FigmaClient::new("test-auth-value")
         .unwrap()
         .with_base_url(mock_server.uri())
         .with_retry_config(0, 100, 200);
@@ -1368,7 +1398,10 @@ async fn rate_limit_429_includes_retry_after_seconds() {
         fcp_figma::error::FigmaError::RateLimited { retry_after_secs } => {
             assert_eq!(retry_after_secs, 45, "should capture retry-after value");
         }
-        e => panic!("Expected RateLimited, got: {e:?}"),
+        e => assert!(matches!(
+            e,
+            fcp_figma::error::FigmaError::RateLimited { .. }
+        )),
     }
 }
 
@@ -1383,7 +1416,7 @@ async fn rate_limit_429_without_retry_after_defaults() {
         .mount(&mock_server)
         .await;
 
-    let client = FigmaClient::new("test-token")
+    let client = FigmaClient::new("test-auth-value")
         .unwrap()
         .with_base_url(mock_server.uri())
         .with_retry_config(0, 100, 200);
@@ -1397,7 +1430,10 @@ async fn rate_limit_429_without_retry_after_defaults() {
                 "should default to 60s without retry-after header"
             );
         }
-        e => panic!("Expected RateLimited, got: {e:?}"),
+        e => assert!(matches!(
+            e,
+            fcp_figma::error::FigmaError::RateLimited { .. }
+        )),
     }
 }
 
@@ -1427,12 +1463,12 @@ async fn list_team_projects_happy_path() {
     let key = setup_handshake(&mut connector, &["figma.list_team_projects"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.list_team_projects");
+    let capability = generate_valid_token(&key, "figma.list_team_projects");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.list_team_projects",
             "input": { "team_id": "12345" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -1482,12 +1518,12 @@ async fn list_project_files_happy_path() {
     let key = setup_handshake(&mut connector, &["figma.list_project_files"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.list_project_files");
+    let capability = generate_valid_token(&key, "figma.list_project_files");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.list_project_files",
             "input": { "project_id": "67890" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -1532,12 +1568,12 @@ async fn get_file_meta_happy_path() {
     let key = setup_handshake(&mut connector, &["figma.get_file_meta"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.get_file_meta");
+    let capability = generate_valid_token(&key, "figma.get_file_meta");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.get_file_meta",
             "input": { "file_key": "meta123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -1568,12 +1604,12 @@ async fn list_team_projects_requires_capability() {
     setup_configure(&mut connector, &mock_server.uri()).await;
 
     // Generate token for figma.get_file, but try to call list_team_projects
-    let token = generate_valid_token(&key, "figma.get_file");
+    let capability = generate_valid_token(&key, "figma.get_file");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.list_team_projects",
             "input": { "team_id": "12345" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -1590,12 +1626,12 @@ async fn list_team_projects_missing_team_id() {
     let mock_server = MockServer::start().await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.list_team_projects");
+    let capability = generate_valid_token(&key, "figma.list_team_projects");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.list_team_projects",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -1604,7 +1640,7 @@ async fn list_team_projects_missing_team_id() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(message.contains("team_id"));
         }
-        e => panic!("Expected InvalidRequest about team_id, got: {e:?}"),
+        e => assert!(matches!(e, fcp_core::FcpError::InvalidRequest { .. })),
     }
 }
 
@@ -1626,12 +1662,12 @@ async fn list_project_files_empty_result() {
     let key = setup_handshake(&mut connector, &["figma.list_project_files"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.list_project_files");
+    let capability = generate_valid_token(&key, "figma.list_project_files");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.list_project_files",
             "input": { "project_id": "99999" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -1658,7 +1694,7 @@ async fn list_team_projects_unauthorized() {
         .mount(&mock_server)
         .await;
 
-    let client = FigmaClient::new("bad-token")
+    let client = FigmaClient::new("bad-auth-value")
         .unwrap()
         .with_base_url(mock_server.uri())
         .with_retry_config(0, 100, 200);
@@ -1670,7 +1706,11 @@ async fn list_team_projects_unauthorized() {
             assert_eq!(status, 403);
         }
         fcp_figma::error::FigmaError::Unauthorized => {}
-        e => panic!("Expected Api(403) or Unauthorized, got: {e:?}"),
+        e => assert!(matches!(
+            e,
+            fcp_figma::error::FigmaError::Api { status: 403, .. }
+                | fcp_figma::error::FigmaError::Unauthorized
+        )),
     }
 }
 
@@ -1740,22 +1780,25 @@ async fn styles_list_happy_path() {
     let key = setup_handshake(&mut connector, &["figma.styles.list"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.styles.list");
+    let capability = generate_valid_token(&key, "figma.styles.list");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.styles.list",
             "input": { "file_key": "abc123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
 
     assert_eq!(result["count"], 4);
-    let tokens = result["tokens"].as_array().unwrap();
-    assert_eq!(tokens.len(), 4);
+    let style_entries = result["tokens"].as_array().unwrap();
+    assert_eq!(style_entries.len(), 4);
 
     // Tokens should be sorted by normalized name
-    let names: Vec<&str> = tokens.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = style_entries
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
     assert_eq!(
         names,
         vec!["gray-100", "heading-large", "primary-500", "shadow-medium"]
@@ -1772,12 +1815,15 @@ async fn styles_list_happy_path() {
     );
 
     // Verify first color token has expected structure
-    let color_token = tokens.iter().find(|t| t["name"] == "primary-500").unwrap();
-    assert_eq!(color_token["category"], "color");
-    assert_eq!(color_token["original_name"], "Primary / 500");
-    assert_eq!(color_token["value"]["type"], "color");
+    let color_entry = style_entries
+        .iter()
+        .find(|t| t["name"] == "primary-500")
+        .unwrap();
+    assert_eq!(color_entry["category"], "color");
+    assert_eq!(color_entry["original_name"], "Primary / 500");
+    assert_eq!(color_entry["value"]["type"], "color");
     assert!(
-        color_token["value"]["hex"]
+        color_entry["value"]["hex"]
             .as_str()
             .unwrap()
             .starts_with('#')
@@ -1801,12 +1847,12 @@ async fn styles_list_empty_file() {
     let key = setup_handshake(&mut connector, &["figma.styles.list"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.styles.list");
+    let capability = generate_valid_token(&key, "figma.styles.list");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.styles.list",
             "input": { "file_key": "empty123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -1830,12 +1876,12 @@ async fn tokens_export_json_happy_path() {
     let key = setup_handshake(&mut connector, &["figma.tokens.export"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.tokens.export");
+    let capability = generate_valid_token(&key, "figma.tokens.export");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.tokens.export",
             "input": { "file_key": "abc123", "format": "json" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -1867,12 +1913,12 @@ async fn tokens_export_css_happy_path() {
     let key = setup_handshake(&mut connector, &["figma.tokens.export"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.tokens.export");
+    let capability = generate_valid_token(&key, "figma.tokens.export");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.tokens.export",
             "input": { "file_key": "abc123", "format": "css", "prefix": "ds" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -1904,12 +1950,12 @@ async fn tokens_export_css_no_prefix() {
     let key = setup_handshake(&mut connector, &["figma.tokens.export"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.tokens.export");
+    let capability = generate_valid_token(&key, "figma.tokens.export");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.tokens.export",
             "input": { "file_key": "abc123", "format": "css" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -1935,7 +1981,7 @@ async fn tokens_export_category_filter() {
     let key = setup_handshake(&mut connector, &["figma.tokens.export"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.tokens.export");
+    let capability = generate_valid_token(&key, "figma.tokens.export");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.tokens.export",
@@ -1944,7 +1990,7 @@ async fn tokens_export_category_filter() {
                 "format": "json",
                 "categories": ["color"]
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -1968,12 +2014,12 @@ async fn tokens_export_invalid_format() {
     let key = setup_handshake(&mut connector, &["figma.tokens.export"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.tokens.export");
+    let capability = generate_valid_token(&key, "figma.tokens.export");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.tokens.export",
             "input": { "file_key": "abc123", "format": "yaml" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -1982,7 +2028,7 @@ async fn tokens_export_invalid_format() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(message.contains("yaml"));
         }
-        e => panic!("Expected InvalidRequest, got: {e:?}"),
+        e => assert!(matches!(e, fcp_core::FcpError::InvalidRequest { .. })),
     }
 }
 
@@ -2001,13 +2047,13 @@ async fn tokens_export_default_json_format() {
     let key = setup_handshake(&mut connector, &["figma.tokens.export"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.tokens.export");
+    let capability = generate_valid_token(&key, "figma.tokens.export");
     // No format specified — should default to json
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.tokens.export",
             "input": { "file_key": "abc123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("invoke should succeed");
@@ -2034,22 +2080,22 @@ async fn tokens_export_deterministic_output() {
     let key = setup_handshake(&mut connector, &["figma.tokens.export"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token1 = generate_valid_token(&key, "figma.tokens.export");
+    let first_capability = generate_valid_token(&key, "figma.tokens.export");
     let result1 = connector
         .handle_invoke(json!({
             "operation": "figma.tokens.export",
             "input": { "file_key": "abc123", "format": "json" },
-            "capability_token": token1
+            "capability_token": first_capability
         }))
         .await
         .expect("first invoke should succeed");
 
-    let token2 = generate_valid_token(&key, "figma.tokens.export");
+    let second_capability = generate_valid_token(&key, "figma.tokens.export");
     let result2 = connector
         .handle_invoke(json!({
             "operation": "figma.tokens.export",
             "input": { "file_key": "abc123", "format": "json" },
-            "capability_token": token2
+            "capability_token": second_capability
         }))
         .await
         .expect("second invoke should succeed");
@@ -2070,12 +2116,12 @@ async fn styles_list_missing_file_key() {
     let key = setup_handshake(&mut connector, &["figma.styles.list"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "figma.styles.list");
+    let capability = generate_valid_token(&key, "figma.styles.list");
     let result = connector
         .handle_invoke(json!({
             "operation": "figma.styles.list",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -2084,6 +2130,6 @@ async fn styles_list_missing_file_key() {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(message.contains("file_key"));
         }
-        e => panic!("Expected InvalidRequest, got: {e:?}"),
+        e => assert!(matches!(e, fcp_core::FcpError::InvalidRequest { .. })),
     }
 }

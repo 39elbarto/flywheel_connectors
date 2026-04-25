@@ -207,6 +207,23 @@ impl Default for ConfluenceConnector {
     }
 }
 
+fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
+    let capability = match operation {
+        OP_SPACES_LIST | OP_SPACES_GET | OP_HEALTH => CapabilityId::from_static(CAP_SPACES_READ),
+        OP_PAGES_LIST | OP_PAGES_GET | OP_SEARCH => CapabilityId::from_static(CAP_PAGES_READ),
+        OP_PAGES_CREATE | OP_PAGES_UPDATE | OP_PAGES_DELETE => {
+            CapabilityId::from_static(CAP_PAGES_WRITE)
+        }
+        _ => {
+            return Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: format!("Unknown operation: {operation}"),
+            });
+        }
+    };
+    Ok(capability)
+}
+
 /// Build the typed operations catalog.
 pub fn operations_info() -> Vec<OperationInfo> {
     vec![
@@ -625,6 +642,41 @@ impl FcpConnector for ConfluenceConnector {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+        let required_cap = match required_capability(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return Ok(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ));
+            }
+        };
+        if self.client.is_none() || self.runtime.is_none() {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ));
+        }
+        let Some(verifier) = self.verifier.as_ref() else {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector has not completed handshake",
+                FcpError::NotHandshaken.error_code(),
+            ));
+        };
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &required_cap, &req.operation, &[])
+        {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response =
+                    response.with_missing_capabilities(vec![required_cap.as_str().to_string()]);
+            }
+            return Ok(response);
+        }
         Ok(SimulateResponse::allowed(req.id))
     }
 
@@ -677,22 +729,8 @@ impl ConfluenceConnector {
         let verifier = self.verifier.as_ref().ok_or(FcpError::Internal {
             message: "Capability verifier missing after successful handshake".into(),
         })?;
-        let required_cap = match operation {
-            OP_SPACES_LIST | OP_SPACES_GET | OP_HEALTH => {
-                CapabilityId::from_static(CAP_SPACES_READ)
-            }
-            OP_PAGES_LIST | OP_PAGES_GET | OP_SEARCH => CapabilityId::from_static(CAP_PAGES_READ),
-            OP_PAGES_CREATE | OP_PAGES_UPDATE | OP_PAGES_DELETE => {
-                CapabilityId::from_static(CAP_PAGES_WRITE)
-            }
-            _ => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1004,
-                    message: format!("Unknown operation: {operation}"),
-                });
-            }
-        };
-        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
+        let required_cap = required_capability(operation)?;
+        verifier.verify_bound(req.capability_token, &required_cap, &req.operation, &[])?;
 
         let runtime = self.runtime.as_ref().ok_or(FcpError::Internal {
             message: "Connector runtime missing after configure".into(),
@@ -969,7 +1007,7 @@ mod tests {
         json!({
             "base_url": "https://test.atlassian.net/wiki",
             "email": "user@test.com",
-            "api_token": "test_token"
+            "api_token": "test-auth-material"
         })
     }
 
@@ -1047,7 +1085,8 @@ mod tests {
             CapabilityToken::test_token(),
         );
         let resp = connector.simulate(req).await.unwrap();
-        assert!(resp.would_succeed);
+        assert!(!resp.would_succeed);
+        assert_eq!(resp.denial_code.as_deref(), Some("FCP-5002"));
     }
 
     #[test]

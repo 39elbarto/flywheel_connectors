@@ -285,6 +285,14 @@ impl GmailClient {
         self.get(&url).await
     }
 
+    /// Create a draft from an RFC 2822 encoded, base64url message.
+    #[instrument(skip(self, raw_message))]
+    pub async fn create_draft(&self, raw_message: &str) -> GmailResult<GmailDraft> {
+        let url = format!("{}/users/me/drafts", self.base_url);
+        let body = serde_json::json!({ "message": { "raw": raw_message } });
+        self.post_json(&url, &body).await
+    }
+
     /// Send a draft.
     #[instrument(skip(self))]
     pub async fn send_draft(&self, draft_id: &str) -> GmailResult<GmailMessage> {

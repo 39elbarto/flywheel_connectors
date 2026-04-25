@@ -790,8 +790,8 @@ where
     })
 }
 
-fn parse_token(token: String) -> FcpResult<ConversationToken> {
-    ConversationToken::new(token).map_err(|message| FcpError::InvalidRequest {
+fn parse_conversation_ref(raw_conversation_ref: String) -> FcpResult<ConversationToken> {
+    ConversationToken::new(raw_conversation_ref).map_err(|message| FcpError::InvalidRequest {
         code: 1005,
         message,
     })
@@ -824,22 +824,28 @@ fn resolve_poll_query(
     Ok(query)
 }
 
-fn required_capability(operation: &str) -> Option<&'static str> {
-    match operation {
+fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
+    let capability = match operation {
         OP_HEALTH
         | OP_LIST_CONVERSATIONS
         | OP_GET_CONVERSATION
         | OP_GET_MESSAGES
         | OP_POLL_CONVERSATION_EVENTS
         | OP_LIST_PARTICIPANTS
-        | OP_GET_CALL_STATE => Some(CAP_READ),
+        | OP_GET_CALL_STATE => CAP_READ,
         OP_SEND_MESSAGE | OP_SET_READ_MARKER | OP_ADD_REACTION | OP_DELETE_REACTION
-        | OP_SHARE_FILE => Some(CAP_WRITE),
+        | OP_SHARE_FILE => CAP_WRITE,
         OP_CREATE_CONVERSATION | OP_DELETE_MESSAGE | OP_ADD_PARTICIPANT | OP_REMOVE_PARTICIPANT => {
-            Some(CAP_MANAGE)
+            CAP_MANAGE
         }
-        _ => None,
-    }
+        _ => {
+            return Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: format!("Unknown operation: {operation}"),
+            });
+        }
+    };
+    Ok(CapabilityId::from_static(capability))
 }
 
 fcp_core::impl_fcp_sealed!(NextcloudTalkConnector);
@@ -946,6 +952,41 @@ impl FcpConnector for NextcloudTalkConnector {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+        let required_cap = match required_capability(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return Ok(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ));
+            }
+        };
+        if self.client.is_none() || self.runtime.is_none() {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ));
+        }
+        let Some(verifier) = self.verifier.as_ref() else {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            ));
+        };
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &required_cap, &req.operation, &[])
+        {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response =
+                    response.with_missing_capabilities(vec![required_cap.as_str().to_string()]);
+            }
+            return Ok(response);
+        }
         Ok(SimulateResponse::allowed(req.id))
     }
 
@@ -1003,19 +1044,10 @@ impl NextcloudTalkConnector {
         let operation_name = operation.as_str();
 
         if let Some(verifier) = &self.verifier {
-            let capability =
-                required_capability(operation_name).ok_or_else(|| FcpError::InvalidRequest {
-                    code: 1004,
-                    message: format!("Unknown operation: {operation_name}"),
-                })?;
-            verifier.verify(
-                capability_token,
-                &CapabilityId::from_static(capability),
-                &operation,
-                &[],
-            )?;
+            let capability = required_capability(operation_name)?;
+            verifier.verify_bound(capability_token, &capability, &operation, &[])?;
         } else {
-            return Err(FcpError::NotConfigured);
+            return Err(FcpError::NotHandshaken);
         }
 
         let runtime = self.runtime.as_ref().ok_or(FcpError::NotConfigured)?;
@@ -1051,9 +1083,9 @@ impl NextcloudTalkConnector {
             }
             OP_GET_CONVERSATION => {
                 let input: TokenInput = parse_input(input, operation_name)?;
-                let token = parse_token(input.token)?;
+                let room_ref = parse_conversation_ref(input.token)?;
                 let conversation = client
-                    .get_conversation(runtime, &token)
+                    .get_conversation(runtime, &room_ref)
                     .await
                     .map_err(|error| error.to_fcp_error())?;
                 json!({ "conversation": conversation })
@@ -1068,10 +1100,10 @@ impl NextcloudTalkConnector {
             }
             OP_GET_MESSAGES => {
                 let input: GetMessagesInput = parse_input(input, operation_name)?;
-                let token = parse_token(input.token)?;
+                let room_ref = parse_conversation_ref(input.token)?;
                 let query = resolve_message_query(input.query, config)?;
                 let page = client
-                    .get_messages(runtime, &token, &query)
+                    .get_messages(runtime, &room_ref, &query)
                     .await
                     .map_err(|error| error.to_fcp_error())?;
                 json!({
@@ -1083,10 +1115,10 @@ impl NextcloudTalkConnector {
             }
             OP_POLL_CONVERSATION_EVENTS => {
                 let input: GetMessagesInput = parse_input(input, operation_name)?;
-                let token = parse_token(input.token)?;
+                let room_ref = parse_conversation_ref(input.token)?;
                 let query = resolve_poll_query(input.query, config)?;
                 let page = client
-                    .get_messages(runtime, &token, &query)
+                    .get_messages(runtime, &room_ref, &query)
                     .await
                     .map_err(|error| error.to_fcp_error())?;
                 let last_event_message_id = page.messages.last().map(|message| message.id.get());
@@ -1122,57 +1154,57 @@ impl NextcloudTalkConnector {
             }
             OP_SEND_MESSAGE => {
                 let input: SendMessageInput = parse_input(input, operation_name)?;
-                let token = parse_token(input.token)?;
+                let room_ref = parse_conversation_ref(input.token)?;
                 let message = client
-                    .send_message(runtime, &token, &input.request)
+                    .send_message(runtime, &room_ref, &input.request)
                     .await
                     .map_err(|error| error.to_fcp_error())?;
                 json!({ "message": message })
             }
             OP_DELETE_MESSAGE => {
                 let input: DeleteMessageInput = parse_input(input, operation_name)?;
-                let token = parse_token(input.token)?;
+                let room_ref = parse_conversation_ref(input.token)?;
                 let message = client
-                    .delete_message(runtime, &token, input.message_id)
+                    .delete_message(runtime, &room_ref, input.message_id)
                     .await
                     .map_err(|error| error.to_fcp_error())?;
                 json!({ "message": message })
             }
             OP_SET_READ_MARKER => {
                 let input: SetReadMarkerInput = parse_input(input, operation_name)?;
-                let token = parse_token(input.token)?;
+                let room_ref = parse_conversation_ref(input.token)?;
                 let conversation = client
-                    .set_read_marker(runtime, &token, &input.request)
+                    .set_read_marker(runtime, &room_ref, &input.request)
                     .await
                     .map_err(|error| error.to_fcp_error())?;
                 json!({ "conversation": conversation })
             }
             OP_LIST_PARTICIPANTS => {
                 let input: ListParticipantsInput = parse_input(input, operation_name)?;
-                let token = parse_token(input.token)?;
+                let room_ref = parse_conversation_ref(input.token)?;
                 let participants = client
-                    .list_participants(runtime, &token, &input.query)
+                    .list_participants(runtime, &room_ref, &input.query)
                     .await
                     .map_err(|error| error.to_fcp_error())?;
                 json!({ "participants": participants })
             }
             OP_ADD_PARTICIPANT => {
                 let input: AddParticipantInput = parse_input(input, operation_name)?;
-                let token = parse_token(input.token)?;
+                let room_ref = parse_conversation_ref(input.token)?;
                 let result = client
-                    .add_participant(runtime, &token, &input.request)
+                    .add_participant(runtime, &room_ref, &input.request)
                     .await
                     .map_err(|error| error.to_fcp_error())?;
                 json!({ "result": result })
             }
             OP_REMOVE_PARTICIPANT => {
                 let input: RemoveParticipantInput = parse_input(input, operation_name)?;
-                let token = parse_token(input.token)?;
+                let room_ref = parse_conversation_ref(input.token)?;
                 let request = RemoveParticipantRequest {
                     attendee_id: input.attendee_id,
                 };
                 client
-                    .remove_participant(runtime, &token, &request)
+                    .remove_participant(runtime, &room_ref, &request)
                     .await
                     .map_err(|error| error.to_fcp_error())?;
                 json!({
@@ -1182,42 +1214,42 @@ impl NextcloudTalkConnector {
             }
             OP_GET_CALL_STATE => {
                 let input: TokenInput = parse_input(input, operation_name)?;
-                let token = parse_token(input.token)?;
+                let room_ref = parse_conversation_ref(input.token)?;
                 let participants = client
-                    .get_call_state(runtime, &token)
+                    .get_call_state(runtime, &room_ref)
                     .await
                     .map_err(|error| error.to_fcp_error())?;
                 json!({ "participants": participants })
             }
             OP_ADD_REACTION => {
                 let input: ReactionInput = parse_input(input, operation_name)?;
-                let token = parse_token(input.token)?;
+                let room_ref = parse_conversation_ref(input.token)?;
                 let request = ReactionRequest {
                     reaction: input.reaction,
                 };
                 let reactions = client
-                    .add_reaction(runtime, &token, input.message_id, &request)
+                    .add_reaction(runtime, &room_ref, input.message_id, &request)
                     .await
                     .map_err(|error| error.to_fcp_error())?;
                 json!({ "reactions": reactions })
             }
             OP_DELETE_REACTION => {
                 let input: ReactionInput = parse_input(input, operation_name)?;
-                let token = parse_token(input.token)?;
+                let room_ref = parse_conversation_ref(input.token)?;
                 let request = ReactionRequest {
                     reaction: input.reaction,
                 };
                 let reactions = client
-                    .delete_reaction(runtime, &token, input.message_id, &request)
+                    .delete_reaction(runtime, &room_ref, input.message_id, &request)
                     .await
                     .map_err(|error| error.to_fcp_error())?;
                 json!({ "reactions": reactions })
             }
             OP_SHARE_FILE => {
                 let input: ShareFileInput = parse_input(input, operation_name)?;
-                let token = parse_token(input.token)?;
+                let room_ref = parse_conversation_ref(input.token)?;
                 let share = client
-                    .share_file(runtime, &token, &input.request)
+                    .share_file(runtime, &room_ref, &input.request)
                     .await
                     .map_err(|error| error.to_fcp_error())?;
                 json!({ "share": share })
@@ -1286,12 +1318,38 @@ mod tests {
         }
     }
 
+    fn base_simulate(
+        connector_id: &ConnectorId,
+        operation: &'static str,
+        capability_token: CapabilityToken,
+    ) -> SimulateRequest {
+        SimulateRequest {
+            r#type: "simulate".into(),
+            id: RequestId::new("sim_nextcloud_talk"),
+            connector_id: connector_id.clone(),
+            operation: OperationId::from_static(operation),
+            zone_id: ZoneId::work(),
+            input: json!({}),
+            capability_token,
+            estimate_cost: false,
+            check_availability: false,
+            context: None,
+            correlation_id: None,
+        }
+    }
+
     fn generate_valid_token(
         signing_key: &Ed25519SigningKey,
         capability: &'static str,
         operations: &[&'static str],
     ) -> CapabilityToken {
         let now = Utc::now();
+        let constraints = fcp_core::CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
         let cose = CapabilityTokenBuilder::new()
             .capability_id(capability)
             .zone_id("z:work")
@@ -1299,8 +1357,10 @@ mod tests {
             .operations(operations)
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
-            .expect("token");
+            .expect("capability token should sign");
         CapabilityToken::from_raw(cose)
     }
 
@@ -1334,6 +1394,54 @@ mod tests {
         let report = connector.doctor();
         assert!(report.passed);
         assert!(report.checks.iter().any(|check| check.name == "auth_mode"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_requires_configuration() {
+        let connector = NextcloudTalkConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let grant = generate_valid_token(&signing_key, CAP_READ, &[OP_HEALTH]);
+        let response = connector
+            .simulate(base_simulate(connector.id(), OP_HEALTH, grant))
+            .await
+            .expect("simulate");
+
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(FcpError::NotConfigured.error_code())
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_checks_bound_capability_token() {
+        let server = MockServer::start().await;
+        let mut connector = NextcloudTalkConnector::new();
+        connector
+            .configure(json!({
+                "server_url": server.uri(),
+                "auth": {
+                    "mode": "bearer_token",
+                    "access_token": "oauth-test-material"
+                }
+            }))
+            .await
+            .expect("configure");
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let mut handshake = base_handshake();
+        handshake.host_public_key = verifying_key.to_bytes();
+        connector.handshake(handshake).await.expect("handshake");
+
+        let grant = generate_valid_token(&signing_key, CAP_READ, &[OP_SEND_MESSAGE]);
+        let response = connector
+            .simulate(base_simulate(connector.id(), OP_SEND_MESSAGE, grant))
+            .await
+            .expect("simulate");
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-3003"));
+        assert!(response.missing_capabilities.is_empty());
     }
 
     #[test]
@@ -1407,9 +1515,9 @@ mod tests {
         handshake.host_public_key = verifying_key.to_bytes();
         connector.handshake(handshake).await.expect("handshake");
 
-        let token = generate_valid_token(&signing_key, CAP_READ, &[OP_HEALTH]);
+        let grant = generate_valid_token(&signing_key, CAP_READ, &[OP_HEALTH]);
         let response = connector
-            .invoke(base_invoke(connector.id(), OP_HEALTH, token, json!({})))
+            .invoke(base_invoke(connector.id(), OP_HEALTH, grant, json!({})))
             .await
             .expect("invoke");
 
@@ -1465,12 +1573,12 @@ mod tests {
         handshake.host_public_key = verifying_key.to_bytes();
         connector.handshake(handshake).await.expect("handshake");
 
-        let token = generate_valid_token(&signing_key, CAP_READ, &[OP_LIST_CONVERSATIONS]);
+        let grant = generate_valid_token(&signing_key, CAP_READ, &[OP_LIST_CONVERSATIONS]);
         let response = connector
             .invoke(base_invoke(
                 connector.id(),
                 OP_LIST_CONVERSATIONS,
-                token,
+                grant,
                 json!({ "include_status": true }),
             ))
             .await
@@ -1533,12 +1641,12 @@ mod tests {
         handshake.host_public_key = verifying_key.to_bytes();
         connector.handshake(handshake).await.expect("handshake");
 
-        let token = generate_valid_token(&signing_key, CAP_WRITE, &[OP_SEND_MESSAGE]);
+        let grant = generate_valid_token(&signing_key, CAP_WRITE, &[OP_SEND_MESSAGE]);
         let response = connector
             .invoke(base_invoke(
                 connector.id(),
                 OP_SEND_MESSAGE,
-                token,
+                grant,
                 json!({
                     "token": "room123",
                     "message": "hello world",
@@ -1608,12 +1716,12 @@ mod tests {
         handshake.host_public_key = verifying_key.to_bytes();
         connector.handshake(handshake).await.expect("handshake");
 
-        let token = generate_valid_token(&signing_key, CAP_MANAGE, &[OP_DELETE_MESSAGE]);
+        let grant = generate_valid_token(&signing_key, CAP_MANAGE, &[OP_DELETE_MESSAGE]);
         let response = connector
             .invoke(base_invoke(
                 connector.id(),
                 OP_DELETE_MESSAGE,
-                token,
+                grant,
                 json!({
                     "token": "room123",
                     "message_id": 42
@@ -1663,12 +1771,12 @@ mod tests {
         handshake.host_public_key = verifying_key.to_bytes();
         connector.handshake(handshake).await.expect("handshake");
 
-        let token = generate_valid_token(&signing_key, CAP_READ, &[OP_GET_MESSAGES]);
+        let grant = generate_valid_token(&signing_key, CAP_READ, &[OP_GET_MESSAGES]);
         let response = connector
             .invoke(base_invoke(
                 connector.id(),
                 OP_GET_MESSAGES,
-                token,
+                grant,
                 json!({
                     "token": "room123",
                     "look_into_future": true
@@ -1746,12 +1854,12 @@ mod tests {
         handshake.host_public_key = verifying_key.to_bytes();
         connector.handshake(handshake).await.expect("handshake");
 
-        let token = generate_valid_token(&signing_key, CAP_READ, &[OP_POLL_CONVERSATION_EVENTS]);
+        let grant = generate_valid_token(&signing_key, CAP_READ, &[OP_POLL_CONVERSATION_EVENTS]);
         let response = connector
             .invoke(base_invoke(
                 connector.id(),
                 OP_POLL_CONVERSATION_EVENTS,
-                token,
+                grant,
                 json!({
                     "token": "room123",
                     "look_into_future": true
@@ -1806,12 +1914,12 @@ mod tests {
         handshake.host_public_key = verifying_key.to_bytes();
         connector.handshake(handshake).await.expect("handshake");
 
-        let token = generate_valid_token(&signing_key, CAP_READ, &[OP_POLL_CONVERSATION_EVENTS]);
+        let grant = generate_valid_token(&signing_key, CAP_READ, &[OP_POLL_CONVERSATION_EVENTS]);
         let response = connector
             .invoke(base_invoke(
                 connector.id(),
                 OP_POLL_CONVERSATION_EVENTS,
-                token,
+                grant,
                 json!({
                     "token": "room123",
                     "look_into_future": true,

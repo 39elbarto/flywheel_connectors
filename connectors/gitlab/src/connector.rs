@@ -4,9 +4,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_core::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
-    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
+    AgentHint, BaseConnector, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
+    CredentialId, FcpError, FcpResult, IdempotencyClass, OperationId, OperationInfo,
+    ProvisioningRecipe, ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier,
+    SelfCheckReport, StepId, ZoneId,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -187,6 +188,7 @@ pub struct GitLabConnector {
     base: Arc<BaseConnector>,
     config: Option<GitLabConfig>,
     client: Option<Arc<GitLabClient>>,
+    verifier: Option<CapabilityVerifier>,
     session_id: Option<String>,
     request_count: AtomicU64,
     error_count: AtomicU64,
@@ -199,6 +201,7 @@ impl GitLabConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("gitlab"))),
             config: None,
             client: None,
+            verifier: None,
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
@@ -223,7 +226,10 @@ impl GitLabConnector {
             .map_err(|e| e.to_fcp_error())?;
         self.client = Some(Arc::new(client));
         self.config = Some(config);
+        self.verifier = None;
+        self.session_id = None;
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
         Ok(json!({}))
     }
 
@@ -237,15 +243,24 @@ impl GitLabConnector {
                 message: "Connector not configured".into(),
             });
         }
-        self.session_id = params
+        let host_public_key = parse_host_public_key(&params)?;
+        let zone = parse_handshake_zone(&params)?;
+        self.verifier = Some(CapabilityVerifier::new(
+            host_public_key,
+            zone,
+            self.base.instance_id.clone(),
+        ));
+        let session_id = params
             .get("session_id")
             .and_then(|v| v.as_str())
-            .map(str::to_string);
+            .map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_string);
+        self.session_id = Some(session_id.clone());
         self.base.set_handshaken(true);
         Ok(json!({
             "protocol_version": "2.0",
             "connector_id": "fcp.gitlab",
             "connector_version": "0.1.0",
+            "session_id": session_id,
             "capabilities": ["gitlab.projects.read", "gitlab.issues.read", "gitlab.issues.write", "gitlab.merge_requests.read", "gitlab.pipelines.read"]
         }))
     }
@@ -358,6 +373,17 @@ impl GitLabConnector {
             },
         )?;
         let input = params.get("input").cloned().unwrap_or(json!({}));
+        let cap_id = gitlab_capability_for_operation(operation)?;
+        validate_gitlab_input(operation, &input)?;
+        let token = parse_capability_token(&params)?;
+        let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid operation_id".into(),
+        })?;
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        let resource_uris = gitlab_resource_uris(operation, &input);
+        verifier.verify_bound(token, &cap_id, &op_id, &resource_uris)?;
+
         self.request_count.fetch_add(1, Ordering::Relaxed);
         let client = self.client.as_ref().ok_or(FcpError::Internal {
             message: "Client not initialized".into(),
@@ -384,14 +410,85 @@ impl GitLabConnector {
     }
 
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let operation = params
-            .get("operation_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let allowed = operations_info().iter().any(|o| o.id.as_ref() == operation);
-        Ok(
-            json!({ "allowed": allowed, "reason": if allowed { "Operation supported" } else { "Unknown operation" } }),
-        )
+        let Some(operation) = params.get("operation_id").and_then(|v| v.as_str()) else {
+            let error = FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing operation_id".into(),
+            };
+            return Ok(gitlab_simulate_denied(
+                error.to_string(),
+                error.error_code(),
+                None,
+            ));
+        };
+        let input = params.get("input").cloned().unwrap_or(json!({}));
+
+        let capability = match gitlab_capability_for_operation(operation) {
+            Ok(capability) => capability,
+            Err(error) => {
+                let reason = if matches!(error, FcpError::OperationNotGranted { .. }) {
+                    "Unknown operation".to_string()
+                } else {
+                    error.to_string()
+                };
+                return Ok(gitlab_simulate_denied(reason, error.error_code(), None));
+            }
+        };
+
+        if let Err(error) = validate_gitlab_input(operation, &input) {
+            return Ok(gitlab_simulate_denied(
+                error.to_string(),
+                error.error_code(),
+                None,
+            ));
+        }
+
+        if self.config.is_none() || self.client.is_none() {
+            return Ok(gitlab_simulate_denied(
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+                None,
+            ));
+        }
+
+        let Some(verifier) = &self.verifier else {
+            return Ok(gitlab_simulate_denied(
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+                None,
+            ));
+        };
+
+        let token = match parse_capability_token(&params) {
+            Ok(token) => token,
+            Err(error) => {
+                return Ok(gitlab_simulate_denied(
+                    error.to_string(),
+                    error.error_code(),
+                    None,
+                ));
+            }
+        };
+        let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid operation_id".into(),
+        })?;
+        let resource_uris = gitlab_resource_uris(operation, &input);
+        match verifier.verify_bound(token, &capability, &op_id, &resource_uris) {
+            Ok(_) => Ok(json!({"allowed": true, "reason": "Operation supported"})),
+            Err(error) => {
+                let missing = matches!(
+                    error,
+                    FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+                )
+                .then(|| capability.as_str().to_string());
+                Ok(gitlab_simulate_denied(
+                    error.to_string(),
+                    error.error_code(),
+                    missing,
+                ))
+            }
+        }
     }
 
     pub async fn handle_shutdown(
@@ -401,6 +498,8 @@ impl GitLabConnector {
         info!("GitLab connector shutting down");
         self.client = None;
         self.config = None;
+        self.verifier = None;
+        self.session_id = None;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
         Ok(json!({}))
@@ -556,6 +655,140 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         .get(field)
         .and_then(|v| v.as_str())
         .ok_or_else(|| GitLabError::InvalidInput(format!("Missing required field: {field}")))
+}
+
+fn parse_host_public_key(params: &serde_json::Value) -> FcpResult<[u8; 32]> {
+    let value = params
+        .get("host_public_key")
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing host_public_key".into(),
+        })?;
+    let bytes: Vec<u8> =
+        serde_json::from_value(value.clone()).map_err(|e| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("host_public_key must be an array of 32 bytes: {e}"),
+        })?;
+    bytes.try_into().map_err(|_| FcpError::InvalidRequest {
+        code: 1003,
+        message: "host_public_key must contain exactly 32 bytes".into(),
+    })
+}
+
+fn parse_handshake_zone(params: &serde_json::Value) -> FcpResult<ZoneId> {
+    params
+        .get("zone")
+        .and_then(|value| value.as_str())
+        .map_or_else(
+            || Ok(ZoneId::work()),
+            |zone| {
+                zone.parse().map_err(|error| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid zone: {error}"),
+                })
+            },
+        )
+}
+
+fn parse_capability_token(params: &serde_json::Value) -> FcpResult<CapabilityToken> {
+    let token = params
+        .get("capability_token")
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing capability_token".into(),
+        })?;
+    serde_json::from_value(token.clone()).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Invalid capability_token format: {error}"),
+    })
+}
+
+fn gitlab_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
+    operations_info()
+        .into_iter()
+        .find(|info| info.id.as_ref() == operation)
+        .map(|info| info.capability)
+        .ok_or_else(|| FcpError::OperationNotGranted {
+            operation: operation.into(),
+        })
+}
+
+fn validate_gitlab_input(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+    match operation {
+        "gitlab.projects.list" => {
+            if let Some(value) = input.get("per_page") {
+                let per_page = value.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "per_page must be an unsigned integer".into(),
+                })?;
+                if !(1..=100).contains(&per_page) {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "per_page must be between 1 and 100".into(),
+                    });
+                }
+            }
+            Ok(())
+        }
+        "gitlab.issues.list" | "gitlab.merge_requests.list" | "gitlab.pipelines.list" => {
+            require_str(input, "project_id").map_err(|error| error.to_fcp_error())?;
+            Ok(())
+        }
+        "gitlab.issues.create" => {
+            require_str(input, "project_id").map_err(|error| error.to_fcp_error())?;
+            require_str(input, "title").map_err(|error| error.to_fcp_error())?;
+            if let Some(description) = input.get("description")
+                && description.as_str().is_none()
+            {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "description must be a string".into(),
+                });
+            }
+            Ok(())
+        }
+        _ => Err(FcpError::OperationNotGranted {
+            operation: operation.into(),
+        }),
+    }
+}
+
+fn gitlab_resource_uris(operation: &str, input: &serde_json::Value) -> Vec<String> {
+    match operation {
+        "gitlab.projects.list" => vec!["gitlab:projects".into()],
+        "gitlab.issues.list" | "gitlab.issues.create" => input
+            .get("project_id")
+            .and_then(|value| value.as_str())
+            .map(|project_id| vec![format!("gitlab:project:{project_id}:issues")])
+            .unwrap_or_default(),
+        "gitlab.merge_requests.list" => input
+            .get("project_id")
+            .and_then(|value| value.as_str())
+            .map(|project_id| vec![format!("gitlab:project:{project_id}:merge_requests")])
+            .unwrap_or_default(),
+        "gitlab.pipelines.list" => input
+            .get("project_id")
+            .and_then(|value| value.as_str())
+            .map(|project_id| vec![format!("gitlab:project:{project_id}:pipelines")])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn gitlab_simulate_denied(
+    reason: impl Into<String>,
+    denial_code: impl Into<String>,
+    missing_capability: Option<String>,
+) -> serde_json::Value {
+    let mut response = json!({
+        "allowed": false,
+        "reason": reason.into(),
+        "denial_code": denial_code.into(),
+    });
+    if let Some(capability) = missing_capability {
+        response["missing_capabilities"] = json!([capability]);
+    }
+    response
 }
 
 fn operations_info() -> Vec<OperationInfo> {

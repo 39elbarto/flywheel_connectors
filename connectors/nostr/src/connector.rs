@@ -247,17 +247,17 @@ impl NostrConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         let capability = required_capability(req.operation.as_str())?;
-        verifier.verify(req.capability_token, &capability, &req.operation, &[])?;
+        verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])?;
 
         let output = match req.operation.as_str() {
-            OP_PUBLISH_NOTE => client.publish_note(&req.input).await?,
-            OP_QUERY_EVENTS => client.query_events(&req.input).await?,
+            OP_PUBLISH_NOTE => Box::pin(client.publish_note(&req.input)).await?,
+            OP_QUERY_EVENTS => Box::pin(client.query_events(&req.input)).await?,
             OP_LIST_RELAYS => json!({
                 "relays": client.relay_urls(),
                 "public_key_hex": client.public_key_hex(),
             }),
             OP_HEALTH => client.health_details().await?,
-            OP_RELAYS_HEALTH => client.relay_health_scores().await,
+            OP_RELAYS_HEALTH => Box::pin(client.relay_health_scores()).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
@@ -385,7 +385,7 @@ impl FcpConnector for NostrConnector {
     }
 
     async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
-        let result = self.invoke_inner(req).await;
+        let result = Box::pin(self.invoke_inner(req)).await;
         self.base.record_request(result.is_ok());
         result
     }
@@ -415,7 +415,8 @@ impl FcpConnector for NostrConnector {
                 FcpError::NotHandshaken.error_code(),
             ));
         };
-        if let Err(error) = verifier.verify(req.capability_token, &capability, &req.operation, &[])
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])
         {
             let mut response =
                 SimulateResponse::denied(req.id, error.to_string(), error.error_code());
@@ -555,7 +556,9 @@ fn operation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::{CapabilityToken, ConnectorId, SelfCheckStatus, ZoneId};
+    use chrono::{Duration as ChronoDuration, Utc};
+    use fcp_core::{CapabilityConstraints, CapabilityToken, ConnectorId, SelfCheckStatus, ZoneId};
+    use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
     use fcp_sdk::prelude::FcpConnector;
     use std::sync::atomic::Ordering;
 
@@ -566,18 +569,48 @@ mod tests {
         })
     }
 
-    fn handshake_request() -> HandshakeRequest {
+    fn handshake_request_for(host_public_key: [u8; 32]) -> HandshakeRequest {
         HandshakeRequest {
             protocol_version: "2.0.0".into(),
             zone: ZoneId::work(),
             zone_dir: None,
-            host_public_key: [7u8; 32],
+            host_public_key,
             nonce: [9u8; 32],
             capabilities_requested: vec![CapabilityId::from_static(CAP_HEALTH_READ)],
             host: None,
             transport_caps: None,
             requested_instance_id: None,
         }
+    }
+
+    fn handshake_request() -> HandshakeRequest {
+        handshake_request_for([7u8; 32])
+    }
+
+    fn capability_token(
+        signing_key: &Ed25519SigningKey,
+        capability: &'static str,
+        operation: &'static str,
+    ) -> CapabilityToken {
+        let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+        let raw = CapabilityTokenBuilder::new()
+            .capability_id(capability)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&[operation])
+            .issuer("node:test")
+            .validity(now, now + ChronoDuration::hours(1))
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
+            .sign(signing_key)
+            .expect("token should sign");
+        CapabilityToken::from_raw(raw)
     }
 
     // ── Doctor tests ─────────────────────────────────────────────────
@@ -763,6 +796,37 @@ mod tests {
             response.failure_reason.as_deref(),
             Some("Connector is not configured")
         );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_checks_capability_operation_grant() {
+        let mut connector = NostrConnector::new();
+        connector
+            .configure(test_config())
+            .await
+            .expect("configure should succeed");
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_request_for(
+                signing_key.verifying_key().to_bytes(),
+            ))
+            .await
+            .expect("handshake should succeed");
+
+        let response = connector
+            .simulate(SimulateRequest::new(
+                ConnectorId::from_static("fcp.nostr"),
+                OperationId::from_static(OP_PUBLISH_NOTE),
+                ZoneId::work(),
+                json!({ "content": "hello" }),
+                capability_token(&signing_key, CAP_EVENTS_READ, OP_PUBLISH_NOTE),
+            ))
+            .await
+            .expect("simulate should return a policy result");
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-3003"));
+        assert!(response.missing_capabilities.is_empty());
     }
 
     // ── Configure / handshake / shutdown lifecycle tests ─────────────

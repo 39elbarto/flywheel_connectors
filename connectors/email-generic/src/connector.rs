@@ -218,7 +218,7 @@ impl EmailGenericConnector {
                 });
             }
         };
-        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
+        verifier.verify_bound(req.capability_token, &required_cap, &req.operation, &[])?;
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
         let output = match req.operation.as_str() {
@@ -295,7 +295,12 @@ impl EmailGenericConnector {
                     .send_message(&to, subject, body, &cc)
                     .map_err(|error| error.to_fcp_error())?
             }
-            _ => unreachable!(),
+            operation => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!("Unknown operation: {operation}"),
+                });
+            }
         };
         Ok(InvokeResponse::ok(req.id, output))
     }
@@ -441,7 +446,8 @@ impl FcpConnector for EmailGenericConnector {
                 FcpError::NotHandshaken.error_code(),
             ));
         };
-        if let Err(error) = verifier.verify(req.capability_token, &capability, &req.operation, &[])
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])
         {
             let mut response =
                 SimulateResponse::denied(req.id, error.to_string(), error.error_code());
@@ -535,7 +541,8 @@ mod tests {
             .operations(&[operation])
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
             .expect("token should sign");
         CapabilityToken::from_raw(raw)

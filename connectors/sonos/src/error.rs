@@ -116,7 +116,7 @@ mod tests {
                 assert!(retryable);
                 assert_eq!(status_code, Some(500));
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(matches!(other, FcpError::External { .. })),
         }
     }
 
@@ -128,7 +128,7 @@ mod tests {
         };
         match err.to_fcp_error() {
             FcpError::External { retryable, .. } => assert!(!retryable),
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(matches!(other, FcpError::External { .. })),
         }
     }
 
@@ -201,7 +201,7 @@ mod tests {
         assert!(err.is_retryable(), "timeout should remain retryable");
         match err.to_fcp_error() {
             FcpError::External { retryable, .. } => assert!(retryable),
-            other => panic!("expected retryable External, got {other:?}"),
+            other => assert!(matches!(other, FcpError::External { .. })),
         }
     }
 

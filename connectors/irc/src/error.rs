@@ -203,7 +203,7 @@ mod tests {
                 assert_eq!(service, "irc");
                 assert!(retryable);
             }
-            other => panic!("Expected External, got {other:?}"),
+            other => assert!(matches!(other, FcpError::External { .. })),
         }
     }
 
@@ -223,7 +223,7 @@ mod tests {
                 assert_eq!(code, 1001);
                 assert!(message.contains("missing server"));
             }
-            other => panic!("Expected InvalidRequest, got {other:?}"),
+            other => assert!(matches!(other, FcpError::InvalidRequest { .. })),
         }
     }
 
@@ -233,7 +233,7 @@ mod tests {
         let fcp = err.to_fcp_error();
         match fcp {
             FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1005),
-            other => panic!("Expected InvalidRequest, got {other:?}"),
+            other => assert!(matches!(other, FcpError::InvalidRequest { .. })),
         }
     }
 
@@ -252,7 +252,7 @@ mod tests {
                 assert!(message.contains("TLS"));
                 assert!(retryable);
             }
-            other => panic!("Expected External, got {other:?}"),
+            other => assert!(matches!(other, FcpError::External { .. })),
         }
     }
 

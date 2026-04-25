@@ -239,7 +239,7 @@ impl GooglePlacesConnector {
             capability_token,
             ..
         } = req;
-        verifier.verify(capability_token, &required_cap, &operation, &[])?;
+        verifier.verify_bound(capability_token, &required_cap, &operation, &[])?;
 
         let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
         let output = match operation.as_str() {
@@ -451,7 +451,8 @@ impl FcpConnector for GooglePlacesConnector {
                 FcpError::NotHandshaken.error_code(),
             ));
         };
-        if let Err(error) = verifier.verify(req.capability_token, &capability, &req.operation, &[])
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])
         {
             let mut response =
                 SimulateResponse::denied(req.id, error.to_string(), error.error_code());
@@ -536,7 +537,8 @@ mod tests {
             .operations(&[operation])
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
-            .constraints_cbor(&cbor)
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
             .expect("token should sign");
         CapabilityToken::from_raw(raw)

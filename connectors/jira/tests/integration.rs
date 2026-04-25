@@ -71,7 +71,8 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .unwrap()
         .sign(signing_key)
         .unwrap();
     fcp_core::CapabilityToken::from_raw(cose)
@@ -140,6 +141,22 @@ fn jira_error_response(messages: &[&str]) -> serde_json::Value {
     json!({
         "errorMessages": messages,
         "errors": {}
+    })
+}
+
+fn simulate_request(
+    operation: &str,
+    input: &serde_json::Value,
+    token: &fcp_core::CapabilityToken,
+) -> serde_json::Value {
+    json!({
+        "type": "simulate",
+        "id": "sim-test",
+        "connector_id": "fcp.jira",
+        "operation": operation,
+        "zone_id": "z:work",
+        "input": input,
+        "capability_token": token
     })
 }
 
@@ -1071,6 +1088,79 @@ async fn capability_unknown_operation_fails() {
     assert!(
         matches!(err, fcp_core::FcpError::OperationNotGranted { .. }),
         "expected OperationNotGranted, got: {err:?}"
+    );
+}
+
+/// Simulate validates the same capability token path as invoke.
+#[fcp_async_core::runtime::test]
+async fn simulate_valid_capability_is_allowed() {
+    let _ctx = AsyncTestContext::for_scenario("jira.simulate.valid_capability");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = JiraConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["jira.get_issue"]).await;
+    let token = generate_valid_token(&signing_key, "jira.get_issue");
+
+    let result = connector
+        .handle_simulate(simulate_request(
+            "jira.get_issue",
+            &json!({"issue_key": "PROJ-1"}),
+            &token,
+        ))
+        .await
+        .expect("simulate should serialize");
+
+    assert_eq!(result["would_succeed"], true);
+    assert_eq!(result["failure_reason"], serde_json::Value::Null);
+}
+
+/// Simulate denies tokens that do not authorize the requested operation.
+#[fcp_async_core::runtime::test]
+async fn simulate_wrong_capability_is_denied() {
+    let _ctx = AsyncTestContext::for_scenario("jira.simulate.wrong_capability");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = JiraConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["jira.get_issue", "jira.create_issue"]).await;
+    let wrong_token = generate_valid_token(&signing_key, "jira.create_issue");
+
+    let result = connector
+        .handle_simulate(simulate_request(
+            "jira.get_issue",
+            &json!({"issue_key": "PROJ-1"}),
+            &wrong_token,
+        ))
+        .await
+        .expect("simulate should serialize");
+
+    assert_eq!(result["would_succeed"], false);
+    assert_eq!(result["missing_capabilities"][0], "jira.read");
+}
+
+/// Unknown operations are denied during simulation, not optimistically allowed.
+#[fcp_async_core::runtime::test]
+async fn simulate_unknown_operation_is_denied() {
+    let mock_server = MockServer::start().await;
+
+    let mut connector = JiraConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["jira.nonexistent"]).await;
+    let token = generate_valid_token(&signing_key, "jira.nonexistent");
+
+    let result = connector
+        .handle_simulate(simulate_request("jira.nonexistent", &json!({}), &token))
+        .await
+        .expect("simulate should serialize");
+
+    assert_eq!(result["would_succeed"], false);
+    assert!(
+        result["failure_reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("jira.nonexistent")
     );
 }
 

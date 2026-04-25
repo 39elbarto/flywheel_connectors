@@ -167,26 +167,27 @@ impl DingTalkClient {
             DingTalkError::Token(format!("failed to decode access token response: {e}"))
         })?;
 
-        let token: AccessTokenResponse = serde_json::from_value(body.clone()).map_err(|e| {
-            DingTalkError::Token(format!("failed to parse access token payload: {e}"))
-        })?;
+        let auth_response: AccessTokenResponse =
+            serde_json::from_value(body.clone()).map_err(|e| {
+                DingTalkError::Token(format!("failed to parse access token payload: {e}"))
+            })?;
 
-        if token.access_token.trim().is_empty() {
+        if auth_response.access_token.trim().is_empty() {
             return Err(DingTalkError::Token(
                 "access token response missing or empty access_token field".into(),
             ));
         }
 
-        let ttl = token
+        let ttl = auth_response
             .expire_in
             .saturating_sub(TOKEN_REFRESH_SAFETY_MARGIN_SECS)
             .max(1);
         *self.token_cache.lock().await = Some(CachedAccessToken {
-            token: token.access_token.clone(),
+            token: auth_response.access_token.clone(),
             expires_at: Instant::now() + Duration::from_secs(ttl),
         });
 
-        Ok(token.access_token)
+        Ok(auth_response.access_token)
     }
 
     /// Send a JSON `POST` request against the `DingTalk` API.
@@ -196,12 +197,12 @@ impl DingTalkClient {
     /// Returns an error if token acquisition fails, the request cannot be sent,
     /// or `DingTalk` returns a non-success response.
     pub async fn post_json(&self, path: &str, body: Value) -> DingTalkResult<Value> {
-        let token = self.access_token().await?;
+        let auth_material = self.access_token().await?;
         let url = self.api_url(path)?;
         let response = self
             .client
             .post(url)
-            .header("x-acs-dingtalk-access-token", &token)
+            .header("x-acs-dingtalk-access-token", &auth_material)
             .json(&body)
             .send()
             .await
@@ -230,7 +231,7 @@ impl DingTalkClient {
         mime_type: &str,
         content_base64: &str,
     ) -> DingTalkResult<Value> {
-        let token = self.access_token().await?;
+        let auth_material = self.access_token().await?;
         let bytes = BASE64.decode(content_base64.trim()).map_err(|e| {
             DingTalkError::InvalidInput(format!("content_base64 must be valid base64: {e}"))
         })?;
@@ -238,7 +239,7 @@ impl DingTalkClient {
         let mut url = self.media_url("/media/upload")?;
         {
             let mut query = url.query_pairs_mut();
-            query.append_pair("access_token", &token);
+            query.append_pair("access_token", &auth_material);
             query.append_pair("type", media_type);
         }
 
@@ -460,7 +461,7 @@ mod tests {
     #[test]
     fn rejects_empty_client_secret() {
         let mut config = localhost_config();
-        config.client_secret = String::new();
+        config.client_secret.clear();
         assert!(DingTalkClient::new(config).is_err());
     }
 
@@ -665,12 +666,10 @@ mod tests {
 
         let client = DingTalkClient::new(test_config(&server.uri())).unwrap();
         let err = client.access_token().await.unwrap_err();
-        match err {
-            DingTalkError::Unauthorized(message) => {
-                assert!(message.contains("bad credentials"));
-            }
-            other => panic!("expected Unauthorized, got {other:?}"),
-        }
+        assert!(matches!(
+            err,
+            DingTalkError::Unauthorized(ref message) if message.contains("bad credentials")
+        ));
     }
 
     #[fcp_async_core::runtime::test]

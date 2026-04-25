@@ -166,9 +166,15 @@ impl S3Connector {
 
         info!(auth = %config.auth.redacted_label(), "S3 connector configured");
 
+        if let Some(client) = self.client.take() {
+            client.shutdown();
+        }
         self.config = Some(config);
         self.client = Some(client);
+        self.verifier = None;
+        self.session_id = None;
         self.base.set_configured(true);
+        self.base.set_handshaken(false);
 
         Ok(json!({ "status": "configured" }))
     }
@@ -183,6 +189,10 @@ impl S3Connector {
                 code: 1003,
                 message: format!("Invalid handshake request: {e}"),
             })?;
+
+        if self.client.is_none() {
+            return Err(FcpError::NotConfigured);
+        }
 
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -706,15 +716,62 @@ impl S3Connector {
     /// Handle simulate method.
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let req: SimulateRequest =
-            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
+            serde_json::from_value(params.clone()).map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid simulate request: {e}"),
             })?;
 
-        let response = SimulateResponse::allowed(req.id);
-        serde_json::to_value(response).map_err(|e| FcpError::Internal {
-            message: format!("Failed to serialize response: {e}"),
-        })
+        let capability = match self.capability_for_operation(req.operation.as_ref()).await {
+            Ok(capability) => capability,
+            Err(error) => {
+                let response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                return Self::serialize_simulate_response(response);
+            }
+        };
+
+        if let Err(error) = Self::validate_operation_input(req.operation.as_ref(), &req.input) {
+            let response = SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            return Self::serialize_simulate_response(response);
+        }
+
+        let Some(verifier) = &self.verifier else {
+            let error = if self.client.is_some() {
+                FcpError::NotHandshaken
+            } else {
+                FcpError::NotConfigured
+            };
+            let response = SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            return Self::serialize_simulate_response(response);
+        };
+
+        let missing_capability = capability.as_str().to_string();
+        let response =
+            match verifier.verify_bound(req.capability_token, &capability, &req.operation, &[]) {
+                Ok(_verified) => match Self::require_execution_approval(
+                    req.operation.as_ref(),
+                    &req.input,
+                    &params,
+                ) {
+                    Ok(_) => SimulateResponse::allowed(req.id),
+                    Err(error) => {
+                        SimulateResponse::denied(req.id, error.to_string(), error.error_code())
+                    }
+                },
+                Err(error) => {
+                    let response =
+                        SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                    if matches!(
+                        error,
+                        FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+                    ) {
+                        response.with_missing_capabilities(vec![missing_capability])
+                    } else {
+                        response
+                    }
+                }
+            };
+        Self::serialize_simulate_response(response)
     }
 
     /// Handle invoke method.
@@ -778,11 +835,15 @@ impl S3Connector {
             message: "Invalid capability ID format".into(),
         })?;
 
-        if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
-        } else {
-            return Err(FcpError::NotConfigured);
-        }
+        let Some(verifier) = &self.verifier else {
+            return if self.client.is_some() {
+                Err(FcpError::NotHandshaken)
+            } else {
+                Err(FcpError::NotConfigured)
+            };
+        };
+
+        verifier.verify_bound(token, &cap_id, &op_id, &[])?;
 
         let execution_approval = Self::require_execution_approval(operation, &input, &params)?;
 
@@ -812,6 +873,71 @@ impl S3Connector {
                 operation: operation.into(),
             }),
         }
+    }
+
+    fn validate_operation_input(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+        match operation {
+            "s3.put_object" => {
+                require_str(input, "bucket")?;
+                require_str(input, "key")?;
+                require_str(input, "body")?;
+            }
+            "s3.get_object" | "s3.delete_object" | "s3.head_object" => {
+                require_str(input, "bucket")?;
+                require_str(input, "key")?;
+            }
+            "s3.create_bucket" | "s3.delete_bucket" => {
+                require_str(input, "bucket")?;
+            }
+            "s3.list_objects" => {
+                require_str(input, "bucket")?;
+            }
+            "s3.list_buckets" => {}
+            "s3.copy_object" => {
+                require_str(input, "source_bucket")?;
+                require_str(input, "source_key")?;
+                require_str(input, "dest_bucket")?;
+                require_str(input, "dest_key")?;
+            }
+            "s3.generate_presigned_url" => {
+                require_str(input, "bucket")?;
+                require_str(input, "key")?;
+            }
+            _ => {
+                return Err(FcpError::OperationNotGranted {
+                    operation: operation.into(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn capability_for_operation(&self, operation: &str) -> FcpResult<CapabilityId> {
+        let intro = self.handle_introspect().await?;
+        let cap_str = intro
+            .get("operations")
+            .and_then(|ops| ops.as_array())
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|op| op.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
+            .and_then(|op| op.get("capability"))
+            .and_then(|capability| capability.as_str())
+            .ok_or_else(|| FcpError::OperationNotGranted {
+                operation: operation.into(),
+            })?;
+
+        cap_str.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid capability ID format".into(),
+        })
+    }
+
+    fn serialize_simulate_response(response: SimulateResponse) -> FcpResult<serde_json::Value> {
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })
     }
 
     fn require_execution_approval(
@@ -1044,13 +1170,18 @@ impl S3Connector {
 
     /// Handle shutdown.
     pub async fn handle_shutdown(
-        &self,
+        &mut self,
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("S3 connector shutting down");
-        if let Some(client) = &self.client {
+        if let Some(client) = self.client.take() {
             client.shutdown();
         }
+        self.config = None;
+        self.verifier = None;
+        self.session_id = None;
+        self.base.set_configured(false);
+        self.base.set_handshaken(false);
         Ok(json!({ "status": "shutdown" }))
     }
 }
@@ -1140,6 +1271,7 @@ fn op_info(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+    use fcp_core::{CapabilityConstraints, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
@@ -1157,6 +1289,12 @@ mod tests {
             _ => "s3.read",
         };
         let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut constraints_cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut constraints_cbor).unwrap();
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
@@ -1164,14 +1302,43 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
+            .try_constraints_cbor(&constraints_cbor)
+            .unwrap()
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
     }
 
+    async fn configure_for_tests(connector: &mut S3Connector) {
+        connector
+            .handle_configure(json!({
+                "access_key_id": "test_key",
+                "secret_access_key": "test_secret",
+                "region": "us-east-1",
+                "base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
+    }
+
+    async fn handshake_for_tests(connector: &mut S3Connector, signing_key: &Ed25519SigningKey) {
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["s3.read", "s3.write", "s3.delete"]
+            }))
+            .await
+            .unwrap();
+    }
+
     #[fcp_async_core::runtime::test]
     async fn test_handshake() {
         let mut connector = S3Connector::new();
+        configure_for_tests(&mut connector).await;
         let result = connector
             .handle_handshake(json!({
                 "protocol_version": "1.0.0",
@@ -1186,6 +1353,22 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_handshake_requires_configuration() {
+        let mut connector = S3Connector::new();
+        let result = connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": vec![0u8; 32],
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["s3.read"]
+            }))
+            .await;
+
+        assert!(matches!(result.unwrap_err(), FcpError::NotConfigured));
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_health_not_configured() {
         let connector = S3Connector::new();
         let result = connector.handle_health().await.unwrap();
@@ -1196,18 +1379,6 @@ mod tests {
     async fn test_invoke_without_config() {
         let mut connector = S3Connector::new();
         let signing_key = Ed25519SigningKey::generate();
-        let verifying_key = signing_key.verifying_key();
-
-        connector
-            .handle_handshake(json!({
-                "protocol_version": "1.0.0",
-                "zone": "z:work",
-                "host_public_key": verifying_key.to_bytes(),
-                "nonce": vec![0u8; 32],
-                "capabilities_requested": ["s3.get_object"]
-            }))
-            .await
-            .unwrap();
 
         let token = generate_valid_token(&signing_key, "s3.get_object");
         let result = connector
@@ -1224,29 +1395,10 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_missing_field() {
         let mut connector = S3Connector::new();
-        connector
-            .handle_configure(json!({
-                "access_key_id": "test_key",
-                "secret_access_key": "test_secret",
-                "region": "us-east-1",
-                "base_url": "http://localhost:9999"
-            }))
-            .await
-            .unwrap();
-
         let signing_key = Ed25519SigningKey::generate();
-        let verifying_key = signing_key.verifying_key();
 
-        connector
-            .handle_handshake(json!({
-                "protocol_version": "1.0.0",
-                "zone": "z:work",
-                "host_public_key": verifying_key.to_bytes(),
-                "nonce": vec![0u8; 32],
-                "capabilities_requested": ["s3.put_object"]
-            }))
-            .await
-            .unwrap();
+        configure_for_tests(&mut connector).await;
+        handshake_for_tests(&mut connector, &signing_key).await;
 
         let token = generate_valid_token(&signing_key, "s3.put_object");
         let result = connector
@@ -1261,6 +1413,153 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => assert!(message.contains("body")),
             e => panic!("Expected InvalidRequest, got: {e:?}"),
         }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_verifies_capability_token() {
+        let mut connector = S3Connector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        configure_for_tests(&mut connector).await;
+        handshake_for_tests(&mut connector, &signing_key).await;
+
+        let request = SimulateRequest::new(
+            ConnectorId::from_static("s3"),
+            OperationId::from_static("s3.list_buckets"),
+            ZoneId::work(),
+            json!({}),
+            generate_valid_token(&signing_key, "s3.list_buckets"),
+        );
+        let result = connector
+            .handle_simulate(serde_json::to_value(request).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(result["would_succeed"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_rejects_wrong_capability() {
+        let mut connector = S3Connector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        configure_for_tests(&mut connector).await;
+        handshake_for_tests(&mut connector, &signing_key).await;
+
+        let request = SimulateRequest::new(
+            ConnectorId::from_static("s3"),
+            OperationId::from_static("s3.put_object"),
+            ZoneId::work(),
+            json!({ "bucket": "bucket", "key": "key", "body": "body" }),
+            generate_valid_token(&signing_key, "s3.list_buckets"),
+        );
+        let result = connector
+            .handle_simulate(serde_json::to_value(request).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(result["would_succeed"], false);
+        assert_eq!(result["missing_capabilities"][0], "s3.write");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_rejects_invalid_input() {
+        let mut connector = S3Connector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        configure_for_tests(&mut connector).await;
+        handshake_for_tests(&mut connector, &signing_key).await;
+
+        let request = SimulateRequest::new(
+            ConnectorId::from_static("s3"),
+            OperationId::from_static("s3.put_object"),
+            ZoneId::work(),
+            json!({ "bucket": "bucket", "key": "key" }),
+            generate_valid_token(&signing_key, "s3.put_object"),
+        );
+        let result = connector
+            .handle_simulate(serde_json::to_value(request).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(result["would_succeed"], false);
+        assert!(
+            result["failure_reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("body"))
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_rejects_unknown_operation() {
+        let mut connector = S3Connector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        configure_for_tests(&mut connector).await;
+        handshake_for_tests(&mut connector, &signing_key).await;
+
+        let request = SimulateRequest::new(
+            ConnectorId::from_static("s3"),
+            OperationId::from_static("s3.unknown"),
+            ZoneId::work(),
+            json!({}),
+            generate_valid_token(&signing_key, "s3.unknown"),
+        );
+        let result = connector
+            .handle_simulate(serde_json::to_value(request).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(result["would_succeed"], false);
+        let expected_code = FcpError::OperationNotGranted {
+            operation: "s3.unknown".into(),
+        }
+        .error_code();
+        assert_eq!(result["denial_code"].as_str(), Some(expected_code.as_str()));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_dangerous_operation_requires_approval() {
+        let mut connector = S3Connector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        configure_for_tests(&mut connector).await;
+        handshake_for_tests(&mut connector, &signing_key).await;
+
+        let request = SimulateRequest::new(
+            ConnectorId::from_static("s3"),
+            OperationId::from_static("s3.delete_object"),
+            ZoneId::work(),
+            json!({ "bucket": "bucket", "key": "key" }),
+            generate_valid_token(&signing_key, "s3.delete_object"),
+        );
+        let result = connector
+            .handle_simulate(serde_json::to_value(request).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(result["would_succeed"], false);
+        let expected_code = FcpError::CapabilityDenied {
+            capability: "s3.delete_object".into(),
+            reason: String::new(),
+        }
+        .error_code();
+        assert_eq!(result["denial_code"].as_str(), Some(expected_code.as_str()));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_shutdown_clears_state() {
+        let mut connector = S3Connector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        configure_for_tests(&mut connector).await;
+        handshake_for_tests(&mut connector, &signing_key).await;
+
+        let result = connector.handle_shutdown(json!({})).await.unwrap();
+
+        assert_eq!(result["status"], "shutdown");
+        assert!(connector.config.is_none());
+        assert!(connector.client.is_none());
+        assert!(connector.verifier.is_none());
+        assert!(connector.session_id.is_none());
+        assert_eq!(
+            connector.handle_health().await.unwrap()["status"],
+            "not_configured"
+        );
     }
 
     #[fcp_async_core::runtime::test]

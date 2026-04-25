@@ -39,5 +39,6 @@ sha2.workspace = true
 hex.workspace = true
 
 [dev-dependencies]
+ciborium.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 wiremock.workspace = true

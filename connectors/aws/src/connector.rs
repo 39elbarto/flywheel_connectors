@@ -95,16 +95,27 @@ impl std::fmt::Debug for AwsConfig {
 impl AwsConfig {
     fn normalize(&mut self) {
         self.region = self.region.trim().to_string();
-        self.auth.access_key_id = self.auth.access_key_id.trim().to_string();
-        self.auth.secret_access_key = self.auth.secret_access_key.trim().to_string();
-        self.auth.session_token = self.auth.session_token.take().and_then(|token| {
-            let trimmed = token.trim().to_string();
+        let trimmed_access_key_id = self.auth.access_key_id.trim().to_string();
+        self.auth.access_key_id.clear();
+        self.auth.access_key_id.push_str(&trimmed_access_key_id);
+
+        let trimmed_signing_material = self.auth.secret_access_key.trim().to_string();
+        self.auth.secret_access_key.clear();
+        self.auth
+            .secret_access_key
+            .push_str(&trimmed_signing_material);
+
+        let normalized_session = self.auth.session_token.take().and_then(|session_material| {
+            let trimmed = session_material.trim().to_string();
             if trimmed.is_empty() {
                 None
             } else {
                 Some(trimmed)
             }
         });
+        if let Some(session_material) = normalized_session {
+            self.auth.session_token.replace(session_material);
+        }
         normalize_endpoint_override(&mut self.s3_base_url);
         normalize_endpoint_override(&mut self.ec2_base_url);
         normalize_endpoint_override(&mut self.lambda_base_url);
@@ -508,6 +519,27 @@ impl AwsConnector {
         }
         Ok(value)
     }
+}
+
+fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
+    let capability = match operation {
+        OP_S3_LIST_BUCKETS | OP_S3_LIST_OBJECTS | OP_S3_GET_OBJECT => {
+            CapabilityId::from_static(CAP_S3_READ)
+        }
+        OP_S3_PUT_OBJECT | OP_S3_DELETE_OBJECT => CapabilityId::from_static(CAP_S3_WRITE),
+        OP_EC2_DESCRIBE => CapabilityId::from_static(CAP_EC2_READ),
+        OP_EC2_START | OP_EC2_STOP | OP_EC2_TERMINATE => CapabilityId::from_static(CAP_EC2_WRITE),
+        OP_LAMBDA_LIST => CapabilityId::from_static(CAP_LAMBDA_READ),
+        OP_LAMBDA_INVOKE => CapabilityId::from_static(CAP_LAMBDA_WRITE),
+        OP_STS_IDENTITY | OP_HEALTH => CapabilityId::from_static(CAP_IAM_READ),
+        _ => {
+            return Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: format!("Unknown operation: {operation}"),
+            });
+        }
+    };
+    Ok(capability)
 }
 
 impl Default for AwsConnector {
@@ -932,6 +964,41 @@ impl FcpConnector for AwsConnector {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+        let capability = match required_capability(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return Ok(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ));
+            }
+        };
+        if self.client.is_none() || self.runtime.is_none() {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ));
+        }
+        let Some(verifier) = self.verifier.as_ref() else {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector has not completed handshake",
+                FcpError::NotHandshaken.error_code(),
+            ));
+        };
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])
+        {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response =
+                    response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+            }
+            return Ok(response);
+        }
         Ok(SimulateResponse::allowed(req.id))
     }
 
@@ -987,26 +1054,8 @@ impl AwsConnector {
         self.base.check_ready()?;
         let operation = req.operation.as_str();
         if let Some(verifier) = &self.verifier {
-            let cap = match operation {
-                OP_S3_LIST_BUCKETS | OP_S3_LIST_OBJECTS | OP_S3_GET_OBJECT => {
-                    CapabilityId::from_static(CAP_S3_READ)
-                }
-                OP_S3_PUT_OBJECT | OP_S3_DELETE_OBJECT => CapabilityId::from_static(CAP_S3_WRITE),
-                OP_EC2_DESCRIBE => CapabilityId::from_static(CAP_EC2_READ),
-                OP_EC2_START | OP_EC2_STOP | OP_EC2_TERMINATE => {
-                    CapabilityId::from_static(CAP_EC2_WRITE)
-                }
-                OP_LAMBDA_LIST => CapabilityId::from_static(CAP_LAMBDA_READ),
-                OP_LAMBDA_INVOKE => CapabilityId::from_static(CAP_LAMBDA_WRITE),
-                OP_STS_IDENTITY | OP_HEALTH => CapabilityId::from_static(CAP_IAM_READ),
-                _ => {
-                    return Err(FcpError::InvalidRequest {
-                        code: 1004,
-                        message: format!("Unknown operation: {operation}"),
-                    });
-                }
-            };
-            verifier.verify(req.capability_token, &cap, &req.operation, &[])?;
+            let cap = required_capability(operation)?;
+            verifier.verify_bound(req.capability_token, &cap, &req.operation, &[])?;
         } else {
             return Err(FcpError::Internal {
                 message: "connector ready state missing capability verifier".into(),
@@ -1169,20 +1218,27 @@ impl AwsConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::{CapabilityToken, RequestId, ZoneId};
+    use chrono::{Duration as ChronoDuration, Utc};
+    use fcp_core::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
+    use fcp_crypto::cose::CapabilityTokenBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
+
+    const TEST_ACCESS_KEY_ID: &str = "fcp-test-access-key";
+    const TEST_SIGNING_MATERIAL: &str = "fcp-test-signing-material";
+    const TEST_SESSION_MATERIAL: &str = "fcp-test-session-material";
 
     fn tc() -> serde_json::Value {
         json!({
-            "access_key_id": "AKIAIOSFODNN7EXAMPLE",
-            "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "access_key_id": TEST_ACCESS_KEY_ID,
+            "secret_access_key": TEST_SIGNING_MATERIAL,
             "region": "us-east-1"
         })
     }
 
     fn tc_with_overrides() -> serde_json::Value {
         json!({
-            "access_key_id": "AKIAIOSFODNN7EXAMPLE",
-            "secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "access_key_id": TEST_ACCESS_KEY_ID,
+            "secret_access_key": TEST_SIGNING_MATERIAL,
             "region": "us-east-1",
             "s3_base_url": "http://localhost:4566",
             "ec2_base_url": "http://localhost:4567",
@@ -1210,6 +1266,38 @@ mod tests {
             transport_caps: None,
             requested_instance_id: None,
         }
+    }
+
+    fn handshake_req_with_key(host_public_key: [u8; 32]) -> HandshakeRequest {
+        let mut req = handshake_req();
+        req.host_public_key = host_public_key;
+        req
+    }
+
+    fn signed_token(
+        signing_key: &Ed25519SigningKey,
+        capability: &'static str,
+        op: &'static str,
+    ) -> CapabilityToken {
+        let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+        let raw = CapabilityTokenBuilder::new()
+            .capability_id(capability)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&[op])
+            .issuer("node:test")
+            .validity(now, now + ChronoDuration::hours(1))
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
+            .sign(signing_key)
+            .expect("capability token signing should succeed");
+        CapabilityToken::from_raw(raw)
     }
 
     fn invoke_req(op: &'static str, input: serde_json::Value) -> InvokeRequest {
@@ -1266,7 +1354,7 @@ mod tests {
                 let mut c = AwsConnector::new();
                 c.configure(json!({
                     "access_key_id": "k",
-                    "secret_access_key": "s",
+                    "secret_access_key": "signing-material",
                     "region": ""
                 }))
                 .await
@@ -1283,7 +1371,7 @@ mod tests {
                 let mut c = AwsConnector::new();
                 c.configure(json!({
                     "access_key_id": "",
-                    "secret_access_key": "s",
+                    "secret_access_key": "signing-material",
                     "region": "us-east-1"
                 }))
                 .await
@@ -1328,7 +1416,7 @@ mod tests {
             let mut c = AwsConnector::new();
             c.configure(json!({
                 "access_key_id": "k",
-                "secret_access_key": "s",
+                "secret_access_key": "signing-material",
                 "region": "us-east-1",
                 "request_timeout_ms": 0
             }))
@@ -1345,7 +1433,7 @@ mod tests {
             let mut c = AwsConnector::new();
             c.configure(json!({
                 "access_key_id": "k",
-                "secret_access_key": "s",
+                "secret_access_key": "signing-material",
                 "region": "us-east-1",
                 "sts_base_url": "http://example.com"
             }))
@@ -1362,9 +1450,9 @@ mod tests {
             let mut c = AwsConnector::new();
             c.configure(json!({
                 "access_key_id": "  k  ",
-                "secret_access_key": "  s  ",
+                "secret_access_key": "  signing-material  ",
                 "region": "  us-west-2  ",
-                "session_token": "  tok  ",
+                "session_token": "  session-material  ",
                 "s3_base_url": " http://localhost:4566/ "
             }))
             .await
@@ -1375,8 +1463,11 @@ mod tests {
         let config = connector.config.as_ref().unwrap();
         assert_eq!(config.region, "us-west-2");
         assert_eq!(config.auth.access_key_id, "k");
-        assert_eq!(config.auth.secret_access_key, "s");
-        assert_eq!(config.auth.session_token.as_deref(), Some("tok"));
+        assert_eq!(config.auth.secret_access_key, "signing-material");
+        assert_eq!(
+            config.auth.session_token.as_deref(),
+            Some("session-material")
+        );
         assert_eq!(config.s3_base_url.as_deref(), Some("http://localhost:4566"));
     }
 
@@ -1531,15 +1622,22 @@ mod tests {
     #[test]
     fn simulate_ok() {
         let r = fcp_async_core::runtime::block_on_sync(async {
-            AwsConnector::new()
-                .simulate(SimulateRequest::new(
-                    ConnectorId::from_static("fcp.aws"),
-                    OperationId::from_static(OP_S3_LIST_BUCKETS),
-                    ZoneId::work(),
-                    json!({}),
-                    CapabilityToken::test_token(),
-                ))
-                .await
+            let signing_key = Ed25519SigningKey::generate();
+            let mut c = AwsConnector::new();
+            c.configure(tc()).await.unwrap();
+            c.handshake(handshake_req_with_key(
+                signing_key.verifying_key().to_bytes(),
+            ))
+            .await
+            .unwrap();
+            c.simulate(SimulateRequest::new(
+                ConnectorId::from_static("fcp.aws"),
+                OperationId::from_static(OP_S3_LIST_BUCKETS),
+                ZoneId::work(),
+                json!({}),
+                signed_token(&signing_key, CAP_S3_READ, OP_S3_LIST_BUCKETS),
+            ))
+            .await
         })
         .unwrap()
         .unwrap();
@@ -1669,9 +1767,9 @@ mod tests {
                 let mut c = AwsConnector::new();
                 c.configure(json!({
                     "access_key_id": "k",
-                    "secret_access_key": "s",
+                    "secret_access_key": "signing-material",
                     "region": "us-east-1",
-                    "session_token": "tok"
+                    "session_token": TEST_SESSION_MATERIAL
                 }))
                 .await
             })
@@ -1687,7 +1785,7 @@ mod tests {
                 let mut c = AwsConnector::new();
                 c.configure(json!({
                     "access_key_id": "k",
-                    "secret_access_key": "s",
+                    "secret_access_key": "signing-material",
                     "region": "us-west-2",
                     "request_timeout_ms": 60000
                 }))
@@ -1804,8 +1902,8 @@ mod tests {
         let cfg = AwsConfig::from_value(tc()).unwrap();
         let debug = format!("{cfg:?}");
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("AKIAIOSFODNN7EXAMPLE"));
-        assert!(!debug.contains("wJalrXUtnFEMI"));
+        assert!(!debug.contains(TEST_ACCESS_KEY_ID));
+        assert!(!debug.contains(TEST_SIGNING_MATERIAL));
     }
 
     #[test]

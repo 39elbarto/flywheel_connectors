@@ -198,12 +198,12 @@ impl QqClient {
         path: &str,
         body: Option<Value>,
     ) -> QqResult<Value> {
-        let token = self.access_token().await?;
+        let access_material = self.access_token().await?;
         let url = self.api_url(path)?;
         let request = self
             .client
             .request(method, url)
-            .header("Authorization", format!("QQBot {token}"));
+            .header("Authorization", format!("QQBot {access_material}"));
         let request = if let Some(body) = body.as_ref() {
             request.json(body)
         } else {
@@ -452,7 +452,7 @@ mod tests {
     #[test]
     fn rejects_empty_client_secret() {
         let mut config = localhost_config();
-        config.client_secret = String::new();
+        config.client_secret.clear();
         assert!(QqClient::new(config).is_err());
     }
 
@@ -748,7 +748,10 @@ mod tests {
             QqError::Unauthorized(message) => {
                 assert!(message.contains("invalid bot secret"));
             }
-            other => panic!("expected Unauthorized, got {other:?}"),
+            other => assert!(
+                matches!(other, QqError::Unauthorized(_)),
+                "expected Unauthorized"
+            ),
         }
     }
 
@@ -994,7 +997,10 @@ mod tests {
                 assert!(msg.contains("GUILD_CREATE"));
                 assert!(msg.contains("not a normalizable"));
             }
-            other => panic!("expected InvalidInput, got {other:?}"),
+            other => assert!(
+                matches!(other, QqError::InvalidInput(_)),
+                "expected InvalidInput"
+            ),
         }
     }
 

@@ -254,7 +254,7 @@ impl HueConnector {
                 });
             }
         };
-        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
+        verifier.verify_bound(req.capability_token, &required_cap, &req.operation, &[])?;
         let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
         let output = match req.operation.as_str() {
             OP_HEALTH => json!({
@@ -471,7 +471,8 @@ impl FcpConnector for HueConnector {
                 FcpError::NotHandshaken.error_code(),
             ));
         };
-        if let Err(error) = verifier.verify(req.capability_token, &capability, &req.operation, &[])
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])
         {
             let mut response =
                 SimulateResponse::denied(req.id, error.to_string(), error.error_code());
@@ -518,7 +519,7 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
 #[cfg(test)]
 mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
-    use fcp_core::{CapabilityToken, RequestId, ZoneId};
+    use fcp_core::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 
     use super::*;
@@ -546,6 +547,12 @@ mod tests {
         operation: &'static str,
     ) -> CapabilityToken {
         let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
         let raw = CapabilityTokenBuilder::new()
             .capability_id(capability)
             .zone_id("z:work")
@@ -553,6 +560,8 @@ mod tests {
             .operations(&[operation])
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
             .expect("token should sign");
         CapabilityToken::from_raw(raw)

@@ -484,7 +484,7 @@ fn parse_error_response(
         }
 
         if status == StatusCode::UNAUTHORIZED {
-            return AnthropicError::InvalidApiKey;
+            return AnthropicError::InvalidApiCredential;
         }
 
         if error.error_type == "invalid_request_error" && error.message.contains("context length") {
@@ -719,7 +719,10 @@ mod tests {
         let result = client.chat(Model::ClaudeSonnet4, "Hi", None, 1024).await;
 
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), AnthropicError::InvalidApiKey));
+        assert!(matches!(
+            result.unwrap_err(),
+            AnthropicError::InvalidApiCredential
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -958,7 +961,7 @@ mod tests {
                 assert_eq!(error.error_type, "api_error");
                 assert_eq!(error.message, "café");
             }
-            _ => panic!("expected Error"),
+            other => assert!(matches!(other, StreamEvent::Error { .. }), "expected Error"),
         }
     }
 
@@ -1014,7 +1017,7 @@ mod tests {
             }
             .is_retryable()
         );
-        assert!(!AnthropicError::InvalidApiKey.is_retryable());
+        assert!(!AnthropicError::InvalidApiCredential.is_retryable());
     }
 
     // ---- Auth tests ----
@@ -1174,7 +1177,10 @@ mod tests {
         let event = event.unwrap().unwrap();
         match event {
             StreamEvent::ContentBlockStop { index } => assert_eq!(index, 0),
-            _ => panic!("expected ContentBlockStop"),
+            other => assert!(
+                matches!(other, StreamEvent::ContentBlockStop { .. }),
+                "expected ContentBlockStop"
+            ),
         }
     }
 
@@ -1189,7 +1195,7 @@ mod tests {
                 assert_eq!(error.error_type, "api_error");
                 assert_eq!(error.message, "fail");
             }
-            _ => panic!("expected Error"),
+            other => assert!(matches!(other, StreamEvent::Error { .. }), "expected Error"),
         }
     }
 
@@ -1216,7 +1222,10 @@ mod tests {
                 assert_eq!(message.id, "msg_1");
                 assert_eq!(message.role, crate::types::Role::Assistant);
             }
-            _ => panic!("expected MessageStart"),
+            other => assert!(
+                matches!(other, StreamEvent::MessageStart { .. }),
+                "expected MessageStart"
+            ),
         }
     }
 
@@ -1264,7 +1273,7 @@ mod tests {
             r#"{"error":{"type":"authentication_error","message":"Invalid key"}}"#,
         );
         let err = parse_error_response(StatusCode::UNAUTHORIZED, &bytes, None);
-        assert!(matches!(err, AnthropicError::InvalidApiKey));
+        assert!(matches!(err, AnthropicError::InvalidApiCredential));
     }
 
     #[test]
@@ -1292,7 +1301,10 @@ mod tests {
                 assert_eq!(message, "Model not found");
                 assert_eq!(status_code, Some(404));
             }
-            _ => panic!("expected Api error"),
+            other => assert!(
+                matches!(other, AnthropicError::Api { .. }),
+                "expected Api error"
+            ),
         }
     }
 
@@ -1310,7 +1322,10 @@ mod tests {
                 assert_eq!(message, "not json");
                 assert_eq!(status_code, Some(500));
             }
-            _ => panic!("expected Api error"),
+            other => assert!(
+                matches!(other, AnthropicError::Api { .. }),
+                "expected Api error"
+            ),
         }
     }
 

@@ -36,7 +36,7 @@ pub enum AnthropicError {
 
     /// Invalid API key
     #[error("Invalid API key")]
-    InvalidApiKey,
+    InvalidApiCredential,
 
     /// Context length exceeded
     #[error("Context length exceeded: {message}")]
@@ -116,7 +116,7 @@ impl AnthropicError {
                 retryable: true,
                 retry_after: Some(Duration::from_millis(*retry_after_ms)),
             },
-            Self::InvalidApiKey => FcpError::Unauthorized {
+            Self::InvalidApiCredential => FcpError::Unauthorized {
                 code: 2001,
                 message: "Invalid Anthropic API key".into(),
             },
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn display_invalid_api_key() {
-        let err = AnthropicError::InvalidApiKey;
+        let err = AnthropicError::InvalidApiCredential;
         assert!(err.to_string().contains("Invalid API key"));
     }
 
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn not_retryable_invalid_api_key() {
-        assert!(!AnthropicError::InvalidApiKey.is_retryable());
+        assert!(!AnthropicError::InvalidApiCredential.is_retryable());
     }
 
     #[test]
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn retry_after_other_none() {
-        assert_eq!(AnthropicError::InvalidApiKey.retry_after(), None);
+        assert_eq!(AnthropicError::InvalidApiCredential.retry_after(), None);
         assert_eq!(
             AnthropicError::Api {
                 error_type: "x".into(),
@@ -348,7 +348,10 @@ mod tests {
                 assert_eq!(code, 2001);
                 assert!(message.contains("Anthropic API key"));
             }
-            other => panic!("expected Unauthorized, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::Unauthorized { .. }),
+                "expected Unauthorized, got {other:?}"
+            ),
         }
     }
 
@@ -361,7 +364,10 @@ mod tests {
         };
         match err.to_fcp_error() {
             FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 30_000),
-            other => panic!("expected RateLimited, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::RateLimited { .. }),
+                "expected RateLimited, got {other:?}"
+            ),
         }
     }
 
@@ -385,7 +391,10 @@ mod tests {
                 assert_eq!(status_code, Some(500));
                 assert!(message.contains("api_error"));
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::External { .. }),
+                "expected External, got {other:?}"
+            ),
         }
     }
 
@@ -402,7 +411,10 @@ mod tests {
                 assert_eq!(retry_after_ms, 2000);
                 assert!(violation.is_none());
             }
-            other => panic!("expected RateLimited, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::RateLimited { .. }),
+                "expected RateLimited, got {other:?}"
+            ),
         }
     }
 
@@ -424,15 +436,21 @@ mod tests {
                 assert!(retryable);
                 assert_eq!(retry_after, Some(Duration::from_secs(15)));
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::External { .. }),
+                "expected External, got {other:?}"
+            ),
         }
     }
 
     #[test]
     fn to_fcp_error_invalid_api_key() {
-        match AnthropicError::InvalidApiKey.to_fcp_error() {
+        match AnthropicError::InvalidApiCredential.to_fcp_error() {
             FcpError::Unauthorized { code, .. } => assert_eq!(code, 2001),
-            other => panic!("expected Unauthorized, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::Unauthorized { .. }),
+                "expected Unauthorized, got {other:?}"
+            ),
         }
     }
 
@@ -446,7 +464,10 @@ mod tests {
                 assert_eq!(code, 1004);
                 assert!(message.contains("200k tokens"));
             }
-            other => panic!("expected InvalidRequest, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::InvalidRequest { .. }),
+                "expected InvalidRequest, got {other:?}"
+            ),
         }
     }
 
@@ -456,7 +477,10 @@ mod tests {
         let err = AnthropicError::Json(json_err);
         match err.to_fcp_error() {
             FcpError::Internal { message } => assert!(message.contains("JSON error")),
-            other => panic!("expected Internal, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::Internal { .. }),
+                "expected Internal, got {other:?}"
+            ),
         }
     }
 
@@ -479,7 +503,7 @@ mod tests {
 
     #[test]
     fn anthropic_result_err() {
-        let r: AnthropicResult<u32> = Err(AnthropicError::InvalidApiKey);
+        let r: AnthropicResult<u32> = Err(AnthropicError::InvalidApiCredential);
         assert!(r.is_err());
     }
 
@@ -487,7 +511,7 @@ mod tests {
 
     #[test]
     fn error_trait_impl() {
-        let err = AnthropicError::InvalidApiKey;
+        let err = AnthropicError::InvalidApiCredential;
         let _: &dyn std::error::Error = &err;
     }
 
@@ -629,7 +653,10 @@ mod tests {
                 assert!(message.contains("unknown_error"));
                 assert!(message.contains("something"));
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::External { .. }),
+                "expected External, got {other:?}"
+            ),
         }
     }
 
@@ -649,7 +676,10 @@ mod tests {
                 assert_eq!(service, "anthropic");
                 assert_eq!(status_code, Some(403));
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::External { .. }),
+                "expected External, got {other:?}"
+            ),
         }
     }
 
@@ -690,8 +720,8 @@ mod tests {
 
     #[test]
     fn debug_invalid_api_key() {
-        let dbg = format!("{:?}", AnthropicError::InvalidApiKey);
-        assert!(dbg.contains("InvalidApiKey"));
+        let dbg = format!("{:?}", AnthropicError::InvalidApiCredential);
+        assert!(dbg.contains("InvalidApiCredential"));
     }
 
     #[test]
@@ -716,7 +746,7 @@ mod tests {
 
     #[test]
     fn source_invalid_api_key_none() {
-        let err = AnthropicError::InvalidApiKey;
+        let err = AnthropicError::InvalidApiCredential;
         assert!(std::error::Error::source(&err).is_none());
     }
 

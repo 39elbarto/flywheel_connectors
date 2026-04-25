@@ -15,6 +15,7 @@ name = "fcp_cloudflare"
 path = "src/lib.rs"
 
 [dependencies]
+chrono.workspace = true
 fcp-core.workspace = true
 fcp-sdk.workspace = true
 fcp-async-core.workspace = true
@@ -32,7 +33,6 @@ percent-encoding.workspace = true
 
 [dev-dependencies]
 ciborium.workspace = true
-chrono.workspace = true
 fcp-crypto.workspace = true
 fcp-testkit.workspace = true
 wiremock.workspace = true

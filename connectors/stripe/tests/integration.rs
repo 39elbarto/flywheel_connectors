@@ -18,6 +18,7 @@ use hmac::{Hmac, Mac};
 use serde_json::json;
 use sha2::Sha256;
 use std::collections::HashMap;
+use std::fmt::Write as FmtWrite;
 use std::io::{Read, Write};
 use std::net::TcpListener as StdTcpListener;
 use std::sync::{Arc, Mutex};
@@ -63,7 +64,8 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)
@@ -120,7 +122,8 @@ struct StructuredHttpResponse {
 }
 
 impl StructuredHttpResponse {
-    fn json(status: u16, body: serde_json::Value) -> Self {
+    fn json(status: u16, body: impl Into<serde_json::Value>) -> Self {
+        let body = body.into();
         Self {
             status,
             headers: vec![("content-type".into(), "application/json".into())],
@@ -128,7 +131,7 @@ impl StructuredHttpResponse {
         }
     }
 
-    fn empty(status: u16) -> Self {
+    const fn empty(status: u16) -> Self {
         Self {
             status,
             headers: Vec::new(),
@@ -242,7 +245,6 @@ fn write_structured_http_response(
     response: StructuredHttpResponse,
 ) {
     let reason = match response.status {
-        200 => "OK",
         401 => "Unauthorized",
         404 => "Not Found",
         429 => "Too Many Requests",
@@ -256,7 +258,7 @@ fn write_structured_http_response(
         response.body.len()
     );
     for (name, value) in response.headers {
-        raw.push_str(&format!("{name}: {value}\r\n"));
+        let _ = write!(raw, "{name}: {value}\r\n");
     }
     raw.push_str("\r\n");
     stream
@@ -459,12 +461,10 @@ async fn stripe_api_error_parsed_from_response() {
         .create_customer("not-an-email", None)
         .await
         .unwrap_err();
-    match &err {
-        StripeError::Api { message, .. } => {
-            assert!(message.contains("Invalid email"));
-        }
-        e => panic!("Expected Api error, got: {e:?}"),
-    }
+    assert!(matches!(
+        &err,
+        StripeError::Api { message, .. } if message.contains("Invalid email")
+    ));
 }
 
 // ============================================================================
@@ -475,7 +475,7 @@ async fn stripe_api_error_parsed_from_response() {
 #[fcp_async_core::runtime::test]
 async fn redaction_secret_key_not_in_error_message() {
     let mock_server = MockServer::start().await;
-    let secret = "sk_live_SuperSecretKeyThatShouldNotLeak12345";
+    let redaction_probe = "sk_live_SuperSecretKeyThatShouldNotLeak12345";
 
     Mock::given(method("GET"))
         .and(path("/v1/balance"))
@@ -483,7 +483,7 @@ async fn redaction_secret_key_not_in_error_message() {
         .mount(&mock_server)
         .await;
 
-    let client = StripeClient::new(secret)
+    let client = StripeClient::new(redaction_probe)
         .unwrap()
         .with_api_url(&format!("{}/v1", mock_server.uri()))
         .with_retry_config(0);
@@ -491,14 +491,14 @@ async fn redaction_secret_key_not_in_error_message() {
     let err = client.get_balance().await.unwrap_err();
     let err_string = format!("{err:?}");
     assert!(
-        !err_string.contains(secret),
+        !err_string.contains(redaction_probe),
         "Secret key should not appear in error debug output"
     );
 
     let fcp_err = err.to_fcp_error();
     let fcp_err_string = format!("{fcp_err:?}");
     assert!(
-        !fcp_err_string.contains(secret),
+        !fcp_err_string.contains(redaction_probe),
         "Secret key should not appear in FCP error debug output"
     );
 }
@@ -510,8 +510,12 @@ async fn secret_key_sent_as_bearer_auth() {
         assert_eq!(request.method, "GET");
         assert_eq!(request.path, "/v1/balance");
         assert!(
-            request.headers.get("content-type").is_none(),
+            !request.headers.contains_key("content-type"),
             "GET balance should not send a content-type header"
+        );
+        assert!(
+            request.body.is_empty(),
+            "GET balance should not send a body"
         );
         StructuredHttpResponse::json(
             200,
@@ -887,13 +891,13 @@ async fn invoke_get_balance_through_connector() {
     let mut connector = StripeConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["stripe.get_balance"]).await;
-    let token = generate_valid_token(&signing_key, "stripe.get_balance");
+    let capability = generate_valid_token(&signing_key, "stripe.get_balance");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "stripe.get_balance",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -919,13 +923,13 @@ async fn invoke_create_customer_through_connector() {
     let mut connector = StripeConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["stripe.create_customer"]).await;
-    let token = generate_valid_token(&signing_key, "stripe.create_customer");
+    let capability = generate_valid_token(&signing_key, "stripe.create_customer");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "stripe.create_customer",
             "input": { "email": "new@example.com" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -953,14 +957,14 @@ async fn invoke_create_customer_derives_idempotency_key_from_operation_id() {
     let mut connector = StripeConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["stripe.create_customer"]).await;
-    let token = generate_valid_token(&signing_key, "stripe.create_customer");
+    let capability = generate_valid_token(&signing_key, "stripe.create_customer");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "stripe.create_customer",
             "operation_id": "op-cc-1",
             "input": { "email": "new@example.com" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -987,14 +991,14 @@ async fn invoke_update_customer_through_connector() {
     let mut connector = StripeConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["stripe.update_customer"]).await;
-    let token = generate_valid_token(&signing_key, "stripe.update_customer");
+    let capability = generate_valid_token(&signing_key, "stripe.update_customer");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "stripe.update_customer",
             "operation_id": "op-update-1",
             "input": { "customer_id": "cus_42", "email": "updated@example.com" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1026,14 +1030,14 @@ async fn invoke_delete_customer_through_connector() {
     let mut connector = StripeConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["stripe.delete_customer"]).await;
-    let token = generate_valid_token(&signing_key, "stripe.delete_customer");
+    let capability = generate_valid_token(&signing_key, "stripe.delete_customer");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "stripe.delete_customer",
             "operation_id": "op-delete-1",
             "input": { "customer_id": "cus_42" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1061,13 +1065,13 @@ async fn invoke_get_subscription_through_connector() {
     let mut connector = StripeConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["stripe.get_subscription"]).await;
-    let token = generate_valid_token(&signing_key, "stripe.get_subscription");
+    let capability = generate_valid_token(&signing_key, "stripe.get_subscription");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "stripe.get_subscription",
             "input": { "subscription_id": "sub_123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1095,13 +1099,13 @@ async fn invoke_list_subscriptions_through_connector() {
     let mut connector = StripeConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["stripe.list_subscriptions"]).await;
-    let token = generate_valid_token(&signing_key, "stripe.list_subscriptions");
+    let capability = generate_valid_token(&signing_key, "stripe.list_subscriptions");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "stripe.list_subscriptions",
             "input": { "customer": "cus_42", "status": "active", "limit": 10 },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1130,13 +1134,13 @@ async fn invoke_get_invoice_through_connector() {
     let mut connector = StripeConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["stripe.get_invoice"]).await;
-    let token = generate_valid_token(&signing_key, "stripe.get_invoice");
+    let capability = generate_valid_token(&signing_key, "stripe.get_invoice");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "stripe.get_invoice",
             "input": { "invoice_id": "in_123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1165,13 +1169,13 @@ async fn invoke_create_refund_through_connector() {
     let mut connector = StripeConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["stripe.create_refund"]).await;
-    let token = generate_valid_token(&signing_key, "stripe.create_refund");
+    let capability = generate_valid_token(&signing_key, "stripe.create_refund");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "stripe.create_refund",
             "input": { "payment_intent": "pi_789", "amount": 500 },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1201,14 +1205,14 @@ async fn invoke_create_subscription_derives_idempotency_key_from_operation_id() 
     let mut connector = StripeConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["stripe.create_subscription"]).await;
-    let token = generate_valid_token(&signing_key, "stripe.create_subscription");
+    let capability = generate_valid_token(&signing_key, "stripe.create_subscription");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "stripe.create_subscription",
             "operation_id": "op-sub-create-1",
             "input": { "customer": "cus_42", "price": "price_abc123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1238,14 +1242,14 @@ async fn invoke_cancel_subscription_derives_idempotency_key_from_operation_id() 
     let mut connector = StripeConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["stripe.cancel_subscription"]).await;
-    let token = generate_valid_token(&signing_key, "stripe.cancel_subscription");
+    let capability = generate_valid_token(&signing_key, "stripe.cancel_subscription");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "stripe.cancel_subscription",
             "operation_id": "op-sub-cancel-1",
             "input": { "subscription_id": "sub_derived" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1277,14 +1281,14 @@ async fn invoke_create_refund_derives_idempotency_key_from_operation_id() {
     let mut connector = StripeConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["stripe.create_refund"]).await;
-    let token = generate_valid_token(&signing_key, "stripe.create_refund");
+    let capability = generate_valid_token(&signing_key, "stripe.create_refund");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "stripe.create_refund",
             "operation_id": "op-789",
             "input": { "payment_intent": "pi_derived", "amount": 250 },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1301,13 +1305,13 @@ async fn wrong_capability_rejected() {
     let mut connector = StripeConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["stripe.get_balance"]).await;
-    let token = generate_valid_token(&signing_key, "stripe.get_balance");
+    let capability = generate_valid_token(&signing_key, "stripe.get_balance");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "stripe.get_customer",
             "input": { "customer_id": "cus_123" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -1322,13 +1326,13 @@ async fn missing_required_field_returns_invalid_request() {
     let mut connector = StripeConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["stripe.create_payment_intent"]).await;
-    let token = generate_valid_token(&signing_key, "stripe.create_payment_intent");
+    let capability = generate_valid_token(&signing_key, "stripe.create_payment_intent");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "stripe.create_payment_intent",
             "input": { "amount": 2000 },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -1347,13 +1351,13 @@ async fn unknown_operation_rejected() {
     let mut connector = StripeConnector::new();
     setup_configure(&mut connector, &format!("{}/v1", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["stripe.nonexistent"]).await;
-    let token = generate_valid_token(&signing_key, "stripe.nonexistent");
+    let capability = generate_valid_token(&signing_key, "stripe.nonexistent");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "stripe.nonexistent",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -1374,7 +1378,7 @@ async fn invoke_ingest_webhook_event_success() {
         .expect("configure should succeed");
 
     let signing_key = setup_handshake(&mut connector, &["stripe.ingest_webhook_event"]).await;
-    let token = generate_valid_token(&signing_key, "stripe.ingest_webhook_event");
+    let capability = generate_valid_token(&signing_key, "stripe.ingest_webhook_event");
 
     let payload = r#"{"id":"evt_integration","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
     let signature = build_webhook_signature("whsec_integration", payload, 1_700_000_000);
@@ -1387,7 +1391,7 @@ async fn invoke_ingest_webhook_event_success() {
                 "stripe_signature": signature,
                 "received_at": 1_700_000_010
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap();
@@ -1412,7 +1416,7 @@ async fn invoke_ingest_webhook_event_replay_rejected() {
         .expect("configure should succeed");
 
     let signing_key = setup_handshake(&mut connector, &["stripe.ingest_webhook_event"]).await;
-    let token = generate_valid_token(&signing_key, "stripe.ingest_webhook_event");
+    let capability = generate_valid_token(&signing_key, "stripe.ingest_webhook_event");
 
     let payload = r#"{"id":"evt_replay_test","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
     let signature = build_webhook_signature("whsec_replay", payload, 1_700_000_000);
@@ -1423,7 +1427,7 @@ async fn invoke_ingest_webhook_event_replay_rejected() {
             "stripe_signature": signature,
             "received_at": 1_700_000_005
         },
-        "capability_token": token
+        "capability_token": capability
     });
 
     connector.handle_invoke(invoke.clone()).await.unwrap();
@@ -1439,18 +1443,18 @@ async fn invoke_ingest_webhook_event_replay_rejected() {
 #[fcp_async_core::runtime::test]
 async fn invoke_ingest_webhook_event_invalid_signature_is_redacted() {
     let mut connector = StripeConnector::new();
-    let secret = "whsec_should_not_leak";
+    let webhook_material = "whsec_should_not_leak";
     connector
         .handle_configure(json!({
             "secret_key": "sk_test_integration_key",
             "api_url": "http://127.0.0.1:9/v1",
-            "webhook_signing_secret": secret
+            "webhook_signing_secret": webhook_material
         }))
         .await
         .expect("configure should succeed");
 
     let signing_key = setup_handshake(&mut connector, &["stripe.ingest_webhook_event"]).await;
-    let token = generate_valid_token(&signing_key, "stripe.ingest_webhook_event");
+    let capability = generate_valid_token(&signing_key, "stripe.ingest_webhook_event");
 
     let payload = r#"{"id":"evt_invalid_sig","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
     let err = connector
@@ -1461,12 +1465,15 @@ async fn invoke_ingest_webhook_event_invalid_signature_is_redacted() {
                 "stripe_signature": "t=1700000000,v1=badbadbad",
                 "received_at": 1_700_000_000
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .unwrap_err();
 
     let rendered = format!("{err:?}");
-    assert!(!rendered.contains(secret), "webhook secret leaked in error");
+    assert!(
+        !rendered.contains(webhook_material),
+        "webhook secret leaked in error"
+    );
     assert!(matches!(err, FcpError::Unauthorized { .. }));
 }

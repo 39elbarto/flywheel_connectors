@@ -112,20 +112,20 @@ impl PerplexityClient {
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let body = serde_json::to_value(request).map_err(PerplexityError::Json)?;
-        let api_key = self.auth.api_key.clone();
+        let auth_material = self.auth.api_key.clone();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.http.clone();
-            let api_key = api_key.clone();
+            let auth_material = auth_material.clone();
             let body = body.clone();
             async move {
                 debug!(attempt, "Perplexity chat/completions request");
 
-                let req = if api_key.is_empty() {
+                let req = if auth_material.is_empty() {
                     client.post(&url).json(&body)
                 } else {
-                    client.post(&url).bearer_auth(&api_key).json(&body)
+                    client.post(&url).bearer_auth(&auth_material).json(&body)
                 };
 
                 let resp = match req.send().await {

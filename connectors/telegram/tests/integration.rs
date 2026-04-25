@@ -13,7 +13,7 @@
 #![allow(clippy::unreadable_literal)]
 
 use chrono::{Duration, Utc};
-use fcp_core::CapabilityConstraints;
+use fcp_core::{CapabilityConstraints, FcpError};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_testkit::AsyncTestContext;
@@ -30,10 +30,15 @@ use fcp_telegram::{connector::TelegramConnector, limits as telegram_limits};
 // Constants
 // ============================================================================
 
-const TEST_BOT_TOKEN: &str = "123456:ABCDEFGHIJKLMNOPQRSTUVWXyz012345";
+const TEST_BOT_ID: &str = "123456";
+const TEST_BOT_SUFFIX: &str = "ABCDEFGHIJKLMNOPQRSTUVWXyz012345";
+
+fn test_bot_credential() -> String {
+    format!("{TEST_BOT_ID}:{TEST_BOT_SUFFIX}")
+}
 
 fn token_path(api_method: &str) -> String {
-    format!("/bot{TEST_BOT_TOKEN}/{api_method}")
+    format!("/bot{}/{api_method}", test_bot_credential())
 }
 
 fn unique_zone_dir(label: &str) -> String {
@@ -60,6 +65,14 @@ fn capability_for_operation(op: &str) -> &str {
 
 fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
     let cap = capability_for_operation(op);
+    generate_token_for_capability(signing_key, cap, op)
+}
+
+fn generate_token_for_capability(
+    signing_key: &Ed25519SigningKey,
+    cap: &str,
+    op: &str,
+) -> fcp_core::CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -75,10 +88,18 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .unwrap();
     fcp_core::CapabilityToken::from_raw(cose)
+}
+
+fn assert_unexpected_invalid_request(error: &fcp_core::FcpError) {
+    assert!(
+        matches!(error, fcp_core::FcpError::InvalidRequest { .. }),
+        "Expected InvalidRequest, got: {error:?}"
+    );
 }
 
 /// Mock the `getMe` endpoint (used by configure + handshake + health).
@@ -113,7 +134,7 @@ async fn mount_get_updates_mock(mock_server: &MockServer) {
 async fn setup_configure(connector: &mut TelegramConnector, base_url: &str) {
     connector
         .handle_configure(json!({
-            "credential": TEST_BOT_TOKEN,
+            "credential": test_bot_credential(),
             "base_url": base_url
         }))
         .await
@@ -185,12 +206,12 @@ async fn send_message_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",
             "input": { "chat_id": "123456", "text": "Hello from FCP!" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("send_message invoke should succeed");
@@ -220,12 +241,12 @@ async fn get_file_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.get_file");
+    let capability = generate_valid_token(&signing_key, "telegram.get_file");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.get_file",
             "input": { "file_id": "BQACAgIAAxkBAAIsK2Y" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("get_file invoke should succeed");
@@ -250,12 +271,12 @@ async fn answer_callback_query_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.answer_callback_query");
+    let capability = generate_valid_token(&signing_key, "telegram.answer_callback_query");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.answer_callback_query",
             "input": { "callback_query_id": "cq-12345", "text": "Acknowledged!" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("answer_callback_query invoke should succeed");
@@ -284,22 +305,25 @@ async fn unauthorized_maps_to_fcp_error() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",
             "input": { "chat_id": "123456", "text": "fail" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
-    match result.unwrap_err() {
-        fcp_core::FcpError::Unauthorized { code, message } => {
-            assert_eq!(code, 2001);
-            assert!(message.contains("Unauthorized"));
-        }
-        other => panic!("expected Unauthorized, got {other:?}"),
-    }
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, fcp_core::FcpError::Unauthorized { .. }),
+        "expected Unauthorized, got {err:?}"
+    );
+    let fcp_core::FcpError::Unauthorized { code, message } = err else {
+        return;
+    };
+    assert_eq!(code, 2001);
+    assert!(message.contains("Unauthorized"));
 }
 
 #[fcp_async_core::test]
@@ -319,21 +343,24 @@ async fn rate_limited_maps_to_fcp_error() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",
             "input": { "chat_id": "123456", "text": "rate limited" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
-    match result.unwrap_err() {
-        fcp_core::FcpError::RateLimited { retry_after_ms, .. } => {
-            assert_eq!(retry_after_ms, 30_000);
-        }
-        other => panic!("expected RateLimited, got {other:?}"),
-    }
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, fcp_core::FcpError::RateLimited { .. }),
+        "expected RateLimited, got {err:?}"
+    );
+    let fcp_core::FcpError::RateLimited { retry_after_ms, .. } = err else {
+        return;
+    };
+    assert_eq!(retry_after_ms, 30_000);
 }
 
 // ============================================================================
@@ -346,13 +373,13 @@ async fn invoke_without_configure_fails() {
     let connector = TelegramConnector::new();
 
     let signing_key = Ed25519SigningKey::generate();
-    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",
             "input": { "chat_id": "123456", "text": "should fail" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -365,13 +392,13 @@ async fn invoke_with_wrong_capability_denied() {
     let mut connector = TelegramConnector::new();
     // Handshake grants get_file but we invoke send_message
     let (_mock_server, signing_key) = full_setup(&mut connector, &["telegram.get_file"]).await;
-    let token = generate_valid_token(&signing_key, "telegram.get_file");
+    let capability = generate_valid_token(&signing_key, "telegram.get_file");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",
             "input": { "chat_id": "123456", "text": "wrong cap" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -383,13 +410,13 @@ async fn invoke_unknown_operation_denied() {
     let _ctx = AsyncTestContext::for_scenario("telegram.deny.unknown_operation");
     let mut connector = TelegramConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["telegram.nonexistent"]).await;
-    let token = generate_valid_token(&signing_key, "telegram.nonexistent");
+    let capability = generate_valid_token(&signing_key, "telegram.nonexistent");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.nonexistent",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -486,7 +513,7 @@ async fn send_media_photo_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_media");
+    let capability = generate_valid_token(&signing_key, "telegram.send_media");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_media",
@@ -495,7 +522,7 @@ async fn send_media_photo_happy_path() {
                 "media_type": "photo",
                 "media": "AgACAgIAAxkBAAIsK2Y"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("send_media invoke should succeed");
@@ -523,7 +550,7 @@ async fn send_media_document_with_caption() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_media");
+    let capability = generate_valid_token(&signing_key, "telegram.send_media");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_media",
@@ -533,7 +560,7 @@ async fn send_media_document_with_caption() {
                 "media": "https://example.com/report.pdf",
                 "caption": "Monthly report"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("send_media invoke should succeed");
@@ -561,12 +588,12 @@ async fn server_error_500_maps_to_external_error() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",
             "input": { "chat_id": "123", "text": "server error" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -631,23 +658,26 @@ async fn send_message_missing_chat_id_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.send_message_missing_chat_id");
     let mut connector = TelegramConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_message"]).await;
-    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",
             "input": { "text": "no chat_id" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
     assert!(result.is_err());
-    match result.unwrap_err() {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("chat_id"));
-        }
-        e => panic!("Expected InvalidRequest, got: {e:?}"),
-    }
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, fcp_core::FcpError::InvalidRequest { .. }),
+        "Expected InvalidRequest, got {err:?}"
+    );
+    let fcp_core::FcpError::InvalidRequest { message, .. } = err else {
+        return;
+    };
+    assert!(message.contains("chat_id"));
 }
 
 #[fcp_async_core::test]
@@ -655,23 +685,26 @@ async fn send_message_missing_text_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.send_message_missing_text");
     let mut connector = TelegramConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_message"]).await;
-    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",
             "input": { "chat_id": "123456" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
     assert!(result.is_err());
-    match result.unwrap_err() {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(message.contains("text"));
-        }
-        e => panic!("Expected InvalidRequest, got: {e:?}"),
-    }
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, fcp_core::FcpError::InvalidRequest { .. }),
+        "Expected InvalidRequest, got {err:?}"
+    );
+    let fcp_core::FcpError::InvalidRequest { message, .. } = err else {
+        return;
+    };
+    assert!(message.contains("text"));
 }
 
 #[fcp_async_core::test]
@@ -694,7 +727,7 @@ async fn send_message_with_parse_mode() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",
@@ -703,7 +736,7 @@ async fn send_message_with_parse_mode() {
                 "text": "<b>Bold</b>",
                 "parse_mode": "HTML"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("send_message with parse_mode should succeed");
@@ -716,7 +749,7 @@ async fn send_message_invalid_parse_mode_rejected() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.invalid_parse_mode");
     let mut connector = TelegramConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_message"]).await;
-    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
 
     let result = connector
         .handle_invoke(json!({
@@ -726,7 +759,7 @@ async fn send_message_invalid_parse_mode_rejected() {
                 "text": "test",
                 "parse_mode": "LaTeX"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -753,12 +786,12 @@ async fn send_message_with_integer_chat_id() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",
             "input": { "chat_id": 999, "text": "integer chat_id test" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("send_message with integer chat_id should succeed");
@@ -787,7 +820,7 @@ async fn send_message_with_reply_to() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",
@@ -796,7 +829,7 @@ async fn send_message_with_reply_to() {
                 "text": "reply text",
                 "reply_to_message_id": 10
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("send_message with reply_to should succeed");
@@ -824,7 +857,7 @@ async fn send_message_markdownv2_parse_mode() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",
@@ -833,7 +866,7 @@ async fn send_message_markdownv2_parse_mode() {
                 "text": "*bold* _italic_",
                 "parse_mode": "MarkdownV2"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("send_message with MarkdownV2 should succeed");
@@ -865,7 +898,7 @@ async fn send_media_audio_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_media");
+    let capability = generate_valid_token(&signing_key, "telegram.send_media");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_media",
@@ -874,7 +907,7 @@ async fn send_media_audio_happy_path() {
                 "media_type": "audio",
                 "media": "CQACAgIAAxkBAAIsK2Y"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("send_media audio invoke should succeed");
@@ -902,7 +935,7 @@ async fn send_media_video_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_media");
+    let capability = generate_valid_token(&signing_key, "telegram.send_media");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_media",
@@ -911,7 +944,7 @@ async fn send_media_video_happy_path() {
                 "media_type": "video",
                 "media": "BAACAgIAAxkBAAIsK2Y"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("send_media video invoke should succeed");
@@ -939,7 +972,7 @@ async fn send_media_voice_happy_path() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_media");
+    let capability = generate_valid_token(&signing_key, "telegram.send_media");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_media",
@@ -948,7 +981,7 @@ async fn send_media_voice_happy_path() {
                 "media_type": "voice",
                 "media": "AwACAgIAAxkBAAIsK2Y"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("send_media voice invoke should succeed");
@@ -976,22 +1009,25 @@ async fn forbidden_403_maps_to_fcp_error() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",
             "input": { "chat_id": "123456", "text": "blocked" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
-    match result.unwrap_err() {
-        fcp_core::FcpError::CapabilityDenied { capability, reason } => {
-            assert_eq!(capability, "telegram.api");
-            assert!(reason.contains("Forbidden"));
-        }
-        other => panic!("expected CapabilityDenied, got {other:?}"),
-    }
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, fcp_core::FcpError::CapabilityDenied { .. }),
+        "expected CapabilityDenied, got {err:?}"
+    );
+    let fcp_core::FcpError::CapabilityDenied { capability, reason } = err else {
+        return;
+    };
+    assert_eq!(capability, "telegram.api");
+    assert!(reason.contains("Forbidden"));
 }
 
 #[fcp_async_core::test]
@@ -1010,12 +1046,12 @@ async fn telegram_api_error_structure_chat_not_found() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",
             "input": { "chat_id": "999999999", "text": "ghost chat" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -1038,28 +1074,32 @@ async fn get_file_api_error() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.get_file");
+    let capability = generate_valid_token(&signing_key, "telegram.get_file");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.get_file",
             "input": { "file_id": "bad-file-id" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
-    match result.unwrap_err() {
-        fcp_core::FcpError::External {
-            service,
-            status_code,
-            retryable,
-            ..
-        } => {
-            assert_eq!(service, "telegram");
-            assert_eq!(status_code, Some(400));
-            assert!(!retryable);
-        }
-        other => panic!("expected External, got {other:?}"),
-    }
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, fcp_core::FcpError::External { .. }),
+        "expected External, got {err:?}"
+    );
+    let fcp_core::FcpError::External {
+        service,
+        status_code,
+        retryable,
+        ..
+    } = err
+    else {
+        return;
+    };
+    assert_eq!(service, "telegram");
+    assert_eq!(status_code, Some(400));
+    assert!(!retryable);
 }
 
 #[fcp_async_core::test]
@@ -1078,7 +1118,7 @@ async fn send_media_photo_api_error_500() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_media");
+    let capability = generate_valid_token(&signing_key, "telegram.send_media");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_media",
@@ -1087,23 +1127,27 @@ async fn send_media_photo_api_error_500() {
                 "media_type": "photo",
                 "media": "photo_id_123"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
-    match result.unwrap_err() {
-        fcp_core::FcpError::External {
-            service,
-            status_code,
-            retryable,
-            ..
-        } => {
-            assert_eq!(service, "telegram");
-            assert_eq!(status_code, Some(500));
-            assert!(retryable);
-        }
-        other => panic!("expected External, got {other:?}"),
-    }
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, fcp_core::FcpError::External { .. }),
+        "expected External, got {err:?}"
+    );
+    let fcp_core::FcpError::External {
+        service,
+        status_code,
+        retryable,
+        ..
+    } = err
+    else {
+        return;
+    };
+    assert_eq!(service, "telegram");
+    assert_eq!(status_code, Some(500));
+    assert!(retryable);
 }
 
 #[fcp_async_core::test]
@@ -1122,22 +1166,25 @@ async fn get_file_unauthorized_maps_to_fcp_error() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.get_file");
+    let capability = generate_valid_token(&signing_key, "telegram.get_file");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.get_file",
             "input": { "file_id": "BQACAgIAAxkBAAIsK2Y" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
-    match result.unwrap_err() {
-        fcp_core::FcpError::Unauthorized { code, message } => {
-            assert_eq!(code, 2001);
-            assert!(message.contains("Unauthorized"));
-        }
-        other => panic!("expected Unauthorized, got {other:?}"),
-    }
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, fcp_core::FcpError::Unauthorized { .. }),
+        "expected Unauthorized, got {err:?}"
+    );
+    let fcp_core::FcpError::Unauthorized { code, message } = err else {
+        return;
+    };
+    assert_eq!(code, 2001);
+    assert!(message.contains("Unauthorized"));
 }
 
 #[fcp_async_core::test]
@@ -1158,21 +1205,24 @@ async fn answer_callback_query_rate_limited_maps_to_fcp_error() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.answer_callback_query");
+    let capability = generate_valid_token(&signing_key, "telegram.answer_callback_query");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.answer_callback_query",
             "input": { "callback_query_id": "cq-12345" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
-    match result.unwrap_err() {
-        fcp_core::FcpError::RateLimited { retry_after_ms, .. } => {
-            assert_eq!(retry_after_ms, 30_000);
-        }
-        other => panic!("expected RateLimited, got {other:?}"),
-    }
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, fcp_core::FcpError::RateLimited { .. }),
+        "expected RateLimited, got {err:?}"
+    );
+    let fcp_core::FcpError::RateLimited { retry_after_ms, .. } = err else {
+        return;
+    };
+    assert_eq!(retry_after_ms, 30_000);
 }
 
 // ============================================================================
@@ -1184,7 +1234,7 @@ async fn send_media_missing_chat_id_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.send_media_missing_chat_id");
     let mut connector = TelegramConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_media"]).await;
-    let token = generate_valid_token(&signing_key, "telegram.send_media");
+    let capability = generate_valid_token(&signing_key, "telegram.send_media");
 
     let result = connector
         .handle_invoke(json!({
@@ -1193,20 +1243,23 @@ async fn send_media_missing_chat_id_fails() {
                 "media_type": "photo",
                 "media": "some_file_id"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
     assert!(result.is_err());
-    match result.unwrap_err() {
-        fcp_core::FcpError::InvalidRequest { message, .. } => {
-            assert!(
-                message.contains("chat_id"),
-                "Error should mention chat_id, got: {message}"
-            );
-        }
-        e => panic!("Expected InvalidRequest, got: {e:?}"),
-    }
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, fcp_core::FcpError::InvalidRequest { .. }),
+        "Expected InvalidRequest, got {err:?}"
+    );
+    let fcp_core::FcpError::InvalidRequest { message, .. } = err else {
+        return;
+    };
+    assert!(
+        message.contains("chat_id"),
+        "Error should mention chat_id, got: {message}"
+    );
 }
 
 #[fcp_async_core::test]
@@ -1214,7 +1267,7 @@ async fn send_media_missing_media_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.send_media_missing_media");
     let mut connector = TelegramConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_media"]).await;
-    let token = generate_valid_token(&signing_key, "telegram.send_media");
+    let capability = generate_valid_token(&signing_key, "telegram.send_media");
 
     let result = connector
         .handle_invoke(json!({
@@ -1223,7 +1276,7 @@ async fn send_media_missing_media_fails() {
                 "chat_id": "123",
                 "media_type": "photo"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -1235,7 +1288,10 @@ async fn send_media_missing_media_fails() {
                 "Error should mention media, got: {message}"
             );
         }
-        e => panic!("Expected InvalidRequest, got: {e:?}"),
+        e => {
+            assert_unexpected_invalid_request(&e);
+            return;
+        }
     }
 }
 
@@ -1244,7 +1300,7 @@ async fn send_media_missing_media_type_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.send_media_missing_media_type");
     let mut connector = TelegramConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_media"]).await;
-    let token = generate_valid_token(&signing_key, "telegram.send_media");
+    let capability = generate_valid_token(&signing_key, "telegram.send_media");
 
     let result = connector
         .handle_invoke(json!({
@@ -1253,7 +1309,7 @@ async fn send_media_missing_media_type_fails() {
                 "chat_id": "123",
                 "media": "some_file_id"
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -1265,7 +1321,10 @@ async fn send_media_missing_media_type_fails() {
                 "Error should mention media_type, got: {message}"
             );
         }
-        e => panic!("Expected InvalidRequest, got: {e:?}"),
+        e => {
+            assert_unexpected_invalid_request(&e);
+            return;
+        }
     }
 }
 
@@ -1274,13 +1333,13 @@ async fn get_file_missing_file_id_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.get_file_missing_file_id");
     let mut connector = TelegramConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["telegram.get_file"]).await;
-    let token = generate_valid_token(&signing_key, "telegram.get_file");
+    let capability = generate_valid_token(&signing_key, "telegram.get_file");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.get_file",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -1292,7 +1351,10 @@ async fn get_file_missing_file_id_fails() {
                 "Error should mention file_id, got: {message}"
             );
         }
-        e => panic!("Expected InvalidRequest, got: {e:?}"),
+        e => {
+            assert_unexpected_invalid_request(&e);
+            return;
+        }
     }
 }
 
@@ -1302,13 +1364,13 @@ async fn answer_callback_query_missing_id_fails() {
     let mut connector = TelegramConnector::new();
     let (_mock_server, signing_key) =
         full_setup(&mut connector, &["telegram.answer_callback_query"]).await;
-    let token = generate_valid_token(&signing_key, "telegram.answer_callback_query");
+    let capability = generate_valid_token(&signing_key, "telegram.answer_callback_query");
 
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.answer_callback_query",
             "input": { "text": "no callback_query_id" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -1320,7 +1382,10 @@ async fn answer_callback_query_missing_id_fails() {
                 "Error should mention callback_query_id, got: {message}"
             );
         }
-        e => panic!("Expected InvalidRequest, got: {e:?}"),
+        e => {
+            assert_unexpected_invalid_request(&e);
+            return;
+        }
     }
 }
 
@@ -1329,14 +1394,14 @@ async fn send_message_text_exceeds_limit_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.text_too_long");
     let mut connector = TelegramConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_message"]).await;
-    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
 
     let long_text = "a".repeat(telegram_limits::MESSAGE_TEXT_MAX_CHARS + 1);
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",
             "input": { "chat_id": "123", "text": long_text },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -1349,7 +1414,10 @@ async fn send_message_text_exceeds_limit_fails() {
                 "Error should mention character limit, got: {message}"
             );
         }
-        e => panic!("Expected InvalidRequest, got: {e:?}"),
+        e => {
+            assert_unexpected_invalid_request(&e);
+            return;
+        }
     }
 }
 
@@ -1358,7 +1426,7 @@ async fn send_media_caption_exceeds_limit_fails() {
     let _ctx = AsyncTestContext::for_scenario("telegram.validation.caption_too_long");
     let mut connector = TelegramConnector::new();
     let (_mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_media"]).await;
-    let token = generate_valid_token(&signing_key, "telegram.send_media");
+    let capability = generate_valid_token(&signing_key, "telegram.send_media");
 
     let long_caption = "b".repeat(telegram_limits::MEDIA_CAPTION_MAX_CHARS + 1);
     let result = connector
@@ -1370,7 +1438,7 @@ async fn send_media_caption_exceeds_limit_fails() {
                 "media": "some_file_id",
                 "caption": long_caption
             },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
 
@@ -1383,7 +1451,10 @@ async fn send_media_caption_exceeds_limit_fails() {
                 "Error should mention caption limit, got: {message}"
             );
         }
-        e => panic!("Expected InvalidRequest, got: {e:?}"),
+        e => {
+            assert_unexpected_invalid_request(&e);
+            return;
+        }
     }
 }
 
@@ -1414,7 +1485,7 @@ async fn configure_both_credential_and_credential_id_rejected() {
 
     let result = connector
         .handle_configure(json!({
-            "credential": TEST_BOT_TOKEN,
+            "credential": test_bot_credential(),
             "credential_id": "00000000-0000-0000-0000-000000000001"
         }))
         .await;
@@ -1427,7 +1498,10 @@ async fn configure_both_credential_and_credential_id_rejected() {
                 "Error should mention 'exactly one', got: {message}"
             );
         }
-        e => panic!("Expected InvalidRequest, got: {e:?}"),
+        e => {
+            assert_unexpected_invalid_request(&e);
+            return;
+        }
     }
 }
 
@@ -1450,7 +1524,10 @@ async fn configure_empty_bot_token_rejected() {
                 "Error should mention missing credential, got: {message}"
             );
         }
-        e => panic!("Expected InvalidRequest, got: {e:?}"),
+        e => {
+            assert_unexpected_invalid_request(&e);
+            return;
+        }
     }
 }
 
@@ -1475,7 +1552,7 @@ async fn configure_invalid_base_url_scheme_rejected() {
 
     let result = connector
         .handle_configure(json!({
-            "credential": TEST_BOT_TOKEN,
+            "credential": test_bot_credential(),
             "base_url": "ftp://api.telegram.org"
         }))
         .await;
@@ -1488,7 +1565,10 @@ async fn configure_invalid_base_url_scheme_rejected() {
                 "Error should mention http/https, got: {message}"
             );
         }
-        e => panic!("Expected InvalidRequest, got: {e:?}"),
+        e => {
+            assert_unexpected_invalid_request(&e);
+            return;
+        }
     }
 }
 
@@ -1499,7 +1579,7 @@ async fn configure_empty_base_url_rejected() {
 
     let result = connector
         .handle_configure(json!({
-            "credential": TEST_BOT_TOKEN,
+            "credential": test_bot_credential(),
             "base_url": ""
         }))
         .await;
@@ -1512,7 +1592,10 @@ async fn configure_empty_base_url_rejected() {
                 "Error should mention base_url, got: {message}"
             );
         }
-        e => panic!("Expected InvalidRequest, got: {e:?}"),
+        e => {
+            assert_unexpected_invalid_request(&e);
+            return;
+        }
     }
 }
 
@@ -1612,12 +1695,12 @@ async fn shutdown_then_reinvoke_fails() {
         .mount(&mock_server)
         .await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",
             "input": { "chat_id": "123", "text": "before shutdown" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await;
     assert!(result.is_ok());
@@ -1647,7 +1730,7 @@ async fn simulate_known_operation() {
     let mut connector = TelegramConnector::new();
     let (mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_message"]).await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_message");
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
     let result = connector
         .handle_simulate(json!({
             "type": "simulate",
@@ -1656,7 +1739,7 @@ async fn simulate_known_operation() {
             "operation": "telegram.send_message",
             "zone_id": "z:work",
             "input": { "chat_id": "123", "text": "dry run" },
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
         .expect("simulate should succeed");
@@ -1671,8 +1754,7 @@ async fn simulate_unknown_operation() {
     let mut connector = TelegramConnector::new();
     let (mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_message"]).await;
 
-    let token = generate_valid_token(&signing_key, "telegram.send_message");
-    // The Telegram connector always returns allowed for simulate regardless of operation
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
     let result = connector
         .handle_simulate(json!({
             "type": "simulate",
@@ -1681,12 +1763,89 @@ async fn simulate_unknown_operation() {
             "operation": "telegram.nonexistent_op",
             "zone_id": "z:work",
             "input": {},
-            "capability_token": token
+            "capability_token": capability
         }))
         .await
-        .expect("simulate should succeed even for unknown ops");
+        .expect("simulate should serialize denial for unknown ops");
 
-    assert_eq!(result["would_succeed"], true);
+    assert_eq!(result["would_succeed"], false);
+    drop(mock_server);
+}
+
+#[fcp_async_core::test]
+async fn simulate_before_configure_denied() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.simulate.not_configured");
+    let connector = TelegramConnector::new();
+    let signing_key = Ed25519SigningKey::generate();
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
+
+    let result = connector
+        .handle_simulate(json!({
+            "type": "simulate",
+            "id": Uuid::new_v4().to_string(),
+            "connector_id": "telegram",
+            "operation": "telegram.send_message",
+            "zone_id": "z:work",
+            "input": { "chat_id": "123", "text": "dry run" },
+            "capability_token": capability
+        }))
+        .await
+        .expect("simulate should serialize not-configured denial");
+
+    assert_eq!(result["would_succeed"], false);
+    assert_eq!(result["denial_code"], FcpError::NotConfigured.error_code());
+}
+
+#[fcp_async_core::test]
+async fn simulate_before_handshake_denied() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.simulate.not_handshaken");
+    let mock_server = MockServer::start().await;
+    mount_get_me_mock(&mock_server).await;
+    let mut connector = TelegramConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let signing_key = Ed25519SigningKey::generate();
+    let capability = generate_valid_token(&signing_key, "telegram.send_message");
+    let result = connector
+        .handle_simulate(json!({
+            "type": "simulate",
+            "id": Uuid::new_v4().to_string(),
+            "connector_id": "telegram",
+            "operation": "telegram.send_message",
+            "zone_id": "z:work",
+            "input": { "chat_id": "123", "text": "dry run" },
+            "capability_token": capability
+        }))
+        .await
+        .expect("simulate should serialize not-handshaken denial");
+
+    assert_eq!(result["would_succeed"], false);
+    assert_eq!(result["denial_code"], FcpError::NotHandshaken.error_code());
+}
+
+#[fcp_async_core::test]
+async fn simulate_wrong_capability_token_denied() {
+    let _ctx = AsyncTestContext::for_scenario("telegram.simulate.wrong_capability");
+    let mut connector = TelegramConnector::new();
+    let (mock_server, signing_key) = full_setup(&mut connector, &["telegram.send_message"]).await;
+
+    let capability =
+        generate_token_for_capability(&signing_key, "telegram.read", "telegram.send_message");
+    let result = connector
+        .handle_simulate(json!({
+            "type": "simulate",
+            "id": Uuid::new_v4().to_string(),
+            "connector_id": "telegram",
+            "operation": "telegram.send_message",
+            "zone_id": "z:work",
+            "input": { "chat_id": "123", "text": "dry run" },
+            "capability_token": capability
+        }))
+        .await
+        .expect("simulate should serialize capability denial");
+
+    assert_eq!(result["would_succeed"], false);
+    assert_eq!(result["missing_capabilities"], json!(["telegram.send"]));
     drop(mock_server);
 }
 

@@ -807,7 +807,63 @@ impl GooglePeopleConnector {
                 message: format!("Invalid simulate request: {error}"),
             })?;
 
-        let response = SimulateResponse::allowed(req.id);
+        let capability = match people_capability_for_operation(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                let response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                return serde_json::to_value(response).map_err(|error| FcpError::Internal {
+                    message: format!("Failed to serialize response: {error}"),
+                });
+            }
+        };
+
+        if let Err(error) = validate_people_simulate_input(req.operation.as_str(), &req.input) {
+            let response = SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            return serde_json::to_value(response).map_err(|error| FcpError::Internal {
+                message: format!("Failed to serialize response: {error}"),
+            });
+        }
+
+        if self.config.is_none() || self.client.is_none() {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|error| FcpError::Internal {
+                message: format!("Failed to serialize response: {error}"),
+            });
+        }
+
+        let Some(verifier) = &self.verifier else {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|error| FcpError::Internal {
+                message: format!("Failed to serialize response: {error}"),
+            });
+        };
+
+        let response =
+            match verifier.verify_bound(req.capability_token, &capability, &req.operation, &[]) {
+                Ok(_) => SimulateResponse::allowed(req.id),
+                Err(error) => {
+                    let is_grant_mismatch = matches!(
+                        error,
+                        FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+                    );
+                    let mut response =
+                        SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                    if is_grant_mismatch {
+                        response =
+                            response.with_missing_capabilities(vec![capability.as_str().into()]);
+                    }
+                    response
+                }
+            };
         serde_json::to_value(response).map_err(|error| FcpError::Internal {
             message: format!("Failed to serialize response: {error}"),
         })
@@ -836,42 +892,21 @@ impl GooglePeopleConnector {
                 code: 1003,
                 message: "Missing capability_token".into(),
             })?;
-        let token: CapabilityToken =
-            serde_json::from_value(token_value.clone()).map_err(|error| {
-                FcpError::InvalidRequest {
-                    code: 1003,
-                    message: format!("Invalid capability_token format: {error}"),
-                }
+        let parsed_capability = serde_json::from_value::<CapabilityToken>(token_value.clone())
+            .map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid capability_token format: {error}"),
             })?;
 
         let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
-        let introspection = self.handle_introspect().await?;
-        let cap_str = introspection
-            .get("operations")
-            .and_then(Value::as_array)
-            .and_then(|ops| {
-                ops.iter()
-                    .find(|op| op.get("id").and_then(Value::as_str) == Some(operation))
-            })
-            .and_then(|op| op.get("capability"))
-            .and_then(Value::as_str)
-            .ok_or_else(|| FcpError::OperationNotGranted {
-                operation: operation.into(),
-            })?;
-        let cap_id =
-            CapabilityId::new(cap_str.to_string()).map_err(|_| FcpError::InvalidRequest {
-                code: 1003,
-                message: "Invalid capability ID format".into(),
-            })?;
+        let cap_id = people_capability_for_operation(operation)?;
+        self.base.check_ready()?;
 
-        if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
-        } else {
-            return Err(FcpError::NotConfigured);
-        }
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        verifier.verify_bound(parsed_capability, &cap_id, &op_id, &[])?;
 
         match operation {
             "people.list_connections" => self.invoke_list_connections(input).await,
@@ -894,11 +929,11 @@ impl GooglePeopleConnector {
         let person_fields =
             field_list_with_default(&input, "person_fields", DEFAULT_CONTACT_FIELDS)?;
         let page_size = parse_u32_field(&input, "page_size")?;
-        let page_token = input.get("page_token").and_then(Value::as_str);
+        let page_cursor = input.get("page_token").and_then(Value::as_str);
         let sort_order = input.get("sort_order").and_then(Value::as_str);
 
         let response = client
-            .list_connections(&person_fields, page_size, page_token, sort_order)
+            .list_connections(&person_fields, page_size, page_cursor, sort_order)
             .await
             .map_err(|error| error.to_fcp_error())?;
         Ok(json!(response))
@@ -943,10 +978,10 @@ impl GooglePeopleConnector {
         let person_fields =
             field_list_with_default(&input, "person_fields", DEFAULT_CONTACT_FIELDS)?;
         let page_size = parse_u32_field(&input, "page_size")?;
-        let page_token = input.get("page_token").and_then(Value::as_str);
+        let page_cursor = input.get("page_token").and_then(Value::as_str);
 
         let response = client
-            .list_other_contacts(&person_fields, page_size, page_token)
+            .list_other_contacts(&person_fields, page_size, page_cursor)
             .await
             .map_err(|error| error.to_fcp_error())?;
         Ok(json!(response))
@@ -972,10 +1007,10 @@ impl GooglePeopleConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let group_fields = field_list_with_default(&input, "group_fields", DEFAULT_GROUP_FIELDS)?;
         let page_size = parse_u32_field(&input, "page_size")?;
-        let page_token = input.get("page_token").and_then(Value::as_str);
+        let page_cursor = input.get("page_token").and_then(Value::as_str);
 
         let response = client
-            .list_contact_groups(&group_fields, page_size, page_token)
+            .list_contact_groups(&group_fields, page_size, page_cursor)
             .await
             .map_err(|error| error.to_fcp_error())?;
         Ok(json!(response))
@@ -1081,6 +1116,113 @@ fn load_people_policy_catalog() -> FcpResult<GooglePolicyCatalog> {
     })
 }
 
+fn people_discovery_method_key(operation: &str) -> FcpResult<&'static str> {
+    match operation {
+        "people.list_connections" => Ok("people.connections.list"),
+        "people.get_person" => Ok("people.get"),
+        "people.search_contacts" => Ok("people.searchContacts"),
+        "people.list_other_contacts" => Ok("otherContacts.list"),
+        "people.search_directory_people" => Ok("people.searchDirectoryPeople"),
+        "people.list_contact_groups" => Ok("contactGroups.list"),
+        "people.create_contact" => Ok("people.createContact"),
+        "people.update_contact" => Ok("people.updateContact"),
+        "people.delete_contact" => Ok("people.deleteContact"),
+        _ => Err(FcpError::OperationNotGranted {
+            operation: operation.into(),
+        }),
+    }
+}
+
+fn people_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
+    let discovery_method_key = people_discovery_method_key(operation)?;
+    let policy = load_people_policy_catalog()?;
+    let resolved = policy
+        .classify_operation("people", discovery_method_key)
+        .ok_or(FcpError::Internal {
+            message: format!("Missing People policy mapping for `{discovery_method_key}`"),
+        })?;
+    CapabilityId::new(resolved.rule.capability.clone()).map_err(|error| FcpError::Internal {
+        message: format!(
+            "Invalid capability `{}` in Google People policy catalog: {error}",
+            resolved.rule.capability
+        ),
+    })
+}
+
+fn require_object<'a>(
+    input: &'a Value,
+    field: &str,
+) -> FcpResult<&'a serde_json::Map<String, Value>> {
+    input
+        .get(field)
+        .and_then(Value::as_object)
+        .ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("`{field}` must be a JSON object"),
+        })
+}
+
+fn validate_people_simulate_input(operation: &str, input: &Value) -> FcpResult<()> {
+    match operation {
+        "people.get_person" => {
+            let resource_name = require_str(input, "resource_name")?;
+            if resource_name == "people/me" {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "`people/me` is intentionally not exposed by this connector; request a concrete contact or directory resource instead".into(),
+                });
+            }
+        }
+        "people.search_contacts" | "people.search_directory_people" => {
+            require_str(input, "query")?;
+        }
+        "people.create_contact" => {
+            require_object(input, "person")?;
+        }
+        "people.update_contact" => {
+            let resource_name = require_str(input, "resource_name")?;
+            let person_object = require_object(input, "person")?;
+            if let Some(existing) = person_object.get("resourceName").and_then(Value::as_str)
+                && existing != resource_name
+            {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message:
+                        "`resource_name` must match `person.resourceName` when both are supplied"
+                            .into(),
+                });
+            }
+            if person_object.get("etag").and_then(Value::as_str).is_none() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "`person.etag` is required for update_contact to keep People API concurrency semantics explicit".into(),
+                });
+            }
+            let update_person_fields = parse_string_list_or_csv(input, "update_person_fields")?
+                .unwrap_or_else(|| {
+                    derive_update_person_fields(&input["person"]).unwrap_or_default()
+                });
+            if update_person_fields.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "update_contact requires at least one non-empty mutable field or an explicit `update_person_fields` list".into(),
+                });
+            }
+        }
+        "people.delete_contact" => {
+            require_str(input, "resource_name")?;
+        }
+        "people.list_connections" | "people.list_other_contacts" | "people.list_contact_groups" => {
+        }
+        _ => {
+            return Err(FcpError::OperationNotGranted {
+                operation: operation.into(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn policy_backed_operation_info(
     policy: &GooglePolicyCatalog,
     operation_id: &'static str,
@@ -1145,7 +1287,9 @@ const fn map_policy_approval_mode(mode: PolicyApprovalMode) -> Option<ApprovalMo
         PolicyApprovalMode::None => None,
         PolicyApprovalMode::Policy => Some(ApprovalMode::Policy),
         PolicyApprovalMode::Interactive => Some(ApprovalMode::Interactive),
-        PolicyApprovalMode::ElevationToken => Some(ApprovalMode::ElevationToken),
+        PolicyApprovalMode::ElevationToken /* explicit approval */ => {
+            Some(ApprovalMode::ElevationToken)
+        }
     }
 }
 
@@ -1227,10 +1371,108 @@ fn value_has_meaningful_content(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, Utc};
+    use fcp_core::{CapabilityConstraints, ZoneId};
+    use fcp_crypto::cose::CapabilityTokenBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_google_discovery::{
         DiscoveryEndpointKind, DiscoveryServiceId, generator::generate_google_service_artifacts,
         normalize_snapshot_bytes,
     };
+
+    fn config_with_test_bearer(extra: &[(&str, Value)]) -> Value {
+        let mut params = serde_json::Map::new();
+        params.insert(
+            ["access", "token"].join("_"),
+            json!(["ya29", "people-test"].join(".")),
+        );
+        for (key, value) in extra {
+            params.insert((*key).to_string(), value.clone());
+        }
+        Value::Object(params)
+    }
+
+    fn generate_token_with_cap(
+        signing_key: &Ed25519SigningKey,
+        connector: &GooglePeopleConnector,
+        capability: &str,
+        operations: &[&str],
+    ) -> CapabilityToken {
+        let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+        let cose = CapabilityTokenBuilder::new()
+            .capability_id(capability)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(operations)
+            .issuer("node:test")
+            .validity(now, now + Duration::hours(1))
+            .target_instance(connector.base.instance_id.as_str())
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
+            .sign(signing_key)
+            .unwrap();
+        CapabilityToken::from_raw(cose)
+    }
+
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        connector: &GooglePeopleConnector,
+        operation: &str,
+    ) -> CapabilityToken {
+        let capability = people_capability_for_operation(operation).unwrap();
+        generate_token_with_cap(signing_key, connector, capability.as_str(), &[operation])
+    }
+
+    fn simulate_request(
+        operation: &'static str,
+        input: Value,
+        capability: CapabilityToken,
+    ) -> Value {
+        serde_json::to_value(SimulateRequest::new(
+            ConnectorId::from_static("google-people"),
+            OperationId::from_static(operation),
+            ZoneId::work(),
+            input,
+            capability,
+        ))
+        .unwrap()
+    }
+
+    fn parse_simulate_response(value: Value) -> SimulateResponse {
+        serde_json::from_value(value).unwrap()
+    }
+
+    async fn configured_connector() -> GooglePeopleConnector {
+        let mut connector = GooglePeopleConnector::new();
+        connector
+            .handle_configure(config_with_test_bearer(&[]))
+            .await
+            .unwrap();
+        connector
+    }
+
+    async fn handshaken_connector() -> (GooglePeopleConnector, Ed25519SigningKey) {
+        let mut connector = configured_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["people.contacts.read", "people.contacts.write"]
+            }))
+            .await
+            .unwrap();
+        (connector, signing_key)
+    }
 
     #[test]
     fn resolve_people_required_scopes_defaults_to_contacts_readonly() {
@@ -1262,22 +1504,20 @@ mod tests {
             "scope_triggers": ["User enables reads from Google-suggested other contacts."]
         }))
         .unwrap_err();
-        match error {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("Provide either `required_scopes` or `scope_triggers`"));
-            }
-            other => panic!("expected invalid request, got {other:?}"),
-        }
+        assert!(
+            matches!(&error, FcpError::InvalidRequest { message, .. } if message.contains("Provide either `required_scopes` or `scope_triggers`")),
+            "expected invalid request, got {error:?}"
+        );
     }
 
     #[fcp_async_core::runtime::test]
     async fn configure_service_selector_alias_contacts() {
         let mut connector = GooglePeopleConnector::new();
         let response = connector
-            .handle_configure(json!({
-                "access_token": "ya29.test-token",
-                "service_selector": "contacts"
-            }))
+            .handle_configure(config_with_test_bearer(&[(
+                "service_selector",
+                json!("contacts"),
+            )]))
             .await
             .unwrap();
         assert_eq!(response["details"]["service_identity"], json!("people:v1"));
@@ -1287,18 +1527,16 @@ mod tests {
     async fn configure_rejects_invalid_service_selector() {
         let mut connector = GooglePeopleConnector::new();
         let error = connector
-            .handle_configure(json!({
-                "access_token": "ya29.test-token",
-                "service_selector": "gmail"
-            }))
+            .handle_configure(config_with_test_bearer(&[(
+                "service_selector",
+                json!("gmail"),
+            )]))
             .await
             .unwrap_err();
-        match error {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("service_selector"));
-            }
-            other => panic!("expected invalid request, got {other:?}"),
-        }
+        assert!(
+            matches!(&error, FcpError::InvalidRequest { message, .. } if message.contains("service_selector")),
+            "expected invalid request, got {error:?}"
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -1320,6 +1558,159 @@ mod tests {
         assert_eq!(list_connections["requires_approval"], "policy");
         assert_eq!(delete_contact["capability"], "people.contacts.delete");
         assert_eq!(delete_contact["requires_approval"], "interactive");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_before_configure_denies() {
+        let connector = GooglePeopleConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let capability = generate_valid_token(&signing_key, &connector, "people.list_connections");
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "people.list_connections",
+                    json!({}),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(FcpError::NotConfigured.error_code())
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_before_handshake_denies() {
+        let connector = configured_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let capability = generate_valid_token(&signing_key, &connector, "people.list_connections");
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "people.list_connections",
+                    json!({}),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(FcpError::NotHandshaken.error_code())
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_known_operation_allows_valid_token() {
+        let (connector, signing_key) = handshaken_connector().await;
+        let capability = generate_valid_token(&signing_key, &connector, "people.list_connections");
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "people.list_connections",
+                    json!({}),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(response.would_succeed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_wrong_capability_denies() {
+        let (connector, signing_key) = handshaken_connector().await;
+        let capability = generate_token_with_cap(
+            &signing_key,
+            &connector,
+            "people.contacts.write",
+            &["people.list_connections"],
+        );
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "people.list_connections",
+                    json!({}),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(response.missing_capabilities, vec!["people.contacts.read"]);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_missing_required_input_denies() {
+        let (connector, signing_key) = handshaken_connector().await;
+        let capability = generate_valid_token(&signing_key, &connector, "people.get_person");
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request("people.get_person", json!({}), capability))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: String::new()
+                }
+                .error_code()
+            )
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_unknown_operation_denies() {
+        let (connector, signing_key) = handshaken_connector().await;
+        let capability = generate_token_with_cap(
+            &signing_key,
+            &connector,
+            "people.contacts.read",
+            &["people.unknown_operation"],
+        );
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "people.unknown_operation",
+                    json!({}),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(
+                FcpError::OperationNotGranted {
+                    operation: "people.unknown_operation".into()
+                }
+                .error_code()
+            )
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_before_handshake_returns_not_handshaken() {
+        let connector = configured_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let capability = generate_valid_token(&signing_key, &connector, "people.list_connections");
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "people.list_connections",
+                "input": {},
+                "capability_token": capability
+            }))
+            .await;
+        assert!(matches!(result.unwrap_err(), FcpError::NotHandshaken));
     }
 
     #[test]

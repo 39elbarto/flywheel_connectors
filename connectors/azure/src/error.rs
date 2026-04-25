@@ -157,48 +157,46 @@ mod tests {
     #[test]
     fn unauthorized_maps_to_fcp_unauthorized() {
         let err = AzureError::Unauthorized("bad token".into());
-        match err.to_fcp_error() {
-            FcpError::Unauthorized { code, message } => {
-                assert_eq!(code, 2001);
-                assert_eq!(message, "bad token");
-            }
-            other => panic!("expected unauthorized, got {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::Unauthorized {
+                code: 2001,
+                ref message
+            } if message == "bad token"
+        ));
     }
 
     #[test]
     fn validation_maps_to_invalid_request() {
         let err = AzureError::Validation("subscription_id is required".into());
-        match err.to_fcp_error() {
-            FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1003);
-                assert_eq!(message, "subscription_id is required");
-            }
-            other => panic!("expected invalid request, got {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::InvalidRequest {
+                code: 1003,
+                ref message
+            } if message == "subscription_id is required"
+        ));
     }
 
     #[test]
     fn config_maps_to_invalid_request_1001() {
         let err = AzureError::Config("missing bearer token".into());
-        match err.to_fcp_error() {
-            FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1001);
-                assert_eq!(message, "missing bearer token");
-            }
-            other => panic!("expected invalid request, got {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::InvalidRequest {
+                code: 1001,
+                ref message
+            } if message == "missing bearer token"
+        ));
     }
 
     #[test]
     fn not_found_maps_to_resource_not_found() {
         let err = AzureError::NotFound("resource group rg-1".into());
-        match err.to_fcp_error() {
-            FcpError::ResourceNotFound { resource } => {
-                assert_eq!(resource, "resource group rg-1");
-            }
-            other => panic!("expected resource not found, got {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::ResourceNotFound { ref resource } if resource == "resource group rg-1"
+        ));
     }
 
     #[test]
@@ -246,12 +244,10 @@ mod tests {
     #[test]
     fn invalid_response_maps_to_internal() {
         let err = AzureError::InvalidResponse("unexpected XML".into());
-        match err.to_fcp_error() {
-            FcpError::Internal { message } => {
-                assert_eq!(message, "unexpected XML");
-            }
-            other => panic!("expected internal, got {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::Internal { ref message } if message == "unexpected XML"
+        ));
     }
 
     #[test]
@@ -259,15 +255,12 @@ mod tests {
         let err = AzureError::RateLimited {
             retry_after_ms: 2_000,
         };
-        match err.to_fcp_error() {
+        assert!(matches!(
+            err.to_fcp_error(),
             FcpError::RateLimited {
-                retry_after_ms,
-                violation,
-            } => {
-                assert_eq!(retry_after_ms, 2_000);
-                assert!(violation.is_none());
+                retry_after_ms: 2_000,
+                violation: None,
             }
-            other => panic!("expected rate limited, got {other:?}"),
-        }
+        ));
     }
 }

@@ -421,27 +421,21 @@ mod tests {
         let err = AirtableError::RateLimited {
             retry_after_secs: 10,
         };
-        match err.to_fcp_error() {
+        assert!(matches!(
+            err.to_fcp_error(),
             FcpError::RateLimited {
-                retry_after_ms,
-                violation,
-            } => {
-                assert_eq!(retry_after_ms, 10_000);
-                assert!(violation.is_none());
+                retry_after_ms: 10_000,
+                violation: None,
             }
-            other => panic!("Expected RateLimited, got: {other:?}"),
-        }
+        ));
     }
 
     #[test]
     fn to_fcp_error_unauthorized_variant() {
-        match AirtableError::Unauthorized.to_fcp_error() {
-            FcpError::Unauthorized { code, message } => {
-                assert_eq!(code, 2001);
-                assert!(message.contains("Airtable"));
-            }
-            other => panic!("Expected Unauthorized, got: {other:?}"),
-        }
+        assert!(matches!(
+            AirtableError::Unauthorized.to_fcp_error(),
+            FcpError::Unauthorized { code: 2001, ref message } if message.contains("Airtable")
+        ));
     }
 
     #[test]
@@ -481,12 +475,10 @@ mod tests {
             message: "record xyz".into(),
             status_code: Some(404),
         };
-        match err.to_fcp_error() {
-            FcpError::ResourceNotFound { resource } => {
-                assert_eq!(resource, "record xyz");
-            }
-            other => panic!("Expected ResourceNotFound, got: {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::ResourceNotFound { ref resource } if resource == "record xyz"
+        ));
     }
 
     #[test]
@@ -509,19 +501,15 @@ mod tests {
             message: "internal".into(),
             status_code: Some(500),
         };
-        match err.to_fcp_error() {
+        assert!(matches!(
+            err.to_fcp_error(),
             FcpError::External {
-                service,
+                ref service,
                 retryable,
-                retry_after,
+                retry_after: None,
                 ..
-            } => {
-                assert_eq!(service, "airtable");
-                assert!(retryable);
-                assert!(retry_after.is_none());
-            }
-            other => panic!("Expected External, got: {other:?}"),
-        }
+            } if service == "airtable" && retryable
+        ));
     }
 
     #[test]
@@ -531,13 +519,10 @@ mod tests {
             message: "bad".into(),
             status_code: Some(422),
         };
-        match err.to_fcp_error() {
-            FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1003);
-                assert_eq!(message, "bad");
-            }
-            other => panic!("Expected InvalidRequest, got: {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::InvalidRequest { code: 1003, ref message } if message == "bad"
+        ));
     }
 
     #[test]
@@ -547,13 +532,11 @@ mod tests {
             message: "Unknown field names in formula".into(),
             status_code: Some(422),
         };
-        match err.to_fcp_error() {
-            FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1003);
-                assert_eq!(message, "Unknown field names in formula");
-            }
-            other => panic!("Expected InvalidRequest, got: {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::InvalidRequest { code: 1003, ref message }
+                if message == "Unknown field names in formula"
+        ));
     }
 
     #[test]
@@ -561,12 +544,10 @@ mod tests {
         let err = AirtableError::BaseNotFound {
             base_id: "appXYZ".into(),
         };
-        match err.to_fcp_error() {
-            FcpError::ResourceNotFound { resource } => {
-                assert_eq!(resource, "base:appXYZ");
-            }
-            other => panic!("Expected ResourceNotFound, got: {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::ResourceNotFound { ref resource } if resource == "base:appXYZ"
+        ));
     }
 
     #[test]
@@ -574,12 +555,10 @@ mod tests {
         let err = AirtableError::RecordNotFound {
             record_id: "rec123".into(),
         };
-        match err.to_fcp_error() {
-            FcpError::ResourceNotFound { resource } => {
-                assert_eq!(resource, "record:rec123");
-            }
-            other => panic!("Expected ResourceNotFound, got: {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::ResourceNotFound { ref resource } if resource == "record:rec123"
+        ));
     }
 
     #[test]
@@ -587,24 +566,20 @@ mod tests {
         let err = AirtableError::TableNotFound {
             table_id: "tblABC".into(),
         };
-        match err.to_fcp_error() {
-            FcpError::ResourceNotFound { resource } => {
-                assert_eq!(resource, "table:tblABC");
-            }
-            other => panic!("Expected ResourceNotFound, got: {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::ResourceNotFound { ref resource } if resource == "table:tblABC"
+        ));
     }
 
     #[test]
     fn to_fcp_error_json() {
         let json_err = serde_json::from_str::<i32>("nope").unwrap_err();
         let err = AirtableError::Json(json_err);
-        match err.to_fcp_error() {
-            FcpError::Internal { message } => {
-                assert!(message.starts_with("JSON error:"));
-            }
-            other => panic!("Expected Internal, got: {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::Internal { ref message } if message.starts_with("JSON error:")
+        ));
     }
 
     // ── Debug format ─────────────────────────────────────────────
@@ -650,12 +625,13 @@ mod tests {
             message: "oops".into(),
             status_code: None,
         };
-        match err.to_fcp_error() {
-            FcpError::External { status_code, .. } => {
-                assert!(status_code.is_none());
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::External {
+                status_code: None,
+                ..
             }
-            other => panic!("Expected External, got: {other:?}"),
-        }
+        ));
     }
 
     // ── Result type alias ────────────────────────────────────────
@@ -712,12 +688,13 @@ mod tests {
         let err = AirtableError::RateLimited {
             retry_after_secs: 0,
         };
-        match err.to_fcp_error() {
-            FcpError::RateLimited { retry_after_ms, .. } => {
-                assert_eq!(retry_after_ms, 0);
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::RateLimited {
+                retry_after_ms: 0,
+                ..
             }
-            other => panic!("Expected RateLimited, got: {other:?}"),
-        }
+        ));
     }
 
     #[test]
@@ -727,15 +704,14 @@ mod tests {
             message: "service down".into(),
             status_code: Some(503),
         };
-        match err.to_fcp_error() {
+        assert!(matches!(
+            err.to_fcp_error(),
             FcpError::External {
-                service, retryable, ..
-            } => {
-                assert_eq!(service, "airtable");
-                assert!(retryable);
-            }
-            other => panic!("Expected External, got: {other:?}"),
-        }
+                ref service,
+                retryable,
+                ..
+            } if service == "airtable" && retryable
+        ));
     }
 
     #[test]
@@ -745,12 +721,13 @@ mod tests {
             message: "timeout".into(),
             status_code: Some(504),
         };
-        match err.to_fcp_error() {
-            FcpError::External { retryable, .. } => {
-                assert!(retryable);
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::External {
+                retryable: true,
+                ..
             }
-            other => panic!("Expected External, got: {other:?}"),
-        }
+        ));
     }
 
     #[test]
@@ -761,10 +738,13 @@ mod tests {
             status_code: Some(408),
         };
         assert!(err.is_retryable());
-        match err.to_fcp_error() {
-            FcpError::External { retryable, .. } => assert!(retryable),
-            other => panic!("Expected External, got: {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::External {
+                retryable: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -774,13 +754,12 @@ mod tests {
             message: "insufficient access".into(),
             status_code: Some(422),
         };
-        match err.to_fcp_error() {
-            FcpError::External { message, .. } => {
-                assert!(message.contains("INVALID_PERMISSIONS"), "got: {message}");
-                assert!(message.contains("insufficient access"), "got: {message}");
-            }
-            other => panic!("Expected External, got: {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::External { ref message, .. }
+                if message.contains("INVALID_PERMISSIONS")
+                    && message.contains("insufficient access")
+        ));
     }
 
     #[test]
@@ -827,12 +806,10 @@ mod tests {
     fn to_fcp_error_json_internal_message() {
         let json_err = serde_json::from_str::<bool>("invalid").unwrap_err();
         let err = AirtableError::Json(json_err);
-        match err.to_fcp_error() {
-            FcpError::Internal { message } => {
-                assert!(message.contains("JSON error:"));
-            }
-            other => panic!("Expected Internal, got: {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::Internal { ref message } if message.contains("JSON error:")
+        ));
     }
 
     #[test]

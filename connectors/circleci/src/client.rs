@@ -219,11 +219,11 @@ impl CircleCiClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let token = self.api_token.clone();
+            let auth_material = self.api_token.clone();
             let query = query.clone();
             async move {
                 debug!(attempt, "GET {}", url);
-                let mut req = client.get(&url).header("Circle-Token", &token);
+                let mut req = client.get(&url).header("Circle-Token", &auth_material);
                 for (k, v) in &query {
                     req = req.query(&[(k, v)]);
                 }
@@ -298,14 +298,14 @@ impl CircleCiClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.to_string();
             let client = self.client.clone();
-            let token = self.api_token.clone();
+            let auth_material = self.api_token.clone();
             let query: Vec<(String, String)> = query
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.clone()))
                 .collect();
             async move {
                 debug!(attempt, "GET {}", url);
-                let mut req = client.get(&url).header("Circle-Token", &token);
+                let mut req = client.get(&url).header("Circle-Token", &auth_material);
                 for (k, v) in &query {
                     req = req.query(&[(k.as_str(), v.as_str())]);
                 }
@@ -338,13 +338,13 @@ impl CircleCiClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.to_string();
             let client = self.client.clone();
-            let token = self.api_token.clone();
+            let auth_material = self.api_token.clone();
             let body = body_clone.clone();
             async move {
                 debug!(attempt, "POST {}", url);
                 let resp = match client
                     .post(&url)
-                    .header("Circle-Token", &token)
+                    .header("Circle-Token", &auth_material)
                     .json(&body)
                     .send()
                     .await

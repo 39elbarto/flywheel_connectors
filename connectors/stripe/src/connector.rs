@@ -90,7 +90,7 @@ impl StripeConfig {
             .to_string();
         let api_url = validate_api_url_for_auth(&api_url, &auth)?;
 
-        let webhook_signing_secret = params
+        let webhook_signature_material = params
             .get("webhook_signing_secret")
             .and_then(|v| v.as_str())
             .map(str::trim)
@@ -117,7 +117,7 @@ impl StripeConfig {
         Ok(Self {
             auth,
             api_url,
-            webhook_signing_secret,
+            webhook_signing_secret: webhook_signature_material,
             webhook_tolerance_seconds,
         })
     }
@@ -392,11 +392,7 @@ impl StripeConnector {
         checks.push(DoctorCheck {
             name: "network_constraints".into(),
             passed: host_ok,
-            message: Some(if host_ok {
-                network_message
-            } else {
-                network_message
-            }),
+            message: Some(network_message),
             critical: true,
         });
 
@@ -1047,7 +1043,78 @@ impl StripeConnector {
                 message: format!("Invalid simulate request: {e}"),
             })?;
 
-        let response = SimulateResponse::allowed(req.id);
+        let capability = match stripe_capability_for_operation(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                let response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize response: {e}"),
+                });
+            }
+        };
+
+        if let Err(error) = validate_simulate_input(req.operation.as_str(), &req.input) {
+            let response = SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
+        if self.config.is_none() || self.client.is_none() {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
+        let Some(verifier) = &self.verifier else {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        };
+
+        let resource_uris = match resource_uris_for_operation(req.operation.as_str(), &req.input) {
+            Ok(resource_uris) => resource_uris,
+            Err(error) => {
+                let response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize response: {e}"),
+                });
+            }
+        };
+
+        let response = match verifier.verify_bound(
+            req.capability_token,
+            &capability,
+            &req.operation,
+            &resource_uris,
+        ) {
+            Ok(_) => SimulateResponse::allowed(req.id),
+            Err(error) => {
+                let is_grant_mismatch = matches!(
+                    error,
+                    FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+                );
+                let mut response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                if is_grant_mismatch {
+                    response =
+                        response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+                }
+                response
+            }
+        };
         serde_json::to_value(response).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize response: {e}"),
         })
@@ -1075,6 +1142,7 @@ impl StripeConnector {
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
         let derived_idempotency_key = derive_invoke_idempotency_key(operation, &params);
+        self.base.check_ready()?;
 
         let token_value = params
             .get("capability_token")
@@ -1083,8 +1151,8 @@ impl StripeConnector {
                 message: "Missing capability_token".into(),
             })?;
 
-        let token: CapabilityToken =
-            serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
+        let parsed_capability = serde_json::from_value::<CapabilityToken>(token_value.clone())
+            .map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid capability_token format: {e}"),
             })?;
@@ -1093,32 +1161,11 @@ impl StripeConnector {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
-        let intro = self.handle_introspect().await?;
-        let cap_str = intro
-            .get("operations")
-            .and_then(|ops| ops.as_array())
-            .and_then(|ops| {
-                ops.iter()
-                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
-            })
-            .and_then(|op| op.get("capability"))
-            .and_then(|cap| cap.as_str())
-            .ok_or_else(|| FcpError::OperationNotGranted {
-                operation: operation.into(),
-            })?;
-
-        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
-            code: 1003,
-            message: "Invalid capability ID format".into(),
-        })?;
-
+        let cap_id = stripe_capability_for_operation(operation)?;
         let resource_uris = resource_uris_for_operation(operation, &input)?;
 
-        if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &resource_uris)?;
-        } else {
-            return Err(FcpError::NotConfigured);
-        }
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        verifier.verify_bound(parsed_capability, &cap_id, &op_id, &resource_uris)?;
 
         match operation {
             "stripe.create_customer" => {
@@ -1602,7 +1649,7 @@ impl StripeConnector {
             .unwrap_or_else(|| Utc::now().timestamp());
 
         let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
-        let signing_secret =
+        let webhook_signature_material =
             config
                 .webhook_signing_secret
                 .as_deref()
@@ -1612,7 +1659,7 @@ impl StripeConnector {
                 })?;
 
         let signature_timestamp = verify_webhook_signature(
-            signing_secret,
+            webhook_signature_material,
             payload,
             signature_header,
             received_at,
@@ -1731,6 +1778,94 @@ fn stripe_object_resource_uri(object_type: &str, object_id: &str) -> Option<Stri
     }
 }
 
+fn stripe_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
+    let capability = match operation {
+        "stripe.get_customer"
+        | "stripe.list_customers"
+        | "stripe.get_payment_intent"
+        | "stripe.get_subscription"
+        | "stripe.list_subscriptions"
+        | "stripe.list_invoices"
+        | "stripe.get_invoice"
+        | "stripe.get_balance" => "stripe.read",
+        "stripe.create_customer" | "stripe.update_customer" | "stripe.delete_customer" => {
+            "stripe.write"
+        }
+        "stripe.create_payment_intent"
+        | "stripe.confirm_payment_intent"
+        | "stripe.capture_payment_intent"
+        | "stripe.cancel_payment_intent"
+        | "stripe.create_refund"
+        | "stripe.create_subscription"
+        | "stripe.cancel_subscription" => "stripe.payment",
+        "stripe.ingest_webhook_event" => "stripe.webhook",
+        _ => {
+            return Err(FcpError::OperationNotGranted {
+                operation: operation.into(),
+            });
+        }
+    };
+    Ok(CapabilityId::from_static(capability))
+}
+
+fn require_u64(input: &serde_json::Value, field: &str) -> FcpResult<u64> {
+    input
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Missing or invalid required field: {field}"),
+        })
+}
+
+fn validate_simulate_input(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+    match operation {
+        "stripe.create_customer" => {
+            require_str(input, "email")?;
+        }
+        "stripe.get_customer" | "stripe.update_customer" | "stripe.delete_customer" => {
+            require_str(input, "customer_id")?;
+        }
+        "stripe.create_payment_intent" => {
+            require_u64(input, "amount")?;
+            require_str(input, "currency")?;
+        }
+        "stripe.get_payment_intent"
+        | "stripe.confirm_payment_intent"
+        | "stripe.capture_payment_intent"
+        | "stripe.cancel_payment_intent" => {
+            require_str(input, "payment_intent_id")?;
+        }
+        "stripe.create_refund" => {
+            require_str(input, "payment_intent")?;
+        }
+        "stripe.create_subscription" => {
+            require_str(input, "customer")?;
+            require_str(input, "price")?;
+        }
+        "stripe.get_subscription" | "stripe.cancel_subscription" => {
+            require_str(input, "subscription_id")?;
+        }
+        "stripe.get_invoice" => {
+            require_str(input, "invoice_id")?;
+        }
+        "stripe.ingest_webhook_event" => {
+            require_str(input, "payload")?;
+            require_str(input, "stripe_signature")?;
+        }
+        "stripe.list_customers"
+        | "stripe.list_subscriptions"
+        | "stripe.list_invoices"
+        | "stripe.get_balance" => {}
+        _ => {
+            return Err(FcpError::OperationNotGranted {
+                operation: operation.into(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn resource_uris_for_operation(
     operation: &str,
     input: &serde_json::Value,
@@ -1801,7 +1936,8 @@ fn resource_uris_for_operation(
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
             let object_id = event.data.object.get("id").and_then(|v| v.as_str());
-            if let Some(uri) = object_id.and_then(|id| stripe_object_resource_uri(object_type, id)) {
+            if let Some(uri) = object_id.and_then(|id| stripe_object_resource_uri(object_type, id))
+            {
                 push_unique(uri);
             } else {
                 push_unique(stripe_resource_uri("event", &event.id));
@@ -1983,7 +2119,7 @@ fn op_info(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_core::CapabilityConstraints;
+    use fcp_core::{CapabilityConstraints, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
@@ -2006,7 +2142,10 @@ mod tests {
         let now = Utc::now();
         // C3.4: tokens MUST include constraints (default-deny)
         let constraints = CapabilityConstraints {
-            resource_allow: resource_allow.iter().map(|value| (*value).to_string()).collect(),
+            resource_allow: resource_allow
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
             ..Default::default()
         };
         let mut cbor = Vec::new();
@@ -2018,10 +2157,66 @@ mod tests {
             .operations(operations)
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&cbor)
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
+    }
+
+    fn simulate_request(
+        operation: &'static str,
+        input: serde_json::Value,
+        capability: CapabilityToken,
+    ) -> serde_json::Value {
+        serde_json::to_value(SimulateRequest::new(
+            ConnectorId::from_static("stripe"),
+            OperationId::from_static(operation),
+            ZoneId::work(),
+            input,
+            capability,
+        ))
+        .unwrap()
+    }
+
+    fn parse_simulate_response(value: serde_json::Value) -> SimulateResponse {
+        serde_json::from_value(value).unwrap()
+    }
+
+    async fn configured_stripe_connector() -> StripeConnector {
+        let mut connector = StripeConnector::new();
+        connector
+            .handle_configure(json!({
+                "secret_key": "sk_test",
+                "api_url": "http://localhost:9999/v1"
+            }))
+            .await
+            .unwrap();
+        connector
+    }
+
+    async fn handshaken_stripe_connector() -> (StripeConnector, Ed25519SigningKey) {
+        let mut connector = configured_stripe_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["stripe.read", "stripe.payment"]
+            }))
+            .await
+            .unwrap();
+        (connector, signing_key)
+    }
+
+    fn assert_invalid_request_contains(error: FcpError, expected: &str) {
+        assert!(matches!(&error, FcpError::InvalidRequest { .. }));
+        if let FcpError::InvalidRequest { message, .. } = error {
+            assert!(message.contains(expected));
+        }
     }
 
     #[fcp_async_core::runtime::test]
@@ -2064,16 +2259,174 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
+        let capability =
+            generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
         let result = connector
             .handle_invoke(json!({
                 "operation": "stripe.get_customer",
                 "input": { "customer_id": "cus_123" },
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), FcpError::NotConfigured));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_before_handshake_returns_not_handshaken() {
+        let connector = configured_stripe_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let capability =
+            generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "stripe.get_customer",
+                "input": { "customer_id": "cus_123" },
+                "capability_token": capability
+            }))
+            .await;
+        assert!(matches!(result.unwrap_err(), FcpError::NotHandshaken));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_before_configure_denied() {
+        let connector = StripeConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let capability =
+            generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "stripe.get_customer",
+                    json!({ "customer_id": "cus_123" }),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(FcpError::NotConfigured.error_code())
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_before_handshake_denied() {
+        let connector = configured_stripe_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let capability =
+            generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "stripe.get_customer",
+                    json!({ "customer_id": "cus_123" }),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(FcpError::NotHandshaken.error_code())
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_wrong_capability_denied() {
+        let (connector, signing_key) = handshaken_stripe_connector().await;
+        let capability =
+            generate_valid_token(&signing_key, "stripe.write", &["stripe.get_customer"]);
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "stripe.get_customer",
+                    json!({ "customer_id": "cus_123" }),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(response.missing_capabilities, vec!["stripe.read"]);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_known_operation_allowed() {
+        let (connector, signing_key) = handshaken_stripe_connector().await;
+        let capability =
+            generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "stripe.get_customer",
+                    json!({ "customer_id": "cus_123" }),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(response.would_succeed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_missing_required_input_denied() {
+        let (connector, signing_key) = handshaken_stripe_connector().await;
+        let capability = generate_valid_token(
+            &signing_key,
+            "stripe.payment",
+            &["stripe.create_payment_intent"],
+        );
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "stripe.create_payment_intent",
+                    json!({ "amount": 2_000 }),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: String::new()
+                }
+                .error_code()
+            )
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_unknown_operation_denied() {
+        let (connector, signing_key) = handshaken_stripe_connector().await;
+        let capability =
+            generate_valid_token(&signing_key, "stripe.read", &["stripe.get_customer"]);
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "stripe.unknown_operation",
+                    json!({ "customer_id": "cus_123" }),
+                    capability,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(
+                FcpError::OperationNotGranted {
+                    operation: "stripe.unknown_operation".into()
+                }
+                .error_code()
+            )
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -2084,6 +2437,7 @@ mod tests {
                 .unwrap()
                 .with_api_url("http://localhost:9999/v1"),
         );
+        connector.base.set_configured(true);
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -2099,7 +2453,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(
+        let capability = generate_valid_token(
             &signing_key,
             "stripe.payment",
             &["stripe.create_payment_intent"],
@@ -2108,14 +2462,11 @@ mod tests {
             .handle_invoke(json!({
                 "operation": "stripe.create_payment_intent",
                 "input": { "amount": 2000 },
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => assert!(message.contains("currency")),
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), "currency");
     }
 
     #[fcp_async_core::runtime::test]
@@ -2126,6 +2477,7 @@ mod tests {
                 .unwrap()
                 .with_api_url("http://localhost:9999/v1"),
         );
+        connector.base.set_configured(true);
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -2141,21 +2493,17 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "stripe.write", &["stripe.update_customer"]);
+        let capability =
+            generate_valid_token(&signing_key, "stripe.write", &["stripe.update_customer"]);
         let result = connector
             .handle_invoke(json!({
                 "operation": "stripe.update_customer",
                 "input": { "customer_id": "cus_123" },
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("email or name"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), "email or name");
     }
 
     #[test]
@@ -2182,7 +2530,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_invoke_rejects_customer_outside_resource_allow() {
-        let mut connector = StripeConnector::new();
+        let mut connector = configured_stripe_connector().await;
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
 
@@ -2197,7 +2545,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token_with_resources(
+        let capability = generate_valid_token_with_resources(
             &signing_key,
             "stripe.read",
             &["stripe.get_customer"],
@@ -2207,15 +2555,17 @@ mod tests {
             .handle_invoke(json!({
                 "operation": "stripe.get_customer",
                 "input": { "customer_id": "cus_denied" },
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
 
-        match result.unwrap_err() {
-            FcpError::ResourceNotAllowed { resource } => {
-                assert_eq!(resource, "stripe:customer:cus_denied");
-            }
-            other => panic!("Expected ResourceNotAllowed, got: {other:?}"),
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            FcpError::ResourceNotAllowed { resource } if resource == "stripe:customer:cus_denied"
+        ));
+        if let FcpError::ResourceNotAllowed { resource } = err {
+            assert_eq!(resource, "stripe:customer:cus_denied");
         }
     }
 
@@ -2360,7 +2710,7 @@ mod tests {
 
         let payload = r#"{"id":"evt_123","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
         let header = build_test_webhook_signature("whsec_test", payload, 1_700_000_000);
-        let token = generate_valid_token(
+        let capability = generate_valid_token(
             &signing_key,
             "stripe.webhook",
             &["stripe.ingest_webhook_event"],
@@ -2374,7 +2724,7 @@ mod tests {
                     "stripe_signature": header,
                     "received_at": 1_700_000_005
                 },
-                "capability_token": token
+                "capability_token": capability
             }))
             .await
             .unwrap();
@@ -2412,7 +2762,7 @@ mod tests {
 
         let payload = r#"{"id":"evt_replay","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
         let header = build_test_webhook_signature("whsec_test", payload, 1_700_000_000);
-        let token = generate_valid_token(
+        let capability = generate_valid_token(
             &signing_key,
             "stripe.webhook",
             &["stripe.ingest_webhook_event"],
@@ -2424,7 +2774,7 @@ mod tests {
                 "stripe_signature": header,
                 "received_at": 1_700_000_005
             },
-            "capability_token": token
+            "capability_token": capability
         });
 
         connector.handle_invoke(invoke.clone()).await.unwrap();
@@ -2457,7 +2807,7 @@ mod tests {
             .unwrap();
 
         let payload = r#"{"id":"evt_bad","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
-        let token = generate_valid_token(
+        let capability = generate_valid_token(
             &signing_key,
             "stripe.webhook",
             &["stripe.ingest_webhook_event"],
@@ -2469,7 +2819,7 @@ mod tests {
                     "payload": payload,
                     "stripe_signature": "t=1700000000,v1=badbadbad"
                 },
-                "capability_token": token
+                "capability_token": capability
             }))
             .await
             .unwrap_err();
@@ -2544,7 +2894,13 @@ mod tests {
             .unwrap();
 
         let result = connector.handle_doctor().await.unwrap();
-        assert_eq!(result["status"], "healthy");
+        assert_eq!(result["status"], "degraded");
+        let checks = result["checks"].as_array().unwrap();
+        let network_check = checks
+            .iter()
+            .find(|check| check["name"] == "network_constraints")
+            .unwrap();
+        assert!(network_check["passed"].as_bool().unwrap());
     }
 
     // ── Self-check tests ────────────────────────────────────────
@@ -2631,12 +2987,7 @@ mod tests {
             }))
             .await;
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("exactly one"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), "exactly one");
     }
 
     #[fcp_async_core::runtime::test]
@@ -2649,12 +3000,7 @@ mod tests {
             }))
             .await;
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains(STRIPE_API_HOST));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), STRIPE_API_HOST);
     }
 
     #[fcp_async_core::runtime::test]
@@ -2662,12 +3008,7 @@ mod tests {
         let mut connector = StripeConnector::new();
         let result = connector.handle_configure(json!({})).await;
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("Missing"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), "Missing");
     }
 
     // ── Invoke dispatch tests for new operations ────────────────
@@ -2680,6 +3021,7 @@ mod tests {
                 .unwrap()
                 .with_api_url("http://localhost:9999/v1"),
         );
+        connector.base.set_configured(true);
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -2695,7 +3037,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(
+        let capability = generate_valid_token(
             &signing_key,
             "stripe.payment",
             &["stripe.confirm_payment_intent"],
@@ -2704,16 +3046,11 @@ mod tests {
             .handle_invoke(json!({
                 "operation": "stripe.confirm_payment_intent",
                 "input": {},
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("payment_intent_id"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), "payment_intent_id");
     }
 
     #[fcp_async_core::runtime::test]
@@ -2724,6 +3061,7 @@ mod tests {
                 .unwrap()
                 .with_api_url("http://localhost:9999/v1"),
         );
+        connector.base.set_configured(true);
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -2739,7 +3077,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(
+        let capability = generate_valid_token(
             &signing_key,
             "stripe.payment",
             &["stripe.capture_payment_intent"],
@@ -2748,16 +3086,11 @@ mod tests {
             .handle_invoke(json!({
                 "operation": "stripe.capture_payment_intent",
                 "input": {},
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("payment_intent_id"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), "payment_intent_id");
     }
 
     #[fcp_async_core::runtime::test]
@@ -2768,6 +3101,7 @@ mod tests {
                 .unwrap()
                 .with_api_url("http://localhost:9999/v1"),
         );
+        connector.base.set_configured(true);
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -2783,7 +3117,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(
+        let capability = generate_valid_token(
             &signing_key,
             "stripe.payment",
             &["stripe.cancel_payment_intent"],
@@ -2792,16 +3126,11 @@ mod tests {
             .handle_invoke(json!({
                 "operation": "stripe.cancel_payment_intent",
                 "input": {},
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("payment_intent_id"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), "payment_intent_id");
     }
 
     // ── Introspect schema detail tests ────────────────────────────
@@ -3153,12 +3482,7 @@ mod tests {
         let input = json!({"field": 42});
         let result = require_str(&input, "field");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("field"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), "field");
     }
 
     #[test]
@@ -3182,12 +3506,7 @@ mod tests {
         let params = json!({ "secret_key": "   " });
         let result = StripeConfig::from_params(&params);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("Missing"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), "Missing");
     }
 
     #[test]
@@ -3195,12 +3514,7 @@ mod tests {
         let params = json!({ "credential_id": 12345 });
         let result = StripeConfig::from_params(&params);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("string"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), "string");
     }
 
     #[test]
@@ -3211,12 +3525,7 @@ mod tests {
         });
         let result = StripeConfig::from_params(&params);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("between 1 and 3600"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), "between 1 and 3600");
     }
 
     #[test]
@@ -3258,12 +3567,7 @@ mod tests {
         });
         let result = StripeConfig::from_params(&params);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains(STRIPE_API_HOST));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), STRIPE_API_HOST);
     }
 
     #[test]
@@ -3284,12 +3588,7 @@ mod tests {
         });
         let result = StripeConfig::from_params(&params);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("query or fragment"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert_invalid_request_contains(result.unwrap_err(), "query or fragment");
     }
 
     // --- DoctorResult from_checks all healthy ---

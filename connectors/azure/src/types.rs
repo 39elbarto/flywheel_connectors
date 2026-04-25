@@ -256,11 +256,11 @@ mod tests {
     #[test]
     fn azure_auth_debug_redacts_bearer_token() {
         let auth = AzureAuth::BearerToken {
-            bearer_token: "super-secret-token".into(),
+            bearer_token: "redacted-auth-material".into(),
         };
         let debug = format!("{auth:?}");
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("super-secret-token"));
+        assert!(!debug.contains("redacted-auth-material"));
     }
 
     #[test]
@@ -384,12 +384,12 @@ mod tests {
     #[test]
     fn secret_bundle_deserializes() {
         let json = serde_json::json!({
-            "value": "super-secret-value",
+            "value": "redacted-vault-value",
             "id": "https://myvault.vault.azure.net/secrets/my-secret/abc123",
             "attributes": { "enabled": true }
         });
         let bundle: SecretBundle = serde_json::from_value(json).unwrap();
-        assert_eq!(bundle.value.as_deref(), Some("super-secret-value"));
+        assert_eq!(bundle.value.as_deref(), Some("redacted-vault-value"));
     }
 
     #[test]

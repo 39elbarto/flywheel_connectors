@@ -961,7 +961,64 @@ impl M365Connector {
                 message: format!("Invalid simulate request: {e}"),
             })?;
 
-        let response = SimulateResponse::allowed(req.id);
+        let operation_info = match operation_info_for(req.operation.as_str()) {
+            Ok(operation_info) => operation_info,
+            Err(error) => {
+                let response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize response: {e}"),
+                });
+            }
+        };
+
+        if let Err(error) = validate_simulate_input(&operation_info, &req.input) {
+            let response = SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
+        if self.config.is_none() || self.client.is_none() {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
+        let Some(verifier) = &self.verifier else {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        };
+
+        let capability = operation_info.capability;
+        let response =
+            match verifier.verify_bound(req.capability_token, &capability, &req.operation, &[]) {
+                Ok(_) => SimulateResponse::allowed(req.id),
+                Err(error) => {
+                    let is_grant_mismatch = matches!(
+                        error,
+                        FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+                    );
+                    let mut response =
+                        SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                    if is_grant_mismatch {
+                        response =
+                            response.with_missing_capabilities(vec![capability.as_str().into()]);
+                    }
+                    response
+                }
+            };
         serde_json::to_value(response).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize response: {e}"),
         })
@@ -1247,30 +1304,11 @@ impl M365Connector {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
-        let intro = self.handle_introspect().await?;
-        let cap_str = intro
-            .get("operations")
-            .and_then(|ops| ops.as_array())
-            .and_then(|ops| {
-                ops.iter()
-                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
-            })
-            .and_then(|op| op.get("capability"))
-            .and_then(|cap| cap.as_str())
-            .ok_or_else(|| FcpError::OperationNotGranted {
-                operation: operation.into(),
-            })?;
+        let cap_id = required_capability_for_operation(operation)?;
+        self.base.check_ready()?;
 
-        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
-            code: 1003,
-            message: "Invalid capability ID format".into(),
-        })?;
-
-        if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
-        } else {
-            return Err(FcpError::NotConfigured);
-        }
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        verifier.verify_bound(token, &cap_id, &op_id, &[])?;
 
         match operation {
             // ── Mail ─────────────────────────────────────────
@@ -2929,6 +2967,82 @@ fn op_info(
     }
 }
 
+fn operation_info_for(operation: &str) -> FcpResult<OperationInfo> {
+    build_operations()
+        .into_iter()
+        .find(|operation_info| operation_info.id.as_str() == operation)
+        .ok_or_else(|| FcpError::OperationNotGranted {
+            operation: operation.into(),
+        })
+}
+
+fn required_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
+    Ok(operation_info_for(operation)?.capability)
+}
+
+fn input_has_required_fields(input: &serde_json::Value, required: &[serde_json::Value]) -> bool {
+    required
+        .iter()
+        .filter_map(|field| field.as_str())
+        .all(|field| input.get(field).is_some_and(|value| !value.is_null()))
+}
+
+fn validate_simulate_input(
+    operation_info: &OperationInfo,
+    input: &serde_json::Value,
+) -> FcpResult<()> {
+    let schema = &operation_info.input_schema;
+    if let Some(required) = schema.get("required").and_then(|value| value.as_array())
+        && !input_has_required_fields(input, required)
+    {
+        let fields = required
+            .iter()
+            .filter_map(|field| field.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "Missing required field for {}: {fields}",
+                operation_info.id.as_str()
+            ),
+        });
+    }
+
+    if let Some(any_of) = schema.get("anyOf").and_then(|value| value.as_array()) {
+        let required_groups = any_of
+            .iter()
+            .filter_map(|entry| entry.get("required").and_then(|value| value.as_array()))
+            .collect::<Vec<_>>();
+        if !required_groups.is_empty()
+            && !required_groups
+                .iter()
+                .any(|required| input_has_required_fields(input, required))
+        {
+            let groups = required_groups
+                .iter()
+                .map(|required| {
+                    required
+                        .iter()
+                        .filter_map(|field| field.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" + ")
+                })
+                .collect::<Vec<_>>()
+                .join(" or ");
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "Missing one required field set for {}: {groups}",
+                    operation_info.id.as_str()
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 fn build_operations() -> Vec<OperationInfo> {
     vec![
         // ── Mail operations ──────────────────────────────────────
@@ -4264,6 +4378,7 @@ fn build_operations() -> Vec<OperationInfo> {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+    use fcp_core::{CapabilityConstraints, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
@@ -4274,68 +4389,94 @@ mod tests {
         matchers::{method, path, query_param},
     };
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
-        let cap = match op {
-            // Mail
-            "m365.mail.list_messages"
-            | "m365.mail.get_message"
-            | "m365.mail.search_messages"
-            | "m365.mail.list_threads"
-            | "m365.mail.list_attachments" => "m365.mail.read",
-            "m365.mail.send_message" | "m365.mail.reply_message" | "m365.mail.forward_message" => {
-                "m365.mail.send"
-            }
-            "m365.mail.create_draft" | "m365.mail.add_attachment" => "m365.mail.write",
-            // Files
-            "m365.files.list_items"
-            | "m365.files.get_item"
-            | "m365.files.download_file"
-            | "m365.files.search" => "m365.files.read",
-            "m365.files.upload_file"
-            | "m365.files.delete_item"
-            | "m365.files.create_share_link" => "m365.files.write",
-            // Word
-            "m365.word.list_documents"
-            | "m365.word.get_document"
-            | "m365.word.extract_text"
-            | "m365.word.export_document" => "m365.word.read",
-            "m365.word.create_document" | "m365.word.update_document" => "m365.word.write",
-            // OneNote
-            "m365.onenote.list_notebooks"
-            | "m365.onenote.list_sections"
-            | "m365.onenote.list_pages"
-            | "m365.onenote.get_page"
-            | "m365.onenote.get_page_content" => "m365.onenote.read",
-            "m365.onenote.create_page" | "m365.onenote.update_page" => "m365.onenote.write",
-            // Calendar
-            "m365.calendar.list_events"
-            | "m365.calendar.get_event"
-            | "m365.calendar.get_freebusy" => "m365.calendar.read",
-            "m365.calendar.create_event"
-            | "m365.calendar.delete_event"
-            | "m365.calendar.update_event" => "m365.calendar.write",
-            // Tasks
-            "m365.tasks.list_task_lists" | "m365.tasks.list_tasks" => "m365.tasks.read",
-            "m365.tasks.create_task" => "m365.tasks.write",
-            // Subscriptions
-            "m365.subscriptions.create"
-            | "m365.subscriptions.renew"
-            | "m365.subscriptions.delete" => "m365.subscriptions.write",
-            // Delta
-            "m365.delta.sync" => "m365.delta.read",
-            _ => "m365.mail.read",
-        };
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        connector: &M365Connector,
+        op: &str,
+    ) -> CapabilityToken {
+        let cap = required_capability_for_operation(op).map_or_else(
+            |_| "m365.mail.read".to_string(),
+            |capability| capability.as_str().to_string(),
+        );
+        generate_token_with_cap(signing_key, connector, cap.as_str(), &[op])
+    }
+
+    fn generate_token_with_cap(
+        signing_key: &Ed25519SigningKey,
+        connector: &M365Connector,
+        cap: &str,
+        operations: &[&str],
+    ) -> CapabilityToken {
         let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
-            .operations(&[op])
+            .operations(operations)
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
+            .target_instance(connector.base.instance_id.as_str())
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
+    }
+
+    fn simulate_request(
+        operation: &'static str,
+        input: serde_json::Value,
+        capability: CapabilityToken,
+    ) -> serde_json::Value {
+        serde_json::to_value(SimulateRequest::new(
+            ConnectorId::from_static("fcp.microsoft365"),
+            OperationId::from_static(operation),
+            ZoneId::work(),
+            input,
+            capability,
+        ))
+        .unwrap()
+    }
+
+    fn parse_simulate_response(value: serde_json::Value) -> SimulateResponse {
+        serde_json::from_value(value).unwrap()
+    }
+
+    async fn configured_m365_connector() -> M365Connector {
+        let mut connector = M365Connector::new();
+        let token = make_access_token(&["Mail.Read"], &[]);
+        connector
+            .handle_configure(json!({
+                "allow_test_api_url": true,
+                "api_url": "http://localhost:9999",
+                "access_token": token
+            }))
+            .await
+            .unwrap();
+        connector
+    }
+
+    async fn handshaken_m365_connector() -> (M365Connector, Ed25519SigningKey) {
+        let mut connector = configured_m365_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["m365.mail.read", "m365.mail.send", "m365.calendar.write"]
+            }))
+            .await
+            .unwrap();
+        (connector, signing_key)
     }
 
     fn make_access_token(scopes: &[&str], roles: &[&str]) -> String {
@@ -4397,7 +4538,7 @@ mod tests {
             .await
             .unwrap();
 
-        let cap = generate_valid_token(&signing_key, "m365.delta.sync");
+        let cap = generate_valid_token(&signing_key, &connector, "m365.delta.sync");
         let result = connector
             .handle_invoke(json!({
                 "operation": "m365.delta.sync",
@@ -4467,7 +4608,7 @@ mod tests {
             .await
             .unwrap();
 
-        let cap = generate_valid_token(&signing_key, "m365.delta.sync");
+        let cap = generate_valid_token(&signing_key, &connector, "m365.delta.sync");
         let first = connector
             .handle_invoke(json!({
                 "operation": "m365.delta.sync",
@@ -4481,7 +4622,7 @@ mod tests {
             .unwrap();
         assert_eq!(first["delta_token"], "opaque123");
 
-        let cap = generate_valid_token(&signing_key, "m365.delta.sync");
+        let cap = generate_valid_token(&signing_key, &connector, "m365.delta.sync");
         let second = connector
             .handle_invoke(json!({
                 "operation": "m365.delta.sync",
@@ -4552,7 +4693,8 @@ mod tests {
             .await
             .unwrap();
 
-        let create_cap = generate_valid_token(&signing_key, "m365.subscriptions.create");
+        let create_cap =
+            generate_valid_token(&signing_key, &connector, "m365.subscriptions.create");
         let created = connector
             .handle_invoke(json!({
                 "operation": "m365.subscriptions.create",
@@ -4574,7 +4716,8 @@ mod tests {
             .unwrap();
         assert!(state.subscriptions.contains_key("sub-123"));
 
-        let delete_cap = generate_valid_token(&signing_key, "m365.subscriptions.delete");
+        let delete_cap =
+            generate_valid_token(&signing_key, &connector, "m365.subscriptions.delete");
         connector
             .handle_invoke(json!({
                 "operation": "m365.subscriptions.delete",
@@ -4865,7 +5008,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "m365.mail.get_message");
+        let token = generate_valid_token(&signing_key, &connector, "m365.mail.get_message");
         let result = connector
             .handle_invoke(json!({
                 "operation": "m365.mail.get_message",
@@ -4878,6 +5021,21 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_invoke_before_handshake_returns_not_handshaken() {
+        let connector = configured_m365_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let token = generate_valid_token(&signing_key, &connector, "m365.mail.get_message");
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "m365.mail.get_message",
+                "input": { "user_id": "me", "message_id": "msg_123" },
+                "capability_token": token
+            }))
+            .await;
+        assert!(matches!(result.unwrap_err(), FcpError::NotHandshaken));
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_invoke_missing_field() {
         let mut connector = M365Connector::new();
         connector.client = Some(
@@ -4885,6 +5043,7 @@ mod tests {
                 .unwrap()
                 .with_api_url("http://localhost:9999"),
         );
+        connector.base.set_configured(true);
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -4900,7 +5059,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "m365.calendar.create_event");
+        let token = generate_valid_token(&signing_key, &connector, "m365.calendar.create_event");
         let result = connector
             .handle_invoke(json!({
                 "operation": "m365.calendar.create_event",
@@ -5574,22 +5733,144 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_simulate_returns_allowed() {
+        let (connector, signing_key) = handshaken_m365_connector().await;
+        let token = generate_valid_token(&signing_key, &connector, "m365.mail.list_messages");
+        let result = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "m365.mail.list_messages",
+                    json!({ "user_id": "me" }),
+                    token,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(result.would_succeed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_before_configure_denied() {
         let connector = M365Connector::new();
         let signing_key = Ed25519SigningKey::generate();
-        let token = generate_valid_token(&signing_key, "m365.mail.list_messages");
-        let result = connector
-            .handle_simulate(json!({
-                "type": "simulate",
-                "id": "sim-1",
-                "connector_id": "fcp.microsoft365",
-                "operation": "m365.mail.list_messages",
-                "zone_id": "z:work",
-                "input": { "user_id": "me" },
-                "capability_token": token
-            }))
-            .await
-            .unwrap();
-        assert_eq!(result["would_succeed"], true);
+        let token = generate_valid_token(&signing_key, &connector, "m365.mail.list_messages");
+        let result = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "m365.mail.list_messages",
+                    json!({ "user_id": "me" }),
+                    token,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!result.would_succeed);
+        assert_eq!(
+            result.denial_code,
+            Some(FcpError::NotConfigured.error_code())
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_before_handshake_denied() {
+        let connector = configured_m365_connector().await;
+        let signing_key = Ed25519SigningKey::generate();
+        let token = generate_valid_token(&signing_key, &connector, "m365.mail.list_messages");
+        let result = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "m365.mail.list_messages",
+                    json!({ "user_id": "me" }),
+                    token,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!result.would_succeed);
+        assert_eq!(
+            result.denial_code,
+            Some(FcpError::NotHandshaken.error_code())
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_wrong_capability_denied() {
+        let (connector, signing_key) = handshaken_m365_connector().await;
+        let token = generate_token_with_cap(
+            &signing_key,
+            &connector,
+            "m365.mail.send",
+            &["m365.mail.list_messages"],
+        );
+        let result = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "m365.mail.list_messages",
+                    json!({ "user_id": "me" }),
+                    token,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!result.would_succeed);
+        assert_eq!(result.missing_capabilities, vec!["m365.mail.read"]);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_missing_required_input_denied() {
+        let (connector, signing_key) = handshaken_m365_connector().await;
+        let token = generate_valid_token(&signing_key, &connector, "m365.mail.list_messages");
+        let result = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "m365.mail.list_messages",
+                    json!({}),
+                    token,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!result.would_succeed);
+        assert_eq!(
+            result.denial_code,
+            Some(
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: String::new(),
+                }
+                .error_code()
+            )
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_unknown_operation_denied() {
+        let (connector, signing_key) = handshaken_m365_connector().await;
+        let token = generate_token_with_cap(
+            &signing_key,
+            &connector,
+            "m365.mail.read",
+            &["m365.unknown.operation"],
+        );
+        let result = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    "m365.unknown.operation",
+                    json!({ "user_id": "me" }),
+                    token,
+                ))
+                .await
+                .unwrap(),
+        );
+        assert!(!result.would_succeed);
+        assert_eq!(
+            result.denial_code,
+            Some(
+                FcpError::OperationNotGranted {
+                    operation: "m365.unknown.operation".into()
+                }
+                .error_code()
+            )
+        );
     }
 
     // ── Shutdown test ────────────────────────────────────────────
@@ -5636,7 +5917,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "m365.nonexistent.op");
+        let token = generate_valid_token(&signing_key, &connector, "m365.nonexistent.op");
         let result = connector
             .handle_invoke(json!({
                 "operation": "m365.nonexistent.op",

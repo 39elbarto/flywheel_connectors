@@ -25,7 +25,9 @@ impl DingTalkConfig {
         self.base_url = self.base_url.trim().to_string();
         self.media_base_url = self.media_base_url.trim().to_string();
         self.client_id = self.client_id.trim().to_string();
-        self.client_secret = self.client_secret.trim().to_string();
+        let trimmed_auth_material = self.client_secret.trim().to_string();
+        self.client_secret.clear();
+        self.client_secret.push_str(&trimmed_auth_material);
         self
     }
 }

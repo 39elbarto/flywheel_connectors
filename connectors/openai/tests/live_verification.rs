@@ -31,7 +31,7 @@ macro_rules! skip_without_token {
         let Some($var) = openai_api_key() else {
             eprintln!(
                 "SKIP: OPENAI_API_KEY not set — skipping live OpenAI connector verification. \
-                 Set OPENAI_API_KEY=sk-... to enable."
+                 Set OPENAI_API_KEY before running this test to enable it."
             );
             return;
         };
@@ -58,7 +58,8 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .operations(&[op])
         .issuer("node:live-test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)
@@ -101,7 +102,7 @@ async fn live_chat_completions() {
 
     let mut connector = OpenAIConnector::new();
     let signing_key = setup_live_connector(&mut connector, &api_key).await;
-    let cap_token = generate_read_token(&signing_key, "openai.simple_chat");
+    let capability = generate_read_token(&signing_key, "openai.simple_chat");
 
     let result = connector
         .handle_invoke(json!({
@@ -110,7 +111,7 @@ async fn live_chat_completions() {
                 "message": "Say the word 'hello' and nothing else.",
                 "max_tokens": 5
             },
-            "capability_token": cap_token
+            "capability_token": capability
         }))
         .await
         .expect("simple_chat invoke should succeed");
@@ -162,7 +163,7 @@ async fn live_error_mapping_invalid_key() {
         .await
         .expect("handshake should succeed");
 
-    let cap_token = generate_read_token(&signing_key, "openai.simple_chat");
+    let capability = generate_read_token(&signing_key, "openai.simple_chat");
 
     let err = connector
         .handle_invoke(json!({
@@ -170,7 +171,7 @@ async fn live_error_mapping_invalid_key() {
             "input": {
                 "message": "Hello"
             },
-            "capability_token": cap_token
+            "capability_token": capability
         }))
         .await;
 

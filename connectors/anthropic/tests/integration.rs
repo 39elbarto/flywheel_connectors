@@ -29,6 +29,8 @@ use fcp_anthropic::client::AnthropicClient;
 use fcp_anthropic::connector::AnthropicConnector;
 use fcp_anthropic::types::Model;
 
+type TestCapability = fcp_core::CapabilityToken;
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -50,7 +52,8 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core:
         .operations(&[cap])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .unwrap();
     fcp_core::CapabilityToken::from_raw(cose)
@@ -164,7 +167,7 @@ async fn chat_invoke_happy_path() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.chat"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.chat");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.chat");
 
     let result = connector
         .handle_invoke(json!({
@@ -199,7 +202,7 @@ async fn message_invoke_multi_turn() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message");
 
     let result = connector
         .handle_invoke(json!({
@@ -235,7 +238,7 @@ async fn message_invoke_with_system() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message");
 
     let result = connector
         .handle_invoke(json!({
@@ -534,7 +537,7 @@ async fn tool_use_invoke_shape() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message");
 
     let result = connector
         .handle_invoke(json!({
@@ -722,7 +725,7 @@ async fn error_401_maps_to_unauthorized() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.chat"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.chat");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.chat");
 
     let err = connector
         .handle_invoke(json!({
@@ -823,7 +826,10 @@ async fn error_529_maps_to_external_retryable() {
             assert!(retryable, "529 should be retryable");
             assert_eq!(*status_code, Some(529));
         }
-        other => panic!("expected FcpError::External, got: {other:?}"),
+        other => assert!(
+            matches!(other, fcp_core::FcpError::External { .. }),
+            "expected FcpError::External, got: {other:?}"
+        ),
     }
 }
 
@@ -875,7 +881,7 @@ async fn error_context_length_maps_to_invalid_request() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.chat"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.chat");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.chat");
 
     let err = connector
         .handle_invoke(json!({
@@ -893,7 +899,10 @@ async fn error_context_length_maps_to_invalid_request() {
                 "error should mention context length: {message}"
             );
         }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
+        other => assert!(
+            matches!(other, fcp_core::FcpError::InvalidRequest { .. }),
+            "expected InvalidRequest, got: {other:?}"
+        ),
     }
 }
 
@@ -930,7 +939,7 @@ async fn usage_metrics_accumulate() {
         setup_handshake(&mut connector, &["anthropic.chat", "anthropic.get_usage"]).await;
 
     // First invocation
-    let token = generate_valid_token(&signing_key, "anthropic.chat");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.chat");
     connector
         .handle_invoke(json!({
             "operation": "anthropic.chat",
@@ -941,7 +950,7 @@ async fn usage_metrics_accumulate() {
         .expect("first invoke should succeed");
 
     // Check metrics via get_usage
-    let usage_token = generate_valid_token(&signing_key, "anthropic.get_usage");
+    let usage_token: TestCapability = generate_valid_token(&signing_key, "anthropic.get_usage");
     let usage = connector
         .handle_invoke(json!({
             "operation": "anthropic.get_usage",
@@ -987,7 +996,7 @@ async fn usage_cost_is_model_dependent() {
         .await
         .unwrap();
     let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message");
 
     let result = connector
         .handle_invoke(json!({
@@ -1050,7 +1059,7 @@ async fn capability_no_handshake_fails() {
 
     // Generate token with arbitrary key (no handshake, so no verifier)
     let signing_key = Ed25519SigningKey::generate();
-    let token = generate_valid_token(&signing_key, "anthropic.chat");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.chat");
 
     let err = connector
         .handle_invoke(json!({
@@ -1062,8 +1071,8 @@ async fn capability_no_handshake_fails() {
         .expect_err("invoke without handshake should fail");
 
     assert!(
-        matches!(err, fcp_core::FcpError::NotConfigured),
-        "expected NotConfigured, got: {err:?}"
+        matches!(err, fcp_core::FcpError::NotHandshaken),
+        "expected NotHandshaken, got: {err:?}"
     );
 }
 
@@ -1074,7 +1083,7 @@ async fn capability_no_configure_fails() {
 
     let mut connector = AnthropicConnector::new();
     let signing_key = setup_handshake(&mut connector, &["anthropic.chat"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.chat");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.chat");
 
     let err = connector
         .handle_invoke(json!({
@@ -1103,7 +1112,7 @@ async fn capability_wrong_operation_fails() {
         setup_handshake(&mut connector, &["anthropic.chat", "anthropic.get_usage"]).await;
 
     // Token signed for get_usage, used on chat
-    let wrong_token = generate_valid_token(&signing_key, "anthropic.get_usage");
+    let wrong_token: TestCapability = generate_valid_token(&signing_key, "anthropic.get_usage");
 
     let err = connector
         .handle_invoke(json!({
@@ -1135,7 +1144,7 @@ async fn capability_unknown_operation_fails() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.nonexistent"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.nonexistent");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.nonexistent");
 
     let err = connector
         .handle_invoke(json!({
@@ -1258,7 +1267,7 @@ async fn validation_empty_messages_fails() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message");
 
     let err = connector
         .handle_invoke(json!({
@@ -1277,7 +1286,10 @@ async fn validation_empty_messages_fails() {
                 "error should mention messages: {message}"
             );
         }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
+        other => assert!(
+            matches!(other, fcp_core::FcpError::InvalidRequest { .. }),
+            "expected InvalidRequest, got: {other:?}"
+        ),
     }
 }
 
@@ -1288,7 +1300,7 @@ async fn validation_unknown_model_fails() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message");
 
     let err = connector
         .handle_invoke(json!({
@@ -1315,7 +1327,7 @@ async fn validation_chat_missing_message_fails() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.chat"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.chat");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.chat");
 
     let err = connector
         .handle_invoke(json!({
@@ -1333,7 +1345,10 @@ async fn validation_chat_missing_message_fails() {
                 "error should mention message: {message}"
             );
         }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
+        other => assert!(
+            matches!(other, fcp_core::FcpError::InvalidRequest { .. }),
+            "expected InvalidRequest, got: {other:?}"
+        ),
     }
 }
 
@@ -1353,7 +1368,7 @@ async fn metrics_error_counter_increments() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.chat"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.chat");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.chat");
 
     let _ = connector
         .handle_invoke(json!({
@@ -1394,7 +1409,7 @@ async fn chat_invoke_provenance_metadata() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.chat"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.chat");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.chat");
 
     let result = connector
         .handle_invoke(json!({
@@ -1438,7 +1453,7 @@ async fn message_invoke_provenance_metadata() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message");
 
     let result = connector
         .handle_invoke(json!({
@@ -1530,7 +1545,7 @@ async fn message_stream_invoke_full_response() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message.stream"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message.stream");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message.stream");
 
     let result = connector
         .handle_invoke(json!({
@@ -1672,7 +1687,7 @@ async fn message_stream_invoke_honors_interleaved_block_indices() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message.stream"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message.stream");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message.stream");
 
     let result = connector
         .handle_invoke(json!({
@@ -1760,7 +1775,10 @@ async fn error_403_maps_to_external() {
             assert_eq!(*status_code, Some(403));
             assert!(!retryable, "403 should not be retryable");
         }
-        other => panic!("expected FcpError::External, got: {other:?}"),
+        other => assert!(
+            matches!(other, fcp_core::FcpError::External { .. }),
+            "expected FcpError::External, got: {other:?}"
+        ),
     }
 }
 
@@ -1796,7 +1814,10 @@ async fn error_404_maps_to_external() {
             assert_eq!(*status_code, Some(404));
             assert!(!retryable, "404 should not be retryable");
         }
-        other => panic!("expected FcpError::External, got: {other:?}"),
+        other => assert!(
+            matches!(other, fcp_core::FcpError::External { .. }),
+            "expected FcpError::External, got: {other:?}"
+        ),
     }
 }
 
@@ -1831,7 +1852,10 @@ async fn error_502_maps_to_retryable_external() {
             assert_eq!(*status_code, Some(502));
             assert!(retryable, "502 should be retryable");
         }
-        other => panic!("expected FcpError::External, got: {other:?}"),
+        other => assert!(
+            matches!(other, fcp_core::FcpError::External { .. }),
+            "expected FcpError::External, got: {other:?}"
+        ),
     }
 }
 
@@ -1865,7 +1889,10 @@ async fn error_non_json_response_body() {
                 "error message should contain the raw body text: {message}"
             );
         }
-        other => panic!("expected FcpError::External, got: {other:?}"),
+        other => assert!(
+            matches!(other, fcp_core::FcpError::External { .. }),
+            "expected FcpError::External, got: {other:?}"
+        ),
     }
 }
 
@@ -1884,7 +1911,7 @@ async fn error_529_via_connector_invoke() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.chat"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.chat");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.chat");
 
     let err = connector
         .handle_invoke(json!({
@@ -1906,7 +1933,10 @@ async fn error_529_via_connector_invoke() {
             assert!(retryable, "529 should be retryable");
             assert_eq!(*status_code, Some(529));
         }
-        other => panic!("expected FcpError::External, got: {other:?}"),
+        other => assert!(
+            matches!(other, fcp_core::FcpError::External { .. }),
+            "expected FcpError::External, got: {other:?}"
+        ),
     }
 }
 
@@ -1921,7 +1951,7 @@ async fn validation_message_missing_messages_field() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message");
 
     let err = connector
         .handle_invoke(json!({
@@ -1940,7 +1970,10 @@ async fn validation_message_missing_messages_field() {
                 "error should mention messages: {message}"
             );
         }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
+        other => assert!(
+            matches!(other, fcp_core::FcpError::InvalidRequest { .. }),
+            "expected InvalidRequest, got: {other:?}"
+        ),
     }
 }
 
@@ -1962,7 +1995,7 @@ async fn validation_chat_empty_message_string() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.chat"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.chat");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.chat");
 
     let err = connector
         .handle_invoke(json!({
@@ -1990,7 +2023,7 @@ async fn validation_missing_operation_field() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.chat"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.chat");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.chat");
 
     let err = connector
         .handle_invoke(json!({
@@ -2007,7 +2040,10 @@ async fn validation_missing_operation_field() {
                 "error should mention operation: {message}"
             );
         }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
+        other => assert!(
+            matches!(other, fcp_core::FcpError::InvalidRequest { .. }),
+            "expected InvalidRequest, got: {other:?}"
+        ),
     }
 }
 
@@ -2018,7 +2054,7 @@ async fn validation_stream_empty_messages_fails() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message.stream"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message.stream");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message.stream");
 
     let err = connector
         .handle_invoke(json!({
@@ -2042,7 +2078,7 @@ async fn validation_stream_unknown_model_fails() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message.stream"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message.stream");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message.stream");
 
     let err = connector
         .handle_invoke(json!({
@@ -2112,7 +2148,10 @@ async fn config_both_auth_modes_rejected() {
                 "error should mention 'exactly one': {message}"
             );
         }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
+        other => assert!(
+            matches!(other, fcp_core::FcpError::InvalidRequest { .. }),
+            "expected InvalidRequest, got: {other:?}"
+        ),
     }
 }
 
@@ -2132,7 +2171,10 @@ async fn config_no_auth_rejected() {
                 "error should mention missing auth: {message}"
             );
         }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
+        other => assert!(
+            matches!(other, fcp_core::FcpError::InvalidRequest { .. }),
+            "expected InvalidRequest, got: {other:?}"
+        ),
     }
 }
 
@@ -2195,7 +2237,10 @@ async fn config_invalid_credential_id_format() {
                 "error should mention UUID or credential_id: {message}"
             );
         }
-        other => panic!("expected InvalidRequest, got: {other:?}"),
+        other => assert!(
+            matches!(other, fcp_core::FcpError::InvalidRequest { .. }),
+            "expected InvalidRequest, got: {other:?}"
+        ),
     }
 }
 
@@ -2348,7 +2393,7 @@ async fn lifecycle_shutdown_then_reinvoke() {
     assert_eq!(shutdown_result["status"], "shutdown");
 
     // Re-invoke (client and config are still present since shutdown is soft)
-    let token = generate_valid_token(&signing_key, "anthropic.chat");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.chat");
     let result = connector
         .handle_invoke(json!({
             "operation": "anthropic.chat",
@@ -2376,7 +2421,7 @@ async fn health_metrics_after_operations() {
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.chat"]).await;
 
-    let token = generate_valid_token(&signing_key, "anthropic.chat");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.chat");
     connector
         .handle_invoke(json!({
             "operation": "anthropic.chat",
@@ -2424,7 +2469,7 @@ async fn chat_opus_model_higher_cost() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message");
 
     let result = connector
         .handle_invoke(json!({
@@ -2465,7 +2510,7 @@ async fn chat_claude35_sonnet_model() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message");
 
     let result = connector
         .handle_invoke(json!({
@@ -2497,7 +2542,7 @@ async fn message_with_zero_temperature() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message");
 
     let result = connector
         .handle_invoke(json!({
@@ -2540,7 +2585,7 @@ async fn message_empty_content_response() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message");
 
     let result = connector
         .handle_invoke(json!({
@@ -2606,8 +2651,9 @@ async fn client_token_counter_accumulation() {
 #[fcp_async_core::test]
 async fn simulate_returns_allowed() {
     let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, "http://localhost:9999").await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message");
 
     let result = connector
         .handle_simulate(json!({
@@ -2626,6 +2672,34 @@ async fn simulate_returns_allowed() {
 
     assert_eq!(result["id"], "sim_001");
     assert_eq!(result["would_succeed"], true);
+}
+
+/// Simulate denies requests whose token operation does not cover the operation.
+#[fcp_async_core::test]
+async fn simulate_checks_bound_capability_grants() {
+    let mut connector = AnthropicConnector::new();
+    setup_configure(&mut connector, "http://localhost:9999").await;
+    let signing_key = setup_handshake(&mut connector, &["anthropic.get_usage"]).await;
+    let capability = generate_valid_token(&signing_key, "anthropic.get_usage");
+
+    let result = connector
+        .handle_simulate(json!({
+            "type": "simulate",
+            "id": "sim_denied",
+            "connector_id": "anthropic",
+            "operation": "anthropic.message",
+            "zone_id": "z:work",
+            "capability_token": capability,
+            "input": {
+                "messages": [{"role": "user", "content": "test"}]
+            }
+        }))
+        .await
+        .expect("simulate should return a denial response");
+
+    assert_eq!(result["id"], "sim_denied");
+    assert_eq!(result["would_succeed"], false);
+    assert_eq!(result["denial_code"], "FCP-3003");
 }
 
 /// Introspect schema has required fields for all operations.
@@ -2677,7 +2751,7 @@ async fn get_usage_initial_state() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.get_usage"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.get_usage");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.get_usage");
 
     let usage = connector
         .handle_invoke(json!({
@@ -2774,7 +2848,7 @@ async fn stream_tool_use_via_connector_invoke() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message.stream"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message.stream");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message.stream");
 
     let result = connector
         .handle_invoke(json!({
@@ -2876,7 +2950,7 @@ async fn stream_tool_use_via_connector_invoke_rejects_malformed_input_json() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message.stream"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message.stream");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message.stream");
 
     let err = connector
         .handle_invoke(json!({
@@ -2905,7 +2979,10 @@ async fn stream_tool_use_via_connector_invoke_rejects_malformed_input_json() {
                 "unexpected message: {message}"
             );
         }
-        other => panic!("expected FcpError::External, got: {other:?}"),
+        other => assert!(
+            matches!(other, fcp_core::FcpError::External { .. }),
+            "expected FcpError::External, got: {other:?}"
+        ),
     }
 }
 
@@ -2950,7 +3027,7 @@ async fn stream_error_via_connector_invoke() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message.stream"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message.stream");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message.stream");
 
     let err = connector
         .handle_invoke(json!({
@@ -2970,7 +3047,10 @@ async fn stream_error_via_connector_invoke() {
                 "error message should propagate: {message}"
             );
         }
-        other => panic!("expected FcpError::External, got: {other:?}"),
+        other => assert!(
+            matches!(other, fcp_core::FcpError::External { .. }),
+            "expected FcpError::External, got: {other:?}"
+        ),
     }
 }
 
@@ -2991,7 +3071,7 @@ async fn stream_pre_stream_auth_error() {
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["anthropic.message.stream"]).await;
-    let token = generate_valid_token(&signing_key, "anthropic.message.stream");
+    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.message.stream");
 
     let err = connector
         .handle_invoke(json!({

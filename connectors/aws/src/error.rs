@@ -167,10 +167,10 @@ mod tests {
     fn not_found_maps_to_resource_not_found() {
         let err = AwsError::NotFound("bucket my-bucket".into());
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::ResourceNotFound { resource } => assert_eq!(resource, "bucket my-bucket"),
-            other => panic!("Expected ResourceNotFound, got {other:?}"),
-        }
+        assert!(matches!(
+            fcp,
+            FcpError::ResourceNotFound { resource } if resource == "bucket my-bucket"
+        ));
     }
 
     #[test]
@@ -192,23 +192,18 @@ mod tests {
     fn config_error_maps_to_invalid_request() {
         let err = AwsError::Config("missing access_key_id".into());
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1001);
-                assert!(message.contains("missing access_key_id"));
-            }
-            other => panic!("Expected InvalidRequest, got {other:?}"),
-        }
+        assert!(matches!(
+            fcp,
+            FcpError::InvalidRequest { code: 1001, ref message }
+                if message.contains("missing access_key_id")
+        ));
     }
 
     #[test]
     fn invalid_input_maps_to_invalid_request() {
         let err = AwsError::InvalidInput("bucket name required".into());
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::InvalidRequest { code, .. } => assert_eq!(code, 1005),
-            other => panic!("Expected InvalidRequest, got {other:?}"),
-        }
+        assert!(matches!(fcp, FcpError::InvalidRequest { code: 1005, .. }));
     }
 
     #[test]
@@ -217,16 +212,13 @@ mod tests {
             retry_after_ms: 3_000,
         };
         let fcp = err.to_fcp_error();
-        match fcp {
+        assert!(matches!(
+            fcp,
             FcpError::RateLimited {
-                retry_after_ms,
-                violation,
-            } => {
-                assert_eq!(retry_after_ms, 3_000);
-                assert!(violation.is_none());
+                retry_after_ms: 3_000,
+                violation: None,
             }
-            other => panic!("Expected RateLimited, got {other:?}"),
-        }
+        ));
     }
 
     #[test]
@@ -251,19 +243,15 @@ mod tests {
             message: "NoSuchBucket".into(),
         };
         let fcp = err.to_fcp_error();
-        match fcp {
+        assert!(matches!(
+            fcp,
             FcpError::External {
-                service,
-                message,
+                ref service,
+                ref message,
                 retryable,
                 ..
-            } => {
-                assert_eq!(service, "s3");
-                assert_eq!(message, "NoSuchBucket");
-                assert!(!retryable);
-            }
-            other => panic!("Expected External, got {other:?}"),
-        }
+            } if service == "s3" && message == "NoSuchBucket" && !retryable
+        ));
     }
 
     #[test]
@@ -271,12 +259,10 @@ mod tests {
         // We can't easily construct a reqwest::Error, but we can test the Json path
         let err = AwsError::Json(serde_json::from_str::<()>("invalid").unwrap_err());
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::Internal { message } => {
-                assert!(message.contains("JSON parse error"));
-            }
-            other => panic!("Expected Internal, got {other:?}"),
-        }
+        assert!(matches!(
+            fcp,
+            FcpError::Internal { ref message } if message.contains("JSON parse error")
+        ));
     }
 
     #[test]

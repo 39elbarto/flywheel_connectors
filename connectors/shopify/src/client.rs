@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use reqwest::{Client, RequestBuilder};
+use chrono::{DateTime, Utc};
+use reqwest::{Client, RequestBuilder, header::HeaderMap};
 use serde_json::json;
 use tracing::debug;
 
@@ -84,7 +85,7 @@ impl ShopifyClient {
                     }
                 };
                 let status = resp.status().as_u16();
-                if let Some(outcome) = check_error_status(status) {
+                if let Some(outcome) = check_error_status(status, resp.headers()) {
                     return outcome;
                 }
                 match resp.json::<ShopResponse>().await {
@@ -333,7 +334,9 @@ impl ShopifyClient {
                     }
                 };
                 let status = resp.status().as_u16();
-                if let Some(outcome) = check_error_status::<serde_json::Value>(status) {
+                if let Some(outcome) =
+                    check_error_status::<serde_json::Value>(status, resp.headers())
+                {
                     return outcome;
                 }
                 if resp.status().is_success() {
@@ -365,13 +368,17 @@ fn authenticate(req: RequestBuilder, auth: &ShopifyAuth) -> RequestBuilder {
     }
 }
 
-fn check_error_status<T>(status: u16) -> Option<AttemptOutcome<T, ShopifyError>> {
+fn check_error_status<T>(
+    status: u16,
+    headers: &HeaderMap,
+) -> Option<AttemptOutcome<T, ShopifyError>> {
     if status == 429 {
+        let retry_after = retry_after_from_headers(headers).unwrap_or(Duration::from_secs(2));
         return Some(AttemptOutcome::Retryable {
             error: ShopifyError::RateLimited {
-                retry_after_ms: 2_000,
+                retry_after_ms: duration_millis_saturated(retry_after),
             },
-            retry_after: Some(Duration::from_secs(2)),
+            retry_after: Some(retry_after),
         });
     }
     if status == 401 || status == 403 {
@@ -385,6 +392,36 @@ fn check_error_status<T>(status: u16) -> Option<AttemptOutcome<T, ShopifyError>>
         ))));
     }
     None
+}
+
+fn duration_millis_saturated(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u128>() {
+        return Some(Duration::from_secs(
+            u64::try_from(seconds).unwrap_or(u64::MAX),
+        ));
+    }
+
+    let retry_at = DateTime::parse_from_rfc2822(value).ok()?;
+    let wait = retry_at
+        .with_timezone(&Utc)
+        .signed_duration_since(Utc::now());
+    if wait <= chrono::Duration::zero() {
+        Some(Duration::ZERO)
+    } else {
+        Some(wait.to_std().unwrap_or(Duration::from_secs(u64::MAX)))
+    }
+}
+
+fn retry_after_from_headers(headers: &HeaderMap) -> Option<Duration> {
+    headers
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_retry_after)
 }
 
 async fn handle_response<T: serde::de::DeserializeOwned>(
@@ -404,17 +441,13 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
     let status = resp.status().as_u16();
 
     if status == 429 {
-        let retry_after = resp
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(Duration::from_secs);
+        let retry_after = retry_after_from_headers(resp.headers());
+        let retry_after_duration = retry_after.unwrap_or(Duration::from_secs(2));
         return AttemptOutcome::Retryable {
             error: ShopifyError::RateLimited {
-                retry_after_ms: retry_after.unwrap_or(Duration::from_secs(2)).as_millis() as u64,
+                retry_after_ms: duration_millis_saturated(retry_after_duration),
             },
-            retry_after,
+            retry_after: Some(retry_after_duration),
         };
     }
 
@@ -454,6 +487,91 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::header::{HeaderName, HeaderValue};
+
+    #[test]
+    fn parse_retry_after_trims_delta_seconds() {
+        assert_eq!(parse_retry_after(" 3 "), Some(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn parse_retry_after_saturates_large_delta_seconds() {
+        assert_eq!(
+            parse_retry_after("340282366920938463463374607431768211455"),
+            Some(Duration::from_secs(u64::MAX))
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_http_date() {
+        let retry_at = (Utc::now() + chrono::Duration::seconds(120))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+
+        assert!(
+            matches!(
+                parse_retry_after(&retry_at),
+                Some(retry_after)
+                    if retry_after >= Duration::from_secs(118)
+                        && retry_after <= Duration::from_secs(121)
+            ),
+            "future HTTP-date should parse to a delay near 120 seconds"
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_past_http_date_is_zero() {
+        let retry_at = (Utc::now() - chrono::Duration::seconds(30))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+
+        assert_eq!(parse_retry_after(&retry_at), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn retry_after_from_headers_is_case_insensitive() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("retry-after"),
+            HeaderValue::from_static("4"),
+        );
+
+        assert_eq!(
+            retry_after_from_headers(&headers),
+            Some(Duration::from_secs(4))
+        );
+    }
+
+    #[test]
+    fn check_error_status_uses_retry_after_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Retry-After", HeaderValue::from_static("5"));
+
+        assert!(matches!(
+            check_error_status::<()>(429, &headers),
+            Some(AttemptOutcome::Retryable {
+                error: ShopifyError::RateLimited {
+                    retry_after_ms: 5_000,
+                },
+                retry_after: Some(delay),
+            }) if delay == Duration::from_secs(5)
+        ));
+    }
+
+    #[test]
+    fn check_error_status_uses_default_retry_after_when_header_missing() {
+        let headers = HeaderMap::new();
+
+        assert!(matches!(
+            check_error_status::<()>(429, &headers),
+            Some(AttemptOutcome::Retryable {
+                error: ShopifyError::RateLimited {
+                    retry_after_ms: 2_000,
+                },
+                retry_after: Some(delay),
+            }) if delay == Duration::from_secs(2)
+        ));
+    }
 
     #[test]
     fn client_debug_redacts_token() {

@@ -95,7 +95,7 @@ impl DockerHubConfig {
 
         ProvisioningReadiness {
             auth_mode: self.auth.auth_mode(),
-            secret_material_configured: !self.auth.is_secretless(),
+            credential_material_configured: !self.auth.is_secretless(),
             requires_credential_injection: self.auth.is_secretless(),
             network_ok,
             network_message,
@@ -108,7 +108,7 @@ impl DockerHubConfig {
 #[derive(Debug, Clone, Serialize)]
 struct ProvisioningReadiness {
     auth_mode: &'static str,
-    secret_material_configured: bool,
+    credential_material_configured: bool,
     requires_credential_injection: bool,
     network_ok: bool,
     network_message: String,
@@ -281,9 +281,9 @@ impl DockerHubConnector {
                 critical: false,
             });
             checks.push(DoctorCheck {
-                name: "secret_material".into(),
-                passed: readiness.secret_material_configured,
-                message: Some(if readiness.secret_material_configured {
+                name: "credential_material".into(),
+                passed: readiness.credential_material_configured,
+                message: Some(if readiness.credential_material_configured {
                     "Credential material configured".into()
                 } else {
                     "Credentials omitted; inject at runtime".into()
@@ -310,6 +310,21 @@ impl DockerHubConnector {
             });
         }
         Ok(value)
+    }
+
+    fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
+        let capability = match operation {
+            OP_REPOS_LIST | OP_REPOS_GET | OP_TAGS_LIST | OP_TAGS_GET | OP_HEALTH => CAP_REPOS_READ,
+            OP_REPOS_CREATE | OP_REPOS_DELETE | OP_TAGS_DELETE => CAP_REPOS_WRITE,
+            OP_ORGS_LIST => CAP_ORGS_READ,
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!("Unknown operation: {operation}"),
+                });
+            }
+        };
+        Ok(CapabilityId::from_static(capability))
     }
 }
 
@@ -644,6 +659,45 @@ impl FcpConnector for DockerHubConnector {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+        let capability = match Self::required_capability(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return Ok(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ));
+            }
+        };
+
+        if self.config.is_none() || self.client.is_none() || self.runtime.is_none() {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ));
+        }
+
+        let Some(verifier) = &self.verifier else {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            ));
+        };
+
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])
+        {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response =
+                    response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+            }
+            return Ok(response);
+        }
+
         Ok(SimulateResponse::allowed(req.id))
     }
 
@@ -699,22 +753,8 @@ impl DockerHubConnector {
         self.base.check_ready()?;
         let operation = req.operation.as_str();
         if let Some(verifier) = &self.verifier {
-            let cap = match operation {
-                OP_REPOS_LIST | OP_REPOS_GET | OP_TAGS_LIST | OP_TAGS_GET | OP_HEALTH => {
-                    CapabilityId::from_static(CAP_REPOS_READ)
-                }
-                OP_REPOS_CREATE | OP_REPOS_DELETE | OP_TAGS_DELETE => {
-                    CapabilityId::from_static(CAP_REPOS_WRITE)
-                }
-                OP_ORGS_LIST => CapabilityId::from_static(CAP_ORGS_READ),
-                _ => {
-                    return Err(FcpError::InvalidRequest {
-                        code: 1004,
-                        message: format!("Unknown operation: {operation}"),
-                    });
-                }
-            };
-            verifier.verify(req.capability_token, &cap, &req.operation, &[])?;
+            let cap = Self::required_capability(operation)?;
+            verifier.verify_bound(req.capability_token, &cap, &req.operation, &[])?;
         } else {
             return Err(FcpError::Internal {
                 message: "connector ready state missing capability verifier".into(),
@@ -848,7 +888,79 @@ impl DockerHubConnector {
 
 #[cfg(test)]
 mod tests {
+    use chrono::{Duration as ChronoDuration, Utc};
+    use fcp_core::{CapabilityConstraints, CapabilityToken, ZoneId};
+    use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+
     use super::*;
+
+    type TestCapability = CapabilityToken;
+
+    fn handshake_request(
+        host_public_key: [u8; 32],
+        capabilities_requested: Vec<CapabilityId>,
+    ) -> HandshakeRequest {
+        HandshakeRequest {
+            protocol_version: "2.0.0".into(),
+            zone: ZoneId::work(),
+            zone_dir: None,
+            host_public_key,
+            nonce: [7u8; 32],
+            capabilities_requested,
+            host: None,
+            transport_caps: None,
+            requested_instance_id: None,
+        }
+    }
+
+    fn capability_token(
+        signing_key: &Ed25519SigningKey,
+        capability: &'static str,
+        operation: &'static str,
+    ) -> CapabilityToken {
+        let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+        let raw = CapabilityTokenBuilder::new()
+            .capability_id(capability)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&[operation])
+            .issuer("node:test")
+            .validity(now, now + ChronoDuration::hours(1))
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
+            .sign(signing_key)
+            .expect("token should sign");
+        CapabilityToken::from_raw(raw)
+    }
+
+    fn configure_and_handshake(
+        connector: &mut DockerHubConnector,
+        capabilities_requested: Vec<CapabilityId>,
+    ) -> Ed25519SigningKey {
+        fcp_async_core::runtime::block_on_sync(connector.configure(json!({
+            "mode": "token",
+            "access_token": "fixture-pat-value",
+            "base_url": "http://localhost:8080"
+        })))
+        .expect("configure future should complete")
+        .expect("configure should succeed");
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        fcp_async_core::runtime::block_on_sync(connector.handshake(handshake_request(
+            verifying_key.to_bytes(),
+            capabilities_requested,
+        )))
+        .expect("handshake future should complete")
+        .expect("handshake should succeed");
+        signing_key
+    }
 
     #[test]
     fn connector_id() {
@@ -1018,7 +1130,7 @@ mod tests {
     fn config_from_value_valid_token() {
         let val = serde_json::json!({
             "mode": "token",
-            "access_token": "dckr_pat_abc123",
+            "access_token": "fixture-pat-value",
             "base_url": "https://hub.docker.com"
         });
         let config = DockerHubConfig::from_value(val).unwrap();
@@ -1042,7 +1154,7 @@ mod tests {
     fn config_default_base_url() {
         let val = serde_json::json!({
             "mode": "token",
-            "access_token": "dckr_pat_abc123"
+            "access_token": "fixture-pat-value"
         });
         let config = DockerHubConfig::from_value(val).unwrap();
         assert_eq!(config.base_url, "https://hub.docker.com");
@@ -1052,11 +1164,11 @@ mod tests {
     fn provisioning_readiness_with_token() {
         let val = serde_json::json!({
             "mode": "token",
-            "access_token": "dckr_pat_abc123"
+            "access_token": "fixture-pat-value"
         });
         let config = DockerHubConfig::from_value(val).unwrap();
         let readiness = config.provisioning_readiness();
-        assert!(readiness.secret_material_configured);
+        assert!(readiness.credential_material_configured);
         assert!(!readiness.requires_credential_injection);
         assert!(readiness.network_ok);
     }
@@ -1069,7 +1181,7 @@ mod tests {
         });
         let config = DockerHubConfig::from_value(val).unwrap();
         let readiness = config.provisioning_readiness();
-        assert!(!readiness.secret_material_configured);
+        assert!(!readiness.credential_material_configured);
         assert!(readiness.requires_credential_injection);
     }
 
@@ -1111,7 +1223,51 @@ mod tests {
 
     #[test]
     fn simulate_returns_allowed() {
-        use fcp_core::{CapabilityToken, ZoneId};
+        let mut c = DockerHubConnector::new();
+        let signing_key =
+            configure_and_handshake(&mut c, vec![CapabilityId::from_static(CAP_REPOS_READ)]);
+        let capability: TestCapability =
+            capability_token(&signing_key, CAP_REPOS_READ, OP_REPOS_LIST);
+        let req = SimulateRequest::new(
+            ConnectorId::from_static("fcp.dockerhub"),
+            OperationId::from_static(OP_REPOS_LIST),
+            ZoneId::try_from("z:work".to_string()).unwrap(),
+            json!({}),
+            capability,
+        );
+        let req_id = req.id.clone();
+        let resp = fcp_async_core::runtime::block_on_sync(c.simulate(req))
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.id, req_id);
+        assert!(resp.would_succeed);
+    }
+
+    #[test]
+    fn simulate_denies_wrong_operation_token() {
+        let mut c = DockerHubConnector::new();
+        let signing_key =
+            configure_and_handshake(&mut c, vec![CapabilityId::from_static(CAP_REPOS_READ)]);
+        let capability: TestCapability =
+            capability_token(&signing_key, CAP_REPOS_READ, OP_TAGS_LIST);
+        let req = SimulateRequest::new(
+            ConnectorId::from_static("fcp.dockerhub"),
+            OperationId::from_static(OP_REPOS_LIST),
+            ZoneId::try_from("z:work".to_string()).unwrap(),
+            json!({}),
+            capability,
+        );
+
+        let resp = fcp_async_core::runtime::block_on_sync(c.simulate(req))
+            .unwrap()
+            .unwrap();
+
+        assert!(!resp.would_succeed);
+        assert_eq!(resp.denial_code.as_deref(), Some("FCP-3003"));
+    }
+
+    #[test]
+    fn simulate_denies_before_configure() {
         let c = DockerHubConnector::new();
         let req = SimulateRequest::new(
             ConnectorId::from_static("fcp.dockerhub"),
@@ -1120,11 +1276,13 @@ mod tests {
             json!({}),
             CapabilityToken::test_token(),
         );
-        let req_id = req.id.clone();
+
         let resp = fcp_async_core::runtime::block_on_sync(c.simulate(req))
             .unwrap()
             .unwrap();
-        assert_eq!(resp.id, req_id);
+
+        assert!(!resp.would_succeed);
+        assert_eq!(resp.denial_code.as_deref(), Some("FCP-5002"));
     }
 
     #[test]

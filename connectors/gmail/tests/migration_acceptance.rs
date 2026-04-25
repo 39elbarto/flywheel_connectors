@@ -97,6 +97,7 @@ async fn gmail_introspect_has_required_operations() {
         "gmail.list_labels",
         "gmail.sync_history",
         "gmail.get_draft",
+        "gmail.create_draft",
         "gmail.send_draft",
     ];
 
@@ -136,6 +137,7 @@ async fn gmail_introspect_write_ops_are_dangerous() {
         "gmail.send_message",
         "gmail.modify_message",
         "gmail.trash_message",
+        "gmail.create_draft",
         "gmail.send_draft",
     ];
     for op in ops {

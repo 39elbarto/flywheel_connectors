@@ -513,7 +513,7 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("64 hex characters"));
             }
-            other => panic!("expected InvalidRequest, got {other:?}"),
+            other => assert!(matches!(other, FcpError::InvalidRequest { .. })),
         }
     }
 
@@ -529,7 +529,7 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("64 hex characters"));
             }
-            other => panic!("expected InvalidRequest, got {other:?}"),
+            other => assert!(matches!(other, FcpError::InvalidRequest { .. })),
         }
     }
 
@@ -748,7 +748,7 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("64-character hex"));
             }
-            other => panic!("expected InvalidRequest, got {other:?}"),
+            other => assert!(matches!(other, FcpError::InvalidRequest { .. })),
         }
     }
 
@@ -784,7 +784,7 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("kind must be 4"));
             }
-            other => panic!("expected InvalidRequest, got {other:?}"),
+            other => assert!(matches!(other, FcpError::InvalidRequest { .. })),
         }
     }
 

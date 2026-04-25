@@ -589,7 +589,7 @@ mod tests {
             table_id: "tbl1".into(),
             record_id: "rec1".into(),
             field_name: "Attachments".into(),
-            url: "https://example.com/images/photo.jpg?token=abc".into(),
+            url: "https://example.com/images/photo.jpg?download_id=abc".into(),
             filename: None,
         };
         assert!(AttachmentValidation::validate_upload(&config, &req).is_ok());
@@ -1173,8 +1173,11 @@ mod tests {
     #[test]
     fn validate_url_with_query_params() {
         assert!(
-            AttachmentValidation::validate_url("https://example.com/f.jpg?token=abc&v=2", true)
-                .is_ok()
+            AttachmentValidation::validate_url(
+                "https://example.com/f.jpg?download_id=abc&v=2",
+                true,
+            )
+            .is_ok()
         );
     }
 
@@ -1269,7 +1272,9 @@ mod tests {
     #[test]
     fn filename_from_url_with_query() {
         assert_eq!(
-            AttachmentValidation::filename_from_url("https://example.com/photo.jpg?token=abc"),
+            AttachmentValidation::filename_from_url(
+                "https://example.com/photo.jpg?download_id=abc",
+            ),
             "photo.jpg"
         );
     }

@@ -40,7 +40,8 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + chrono::Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .unwrap()
         .sign(signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)
@@ -408,8 +409,8 @@ async fn invoke_put_object_through_connector() {
     let mut connector = S3Connector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["s3.put_object"]).await;
     setup_configure(&mut connector, &server.uri()).await;
+    setup_handshake(&mut connector, &signing_key, &["s3.put_object"]).await;
 
     let token = generate_valid_token(&signing_key, "s3.put_object");
     let result = connector
@@ -442,8 +443,8 @@ async fn invoke_list_buckets_through_connector() {
     let mut connector = S3Connector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["s3.list_buckets"]).await;
     setup_configure(&mut connector, &server.uri()).await;
+    setup_handshake(&mut connector, &signing_key, &["s3.list_buckets"]).await;
 
     let token = generate_valid_token(&signing_key, "s3.list_buckets");
     let result = connector
@@ -463,8 +464,8 @@ async fn invoke_wrong_capability_rejected() {
     let mut connector = S3Connector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["s3.read"]).await;
     setup_configure(&mut connector, "http://localhost:1").await;
+    setup_handshake(&mut connector, &signing_key, &["s3.read"]).await;
 
     let token = generate_valid_token(&signing_key, "s3.read");
     let result = connector
@@ -487,8 +488,8 @@ async fn invoke_unknown_operation_rejected() {
     let mut connector = S3Connector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["s3.nonexistent"]).await;
     setup_configure(&mut connector, "http://localhost:1").await;
+    setup_handshake(&mut connector, &signing_key, &["s3.nonexistent"]).await;
 
     let token = generate_valid_token(&signing_key, "s3.nonexistent");
     let result = connector
@@ -513,8 +514,8 @@ async fn invoke_missing_required_field_rejected() {
     let mut connector = S3Connector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["s3.put_object"]).await;
     setup_configure(&mut connector, &server.uri()).await;
+    setup_handshake(&mut connector, &signing_key, &["s3.put_object"]).await;
 
     let token = generate_valid_token(&signing_key, "s3.put_object");
     // Missing key and body
@@ -550,8 +551,8 @@ async fn invoke_get_object_through_connector() {
     let mut connector = S3Connector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["s3.get_object"]).await;
     setup_configure(&mut connector, &server.uri()).await;
+    setup_handshake(&mut connector, &signing_key, &["s3.get_object"]).await;
 
     let token = generate_valid_token(&signing_key, "s3.get_object");
     let result = connector
@@ -582,8 +583,8 @@ async fn invoke_delete_object_through_connector() {
     let mut connector = S3Connector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["s3.delete_object"]).await;
     setup_configure(&mut connector, &server.uri()).await;
+    setup_handshake(&mut connector, &signing_key, &["s3.delete_object"]).await;
 
     let token = generate_valid_token(&signing_key, "s3.delete_object");
     let approval = generate_execution_approval("s3.delete_object");
@@ -617,8 +618,8 @@ async fn invoke_create_bucket_through_connector() {
     let mut connector = S3Connector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["s3.create_bucket"]).await;
     setup_configure(&mut connector, &server.uri()).await;
+    setup_handshake(&mut connector, &signing_key, &["s3.create_bucket"]).await;
 
     let token = generate_valid_token(&signing_key, "s3.create_bucket");
     let approval = generate_execution_approval("s3.create_bucket");
@@ -651,8 +652,8 @@ async fn invoke_delete_bucket_through_connector() {
     let mut connector = S3Connector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["s3.delete_bucket"]).await;
     setup_configure(&mut connector, &server.uri()).await;
+    setup_handshake(&mut connector, &signing_key, &["s3.delete_bucket"]).await;
 
     let token = generate_valid_token(&signing_key, "s3.delete_bucket");
     let approval = generate_execution_approval("s3.delete_bucket");
@@ -687,8 +688,8 @@ async fn invoke_head_object_missing_field() {
     let mut connector = S3Connector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["s3.head_object"]).await;
     setup_configure(&mut connector, &server.uri()).await;
+    setup_handshake(&mut connector, &signing_key, &["s3.head_object"]).await;
 
     let token = generate_valid_token(&signing_key, "s3.head_object");
     let result = connector
@@ -726,8 +727,8 @@ async fn invoke_list_objects_through_connector() {
     let mut connector = S3Connector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["s3.list_objects"]).await;
     setup_configure(&mut connector, &server.uri()).await;
+    setup_handshake(&mut connector, &signing_key, &["s3.list_objects"]).await;
 
     let token = generate_valid_token(&signing_key, "s3.list_objects");
     let result = connector
@@ -761,8 +762,8 @@ async fn invoke_copy_object_through_connector() {
     let mut connector = S3Connector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["s3.copy_object"]).await;
     setup_configure(&mut connector, &server.uri()).await;
+    setup_handshake(&mut connector, &signing_key, &["s3.copy_object"]).await;
 
     let token = generate_valid_token(&signing_key, "s3.copy_object");
     let result = connector
@@ -789,8 +790,8 @@ async fn invoke_generate_presigned_url_through_connector() {
     let mut connector = S3Connector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["s3.generate_presigned_url"]).await;
     setup_configure(&mut connector, &server.uri()).await;
+    setup_handshake(&mut connector, &signing_key, &["s3.generate_presigned_url"]).await;
 
     let token = generate_valid_token(&signing_key, "s3.generate_presigned_url");
     let approval = generate_execution_approval("s3.generate_presigned_url");
@@ -828,7 +829,6 @@ async fn invoke_generate_presigned_url_with_credential_id_returns_unsigned_url()
     let mut connector = S3Connector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["s3.generate_presigned_url"]).await;
     connector
         .handle_configure(json!({
             "credential_id": "00000000-0000-0000-0000-000000000001",
@@ -836,6 +836,7 @@ async fn invoke_generate_presigned_url_with_credential_id_returns_unsigned_url()
         }))
         .await
         .unwrap();
+    setup_handshake(&mut connector, &signing_key, &["s3.generate_presigned_url"]).await;
 
     let token = generate_valid_token(&signing_key, "s3.generate_presigned_url");
     let approval = generate_execution_approval("s3.generate_presigned_url");
@@ -870,8 +871,8 @@ async fn invoke_dangerous_operation_requires_approval_token() {
     let mut connector = S3Connector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["s3.delete_object"]).await;
     setup_configure(&mut connector, &server.uri()).await;
+    setup_handshake(&mut connector, &signing_key, &["s3.delete_object"]).await;
 
     let token = generate_valid_token(&signing_key, "s3.delete_object");
     let result = connector
@@ -932,8 +933,8 @@ async fn invoke_copy_object_missing_field() {
     let mut connector = S3Connector::new();
     let signing_key = Ed25519SigningKey::generate();
 
-    setup_handshake(&mut connector, &signing_key, &["s3.copy_object"]).await;
     setup_configure(&mut connector, &server.uri()).await;
+    setup_handshake(&mut connector, &signing_key, &["s3.copy_object"]).await;
 
     let token = generate_valid_token(&signing_key, "s3.copy_object");
     // Missing dest_key

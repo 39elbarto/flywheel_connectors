@@ -44,7 +44,7 @@ impl AirtableConfig {
     ///
     /// Strict auth: exactly one of `token` or `credential_id` must be supplied.
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
-        let token = optional_config_string(params, "token")?;
+        let auth_material = optional_config_string(params, "token")?;
         let credential_id = match params.get("credential_id") {
             Some(value) => {
                 let raw = value.as_str().ok_or(FcpError::InvalidRequest {
@@ -61,7 +61,7 @@ impl AirtableConfig {
             None => None,
         };
 
-        let auth = match (token, credential_id) {
+        let auth = match (auth_material, credential_id) {
             (Some(t), None) => AirtableAuth::Token(t),
             (None, Some(cid)) => AirtableAuth::CredentialId(cid),
             (Some(_), Some(_)) => {
@@ -89,10 +89,7 @@ impl AirtableConfig {
     }
 }
 
-fn optional_config_string(
-    params: &serde_json::Value,
-    field: &str,
-) -> FcpResult<Option<String>> {
+fn optional_config_string(params: &serde_json::Value, field: &str) -> FcpResult<Option<String>> {
     let Some(value) = params.get(field) else {
         return Ok(None);
     };
@@ -257,6 +254,7 @@ impl AirtableConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
+        let was_configured = self.config.is_some();
         let config = AirtableConfig::from_params(&params)?;
 
         let client = AirtableClient::new_with_auth(config.auth.clone())
@@ -271,6 +269,12 @@ impl AirtableConnector {
         self.client = Some(client);
         self.schema_cache.lock().await.clear();
         self.base.set_configured(true);
+        if was_configured {
+            self.base.set_handshaken(false);
+            self.verifier = None;
+            self.session_id = None;
+            self.zone_id = None;
+        }
 
         Ok(json!({ "status": "configured" }))
     }
@@ -1491,6 +1495,52 @@ impl AirtableConnector {
                 message: format!("Invalid simulate request: {e}"),
             })?;
 
+        let capability = match self
+            .required_capability_for_operation(req.operation.as_str())
+            .await
+        {
+            Ok(capability) => capability,
+            Err(error) => {
+                let response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize response: {e}"),
+                });
+            }
+        };
+        if self.client.is_none() {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+        let Some(verifier) = self.verifier.as_ref() else {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector has not completed handshake",
+                FcpError::NotHandshaken.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        };
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])
+        {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response =
+                    response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+            }
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
         let response = SimulateResponse::allowed(req.id);
         serde_json::to_value(response).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize response: {e}"),
@@ -1529,39 +1579,24 @@ impl AirtableConnector {
                 message: "Missing capability_token".into(),
             })?;
 
-        let token: CapabilityToken =
-            serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("Invalid capability_token format: {e}"),
+        let capability =
+            serde_json::from_value::<CapabilityToken>(token_value.clone()).map_err(|e| {
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid capability_token format: {e}"),
+                }
             })?;
 
         let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
-        let intro = self.handle_introspect().await?;
-        let cap_str = intro
-            .get("operations")
-            .and_then(|ops| ops.as_array())
-            .and_then(|ops| {
-                ops.iter()
-                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
-            })
-            .and_then(|op| op.get("capability"))
-            .and_then(|cap| cap.as_str())
-            .ok_or_else(|| FcpError::OperationNotGranted {
-                operation: operation.into(),
-            })?;
-
-        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
-            code: 1003,
-            message: "Invalid capability ID format".into(),
-        })?;
+        let cap_id = self.required_capability_for_operation(operation).await?;
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
+            verifier.verify_bound(capability, &cap_id, &op_id, &[])?;
         } else {
-            return Err(FcpError::NotConfigured);
+            return Err(FcpError::NotHandshaken);
         }
 
         match operation {
@@ -1596,6 +1631,27 @@ impl AirtableConnector {
                 operation: operation.into(),
             }),
         }
+    }
+
+    async fn required_capability_for_operation(&self, operation: &str) -> FcpResult<CapabilityId> {
+        let intro = self.handle_introspect().await?;
+        let cap_str = intro
+            .get("operations")
+            .and_then(|ops| ops.as_array())
+            .and_then(|ops| {
+                ops.iter()
+                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
+            })
+            .and_then(|op| op.get("capability"))
+            .and_then(|cap| cap.as_str())
+            .ok_or_else(|| FcpError::OperationNotGranted {
+                operation: operation.into(),
+            })?;
+
+        cap_str.parse().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid capability ID format".into(),
+        })
     }
 
     // ── Operation implementations ─────────────────────────────────
@@ -3050,9 +3106,7 @@ fn optional_pagination_offset(input: &serde_json::Value, field: &str) -> FcpResu
     if offset.len() > MAX_AIRTABLE_OFFSET_BYTES {
         return Err(FcpError::InvalidRequest {
             code: 1003,
-            message: format!(
-                "{field} exceeds maximum length of {MAX_AIRTABLE_OFFSET_BYTES} bytes"
-            ),
+            message: format!("{field} exceeds maximum length of {MAX_AIRTABLE_OFFSET_BYTES} bytes"),
         });
     }
     if offset.chars().any(char::is_control) {
@@ -3344,12 +3398,10 @@ mod tests {
         let auth = AirtableAuth::Token("patTEST".into());
         let err =
             validate_base_url_for_auth("https://api.airtable.com/v0?leak=x", &auth).unwrap_err();
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("query"), "got: {message}");
-            }
-            other => panic!("expected InvalidRequest, got {other:?}"),
-        }
+        assert!(matches!(
+            err,
+            FcpError::InvalidRequest { ref message, .. } if message.contains("query")
+        ));
     }
 
     #[test]
@@ -3363,15 +3415,12 @@ mod tests {
     #[test]
     fn validate_base_url_for_auth_rejects_userinfo_with_token() {
         let auth = AirtableAuth::Token("patTEST".into());
-        let err =
-            validate_base_url_for_auth("https://attacker:pw@api.airtable.com/v0", &auth)
-                .unwrap_err();
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("userinfo"), "got: {message}");
-            }
-            other => panic!("expected InvalidRequest, got {other:?}"),
-        }
+        let err = validate_base_url_for_auth("https://attacker:pw@api.airtable.com/v0", &auth)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FcpError::InvalidRequest { ref message, .. } if message.contains("userinfo")
+        ));
     }
 
     #[test]
@@ -3379,8 +3428,7 @@ mod tests {
         let cid = fcp_core::CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let auth = AirtableAuth::CredentialId(cid);
         let err =
-            validate_base_url_for_auth("https://vault-proxy.example/v0?leak=x", &auth)
-                .unwrap_err();
+            validate_base_url_for_auth("https://vault-proxy.example/v0?leak=x", &auth).unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
@@ -3389,11 +3437,8 @@ mod tests {
         // Path-based smuggle: host is evil.com, not api.airtable.com,
         // even though the full string contains "api.airtable.com".
         let auth = AirtableAuth::Token("patTEST".into());
-        let err = validate_base_url_for_auth(
-            "https://evil.com/api.airtable.com/v0",
-            &auth,
-        )
-        .unwrap_err();
+        let err =
+            validate_base_url_for_auth("https://evil.com/api.airtable.com/v0", &auth).unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
@@ -3416,7 +3461,8 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&cbor)
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
@@ -3513,13 +3559,13 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "airtable.read", "airtable.list_bases");
+        let capability = generate_valid_token(&signing_key, "airtable.read", "airtable.list_bases");
 
         let result = connector
             .handle_invoke(json!({
                 "operation": "airtable.list_bases",
                 "input": {},
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
 
@@ -3552,23 +3598,21 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "airtable.read", "airtable.get_record");
+        let capability = generate_valid_token(&signing_key, "airtable.read", "airtable.get_record");
 
         let result = connector
             .handle_invoke(json!({
                 "operation": "airtable.get_record",
                 "input": { "base_id": "appXXX" },
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
 
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("table_id"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert!(matches!(
+            result.unwrap_err(),
+            FcpError::InvalidRequest { ref message, .. } if message.contains("table_id")
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -3626,12 +3670,11 @@ mod tests {
         let mut connector = AirtableConnector::new();
         let result = connector.handle_configure(json!({})).await;
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("Missing authentication"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert!(matches!(
+            result.unwrap_err(),
+            FcpError::InvalidRequest { ref message, .. }
+                if message.contains("Missing authentication")
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -3666,12 +3709,10 @@ mod tests {
             }))
             .await;
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("exactly one"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert!(matches!(
+            result.unwrap_err(),
+            FcpError::InvalidRequest { ref message, .. } if message.contains("exactly one")
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -3684,12 +3725,10 @@ mod tests {
             }))
             .await;
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("api.airtable.com"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert!(matches!(
+            result.unwrap_err(),
+            FcpError::InvalidRequest { ref message, .. } if message.contains("api.airtable.com")
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -3712,12 +3751,10 @@ mod tests {
         let mut connector = AirtableConnector::new();
         let result = connector.handle_configure(json!({ "token": "" })).await;
         assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("non-empty"));
-            }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
-        }
+        assert!(matches!(
+            result.unwrap_err(),
+            FcpError::InvalidRequest { ref message, .. } if message.contains("non-empty")
+        ));
     }
 
     #[fcp_async_core::runtime::test]

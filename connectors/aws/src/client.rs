@@ -749,13 +749,17 @@ async fn handle_json_response<T: serde::de::DeserializeOwned>(
 mod tests {
     use super::*;
 
+    const TEST_ACCESS_KEY_ID: &str = "fcp-test-access-key";
+    const TEST_SIGNING_MATERIAL: &str = "fcp-test-signing-material";
+    const TEST_SESSION_MATERIAL: &str = "fcp-test-session-material";
+
     #[test]
     fn client_debug_redacts_auth() {
         let rt = fcp_async_core::runtime::block_on_sync(async {
             AwsClient::new(
                 AwsAuth {
-                    access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
-                    secret_access_key: "wJalrXUtnFEMI/K7MDENG".into(),
+                    access_key_id: TEST_ACCESS_KEY_ID.into(),
+                    secret_access_key: TEST_SIGNING_MATERIAL.into(),
                     session_token: None,
                 },
                 "us-east-1",
@@ -773,8 +777,8 @@ mod tests {
 
         let debug = format!("{rt:?}");
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("AKIAIOSFODNN7EXAMPLE"));
-        assert!(!debug.contains("wJalrXUtnFEMI"));
+        assert!(!debug.contains(TEST_ACCESS_KEY_ID));
+        assert!(!debug.contains(TEST_SIGNING_MATERIAL));
     }
 
     #[test]
@@ -804,7 +808,7 @@ mod tests {
             AwsClient::new(
                 AwsAuth {
                     access_key_id: "AKID".into(),
-                    secret_access_key: "secret".into(),
+                    secret_access_key: TEST_SIGNING_MATERIAL.into(),
                     session_token: None,
                 },
                 "us-east-1",
@@ -981,17 +985,17 @@ mod tests {
     #[test]
     fn aws_auth_debug_redacts_all_secrets() {
         let auth = AwsAuth {
-            access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
-            secret_access_key: "wJalrXUtnFEMI/K7MDENG".into(),
-            session_token: Some("FwoGZXIvtoken123".into()),
+            access_key_id: TEST_ACCESS_KEY_ID.into(),
+            secret_access_key: TEST_SIGNING_MATERIAL.into(),
+            session_token: Some(TEST_SESSION_MATERIAL.into()),
         };
         let debug = format!("{auth:?}");
         assert!(
-            !debug.contains("wJalrXUtnFEMI"),
+            !debug.contains(TEST_SIGNING_MATERIAL),
             "secret access key must not appear in debug: {debug}"
         );
         assert!(
-            !debug.contains("FwoGZXIvtoken123"),
+            !debug.contains(TEST_SESSION_MATERIAL),
             "session token must not appear in debug: {debug}"
         );
     }
@@ -999,13 +1003,13 @@ mod tests {
     #[test]
     fn aws_auth_debug_redacts_access_key_id() {
         let auth = AwsAuth {
-            access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
-            secret_access_key: "secret".into(),
+            access_key_id: TEST_ACCESS_KEY_ID.into(),
+            secret_access_key: TEST_SIGNING_MATERIAL.into(),
             session_token: None,
         };
         let debug = format!("{auth:?}");
         assert!(
-            !debug.contains("AKIAIOSFODNN7EXAMPLE"),
+            !debug.contains(TEST_ACCESS_KEY_ID),
             "access key must be redacted in debug: {debug}"
         );
         assert!(debug.contains("[REDACTED]"));

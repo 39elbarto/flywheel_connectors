@@ -30,7 +30,7 @@ macro_rules! skip_without_token {
         let Some($var) = telegram_token() else {
             eprintln!(
                 "SKIP: TELEGRAM_BOT_TOKEN not set — skipping live Telegram connector verification. \
-                 Set TELEGRAM_BOT_TOKEN=<bot_id>:<secret> to enable."
+                 Set TELEGRAM_BOT_TOKEN to enable."
             );
             return;
         };
@@ -57,7 +57,8 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .operations(&[op])
         .issuer("node:live-test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)
@@ -172,7 +173,7 @@ async fn live_get_file_nonexistent() {
 
     let mut connector = TelegramConnector::new();
     let signing_key = setup_live_connector(&mut connector, &token).await;
-    let cap_token = generate_read_token(&signing_key, "telegram.get_file");
+    let capability = generate_read_token(&signing_key, "telegram.get_file");
 
     // Invoke get_file with a nonexistent file_id — should return a structured
     // Telegram API error (400 "Bad Request: invalid file_id"), not a panic.
@@ -182,7 +183,7 @@ async fn live_get_file_nonexistent() {
             "input": {
                 "file_id": "nonexistent_file_id_for_live_test"
             },
-            "capability_token": cap_token
+            "capability_token": capability
         }))
         .await;
 

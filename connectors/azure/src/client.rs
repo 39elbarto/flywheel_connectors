@@ -1256,12 +1256,12 @@ mod tests {
             .unwrap()
             .with_management_url(&server.uri());
             let err = client.list_subscriptions().await.unwrap_err();
-            match err {
-                AzureError::RateLimited { retry_after_ms } => {
-                    assert_eq!(retry_after_ms, 5_000);
+            assert!(matches!(
+                err,
+                AzureError::RateLimited {
+                    retry_after_ms: 5_000
                 }
-                other => panic!("expected rate limited, got {other:?}"),
-            }
+            ));
         })
         .unwrap();
     }
@@ -1295,12 +1295,12 @@ mod tests {
             .unwrap()
             .with_management_url(&server.uri());
             let err = client.list_subscriptions().await.unwrap_err();
-            match err {
-                AzureError::RateLimited { retry_after_ms } => {
-                    assert_eq!(retry_after_ms, u64::MAX);
+            assert!(matches!(
+                err,
+                AzureError::RateLimited {
+                    retry_after_ms: u64::MAX
                 }
-                other => panic!("expected rate limited, got {other:?}"),
-            }
+            ));
         })
         .unwrap();
     }
@@ -1309,7 +1309,7 @@ mod tests {
     fn client_debug_hides_auth() {
         let client = AzureClient::new(
             AzureAuth::BearerToken {
-                bearer_token: "super-secret".into(),
+                bearer_token: "redacted-auth-material".into(),
             },
             HttpRetryConfig::default(),
             AzureApiVersions::compiled_defaults(),
@@ -1318,7 +1318,7 @@ mod tests {
         .unwrap();
         let debug = format!("{client:?}");
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("super-secret"));
+        assert!(!debug.contains("redacted-auth-material"));
     }
 
     #[test]
@@ -1343,12 +1343,10 @@ mod tests {
     #[test]
     fn parse_error_empty_body() {
         let err = parse_error_response(StatusCode::INTERNAL_SERVER_ERROR, "", None);
-        match err {
-            AzureError::Api { message, .. } => {
-                assert!(message.contains("500"));
-            }
-            other => panic!("expected api error, got {other:?}"),
-        }
+        assert!(matches!(
+            err,
+            AzureError::Api { ref message, .. } if message.contains("500")
+        ));
     }
 
     #[test]

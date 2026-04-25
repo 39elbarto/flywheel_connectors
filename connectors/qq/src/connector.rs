@@ -228,7 +228,7 @@ impl QqConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         let capability = required_capability(req.operation.as_str())?;
-        verifier.verify(req.capability_token, &capability, &req.operation, &[])?;
+        verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])?;
 
         let output = match req.operation.as_str() {
             OP_SEND_CHANNEL => {
@@ -278,7 +278,7 @@ impl QqConnector {
                 .await
                 .map_err(|e| e.to_fcp_error())?,
             OP_HEALTH => {
-                let _token = client.access_token().await.map_err(|e| e.to_fcp_error())?;
+                let _access_material = client.access_token().await.map_err(|e| e.to_fcp_error())?;
                 let gateway = client
                     .api_request(reqwest::Method::GET, "/gateway", None)
                     .await
@@ -469,7 +469,8 @@ impl FcpConnector for QqConnector {
                 FcpError::NotHandshaken.error_code(),
             ));
         };
-        if let Err(error) = verifier.verify(req.capability_token, &capability, &req.operation, &[])
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])
         {
             let mut response =
                 SimulateResponse::denied(req.id, error.to_string(), error.error_code());

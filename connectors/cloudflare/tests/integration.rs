@@ -45,11 +45,14 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    op: &'static str,
+) -> Result<CapabilityToken, String> {
     let capability = match op {
         OP_ZONES_LIST => "cloudflare.zones.read",
         OP_DNS_DELETE => "cloudflare.dns.write",
-        _ => panic!("unsupported test operation: {op}"),
+        _ => return Err(format!("unsupported test operation: {op}")),
     };
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
@@ -58,7 +61,8 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         ..Default::default()
     };
     let mut cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+    ciborium::into_writer(&constraints, &mut cbor)
+        .map_err(|err| format!("serialize constraints: {err:?}"))?;
     let raw = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -66,10 +70,11 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .map_err(|err| format!("constraints CBOR should validate: {err:?}"))?
         .sign(signing_key)
-        .expect("capability token signing should succeed");
-    CapabilityToken::from_raw(raw)
+        .map_err(|err| format!("capability token signing should succeed: {err:?}"))?;
+    Ok(CapabilityToken::from_raw(raw))
 }
 
 fn invoke_req(
@@ -284,7 +289,7 @@ async fn invoke_safe_read_zones_list() {
         .invoke(invoke_req(
             OP_ZONES_LIST,
             json!({}),
-            generate_valid_token(&signing_key, OP_ZONES_LIST),
+            generate_valid_token(&signing_key, OP_ZONES_LIST).expect("test token should build"),
         ))
         .await
         .unwrap();
@@ -315,7 +320,7 @@ async fn invoke_risky_dns_delete_preserves_artifact_evidence() {
                 "zone_id": "zone-123",
                 "record_id": "rec-456"
             }),
-            generate_valid_token(&signing_key, OP_DNS_DELETE),
+            generate_valid_token(&signing_key, OP_DNS_DELETE).expect("test token should build"),
         ))
         .await
         .unwrap();

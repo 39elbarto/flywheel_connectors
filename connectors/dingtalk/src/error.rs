@@ -187,14 +187,13 @@ mod tests {
     #[test]
     fn config_error_maps_to_invalid_request() {
         let err = DingTalkError::Config("missing client_id".into());
-        let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1001);
-                assert!(message.contains("missing client_id"));
-            }
-            other => panic!("expected InvalidRequest, got {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::InvalidRequest {
+                code: 1001,
+                ref message
+            } if message.contains("missing client_id")
+        ));
     }
 
     #[test]
@@ -203,55 +202,48 @@ mod tests {
             errcode: 40001,
             errmsg: "invalid media".into(),
         };
-        let fcp = err.to_fcp_error();
-        match fcp {
+        assert!(matches!(
+            err.to_fcp_error(),
             FcpError::External {
-                service, retryable, ..
-            } => {
-                assert_eq!(service, "dingtalk");
-                assert!(!retryable);
-            }
-            other => panic!("expected External, got {other:?}"),
-        }
+                ref service,
+                retryable: false,
+                ..
+            } if service == "dingtalk"
+        ));
     }
 
     #[test]
     fn token_error_is_retryable() {
         let err = DingTalkError::Token("expired".into());
         assert!(err.is_retryable());
-        let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::External { retryable, .. } => {
-                assert!(retryable);
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::External {
+                retryable: true,
+                ..
             }
-            other => panic!("expected External, got {other:?}"),
-        }
+        ));
     }
 
     #[test]
     fn async_error_mapping_preserves_timeout() {
         let async_err = AsyncError::Timeout { timeout_ms: 30000 };
         let err = DingTalkError::from_async_error(async_err);
-        match &err {
-            DingTalkError::Async(msg) => {
-                assert!(msg.contains("30000"));
-                assert!(msg.contains("deadline exceeded"));
-            }
-            other => panic!("expected Async, got {other:?}"),
-        }
+        assert!(matches!(
+            err,
+            DingTalkError::Async(ref msg)
+                if msg.contains("30000") && msg.contains("deadline exceeded")
+        ));
     }
 
     #[test]
     fn json_error_maps_to_internal() {
         let json_err: serde_json::Error = serde_json::from_str::<String>("not json").unwrap_err();
         let err = DingTalkError::Json(json_err);
-        let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::Internal { message } => {
-                assert!(message.contains("JSON parse error"));
-            }
-            other => panic!("expected Internal, got {other:?}"),
-        }
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::Internal { ref message } if message.contains("JSON parse error")
+        ));
     }
 
     #[test]

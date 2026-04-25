@@ -56,7 +56,8 @@ fn capability_token(
         .operations(operations)
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .expect("token should sign");
     CapabilityToken::from_raw(raw)
@@ -143,13 +144,15 @@ async fn configure_rejects_non_loopback_http_bridge_url() {
         .await
         .expect_err("non-loopback http should fail");
 
-    match error {
-        FcpError::InvalidRequest { code, message } => {
-            assert_eq!(code, 1003);
-            assert!(message.contains("https"));
-        }
-        other => panic!("unexpected error: {other:?}"),
-    }
+    assert!(
+        matches!(error, FcpError::InvalidRequest { .. }),
+        "unexpected error: {error:?}"
+    );
+    let FcpError::InvalidRequest { code, message } = error else {
+        return;
+    };
+    assert_eq!(code, 1003);
+    assert!(message.contains("https"));
 }
 
 #[fcp_async_core::runtime::test]
@@ -224,13 +227,15 @@ async fn invoke_set_light_state_rejects_out_of_range_brightness() {
         .await
         .expect_err("out-of-range brightness must fail");
 
-    match error {
-        FcpError::InvalidRequest { code, message } => {
-            assert_eq!(code, 1005);
-            assert!(message.contains("between 0 and 100"));
-        }
-        other => panic!("unexpected error: {other:?}"),
-    }
+    assert!(
+        matches!(error, FcpError::InvalidRequest { .. }),
+        "unexpected error: {error:?}"
+    );
+    let FcpError::InvalidRequest { code, message } = error else {
+        return;
+    };
+    assert_eq!(code, 1005);
+    assert!(message.contains("between 0 and 100"));
 }
 
 #[fcp_async_core::runtime::test]

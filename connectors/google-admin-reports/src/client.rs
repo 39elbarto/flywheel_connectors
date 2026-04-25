@@ -60,7 +60,10 @@ impl fmt::Debug for AdminReportsClient {
 impl AdminReportsClient {
     pub fn new_with_auth(auth: GoogleMaterializedAuth) -> AdminReportsResult<Self> {
         let mut headers = header::HeaderMap::new();
-        headers.insert(header::ACCEPT, "application/json".parse().unwrap());
+        headers.insert(
+            header::ACCEPT,
+            header::HeaderValue::from_static("application/json"),
+        );
 
         let client = Client::builder()
             .default_headers(headers)

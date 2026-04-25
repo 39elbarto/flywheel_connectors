@@ -43,7 +43,8 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + chrono::Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .expect("token should sign");
     CapabilityToken::from_raw(cose)
@@ -142,7 +143,7 @@ async fn invoke_search_text_uses_default_operation_field_mask() {
     setup_configure(&mut connector, &server.uri()).await;
     setup_handshake(&mut connector, &signing_key, &["google_places.search_text"]).await;
 
-    let token = generate_valid_token(&signing_key, "google_places.search_text");
+    let capability = generate_valid_token(&signing_key, "google_places.search_text");
     let result = connector
         .invoke(InvokeRequest {
             r#type: "invoke".into(),
@@ -154,7 +155,7 @@ async fn invoke_search_text_uses_default_operation_field_mask() {
                 "query": "coffee near bryant park",
                 "max_result_count": 5
             }),
-            capability_token: token,
+            capability_token: capability,
             holder_proof: None,
             context: None,
             idempotency_key: None,
@@ -206,7 +207,7 @@ async fn invoke_autocomplete_uses_autocomplete_specific_field_mask() {
     )
     .await;
 
-    let token = generate_valid_token(&signing_key, "google_places.autocomplete");
+    let capability = generate_valid_token(&signing_key, "google_places.autocomplete");
     let result = connector
         .invoke(InvokeRequest {
             r#type: "invoke".into(),
@@ -218,7 +219,7 @@ async fn invoke_autocomplete_uses_autocomplete_specific_field_mask() {
                 "input": "coffee ro",
                 "session_token": "session-123"
             }),
-            capability_token: token,
+            capability_token: capability,
             holder_proof: None,
             context: None,
             idempotency_key: None,
@@ -263,7 +264,7 @@ async fn invoke_get_place_uses_place_details_field_mask_and_language_code() {
     setup_configure(&mut connector, &server.uri()).await;
     setup_handshake(&mut connector, &signing_key, &["google_places.get_place"]).await;
 
-    let token = generate_valid_token(&signing_key, "google_places.get_place");
+    let capability = generate_valid_token(&signing_key, "google_places.get_place");
     let result = connector
         .invoke(InvokeRequest {
             r#type: "invoke".into(),
@@ -275,7 +276,7 @@ async fn invoke_get_place_uses_place_details_field_mask_and_language_code() {
                 "place": "/places/ghi789",
                 "language_code": "en"
             }),
-            capability_token: token,
+            capability_token: capability,
             holder_proof: None,
             context: None,
             idempotency_key: None,

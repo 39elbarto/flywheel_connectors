@@ -134,6 +134,25 @@ impl BlueBubblesConnector {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
+    fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
+        let capability = match operation {
+            OP_SEND_MESSAGE | OP_MARK_READ => CAP_SEND,
+            OP_GET_CHATS
+            | OP_GET_CHAT
+            | OP_GET_MESSAGES
+            | OP_SYNC_EVENTS
+            | OP_DOWNLOAD_ATTACHMENT => CAP_READ,
+            OP_GET_SERVER_INFO => CAP_ADMIN,
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!("Unknown operation: {operation}"),
+                });
+            }
+        };
+        Ok(CapabilityId::from_static(capability))
+    }
+
     /// Run connector diagnostics.
     pub fn doctor(&self) -> DoctorResult {
         let mut checks = Vec::new();
@@ -201,11 +220,11 @@ impl BlueBubblesConnector {
                 critical: false,
             });
 
-            let password_ok = !config.password.is_empty();
+            let passcode_ok = !config.server_passcode.is_empty();
             checks.push(DoctorCheck {
                 name: "password".into(),
-                passed: password_ok,
-                message: Some(if password_ok {
+                passed: passcode_ok,
+                message: Some(if passcode_ok {
                     "Password is set".into()
                 } else {
                     "Password is empty".into()
@@ -698,6 +717,45 @@ impl FcpConnector for BlueBubblesConnector {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+        let capability = match Self::required_capability(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return Ok(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ));
+            }
+        };
+
+        if self.state.is_none() {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ));
+        }
+
+        let Some(verifier) = &self.verifier else {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            ));
+        };
+
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])
+        {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response =
+                    response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+            }
+            return Ok(response);
+        }
+
         Ok(SimulateResponse::allowed(req.id))
     }
 
@@ -745,28 +803,12 @@ impl FcpConnector for BlueBubblesConnector {
 impl BlueBubblesConnector {
     #[allow(clippy::too_many_lines)]
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
+        self.base.check_ready()?;
         let operation = req.operation.as_str();
+        let required_cap = Self::required_capability(operation)?;
 
-        if let Some(verifier) = &self.verifier {
-            let required_cap = match operation {
-                OP_SEND_MESSAGE | OP_MARK_READ => CapabilityId::from_static(CAP_SEND),
-                OP_GET_CHATS
-                | OP_GET_CHAT
-                | OP_GET_MESSAGES
-                | OP_SYNC_EVENTS
-                | OP_DOWNLOAD_ATTACHMENT => CapabilityId::from_static(CAP_READ),
-                OP_GET_SERVER_INFO => CapabilityId::from_static(CAP_ADMIN),
-                _ => {
-                    return Err(FcpError::InvalidRequest {
-                        code: 1004,
-                        message: format!("Unknown operation: {operation}"),
-                    });
-                }
-            };
-            verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
-        } else {
-            return Err(FcpError::NotConfigured);
-        }
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        verifier.verify_bound(req.capability_token, &required_cap, &req.operation, &[])?;
 
         let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
         let runtime = &state.runtime;
@@ -1011,6 +1053,7 @@ impl BlueBubblesConnector {
 mod tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, Utc};
+    use fcp_core::CapabilityConstraints;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use wiremock::matchers::{method, path, query_param};
@@ -1074,6 +1117,12 @@ mod tests {
             _ => CAP_READ,
         };
         let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
         let cose = CapabilityTokenBuilder::new()
             .capability_id(capability)
             .zone_id("z:work")
@@ -1081,9 +1130,17 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
+    }
+
+    fn handshake_for_signing_key(signing_key: &Ed25519SigningKey) -> HandshakeRequest {
+        let mut handshake = base_handshake();
+        handshake.host_public_key = signing_key.verifying_key().to_bytes();
+        handshake
     }
 
     #[fcp_async_core::runtime::test]
@@ -1177,6 +1234,26 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_simulate() {
+        let mut connector = BlueBubblesConnector::new();
+        connector.configure(test_config()).await.unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+        let req = SimulateRequest::new(
+            connector.id().clone(),
+            OperationId::from_static(OP_SEND_MESSAGE),
+            ZoneId::work(),
+            json!({}),
+            generate_valid_token(&signing_key, OP_SEND_MESSAGE),
+        );
+        let resp = connector.simulate(req).await.unwrap();
+        assert!(resp.would_succeed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_denies_before_configure() {
         let connector = BlueBubblesConnector::new();
         let req = SimulateRequest::new(
             connector.id().clone(),
@@ -1186,7 +1263,45 @@ mod tests {
             CapabilityToken::test_token(),
         );
         let resp = connector.simulate(req).await.unwrap();
-        assert!(resp.would_succeed);
+        assert!(!resp.would_succeed);
+        assert_eq!(resp.denial_code, Some(FcpError::NotConfigured.error_code()));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_denies_before_handshake() {
+        let mut connector = BlueBubblesConnector::new();
+        connector.configure(test_config()).await.unwrap();
+        let req = SimulateRequest::new(
+            connector.id().clone(),
+            OperationId::from_static(OP_SEND_MESSAGE),
+            ZoneId::work(),
+            json!({}),
+            CapabilityToken::test_token(),
+        );
+        let resp = connector.simulate(req).await.unwrap();
+        assert!(!resp.would_succeed);
+        assert_eq!(resp.denial_code, Some(FcpError::NotHandshaken.error_code()));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_denies_wrong_operation_token() {
+        let mut connector = BlueBubblesConnector::new();
+        connector.configure(test_config()).await.unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+        let req = SimulateRequest::new(
+            connector.id().clone(),
+            OperationId::from_static(OP_SEND_MESSAGE),
+            ZoneId::work(),
+            json!({}),
+            generate_valid_token(&signing_key, OP_GET_CHATS),
+        );
+        let resp = connector.simulate(req).await.unwrap();
+        assert!(!resp.would_succeed);
+        assert_eq!(resp.denial_code.as_deref(), Some("FCP-3003"));
     }
 
     #[test]
@@ -1260,6 +1375,15 @@ mod tests {
         let req = base_invoke(connector.id(), OP_SEND_MESSAGE);
         let result = connector.invoke(req).await;
         assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_configured_without_handshake_reports_not_handshaken() {
+        let mut connector = BlueBubblesConnector::new();
+        connector.configure(test_config()).await.unwrap();
+        let req = base_invoke(connector.id(), OP_SEND_MESSAGE);
+        let result = connector.invoke(req).await;
+        assert!(matches!(result, Err(FcpError::NotHandshaken)));
     }
 
     #[fcp_async_core::runtime::test]
@@ -1478,13 +1602,15 @@ mod tests {
         handshake.host_public_key = verifying_key.to_bytes();
         connector.handshake(handshake).await.unwrap();
 
-        let mut req = base_invoke(connector.id(), OP_SYNC_EVENTS);
-        req.input = json!({
-            "chat_guid": "chat-guid-1",
-            "after": 1_700_000_000_000_i64,
-            "message_limit": 10
-        });
-        req.capability_token = generate_valid_token(&signing_key, OP_SYNC_EVENTS);
+        let req = InvokeRequest {
+            input: json!({
+                "chat_guid": "chat-guid-1",
+                "after": 1_700_000_000_000_i64,
+                "message_limit": 10
+            }),
+            capability_token: generate_valid_token(&signing_key, OP_SYNC_EVENTS),
+            ..base_invoke(connector.id(), OP_SYNC_EVENTS)
+        };
 
         let response = connector.invoke(req).await.unwrap();
         let result = response.result.as_ref().unwrap();

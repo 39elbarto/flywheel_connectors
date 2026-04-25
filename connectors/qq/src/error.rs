@@ -174,33 +174,35 @@ mod tests {
     }
 
     #[test]
-    fn config_error_maps_to_invalid_request() {
+    fn config_error_maps_to_invalid_request() -> Result<(), String> {
         let err = QqError::Config("missing app_id".into());
         let fcp = err.to_fcp_error();
         match fcp {
             FcpError::InvalidRequest { code, message } => {
                 assert_eq!(code, 1001);
                 assert!(message.contains("missing app_id"));
+                Ok(())
             }
-            other => panic!("expected InvalidRequest, got {other:?}"),
+            other => Err(format!("expected InvalidRequest, got {other:?}")),
         }
     }
 
     #[test]
-    fn token_error_is_retryable() {
+    fn token_error_is_retryable() -> Result<(), String> {
         let err = QqError::Token("expired".into());
         assert!(err.is_retryable());
         let fcp = err.to_fcp_error();
         match fcp {
             FcpError::External { retryable, .. } => {
                 assert!(retryable);
+                Ok(())
             }
-            other => panic!("expected External, got {other:?}"),
+            other => Err(format!("expected External, got {other:?}")),
         }
     }
 
     #[test]
-    fn rate_limited_maps_to_fcp_rate_limited() {
+    fn rate_limited_maps_to_fcp_rate_limited() -> Result<(), String> {
         let err = QqError::RateLimited {
             retry_after_ms: 3_000,
         };
@@ -212,71 +214,77 @@ mod tests {
             } => {
                 assert_eq!(retry_after_ms, 3_000);
                 assert!(violation.is_none());
+                Ok(())
             }
-            other => panic!("expected RateLimited, got {other:?}"),
+            other => Err(format!("expected RateLimited, got {other:?}")),
         }
     }
 
     #[test]
-    fn async_error_mapping_preserves_timeout() {
+    fn async_error_mapping_preserves_timeout() -> Result<(), String> {
         let async_err = AsyncError::Timeout { timeout_ms: 30_000 };
         let err = QqError::from_async_error(async_err);
         match &err {
             QqError::Async(msg) => {
                 assert!(msg.contains("30000"));
                 assert!(msg.contains("deadline exceeded"));
+                Ok(())
             }
-            other => panic!("expected Async, got {other:?}"),
+            other => Err(format!("expected Async, got {other:?}")),
         }
     }
 
     #[test]
-    fn json_error_maps_to_internal() {
+    fn json_error_maps_to_internal() -> Result<(), String> {
         let json_err: serde_json::Error = serde_json::from_str::<String>("not json").unwrap_err();
         let err = QqError::Json(json_err);
         let fcp = err.to_fcp_error();
         match fcp {
             FcpError::Internal { message } => {
                 assert!(message.contains("JSON parse error"));
+                Ok(())
             }
-            other => panic!("expected Internal, got {other:?}"),
+            other => Err(format!("expected Internal, got {other:?}")),
         }
     }
 
     #[test]
-    fn invalid_input_maps_to_invalid_request() {
+    fn invalid_input_maps_to_invalid_request() -> Result<(), String> {
         let err = QqError::InvalidInput("channel_id is required".into());
         let fcp = err.to_fcp_error();
         match fcp {
             FcpError::InvalidRequest { code, message } => {
                 assert_eq!(code, 1005);
                 assert!(message.contains("channel_id is required"));
+                Ok(())
             }
-            other => panic!("expected InvalidRequest, got {other:?}"),
+            other => Err(format!("expected InvalidRequest, got {other:?}")),
         }
     }
 
     #[test]
-    fn unauthorized_maps_to_fcp_unauthorized() {
+    fn unauthorized_maps_to_fcp_unauthorized() -> Result<(), String> {
         let err = QqError::Unauthorized("invalid credentials".into());
         let fcp = err.to_fcp_error();
         match fcp {
             FcpError::Unauthorized { code, message } => {
                 assert_eq!(code, 2001);
                 assert_eq!(message, "invalid credentials");
+                Ok(())
             }
-            other => panic!("expected Unauthorized, got {other:?}"),
+            other => Err(format!("expected Unauthorized, got {other:?}")),
         }
     }
 
     #[test]
-    fn async_cancelled_mapping() {
+    fn async_cancelled_mapping() -> Result<(), String> {
         let err = QqError::from_async_error(AsyncError::Cancelled);
         match &err {
             QqError::Async(msg) => {
                 assert!(msg.contains("cancelled"));
+                Ok(())
             }
-            other => panic!("expected Async, got {other:?}"),
+            other => Err(format!("expected Async, got {other:?}")),
         }
     }
 

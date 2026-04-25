@@ -11,21 +11,140 @@
     clippy::unused_async
 )]
 
+use std::ops::{Deref, DerefMut};
+
+use chrono::{Duration, Utc};
+use fcp_core::{CapabilityConstraints, CapabilityToken, FcpResult};
+use fcp_crypto::cose::CapabilityTokenBuilder;
+use fcp_crypto::ed25519::Ed25519SigningKey;
+use serde_json::Value;
 use serde_json::json;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use fcp_bitbucket::connector::BitbucketConnector;
 
-async fn setup_connector(mock_url: &str) -> BitbucketConnector {
+struct TestConnector {
+    connector: BitbucketConnector,
+    signing_key: Ed25519SigningKey,
+}
+
+impl Deref for TestConnector {
+    type Target = BitbucketConnector;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connector
+    }
+}
+
+impl DerefMut for TestConnector {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.connector
+    }
+}
+
+impl TestConnector {
+    async fn handle_invoke(&self, mut params: Value) -> FcpResult<Value> {
+        self.attach_capability_token(&mut params);
+        self.connector.handle_invoke(params).await
+    }
+
+    async fn handle_simulate(&self, mut params: Value) -> FcpResult<Value> {
+        self.attach_capability_token(&mut params);
+        self.connector.handle_simulate(params).await
+    }
+
+    fn attach_capability_token(&self, params: &mut Value) {
+        let Some(object) = params.as_object_mut() else {
+            return;
+        };
+        if object.contains_key("capability_token") {
+            return;
+        }
+        let Some(operation) = object.get("operation_id").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(capability) = capability_for_operation(operation) else {
+            return;
+        };
+        object.insert(
+            "capability_token".into(),
+            serde_json::to_value(generate_token_with_cap(
+                &self.signing_key,
+                capability,
+                &[operation],
+            ))
+            .unwrap(),
+        );
+    }
+}
+
+fn capability_for_operation(operation: &str) -> Option<&'static str> {
+    match operation {
+        "bitbucket.user.get" => Some("bitbucket.user.read"),
+        "bitbucket.repositories.list" | "bitbucket.repositories.get" => {
+            Some("bitbucket.repositories.read")
+        }
+        "bitbucket.pull_requests.list" | "bitbucket.pull_requests.get" => {
+            Some("bitbucket.pull_requests.read")
+        }
+        "bitbucket.pull_requests.create" => Some("bitbucket.pull_requests.write"),
+        "bitbucket.branches.list" => Some("bitbucket.branches.read"),
+        "bitbucket.commits.list" => Some("bitbucket.commits.read"),
+        "bitbucket.pipelines.list" => Some("bitbucket.pipelines.read"),
+        "bitbucket.workspaces.list" => Some("bitbucket.workspaces.read"),
+        _ => None,
+    }
+}
+
+fn generate_token_with_cap(
+    signing_key: &Ed25519SigningKey,
+    capability: &str,
+    operations: &[&str],
+) -> CapabilityToken {
+    let now = Utc::now();
+    let constraints = CapabilityConstraints {
+        resource_allow: vec!["*".into()],
+        ..Default::default()
+    };
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+    let cose = CapabilityTokenBuilder::new()
+        .capability_id(capability)
+        .zone_id("z:work")
+        .principal("user:test")
+        .operations(operations)
+        .issuer("node:test")
+        .validity(now, now + Duration::hours(1))
+        .try_constraints_cbor(&cbor)
+        .unwrap()
+        .sign(signing_key)
+        .unwrap();
+    CapabilityToken::from_raw(cose)
+}
+
+fn handshake_params(signing_key: &Ed25519SigningKey, session_id: &str) -> Value {
+    let verifying_key = signing_key.verifying_key();
+    json!({
+        "session_id": session_id,
+        "zone": "z:work",
+        "host_public_key": verifying_key.to_bytes()
+    })
+}
+
+async fn setup_connector(mock_url: &str) -> TestConnector {
     let mut c = BitbucketConnector::new();
     c.handle_configure(json!({ "access_token": "test_oauth_token", "base_url": mock_url }))
         .await
         .unwrap();
-    c.handle_handshake(json!({"session_id": "test"}))
+    let signing_key = Ed25519SigningKey::generate();
+    c.handle_handshake(handshake_params(&signing_key, "test"))
         .await
         .unwrap();
-    c
+    TestConnector {
+        connector: c,
+        signing_key,
+    }
 }
 
 // -- Lifecycle --
@@ -56,7 +175,10 @@ async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;
     c.handle_shutdown(json!({})).await.unwrap();
-    assert_eq!(c.handle_health().await.unwrap()["status"], "unconfigured");
+    let health = c.handle_health().await.unwrap();
+    assert_eq!(health["status"], "unconfigured");
+    assert_eq!(health["configured"], false);
+    assert_eq!(health["handshaken"], false);
 }
 
 #[fcp_async_core::runtime::test]
@@ -646,13 +768,64 @@ async fn unknown_operation() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn invoke_missing_capability_token_fails() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .connector
+        .handle_invoke(json!({
+            "operation_id": "bitbucket.user.get",
+            "input": {}
+        }))
+        .await;
+    assert!(result.is_err());
+    assert!(matches!(
+        result.unwrap_err(),
+        fcp_core::FcpError::InvalidRequest { message, .. }
+            if message.contains("capability_token")
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_wrong_capability_is_rejected() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let token = generate_token_with_cap(
+        &c.signing_key,
+        "bitbucket.user.read",
+        &["bitbucket.pull_requests.create"],
+    );
+    let result = c
+        .connector
+        .handle_invoke(json!({
+            "operation_id": "bitbucket.pull_requests.create",
+            "input": {
+                "workspace": "myteam",
+                "repo_slug": "backend",
+                "title": "New feature",
+                "source_branch": "feature/xyz"
+            },
+            "capability_token": token
+        }))
+        .await;
+    assert!(matches!(
+        result.unwrap_err(),
+        fcp_core::FcpError::CapabilityDenied { .. }
+            | fcp_core::FcpError::OperationNotGranted { .. }
+    ));
+}
+
+#[fcp_async_core::runtime::test]
 async fn simulate_known() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert!(
-        c.handle_simulate(json!({"operation_id": "bitbucket.repositories.list"}))
-            .await
-            .unwrap()["allowed"]
+        c.handle_simulate(json!({
+            "operation_id": "bitbucket.repositories.list",
+            "input": {"workspace": "myteam"}
+        }))
+        .await
+        .unwrap()["allowed"]
             .as_bool()
             .unwrap()
     );
@@ -668,6 +841,36 @@ async fn simulate_unknown() {
             .unwrap()["allowed"]
             .as_bool()
             .unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_wrong_capability_is_denied() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let token = generate_token_with_cap(
+        &c.signing_key,
+        "bitbucket.user.read",
+        &["bitbucket.pull_requests.create"],
+    );
+    let result = c
+        .connector
+        .handle_simulate(json!({
+            "operation_id": "bitbucket.pull_requests.create",
+            "input": {
+                "workspace": "myteam",
+                "repo_slug": "backend",
+                "title": "New feature",
+                "source_branch": "feature/xyz"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+    assert!(!result["allowed"].as_bool().unwrap());
+    assert_eq!(
+        result["missing_capabilities"][0],
+        "bitbucket.pull_requests.write"
     );
 }
 

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:6974a5aa69103d4ff974b30eee4d09e20240c601f7d8ad3f7efcd2346ec8c188"
+interface_hash = "blake3-256:fcp.interface.v2:47d4629d880f7b2e488bd78618afae950a388554eab0f283ecdc087f8c88369d"
 
 [connector]
 id = "fcp.shopify"
@@ -39,7 +39,14 @@ required = [
     "network.egress",
     "network.tls.sni",
 ]
-optional = []
+optional = [
+    "shopify.products.read",
+    "shopify.products.write",
+    "shopify.orders.read",
+    "shopify.orders.write",
+    "shopify.customers.read",
+    "shopify.inventory.read",
+]
 forbidden = [
     "system.exec",
     "network.listen",

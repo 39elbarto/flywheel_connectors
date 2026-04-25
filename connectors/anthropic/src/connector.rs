@@ -30,7 +30,7 @@ struct AnthropicConfig {
 
 impl AnthropicConfig {
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
-        let api_key = params
+        let direct_auth_value = params
             .get("api_key")
             .and_then(|v| v.as_str())
             .map(str::trim)
@@ -53,7 +53,7 @@ impl AnthropicConfig {
             None => None,
         };
 
-        let auth = match (api_key, credential_id) {
+        let auth = match (direct_auth_value, credential_id) {
             (Some(key), None) => AnthropicAuth::ApiKey(key),
             (None, Some(cred_id)) => AnthropicAuth::CredentialId(cred_id),
             (Some(_), Some(_)) => {
@@ -144,6 +144,34 @@ fn parse_anthropic_base_url(base_url: &str) -> Result<Url, String> {
     }
 
     Ok(parsed)
+}
+
+fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
+    let capability = match operation {
+        "anthropic.message" => "anthropic.message",
+        "anthropic.message.stream" => "anthropic.message.stream",
+        "anthropic.chat" => "anthropic.chat",
+        "anthropic.get_usage" => "anthropic.get_usage",
+        _ => {
+            return Err(FcpError::OperationNotGranted {
+                operation: operation.into(),
+            });
+        }
+    };
+    Ok(CapabilityId::from_static(capability))
+}
+
+fn resource_uris_for_operation(operation: &str, input: &serde_json::Value) -> Vec<String> {
+    match operation {
+        "anthropic.message" | "anthropic.message.stream" | "anthropic.chat" => {
+            let model = input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("claude-sonnet-4-20250514");
+            vec![format!("anthropic:model:{model}")]
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Doctor check result.
@@ -763,6 +791,57 @@ impl AnthropicConnector {
                 message: format!("Invalid simulate request: {e}"),
             })?;
 
+        let capability = match required_capability(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return serde_json::to_value(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ))
+                .map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize response: {e}"),
+                });
+            }
+        };
+        if self.client.is_none() {
+            return serde_json::to_value(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ))
+            .map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+        let Some(verifier) = self.verifier.as_ref() else {
+            return serde_json::to_value(SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            ))
+            .map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        };
+        let resource_uris = resource_uris_for_operation(req.operation.as_str(), &req.input);
+        if let Err(error) = verifier.verify_bound(
+            req.capability_token,
+            &capability,
+            &req.operation,
+            &resource_uris,
+        ) {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response =
+                    response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+            }
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
         let response = SimulateResponse::allowed(req.id);
         serde_json::to_value(response).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize response: {e}"),
@@ -804,10 +883,12 @@ impl AnthropicConnector {
                 message: "Missing capability_token".into(),
             })?;
 
-        let token: CapabilityToken =
-            serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("Invalid capability_token format: {e}"),
+        let capability =
+            serde_json::from_value::<CapabilityToken>(token_value.clone()).map_err(|e| {
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid capability_token format: {e}"),
+                }
             })?;
 
         // Verify token
@@ -815,41 +896,13 @@ impl AnthropicConnector {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
-        let intro = self.handle_introspect().await?;
-        let cap_str = intro
-            .get("operations")
-            .and_then(|ops| ops.as_array())
-            .and_then(|ops| {
-                ops.iter()
-                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
-            })
-            .and_then(|op| op.get("capability"))
-            .and_then(|cap| cap.as_str())
-            .ok_or_else(|| FcpError::OperationNotGranted {
-                operation: operation.into(),
-            })?;
-
-        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
-            code: 1003,
-            message: "Invalid capability ID format".into(),
-        })?;
-
-        let mut resource_uris = Vec::new();
-        if operation == "anthropic.message"
-            || operation == "anthropic.message.stream"
-            || operation == "anthropic.chat"
-        {
-            let model = input
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or("claude-sonnet-4-20250514");
-            resource_uris.push(format!("anthropic:model:{model}"));
-        }
+        let cap_id = required_capability(operation)?;
+        let resource_uris = resource_uris_for_operation(operation, &input);
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &resource_uris)?;
+            verifier.verify_bound(capability, &cap_id, &op_id, &resource_uris)?;
         } else {
-            return Err(FcpError::NotConfigured);
+            return Err(FcpError::NotHandshaken);
         }
 
         match operation {
@@ -1496,7 +1549,8 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&cbor)
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
@@ -1591,7 +1645,10 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("exactly one"));
             }
-            other => panic!("Expected InvalidRequest, got: {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::InvalidRequest { .. }),
+                "Expected InvalidRequest, got: {other:?}"
+            ),
         }
     }
 
@@ -1605,7 +1662,10 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("Missing api_key or credential_id"));
             }
-            other => panic!("Expected InvalidRequest, got: {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::InvalidRequest { .. }),
+                "Expected InvalidRequest, got: {other:?}"
+            ),
         }
     }
 
@@ -1623,7 +1683,10 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("api.anthropic.com"));
             }
-            other => panic!("Expected InvalidRequest, got: {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::InvalidRequest { .. }),
+                "Expected InvalidRequest, got: {other:?}"
+            ),
         }
     }
 
@@ -1641,7 +1704,10 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("without path, query, or fragment"));
             }
-            other => panic!("Expected InvalidRequest, got: {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::InvalidRequest { .. }),
+                "Expected InvalidRequest, got: {other:?}"
+            ),
         }
     }
 
@@ -1881,7 +1947,7 @@ mod tests {
         let result = connector.handle_self_check().await.unwrap();
         let report: SelfCheckReport = serde_json::from_value(result).unwrap();
 
-        // InvalidApiKey is not retryable, so should be Failed
+        // Invalid API credentials are not retryable, so this should be Failed.
         assert_eq!(report.status, fcp_core::SelfCheckStatus::Failed);
         assert_eq!(report.reason_code.as_deref(), Some("self_check_failed"));
     }
@@ -1949,7 +2015,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "anthropic.chat");
+        let capability = generate_valid_token(&signing_key, "anthropic.chat");
 
         let result = connector
             .handle_invoke(json!({
@@ -1957,7 +2023,7 @@ mod tests {
                 "input": {
                     "message": "Hello"
                 },
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
 
@@ -1994,13 +2060,13 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "anthropic.message");
+        let capability = generate_valid_token(&signing_key, "anthropic.message");
 
         let result = connector
             .handle_invoke(json!({
                 "operation": "anthropic.message",
                 "input": {},
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
 
@@ -2010,7 +2076,10 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("messages"));
             }
-            _ => panic!("Expected InvalidRequest for missing messages, got: {err:?}"),
+            other => assert!(
+                matches!(other, FcpError::InvalidRequest { .. }),
+                "Expected InvalidRequest for missing messages, got: {other:?}"
+            ),
         }
     }
 
@@ -2033,13 +2102,13 @@ mod tests {
             .unwrap();
 
         // Must grant the specific operation ID
-        let token = generate_valid_token(&signing_key, "anthropic.get_usage");
+        let capability = generate_valid_token(&signing_key, "anthropic.get_usage");
 
         let result = connector
             .handle_invoke(json!({
                 "operation": "anthropic.get_usage",
                 "input": {},
-                "capability_token": token
+                "capability_token": capability
             }))
             .await
             .unwrap();
@@ -2209,7 +2278,10 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("Missing"));
             }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
+            other => assert!(
+                matches!(other, FcpError::InvalidRequest { .. }),
+                "Expected InvalidRequest, got: {other:?}"
+            ),
         }
     }
 
@@ -2222,7 +2294,10 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("string"));
             }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
+            other => assert!(
+                matches!(other, FcpError::InvalidRequest { .. }),
+                "Expected InvalidRequest, got: {other:?}"
+            ),
         }
     }
 
@@ -2235,7 +2310,10 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("valid UUID"));
             }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
+            other => assert!(
+                matches!(other, FcpError::InvalidRequest { .. }),
+                "Expected InvalidRequest, got: {other:?}"
+            ),
         }
     }
 
@@ -2256,7 +2334,10 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("api_version must be a string"));
             }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
+            other => assert!(
+                matches!(other, FcpError::InvalidRequest { .. }),
+                "Expected InvalidRequest, got: {other:?}"
+            ),
         }
     }
 

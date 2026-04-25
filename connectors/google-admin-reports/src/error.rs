@@ -164,22 +164,28 @@ mod tests {
     }
 
     #[test]
-    fn to_fcp_error_unauthorized() {
+    fn to_fcp_error_unauthorized() -> Result<(), String> {
         match AdminReportsError::Unauthorized.to_fcp_error() {
-            FcpError::Unauthorized { code, .. } => assert_eq!(code, 2001),
-            other => panic!("expected Unauthorized, got {other:?}"),
+            FcpError::Unauthorized { code, .. } => {
+                assert_eq!(code, 2001);
+                Ok(())
+            }
+            other => Err(format!("expected Unauthorized, got {other:?}")),
         }
     }
 
     #[test]
-    fn to_fcp_error_rate_limited() {
+    fn to_fcp_error_rate_limited() -> Result<(), String> {
         match (AdminReportsError::RateLimited {
             retry_after_secs: 30,
         })
         .to_fcp_error()
         {
-            FcpError::RateLimited { retry_after_ms, .. } => assert_eq!(retry_after_ms, 30_000),
-            other => panic!("expected RateLimited, got {other:?}"),
+            FcpError::RateLimited { retry_after_ms, .. } => {
+                assert_eq!(retry_after_ms, 30_000);
+                Ok(())
+            }
+            other => Err(format!("expected RateLimited, got {other:?}")),
         }
     }
 }

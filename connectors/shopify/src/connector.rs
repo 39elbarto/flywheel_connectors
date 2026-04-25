@@ -155,7 +155,7 @@ impl ShopifyConfig {
             .trim()
             .trim_end_matches('/')
             .to_ascii_lowercase();
-        let access_token = config
+        let provided_auth_value = config
             .access_token
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
@@ -164,7 +164,7 @@ impl ShopifyConfig {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty());
-        let auth = match (access_token, credential_id) {
+        let auth = match (provided_auth_value, credential_id) {
             (Some(_), Some(_)) => {
                 return Err(FcpError::InvalidRequest {
                     code: 1001,
@@ -963,10 +963,10 @@ impl FcpConnector for ShopifyConnector {
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
         let cfg = ShopifyConfig::from_value(config)?;
-        self.runtime = Some(ConnectorRuntime::new(
+        let runtime = ConnectorRuntime::new(
             ConnectorRuntimeConfig::default()
                 .with_request_timeout(Duration::from_millis(cfg.request_timeout_ms)),
-        ));
+        );
         let client = ShopifyClient::new(
             &cfg.shop_domain,
             cfg.auth.clone(),
@@ -981,8 +981,12 @@ impl FcpConnector for ShopifyConnector {
         let shop_domain = cfg.shop_domain.clone();
         let api_version = cfg.api_version.clone();
         let auth_mode = cfg.auth.redacted_label();
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown();
+        }
         self.client = Some(client);
         self.config = Some(cfg);
+        self.runtime = Some(runtime);
         self.verifier = None;
         self.base.set_configured(true);
         self.base.set_handshaken(false);
@@ -997,6 +1001,10 @@ impl FcpConnector for ShopifyConnector {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        if self.config.is_none() || self.client.is_none() || self.runtime.is_none() {
+            return Err(FcpError::NotConfigured);
+        }
+
         self.base.set_handshaken(true);
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -1125,7 +1133,58 @@ impl FcpConnector for ShopifyConnector {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
-        Ok(SimulateResponse::allowed(req.id))
+        let capability = match Self::capability_for_operation(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return Ok(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ));
+            }
+        };
+
+        if let Err(error) = Self::validate_input_for_operation(req.operation.as_str(), &req.input) {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                error.to_string(),
+                error.error_code(),
+            ));
+        }
+
+        if self.config.is_none() || self.client.is_none() || self.runtime.is_none() {
+            let error = FcpError::NotConfigured;
+            return Ok(SimulateResponse::denied(
+                req.id,
+                error.to_string(),
+                error.error_code(),
+            ));
+        }
+
+        let Some(verifier) = &self.verifier else {
+            let error = FcpError::NotHandshaken;
+            return Ok(SimulateResponse::denied(
+                req.id,
+                error.to_string(),
+                error.error_code(),
+            ));
+        };
+
+        match verifier.verify_bound(req.capability_token, &capability, &req.operation, &[]) {
+            Ok(_) => Ok(SimulateResponse::allowed(req.id)),
+            Err(error) => {
+                let mut response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                if matches!(
+                    error,
+                    FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+                ) {
+                    response =
+                        response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+                }
+                Ok(response)
+            }
+        }
     }
 
     fn metrics(&self) -> ConnectorMetrics {
@@ -1180,27 +1239,8 @@ impl ShopifyConnector {
         self.base.check_ready()?;
         let operation = req.operation.as_str();
         if let Some(verifier) = &self.verifier {
-            let cap = match operation {
-                OP_PRODUCTS_LIST | OP_PRODUCTS_GET | OP_HEALTH => {
-                    CapabilityId::from_static(CAP_PRODUCTS_READ)
-                }
-                OP_PRODUCTS_CREATE | OP_PRODUCTS_UPDATE | OP_PRODUCTS_DELETE => {
-                    CapabilityId::from_static(CAP_PRODUCTS_WRITE)
-                }
-                OP_ORDERS_LIST | OP_ORDERS_GET => CapabilityId::from_static(CAP_ORDERS_READ),
-                OP_ORDERS_CREATE => CapabilityId::from_static(CAP_ORDERS_WRITE),
-                OP_CUSTOMERS_LIST | OP_CUSTOMERS_GET => {
-                    CapabilityId::from_static(CAP_CUSTOMERS_READ)
-                }
-                OP_INVENTORY_LIST => CapabilityId::from_static(CAP_INVENTORY_READ),
-                _ => {
-                    return Err(FcpError::InvalidRequest {
-                        code: 1004,
-                        message: format!("Unknown operation: {operation}"),
-                    });
-                }
-            };
-            verifier.verify(req.capability_token, &cap, &req.operation, &[])?;
+            let cap = Self::capability_for_operation(operation)?;
+            verifier.verify_bound(req.capability_token, &cap, &req.operation, &[])?;
         } else {
             return Err(FcpError::Internal {
                 message: "connector ready state missing capability verifier".into(),
@@ -1457,6 +1497,69 @@ impl ShopifyConnector {
         };
         Ok(InvokeResponse::ok(req.id, output))
     }
+
+    fn capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
+        let capability = match operation {
+            OP_PRODUCTS_LIST | OP_PRODUCTS_GET | OP_HEALTH => CAP_PRODUCTS_READ,
+            OP_PRODUCTS_CREATE | OP_PRODUCTS_UPDATE | OP_PRODUCTS_DELETE => CAP_PRODUCTS_WRITE,
+            OP_ORDERS_LIST | OP_ORDERS_GET => CAP_ORDERS_READ,
+            OP_ORDERS_CREATE => CAP_ORDERS_WRITE,
+            OP_CUSTOMERS_LIST | OP_CUSTOMERS_GET => CAP_CUSTOMERS_READ,
+            OP_INVENTORY_LIST => CAP_INVENTORY_READ,
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!("Unknown operation: {operation}"),
+                });
+            }
+        };
+        Ok(CapabilityId::from_static(capability))
+    }
+
+    fn validate_input_for_operation(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+        match operation {
+            OP_PRODUCTS_LIST | OP_ORDERS_LIST | OP_CUSTOMERS_LIST | OP_HEALTH => {}
+            OP_PRODUCTS_GET | OP_PRODUCTS_UPDATE | OP_PRODUCTS_DELETE => {
+                Self::require_u64(input, "product_id")?;
+            }
+            OP_PRODUCTS_CREATE => {
+                Self::require_str(input, "title")?;
+            }
+            OP_ORDERS_GET => {
+                Self::require_u64(input, "order_id")?;
+            }
+            OP_ORDERS_CREATE => {
+                let items = input
+                    .get("line_items")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing: line_items array".into(),
+                    })?;
+                for item in items {
+                    item.get("variant_id")
+                        .and_then(|v| v.as_u64())
+                        .ok_or_else(|| FcpError::InvalidRequest {
+                            code: 1005,
+                            message: "line_items[].variant_id required".into(),
+                        })?;
+                }
+            }
+            OP_CUSTOMERS_GET => {
+                Self::require_u64(input, "customer_id")?;
+            }
+            OP_INVENTORY_LIST => {
+                Self::require_u64(input, "location_id")?;
+            }
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!("Unknown operation: {operation}"),
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1464,7 +1567,10 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    use fcp_core::{CapabilityToken, RequestId, ZoneId};
+    use chrono::{Duration, Utc};
+    use fcp_core::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
+    use fcp_crypto::cose::CapabilityTokenBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
 
     fn tc() -> serde_json::Value {
@@ -1497,6 +1603,52 @@ mod tests {
             transport_caps: None,
             requested_instance_id: None,
         }
+    }
+
+    fn handshake_req_for(signing_key: &Ed25519SigningKey) -> HandshakeRequest {
+        let mut req = handshake_req();
+        req.host_public_key = signing_key.verifying_key().to_bytes();
+        req
+    }
+
+    fn signed_token(
+        signing_key: &Ed25519SigningKey,
+        capability: &'static str,
+        operation: &'static str,
+    ) -> CapabilityToken {
+        let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut constraints_cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut constraints_cbor).unwrap();
+        let cose = CapabilityTokenBuilder::new()
+            .capability_id(capability)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&[operation])
+            .issuer("node:test")
+            .validity(now, now + Duration::hours(1))
+            .try_constraints_cbor(&constraints_cbor)
+            .unwrap()
+            .sign(signing_key)
+            .unwrap();
+        CapabilityToken::from_raw(cose)
+    }
+
+    fn simulate_req(
+        operation: &'static str,
+        input: serde_json::Value,
+        token: CapabilityToken,
+    ) -> SimulateRequest {
+        SimulateRequest::new(
+            ConnectorId::from_static("fcp.shopify"),
+            OperationId::from_static(operation),
+            ZoneId::work(),
+            input,
+            token,
+        )
     }
 
     fn invoke_req(op: &'static str, input: serde_json::Value) -> InvokeRequest {
@@ -1659,7 +1811,7 @@ mod tests {
         operations_info()
             .into_iter()
             .find(|op| op.id.as_str() == operation_id)
-            .unwrap_or_else(|| panic!("missing operation {operation_id}"))
+            .expect("operation should exist in operation table")
     }
 
     #[test]
@@ -1767,11 +1919,28 @@ mod tests {
     #[test]
     fn simulate_ok() {
         let r = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = ShopifyConnector::new();
+            let signing_key = Ed25519SigningKey::generate();
+            c.configure(tc()).await.unwrap();
+            c.handshake(handshake_req_for(&signing_key)).await.unwrap();
+            c.simulate(simulate_req(
+                OP_PRODUCTS_LIST,
+                json!({}),
+                signed_token(&signing_key, CAP_PRODUCTS_READ, OP_PRODUCTS_LIST),
+            ))
+            .await
+        })
+        .unwrap()
+        .unwrap();
+        assert!(r.would_succeed);
+    }
+
+    #[test]
+    fn simulate_unconfigured_denied() {
+        let r = fcp_async_core::runtime::block_on_sync(async {
             ShopifyConnector::new()
-                .simulate(SimulateRequest::new(
-                    ConnectorId::from_static("fcp.shopify"),
-                    OperationId::from_static(OP_PRODUCTS_LIST),
-                    ZoneId::work(),
+                .simulate(simulate_req(
+                    OP_PRODUCTS_LIST,
                     json!({}),
                     CapabilityToken::test_token(),
                 ))
@@ -1779,7 +1948,70 @@ mod tests {
         })
         .unwrap()
         .unwrap();
-        assert!(r.would_succeed);
+        assert!(!r.would_succeed);
+        assert_eq!(r.denial_code, Some(FcpError::NotConfigured.error_code()));
+    }
+
+    #[test]
+    fn simulate_requires_handshake() {
+        let r = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = ShopifyConnector::new();
+            c.configure(tc()).await.unwrap();
+            c.simulate(simulate_req(
+                OP_PRODUCTS_LIST,
+                json!({}),
+                CapabilityToken::test_token(),
+            ))
+            .await
+        })
+        .unwrap()
+        .unwrap();
+        assert!(!r.would_succeed);
+        assert_eq!(r.denial_code, Some(FcpError::NotHandshaken.error_code()));
+    }
+
+    #[test]
+    fn simulate_rejects_invalid_input() {
+        let r = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = ShopifyConnector::new();
+            let signing_key = Ed25519SigningKey::generate();
+            c.configure(tc()).await.unwrap();
+            c.handshake(handshake_req_for(&signing_key)).await.unwrap();
+            c.simulate(simulate_req(
+                OP_PRODUCTS_GET,
+                json!({}),
+                signed_token(&signing_key, CAP_PRODUCTS_READ, OP_PRODUCTS_GET),
+            ))
+            .await
+        })
+        .unwrap()
+        .unwrap();
+        assert!(!r.would_succeed);
+        assert!(
+            r.failure_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("product_id"))
+        );
+    }
+
+    #[test]
+    fn simulate_rejects_wrong_capability() {
+        let r = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = ShopifyConnector::new();
+            let signing_key = Ed25519SigningKey::generate();
+            c.configure(tc()).await.unwrap();
+            c.handshake(handshake_req_for(&signing_key)).await.unwrap();
+            c.simulate(simulate_req(
+                OP_PRODUCTS_CREATE,
+                json!({"title": "New product"}),
+                signed_token(&signing_key, CAP_PRODUCTS_READ, OP_PRODUCTS_LIST),
+            ))
+            .await
+        })
+        .unwrap()
+        .unwrap();
+        assert!(!r.would_succeed);
+        assert_eq!(r.missing_capabilities, vec![CAP_PRODUCTS_WRITE.to_string()]);
     }
 
     #[test]
@@ -1831,6 +2063,17 @@ mod tests {
         .unwrap();
         assert_eq!(r.status, "accepted");
         assert_eq!(r.capabilities_granted.len(), 3);
+    }
+
+    #[test]
+    fn handshake_requires_configuration() {
+        assert!(
+            fcp_async_core::runtime::block_on_sync(async {
+                ShopifyConnector::new().handshake(handshake_req()).await
+            })
+            .unwrap()
+            .is_err()
+        );
     }
 
     #[test]

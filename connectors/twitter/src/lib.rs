@@ -595,7 +595,7 @@ mod connector_unit_tests {
     // ── Simulate tests ───────────────────────────────────────────────────
 
     #[fcp_async_core::runtime::test]
-    async fn simulate_returns_allowed() {
+    async fn simulate_denies_when_not_configured() {
         use fcp_core::{CapabilityToken, ConnectorId, SimulateRequest, ZoneId};
 
         let connector = make_connector();
@@ -609,7 +609,9 @@ mod connector_unit_tests {
         let params = serde_json::to_value(&req).expect("serialize");
         let result = connector.handle_simulate(params).await.expect("simulate");
 
-        assert_eq!(result["would_succeed"].as_bool(), Some(true));
+        assert_eq!(result["would_succeed"].as_bool(), Some(false));
+        let expected_code = fcp_core::FcpError::NotConfigured.error_code();
+        assert_eq!(result["denial_code"].as_str(), Some(expected_code.as_str()));
     }
 
     // ── Capability mapping tests ─────────────────────────────────────────

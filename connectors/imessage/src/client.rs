@@ -61,7 +61,7 @@ async fn decode_json<T: serde::de::DeserializeOwned>(
 pub struct BlueBubblesClient {
     client: Client,
     server_url: String,
-    password: String,
+    server_passcode: String,
     retry_config: HttpRetryConfig,
     request_timeout: Duration,
 }
@@ -71,7 +71,7 @@ impl std::fmt::Debug for BlueBubblesClient {
         f.debug_struct("BlueBubblesClient")
             .field("client", &self.client)
             .field("server_url", &self.server_url)
-            .field("password", &"[REDACTED]")
+            .field("server_passcode", &"[REDACTED]")
             .field("retry_config", &self.retry_config)
             .field("request_timeout", &self.request_timeout)
             .finish()
@@ -86,10 +86,15 @@ impl BlueBubblesClient {
     /// Returns an error if the HTTP client cannot be built.
     pub fn new(
         server_url: &str,
-        password: &str,
+        server_passcode: &str,
         retry_config: HttpRetryConfig,
     ) -> BlueBubblesResult<Self> {
-        Self::build(server_url, password, retry_config, Duration::from_secs(30))
+        Self::build(
+            server_url,
+            server_passcode,
+            retry_config,
+            Duration::from_secs(30),
+        )
     }
 
     /// Create a client from validated connector configuration.
@@ -100,7 +105,7 @@ impl BlueBubblesClient {
     pub fn from_config(config: &BlueBubblesConfig) -> BlueBubblesResult<Self> {
         Self::build(
             &config.server_url,
-            &config.password,
+            &config.server_passcode,
             config.retry.clone(),
             Duration::from_millis(config.request_timeout_ms),
         )
@@ -108,7 +113,7 @@ impl BlueBubblesClient {
 
     fn build(
         server_url: &str,
-        password: &str,
+        server_passcode: &str,
         retry_config: HttpRetryConfig,
         request_timeout: Duration,
     ) -> BlueBubblesResult<Self> {
@@ -120,7 +125,7 @@ impl BlueBubblesClient {
         Ok(Self {
             client,
             server_url: server_url.trim().trim_end_matches('/').to_string(),
-            password: password.trim().to_string(),
+            server_passcode: server_passcode.trim().to_string(),
             retry_config,
             request_timeout,
         })
@@ -147,17 +152,17 @@ impl BlueBubblesClient {
         let url = format!("{}/api/v1/server/info", self.server_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
-        let password = self.password.clone();
+        let server_passcode = self.server_passcode.clone();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let password = password.clone();
+            let server_passcode = server_passcode.clone();
             async move {
                 debug!(attempt, "Fetching BlueBubbles server info");
                 let resp = match client
                     .get(&url)
-                    .query(&[("password", &password)])
+                    .query(&[("password", &server_passcode)])
                     .send()
                     .await
                 {
@@ -232,7 +237,7 @@ impl BlueBubblesClient {
         let url = format!("{}/api/v1/message/text", self.server_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
-        let password = self.password.clone();
+        let server_passcode = self.server_passcode.clone();
 
         let body = SendMessageRequest {
             chat_guid: chat_guid.to_string(),
@@ -244,13 +249,13 @@ impl BlueBubblesClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let password = password.clone();
+            let server_passcode = server_passcode.clone();
             let body = body.clone();
             async move {
                 debug!(attempt, "Sending iMessage via BlueBubbles");
                 let resp = match client
                     .post(&url)
-                    .query(&[("password", &password)])
+                    .query(&[("password", &server_passcode)])
                     .json(&body)
                     .send()
                     .await
@@ -318,17 +323,17 @@ impl BlueBubblesClient {
         let url = format!("{}/api/v1/chat", self.server_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
-        let password = self.password.clone();
+        let server_passcode = self.server_passcode.clone();
         let params = params.clone();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let password = password.clone();
+            let server_passcode = server_passcode.clone();
             let params = params.clone();
             async move {
                 debug!(attempt, "Fetching BlueBubbles chats");
-                let mut query: Vec<(&str, String)> = vec![("password", password)];
+                let mut query: Vec<(&str, String)> = vec![("password", server_passcode)];
                 if let Some(offset) = params.offset {
                     query.push(("offset", offset.to_string()));
                 }
@@ -404,19 +409,19 @@ impl BlueBubblesClient {
         let url = format!("{}/api/v1/chat/{guid}", self.server_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
-        let password = self.password.clone();
+        let server_passcode = self.server_passcode.clone();
         let guid = guid.to_string();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let password = password.clone();
+            let server_passcode = server_passcode.clone();
             let guid = guid.clone();
             async move {
                 debug!(attempt, "Fetching BlueBubbles chat");
                 let resp = match client
                     .get(&url)
-                    .query(&[("password", &password)])
+                    .query(&[("password", &server_passcode)])
                     .send()
                     .await
                 {
@@ -489,19 +494,19 @@ impl BlueBubblesClient {
         let url = format!("{}/api/v1/chat/{chat_guid}/message", self.server_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
-        let password = self.password.clone();
+        let server_passcode = self.server_passcode.clone();
         let chat_guid = chat_guid.to_string();
         let params = params.clone();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let password = password.clone();
+            let server_passcode = server_passcode.clone();
             let chat_guid = chat_guid.clone();
             let params = params.clone();
             async move {
                 debug!(attempt, "Fetching BlueBubbles messages");
-                let mut query: Vec<(&str, String)> = vec![("password", password)];
+                let mut query: Vec<(&str, String)> = vec![("password", server_passcode)];
                 if let Some(offset) = params.offset {
                     query.push(("offset", offset.to_string()));
                 }
@@ -584,17 +589,17 @@ impl BlueBubblesClient {
         let url = format!("{}/api/v1/attachment/{guid}/download", self.server_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
-        let password = self.password.clone();
+        let server_passcode = self.server_passcode.clone();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let password = password.clone();
+            let server_passcode = server_passcode.clone();
             async move {
                 debug!(attempt, "Downloading BlueBubbles attachment");
                 let resp = match client
                     .get(&url)
-                    .query(&[("password", &password)])
+                    .query(&[("password", &server_passcode)])
                     .send()
                     .await
                 {
@@ -663,17 +668,17 @@ impl BlueBubblesClient {
         let url = format!("{}/api/v1/chat/{chat_guid}/read", self.server_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
-        let password = self.password.clone();
+        let server_passcode = self.server_passcode.clone();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let password = password.clone();
+            let server_passcode = server_passcode.clone();
             async move {
                 debug!(attempt, "Marking BlueBubbles chat as read");
                 let resp = match client
                     .post(&url)
-                    .query(&[("password", &password)])
+                    .query(&[("password", &server_passcode)])
                     .send()
                     .await
                 {
@@ -735,7 +740,7 @@ impl BlueBubblesClient {
         let resp = self
             .client
             .get(&url)
-            .query(&[("password", &self.password)])
+            .query(&[("password", &self.server_passcode)])
             .send()
             .await
             .map_err(BlueBubblesError::from_transport_error)?;

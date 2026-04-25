@@ -253,6 +253,7 @@ impl SymbolRequestHandler {
     /// # Errors
     ///
     /// Returns `SymbolRequestError` if the request is invalid or exceeds bounds.
+    #[allow(clippy::too_many_lines)] // Keep the fail-closed validation gates in request-processing order.
     pub fn validate_request(
         &self,
         request: &SymbolRequest,
@@ -330,11 +331,9 @@ impl SymbolRequestHandler {
         // enforcement stays aligned with the symbol-request threshold semantics.
         let has_proof_of_need = request.has_proof_of_need();
         let amplification_request_symbols = if has_proof_of_need {
-            request
-                .missing_hint
-                .as_ref()
-                .map(|hints| u32::try_from(hints.len()).unwrap_or(u32::MAX).max(1))
-                .unwrap_or(1)
+            request.missing_hint.as_ref().map_or(1, |hints| {
+                u32::try_from(hints.len()).unwrap_or(u32::MAX).max(1)
+            })
         } else {
             let max_factor = admission.policy().max_amplification_factor;
             if max_factor == 0 {

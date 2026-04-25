@@ -589,7 +589,10 @@ impl MultiNodeMeshHarness {
                     key: owner_vk.clone(),
                     reply: tx,
                 });
-                let handle = self.nodes.get(&name).expect("node exists");
+                let handle = self
+                    .nodes
+                    .get(&name)
+                    .ok_or_else(|| HarnessError::UnknownNode(name.clone()))?;
                 handle
                     .event_tx
                     .send(event)
@@ -972,22 +975,29 @@ async fn run_node_task(
                         HashSet::new(),
                         Vec::new(),
                     );
+                    mesh.update_local_zones(HashSet::from([ZoneId::work()]));
                     for peer in peers {
                         if peer.node_id == identity.node_id {
                             continue;
                         }
+                        let peer_id = peer.node_id.clone();
                         mesh.update_peer_state(
-                            peer.node_id.clone(),
-                            default_profile(&peer.node_id),
+                            peer_id.clone(),
+                            default_profile(&peer_id),
                             HashSet::new(),
                             Vec::new(),
                             now_ms,
                         );
-                        mesh.register_peer_signing_key(peer.node_id, peer.signing_public_key);
+                        mesh.update_peer_zones(&peer_id, HashSet::from([ZoneId::work()]));
+                        mesh.register_peer_signing_key(peer_id, peer.signing_public_key);
                     }
                     let _ = reply.send(());
                 }
-                NodeCommand::RegisterZoneOwnerKey { zone_id, key, reply } => {
+                NodeCommand::RegisterZoneOwnerKey {
+                    zone_id,
+                    key,
+                    reply,
+                } => {
                     mesh.register_zone_owner_key(zone_id, key);
                     let _ = reply.send(());
                 }
@@ -1502,7 +1512,7 @@ async fn multi_node_harness_enforces_summary_signature_boundary() {
         .snapshot(&node_b, zone_id.clone(), 10)
         .await
         .unwrap();
-    assert_eq!(signed_snapshot.peer_count, 1);
+    assert_eq!(signed_snapshot.peer_count, 2);
     assert!(
         signed_snapshot
             .observed_messages
@@ -1522,7 +1532,7 @@ async fn multi_node_harness_enforces_summary_signature_boundary() {
         .snapshot(&node_b, zone_id.clone(), 10)
         .await
         .unwrap();
-    assert_eq!(rejected_snapshot.peer_count, 1);
+    assert_eq!(rejected_snapshot.peer_count, 2);
     assert!(
         rejected_snapshot
             .observed_messages

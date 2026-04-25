@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::auth::{
-    google_auth_source_policies, GoogleAuthSourceDisposition, DEFAULT_GOOGLE_OAUTH_TOKEN_URL,
+    DEFAULT_GOOGLE_OAUTH_TOKEN_URL, GoogleAuthSourceDisposition, google_auth_source_policies,
 };
 use crate::policy::{
     GoogleGcloudAutomationBoundary, GooglePolicyCatalog, GoogleProvisioningScopeEscalation,
@@ -301,7 +301,7 @@ pub fn load_default_google_provisioning_bundle(
     GooglePolicyCatalog::load_default()?.provisioning_bundle(surface_id)
 }
 
-fn validate_auth_flow(
+const fn validate_auth_flow(
     auth_flow: &GoogleProvisioningAuthFlow,
 ) -> Result<(), GoogleProvisioningError> {
     match auth_flow {
@@ -690,10 +690,12 @@ mod tests {
             bundle.surface.default_scopes,
             vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()]
         );
-        assert!(bundle
-            .automation
-            .required_api_enablement
-            .contains(&"Gmail API".to_string()));
+        assert!(
+            bundle
+                .automation
+                .required_api_enablement
+                .contains(&"Gmail API".to_string())
+        );
         assert_eq!(bundle.recipe.id.as_str(), "google/gmail/setup");
         assert_eq!(bundle.recipe.steps.len(), 5);
         assert_eq!(
@@ -776,15 +778,19 @@ mod tests {
             bundle.setup.estimated_duration_ms,
             Some(WORKSPACE_EVENTS_ESTIMATED_DURATION_MS)
         );
-        assert!(bundle
-            .automation
-            .required_api_enablement
-            .contains(&"Google Cloud Pub/Sub API".to_string()));
-        assert!(bundle
-            .automation
-            .gcloud_assisted_steps
-            .iter()
-            .any(|step| step.contains("Pub/Sub topic")));
+        assert!(
+            bundle
+                .automation
+                .required_api_enablement
+                .contains(&"Google Cloud Pub/Sub API".to_string())
+        );
+        assert!(
+            bundle
+                .automation
+                .gcloud_assisted_steps
+                .iter()
+                .any(|step| step.contains("Pub/Sub topic"))
+        );
         let bootstrap_step = bundle
             .recipe
             .steps
@@ -950,7 +956,7 @@ mod tests {
         );
         assert!(msg.contains("device_code"), "got: {msg}");
         assert!(msg.contains("poll_interval_seconds"), "got: {msg}");
-        assert!(msg.contains("0"), "got: {msg}");
+        assert!(msg.contains('0'), "got: {msg}");
     }
 
     #[test]
@@ -1579,17 +1585,21 @@ mod tests {
             bundle.surface.default_scopes,
             vec!["https://www.googleapis.com/auth/contacts.readonly".to_string()]
         );
-        assert!(bundle
-            .surface
-            .escalation_paths
-            .iter()
-            .any(|path| path.trigger.contains("directory search")));
-        assert!(bundle
-            .surface
-            .escalation_paths
-            .iter()
-            .flat_map(|path| path.add_scopes.iter())
-            .any(|scope| scope == "https://www.googleapis.com/auth/directory.readonly"));
+        assert!(
+            bundle
+                .surface
+                .escalation_paths
+                .iter()
+                .any(|path| path.trigger.contains("directory search"))
+        );
+        assert!(
+            bundle
+                .surface
+                .escalation_paths
+                .iter()
+                .flat_map(|path| path.add_scopes.iter())
+                .any(|scope| scope == "https://www.googleapis.com/auth/directory.readonly")
+        );
     }
 
     #[test]
@@ -1601,17 +1611,23 @@ mod tests {
             bundle.surface.default_scopes,
             vec!["https://www.googleapis.com/auth/admin.reports.audit.readonly".to_string()]
         );
-        assert!(bundle
-            .surface
-            .escalation_paths
-            .iter()
-            .any(|path| path.trigger.contains("usage-report workflows")));
-        assert!(bundle
-            .surface
-            .escalation_paths
-            .iter()
-            .flat_map(|path| path.add_scopes.iter())
-            .any(|scope| scope == "https://www.googleapis.com/auth/admin.reports.usage.readonly"));
+        assert!(
+            bundle
+                .surface
+                .escalation_paths
+                .iter()
+                .any(|path| path.trigger.contains("usage-report workflows"))
+        );
+        assert!(
+            bundle
+                .surface
+                .escalation_paths
+                .iter()
+                .flat_map(|path| path.add_scopes.iter())
+                .any(
+                    |scope| scope == "https://www.googleapis.com/auth/admin.reports.usage.readonly"
+                )
+        );
     }
 
     // ── Message content tests ───────────────────────────────────────

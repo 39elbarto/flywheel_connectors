@@ -53,7 +53,7 @@ fn valid_attestation(digest: &str) -> SupplyChainAttestation {
         signature: SupplyChainSignature {
             algorithm: "ed25519".to_string(),
             key_id: "key-001".to_string(),
-            signature: "sig-placeholder".to_string(),
+            signature: "f".repeat(128),
             signed_fields: SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS
                 .iter()
                 .map(|s| (*s).to_string())
@@ -87,7 +87,7 @@ fn valid_sbom() -> SoftwareBillOfMaterials {
         signature: SupplyChainSignature {
             algorithm: "ed25519".to_string(),
             key_id: "key-002".to_string(),
-            signature: "sig-placeholder".to_string(),
+            signature: "f".repeat(128),
             signed_fields: SBOM_SIGNED_FIELDS
                 .iter()
                 .map(|s| (*s).to_string())
@@ -265,6 +265,27 @@ fn verify_dev_override_allows_unsigned() {
     assert_eq!(
         outcome.evidence.reason_code,
         VerificationReasonCode::AllowedUnsigned
+    );
+}
+
+#[test]
+fn verify_dev_override_still_rejects_invalid_artifact_digest() {
+    let config = SupplyChainGateConfig {
+        policy: SupplyChainVerificationPolicy::default(),
+        allow_dev_overrides: true,
+        cache_capacity: 256,
+    };
+    let gate = SupplyChainGate::with_config(config);
+    let cid = ConnectorId::from_static("fcp.test-dev:utility:0.1.0");
+
+    let outcome = gate
+        .verify_at(&cid, "0.1.0-dev", "not-a-digest", None, None, test_time())
+        .unwrap();
+
+    assert!(!outcome.allowed);
+    assert_eq!(
+        outcome.evidence.reason_code,
+        VerificationReasonCode::ArtifactDigestInvalid
     );
 }
 

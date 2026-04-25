@@ -844,7 +844,7 @@ const fn suite_rank(s: SessionCryptoSuite) -> u8 {
 /// strength. Suites weaker than the floor are refused even if both peers
 /// still list them.
 ///
-/// This is the modern-crypto default (TLS 1.3, Noise, WireGuard) and
+/// This is the modern-crypto default (TLS 1.3, Noise, `WireGuard`) and
 /// defends against downgrade via a malicious or coerced initiator that
 /// deliberately orders its offers worst-first. The `MINIMUM_SUITE` floor
 /// is the belt-and-braces defense against a responder with a stale or
@@ -1398,7 +1398,8 @@ mod tests {
                     signature: None,
                 };
                 hello.sign(&initiator_signing_key).expect("sign hello");
-                hello.verify(&initiator_signing_key.verifying_key())
+                hello
+                    .verify(&initiator_signing_key.verifying_key())
                     .expect("verify hello");
 
                 let mut ack = MeshSessionAck {
@@ -3326,7 +3327,9 @@ mod tests {
             transport_limits: None,
             signature: None,
         };
-        old_hello.sign(&initiator_signing_key).expect("sign old hello");
+        old_hello
+            .sign(&initiator_signing_key)
+            .expect("sign old hello");
 
         let mut captured_ack = MeshSessionAck {
             from: responder.clone(),

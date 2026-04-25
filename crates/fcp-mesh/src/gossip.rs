@@ -306,6 +306,11 @@ impl IbltPlaceholder {
     /// [`Iblt::recommended_cell_count`] which floors at
     /// [`MIN_RECOMMENDED_IBLT_CELLS`] — so even
     /// `with_max_changes(0)` produces a valid (if unused) sketch.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the recommended cell-count helper violates its own
+    /// minimum-size contract.
     #[must_use]
     pub fn with_max_changes(max_changes: usize) -> Self {
         let cell_count = Iblt::recommended_cell_count(max_changes);
@@ -423,6 +428,11 @@ impl IbltPlaceholder {
     /// Reset the sketch to an empty IBLT of the same cell budget.
     /// `change_seq` is preserved so metrics observers do not see a
     /// reset.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the previously validated cell count is no longer
+    /// accepted by [`Iblt::with_cell_count`].
     pub fn clear(&mut self) {
         self.iblt = Iblt::with_cell_count(self.cell_count)
             .expect("cell_count was previously validated to be >= IBLT_HASH_COUNT");
@@ -475,10 +485,14 @@ pub struct GossipState {
 
 impl GossipState {
     /// Create a new gossip state for a zone.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the reconciliation batch size maps to an invalid IBLT
+    /// cell count, which would violate [`Iblt::recommended_cell_count`].
     #[must_use]
     pub fn new(zone_id: ZoneId, config: &GossipConfig) -> Self {
-        let cached_iblt_cell_count =
-            Iblt::recommended_cell_count(config.reconciliation_batch_size);
+        let cached_iblt_cell_count = Iblt::recommended_cell_count(config.reconciliation_batch_size);
         let cached_iblt = Iblt::with_cell_count(cached_iblt_cell_count)
             .expect("reconciliation_batch_size yields a valid cell count");
         Self {
@@ -1624,6 +1638,7 @@ impl MeshGossip {
     ///
     /// Returns `true` when the summary was accepted and mutated peer state,
     /// or `false` when it was rejected and ignored.
+    #[allow(clippy::too_many_lines)] // Summary validation updates several independent gossip indexes atomically.
     pub fn handle_summary(&mut self, summary: GossipSummary, now: u64) -> bool {
         if summary.is_stale(now, self.config.summary_ttl_secs) {
             let age_secs = now.saturating_sub(summary.timestamp);
@@ -4159,7 +4174,9 @@ mod tests {
         let config = GossipConfig::default();
         let mut state = GossipState::new(test_zone(), &config);
 
-        let ids: Vec<_> = (0..16).map(|i| test_object_id(&format!("m68xt-{i}"))).collect();
+        let ids: Vec<_> = (0..16)
+            .map(|i| test_object_id(&format!("m68xt-{i}")))
+            .collect();
 
         // Interleave announces and removes; after each operation the
         // cached IBLT (returned via build_iblt at the cache's cell
@@ -4205,7 +4222,11 @@ mod tests {
         for admitted in state.admitted_objects_iter_for_test() {
             fresh.insert(*admitted);
         }
-        assert_eq!(cached.cells(), fresh.cells(), "idempotent remove desynced cache");
+        assert_eq!(
+            cached.cells(),
+            fresh.cells(),
+            "idempotent remove desynced cache"
+        );
     }
 
     /// Regression for br-m68xt slow path: when build_iblt is called
@@ -4226,7 +4247,9 @@ mod tests {
         let slow = state.build_iblt(mismatched_diff);
         assert_ne!(
             slow.cell_count(),
-            state.build_iblt(config.reconciliation_batch_size).cell_count(),
+            state
+                .build_iblt(config.reconciliation_batch_size)
+                .cell_count(),
             "slow-path test needs a differently-sized IBLT"
         );
 
@@ -4234,7 +4257,11 @@ mod tests {
         for admitted in state.admitted_objects_iter_for_test() {
             fresh.insert(*admitted);
         }
-        assert_eq!(slow.cells(), fresh.cells(), "slow-path build_iblt desynced from admitted");
+        assert_eq!(
+            slow.cells(),
+            fresh.cells(),
+            "slow-path build_iblt desynced from admitted"
+        );
     }
 
     #[test]

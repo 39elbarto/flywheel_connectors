@@ -31,11 +31,12 @@ const DECISION_RECEIPT_ID_DOMAIN: &[u8] = b"FCP2-DECISION-RECEIPT-V1";
 const DECISION_RECEIPT_SIG_DOMAIN: &[u8] = b"FCP2-DECISION-RECEIPT-SIG-V1";
 
 /// Default grace window (seconds) for entries whose `occurred_at` is ahead of
-/// the verifier's wall clock. Entries timestamped more than this far in the
-/// future are treated as clock skew beyond tolerance or deliberate poisoning
-/// of freshness/SLA signals, and are flagged as critical by
-/// [`verify_chain_with_clock`]. 300 seconds (5 minutes) matches the skew
-/// tolerance used by Kerberos and most IAM systems.
+/// the verifier's wall clock.
+///
+/// Entries timestamped more than this far in the future are treated as clock
+/// skew beyond tolerance or deliberate poisoning of freshness/SLA signals, and
+/// are flagged as critical by [`verify_chain_with_clock`]. 300 seconds (5
+/// minutes) matches the skew tolerance used by Kerberos and most IAM systems.
 pub const MAX_FUTURE_TIMESTAMP_SKEW_SECS: u64 = 300;
 const AUDIT_ENTRY_SIG_DOMAIN: &[u8] = b"FCP2-AUDIT-ENTRY-SIG-V1";
 const CHAIN_HEAD_SIG_DOMAIN: &[u8] = b"FCP2-AUDIT-CHAIN-HEAD-SIG-V1";
@@ -389,10 +390,7 @@ impl AuditEntry {
     ///
     /// # Errors
     /// See above for the typed error variants.
-    pub fn verify_signature(
-        &self,
-        verifying_key: &Ed25519VerifyingKey,
-    ) -> Result<(), AuditError> {
+    pub fn verify_signature(&self, verifying_key: &Ed25519VerifyingKey) -> Result<(), AuditError> {
         let id = self.computed_id()?;
         self.verify_signature_with_id(verifying_key, &id)
     }
@@ -752,8 +750,13 @@ impl ChainHead {
         let zone_bytes = self.zone_id.as_bytes();
         let head_entry_bytes = self.head_entry.as_bytes();
         let epoch_bytes = self.epoch_id.as_bytes();
-        let coverage_bps =
-            (self.coverage.clamp(0.0, 1.0) * 10_000.0).round() as u64;
+        let normalized_coverage = if self.coverage.is_finite() {
+            self.coverage.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let coverage_bps = (normalized_coverage * 10_000.0).round() as u64;
 
         let mut bytes = Vec::with_capacity(
             CHAIN_HEAD_SIG_DOMAIN.len()
@@ -821,8 +824,8 @@ impl ChainHead {
         for sig in &self.signatures {
             let kid = KeyId::from_hex(&sig.issuer_kid)
                 .map_err(|_| AuditError::UnknownIssuer { seq: self.head_seq })?;
-            let verifying_key = key_lookup(&kid)
-                .ok_or(AuditError::UnknownIssuer { seq: self.head_seq })?;
+            let verifying_key =
+                key_lookup(&kid).ok_or(AuditError::UnknownIssuer { seq: self.head_seq })?;
             if verifying_key.key_id().as_slice() != kid.as_slice() {
                 return Err(AuditError::SignatureInvalid { seq: self.head_seq });
             }
@@ -1100,10 +1103,7 @@ impl DecisionReceipt {
     ///
     /// # Errors
     /// See above for the typed error variants.
-    pub fn verify_signature(
-        &self,
-        verifying_key: &Ed25519VerifyingKey,
-    ) -> Result<(), AuditError> {
+    pub fn verify_signature(&self, verifying_key: &Ed25519VerifyingKey) -> Result<(), AuditError> {
         let kid = self
             .issuer_kid
             .as_ref()
@@ -1478,10 +1478,11 @@ pub fn verify_chain(
     verify_chain_with_precomputed_ids(entries, head, zone_id, &precomputed)
 }
 
-/// Internal core of [`verify_chain`] that accepts precomputed canonical
-/// ids. Exposed for batch callers (see [`verify_chain_with_signers`])
-/// that need to share canonical-id work across signature verification
-/// AND chain-integrity verification (br-atd32).
+/// Internal core of [`verify_chain`] that accepts precomputed canonical ids.
+///
+/// Exposed for batch callers (see [`verify_chain_with_signers`]) that need to
+/// share canonical-id work across signature verification AND chain-integrity
+/// verification (br-atd32).
 ///
 /// The slice length MUST equal `entries.len()`; each element is either
 /// `Ok(canonical_id)` or `Err(err)` for the corresponding entry.
@@ -1489,6 +1490,7 @@ pub fn verify_chain(
 /// the returned report, matching the behavior of the unified
 /// [`verify_chain`] path.
 #[must_use]
+#[allow(clippy::too_many_lines)] // Single report builder keeps all chain-integrity issues in one pass.
 pub fn verify_chain_with_precomputed_ids(
     entries: &[AuditEntry],
     head: Option<&ChainHead>,
@@ -1610,23 +1612,20 @@ pub fn verify_chain_with_precomputed_ids(
             // Use checked_add so seq == u64::MAX is correctly treated as a
             // terminal state, consistent with AuditEntry::follows().
             // saturating_add would silently accept a stalled chain.
-            let expected_seq = match prev.seq.checked_add(1) {
-                Some(next) => next,
-                None => {
-                    issues.push(
-                        VerifyIssue::new(
-                            "audit.seq_overflow",
-                            format!(
-                                "sequence number overflow: previous seq {} cannot be incremented",
-                                prev.seq
-                            ),
-                        )
-                        .with_seq(prev.seq)
-                        .with_entry_id(&prev.id),
-                    );
-                    // Cannot validate further entries after overflow.
-                    break;
-                }
+            let Some(expected_seq) = prev.seq.checked_add(1) else {
+                issues.push(
+                    VerifyIssue::new(
+                        "audit.seq_overflow",
+                        format!(
+                            "sequence number overflow: previous seq {} cannot be incremented",
+                            prev.seq
+                        ),
+                    )
+                    .with_seq(prev.seq)
+                    .with_entry_id(&prev.id),
+                );
+                // Cannot validate further entries after overflow.
+                break;
             };
             if entry.seq != expected_seq {
                 issues.push(
@@ -2830,7 +2829,9 @@ mod tests {
         );
 
         // Both verify paths must accept the legitimate signature.
-        entry.verify_signature(&verifying_key).expect("legacy verify ok");
+        entry
+            .verify_signature(&verifying_key)
+            .expect("legacy verify ok");
         entry
             .verify_signature_with_id(&verifying_key, &canonical_id)
             .expect("fast-path verify ok");
@@ -2923,7 +2924,8 @@ mod tests {
         // intentionally do NOT sign e1
 
         let entries = vec![e0, e1];
-        let resolver = |_kid: &KeyId| -> Option<Ed25519VerifyingKey> { Some(verifying_key.clone()) };
+        let resolver =
+            |_kid: &KeyId| -> Option<Ed25519VerifyingKey> { Some(verifying_key.clone()) };
         match verify_chain_with_signers(&entries, None, Some("z:work"), resolver) {
             Err(AuditError::SignerMissing { seq: 1 }) => {}
             other => panic!("expected SignerMissing at seq 1, got {other:?}"),
@@ -2988,9 +2990,8 @@ mod tests {
         let (entries, mut head) = signed_chain_and_head(&signing_key);
         sign_head(&mut head, &signing_key);
 
-        let resolver = |_kid: &KeyId| -> Option<Ed25519VerifyingKey> {
-            Some(verifying_key.clone())
-        };
+        let resolver =
+            |_kid: &KeyId| -> Option<Ed25519VerifyingKey> { Some(verifying_key.clone()) };
         let report = verify_chain_with_signers(&entries, Some(&head), Some("z:work"), resolver)
             .expect("properly-signed head must verify");
         assert_eq!(report.chain_len, entries.len());
@@ -3010,9 +3011,8 @@ mod tests {
         assert!(head.signatures.is_empty());
         assert_eq!(head.signature_count, 1);
 
-        let resolver = |_kid: &KeyId| -> Option<Ed25519VerifyingKey> {
-            Some(verifying_key.clone())
-        };
+        let resolver =
+            |_kid: &KeyId| -> Option<Ed25519VerifyingKey> { Some(verifying_key.clone()) };
         match verify_chain_with_signers(&entries, Some(&head), Some("z:work"), resolver) {
             Err(AuditError::SignerMissing { .. }) => {}
             other => panic!("expected SignerMissing for unsigned head, got {other:?}"),
@@ -3033,9 +3033,8 @@ mod tests {
         }];
         head.signature_count = 1;
 
-        let resolver = |_kid: &KeyId| -> Option<Ed25519VerifyingKey> {
-            Some(verifying_key.clone())
-        };
+        let resolver =
+            |_kid: &KeyId| -> Option<Ed25519VerifyingKey> { Some(verifying_key.clone()) };
         match verify_chain_with_signers(&entries, Some(&head), Some("z:work"), resolver) {
             Err(AuditError::SignatureInvalid { .. }) => {}
             other => panic!("expected SignatureInvalid, got {other:?}"),
@@ -3085,7 +3084,7 @@ mod tests {
         let mut tampered_epoch = head.clone();
         tampered_epoch.epoch_id = "epoch-drift".into();
         assert_ne!(tampered_epoch.signing_bytes(), baseline);
-        let mut tampered_entry = head.clone();
+        let mut tampered_entry = head;
         tampered_entry.head_entry = "forged-tip".into();
         assert_ne!(tampered_entry.signing_bytes(), baseline);
     }
@@ -3289,12 +3288,14 @@ mod tests {
             signature_count: 7,
             signatures: vec![],
         };
-        assert!(!forged.has_quorum(), "quorum cannot be asserted from a bare count");
+        assert!(
+            !forged.has_quorum(),
+            "quorum cannot be asserted from a bare count"
+        );
 
         // Legacy wire: omitted signatures default to empty; regardless of
         // count, has_quorum returns false on decoded legacy heads.
-        let legacy_json =
-            r#"{"zone_id":"z:work","head_entry":"e","head_seq":0,"coverage":1.0,"epoch_id":"ep","signature_count":3}"#;
+        let legacy_json = r#"{"zone_id":"z:work","head_entry":"e","head_seq":0,"coverage":1.0,"epoch_id":"ep","signature_count":3}"#;
         let legacy: ChainHead = serde_json::from_str(legacy_json).unwrap();
         assert!(legacy.signatures.is_empty());
         assert!(!legacy.has_quorum());
@@ -3992,11 +3993,17 @@ mod tests {
         };
         let report = verify_chain(&entries, Some(&forged_head), None);
         assert!(
-            report.issues.iter().any(|i| i.code == "audit.head_signature_count_inconsistent"),
+            report
+                .issues
+                .iter()
+                .any(|i| i.code == "audit.head_signature_count_inconsistent"),
             "expected head_signature_count_inconsistent, got {:?}",
             report.issues
         );
-        assert!(report.status.is_fail(), "inconsistent count must be a critical failure");
+        assert!(
+            report.status.is_fail(),
+            "inconsistent count must be a critical failure"
+        );
     }
 
     #[test]
@@ -4004,10 +4011,16 @@ mod tests {
         // Count matches signatures attached → no inconsistency issue.
         let entries = canonical_chain_in_zone(2, "z:work");
         let head = chain_head_for(&entries, "z:work");
-        assert_eq!(usize::try_from(head.signature_count).unwrap(), head.signatures.len());
+        assert_eq!(
+            usize::try_from(head.signature_count).unwrap(),
+            head.signatures.len()
+        );
         let report = verify_chain(&entries, Some(&head), None);
         assert!(
-            !report.issues.iter().any(|i| i.code == "audit.head_signature_count_inconsistent"),
+            !report
+                .issues
+                .iter()
+                .any(|i| i.code == "audit.head_signature_count_inconsistent"),
             "consistent head must not emit inconsistent-count issue"
         );
     }
@@ -6382,7 +6395,7 @@ mod tests {
             correlation_id: Some(entry.correlation_id.clone()),
             trace_context: entry.trace_context.clone(),
             connector_id: entry.connector_id.clone(),
-            operation_id: entry.operation_id.clone(),
+            operation_id: entry.operation_id,
             issuer_kid: None,
             signature: None,
         };
@@ -6405,7 +6418,7 @@ mod tests {
         let report = verify_chain(&entries, Some(&head), Some("z:work"));
         assert!(report.status.is_ok());
         assert_eq!(report.head_seq, Some(2));
-        assert_eq!(report.head_entry, Some(head.head_entry.clone()));
+        assert_eq!(report.head_entry, Some(head.head_entry));
         assert_eq!(report.zone_id, Some("z:work".into()));
 
         // e1 has Warning severity (chain_entry sets it)
@@ -6549,7 +6562,7 @@ mod tests {
         let receipt = sample_receipt();
         let a = receipt.computed_id().expect("computed_id 1");
         let b = receipt.computed_id().expect("computed_id 2");
-        let c = receipt.clone().computed_id().expect("computed_id cloned");
+        let c = receipt.computed_id().expect("computed_id cloned");
         assert_eq!(a, b);
         assert_eq!(a, c);
     }

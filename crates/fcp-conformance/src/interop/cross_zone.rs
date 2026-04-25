@@ -19,8 +19,8 @@
 //! and as a reference for the follow-up work tracked in beads.
 //!
 //! DO NOT wire this module back into the conformance test binary
-//! without first making the types delegate to real fcp_core /
-//! fcp_host APIs.
+//! without first making the types delegate to real `fcp_core` /
+//! `fcp_host` APIs.
 
 use crate::interop::{InteropTestSummary, TestFailure};
 

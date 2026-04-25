@@ -50,7 +50,7 @@ fn build_test_token(
         .principal("user:metamorphic")
         .operations(&[operation_id])
         .issuer("node:metamorphic")
-        .audience("connector:metamorphic")
+        .audience(zone_id)
         .token_id(b"metamorphic-token")
         .validity(not_before, expires)
         .try_constraints_cbor(&constraints_cbor)
@@ -113,20 +113,20 @@ fn metamorphic_mr1_capability_verification_stabilizes_under_reverify() {
         .to_cbor()
         .expect("claims must serialize deterministically");
 
-    let verified = verifier
+    let owned_checked = verifier
         .verify(token, &capability, &operation, &[])
         .expect("owned verification must succeed");
-    let first_claims = verified
+    let first_claims = owned_checked
         .claims()
         .to_cbor()
         .expect("verified claims must serialize deterministically");
-    let raw_token = verified
+    let raw_token = owned_checked
         .raw()
         .to_cbor()
         .expect("verified raw token must serialize");
 
     let reverified = verifier
-        .verify(verified.downgrade(), &capability, &operation, &[])
+        .verify(owned_checked.downgrade(), &capability, &operation, &[])
         .expect("downgraded token must re-verify");
 
     assert_eq!(first_claims, by_ref_claims);
@@ -166,7 +166,7 @@ fn metamorphic_mr2_zone_scoping_is_exact_not_parent_derived() {
     let signing_key = Ed25519SigningKey::from_bytes(&[9u8; 32]).expect("fixed key must parse");
     let verifier = CapabilityVerifier::without_instance_binding(
         signing_key.verifying_key().to_bytes(),
-        parent_zone.clone(),
+        parent_zone,
     );
     let capability = CapabilityId::from_static("cap.zone-meta");
     let operation = OperationId::from_static("op.zone-meta");

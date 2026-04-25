@@ -73,6 +73,14 @@ impl RetryPolicy {
             RetryStrategy::Never => RetryDecision::DoNotRetry,
             RetryStrategy::IdempotentOnly if !idempotent => RetryDecision::DoNotRetry,
             _ => {
+                if let GraphqlClientError::HttpStatus {
+                    retry_after: Some(delay),
+                    ..
+                } = error
+                {
+                    return RetryDecision::RetryAfter(*delay);
+                }
+
                 let base_ms = u64::try_from(self.base_delay.as_millis()).unwrap_or(u64::MAX);
                 let exp = 2_u64
                     .saturating_pow(u32::try_from(attempt.saturating_sub(1)).unwrap_or(u32::MAX));
@@ -88,7 +96,8 @@ impl RetryPolicy {
                 } else {
                     0
                 };
-                RetryDecision::RetryAfter(Duration::from_millis(delay_ms + jitter_ms))
+                let delay_ms = delay_ms.saturating_add(jitter_ms).min(max_ms);
+                RetryDecision::RetryAfter(Duration::from_millis(delay_ms))
             }
         }
     }
@@ -245,6 +254,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn decide_caps_jittered_delay_at_max_delay() {
+        let p = RetryPolicy {
+            max_attempts: 10,
+            base_delay: Duration::from_millis(500),
+            max_delay: Duration::from_millis(500),
+            max_jitter: Duration::from_millis(500),
+            strategy: RetryStrategy::Always,
+        };
+
+        for _ in 0..20 {
+            match p.decide(&retryable_error(), 1, true) {
+                RetryDecision::RetryAfter(d) => assert_eq!(d, Duration::from_millis(500)),
+                RetryDecision::DoNotRetry => panic!("should retry"),
+            }
+        }
+    }
+
     // ---- decide: jitter ----
 
     #[test]
@@ -278,8 +305,26 @@ mod tests {
             retry_after: Some(Duration::from_secs(10)),
         };
         match p.decide(&err, 1, true) {
-            RetryDecision::RetryAfter(_) => {}
+            RetryDecision::RetryAfter(delay) => assert_eq!(delay, Duration::from_secs(10)),
             RetryDecision::DoNotRetry => panic!("429 should be retryable"),
+        }
+    }
+
+    #[test]
+    fn decide_delay_arithmetic_saturates() {
+        let p = RetryPolicy {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(u64::MAX),
+            max_delay: Duration::from_millis(u64::MAX),
+            max_jitter: Duration::from_millis(u64::MAX),
+            strategy: RetryStrategy::Always,
+        };
+
+        match p.decide(&retryable_error(), 1, true) {
+            RetryDecision::RetryAfter(delay) => {
+                assert_eq!(delay, Duration::from_millis(u64::MAX));
+            }
+            RetryDecision::DoNotRetry => panic!("should retry"),
         }
     }
 

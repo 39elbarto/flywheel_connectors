@@ -5,6 +5,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use chrono::Utc;
+
 /// Parsed rate limit information from HTTP headers.
 #[derive(Debug, Clone, Default)]
 pub struct RateLimitHeaders {
@@ -53,10 +55,8 @@ impl RateLimitHeaders {
             .or_else(|| parse_header_u64(headers, "ratelimit-reset"));
 
         // Retry-After header
-        if let Some(retry) = headers.get("retry-after") {
-            if let Ok(secs) = retry.parse::<u64>() {
-                result.retry_after = Some(Duration::from_secs(secs));
-            }
+        if let Some(retry) = header_value(headers, "retry-after") {
+            result.retry_after = parse_retry_after(retry);
         }
 
         result
@@ -88,10 +88,10 @@ impl RateLimitHeaders {
                 .provider_info
                 .insert("used".to_string(), used.to_string());
         }
-        if let Some(resource) = headers.get("x-ratelimit-resource") {
+        if let Some(resource) = header_value(headers, "x-ratelimit-resource") {
             result
                 .provider_info
-                .insert("resource".to_string(), resource.clone());
+                .insert("resource".to_string(), resource.trim().to_string());
         }
 
         result
@@ -132,10 +132,10 @@ impl RateLimitHeaders {
         let mut result = Self::parse(headers);
 
         // Stripe uses different header naming
-        if let Some(request_id) = headers.get("request-id") {
+        if let Some(request_id) = header_value(headers, "request-id") {
             result
                 .provider_info
-                .insert("request_id".to_string(), request_id.clone());
+                .insert("request_id".to_string(), request_id.trim().to_string());
         }
 
         result
@@ -169,7 +169,7 @@ impl RateLimitHeaders {
         }
 
         // Reset times
-        if let Some(reset_requests) = headers.get("x-ratelimit-reset-requests") {
+        if let Some(reset_requests) = header_value(headers, "x-ratelimit-reset-requests") {
             if let Some(duration) = parse_duration_string(reset_requests) {
                 result.reset_seconds = Some(duration.as_secs());
             }
@@ -210,10 +210,10 @@ impl RateLimitHeaders {
         }
 
         // Reset time
-        if let Some(reset) = headers.get("anthropic-ratelimit-requests-reset") {
+        if let Some(reset) = header_value(headers, "anthropic-ratelimit-requests-reset") {
             result
                 .provider_info
-                .insert("reset_time".to_string(), reset.clone());
+                .insert("reset_time".to_string(), reset.trim().to_string());
         }
 
         result
@@ -242,14 +242,42 @@ impl RateLimitHeaders {
     }
 }
 
+fn header_value<'a>(headers: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
+    headers.get(key).map(String::as_str).or_else(|| {
+        headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            .map(|(_, value)| value.as_str())
+    })
+}
+
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u128>() {
+        return Some(Duration::from_secs(
+            u64::try_from(seconds).unwrap_or(u64::MAX),
+        ));
+    }
+
+    let retry_at = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    let wait = retry_at
+        .with_timezone(&Utc)
+        .signed_duration_since(Utc::now());
+    if wait <= chrono::Duration::zero() {
+        Some(Duration::ZERO)
+    } else {
+        Some(wait.to_std().unwrap_or(Duration::from_secs(u64::MAX)))
+    }
+}
+
 /// Helper to parse a header as u32.
 fn parse_header_u32(headers: &HashMap<String, String>, key: &str) -> Option<u32> {
-    headers.get(key).and_then(|v| v.parse().ok())
+    header_value(headers, key).and_then(|v| v.trim().parse().ok())
 }
 
 /// Helper to parse a header as u64.
 fn parse_header_u64(headers: &HashMap<String, String>, key: &str) -> Option<u64> {
-    headers.get(key).and_then(|v| v.parse().ok())
+    header_value(headers, key).and_then(|v| v.trim().parse().ok())
 }
 
 /// Parse duration strings like "1s", "500ms", "5m", "2h".
@@ -269,8 +297,8 @@ fn parse_duration_string(s: &str) -> Option<Duration> {
     }
     if s.ends_with('s') && !s.ends_with("ms") {
         if let Ok(secs) = s.trim_end_matches('s').parse::<f64>() {
-            if secs >= 0.0 && secs.is_finite() && secs <= u64::MAX as f64 {
-                return Some(Duration::from_secs_f64(secs));
+            if secs >= 0.0 && secs.is_finite() {
+                return Duration::try_from_secs_f64(secs).ok();
             }
             return None;
         }
@@ -403,6 +431,40 @@ mod tests {
     }
 
     #[test]
+    fn parse_header_names_case_insensitively_and_trim_values() {
+        let mut headers = HashMap::new();
+        headers.insert("X-RateLimit-Limit".to_string(), " 100 ".to_string());
+        headers.insert("RateLimit-Remaining".to_string(), " 0 ".to_string());
+        headers.insert("Retry-After".to_string(), " 2 ".to_string());
+
+        let parsed = RateLimitHeaders::parse(&headers);
+
+        assert_eq!(parsed.limit, Some(100));
+        assert_eq!(parsed.remaining, Some(0));
+        assert_eq!(parsed.retry_after, Some(Duration::from_secs(2)));
+        assert!(parsed.is_limited());
+    }
+
+    #[test]
+    fn parse_retry_after_http_date() {
+        let retry_at = (chrono::Utc::now() + chrono::Duration::seconds(120))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        let mut headers = HashMap::new();
+        headers.insert("Retry-After".to_string(), retry_at);
+
+        let parsed = RateLimitHeaders::parse(&headers);
+
+        let retry_after = parsed
+            .retry_after
+            .expect("future Retry-After HTTP-date should parse");
+        assert!(
+            retry_after >= Duration::from_secs(118) && retry_after <= Duration::from_secs(121),
+            "retry_after={retry_after:?}"
+        );
+    }
+
+    #[test]
     fn is_limited_with_zero_remaining() {
         let mut headers = HashMap::new();
         headers.insert("x-ratelimit-remaining".to_string(), "0".to_string());
@@ -437,6 +499,21 @@ mod tests {
         assert_eq!(
             parsed.provider_info.get("resource"),
             Some(&"core".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_github_provider_info_case_insensitively_and_trimmed() {
+        let mut headers = HashMap::new();
+        headers.insert("X-RateLimit-Used".to_string(), " 7 ".to_string());
+        headers.insert("X-RateLimit-Resource".to_string(), " search ".to_string());
+
+        let parsed = RateLimitHeaders::parse_github(&headers);
+
+        assert_eq!(parsed.provider_info.get("used"), Some(&"7".to_string()));
+        assert_eq!(
+            parsed.provider_info.get("resource"),
+            Some(&"search".to_string())
         );
     }
 
@@ -1176,12 +1253,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_standard_whitespace_values_ignored() {
+    fn parse_standard_whitespace_values_trimmed() {
         let mut headers = HashMap::new();
         headers.insert("x-ratelimit-limit".to_string(), " 100 ".to_string());
         let parsed = RateLimitHeaders::parse(&headers);
-        // parse::<u32>() doesn't trim whitespace, so None
-        assert!(parsed.limit.is_none());
+        assert_eq!(parsed.limit, Some(100));
     }
 
     #[test]

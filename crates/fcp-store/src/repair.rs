@@ -59,10 +59,11 @@ pub struct RepairResult {
 /// deliberately narrow — just AC vs. Battery(percent) — because the
 /// controller does not need the full `DeviceProfile` surface, only
 /// the signal that gates deferral.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PowerState {
     /// Running on wall power (or power state is unknown / not reported).
     /// The controller behaves as before — no deferral.
+    #[default]
     Ac,
     /// Running on battery. `percent` is 0..=100.
     Battery {
@@ -81,12 +82,6 @@ impl PowerState {
             Self::Ac => false,
             Self::Battery { percent } => percent < threshold_percent,
         }
-    }
-}
-
-impl Default for PowerState {
-    fn default() -> Self {
-        Self::Ac
     }
 }
 
@@ -5666,9 +5661,9 @@ mod tests {
         // deferral_count=0, no aging boost).
         controller.queue_repair(RepairRequest {
             object_id: fresh_high,
-            zone_id: zone.clone(),
-            coverage: coverage.clone(),
-            policy: policy.clone(),
+            zone_id: zone,
+            coverage,
+            policy,
             priority: 1000,
         });
 
@@ -5718,9 +5713,9 @@ mod tests {
         });
         controller.queue_repair(RepairRequest {
             object_id: high,
-            zone_id: zone.clone(),
-            coverage: coverage.clone(),
-            policy: policy.clone(),
+            zone_id: zone,
+            coverage,
+            policy,
             priority: 1000,
         });
 

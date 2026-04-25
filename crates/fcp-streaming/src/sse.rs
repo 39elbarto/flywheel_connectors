@@ -92,7 +92,7 @@ const fn clamp_sse_buffer_size(size: usize) -> usize {
     }
 }
 
-fn retained_buffer_overflow(
+const fn retained_buffer_overflow(
     retained_bytes: usize,
     next_chunk_len: usize,
     max_buffer_size: usize,

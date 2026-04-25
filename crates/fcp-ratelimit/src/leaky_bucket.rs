@@ -11,6 +11,24 @@ use async_trait::async_trait;
 
 use crate::{RateLimitError, RateLimitState, RateLimiter};
 
+fn sanitize_leak_rate(leak_rate: f64) -> f64 {
+    if leak_rate.is_nan() || leak_rate <= 0.0 {
+        0.0
+    } else if leak_rate.is_infinite() {
+        f64::MAX
+    } else {
+        leak_rate
+    }
+}
+
+fn ceil_positive_duration(secs: f64) -> Duration {
+    match Duration::try_from_secs_f64(secs) {
+        Ok(duration) if duration.is_zero() && secs > 0.0 => Duration::from_nanos(1),
+        Ok(duration) => duration,
+        Err(_) => Duration::MAX,
+    }
+}
+
 /// Leaky bucket rate limiter.
 ///
 /// Requests "leak" out at a constant rate. New requests are added to the bucket.
@@ -47,7 +65,7 @@ impl LeakyBucket {
     pub fn new(capacity: u32, leak_rate: f64) -> Self {
         Self {
             capacity,
-            leak_rate,
+            leak_rate: sanitize_leak_rate(leak_rate),
             level: Mutex::new(0.0),
             last_leak: Mutex::new(Instant::now()),
         }
@@ -56,12 +74,13 @@ impl LeakyBucket {
     /// Create from requests per window.
     #[must_use]
     pub fn from_window(requests_per_window: u32, window: Duration) -> Self {
-        let secs = window.as_secs_f64();
-        let leak_rate = if secs > 0.0 {
-            f64::from(requests_per_window) / secs
+        let window = if window.is_zero() {
+            Duration::from_nanos(1)
         } else {
-            f64::MAX
+            window
         };
+        let secs = window.as_secs_f64();
+        let leak_rate = f64::from(requests_per_window) / secs;
         Self::new(requests_per_window, leak_rate)
     }
 
@@ -100,8 +119,8 @@ impl LeakyBucket {
             let secs = overflow / self.leak_rate;
             // Cap at Duration::MAX representable seconds to avoid panic in
             // from_secs_f64 for extremely small leak rates.
-            if secs.is_finite() && secs >= 0.0 && secs <= u64::MAX as f64 {
-                Duration::from_secs_f64(secs)
+            if secs.is_finite() && secs >= 0.0 {
+                ceil_positive_duration(secs)
             } else {
                 Duration::MAX
             }
@@ -218,8 +237,10 @@ impl SmoothPacer {
     /// Create from requests per second.
     #[must_use]
     pub fn from_rate(requests_per_second: f64) -> Self {
-        if requests_per_second <= 0.0 {
+        if requests_per_second.is_nan() || requests_per_second <= 0.0 {
             Self::new(Duration::MAX)
+        } else if requests_per_second.is_infinite() {
+            Self::new(Duration::ZERO)
         } else {
             Self::new(Duration::from_secs_f64(1.0 / requests_per_second))
         }
@@ -470,13 +491,11 @@ mod tests {
         limiter.try_acquire().await;
 
         let result = limiter.acquire(Duration::from_millis(5)).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            RateLimitError::WaitExceeded { max_wait, .. } => {
-                assert_eq!(max_wait, Duration::from_millis(5));
-            }
-            other => panic!("expected WaitExceeded, got {other:?}"),
-        }
+        assert!(matches!(
+            result,
+            Err(RateLimitError::WaitExceeded { max_wait, .. })
+                if max_wait == Duration::from_millis(5)
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -643,13 +662,11 @@ mod tests {
         pacer.try_acquire().await;
 
         let result = pacer.acquire(Duration::from_millis(5)).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            RateLimitError::WaitExceeded { max_wait, .. } => {
-                assert_eq!(max_wait, Duration::from_millis(5));
-            }
-            other => panic!("expected WaitExceeded, got {other:?}"),
-        }
+        assert!(matches!(
+            result,
+            Err(RateLimitError::WaitExceeded { max_wait, .. })
+                if max_wait == Duration::from_millis(5)
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -666,7 +683,8 @@ mod tests {
     async fn leaky_bucket_from_window_zero_duration() {
         let limiter = LeakyBucket::from_window(10, Duration::ZERO);
         assert_eq!(limiter.capacity, 10);
-        assert!((limiter.leak_rate - f64::MAX).abs() < f64::EPSILON);
+        let expected = f64::from(10) / Duration::from_nanos(1).as_secs_f64();
+        assert!((limiter.leak_rate - expected).abs() < f64::EPSILON);
     }
 
     #[fcp_async_core::runtime::test]
@@ -831,9 +849,30 @@ mod tests {
     }
 
     #[test]
-    fn leaky_bucket_from_window_zero_duration_uses_max_rate() {
+    fn leaky_bucket_from_window_zero_duration_clamps_window() {
         let limiter = LeakyBucket::from_window(10, Duration::ZERO);
-        assert!((limiter.leak_rate - f64::MAX).abs() < f64::EPSILON);
+        let expected = f64::from(10) / Duration::from_nanos(1).as_secs_f64();
+        assert!((limiter.leak_rate - expected).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn leaky_bucket_new_sanitizes_non_finite_rates() {
+        let nan = LeakyBucket::new(1, f64::NAN);
+        assert!(nan.leak_rate.abs() < f64::EPSILON);
+
+        let neg_inf = LeakyBucket::new(1, f64::NEG_INFINITY);
+        assert!(neg_inf.leak_rate.abs() < f64::EPSILON);
+
+        let inf = LeakyBucket::new(1, f64::INFINITY);
+        assert!((inf.leak_rate - f64::MAX).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn leaky_bucket_time_until_room_rounds_positive_subnanosecond_wait_up() {
+        let limiter = LeakyBucket::from_window(10, Duration::ZERO);
+        *limiter.level.lock() = 10.0;
+
+        assert_eq!(limiter.time_until_room(), Duration::from_nanos(1));
     }
 
     #[test]
@@ -927,6 +966,18 @@ mod tests {
     fn smooth_pacer_from_rate_negative_uses_max() {
         let pacer = SmoothPacer::from_rate(-1.23);
         assert_eq!(pacer.min_interval, Duration::MAX);
+    }
+
+    #[test]
+    fn smooth_pacer_from_rate_nan_uses_max() {
+        let pacer = SmoothPacer::from_rate(f64::NAN);
+        assert_eq!(pacer.min_interval, Duration::MAX);
+    }
+
+    #[test]
+    fn smooth_pacer_from_rate_infinite_uses_zero() {
+        let pacer = SmoothPacer::from_rate(f64::INFINITY);
+        assert_eq!(pacer.min_interval, Duration::ZERO);
     }
 
     #[test]

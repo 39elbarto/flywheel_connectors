@@ -1016,9 +1016,11 @@ impl EnforcementCheck for RevocationCheck {
     fn check(&self, ctx: &EnforcementContext, config: &EnforcementConfig) -> CheckOutcome {
         // 1. Validate freshness of the revocation list.
         match ctx.revocation_list_age_ms {
-            None => return CheckOutcome::Skip {
-                reason: "revocation list age not available".into(),
-            },
+            None => {
+                return CheckOutcome::Skip {
+                    reason: "revocation list age not available".into(),
+                };
+            }
             Some(age) if age > config.revocation_max_age_ms => {
                 return CheckOutcome::Deny {
                     reason_code: "REVOCATION_LIST_STALE".into(),
@@ -1037,43 +1039,43 @@ impl EnforcementCheck for RevocationCheck {
         };
 
         // Check capability token revocation
-        if let Some(token_id) = &ctx.token_id {
-            if registry.is_revoked(token_id) {
-                return CheckOutcome::Deny {
-                    reason_code: "CAPABILITY_REVOKED".into(),
-                    explanation: format!("capability token '{token_id}' has been revoked"),
-                };
-            }
+        if let Some(token_id) = &ctx.token_id
+            && registry.is_revoked(token_id)
+        {
+            return CheckOutcome::Deny {
+                reason_code: "CAPABILITY_REVOKED".into(),
+                explanation: format!("capability token '{token_id}' has been revoked"),
+            };
         }
 
         // Check node attestation revocation
-        if let Some(att_id) = &ctx.node_attestation_id {
-            if registry.is_revoked(att_id) {
-                return CheckOutcome::Deny {
-                    reason_code: "NODE_ATTESTATION_REVOKED".into(),
-                    explanation: format!("node attestation '{att_id}' has been revoked"),
-                };
-            }
+        if let Some(att_id) = &ctx.node_attestation_id
+            && registry.is_revoked(att_id)
+        {
+            return CheckOutcome::Deny {
+                reason_code: "NODE_ATTESTATION_REVOKED".into(),
+                explanation: format!("node attestation '{att_id}' has been revoked"),
+            };
         }
 
         // Check issuer key revocation
-        if let Some(key_id) = &ctx.issuer_key_id {
-            if registry.is_revoked(key_id) {
-                return CheckOutcome::Deny {
-                    reason_code: "ISSUER_KEY_REVOKED".into(),
-                    explanation: format!("issuer key '{key_id}' has been revoked"),
-                };
-            }
+        if let Some(key_id) = &ctx.issuer_key_id
+            && registry.is_revoked(key_id)
+        {
+            return CheckOutcome::Deny {
+                reason_code: "ISSUER_KEY_REVOKED".into(),
+                explanation: format!("issuer key '{key_id}' has been revoked"),
+            };
         }
 
         // Check binary artifact revocation
-        if let Some(bin_id) = &ctx.binary_artifact_id {
-            if registry.is_revoked(bin_id) {
-                return CheckOutcome::Deny {
-                    reason_code: "BINARY_ARTIFACT_REVOKED".into(),
-                    explanation: format!("connector binary artifact '{bin_id}' has been revoked"),
-                };
-            }
+        if let Some(bin_id) = &ctx.binary_artifact_id
+            && registry.is_revoked(bin_id)
+        {
+            return CheckOutcome::Deny {
+                reason_code: "BINARY_ARTIFACT_REVOKED".into(),
+                explanation: format!("connector binary artifact '{bin_id}' has been revoked"),
+            };
         }
 
         CheckOutcome::Allow
@@ -3656,8 +3658,7 @@ mod tests {
         };
         registry.add_revocation(&revocation);
 
-        let config = EnforcementConfig::default()
-            .with_revocation_registry(Arc::new(registry));
+        let config = EnforcementConfig::default().with_revocation_registry(Arc::new(registry));
 
         let mut ctx = EnforcementContextBuilder::new()
             .request_id("r1")
@@ -3683,8 +3684,7 @@ mod tests {
     #[test]
     fn revocation_check_allows_fresh_unrevoked() {
         let registry = RevocationRegistry::new();
-        let config = EnforcementConfig::default()
-            .with_revocation_registry(Arc::new(registry));
+        let config = EnforcementConfig::default().with_revocation_registry(Arc::new(registry));
 
         let mut ctx = EnforcementContextBuilder::new()
             .request_id("r1")

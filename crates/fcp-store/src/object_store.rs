@@ -1531,7 +1531,9 @@ mod tests {
             // actual canonical-size cost must reject.
             let obj = test_stored_object(1, b"");
             let exact = MemoryObjectStore::object_size(&obj);
-            let config = MemoryObjectStoreConfig { max_bytes: exact - 1 };
+            let config = MemoryObjectStoreConfig {
+                max_bytes: exact - 1,
+            };
             let store = MemoryObjectStore::new(config);
             let result = store.put(obj).await;
             assert!(matches!(
@@ -1820,8 +1822,8 @@ mod tests {
                 // test headers changes.
                 let obj1 = test_stored_object(1, b"aaaa");
                 let obj2 = test_stored_object(2, b"bb");
-                let expected = MemoryObjectStore::object_size(&obj1)
-                    + MemoryObjectStore::object_size(&obj2);
+                let expected =
+                    MemoryObjectStore::object_size(&obj1) + MemoryObjectStore::object_size(&obj2);
                 store.put(obj1).await.unwrap();
                 store.put(obj2).await.unwrap();
 
@@ -2183,7 +2185,7 @@ mod tests {
 
     /// Regression for br-fm746: a header-heavy object (tiny body, huge
     /// `refs` list) MUST have its canonical header cost counted against
-    /// the store quota. Before the fix, MemoryObjectStore pegged header
+    /// the store quota. Before the fix, `MemoryObjectStore` pegged header
     /// overhead at a flat 512-byte estimate regardless of actual
     /// canonical size, so an attacker could store many `refs`-heavy
     /// objects with ~0-byte bodies and drive in-memory footprint
@@ -2203,8 +2205,9 @@ mod tests {
                 // as ~512 bytes; under the fix it must count as the real
                 // ~17 KB.
                 let mut header_heavy = test_stored_object(1, b"");
-                header_heavy.header.refs =
-                    (0..512_u32).map(|i| ObjectId::from_bytes([i as u8; 32])).collect();
+                header_heavy.header.refs = (0..512_u32)
+                    .map(|i| ObjectId::from_bytes([i as u8; 32]))
+                    .collect();
 
                 let actual_size = MemoryObjectStore::object_size(&header_heavy);
                 assert!(
@@ -2223,7 +2226,9 @@ mod tests {
                 );
 
                 // Quota set below the real cost must reject the object.
-                let config = MemoryObjectStoreConfig { max_bytes: actual_size - 1 };
+                let config = MemoryObjectStoreConfig {
+                    max_bytes: actual_size - 1,
+                };
                 let store = MemoryObjectStore::new(config);
                 let result = store.put(header_heavy.clone()).await;
                 assert!(
@@ -2232,7 +2237,9 @@ mod tests {
                 );
 
                 // Quota set at exactly the real cost must accept it.
-                let exact_config = MemoryObjectStoreConfig { max_bytes: actual_size };
+                let exact_config = MemoryObjectStoreConfig {
+                    max_bytes: actual_size,
+                };
                 let exact_store = MemoryObjectStore::new(exact_config);
                 exact_store
                     .put(header_heavy)
@@ -2254,13 +2261,13 @@ mod tests {
     /// check in `MemoryObjectStore::put` previously read
     /// `used_bytes` inside the `objects.write()` critical section but
     /// deferred the `fetch_add` commit to after `drop(objects)`.
-    /// Between the drop and the fetch_add, a concurrent `put` could
+    /// Between the drop and the `fetch_add`, a concurrent `put` could
     /// acquire `objects.write()`, re-observe the pre-commit
     /// `used_bytes` value, and pass its own quota check despite the
     /// in-flight commit. Both puts would then succeed and
     /// `used_bytes` would end up above `max_bytes`.
     ///
-    /// The fix (object_store.rs:430) moves the `fetch_add` inside
+    /// The fix (`object_store.rs:430`) moves the `fetch_add` inside
     /// the critical section so the quota read and the commit are
     /// serialized with the `objects.write()` lock. This test spins
     /// up many concurrent `put` tasks, each attempting to insert an
@@ -2298,9 +2305,9 @@ mod tests {
                     // duplicate-key branch never short-circuits the
                     // quota path.
                     let obj = test_stored_object(i as u8 + 1, &vec![0_u8; BODY]);
-                    handles.push(fcp_async_core::task::spawn(async move {
-                        store.put(obj).await
-                    }));
+                    handles.push(fcp_async_core::task::spawn(
+                        async move { store.put(obj).await },
+                    ));
                 }
 
                 let mut accepted = 0_u32;

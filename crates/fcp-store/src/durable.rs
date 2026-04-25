@@ -11,8 +11,8 @@
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
 use std::io::ErrorKind;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,6 +30,7 @@ use crate::object_id_verifier::ObjectIdVerifier;
 use crate::object_store::{MemoryObjectStoreConfig, ObjectStore};
 use crate::symbol_store::{
     MemorySymbolStoreConfig, ObjectSymbolMeta, StoredSymbol, SymbolMeta, SymbolStore,
+    validate_source_symbols,
 };
 
 const SNAPSHOT_VERSION: u32 = 1;
@@ -135,7 +136,7 @@ struct ObjectSnapshot {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum ObjectWalOp {
-    Put(StoredObject),
+    Put(Box<StoredObject>),
     Delete {
         object_id: ObjectId,
     },
@@ -210,9 +211,16 @@ pub struct DurableSymbolStore {
 
 impl DurableObjectState {
     fn object_size(object: &StoredObject) -> u64 {
-        #[allow(clippy::cast_possible_truncation)]
-        let size = object.body.len() as u64 + 512;
-        size
+        // Keep durable quota accounting aligned with the in-memory object
+        // store: charge the exact canonical object bytes rather than the old
+        // body-plus-512 estimate. Header-heavy objects can otherwise bypass
+        // max_bytes by putting most of their payload in refs/placement.
+        const MAX_CANONICAL_FALLBACK: u64 = 64 * 1024 * 1024;
+
+        match StoredObject::canonical_bytes(&object.header, &object.body) {
+            Ok(bytes) => bytes.len() as u64,
+            Err(_) => MAX_CANONICAL_FALLBACK,
+        }
     }
 
     fn from_snapshot(
@@ -304,7 +312,7 @@ impl DurableObjectState {
                 if self.objects.contains_key(&object.object_id) {
                     return Err(ObjectStoreError::AlreadyExists(object.object_id));
                 }
-                self.insert_loaded(object);
+                self.insert_loaded(*object);
                 Ok(())
             }
             ObjectWalOp::Delete { object_id } => self.delete_unchecked(&object_id),
@@ -322,11 +330,12 @@ impl DurableObjectState {
             .ok_or(ObjectStoreError::NotFound(*object_id))?;
         let zone_id = object.header.zone_id.clone();
         self.used_bytes = self.used_bytes.saturating_sub(Self::object_size(&object));
-        let mut remove_zone_entry = false;
-        if let Some(ids) = self.zone_index.get_mut(&zone_id) {
+        let remove_zone_entry = if let Some(ids) = self.zone_index.get_mut(&zone_id) {
             ids.retain(|candidate| candidate != object_id);
-            remove_zone_entry = ids.is_empty();
-        }
+            ids.is_empty()
+        } else {
+            false
+        };
         if remove_zone_entry {
             self.zone_index.remove(&zone_id);
         }
@@ -348,7 +357,7 @@ impl DurableObjectState {
 }
 
 impl DurableSymbolState {
-    fn symbol_size(symbol: &StoredSymbol) -> u64 {
+    const fn symbol_size(symbol: &StoredSymbol) -> u64 {
         #[allow(clippy::cast_possible_truncation)]
         let size = symbol.data.len() as u64 + 64;
         size
@@ -404,13 +413,14 @@ impl DurableSymbolState {
         true
     }
 
-    fn from_snapshot(snapshot: SymbolSnapshot) -> Self {
+    fn from_snapshot(snapshot: SymbolSnapshot) -> Result<Self, SymbolStoreError> {
         let mut state = Self::default();
         for entry in snapshot.objects {
+            validate_source_symbols(&entry.meta)?;
             state.load_entry(entry);
         }
         state.scrub_corrupt_symbols();
-        state
+        Ok(state)
     }
 
     fn to_snapshot(&self) -> SymbolSnapshot {
@@ -455,6 +465,7 @@ impl DurableSymbolState {
     fn validate_mutation(&self, op: &SymbolWalOp, max_bytes: u64) -> Result<(), SymbolStoreError> {
         match op {
             SymbolWalOp::PutObjectMeta(meta) => {
+                validate_source_symbols(meta)?;
                 if let Some(object) = self.objects.get(&meta.object_id) {
                     if object.meta != *meta {
                         return Err(SymbolStoreError::InvalidSymbol {
@@ -553,6 +564,7 @@ impl DurableSymbolState {
     }
 
     fn apply_put_object_meta(&mut self, meta: ObjectSymbolMeta) -> Result<(), SymbolStoreError> {
+        validate_source_symbols(&meta)?;
         if let Some(existing) = self.objects.get(&meta.object_id) {
             if existing.meta != meta {
                 return Err(SymbolStoreError::InvalidSymbol {
@@ -562,11 +574,13 @@ impl DurableSymbolState {
             return Ok(());
         }
 
+        let object_id = meta.object_id;
+        let source_symbols = meta.source_symbols;
         self.objects.insert(
-            meta.object_id,
+            object_id,
             DurableObjectSymbols {
-                meta: meta.clone(),
-                symbols: HashMap::with_capacity(meta.source_symbols as usize),
+                meta,
+                symbols: HashMap::with_capacity(source_symbols as usize),
             },
         );
         Ok(())
@@ -714,9 +728,7 @@ impl DurableObjectStore {
             // in-process caller must surface as `ContentIdMismatch`,
             // not as `AlreadyExists` when the id happens to collide
             // with a legit record (flywheel_connectors-4g0qr).
-            if let (Some(verifier), ObjectWalOp::Put(object)) =
-                (self.verifier.as_ref(), &op)
-            {
+            if let (Some(verifier), ObjectWalOp::Put(object)) = (self.verifier.as_ref(), &op) {
                 verifier.verify(object)?;
             }
             state.validate_mutation(&op, self.config.max_bytes)?;
@@ -747,7 +759,7 @@ impl DurableObjectStore {
 #[async_trait]
 impl ObjectStore for DurableObjectStore {
     async fn put(&self, object: StoredObject) -> Result<(), ObjectStoreError> {
-        self.record_mutation(ObjectWalOp::Put(object))
+        self.record_mutation(ObjectWalOp::Put(Box::new(object)))
     }
 
     async fn get(&self, id: &ObjectId) -> Result<StoredObject, ObjectStoreError> {
@@ -957,11 +969,9 @@ impl SymbolStore for DurableSymbolStore {
         if !state.scrub_object_if_present(object_id) {
             return 0;
         }
-        let count = state
-            .objects
-            .get(object_id)
-            .map(|object| u32::try_from(object.symbols.len()).unwrap_or(u32::MAX))
-            .unwrap_or(0);
+        let count = state.objects.get(object_id).map_or(0, |object| {
+            u32::try_from(object.symbols.len()).unwrap_or(u32::MAX)
+        });
         drop(state);
 
         count
@@ -1095,7 +1105,7 @@ fn load_durable_symbol_state(
 ) -> Result<(DurableSymbolState, u64), SymbolStoreError> {
     let (mut state, last_snapshot_seq) =
         match read_snapshot::<SymbolSnapshot>(snapshot_path).map_err(symbol_io)? {
-            Some((snapshot, seq)) => (DurableSymbolState::from_snapshot(snapshot), seq),
+            Some((snapshot, seq)) => (DurableSymbolState::from_snapshot(snapshot)?, seq),
             None => (DurableSymbolState::default(), 0),
         };
 
@@ -1170,8 +1180,8 @@ where
 
     // Reject snapshot files larger than `MAX_SNAPSHOT_BYTES` before
     // allocating to avoid OOM on a corrupted or adversarial file.
-    let metadata = fs::metadata(path)
-        .map_err(|error| format!("stat snapshot {}: {error}", path.display()))?;
+    let metadata =
+        fs::metadata(path).map_err(|error| format!("stat snapshot {}: {error}", path.display()))?;
     if metadata.len() > MAX_SNAPSHOT_BYTES {
         return Err(format!(
             "snapshot {} exceeds {} bytes (got {})",
@@ -1220,8 +1230,9 @@ where
 
     loop {
         raw.clear();
-        let (bytes_read, hit_cap) = read_until_bounded(&mut reader, b'\n', &mut raw, MAX_WAL_RECORD_BYTES)
-            .map_err(|error| format!("read wal {}: {error}", path.display()))?;
+        let (bytes_read, hit_cap) =
+            read_until_bounded(&mut reader, b'\n', &mut raw, MAX_WAL_RECORD_BYTES)
+                .map_err(|error| format!("read wal {}: {error}", path.display()))?;
         if bytes_read == 0 {
             break;
         }
@@ -1235,12 +1246,9 @@ where
             break;
         }
 
-        let envelope: WalEnvelope<T> = match serde_json::from_slice(&raw) {
-            Ok(envelope) => envelope,
-            Err(_) => {
-                truncated = true;
-                break;
-            }
+        let Ok(envelope) = serde_json::from_slice::<WalEnvelope<T>>(&raw) else {
+            truncated = true;
+            break;
         };
 
         if envelope.version != WAL_VERSION {
@@ -1336,11 +1344,7 @@ where
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("invalid snapshot path {}", path.display()))?;
-    let temp_file_name = format!(
-        "{file_name}.tmp.{}.{}",
-        std::process::id(),
-        last_seq
-    );
+    let temp_file_name = format!("{file_name}.tmp.{}.{}", std::process::id(), last_seq);
     let (temp_path, mut file) = open_unique_snapshot_temp_file(path, &temp_file_name)?;
     file.write_all(&bytes)
         .map_err(|error| format!("write temp snapshot {}: {error}", temp_path.display()))?;
@@ -1376,7 +1380,7 @@ fn open_unique_snapshot_temp_file(path: &Path, base_name: &str) -> Result<(PathB
             .open(&candidate)
         {
             Ok(file) => return Ok((candidate, file)),
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
             Err(error) => {
                 return Err(format!(
                     "create temp snapshot {}: {error}",
@@ -1419,10 +1423,12 @@ fn sync_parent_dir(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn object_io(error: impl ToString) -> ObjectStoreError {
     ObjectStoreError::Io(error.to_string())
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn symbol_io(error: impl ToString) -> SymbolStoreError {
     SymbolStoreError::Io(error.to_string())
 }
@@ -1536,6 +1542,51 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn durable_object_store_counts_canonical_header_in_quota() {
+        // Durable quota accounting must mirror MemoryObjectStore. The old
+        // body-plus-512 estimate let tiny-body objects with large ref lists
+        // bypass max_bytes by moving their cost into the canonical header.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut header_heavy = test_object(9);
+        header_heavy.body.clear();
+        header_heavy.header.refs = (0_u8..=u8::MAX)
+            .cycle()
+            .take(512)
+            .map(|seed| ObjectId::from_bytes([seed; 32]))
+            .collect();
+
+        let actual_size = DurableObjectState::object_size(&header_heavy);
+        assert!(
+            actual_size > 4_096,
+            "canonical header-heavy object must cost > 4 KiB, got {actual_size}"
+        );
+
+        #[allow(clippy::cast_possible_truncation)]
+        let old_estimate = header_heavy.body.len() as u64 + 512;
+        assert!(
+            actual_size > old_estimate * 8,
+            "canonical accounting must dominate the old 512-byte estimate; actual={actual_size} old={old_estimate}"
+        );
+
+        let mut rejected_config = DurableObjectStoreConfig::new(temp_dir.path().join("reject"));
+        rejected_config.max_bytes = actual_size - 1;
+        let rejected_store = DurableObjectStore::open(rejected_config).expect("open reject store");
+        let result = rejected_store.put(header_heavy.clone()).await;
+        assert!(
+            matches!(result, Err(ObjectStoreError::QuotaExceeded { .. })),
+            "header-heavy object must be rejected when quota < canonical cost, got {result:?}"
+        );
+
+        let mut exact_config = DurableObjectStoreConfig::new(temp_dir.path().join("exact"));
+        exact_config.max_bytes = actual_size;
+        let exact_store = DurableObjectStore::open(exact_config).expect("open exact store");
+        exact_store
+            .put(header_heavy)
+            .await
+            .expect("exact-fit quota must accept the object");
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn wal_replay_rejects_oversized_object_body() {
         // Regression for flywheel_connectors-4g0qr: WAL replay used to call
         // `apply_loaded_mutation` directly without `validate_mutation`, so
@@ -1566,9 +1617,8 @@ mod tests {
         // 3) Append the forged record to the object WAL with the correct
         //    checksum so the bytes-on-disk look authentic.
         let wal_path = temp_dir.path().join("objects.wal.jsonl");
-        let op = ObjectWalOp::Put(forged);
-        let checksum =
-            checksum_json(&(WAL_VERSION, 2u64, &op)).expect("compute forged checksum");
+        let op = ObjectWalOp::Put(Box::new(forged));
+        let checksum = checksum_json(&(WAL_VERSION, 2u64, &op)).expect("compute forged checksum");
         let envelope = WalEnvelope {
             version: WAL_VERSION,
             seq: 2u64,
@@ -1676,9 +1726,8 @@ mod tests {
         forged.object_id = legit_id;
 
         let wal_path = temp_dir.path().join("objects.wal.jsonl");
-        let op = ObjectWalOp::Put(forged);
-        let checksum =
-            checksum_json(&(WAL_VERSION, 2u64, &op)).expect("compute forged checksum");
+        let op = ObjectWalOp::Put(Box::new(forged));
+        let checksum = checksum_json(&(WAL_VERSION, 2u64, &op)).expect("compute forged checksum");
         let envelope = WalEnvelope {
             version: WAL_VERSION,
             seq: 2u64,
@@ -1758,7 +1807,7 @@ mod tests {
 
         // Case 2: single record larger than cap, no newline within first
         // `cap` bytes → returns `hit_cap = true` and `buf.len() <= cap`.
-        let oversized: Vec<u8> = std::iter::repeat(b'A').take(cap * 4).collect();
+        let oversized: Vec<u8> = std::iter::repeat_n(b'A', cap * 4).collect();
         let mut reader = Cursor::new(oversized);
         let mut buf = Vec::new();
         let (n, capped) =
@@ -1921,6 +1970,60 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn durable_symbol_store_rejects_oversized_source_symbols() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config = DurableSymbolStoreConfig::new(temp_dir.path().join("symbols"));
+        let store = DurableSymbolStore::open(config).expect("open symbol store");
+
+        let mut poisoned = test_symbol_meta(12);
+        poisoned.source_symbols = u32::MAX;
+        let result = store.put_object_meta(poisoned).await;
+        assert!(
+            matches!(result, Err(SymbolStoreError::InvalidSymbol { .. })),
+            "durable meta writes must reject oversized source_symbols before allocation, got {result:?}"
+        );
+
+        let mut zero = test_symbol_meta(13);
+        zero.source_symbols = 0;
+        let result = store.put_object_meta(zero).await;
+        assert!(
+            matches!(result, Err(SymbolStoreError::InvalidSymbol { .. })),
+            "durable meta writes must reject zero source_symbols, got {result:?}"
+        );
+
+        assert!(
+            store.list_zone(&test_zone()).await.is_empty(),
+            "rejected metadata must not create durable symbol objects"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn durable_symbol_store_rejects_invalid_snapshot_source_symbols() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config = DurableSymbolStoreConfig::new(temp_dir.path().join("symbols"));
+        fs::create_dir_all(&config.root_dir).expect("create root dir");
+        let snapshot_path = config.root_dir.join("symbols.snapshot.json");
+
+        let mut invalid_meta = test_symbol_meta(14);
+        invalid_meta.source_symbols = 0;
+        let snapshot = SymbolSnapshot {
+            objects: vec![SymbolSnapshotEntry {
+                meta: invalid_meta,
+                symbols: Vec::new(),
+            }],
+        };
+        write_snapshot(&snapshot_path, 1, &snapshot).expect("write invalid snapshot");
+
+        match DurableSymbolStore::open(config) {
+            Err(SymbolStoreError::InvalidSymbol { .. }) => {}
+            Err(other) => {
+                panic!("expected InvalidSymbol for invalid source_symbols, got {other:?}")
+            }
+            Ok(_) => panic!("expected recovery to reject invalid source_symbols"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn durable_symbol_store_rejects_semantically_invalid_wal_on_recovery() {
         let temp_dir = TempDir::new().expect("temp dir");
         let mut config = DurableSymbolStoreConfig::new(temp_dir.path().join("symbols"));
@@ -2044,8 +2147,7 @@ mod tests {
             "object should still be present"
         );
         assert_eq!(
-            state.used_bytes,
-            valid_size,
+            state.used_bytes, valid_size,
             "scrub must repair quota accounting before releasing the state lock"
         );
         assert_eq!(

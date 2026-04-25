@@ -9172,6 +9172,35 @@ schema_version = "2.1"
     }
 
     #[test]
+    fn rate_limits_section_rejects_duplicate_pool_refs_per_operation() {
+        let section = RateLimitsSection {
+            pools: vec![RateLimitPoolSection {
+                id: "api".into(),
+                description: None,
+                requests: 10,
+                window_ms: 1000,
+                burst: None,
+                unit: None,
+                enforcement: None,
+                scope: None,
+            }],
+            operation_pools: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("op".into(), vec!["api".into(), "api".into()]);
+                m
+            },
+        };
+
+        assert!(matches!(
+            section.validate().unwrap_err(),
+            ManifestError::RateLimitDeclaration(RateLimitDeclarationError::DuplicateToolPool {
+                tool,
+                pool,
+            }) if tool == "op" && pool == "api"
+        ));
+    }
+
+    #[test]
     fn rate_limits_section_pool_window_zero() {
         // window_ms = 0 creates a Duration of 0, which may or may not be valid
         // depending on the RateLimitDeclarations validation

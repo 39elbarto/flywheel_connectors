@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use fcp_core::{
     CapabilityVerifier, FcpError, InvokeRequest, InvokeValidationError, ObjectId, OperationIntent,
-    OperationReceipt, RevocationRegistry, TailscaleNodeId, ZoneId, ZoneKey,
-    ZoneKeyAlgorithm, ZoneTransportPolicy,
+    OperationReceipt, RevocationRegistry, TailscaleNodeId, ZoneId, ZoneKey, ZoneKeyAlgorithm,
+    ZoneTransportPolicy,
 };
 use fcp_crypto::{CwtClaims, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_protocol::{DecodeStatus, SymbolAck, SymbolRequest};
@@ -757,7 +757,20 @@ impl MeshNode {
     pub fn update_peer_zones(&mut self, node_id: &NodeId, zones: HashSet<ZoneId>) {
         if let Some(state) = self.peers.get_mut(node_id) {
             state.zones = zones;
+            return;
         }
+
+        self.peers.insert(
+            node_id.clone(),
+            PeerState {
+                profile: DeviceProfile::builder(node_id.clone()).build(),
+                local_symbols: HashSet::new(),
+                held_leases: Vec::new(),
+                zones,
+                last_seen_ms: current_time_ms(),
+            },
+        );
+        self.metrics.peer_updates += 1;
     }
 
     /// Replace the set of zones the local node is authorized for.
@@ -1100,7 +1113,7 @@ impl MeshNode {
     /// `admission.set_authenticated(peer, true, ..)`. Authentication is
     /// a property of the cryptographic session only; callers that need
     /// the authenticated tier in tests should pre-mark the peer via
-    /// [`MeshNode::admission_mut`]`.set_authenticated(peer, true, now_ms)`
+    /// <code>[MeshNode::admission_mut].set_authenticated(peer, true, now_ms)</code>
     /// or establish a real `MeshSession` via [`MeshNode::register_session`].
     /// Follow-up work (bead `flywheel_connectors-q92i7`) can delete the
     /// parameter once every call site has migrated.
@@ -1193,6 +1206,7 @@ impl MeshNode {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)] // Validation is intentionally linear so each fail-closed gate stays visible.
     async fn validate_symbol_request(
         &mut self,
         request: &SymbolRequest,
@@ -1644,6 +1658,10 @@ impl MeshNode {
     /// Dispatch a gossip control-plane message through the verified node entrypoint.
     ///
     /// Returns a verified revocation push when the message carries one.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MeshNodeError` if summary or revocation-push verification fails.
     pub fn handle_gossip_message(
         &mut self,
         message: GossipMessage,
@@ -1741,6 +1759,11 @@ impl MeshNode {
     }
 
     /// Apply a decode status update (targeted repair feedback).
+    ///
+    /// # Errors
+    ///
+    /// Returns `MeshNodeError` if the status targets a different recipient or
+    /// fails peer signature verification.
     pub fn handle_decode_status(
         &mut self,
         peer: &NodeId,
@@ -1767,6 +1790,11 @@ impl MeshNode {
     }
 
     /// Apply a SymbolAck and stop further sends.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MeshNodeError` if the ack targets a different recipient or
+    /// fails peer signature verification.
     pub fn handle_symbol_ack(
         &mut self,
         peer: &NodeId,
@@ -1842,9 +1870,13 @@ impl MeshNode {
         zone_key: &ZoneKey,
         algorithm: ZoneKeyAlgorithm,
     ) -> Result<Vec<fcp_protocol::FcpsFrame>, MeshNodeError> {
-        Ok(self
-            .degraded_encoder
-            .encode_authenticated(envelope, epoch_id, zone_key, algorithm, &self.local_node_ts)?)
+        Ok(self.degraded_encoder.encode_authenticated(
+            envelope,
+            epoch_id,
+            zone_key,
+            algorithm,
+            &self.local_node_ts,
+        )?)
     }
 
     /// Decode a control-plane frame in degraded mode.
@@ -1852,6 +1884,7 @@ impl MeshNode {
     /// # Errors
     ///
     /// Returns `MeshNodeError::DegradedTransport` if decoding fails.
+    #[allow(clippy::too_many_arguments)] // Degraded decode must bind peer, frame, zone, retention, crypto, and time.
     pub fn decode_control_plane(
         &mut self,
         peer: &NodeId,
@@ -1866,16 +1899,14 @@ impl MeshNode {
         self.admission.try_acquire_decode(peer, now_ms)?;
 
         let sender_node_id = TailscaleNodeId::new(peer.as_str());
-        let result = self
-            .degraded_decoder
-            .process_frame_authenticated(
-                frame,
-                expected_zone_id,
-                retention,
-                zone_key,
-                algorithm,
-                &sender_node_id,
-            );
+        let result = self.degraded_decoder.process_frame_authenticated(
+            frame,
+            expected_zone_id,
+            retention,
+            zone_key,
+            algorithm,
+            &sender_node_id,
+        );
 
         // Release the decode slot immediately after processing the frame.
         // This bounds the active CPU time spent decoding for this peer.
@@ -1890,6 +1921,7 @@ impl MeshNode {
     ///
     /// Returns `MeshNodeError` if decoding fails or the handler rejects the
     /// envelope.
+    #[allow(clippy::too_many_arguments)] // Frame processing adds the handler to the degraded decode context.
     pub fn process_control_plane_frame(
         &mut self,
         peer: &NodeId,
@@ -2145,6 +2177,10 @@ mod tests {
         DeviceProfileBuilder::new(NodeId::new(node_name)).build()
     }
 
+    fn zone_set(zone_id: ZoneId) -> HashSet<ZoneId> {
+        HashSet::from([zone_id])
+    }
+
     /// Attach a peer signature AND a zone-owner signature to `push`
     /// (br-uxsnk). Tests that exercise the happy path must sign both
     /// layers; tests that exercise forgery detection call only the
@@ -2348,7 +2384,7 @@ mod tests {
         let zone_key_id = ZoneKeyId::from_bytes([9u8; 8]);
         let object_id = test_object_id("meshnode-prune-state");
         let peer = NodeId::new("peer-1");
-        node.update_peer_zones(&peer, [zone_id.clone()].into_iter().collect());
+        node.update_peer_zones(&peer, zone_set(zone_id.clone()));
         // q92i7 migration: pre-mark the peer as authenticated via the
         // admission controller rather than passing `true` as the ignored
         // `_is_authenticated` arg to `handle_symbol_request`. The OR
@@ -2425,7 +2461,7 @@ mod tests {
         let zone_key_id = ZoneKeyId::from_bytes([10u8; 8]);
         let object_id = test_object_id("meshnode-quarantined-request");
         let peer = NodeId::new("peer-1");
-        node.update_peer_zones(&peer, [zone_id.clone()].into_iter().collect());
+        node.update_peer_zones(&peer, zone_set(zone_id.clone()));
 
         node.quarantine_store()
             .quarantine(QuarantinedObject {
@@ -2486,7 +2522,7 @@ mod tests {
             !node.is_peer_authenticated(&peer),
             "precondition: peer must start unauthenticated"
         );
-        node.update_peer_zones(&peer, [zone_id.clone()].into_iter().collect());
+        node.update_peer_zones(&peer, zone_set(zone_id.clone()));
 
         let oti = ObjectTransmissionInformation::new(256, 64, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -2502,7 +2538,7 @@ mod tests {
         let request = SymbolRequest::new(
             test_object_header(),
             object_id,
-            zone_id.clone(),
+            zone_id,
             zone_key_id,
             1,
             2,
@@ -2526,9 +2562,8 @@ mod tests {
         assert!(
             matches!(
                 err,
-                SymbolRequestError::AdmissionRejected(
-                    AdmissionError::AuthenticationRequired { .. }
-                ) | SymbolRequestError::SignatureInvalid
+                SymbolRequestError::AdmissionRejected(AdmissionError::AuthenticationRequired)
+                    | SymbolRequestError::SignatureInvalid
             ),
             "expected an auth-required / signature-invalid refusal, got {err:?}"
         );
@@ -2572,7 +2607,7 @@ mod tests {
         let signing_key = Ed25519SigningKey::generate();
         request.sign(&signing_key);
         node.register_peer_signing_key(peer_id.clone(), signing_key.verifying_key());
-        node.update_peer_zones(&peer_id, [zone_id.clone()].into_iter().collect());
+        node.update_peer_zones(&peer_id, zone_set(zone_id.clone()));
 
         let result = fcp_async_core::runtime::block_on_sync(async {
             node.symbol_store
@@ -2636,7 +2671,7 @@ mod tests {
         let wrong_key = Ed25519SigningKey::generate();
         request.sign(&wrong_key);
         node.register_peer_signing_key(peer_id.clone(), signing_key.verifying_key());
-        node.update_peer_zones(&peer_id, [zone_id.clone()].into_iter().collect());
+        node.update_peer_zones(&peer_id, zone_set(zone_id.clone()));
 
         let err = fcp_async_core::runtime::block_on_sync(async {
             node.symbol_store
@@ -3047,7 +3082,7 @@ mod tests {
             vec![],
             1_000,
         );
-        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
 
         let mut peer_gossip = MeshGossip::with_defaults(TailscaleNodeId::new("peer-1"));
         peer_gossip.announce_object(
@@ -3243,7 +3278,7 @@ mod tests {
             vec![],
             1_000,
         );
-        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
 
         let unauthorized_zone = ZoneId::private();
         let template = GossipSummary {
@@ -3328,7 +3363,7 @@ mod tests {
             vec![],
             1_000,
         );
-        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
 
         let template = GossipSummary {
             from: TailscaleNodeId::new("peer-1"),
@@ -3381,7 +3416,7 @@ mod tests {
             vec![],
             1_000,
         );
-        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
 
         let signed_summary = |timestamp: u64, object_names: &[&str]| {
             let mut peer_gossip = MeshGossip::with_defaults(TailscaleNodeId::new("peer-1"));
@@ -3444,7 +3479,7 @@ mod tests {
             vec![],
             1_000,
         );
-        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
 
         let mut push = RevocationPushMessage::new(
             TailscaleNodeId::new("peer-1"),
@@ -3482,7 +3517,7 @@ mod tests {
             vec![],
             1_000,
         );
-        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
 
         let mut push = RevocationPushMessage::new(
             TailscaleNodeId::new("peer-1"),
@@ -3532,7 +3567,7 @@ mod tests {
             vec![],
             1_000,
         );
-        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
 
         let mut push = RevocationPushMessage::new(
             TailscaleNodeId::new("peer-1"),
@@ -3568,7 +3603,7 @@ mod tests {
             vec![],
             1_000,
         );
-        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
 
         let mut push = RevocationPushMessage::new(
             TailscaleNodeId::new("peer-1"),
@@ -3621,7 +3656,7 @@ mod tests {
             vec![],
             1_000,
         );
-        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
 
         let mut push = RevocationPushMessage::new(
             TailscaleNodeId::new("peer-1"),
@@ -3656,7 +3691,7 @@ mod tests {
             vec![],
             1_000,
         );
-        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
 
         let mut push = RevocationPushMessage::new(
             TailscaleNodeId::new("peer-1"),
@@ -3699,7 +3734,7 @@ mod tests {
             vec![],
             1_000,
         );
-        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
 
         let mut push = RevocationPushMessage::new(
             TailscaleNodeId::new("peer-1"),
@@ -3739,7 +3774,7 @@ mod tests {
             vec![],
             1_000,
         );
-        node.update_peer_zones(&peer, [ZoneId::work()].into_iter().collect());
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
 
         let mut push = RevocationPushMessage::new(
             TailscaleNodeId::new("peer-1"),
@@ -5431,6 +5466,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Regression assembles full per-peer transfer state before and after ack.
     fn symbol_transfer_state_is_scoped_per_peer() {
         let mut node = test_node("node-ack");
         let peer_a = NodeId::new("peer-a");
@@ -5439,10 +5475,24 @@ mod tests {
         let zone_key_id = ZoneKeyId::from_bytes([0xCD; 8]);
         let object_id = ObjectId::from_bytes([0xCE; 32]);
 
-        node.update_peer_zones(&peer_a, [zone_id.clone()].into_iter().collect());
-        node.update_peer_zones(&peer_b, [zone_id.clone()].into_iter().collect());
+        node.update_peer_zones(&peer_a, zone_set(zone_id.clone()));
+        node.update_peer_zones(&peer_b, zone_set(zone_id.clone()));
+        node.admission_mut().set_authenticated(&peer_a, true, 0);
+        node.admission_mut().set_authenticated(&peer_b, true, 0);
 
         fcp_async_core::runtime::block_on_sync(async {
+            let oti = ObjectTransmissionInformation::new(256, 64, 1, 1, 1);
+            node.symbol_store
+                .put_object_meta(ObjectSymbolMeta {
+                    object_id,
+                    zone_id: zone_id.clone(),
+                    oti: ObjectTransmissionInfo::from(oti),
+                    source_symbols: 4,
+                    first_symbol_at: 0,
+                })
+                .await
+                .expect("store meta");
+
             for esi in 0..4 {
                 let symbol = StoredSymbol {
                     meta: SymbolMeta {

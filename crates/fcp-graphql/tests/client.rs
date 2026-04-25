@@ -511,24 +511,18 @@ async fn execute_batch_success() {
     let mut ctx = TestContext::new("execute_batch_success");
     let server = MockServer::start().await;
 
-    let items = vec![
-        fcp_graphql::GraphqlBatchItem::new(
-            fcp_graphql::GraphqlQuery::from_static(ViewerByIdQuery::QUERY),
-            IdVars {
-                id: "user-1".to_string(),
-            },
-        )
-        .with_operation_name(ViewerByIdQuery::OPERATION_NAME),
-        fcp_graphql::GraphqlBatchItem::new(
-            fcp_graphql::GraphqlQuery::from_static(ViewerByIdQuery::QUERY),
-            IdVars {
-                id: "user-2".to_string(),
-            },
-        )
-        .with_operation_name(ViewerByIdQuery::OPERATION_NAME),
-    ];
-
-    let expected_body = serde_json::to_value(&items).expect("serialize batch");
+    let expected_body = serde_json::json!([
+        {
+            "query": ViewerByIdQuery::QUERY,
+            "operationName": ViewerByIdQuery::OPERATION_NAME,
+            "variables": { "id": "user-1" }
+        },
+        {
+            "query": ViewerByIdQuery::QUERY,
+            "operationName": ViewerByIdQuery::OPERATION_NAME,
+            "variables": { "id": "user-2" }
+        }
+    ]);
 
     let response_body = serde_json::json!([
         {"data": {"viewer": {"id": "user-1"}}},
@@ -2088,6 +2082,7 @@ fn graphql_client_error_is_std_error() {
 fn graphql_query_serde_roundtrip() {
     let q = GraphqlQuery::from_static("query Foo { bar { id } }");
     let json = serde_json::to_string(&q).unwrap();
+    assert_eq!(json, "\"query Foo { bar { id } }\"");
     let back: GraphqlQuery = serde_json::from_str(&json).unwrap();
     assert_eq!(q.as_str(), back.as_str());
 }
@@ -2101,6 +2096,7 @@ fn graphql_request_serde_skips_none_op_name() {
     let req = GraphqlRequest::new(GraphqlQuery::new("{ users { id } }"), serde_json::json!({}));
     let json = serde_json::to_string(&req).unwrap();
     assert!(!json.contains("operation_name"));
+    assert!(!json.contains("operationName"));
 }
 
 #[test]
@@ -2112,6 +2108,8 @@ fn graphql_request_serde_includes_op_name() {
     .with_operation_name("GetUsers");
     let json = serde_json::to_string(&req).unwrap();
     assert!(json.contains("GetUsers"));
+    assert!(json.contains("operationName"));
+    assert!(!json.contains("operation_name"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

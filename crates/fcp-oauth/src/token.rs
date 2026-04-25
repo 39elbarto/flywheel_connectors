@@ -361,6 +361,28 @@ struct RefreshGate {
     refreshing: AtomicBool,
 }
 
+#[derive(Debug)]
+struct RefreshGateLease {
+    gate: Arc<RefreshGate>,
+}
+
+impl RefreshGateLease {
+    fn try_acquire(gate: &Arc<RefreshGate>) -> Option<Self> {
+        gate.refreshing
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self {
+                gate: Arc::clone(gate),
+            })
+    }
+}
+
+impl Drop for RefreshGateLease {
+    fn drop(&mut self) {
+        self.gate.refreshing.store(false, Ordering::Release);
+    }
+}
+
 impl Default for TokenStore {
     fn default() -> Self {
         Self::new()
@@ -442,8 +464,10 @@ impl TokenStore {
     /// Remove tokens by key.
     #[must_use]
     pub fn remove(&self, key: &str) -> Option<OAuthTokens> {
-        let mut store = self.tokens.write();
-        let removed = store.remove(key).map(|s| s.tokens);
+        let removed = {
+            let mut store = self.tokens.write();
+            store.remove(key).map(|s| s.tokens)
+        };
         if removed.is_some() {
             self.refresh_gates.lock().remove(key);
         }
@@ -528,16 +552,12 @@ impl TokenStore {
             let expected_refresh_token = snapshot.refresh_token().map(str::to_string);
             let gate = self.refresh_gate(key);
 
-            if gate
-                .refreshing
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-            {
+            let Some(refresh_lease) = RefreshGateLease::try_acquire(&gate) else {
                 while gate.refreshing.load(Ordering::Acquire) {
                     fcp_async_core::task::yield_now().await;
                 }
                 continue;
-            }
+            };
 
             let refresh_outcome = match client.refresh_tokens(&refresh_token).await {
                 Ok(tokens) => match self.update_after_refresh(
@@ -560,11 +580,10 @@ impl TokenStore {
                     }
                 }
             };
-            gate.refreshing.store(false, Ordering::Release);
+            drop(refresh_lease);
 
-            match refresh_outcome? {
-                Some(tokens) => return Ok(tokens),
-                None => continue,
+            if let Some(tokens) = refresh_outcome? {
+                return Ok(tokens);
             }
         }
     }
@@ -581,7 +600,7 @@ impl TokenStore {
         self.refresh_gates.lock().clear();
     }
 
-    /// Cleanup expired tokens.
+    /// Cleanup expired tokens that cannot be refreshed.
     fn maybe_cleanup(&self) {
         let should_cleanup = {
             let last = self.last_cleanup.read();
@@ -595,7 +614,7 @@ impl TokenStore {
             if last.elapsed() >= self.cleanup_interval {
                 let mut expired_keys = Vec::new();
                 self.tokens.write().retain(|key, value| {
-                    let keep = !value.tokens.is_expired();
+                    let keep = !value.tokens.is_expired() || value.tokens.refresh_token().is_some();
                     if !keep {
                         expired_keys.push(key.clone());
                     }
@@ -625,67 +644,6 @@ impl TokenStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    trait TestOAuthTokensExt {
-        fn expect_tokens(&self) -> &OAuthTokens;
-        fn expect_tokens_mut(&mut self) -> &mut OAuthTokens;
-
-        fn access_token(&self) -> &str {
-            self.expect_tokens().access_token()
-        }
-
-        fn token_type(&self) -> &str {
-            self.expect_tokens().token_type()
-        }
-
-        fn refresh_token(&self) -> Option<&str> {
-            self.expect_tokens().refresh_token()
-        }
-
-        fn scopes(&self) -> &[String] {
-            self.expect_tokens().scopes()
-        }
-
-        fn id_token(&self) -> Option<&str> {
-            self.expect_tokens().id_token()
-        }
-
-        fn is_expired(&self) -> bool {
-            self.expect_tokens().is_expired()
-        }
-
-        fn needs_refresh(&self) -> bool {
-            self.expect_tokens().needs_refresh()
-        }
-
-        fn needs_refresh_within(&self, threshold: Duration) -> bool {
-            self.expect_tokens().needs_refresh_within(threshold)
-        }
-
-        fn time_until_expiry(&self) -> Option<Duration> {
-            self.expect_tokens().time_until_expiry()
-        }
-
-        fn authorization_header(&self) -> OAuthResult<String> {
-            self.expect_tokens().authorization_header()
-        }
-
-        fn update_from_response(&mut self, response: TokenResponse) -> OAuthResult<()> {
-            self.expect_tokens_mut().update_from_response(response)
-        }
-    }
-
-    impl TestOAuthTokensExt for OAuthResult<OAuthTokens> {
-        fn expect_tokens(&self) -> &OAuthTokens {
-            self.as_ref()
-                .expect("valid token fixture must construct before assertion")
-        }
-
-        fn expect_tokens_mut(&mut self) -> &mut OAuthTokens {
-            self.as_mut()
-                .expect("valid token fixture must construct before mutation")
-        }
-    }
 
     fn mock_token_response(expires_in: Option<u64>) -> TokenResponse {
         TokenResponse {
@@ -2348,6 +2306,54 @@ mod tests {
         let stored = store.get("k").unwrap();
         assert_eq!(stored.access_token(), "leader_at");
         assert_eq!(stored.refresh_token(), Some("new_rt"));
+    }
+
+    #[test]
+    fn test_refresh_gate_lease_releases_on_drop() {
+        let store = TokenStore::new();
+        let gate = store.refresh_gate("k");
+
+        let lease = RefreshGateLease::try_acquire(&gate)
+            .expect("first acquire should claim the refresh gate");
+        assert!(gate.refreshing.load(Ordering::Acquire));
+        assert!(
+            RefreshGateLease::try_acquire(&gate).is_none(),
+            "second acquire must observe the active single-flight refresh"
+        );
+
+        drop(lease);
+        assert!(
+            !gate.refreshing.load(Ordering::Acquire),
+            "dropping the lease must release the gate even if the refresh future is cancelled"
+        );
+
+        let reacquired = RefreshGateLease::try_acquire(&gate)
+            .expect("gate should be reusable after the previous lease drops");
+        drop(reacquired);
+    }
+
+    #[test]
+    fn test_token_store_cleanup_keeps_expired_refreshable_tokens() {
+        let store = TokenStore::new().with_cleanup_interval(Duration::ZERO);
+        store.store(
+            "refreshable",
+            valid_tokens(TokenResponse {
+                access_token: "expired_at".into(),
+                token_type: "Bearer".into(),
+                expires_in: Some(0),
+                refresh_token: Some("refreshable_rt".into()),
+                scope: None,
+                id_token: None,
+            }),
+        );
+
+        store.store("active", valid_tokens(mock_token_response(Some(3600))));
+
+        let refreshable = store
+            .get("refreshable")
+            .expect("expired tokens with refresh credentials must remain refreshable");
+        assert!(refreshable.is_expired());
+        assert_eq!(refreshable.refresh_token(), Some("refreshable_rt"));
     }
 
     #[test]

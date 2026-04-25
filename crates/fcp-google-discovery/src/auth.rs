@@ -263,7 +263,7 @@ impl GoogleRefreshTokenExchanger for FcpOAuthRefreshTokenExchanger {
             .with_auth_style(AuthStyle::Post);
 
             if !request.requested_scopes.is_empty() {
-                config = config.with_token_param("scope", request.requested_scopes.join(" "));
+                config = config.with_scopes(request.requested_scopes.clone());
             }
 
             let client = OAuth2Client::new(config).map_err(|error| {
@@ -936,12 +936,17 @@ fn validate_token_url(token_url: &str) -> Result<(), GoogleAuthError> {
         .ok_or_else(|| GoogleAuthError::InvalidConfig {
             message: "`oauth_refresh.token_url` must include a host".to_string(),
         })?;
+    if parsed.username() != "" || parsed.password().is_some() {
+        return Err(GoogleAuthError::InvalidConfig {
+            message: "`oauth_refresh.token_url` must not embed userinfo".to_string(),
+        });
+    }
+
     if is_local_test_host(host) {
         if parsed.query().is_some() || parsed.fragment().is_some() {
             return Err(GoogleAuthError::InvalidConfig {
-                message:
-                    "`oauth_refresh.token_url` must not include query or fragment components"
-                        .to_string(),
+                message: "`oauth_refresh.token_url` must not include query or fragment components"
+                    .to_string(),
             });
         }
         return Ok(());
@@ -949,8 +954,9 @@ fn validate_token_url(token_url: &str) -> Result<(), GoogleAuthError> {
 
     if parsed.scheme() != "https" {
         return Err(GoogleAuthError::InvalidConfig {
-            message: "`oauth_refresh.token_url` must use https unless targeting localhost for tests"
-                .to_string(),
+            message:
+                "`oauth_refresh.token_url` must use https unless targeting localhost for tests"
+                    .to_string(),
         });
     }
     if !host.eq_ignore_ascii_case("oauth2.googleapis.com") {
@@ -964,12 +970,6 @@ fn validate_token_url(token_url: &str) -> Result<(), GoogleAuthError> {
             message:
                 "`oauth_refresh.token_url` must match the canonical Google token endpoint path"
                     .to_string(),
-        });
-    }
-
-    if parsed.username() != "" || parsed.password().is_some() {
-        return Err(GoogleAuthError::InvalidConfig {
-            message: "`oauth_refresh.token_url` must not embed userinfo".to_string(),
         });
     }
 
@@ -1932,7 +1932,10 @@ mod tests {
         let err = validate_token_url("https://oauth2.googleapis.com/not-token")
             .expect_err("wrong path should be rejected");
         let msg = err.to_string();
-        assert!(msg.contains("canonical"), "error should mention canonical path: {msg}");
+        assert!(
+            msg.contains("canonical"),
+            "error should mention canonical path: {msg}"
+        );
     }
 
     #[test]
@@ -1940,7 +1943,21 @@ mod tests {
         let err = validate_token_url("https://oauth2.googleapis.com/token?alt=json")
             .expect_err("query should be rejected");
         let msg = err.to_string();
-        assert!(msg.contains("canonical"), "error should mention canonical path: {msg}");
+        assert!(
+            msg.contains("canonical"),
+            "error should mention canonical path: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_token_url_localhost_userinfo_is_rejected() {
+        let err = validate_token_url("http://user:pass@localhost:8080/token")
+            .expect_err("userinfo should be rejected before localhost test exception");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must not embed userinfo"),
+            "error should mention userinfo: {msg}"
+        );
     }
 
     #[test]
@@ -2147,19 +2164,19 @@ mod tests {
     // ── parse_oauth_refresh_source edge cases ────────────────────────
 
     #[test]
-    fn oauth_refresh_source_with_custom_token_url() {
+    fn oauth_refresh_source_with_local_test_token_url() {
         let params = json!({
             "oauth_refresh": {
                 "client_id": "cid",
                 "client_secret": "csec",
                 "refresh_token": "rt",
-                "token_url": "https://custom.example.com/token"
+                "token_url": "http://localhost:18080/token"
             }
         });
         let source = parse_oauth_refresh_source(&params)
             .expect("should parse ok")
             .expect("should be Some");
-        assert_eq!(source.token_url, "https://custom.example.com/token");
+        assert_eq!(source.token_url, "http://localhost:18080/token");
     }
 
     #[test]

@@ -3193,7 +3193,7 @@ fn sanitizer_receipt_object_id(receipt: &SanitizerReceipt) -> ObjectId {
 /// Outcome of a single sample in the direct zone policy preview.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum PreviewOutcome {
+enum PreviewOutcome {
     /// The policy allows the operation.
     Allow,
     /// The policy denies the operation.
@@ -3213,7 +3213,7 @@ impl From<Decision> for PreviewOutcome {
 #[cfg(test)]
 /// A single row in the preview delta report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PreviewDeltaEntry {
+struct PreviewDeltaEntry {
     /// Index of the sample in the input list.
     pub sample_index: usize,
     /// Decision under the *current* (baseline) policy.
@@ -3231,7 +3231,7 @@ pub(crate) struct PreviewDeltaEntry {
 #[cfg(test)]
 /// Aggregate summary of changes in a preview evaluation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct PreviewSummary {
+struct PreviewSummary {
     /// Total samples evaluated.
     pub total_samples: usize,
     /// Samples whose decision changed.
@@ -3247,7 +3247,7 @@ pub(crate) struct PreviewSummary {
 #[cfg(test)]
 /// Full result of a preview evaluation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PreviewResult {
+struct PreviewResult {
     /// Per-sample delta entries.
     pub deltas: Vec<PreviewDeltaEntry>,
     /// Aggregate summary.
@@ -3261,7 +3261,7 @@ pub(crate) struct PreviewResult {
 /// using a set of sample operations. The evaluator is read-only and
 /// never mutates state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PreviewInput {
+struct PreviewInput {
     /// Current policy in effect.
     pub baseline_policy: ZonePolicyObject,
     /// Proposed replacement policy.
@@ -3281,9 +3281,7 @@ pub(crate) struct PreviewInput {
 /// Returns [`PolicySimulationError`] if any sample cannot be evaluated
 /// (e.g., missing required token claims).
 #[cfg(test)]
-pub(crate) fn preview_policy_changes(
-    input: &PreviewInput,
-) -> Result<PreviewResult, PolicySimulationError> {
+fn preview_policy_changes(input: &PreviewInput) -> Result<PreviewResult, PolicySimulationError> {
     let mut deltas = Vec::with_capacity(input.samples.len());
     let mut summary = PreviewSummary {
         total_samples: input.samples.len(),
@@ -4925,11 +4923,12 @@ mod tests {
 
     #[test]
     fn engine_elevation_rejects_token_bound_to_different_request() {
+        static APPROVALS: std::sync::OnceLock<Vec<ApprovalToken>> = std::sync::OnceLock::new();
+
         // Token was issued for request A; attacker replays it against
         // request B. The engine must surface
         // ApprovalElevationScopeMismatch, not Allow.
         let request_b = ObjectId::from_unscoped_bytes(b"req-B");
-        static APPROVALS: std::sync::OnceLock<Vec<ApprovalToken>> = std::sync::OnceLock::new();
         let approvals = APPROVALS
             .get_or_init(|| vec![elevation_token(ObjectId::from_unscoped_bytes(b"req-A"))]);
         let input = elevation_flow_input(request_b, approvals.as_slice());
@@ -4947,8 +4946,9 @@ mod tests {
 
     #[test]
     fn engine_elevation_accepts_token_bound_to_this_request() {
-        let request = ObjectId::from_unscoped_bytes(b"req-match");
         static APPROVALS: std::sync::OnceLock<Vec<ApprovalToken>> = std::sync::OnceLock::new();
+
+        let request = ObjectId::from_unscoped_bytes(b"req-match");
         let approvals = APPROVALS
             .get_or_init(|| vec![elevation_token(ObjectId::from_unscoped_bytes(b"req-match"))]);
         let input = elevation_flow_input(request, approvals.as_slice());
@@ -4966,12 +4966,13 @@ mod tests {
 
     #[test]
     fn engine_elevation_missing_with_no_elevation_scope_reports_missing_not_mismatch() {
+        static APPROVALS: std::sync::OnceLock<Vec<ApprovalToken>> = std::sync::OnceLock::new();
+
         // If there are no elevation-scoped tokens at all, the engine should
         // return ApprovalMissingElevation (preserving the existing
         // distinction between "missing" and "mismatch"). This guards
         // against the refactor collapsing the two states.
         let request = ObjectId::from_unscoped_bytes(b"req-no-elev");
-        static APPROVALS: std::sync::OnceLock<Vec<ApprovalToken>> = std::sync::OnceLock::new();
         let approvals = APPROVALS.get_or_init(Vec::new);
         let input = elevation_flow_input(request, approvals.as_slice());
         let engine = PolicyEngine {

@@ -145,14 +145,10 @@ impl RaptorQEncoder {
 
         // Repair symbols (ESI K'..K'+repair): RFC 6330 requires repair ISIs
         // start at K' (after the virtual padding range K..K'). The cap
-        // above guarantees `k_prime + i` never overflows; use checked_add
-        // here anyway so the invariant is expressed at the use site and
-        // the rest of the crate's saturating/checked discipline stays
-        // uniform (bead flywheel_connectors-gh7gt).
+        // above guarantees `k_prime + i` never overflows. Use saturating_add
+        // anyway so this public helper cannot panic if the guard is changed.
         for i in 0..repair_count {
-            let esi = k_prime
-                .checked_add(i)
-                .expect("repair_count cap ensures k_prime + i stays within u32");
+            let esi = k_prime.saturating_add(i);
             let data = self.inner.repair_symbol(esi);
             result.push((esi, data));
         }
@@ -182,9 +178,7 @@ impl RaptorQEncoder {
         // result-so-far, rather than source_bytes + all-repairs-buffer +
         // result-so-far.
         let Self {
-            inner,
-            source_data,
-            ..
+            inner, source_data, ..
         } = self;
 
         let mut result = Vec::with_capacity(source_data.len() + repair_count as usize);
@@ -194,14 +188,11 @@ impl RaptorQEncoder {
             result.push((esi as u32, data));
         }
 
-        // Repair symbols (ESI K'..K'+repair_count). checked_add so an
-        // unexpected cap regression surfaces as a panic during
-        // construction instead of a silent wrap producing duplicate
-        // ESIs that collide with the source range (bead gh7gt).
+        // Repair symbols (ESI K'..K'+repair_count). The cap above keeps
+        // this from saturating; saturating_add makes the helper non-panicking
+        // even if the guard is changed later.
         for i in 0..repair_count {
-            let esi = k_prime
-                .checked_add(i)
-                .expect("repair_count cap ensures k_prime + i stays within u32");
+            let esi = k_prime.saturating_add(i);
             result.push((esi, inner.repair_symbol(esi)));
         }
 
@@ -488,7 +479,10 @@ mod tests {
         let consumed = encoder2.into_encode_all();
         let mut seen2: HashSet<u32> = HashSet::with_capacity(consumed.len());
         for (esi, _) in &consumed {
-            assert!(seen2.insert(*esi), "into_encode_all emitted duplicate ESI {esi}");
+            assert!(
+                seen2.insert(*esi),
+                "into_encode_all emitted duplicate ESI {esi}"
+            );
         }
         for (esi, _) in consumed.iter().skip(source_count) {
             assert!(
@@ -1278,7 +1272,9 @@ mod tests {
         let payload: Vec<u8> = (0..1024_u32).map(|i| (i & 0xFF) as u8).collect();
 
         let reference = RaptorQEncoder::new(&payload, &config).unwrap().encode_all();
-        let streamed = RaptorQEncoder::new(&payload, &config).unwrap().into_encode_all();
+        let streamed = RaptorQEncoder::new(&payload, &config)
+            .unwrap()
+            .into_encode_all();
 
         assert_eq!(
             reference.len(),

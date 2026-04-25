@@ -23,6 +23,7 @@
 //!    the operator-facing failure surface is detected immediately.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use fcp_oauth::{
     OAuth1Client, OAuth1Config, OAuth2Client, OAuth2Config, OAuthError, OAuthTokens, PkceMethod,
@@ -255,10 +256,7 @@ fn snapshot_redirect_allowlist_enforcement() {
     // OAuth response parameter is rejected at shape validation time.
     report.push_str(&run(
         "registered_query_collides_with_response_param",
-        ensure_allowlisted_redirect_uri(
-            "https://example.com/oauth/callback?code=pwn",
-            &allowlist,
-        ),
+        ensure_allowlisted_redirect_uri("https://example.com/oauth/callback?code=pwn", &allowlist),
     ));
     report.push_str(&run(
         "registered_embedded_credentials_rejected",
@@ -309,10 +307,9 @@ fn snapshot_redirect_allowlist_enforcement() {
     // br-i58yx: positive path — registered allowlist entry carries a
     // pre-registered query component, callback preserves it, membership
     // check passes.
-    let tenant_aware_allowlist = parse_registered_redirect_allowlist(&[
-        "https://example.com/oauth/callback?tenant=acme",
-    ])
-    .expect("test allowlist must parse");
+    let tenant_aware_allowlist =
+        parse_registered_redirect_allowlist(&["https://example.com/oauth/callback?tenant=acme"])
+            .expect("test allowlist must parse");
     report.push_str(&run(
         "callback_registered_query_preserved_ok",
         ensure_callback_redirect_is_allowlisted(
@@ -343,8 +340,12 @@ fn snapshot_redirect_allowlist_parse_failures() {
     ];
     for (label, raw) in cases {
         match parse_registered_redirect_allowlist(raw) {
-            Ok(_) => report.push_str(&format!("{label}: OK\n")),
-            Err(err) => report.push_str(&format!("{label}: ERR {err}\n")),
+            Ok(_) => {
+                let _ = writeln!(report, "{label}: OK");
+            }
+            Err(err) => {
+                let _ = writeln!(report, "{label}: ERR {err}");
+            }
         }
     }
 
@@ -401,7 +402,7 @@ fn normalize_authorization_url(raw: &str) -> String {
     out.push_str(url.path());
     out.push('\n');
     for (key, value) in params {
-        out.push_str(&format!("  {key} = {value}\n"));
+        let _ = writeln!(out, "  {key} = {value}");
     }
     out
 }
@@ -433,7 +434,7 @@ fn normalize_oauth1_authorization_header(raw: &str) -> String {
 
     let mut out = String::from("OAuth\n");
     for (key, value) in pairs {
-        out.push_str(&format!("  {key} = {value}\n"));
+        let _ = writeln!(out, "  {key} = {value}");
     }
     out
 }

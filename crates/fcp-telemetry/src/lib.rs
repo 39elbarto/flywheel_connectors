@@ -750,7 +750,7 @@ mod tests {
     /// Regression for the silently-ignored sample rate: whatever the
     /// operator configures via `with_sample_rate` MUST reach the OTLP
     /// init function, not get dropped by `init_telemetry_with`. Prior
-    /// behavior threaded only (service_name, endpoint) through, so the
+    /// behavior threaded only (`service_name`, `endpoint`) through, so the
     /// SDK sampler was `AlwaysOn` regardless of config.
     #[test]
     #[allow(clippy::float_cmp)]

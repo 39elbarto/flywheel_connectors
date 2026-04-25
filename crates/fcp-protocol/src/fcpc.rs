@@ -55,6 +55,9 @@ pub enum FcpcError {
     #[error("unsupported version {version}")]
     UnsupportedVersion { version: u16 },
 
+    #[error("invalid flags bits 0x{bits:04x} (known mask 0x{known:04x})")]
+    InvalidFlags { bits: u16, known: u16 },
+
     #[error("payload length mismatch (claimed {claimed}, actual {actual})")]
     LengthMismatch { claimed: usize, actual: usize },
 
@@ -130,7 +133,10 @@ impl FcpcFrameHeader {
         })?;
         let seq = u64::from_le_bytes(seq_bytes);
         let flags_bits = u16::from_le_bytes([bytes[30], bytes[31]]);
-        let flags = FcpcFrameFlags::from_bits_truncate(flags_bits);
+        let flags = FcpcFrameFlags::from_bits(flags_bits).ok_or(FcpcError::InvalidFlags {
+            bits: flags_bits,
+            known: FcpcFrameFlags::all().bits(),
+        })?;
         let len_bytes: [u8; 4] = bytes[32..36].try_into().map_err(|_| FcpcError::TooShort {
             len: bytes.len(),
             min: FCPC_HEADER_LEN,
@@ -368,9 +374,16 @@ mod tests {
 
         for flags in flag_sets {
             for &size in &payload_sizes {
-                let plaintext: Vec<u8> = (0..size).map(|i| (i as u8).wrapping_mul(31)).collect();
-                let frame = FcpcFrame::seal(session_id, 0xDEAD_BEEF, dir, flags, &plaintext, &K_CTX)
-                    .expect("seal should succeed");
+                let plaintext: Vec<u8> = (0..size)
+                    .map(|i| {
+                        u8::try_from(i % 256)
+                            .expect("modulo 256 keeps payload byte generation in range")
+                            .wrapping_mul(31)
+                    })
+                    .collect();
+                let frame =
+                    FcpcFrame::seal(session_id, 0xDEAD_BEEF, dir, flags, &plaintext, &K_CTX)
+                        .expect("seal should succeed");
                 let encoded = frame.encode();
                 let decoded = FcpcFrame::decode(&encoded).expect("decode should succeed");
                 let re_encoded = decoded.encode();
@@ -514,6 +527,29 @@ mod tests {
         bytes[4..6].copy_from_slice(&99u16.to_le_bytes());
         let err = FcpcFrameHeader::decode(&bytes).expect_err("wrong version");
         assert!(matches!(err, FcpcError::UnsupportedVersion { version: 99 }));
+    }
+
+    #[test]
+    fn header_decode_rejects_unknown_flag_bits() {
+        let session_id = MeshSessionId(SESSION_ID_BYTES);
+        let header = FcpcFrameHeader {
+            version: FCPC_VERSION,
+            session_id,
+            seq: 0,
+            flags: FcpcFrameFlags::default(),
+            len: 0,
+        };
+        let mut bytes = header.encode();
+        bytes[30..32].copy_from_slice(&0x8000_u16.to_le_bytes());
+
+        let err = FcpcFrameHeader::decode(&bytes).expect_err("unknown flags");
+        assert!(matches!(
+            err,
+            FcpcError::InvalidFlags {
+                bits: 0x8000,
+                known: 0x0003
+            }
+        ));
     }
 
     #[test]
@@ -729,6 +765,14 @@ mod tests {
         assert_eq!(
             FcpcError::UnsupportedVersion { version: 42 }.to_string(),
             "unsupported version 42"
+        );
+        assert_eq!(
+            FcpcError::InvalidFlags {
+                bits: 0x8000,
+                known: 0x0003
+            }
+            .to_string(),
+            "invalid flags bits 0x8000 (known mask 0x0003)"
         );
         assert_eq!(
             FcpcError::LengthMismatch {

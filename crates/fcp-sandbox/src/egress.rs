@@ -585,6 +585,18 @@ impl EgressGuard {
             canonical
         };
 
+        if let Ok(ip) = canonical_host.parse::<IpAddr>() {
+            if !constraints.ip_allow.is_empty() && !ip_allow_contains(&constraints.ip_allow, ip) {
+                return Err(EgressError::Denied {
+                    reason: format!(
+                        "IP literal {ip} not in ip_allow (size {})",
+                        constraints.ip_allow.len()
+                    ),
+                    code: DenyReason::IpNotAllowed,
+                });
+            }
+        }
+
         // Step 3: Check host against allow list
         if !self.host_matches_allow_list(&canonical_host, is_ip_literal, constraints) {
             warn!(host = %canonical_host, "host not in allow list");
@@ -641,11 +653,15 @@ impl EgressGuard {
         is_ip_literal: bool,
         constraints: &NetworkConstraints,
     ) -> bool {
-        self.host_matches_allow_entries(host, is_ip_literal, &constraints.host_allow, &constraints.ip_allow)
+        Self::host_matches_allow_entries(
+            host,
+            is_ip_literal,
+            &constraints.host_allow,
+            &constraints.ip_allow,
+        )
     }
 
     fn host_matches_allow_entries(
-        &self,
         host: &str,
         is_ip_literal: bool,
         host_allow: &[String],
@@ -654,8 +670,8 @@ impl EgressGuard {
         // Check explicit IP allow list
         if is_ip_literal {
             if let Ok(ip) = host.parse::<IpAddr>() {
-                if ip_allow.contains(&ip) {
-                    return true;
+                if !ip_allow.is_empty() {
+                    return ip_allow_contains(ip_allow, ip);
                 }
             }
         }
@@ -812,7 +828,7 @@ pub fn host_matches_allow_list(host: &str, host_allow: &[String]) -> bool {
         return false;
     };
     let is_ip_literal = canonical_host.parse::<IpAddr>().is_ok();
-    EgressGuard::new().host_matches_allow_entries(&canonical_host, is_ip_literal, host_allow, &[])
+    EgressGuard::host_matches_allow_entries(&canonical_host, is_ip_literal, host_allow, &[])
 }
 
 /// Check whether `ip` is a member of the configured `ip_allow` list.
@@ -2983,8 +2999,61 @@ mod tests {
         let result = guard.evaluate(&request, &constraints);
         assert!(result.is_err());
         if let Err(EgressError::Denied { code, .. }) = result {
-            assert_eq!(code, DenyReason::HostNotAllowed);
+            assert_eq!(code, DenyReason::IpNotAllowed);
         }
+    }
+
+    #[test]
+    fn test_ip_literal_outside_ip_allow_denied_despite_wildcard_host_allow() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.deny_ip_literals = false;
+        constraints.deny_private_ranges = false;
+        constraints.deny_localhost = false;
+        constraints.host_allow = vec!["*".into()];
+        constraints.ip_allow = vec!["93.184.216.34".parse().unwrap()];
+        constraints.port_allow = vec![443];
+
+        let request = EgressRequest::Http(EgressHttpRequest {
+            url: "https://1.2.3.4/".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: None,
+        });
+        let result = guard.evaluate(&request, &constraints);
+        assert!(matches!(
+            result,
+            Err(EgressError::Denied {
+                code: DenyReason::IpNotAllowed,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_ip_literal_allow_list_normalizes_ipv4_mapped_ipv6() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.deny_ip_literals = false;
+        constraints.deny_private_ranges = false;
+        constraints.deny_localhost = false;
+        constraints.host_allow = vec!["*".into()];
+        constraints.ip_allow = vec!["93.184.216.34".parse().unwrap()];
+        constraints.port_allow = vec![443];
+
+        let request = EgressRequest::TcpConnect(EgressTcpConnectRequest {
+            host: "::ffff:93.184.216.34".into(),
+            port: 443,
+            tls: true,
+            sni_override: None,
+            credential_id: None,
+        });
+        let result = guard.evaluate(&request, &constraints);
+        assert!(
+            result.is_ok(),
+            "IPv4-mapped IPv6 literal must match pure IPv4 ip_allow: {result:?}"
+        );
     }
 
     // ── Credential injection edge cases ──────────────────────────────

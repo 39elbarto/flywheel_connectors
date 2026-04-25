@@ -6,8 +6,8 @@
 use std::collections::HashSet;
 
 use fcp_core::{
-    ConnectorId, EpochId, ObjectId, TailscaleNodeId, ZoneId, ZoneKey, ZoneKeyAlgorithm,
-    ZoneKeyId, ZoneTransportPolicy,
+    ConnectorId, EpochId, ObjectId, TailscaleNodeId, ZoneId, ZoneKey, ZoneKeyAlgorithm, ZoneKeyId,
+    ZoneTransportPolicy,
 };
 use fcp_crypto::Ed25519SigningKey;
 use fcp_mesh::degraded::{
@@ -223,8 +223,9 @@ fn admission_window_reset_allows_more() {
     let peer = test_node("peer-1");
     let t0 = 1_000_000u64;
     ctrl.record_bytes(&peer, 100, t0);
-    // 61 seconds later → new window
-    let t1 = t0 + 61_000;
+    // The sliding-window controller keeps the previous bucket decaying
+    // through the next minute. After two windows, the original usage is stale.
+    let t1 = t0 + 121_000;
     ctrl.check_bytes(&peer, 50, t1).expect("new window allows");
 }
 

@@ -85,7 +85,7 @@ pub struct KeyedObjectIdVerifier {
 impl KeyedObjectIdVerifier {
     /// Construct a verifier from an initial zone → key mapping.
     #[must_use]
-    pub fn new(keys: HashMap<ZoneId, ObjectIdKey>) -> Self {
+    pub const fn new(keys: HashMap<ZoneId, ObjectIdKey>) -> Self {
         Self { keys }
     }
 
@@ -105,15 +105,15 @@ impl KeyedObjectIdVerifier {
 
 impl ObjectIdVerifier for KeyedObjectIdVerifier {
     fn verify(&self, object: &StoredObject) -> Result<(), ObjectStoreError> {
-        let key = self
-            .keys
-            .get(&object.header.zone_id)
-            .ok_or_else(|| ObjectStoreError::VerifierKeyMissing {
+        let key = self.keys.get(&object.header.zone_id).ok_or_else(|| {
+            ObjectStoreError::VerifierKeyMissing {
                 zone: object.header.zone_id.clone(),
+            }
+        })?;
+        let computed =
+            StoredObject::derive_id(&object.header, &object.body, key).map_err(|err| {
+                ObjectStoreError::Io(format!("content-id verifier encoding failed: {err}"))
             })?;
-        let computed = StoredObject::derive_id(&object.header, &object.body, key).map_err(
-            |err| ObjectStoreError::Io(format!("content-id verifier encoding failed: {err}")),
-        )?;
         if computed != object.object_id {
             return Err(ObjectStoreError::ContentIdMismatch {
                 claimed: object.object_id,
@@ -135,11 +135,7 @@ mod tests {
     }
 
     fn test_schema() -> SchemaId {
-        SchemaId::new(
-            "fcp.test",
-            "VerifierObject",
-            semver::Version::new(1, 0, 0),
-        )
+        SchemaId::new("fcp.test", "VerifierObject", semver::Version::new(1, 0, 0))
     }
 
     fn test_header(zone: &ZoneId) -> ObjectHeader {

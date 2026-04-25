@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::future::{Future, poll_fn};
 use std::io;
+use std::net::Shutdown;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -58,7 +59,9 @@ fn connection_failed(message: impl Into<String>) -> StreamError {
 fn parse_retry_after(value: &str) -> Option<Duration> {
     let value = value.trim();
     if let Ok(seconds) = value.parse::<u128>() {
-        return Some(Duration::from_secs(seconds.min(u128::from(u64::MAX)) as u64));
+        return Some(Duration::from_secs(
+            u64::try_from(seconds).unwrap_or(u64::MAX),
+        ));
     }
 
     let retry_at = DateTime::parse_from_rfc2822(value).ok()?;
@@ -205,9 +208,55 @@ fn build_tls_connector() -> StreamResult<TlsConnector> {
         .map_err(|err| connection_failed(err.to_string()))
 }
 
+struct WsTcpStream(TcpStream);
+
+impl WsTcpStream {
+    async fn connect(address: String) -> StreamResult<Self> {
+        let tcp = TcpStream::connect(address)
+            .await
+            .map_err(|err| connection_failed(err.to_string()))?;
+        let _ = tcp.set_nodelay(true);
+        Ok(Self(tcp))
+    }
+}
+
+impl AsyncRead for WsTcpStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for WsTcpStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.0).poll_shutdown(cx)
+    }
+}
+
+impl Drop for WsTcpStream {
+    fn drop(&mut self) {
+        let _ = self.0.shutdown(Shutdown::Both);
+    }
+}
+
 enum WsTransport {
-    Plain(Box<WebSocket<TcpStream>>),
-    Tls(Box<WebSocket<TlsStream<TcpStream>>>),
+    Plain(Box<WebSocket<WsTcpStream>>),
+    Tls(Box<WebSocket<TlsStream<WsTcpStream>>>),
 }
 
 impl WsTransport {
@@ -239,10 +288,7 @@ impl WsTransport {
 async fn connect_websocket(url: String, config: WsConfig) -> StreamResult<WsTransport> {
     let parsed = WsUrl::parse(&url).map_err(|err| connection_failed(err.to_string()))?;
     let address = socket_addr(&parsed);
-    let tcp = TcpStream::connect(address)
-        .await
-        .map_err(|err| connection_failed(err.to_string()))?;
-    let _ = tcp.set_nodelay(true);
+    let tcp = WsTcpStream::connect(address).await?;
 
     if parsed.tls {
         let connector = build_tls_connector()?;
@@ -618,7 +664,7 @@ impl WsClient {
 
 /// Active WebSocket connection.
 pub struct WsConnection {
-    inner: WsTransport,
+    inner: Option<WsTransport>,
     config: WsConfig,
     closed: bool,
 }
@@ -626,7 +672,7 @@ pub struct WsConnection {
 impl WsConnection {
     const fn new(inner: WsTransport, config: WsConfig) -> Self {
         Self {
-            inner,
+            inner: Some(inner),
             config,
             closed: false,
         }
@@ -636,9 +682,20 @@ impl WsConnection {
         self.config.io_timeout()
     }
 
-    fn timeout_error(&mut self) -> StreamError {
+    fn drop_transport(&mut self) {
         self.closed = true;
+        let _ = self.inner.take();
+    }
+
+    fn timeout_error(&mut self) -> StreamError {
+        self.drop_transport();
         StreamError::Timeout(self.io_timeout())
+    }
+
+    fn transport_mut(&mut self) -> StreamResult<&mut WsTransport> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| StreamError::InvalidState("Connection is closed".into()))
     }
 
     /// Send a message.
@@ -652,12 +709,21 @@ impl WsConnection {
 
         let is_close = message.is_close();
         let io_timeout = self.io_timeout();
-        timeout(io_timeout, self.inner.send(message.into()))
-            .await
-            .map_err(|_| self.timeout_error())?
-            .map_err(websocket_error)?;
+        let result = {
+            let transport = self.transport_mut()?;
+            timeout(io_timeout, transport.send(message.into())).await
+        };
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                let err = websocket_error(err);
+                self.drop_transport();
+                return Err(err);
+            }
+            Err(_) => return Err(self.timeout_error()),
+        }
         if is_close {
-            self.closed = true;
+            self.drop_transport();
         }
         Ok(())
     }
@@ -698,18 +764,27 @@ impl WsConnection {
         }
 
         let io_timeout = self.io_timeout();
-        if let Some(message) = timeout(io_timeout, self.inner.recv())
-            .await
-            .map_err(|_| self.timeout_error())?
-            .map_err(websocket_error)?
-        {
+        let result = {
+            let transport = self.transport_mut()?;
+            timeout(io_timeout, transport.recv()).await
+        };
+        let message = match result {
+            Ok(Ok(message)) => message,
+            Ok(Err(err)) => {
+                let err = websocket_error(err);
+                self.drop_transport();
+                return Err(err);
+            }
+            Err(_) => return Err(self.timeout_error()),
+        };
+        if let Some(message) = message {
             let message: WsMessage = message.into();
             if message.is_close() {
-                self.closed = true;
+                self.drop_transport();
             }
             Ok(Some(message))
         } else {
-            self.closed = true;
+            self.drop_transport();
             Ok(None)
         }
     }
@@ -721,11 +796,19 @@ impl WsConnection {
     pub async fn close(&mut self) -> StreamResult<()> {
         if !self.closed {
             let io_timeout = self.io_timeout();
-            timeout(io_timeout, self.inner.close(CloseReason::normal()))
-                .await
-                .map_err(|_| self.timeout_error())?
-                .map_err(websocket_error)?;
-            self.closed = true;
+            let result = {
+                let transport = self.transport_mut()?;
+                timeout(io_timeout, transport.close(CloseReason::normal())).await
+            };
+            match result {
+                Ok(Ok(())) => self.drop_transport(),
+                Ok(Err(err)) => {
+                    let err = websocket_error(err);
+                    self.drop_transport();
+                    return Err(err);
+                }
+                Err(_) => return Err(self.timeout_error()),
+            }
         }
         Ok(())
     }
@@ -737,11 +820,19 @@ impl WsConnection {
     pub async fn close_with_frame(&mut self, frame: WsCloseFrame) -> StreamResult<()> {
         if !self.closed {
             let io_timeout = self.io_timeout();
-            timeout(io_timeout, self.inner.close(frame.into()))
-                .await
-                .map_err(|_| self.timeout_error())?
-                .map_err(websocket_error)?;
-            self.closed = true;
+            let result = {
+                let transport = self.transport_mut()?;
+                timeout(io_timeout, transport.close(frame.into())).await
+            };
+            match result {
+                Ok(Ok(())) => self.drop_transport(),
+                Ok(Err(err)) => {
+                    let err = websocket_error(err);
+                    self.drop_transport();
+                    return Err(err);
+                }
+                Err(_) => return Err(self.timeout_error()),
+            }
         }
         Ok(())
     }
@@ -802,14 +893,14 @@ impl ReconnectingWsStream {
         }
     }
 
-    fn note_connection_established(&mut self) {
+    const fn note_connection_established(&mut self) {
         // A TCP/WebSocket handshake alone is not proof of a healthy session. If the
         // peer immediately closes before delivering any frame, keep the accumulated
         // retry budget so reconnect storms back off instead of restarting from zero.
         self.reset_backoff_after_first_message = true;
     }
 
-    fn note_message_received(&mut self, message: &WsMessage) {
+    const fn note_message_received(&mut self, message: &WsMessage) {
         // br-hjaej + br-f46kk: only a data-carrying application frame
         // (Text or Binary) is proof of a healthy session. The earlier
         // fix (br-hjaej) correctly excluded Close, but Ping and Pong
@@ -834,7 +925,7 @@ impl ReconnectingWsStream {
         self.reset_backoff_after_first_message = false;
     }
 
-    fn note_connection_lost(&mut self) {
+    const fn note_connection_lost(&mut self) {
         self.reset_backoff_after_first_message = false;
     }
 }
@@ -997,8 +1088,13 @@ mod tests {
             let (mut second, _) = listener.accept().expect("accept second websocket client");
             complete_server_handshake(&mut second);
             let payload = message.as_bytes();
-            assert!(payload.len() < 126, "test payload must fit in a short frame");
-            let mut frame = vec![0x81, payload.len() as u8];
+            assert!(
+                payload.len() < 126,
+                "test payload must fit in a short frame"
+            );
+            let short_payload_len = u8::try_from(payload.len())
+                .expect("test payload length already asserted below 126 bytes");
+            let mut frame = vec![0x81, short_payload_len];
             frame.extend_from_slice(payload);
             second.write_all(&frame).expect("write websocket frame");
             second.flush().expect("flush websocket frame");
@@ -1039,8 +1135,8 @@ mod tests {
     }
 
     /// br-hjaej regression: a peer that completes the WS handshake and
-    /// immediately sends Close still returns Ok(Some(WsMessage::Close))
-    /// from recv(). The pre-fix note_message_received reset the backoff
+    /// immediately sends Close still returns `Ok(Some(WsMessage::Close))`
+    /// from `recv()`. The pre-fix `note_message_received` reset the backoff
     /// unconditionally on any Ok(Some(_)), which defeated the 6e6cr
     /// hardening and turned "handshake-then-close" into a near-hot
     /// reconnect loop. After the fix, Close frames leave the retry
@@ -1383,6 +1479,10 @@ mod tests {
                 "expected Timeout({expected_timeout:?}), got {err:?}"
             );
             assert!(connection.is_closed());
+            assert!(
+                connection.inner.is_none(),
+                "timed-out recv must drop the transport so TcpStream shutdown runs promptly"
+            );
         });
 
         server.join().expect("websocket server thread");

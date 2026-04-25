@@ -75,7 +75,7 @@ impl CancellationController {
     /// Register an operation for tracking with an explicit owner.
     ///
     /// `owner` is the principal that initiated the operation (e.g. the
-    /// `X-Principal` HTTP header forwarded by invoke_handler). When
+    /// `X-Principal` HTTP header forwarded by `invoke_handler`). When
     /// set, [`Self::cancel`] will reject calls whose asserted principal
     /// does not match — closes br-jdaro (cross-principal cancel via
     /// guessed operation ID).
@@ -485,7 +485,7 @@ mod tests {
     /// Regression for br-jdaro: an operation tracked with an owner MUST
     /// NOT be cancellable by a different principal. Before this fix the
     /// cancel route on `/rpc/cancel` accepted any caller-supplied
-    /// operation_id and cancelled it — cross-principal DoS via guessed ID.
+    /// `operation_id` and cancelled it — cross-principal `DoS` via guessed ID.
     #[test]
     fn cancel_rejects_mismatched_principal_when_owner_recorded() {
         let ctrl = CancellationController::new();
@@ -507,9 +507,7 @@ mod tests {
 
         // State must be untouched after rejected attempts — the real
         // owner's cancel must still be able to run.
-        let resp = ctrl
-            .cancel(&req, Some("agent:alice"), fixed_now())
-            .unwrap();
+        let resp = ctrl.cancel(&req, Some("agent:alice"), fixed_now()).unwrap();
         assert_eq!(resp.outcome, CancellationOutcome::Cancelled);
     }
 

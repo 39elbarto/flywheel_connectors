@@ -2503,8 +2503,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
+ "ciborium",
  "fcp-async-core",
  "fcp-core",
+ "fcp-crypto",
  "fcp-sdk",
  "percent-encoding",
  "reqwest 0.13.2",
@@ -2513,6 +2516,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "wiremock",
 ]
 
@@ -3041,6 +3045,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "ciborium",
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
@@ -3490,6 +3495,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "ciborium",
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
@@ -3542,6 +3548,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
+ "ciborium",
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
@@ -3555,6 +3563,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
+ "urlencoding",
  "wiremock",
 ]
 
@@ -3641,6 +3650,7 @@ name = "fcp-google-discovery"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "chrono",
  "fcp-async-core",
  "fcp-core",
  "fcp-oauth",
@@ -3706,8 +3716,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
+ "ciborium",
  "fcp-async-core",
  "fcp-core",
+ "fcp-crypto",
  "fcp-google-discovery",
  "fcp-sdk",
  "percent-encoding",
@@ -3991,6 +4004,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
+ "ciborium",
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
@@ -4032,6 +4046,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "ciborium",
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
@@ -4594,6 +4609,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "ciborium",
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
@@ -4617,8 +4633,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
+ "ciborium",
  "fcp-async-core",
  "fcp-core",
+ "fcp-crypto",
  "fcp-sdk",
  "fcp-streaming",
  "hex",
@@ -5447,6 +5466,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "ciborium",
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
@@ -5543,6 +5563,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "ciborium",
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
@@ -12504,7 +12525,7 @@ dependencies = [
 
 [[package]]
 name = "tru"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "chrono",

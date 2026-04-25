@@ -12,6 +12,8 @@ use crate::{
     DEFAULT_RECONNECT_DELAY, MAX_RECONNECT_DELAY, MIN_RECONNECT_DELAY, StreamError, StreamResult,
 };
 
+const MAX_SAFE_RECONNECT_DELAY_SECS_F64: f64 = 9_007_199_254_740_992.0;
+
 /// Reconnection configuration.
 #[derive(Debug, Clone)]
 pub struct ReconnectConfig {
@@ -138,11 +140,10 @@ impl ReconnectConfig {
         // exactly representable as `f64`; capping there guarantees the
         // value round-trips safely. We then intersect with `max_delay`
         // back in `Duration` space so legitimate small ceilings still win.
-        const MAX_SAFE_SECS_F64: f64 = (1_u64 << 53) as f64;
         let clamped = if jittered.is_nan() || jittered < 0.0 {
             0.0
         } else {
-            jittered.min(MAX_SAFE_SECS_F64)
+            jittered.min(MAX_SAFE_RECONNECT_DELAY_SECS_F64)
         };
         // Apply the MIN floor BEFORE the max cap. If a caller pinned
         // `max_delay` below MIN_RECONNECT_DELAY, the ceiling wins —
@@ -615,9 +616,9 @@ mod tests {
 
     // ── Metamorphic relations ─────────────────────────────────────
 
-    /// Metamorphic: with jitter disabled and a positive backoff_multiplier
-    /// >= 1.0, delay_for_attempt must be monotonically non-decreasing in
-    /// the attempt counter all the way up to max_delay. A regression that
+    /// Metamorphic: with jitter disabled and a positive `backoff_multiplier`
+    /// at least `1.0`, `delay_for_attempt` must be monotonically non-decreasing in
+    /// the attempt counter all the way up to `max_delay`. A regression that
     /// inverted the exponent or corrupted the clamp would surface here.
     #[test]
     fn test_delay_monotonic_without_jitter() {
@@ -638,7 +639,7 @@ mod tests {
         }
     }
 
-    /// Metamorphic: delay_for_attempt is a pure function of (config, attempt)
+    /// Metamorphic: `delay_for_attempt` is a pure function of (config, attempt)
     /// when jitter is disabled — repeated calls with identical inputs must
     /// produce byte-identical Duration values. This pins the invariant that
     /// the clamp and backoff math have no hidden state and no implicit RNG
@@ -658,10 +659,10 @@ mod tests {
         }
     }
 
-    /// Metamorphic: reset() is idempotent. Calling reset after a reset must
+    /// Metamorphic: `reset()` is idempotent. Calling `reset` after a reset must
     /// leave the handler in the same observable state as a single reset.
-    /// Also verifies that record_failure → reset collapses cleanly, which
-    /// is the hot-path invariant invoked by ReconnectingWsStream when a
+    /// Also verifies that `record_failure` to `reset` collapses cleanly, which
+    /// is the hot-path invariant invoked by `ReconnectingWsStream` when a
     /// message finally arrives on a freshly-reconnected stream.
     #[test]
     fn test_handler_reset_is_idempotent() {
@@ -1272,7 +1273,7 @@ mod tests {
     /// turned `wait_for_reconnect` into a hot retry storm. Drive the
     /// real handler through several consecutive waits with a zero
     /// `initial_delay` and assert every wall-clock duration honours the
-    /// MIN_RECONNECT_DELAY floor.
+    /// `MIN_RECONNECT_DELAY` floor.
     #[fcp_async_core::runtime::test]
     async fn test_rapid_reconnect_waits_are_floored_by_min_delay() {
         let config = ReconnectConfig::new()

@@ -314,13 +314,14 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
         }
 
         let mut state = self.seen_events.write();
-        let cleanup_interval =
-            chrono::Duration::milliseconds(CLEANUP_INTERVAL_MILLIS);
+        let cleanup_interval = chrono::Duration::milliseconds(CLEANUP_INTERVAL_MILLIS);
 
         // Only run cleanup if at least 1 minute has passed since last cleanup
         if now - state.last_cleanup < cleanup_interval {
+            let next_cleanup_at = next_cleanup_deadline(state.last_cleanup);
+            drop(state);
             self.next_cleanup_at_millis
-                .store(next_cleanup_deadline(state.last_cleanup), Ordering::Release);
+                .store(next_cleanup_at, Ordering::Release);
             return;
         }
 
@@ -330,6 +331,7 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
 
         state.events.retain(|_, time| now - *time < ttl);
         state.last_cleanup = now;
+        drop(state);
         self.next_cleanup_at_millis
             .store(next_cleanup_deadline(now), Ordering::Release);
     }
@@ -357,7 +359,7 @@ impl<V: SignatureVerifier + std::fmt::Debug> std::fmt::Debug for WebhookHandler<
     }
 }
 
-fn next_cleanup_deadline(last_cleanup: DateTime<Utc>) -> i64 {
+const fn next_cleanup_deadline(last_cleanup: DateTime<Utc>) -> i64 {
     last_cleanup
         .timestamp_millis()
         .saturating_add(CLEANUP_INTERVAL_MILLIS)
@@ -694,15 +696,24 @@ mod tests {
             joins.push(std::thread::spawn(move || match h.claim_event(EVENT_ID) {
                 Ok(()) => {
                     ok.fetch_add(1, Ordering::SeqCst);
+                    None
                 }
                 Err(WebhookError::ReplayDetected { .. }) => {
                     dup.fetch_add(1, Ordering::SeqCst);
+                    None
                 }
-                Err(other) => panic!("unexpected error under concurrent claim: {other:?}"),
+                Err(other) => Some(other),
             }));
         }
         for j in joins {
-            j.join().expect("worker panic");
+            let join_result = j.join();
+            assert!(join_result.is_ok(), "worker thread panicked");
+            if let Ok(unexpected_error) = join_result {
+                assert!(
+                    unexpected_error.is_none(),
+                    "unexpected error under concurrent claim: {unexpected_error:?}"
+                );
+            }
         }
 
         assert_eq!(

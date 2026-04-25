@@ -439,10 +439,13 @@ mod tests {
         cache.get_or_compile(schema_a).unwrap();
         cache.get_or_compile(schema_b).unwrap();
 
-        let guard = cache.inner.lock().unwrap();
-        assert!(guard.contains_key(schema_a));
-        assert!(guard.contains_key(schema_b));
-        assert_eq!(guard.len(), 2);
+        {
+            let guard = cache.inner.lock().unwrap();
+            assert!(guard.contains_key(schema_a));
+            assert!(guard.contains_key(schema_b));
+            assert_eq!(guard.len(), 2);
+            drop(guard);
+        }
     }
 
     // ---- deeply nested validation ----

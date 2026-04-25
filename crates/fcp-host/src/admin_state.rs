@@ -62,7 +62,7 @@ pub struct ManagedConnectorConfig {
     /// a structurally-valid capability token. Empty (the default) preserves
     /// pre-binding behavior so existing inventories don't break, but
     /// production deployments should pin every connector to its declared
-    /// home/allowed_sources set per the manifest's `[zones]` section.
+    /// `home/allowed_sources` set per the manifest's `[zones]` section.
     /// br-flywheel_connectors-by4vu.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_zones: Vec<String>,
@@ -4144,10 +4144,10 @@ impl HostAdminStateStore {
             if inspection.seconds_remaining == 0 {
                 rejection_reasons.push(format!("Token expired at {}", inspection.expires_at));
             }
-            if let Some(nbf) = inspection.not_before {
-                if effective_now < nbf {
-                    rejection_reasons.push(format!("Token not yet valid (not-before: {nbf})"));
-                }
+            if let Some(nbf) = inspection.not_before
+                && effective_now < nbf
+            {
+                rejection_reasons.push(format!("Token not yet valid (not-before: {nbf})"));
             }
         }
 
@@ -10412,6 +10412,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // Snapshot intentionally covers the full admin request/response surface.
     fn admin_api_request_response_shape_snapshot() {
         let fixed_at = Utc.with_ymd_and_hms(2026, 4, 20, 1, 14, 0).unwrap();
 

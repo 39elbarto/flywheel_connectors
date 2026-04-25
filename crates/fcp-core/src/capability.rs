@@ -1050,9 +1050,11 @@ mod verified_sealed {
 }
 
 /// Marker bound for state-agnostic helpers that accept either
-/// `BoundVerified` or `UnboundVerified`. The deprecated legacy marker
-/// [`CryptographicallyVerified`] is intentionally EXCLUDED so new generic
-/// helpers cannot silently widen back to the ambiguous pre-jkcka surface.
+/// `BoundVerified` or `UnboundVerified`.
+///
+/// The deprecated legacy marker [`CryptographicallyVerified`] is intentionally
+/// EXCLUDED so new generic helpers cannot silently widen back to the ambiguous
+/// pre-jkcka surface.
 ///
 /// Sealed: cannot be implemented outside of `fcp-core`.
 pub trait AnyVerified: verified_sealed::Sealed {}
@@ -1105,8 +1107,8 @@ impl<S> Clone for CapabilityToken<S> {
     }
 }
 
-impl<S> From<&CapabilityToken<S>> for CapabilityToken<S> {
-    fn from(token: &CapabilityToken<S>) -> Self {
+impl<S> From<&Self> for CapabilityToken<S> {
+    fn from(token: &Self) -> Self {
         token.clone()
     }
 }
@@ -1741,7 +1743,7 @@ impl CapabilityVerifier {
     }
 
     #[cfg(test)]
-    fn with_fixed_now_for_tests(mut self, now: chrono::DateTime<Utc>) -> Self {
+    const fn with_fixed_now_for_tests(mut self, now: chrono::DateTime<Utc>) -> Self {
         self.clock_source = CapabilityVerifierClock::Fixed(now);
         self
     }
@@ -1934,6 +1936,108 @@ impl CapabilityVerifier {
         self.verify_claims_inner(token, required_capability, operation, resource_uris)
     }
 
+    fn validate_claim_schema_version(claims: &CwtClaims) -> FcpResult<()> {
+        let schema_version = match claims.get(fcp2_claims::SCHEMA_VERSION) {
+            Some(ciborium::Value::Integer(version)) => {
+                let as_i128: i128 = (*version).into();
+                u16::try_from(as_i128).map_err(|_| FcpError::VersionMismatch {
+                    expected: CURRENT_SCHEMA_VERSION.to_string(),
+                    actual: as_i128.to_string(),
+                })?
+            }
+            Some(_) => {
+                return Err(FcpError::MissingField {
+                    field: "schema_version (must be CBOR integer u16)".into(),
+                });
+            }
+            None => {
+                return Err(FcpError::MissingField {
+                    field: "schema_version".into(),
+                });
+            }
+        };
+
+        if schema_version != CURRENT_SCHEMA_VERSION {
+            return Err(FcpError::VersionMismatch {
+                expected: CURRENT_SCHEMA_VERSION.to_string(),
+                actual: schema_version.to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn validate_audience_binding(&self, claims: &CwtClaims) -> FcpResult<()> {
+        let audience = match claims.get(cwt_claims::AUD) {
+            Some(ciborium::Value::Text(aud)) if !aud.is_empty() => aud.as_str(),
+            Some(ciborium::Value::Text(_)) => {
+                return Err(FcpError::MissingField {
+                    field: "aud (must not be empty)".into(),
+                });
+            }
+            Some(_) => {
+                return Err(FcpError::MissingField {
+                    field: "aud (must be CBOR text)".into(),
+                });
+            }
+            None => {
+                return Err(FcpError::MissingField {
+                    field: "aud".into(),
+                });
+            }
+        };
+
+        if audience != "*" && audience != self.zone_id.as_str() {
+            return Err(FcpError::ZoneViolation {
+                source_zone: audience.to_string(),
+                target_zone: self.zone_id.0.to_string(),
+                message: "Token audience mismatch".into(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn validate_zone_binding(&self, claims: &CwtClaims) -> FcpResult<()> {
+        if let Some(iss) = claims.get_zone_id() {
+            if iss != self.zone_id.as_str() {
+                return Err(FcpError::ZoneViolation {
+                    source_zone: iss.into(),
+                    target_zone: self.zone_id.0.to_string(),
+                    message: "Token zone mismatch".into(),
+                });
+            }
+            Ok(())
+        } else {
+            Err(FcpError::MissingField {
+                field: "iss_zone".into(),
+            })
+        }
+    }
+
+    fn validate_instance_binding(&self, claims: &CwtClaims) -> FcpResult<()> {
+        if let Some(inst_val) = claims.get(fcp2_claims::INSTANCE_ID) {
+            let inst_str = inst_val.as_text().ok_or_else(|| FcpError::MissingField {
+                field: "instance_id (must be CBOR text)".into(),
+            })?;
+            if let Some(expected) = self.instance_id.as_ref()
+                && inst_str != expected.as_str()
+            {
+                return Err(FcpError::ZoneViolation {
+                    source_zone: self.zone_id.0.to_string(),
+                    target_zone: self.zone_id.0.to_string(),
+                    message: format!(
+                        "Token instance mismatch: expected {}, got {}",
+                        expected.as_str(),
+                        inst_str
+                    ),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     /// Shared inner verification logic used by both `verify()` and `verify_claims()`.
     fn verify_claims_inner(
         &self,
@@ -1955,85 +2059,21 @@ impl CapabilityVerifier {
             .verify(&verifying_key)
             .map_err(|_| FcpError::InvalidSignature)?;
 
-        // 2. Enforce the typed auth-claim schema version before consuming any
-        // other private claims. `fcp-auth-schema` introduced an explicit
-        // deployment-gated `SCHEMA_VERSION` claim, but the runtime verifier
-        // must still reject stale or hand-crafted tokens here at the trust
-        // boundary.
-        let schema_version = match claims.get(fcp2_claims::SCHEMA_VERSION) {
-            Some(ciborium::Value::Integer(version)) => {
-                let as_i128: i128 = (*version).into();
-                u16::try_from(as_i128).map_err(|_| FcpError::VersionMismatch {
-                    expected: CURRENT_SCHEMA_VERSION.to_string(),
-                    actual: as_i128.to_string(),
-                })?
-            }
-            Some(_) => {
-                return Err(FcpError::MissingField {
-                    field: "schema_version (must be CBOR integer u16)".into(),
-                });
-            }
-            None => {
-                return Err(FcpError::MissingField {
-                    field: "schema_version".into(),
-                });
-            }
-        };
-        if schema_version != CURRENT_SCHEMA_VERSION {
-            return Err(FcpError::VersionMismatch {
-                expected: CURRENT_SCHEMA_VERSION.to_string(),
-                actual: schema_version.to_string(),
-            });
-        }
+        // 2. Enforce the typed auth-claim schema version at the trust boundary.
+        Self::validate_claim_schema_version(&claims)?;
 
         // 3. Enforce audience binding. Capability tokens are valid for a
         // specific target zone (`aud == "z:..."`) or for all zones
         // (`aud == "*"`) — missing / empty / malformed `aud` must not turn
         // into implicit allow-all.
-        let audience = match claims.get(cwt_claims::AUD) {
-            Some(ciborium::Value::Text(aud)) if !aud.is_empty() => aud.as_str(),
-            Some(ciborium::Value::Text(_)) => {
-                return Err(FcpError::MissingField {
-                    field: "aud (must not be empty)".into(),
-                });
-            }
-            Some(_) => {
-                return Err(FcpError::MissingField {
-                    field: "aud (must be CBOR text)".into(),
-                });
-            }
-            None => {
-                return Err(FcpError::MissingField {
-                    field: "aud".into(),
-                });
-            }
-        };
-        if audience != "*" && audience != self.zone_id.as_str() {
-            return Err(FcpError::ZoneViolation {
-                source_zone: audience.to_string(),
-                target_zone: self.zone_id.0.to_string(),
-                message: "Token audience mismatch".into(),
-            });
-        }
+        self.validate_audience_binding(&claims)?;
 
         // 4. Validate timing
         let now = self.now();
         Self::validate_timing_with_clock_skew(&claims, now)?;
 
         // 5. Check zone binding
-        if let Some(iss) = claims.get_zone_id() {
-            if iss != self.zone_id.as_str() {
-                return Err(FcpError::ZoneViolation {
-                    source_zone: iss.into(),
-                    target_zone: self.zone_id.0.to_string(),
-                    message: "Token zone mismatch".into(),
-                });
-            }
-        } else {
-            return Err(FcpError::MissingField {
-                field: "iss_zone".into(),
-            });
-        }
+        self.validate_zone_binding(&claims)?;
 
         // 5.5. Check instance binding if present.
         //
@@ -2057,26 +2097,7 @@ impl CapabilityVerifier {
         // even in that mode, because a malformed claim is a parser-level
         // violation independent of whether we're enforcing the match
         // (br-flywheel_connectors-5qp7o).
-        if let Some(inst_val) = claims.get(fcp2_claims::INSTANCE_ID) {
-            let inst_str = inst_val.as_text().ok_or_else(|| FcpError::MissingField {
-                field: "instance_id (must be CBOR text)".into(),
-            })?;
-            if let Some(expected) = self.instance_id.as_ref() {
-                if inst_str != expected.as_str() {
-                    return Err(FcpError::ZoneViolation {
-                        source_zone: self.zone_id.0.to_string(),
-                        target_zone: self.zone_id.0.to_string(),
-                        message: format!(
-                            "Token instance mismatch: expected {}, got {}",
-                            expected.as_str(),
-                            inst_str
-                        ),
-                    });
-                }
-            }
-            // verifier.instance_id == None: skip match, but the parser-
-            // level non-Text rejection above still fired.
-        }
+        self.validate_instance_binding(&claims)?;
 
         // 6. Check operation grant
         //
@@ -2821,15 +2842,14 @@ mod tests {
         let op = OperationId::new("op.test").unwrap();
         let cap = CapabilityId::new("cap.test").unwrap();
         let result = verifier.verify(token, &cap, &op, &[]);
-        match result {
-            Err(FcpError::ResourceNotAllowed { resource }) => {
-                assert!(
-                    resource.contains("non-wildcard"),
-                    "expected error to mention non-wildcard intent, got: {resource}"
-                );
-            }
-            other => panic!("expected ResourceNotAllowed for non-wildcard+empty, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                result,
+                Err(FcpError::ResourceNotAllowed { ref resource })
+                    if resource.contains("non-wildcard")
+            ),
+            "expected ResourceNotAllowed for non-wildcard+empty, got {result:?}"
+        );
     }
 
     #[test]
@@ -3189,15 +3209,13 @@ mod tests {
         let err = verifier
             .verify(token, &cap, &op, &[])
             .expect_err("non-Text INSTANCE_ID must be rejected");
-        match err {
-            FcpError::MissingField { ref field } => {
-                assert!(
-                    field.contains("instance_id"),
-                    "expected MissingField with instance_id mention, got {field}"
-                );
-            }
-            other => panic!("expected MissingField, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                FcpError::MissingField { ref field } if field.contains("instance_id")
+            ),
+            "expected MissingField with instance_id mention, got {err:?}"
+        );
     }
 
     #[test]
@@ -3426,8 +3444,8 @@ mod tests {
 
     // ── br-jkcka.3: typestate split regression tests ─────────────────────
 
-    /// Build a token + signing key pair with a known instance_id.
-    /// Returns (token, pub_bytes, instance, capability, operation).
+    /// Build a token + signing key pair with a known `instance_id`.
+    /// Returns (token, `pub_bytes`, instance, capability, operation).
     fn mk_token_with_instance() -> (
         CapabilityToken,
         [u8; 32],
@@ -3467,15 +3485,13 @@ mod tests {
         // Unbound verifier — verify_bound must refuse with a clear error.
         let verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
         let err = verifier.verify_bound(token, &cap, &op, &[]).unwrap_err();
-        match err {
-            FcpError::Internal { message } => {
-                assert!(
-                    message.contains("verify_bound"),
-                    "error message must point at the misuse: {message}"
-                );
-            }
-            other => panic!("expected Internal error, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                FcpError::Internal { ref message } if message.contains("verify_bound")
+            ),
+            "expected Internal error pointing at verify_bound misuse, got {err:?}"
+        );
     }
 
     #[test]
@@ -3484,15 +3500,13 @@ mod tests {
         // Bound verifier — verify_unbound must refuse with a clear error.
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), instance);
         let err = verifier.verify_unbound(token, &cap, &op, &[]).unwrap_err();
-        match err {
-            FcpError::Internal { message } => {
-                assert!(
-                    message.contains("verify_unbound"),
-                    "error message must point at the misuse: {message}"
-                );
-            }
-            other => panic!("expected Internal error, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                FcpError::Internal { ref message } if message.contains("verify_unbound")
+            ),
+            "expected Internal error pointing at verify_unbound misuse, got {err:?}"
+        );
     }
 
     #[test]
@@ -3533,24 +3547,22 @@ mod tests {
         let verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
         let unbound = verifier.verify_unbound(token, &cap, &op, &[]).unwrap();
         let err = unbound.promote_with_instance(&wrong_instance).unwrap_err();
-        match err {
-            FcpError::ZoneViolation {
-                source_zone,
-                target_zone,
-                message,
-            } => {
-                // br-jkcka.8 fresh-eyes fix: zone fields MUST be populated
-                // from the claims (not empty strings) so the error is
-                // informative for debuggers.
-                assert_eq!(source_zone, "z:work");
-                assert_eq!(target_zone, "z:work");
-                assert!(
-                    message.contains("mismatch"),
-                    "message must describe mismatch; got: {message}"
-                );
-            }
-            other => panic!("expected ZoneViolation with populated zones; got {other:?}"),
-        }
+        // br-jkcka.8 fresh-eyes fix: zone fields MUST be populated from the
+        // claims (not empty strings) so the error is informative for debuggers.
+        assert!(
+            matches!(
+                err,
+                FcpError::ZoneViolation {
+                    ref source_zone,
+                    ref target_zone,
+                    ref message,
+                    ..
+                } if source_zone == "z:work"
+                    && target_zone == "z:work"
+                    && message.contains("mismatch")
+            ),
+            "expected ZoneViolation with populated zones; got {err:?}"
+        );
     }
 
     #[test]
@@ -5176,7 +5188,9 @@ mod tests {
         // IdValidationError. The list mirrors the attack surface in the
         // type docstring (empty, whitespace, control bytes,
         // bidi-override, namespace-collision lookalike, uppercase).
-        let cases: &[(&str, fn(&IdValidationError) -> bool)] = &[
+        type ErrorPredicate = fn(&IdValidationError) -> bool;
+
+        let cases: &[(&str, ErrorPredicate)] = &[
             ("", |e| matches!(e, IdValidationError::Empty)),
             ("   ", |e| {
                 matches!(e, IdValidationError::InvalidStartChar { .. })
@@ -6247,18 +6261,17 @@ mod tests {
     fn zone_bound_cross_zone_access_rejected() {
         let bound = ZoneBound::bind("secret", ZoneId::private());
         let result = bound.with_zone_check(&ZoneId::public(), |v| *v);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            FcpError::ZoneViolation {
-                source_zone,
-                target_zone,
-                ..
-            } => {
-                assert_eq!(source_zone, "z:private");
-                assert_eq!(target_zone, "z:public");
-            }
-            other => panic!("expected ZoneViolation, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                result,
+                Err(FcpError::ZoneViolation {
+                    ref source_zone,
+                    ref target_zone,
+                    ..
+                }) if source_zone == "z:private" && target_zone == "z:public"
+            ),
+            "expected ZoneViolation, got {result:?}"
+        );
     }
 
     #[test]

@@ -244,11 +244,10 @@ fn contains_disallowed_control(input: &str) -> bool {
 
 fn fallback_plaintext(input: &str, mode: FormatMode) -> String {
     let stripped = match mode {
-        FormatMode::Plain => input.to_string(),
         FormatMode::Html => strip_html(input),
         // Without a parse_mode Telegram renders this literally, so preserve the
         // original user text instead of dropping punctuation on fallback.
-        FormatMode::MarkdownV2 => input.to_string(),
+        FormatMode::Plain | FormatMode::MarkdownV2 => input.to_string(),
     };
 
     escape_control_chars(&stripped)

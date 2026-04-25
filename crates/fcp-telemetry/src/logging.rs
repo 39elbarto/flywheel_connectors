@@ -938,11 +938,11 @@ mod tests {
     }
 
     /// Regression: the default redact list used by `log_request_response`
-    /// previously only covered password/api_key/secret/token/authorization.
+    /// previously only covered `password`/`api_key`/`secret`/`token`/`authorization`.
     /// Extending the list adds defense-in-depth against common PII/credential
     /// field names that leaked through under the old set. This test exercises
-    /// the expanded list via log_request_response's internal vec by calling
-    /// redact_sensitive with the same list.
+    /// the expanded list via `log_request_response`'s internal vec by calling
+    /// `redact_sensitive` with the same list.
     #[test]
     fn test_redact_covers_expanded_credential_fields() {
         let expanded = vec![

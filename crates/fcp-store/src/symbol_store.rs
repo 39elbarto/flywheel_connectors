@@ -18,13 +18,26 @@ use crate::error::SymbolStoreError;
 
 /// Maximum source-symbol count (K) accepted in an [`ObjectSymbolMeta`].
 ///
-/// Matches the RFC 6330 §5.1.2 K_MAX limit also enforced by
+/// Matches the RFC 6330 §5.1.2 `K_MAX` limit also enforced by
 /// `fcp_raptorq::encode::Encoder::new` (56403). `put_object_meta`
 /// receives metadata from untrusted mesh inputs; a forged value of
 /// e.g. `u32::MAX` would otherwise drive a multi-GB `HashMap::
 /// with_capacity(...)` allocation under the global `objects.write()`
 /// lock before any symbols arrive. See br-ywpup.
 const MAX_SOURCE_SYMBOLS: u32 = 56_403;
+
+pub fn validate_source_symbols(meta: &ObjectSymbolMeta) -> Result<(), SymbolStoreError> {
+    if meta.source_symbols == 0 || meta.source_symbols > MAX_SOURCE_SYMBOLS {
+        return Err(SymbolStoreError::InvalidSymbol {
+            reason: format!(
+                "source_symbols={} out of range (1..={}) for object {}",
+                meta.source_symbols, MAX_SOURCE_SYMBOLS, meta.object_id
+            ),
+        });
+    }
+
+    Ok(())
+}
 
 /// Metadata for a stored symbol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -416,14 +429,7 @@ impl SymbolStore for MemorySymbolStore {
         // only serve to drive a large `HashMap::with_capacity(...)`
         // allocation and stall every concurrent symbol-store operation on
         // `objects.write()`. Rejected early, no lock held (br-ywpup).
-        if meta.source_symbols == 0 || meta.source_symbols > MAX_SOURCE_SYMBOLS {
-            return Err(SymbolStoreError::InvalidSymbol {
-                reason: format!(
-                    "source_symbols={} out of range (1..={}) for object {}",
-                    meta.source_symbols, MAX_SOURCE_SYMBOLS, meta.object_id
-                ),
-            });
-        }
+        validate_source_symbols(&meta)?;
 
         let mut objects = self.objects.write();
 
@@ -725,7 +731,7 @@ impl SymbolStore for MemorySymbolStore {
 #[cfg(test)]
 mod tests {
     use std::panic::{self, AssertUnwindSafe};
-    use std::sync::{mpsc, Arc, Barrier};
+    use std::sync::{Arc, Barrier, mpsc};
     use std::time::Instant;
 
     use super::*;
@@ -871,8 +877,8 @@ mod tests {
 
     /// Regression for br-s5u65: the read-path fast path must be
     /// correct under concurrent reads on the same populated object.
-    /// Before the fix, every get_symbol / get_all_symbols /
-    /// symbol_count took `objects.write()` and serialized every
+    /// Before the fix, every `get_symbol` / `get_all_symbols` /
+    /// `symbol_count` took `objects.write()` and serialized every
     /// concurrent reader into a single critical section. The fix uses
     /// `objects.read()` on the healthy path; this test smokes the
     /// concurrency correctness (observable outputs match a sequential
@@ -905,10 +911,8 @@ mod tests {
                             .unwrap();
                             assert_eq!(sym.meta.esi, esi);
                         }
-                        fcp_async_core::runtime::block_on_sync(
-                            s.symbol_count(&test_object_id()),
-                        )
-                        .expect("runtime")
+                        fcp_async_core::runtime::block_on_sync(s.symbol_count(&test_object_id()))
+                            .expect("runtime")
                     }));
                 }
 
@@ -934,7 +938,7 @@ mod tests {
     }
 
     /// Regression for br-s5u65 fast-path error semantics: the read-lock
-    /// fast path must return `ObjectNotFound` for unknown object_ids
+    /// fast path must return `ObjectNotFound` for unknown `object_id` values
     /// and `NotFound` for unknown ESIs on known objects WITHOUT taking
     /// the global write lock. Before the fix every such error path
     /// wrote-locked the map. This pins the error-return shape so a
@@ -967,19 +971,18 @@ mod tests {
         );
     }
 
-    #[test]
     /// Regression for br-aof5n: the list/count read paths must
     /// self-heal corrupt symbols rather than leaving them in the map
     /// indefinitely. The s5u65 read-lock fast path deferred physical
-    /// pruning to "the next write operation", but put_symbol /
-    /// put_object_meta / delete_* do not scrub — so a caller that
+    /// pruning to "the next write operation", but `put_symbol` /
+    /// `put_object_meta` / `delete_*` do not scrub — so a caller that
     /// only hits list/count paths after metadata drift would leave
     /// corrupt entries polluting the map and `used_bytes` inflated.
     ///
     /// This test injects corruption by swapping the stored meta's
-    /// symbol_size after symbols are written (simulating OTI drift /
+    /// `symbol_size` after symbols are written (simulating OTI drift /
     /// corruption-on-deserialization), then verifies that
-    /// get_all_symbols AND symbol_count both trigger a scrub that
+    /// `get_all_symbols` and `symbol_count` both trigger a scrub that
     /// reclaims the inflated bytes.
     #[test]
     fn list_and_count_paths_self_heal_corrupt_symbols() {
@@ -989,8 +992,7 @@ mod tests {
             "read",
             6,
             || async {
-                let store =
-                    MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
 
                 // Build an initially-consistent state: meta says 64-byte
                 // symbols, we put 3 symbols at 64 bytes each.
@@ -1015,7 +1017,10 @@ mod tests {
                 let mut corrupt = test_symbol(3);
                 corrupt.data = Bytes::from(vec![0_u8; 1]);
                 let rejected = store.put_symbol(corrupt).await;
-                assert!(matches!(rejected, Err(SymbolStoreError::InvalidSymbol { .. })));
+                assert!(matches!(
+                    rejected,
+                    Err(SymbolStoreError::InvalidSymbol { .. })
+                ));
 
                 // Quota accounting MUST not have accepted the bad write.
                 // (Primary aof5n invariant: reads do not inflate used_bytes.)
@@ -1091,40 +1096,49 @@ mod tests {
         // subsequent put_symbol calls, letting a crafted "symbol" block
         // every honest later write and permanently deny repair. A byte
         // mismatch on an existing ESI must surface as InvalidSymbol.
-        run_store_test("conflicting_symbol_rejected", "verify", "write", 3, || async {
-            let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+        run_store_test(
+            "conflicting_symbol_rejected",
+            "verify",
+            "write",
+            3,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
 
-            store.put_object_meta(test_object_meta()).await.unwrap();
-            let honest = test_symbol(0);
-            store.put_symbol(honest.clone()).await.unwrap();
+                store.put_object_meta(test_object_meta()).await.unwrap();
+                let honest = test_symbol(0);
+                store.put_symbol(honest.clone()).await.unwrap();
 
-            // Same bytes → idempotent.
-            let ok_again = store.put_symbol(honest.clone()).await;
-            assert!(ok_again.is_ok(), "identical resubmission must remain idempotent");
+                // Same bytes → idempotent.
+                let ok_again = store.put_symbol(honest.clone()).await;
+                assert!(
+                    ok_again.is_ok(),
+                    "identical resubmission must remain idempotent"
+                );
 
-            // Different bytes for same ESI → explicit rejection, not silent skip.
-            let forged = StoredSymbol {
-                meta: honest.meta.clone(),
-                data: Bytes::from(vec![0xAA_u8; 64]),
-            };
-            let result = store.put_symbol(forged).await;
-            assert!(
-                matches!(&result, Err(SymbolStoreError::InvalidSymbol { reason }) if reason.contains("conflicting")),
-                "expected InvalidSymbol with conflicting reason, got {result:?}"
-            );
+                // Different bytes for same ESI → explicit rejection, not silent skip.
+                let forged = StoredSymbol {
+                    meta: honest.meta.clone(),
+                    data: Bytes::from(vec![0xAA_u8; 64]),
+                };
+                let result = store.put_symbol(forged).await;
+                assert!(
+                    matches!(&result, Err(SymbolStoreError::InvalidSymbol { reason }) if reason.contains("conflicting")),
+                    "expected InvalidSymbol with conflicting reason, got {result:?}"
+                );
 
-            // Honest symbol still retrievable (poisoning attempt did not
-            // overwrite or corrupt the good entry).
-            let fetched = store.get_symbol(&test_object_id(), 0).await.unwrap();
-            assert_eq!(fetched.data, honest.data);
+                // Honest symbol still retrievable (poisoning attempt did not
+                // overwrite or corrupt the good entry).
+                let fetched = store.get_symbol(&test_object_id(), 0).await.unwrap();
+                assert_eq!(fetched.data, honest.data);
 
-            StoreLogData {
-                object_id: Some(test_object_id()),
-                symbol_count: Some(1),
-                details: Some(json!({"note": "conflict_rejected"})),
-                ..StoreLogData::default()
-            }
-        });
+                StoreLogData {
+                    object_id: Some(test_object_id()),
+                    symbol_count: Some(1),
+                    details: Some(json!({"note": "conflict_rejected"})),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
     #[test]
@@ -1971,7 +1985,7 @@ mod tests {
     }
 
     /// Regression for br-ywpup: a forged `source_symbols` above RFC 6330
-    /// K_MAX MUST be rejected BEFORE any `HashMap::with_capacity(...)`
+    /// `K_MAX` MUST be rejected BEFORE any `HashMap::with_capacity(...)`
     /// allocation, and without holding the global `objects.write()` lock.
     #[test]
     fn put_object_meta_rejects_oversized_source_symbols() {
@@ -2002,7 +2016,10 @@ mod tests {
                 poisoned.object_id = ObjectId::from_bytes([9_u8; 32]);
                 poisoned.source_symbols = u32::MAX;
                 let result = store.put_object_meta(poisoned).await;
-                assert!(matches!(result, Err(SymbolStoreError::InvalidSymbol { .. })));
+                assert!(matches!(
+                    result,
+                    Err(SymbolStoreError::InvalidSymbol { .. })
+                ));
 
                 // Zero is also invalid (would preallocate an empty HashMap
                 // but leave a zombie object_id entry that can never be
@@ -2011,7 +2028,10 @@ mod tests {
                 zero.object_id = ObjectId::from_bytes([8_u8; 32]);
                 zero.source_symbols = 0;
                 let result = store.put_object_meta(zero).await;
-                assert!(matches!(result, Err(SymbolStoreError::InvalidSymbol { .. })));
+                assert!(matches!(
+                    result,
+                    Err(SymbolStoreError::InvalidSymbol { .. })
+                ));
 
                 StoreLogData {
                     details: Some(json!({"rejected": "oversized_source_symbols"})),

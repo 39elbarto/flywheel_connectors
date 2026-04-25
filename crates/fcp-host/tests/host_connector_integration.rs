@@ -293,7 +293,7 @@ fn valid_attestation(digest: &str) -> SupplyChainAttestation {
         signature: SupplyChainSignature {
             algorithm: "ed25519".to_string(),
             key_id: "key-001".to_string(),
-            signature: "sig-placeholder".to_string(),
+            signature: "f".repeat(128),
             signed_fields: SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS
                 .iter()
                 .map(|field| (*field).to_string())
@@ -327,7 +327,7 @@ fn valid_sbom() -> SoftwareBillOfMaterials {
         signature: SupplyChainSignature {
             algorithm: "ed25519".to_string(),
             key_id: "key-002".to_string(),
-            signature: "sig-placeholder".to_string(),
+            signature: "f".repeat(128),
             signed_fields: SBOM_SIGNED_FIELDS
                 .iter()
                 .map(|field| (*field).to_string())
@@ -834,6 +834,7 @@ fn admin_auth_headers() -> HeaderMap {
         HeaderValue::from_str(&format!("Bearer {TEST_ADMIN_BEARER_TOKEN}"))
             .expect("test admin bearer token should be a valid header"),
     );
+    headers.insert("x-fcp-zone", HeaderValue::from_static("z:owner"));
     headers
 }
 
@@ -854,6 +855,9 @@ fn with_admin_auth_if_needed(
         HeaderValue::from_str(&format!("Bearer {TEST_ADMIN_BEARER_TOKEN}"))
             .expect("test admin bearer token should be a valid header")
     });
+    headers
+        .entry("x-fcp-zone")
+        .or_insert_with(|| HeaderValue::from_static("z:owner"));
     Some(headers)
 }
 
@@ -878,8 +882,7 @@ where
     B: serde::Serialize + Send + 'static,
     T: DeserializeOwned + Send + 'static,
 {
-    let headers =
-        with_admin_auth_if_needed(&reqwest::Method::PUT, &url, None).unwrap_or_default();
+    let headers = with_admin_auth_if_needed(&reqwest::Method::PUT, &url, None).unwrap_or_default();
     let response = client
         .put(url)
         .headers(headers)
@@ -989,8 +992,14 @@ async fn request_status_text(
 #[test]
 fn protected_route_request_distinguishes_public_artifact_metadata() {
     let artifact_path = "/rpc/connectors/fcp.test.echo:utility:1.0.0/artifact";
-    assert!(!protected_route_request(&reqwest::Method::GET, artifact_path));
-    assert!(protected_route_request(&reqwest::Method::POST, artifact_path));
+    assert!(!protected_route_request(
+        &reqwest::Method::GET,
+        artifact_path
+    ));
+    assert!(protected_route_request(
+        &reqwest::Method::POST,
+        artifact_path
+    ));
     assert!(protected_route_request(
         &reqwest::Method::GET,
         "/rpc/connectors/fcp.test.echo:utility:1.0.0/config"
@@ -4656,7 +4665,10 @@ async fn fcp_host_binary_protected_routes_require_admin_bearer()
     let (artifact_status, artifact_body) = request_status_text(
         host.client.clone(),
         reqwest::Method::GET,
-        url(&format!("/rpc/connectors/{}/artifact", connector_id.as_str())),
+        url(&format!(
+            "/rpc/connectors/{}/artifact",
+            connector_id.as_str()
+        )),
         None,
         None,
     )
@@ -4675,7 +4687,10 @@ async fn fcp_host_binary_protected_routes_require_admin_bearer()
     let (artifact_status, artifact_body) = request_status_text(
         host.client.clone(),
         reqwest::Method::GET,
-        url(&format!("/rpc/connectors/{}/artifact", connector_id.as_str())),
+        url(&format!(
+            "/rpc/connectors/{}/artifact",
+            connector_id.as_str()
+        )),
         None,
         Some(admin_auth_headers()),
     )

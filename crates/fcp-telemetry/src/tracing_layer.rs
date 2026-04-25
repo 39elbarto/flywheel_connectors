@@ -237,7 +237,9 @@ fn is_valid_tracestate_key(key: &str) -> bool {
         return false;
     }
 
-    let (tenant, system) = key.split_once('@').map_or(("", key), |(tenant, system)| (tenant, system));
+    let (tenant, system) = key
+        .split_once('@')
+        .map_or(("", key), |(tenant, system)| (tenant, system));
     if !tenant.is_empty() && !is_valid_tracestate_token(tenant, true) {
         return false;
     }
@@ -897,10 +899,7 @@ mod tests {
             TRACEPARENT_HEADER.to_string(),
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
         );
-        headers.insert(
-            TRACESTATE_HEADER.to_string(),
-            "vendor =bad".to_string(),
-        );
+        headers.insert(TRACESTATE_HEADER.to_string(), "vendor =bad".to_string());
 
         let ctx = extract_trace_context(&headers).expect("traceparent should still extract");
         assert_eq!(ctx.trace_state, None);

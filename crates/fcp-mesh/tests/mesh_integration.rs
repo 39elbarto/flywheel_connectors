@@ -380,6 +380,28 @@ mod meshnode {
         (0..total).filter(|esi| !have.contains(esi)).collect()
     }
 
+    fn authorize_peer_for_zone(node: &mut MeshNode, peer: &NodeId, zone_id: &ZoneId) {
+        node.update_peer_zones(peer, HashSet::from([zone_id.clone()]));
+    }
+
+    fn authenticate_peer_for_zone(
+        node: &mut MeshNode,
+        peer: &NodeId,
+        zone_id: &ZoneId,
+        now_ms: u64,
+    ) {
+        authorize_peer_for_zone(node, peer, zone_id);
+        node.admission_mut().set_authenticated(peer, true, now_ms);
+    }
+
+    fn authorize_default_peer(node: &mut MeshNode, zone_id: &ZoneId) {
+        authorize_peer_for_zone(node, &NodeId::new("peer-1"), zone_id);
+    }
+
+    fn authenticate_default_peer(node: &mut MeshNode, zone_id: &ZoneId) {
+        authenticate_peer_for_zone(node, &NodeId::new("peer-1"), zone_id, 0);
+    }
+
     const fn test_raptorq_config() -> RaptorQConfig {
         RaptorQConfig {
             symbol_size: 64,
@@ -583,6 +605,7 @@ mod meshnode {
 
         let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
         let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+        authenticate_default_peer(&mut node, &zone_id);
 
         let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -642,6 +665,7 @@ mod meshnode {
 
         let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
         let mut node = MeshNode::new(config, object_store, symbol_store, quarantine_store);
+        authenticate_default_peer(&mut node, &zone_id);
 
         let request = SymbolRequest::new(
             test_header(&zone_id),
@@ -673,6 +697,7 @@ mod meshnode {
 
         let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
         let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+        authenticate_default_peer(&mut node, &zone_id);
 
         let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -715,6 +740,7 @@ mod meshnode {
 
         let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
         let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+        authenticate_default_peer(&mut node, &zone_id);
 
         let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
         let symbol_size = oti.symbol_size() as usize;
@@ -785,6 +811,7 @@ mod meshnode {
 
         let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
         let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+        authenticate_default_peer(&mut node, &zone_id);
 
         let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
         let symbol_size = oti.symbol_size() as usize;
@@ -844,6 +871,7 @@ mod meshnode {
 
         let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
         let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+        authenticate_default_peer(&mut node, &zone_id);
 
         let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
         let symbol_size = oti.symbol_size() as usize;
@@ -905,6 +933,7 @@ mod meshnode {
 
         let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
         let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+        authenticate_default_peer(&mut node, &zone_id);
 
         let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
         let symbol_size = oti.symbol_size() as usize;
@@ -965,6 +994,7 @@ mod meshnode {
 
         let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
         let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+        authenticate_default_peer(&mut node, &zone_id);
 
         let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
         let symbol_size = oti.symbol_size() as usize;
@@ -1024,6 +1054,7 @@ mod meshnode {
 
         let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
         let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+        authenticate_default_peer(&mut node, &zone_id);
 
         let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
         let symbol_size = oti.symbol_size() as usize;
@@ -1084,6 +1115,7 @@ mod meshnode {
 
         let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
         let mut node = MeshNode::new(config, object_store, symbol_store.clone(), quarantine_store);
+        authenticate_default_peer(&mut node, &zone_id);
 
         let oti = ObjectTransmissionInformation::new(1024, 256, 1, 1, 1);
         let symbol_size = oti.symbol_size() as usize;
@@ -1174,6 +1206,7 @@ mod meshnode {
 
         let config = MeshNodeConfig::new("node-1").with_sender_instance_id(7);
         let mut node = MeshNode::new(config, object_store, symbol_store, quarantine_store.clone());
+        authenticate_default_peer(&mut node, &zone_id);
 
         quarantine_store
             .quarantine(QuarantinedObject {
@@ -1223,6 +1256,7 @@ mod meshnode {
             symbol_store.clone(),
             quarantine_store,
         );
+        authenticate_default_peer(&mut node, &zone_id);
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
         let symbol_size = oti.symbol_size() as usize;
@@ -1312,6 +1346,7 @@ mod meshnode {
             symbol_store.clone(),
             quarantine_store,
         );
+        authenticate_default_peer(&mut node, &zone_id);
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
         let symbol_size = oti.symbol_size() as usize;
@@ -1398,6 +1433,7 @@ mod meshnode {
             symbol_store.clone(),
             quarantine_store,
         );
+        authorize_default_peer(&mut node, &zone_id);
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -1570,6 +1606,7 @@ mod meshnode {
 
         let mut node_a = build_mesh_node("node-a", 21, 1);
         let node_b = build_mesh_node("node-b", 22, 2);
+        authenticate_peer_for_zone(&mut node_a, &NodeId::new("node-b"), &zone_id, 0);
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -1735,6 +1772,7 @@ mod meshnode {
 
         let mut node = build_mesh_node("node-auth", 41, 3);
         let symbol_store = node.symbol_store().clone();
+        authorize_default_peer(&mut node, &zone_id);
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -1801,6 +1839,7 @@ mod meshnode {
         let mut node = build_mesh_node_with_trace("node-trace", 88, 42);
         let peer = NodeId::new("peer-trace");
         let symbol_store = node.symbol_store().clone();
+        authorize_peer_for_zone(&mut node, &peer, &zone_id);
 
         let session = MeshSession::new(
             MeshSessionId::new(),
@@ -1979,6 +2018,7 @@ mod meshnode {
             .with_redaction(RedactionPolicy::default().with_field("session_id"));
         let mut node_a = build_mesh_node_with_trace_config("node-a-trace", 94, 31, trace_config);
         let node_b = build_mesh_node("node-b", 95, 32);
+        authorize_peer_for_zone(&mut node_a, &peer, &zone_id);
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -2207,6 +2247,7 @@ mod meshnode {
 
         let mut node_a = build_mesh_node_with_trace("node-a", 120, 1);
         let node_b = build_mesh_node("node-b", 121, 2);
+        authenticate_peer_for_zone(&mut node_a, &NodeId::new("node-b"), &zone_id, 1_100);
         let source_meta =
             seed_checkpoint_symbols(&node_a, &checkpoint, checkpoint_object_id, 1, &config).await;
         node_a.announce_object(
@@ -2404,6 +2445,7 @@ mod meshnode {
 
         let mut node_a = build_mesh_node("node-a", 130, 1);
         let node_b = build_mesh_node("node-b", 131, 2);
+        authenticate_peer_for_zone(&mut node_a, &NodeId::new("node-b"), &zone_id, 2_000);
         let source_meta =
             seed_checkpoint_symbols(&node_a, &checkpoint, checkpoint_object_id, 1, &config).await;
 
@@ -3402,8 +3444,10 @@ mod admission_control {
             Err(AdmissionError::ByteBudgetExceeded { .. })
         ));
 
-        // After window reset, should work again
-        let later_ms = now_ms + 61_000; // More than 60 seconds later
+        // The controller uses a conservative two-bucket sliding window:
+        // after one minute, the previous bucket still contributes a
+        // decaying weight. After two windows, the original usage is stale.
+        let later_ms = now_ms + 121_000;
         let result2 = controller.check_bytes(&peer, 300, later_ms);
         assert!(result2.is_ok());
 
@@ -4685,15 +4729,15 @@ mod gossip_integration {
         );
     }
 
-    /// Test: Oversized reconciliation sketches fall back to empty IBLT payloads and log why.
+    /// Test: Production reconciliation sketches stay within budget and log metrics.
     #[test]
-    fn test_gossip_summary_creation_logs_iblt_fallback_reason() {
-        const TEST_NAME: &str = "gossip_summary_creation_logs_iblt_fallback_reason";
+    fn test_gossip_summary_creation_logs_iblt_metrics() {
+        const TEST_NAME: &str = "gossip_summary_creation_logs_iblt_metrics";
         const CATEGORY: &str = "gossip";
         emit_test_start(TEST_NAME, CATEGORY);
 
         let capture = LogCapture::new();
-        let _guard = capture.install_json_with_filter("info");
+        let _guard = capture.install_json_with_filter("debug");
 
         let zone_id = ZoneId::work();
         let epoch = EpochId::new("epoch-fallback");
@@ -4701,6 +4745,7 @@ mod gossip_integration {
             reconciliation_batch_size: 64,
             ..GossipConfig::default()
         };
+        let max_iblt_bytes = config.max_iblt_bytes();
         let mut gossip = MeshGossip::new(TailscaleNodeId::new("node-fallback"), config);
         let object_id = test_object_id("fallback-object");
         let now = 1_000u64;
@@ -4725,7 +4770,8 @@ mod gossip_integration {
         )
         .unwrap_or(u64::MAX);
 
-        assert_eq!(summary.iblt, b"[]".to_vec());
+        assert!(!summary.iblt.is_empty());
+        assert!(summary.iblt.len() <= max_iblt_bytes);
 
         let created_log = find_tracing_event(&capture, "summary_created");
         assert_eq!(
@@ -4744,7 +4790,7 @@ mod gossip_integration {
             created_log
                 .get("fallback_reason")
                 .and_then(serde_json::Value::as_str),
-            Some("iblt_bytes_exceeded")
+            Some("none")
         );
         assert_eq!(
             created_log
@@ -4793,7 +4839,7 @@ mod gossip_integration {
         let now = 1_000u64;
 
         let sender_config = GossipConfig {
-            reconciliation_batch_size: 8,
+            reconciliation_batch_size: 64,
             ..GossipConfig::default()
         };
         let mut sender = MeshGossip::new(TailscaleNodeId::new("node-change-sender"), sender_config);
@@ -5521,6 +5567,20 @@ mod real_component_integration {
         )
     }
 
+    fn authorize_peer_for_zone(node: &mut MeshNode, peer: &NodeId, zone_id: &ZoneId) {
+        node.update_peer_zones(peer, HashSet::from([zone_id.clone()]));
+    }
+
+    fn authenticate_peer_for_zone(
+        node: &mut MeshNode,
+        peer: &NodeId,
+        zone_id: &ZoneId,
+        now_ms: u64,
+    ) {
+        authorize_peer_for_zone(node, peer, zone_id);
+        node.admission_mut().set_authenticated(peer, true, now_ms);
+    }
+
     fn sign_summary(
         signing_key: &Ed25519SigningKey,
         node_id: &NodeId,
@@ -5605,6 +5665,7 @@ mod real_component_integration {
         };
         let mut node = build_mesh_node_with_policy("node-auth-gate", 50, 1, policy);
         let symbol_store = node.symbol_store().clone();
+        authorize_peer_for_zone(&mut node, &peer, &zone_id);
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -5734,6 +5795,7 @@ mod real_component_integration {
         };
         let mut node = build_mesh_node_with_policy("node-flood-byte", 51, 1, policy);
         let symbol_store = node.symbol_store().clone();
+        authenticate_peer_for_zone(&mut node, &peer, &zone_id, 1000);
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -5848,6 +5910,7 @@ mod real_component_integration {
         };
         let mut node = build_mesh_node_with_policy("node-flood-sym", 52, 1, policy);
         let symbol_store = node.symbol_store().clone();
+        authenticate_peer_for_zone(&mut node, &peer, &zone_id, 1000);
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -5921,6 +5984,7 @@ mod real_component_integration {
     // ========================================================================
 
     #[test]
+    #[allow(clippy::similar_names)] // Two-node convergence test intentionally keeps symmetric A/B identifiers.
     fn multi_node_gossip_convergence_via_meshnode() {
         const TEST_NAME: &str = "multi_node_gossip_convergence_via_meshnode";
         const CATEGORY: &str = "real_component";
@@ -5933,12 +5997,14 @@ mod real_component_integration {
 
         let mut node_a = build_node("node-gossip-a", 60, 1);
         let mut node_b = build_node("node-gossip-b", 61, 2);
-        let node_a_id = NodeId::new("node-gossip-a");
-        let node_b_id = NodeId::new("node-gossip-b");
+        let gossip_a_id = NodeId::new("node-gossip-a");
+        let gossip_b_id = NodeId::new("node-gossip-b");
         let signing_key_a = Ed25519SigningKey::generate();
         let signing_key_b = Ed25519SigningKey::generate();
-        node_a.register_peer_signing_key(node_b_id.clone(), signing_key_b.verifying_key());
-        node_b.register_peer_signing_key(node_a_id.clone(), signing_key_a.verifying_key());
+        node_a.register_peer_signing_key(gossip_b_id.clone(), signing_key_b.verifying_key());
+        node_b.register_peer_signing_key(gossip_a_id.clone(), signing_key_a.verifying_key());
+        authorize_peer_for_zone(&mut node_a, &gossip_b_id, &zone_id);
+        authorize_peer_for_zone(&mut node_b, &gossip_a_id, &zone_id);
 
         // Node A announces obj_a and obj_b
         assert!(node_a.announce_object(&zone_id, &obj_a, ObjectAdmissionClass::Admitted, 1000));
@@ -5971,7 +6037,7 @@ mod real_component_integration {
             .gossip_mut()
             .create_summary(&zone_id, epoch.clone())
             .expect("node A should produce a summary");
-        let summary_a = sign_summary(&signing_key_a, &node_a_id, summary_a);
+        let summary_a = sign_summary(&signing_key_a, &gossip_a_id, summary_a);
 
         // B processes A's summary to learn about A's objects
         node_b
@@ -5992,7 +6058,7 @@ mod real_component_integration {
             .gossip_mut()
             .create_summary(&zone_id, epoch)
             .expect("node B should produce a summary");
-        let summary_b = sign_summary(&signing_key_b, &node_b_id, summary_b);
+        let summary_b = sign_summary(&signing_key_b, &gossip_b_id, summary_b);
 
         // A processes B's summary to learn about B's objects
         node_a
@@ -6050,6 +6116,7 @@ mod real_component_integration {
         };
         let mut node_a = build_mesh_node_with_policy("node-a-gated", 70, 1, policy);
         let node_b = build_node("node-b-requester", 71, 2);
+        authorize_peer_for_zone(&mut node_a, &peer_b, &zone_id);
 
         let symbol_store_a = node_a.symbol_store().clone();
         let receiver_store = node_b.symbol_store().clone();
@@ -6250,6 +6317,7 @@ mod real_component_integration {
         };
         let mut node = build_mesh_node_with_policy("node-receipt", 90, 1, policy);
         let symbol_store = node.symbol_store().clone();
+        authenticate_peer_for_zone(&mut node, &peer, &zone_id, 1000);
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -6366,6 +6434,7 @@ mod real_component_integration {
 
         let mut node = build_node("node-decode", 100, 1);
         let symbol_store = node.symbol_store().clone();
+        authenticate_peer_for_zone(&mut node, &peer, &zone_id, 1000);
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -6405,7 +6474,6 @@ mod real_component_integration {
             ttl_secs: None,
             placement: None,
         };
-        let peer = NodeId::new("peer-1");
         let signing_key = fcp_crypto::Ed25519SigningKey::generate();
         node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
 
@@ -6461,7 +6529,7 @@ mod real_component_integration {
     // 9. Gossip checkpoint exchange between MeshNodes
     // ========================================================================
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::similar_names)]
     #[test]
     fn gossip_checkpoint_exchange_reconciliation() {
         const TEST_NAME: &str = "gossip_checkpoint_exchange_reconciliation";
@@ -6503,12 +6571,14 @@ mod real_component_integration {
             symbol_store_b,
             quarantine_store_b,
         );
-        let node_a_id = NodeId::new("node-ckpt-a");
-        let node_b_id = NodeId::new("node-ckpt-b");
+        let checkpoint_a_id = NodeId::new("node-ckpt-a");
+        let checkpoint_b_id = NodeId::new("node-ckpt-b");
         let signing_key_a = Ed25519SigningKey::generate();
         let signing_key_b = Ed25519SigningKey::generate();
-        node_a.register_peer_signing_key(node_b_id.clone(), signing_key_b.verifying_key());
-        node_b.register_peer_signing_key(node_a_id.clone(), signing_key_a.verifying_key());
+        node_a.register_peer_signing_key(checkpoint_b_id.clone(), signing_key_b.verifying_key());
+        node_b.register_peer_signing_key(checkpoint_a_id.clone(), signing_key_a.verifying_key());
+        authorize_peer_for_zone(&mut node_a, &checkpoint_b_id, &zone_id);
+        authorize_peer_for_zone(&mut node_b, &checkpoint_a_id, &zone_id);
 
         // Node A: 5 objects
         let mut a_objects = Vec::new();
@@ -6539,7 +6609,7 @@ mod real_component_integration {
             .gossip_mut()
             .create_summary(&zone_id, epoch.clone())
             .expect("A should produce summary");
-        let summary_a = sign_summary(&signing_key_a, &node_a_id, summary_a);
+        let summary_a = sign_summary(&signing_key_a, &checkpoint_a_id, summary_a);
 
         // B processes A's summary, then requests A's objects it doesn't have
         node_b
@@ -6557,7 +6627,7 @@ mod real_component_integration {
             .gossip_mut()
             .create_summary(&zone_id, epoch)
             .expect("B should produce summary");
-        let summary_b = sign_summary(&signing_key_b, &node_b_id, summary_b);
+        let summary_b = sign_summary(&signing_key_b, &checkpoint_b_id, summary_b);
         node_a
             .handle_gossip_message(GossipMessage::Summary(summary_b), 2002)
             .expect("A should accept B's signed summary");
@@ -6615,6 +6685,7 @@ mod real_component_integration {
         };
         let mut node = build_mesh_node_with_policy("node-amp", 120, 1, policy);
         let symbol_store = node.symbol_store().clone();
+        authorize_peer_for_zone(&mut node, &peer, &zone_id);
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -6758,6 +6829,7 @@ mod real_component_integration {
 
         let mut node = build_node("node-ack", 140, 1);
         let symbol_store = node.symbol_store().clone();
+        authenticate_peer_for_zone(&mut node, &peer, &zone_id, 1000);
 
         let oti = ObjectTransmissionInformation::new(512, 128, 1, 1, 1);
         let meta = ObjectSymbolMeta {
@@ -6786,7 +6858,6 @@ mod real_component_integration {
         assert!(!response.symbol_esis.is_empty());
 
         // Phase 2: SymbolAck Complete — signals object is fully decoded
-        let peer = NodeId::new("peer-1");
         let signing_key = fcp_crypto::Ed25519SigningKey::generate();
         node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
 

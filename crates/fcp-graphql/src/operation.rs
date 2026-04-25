@@ -6,6 +6,7 @@ use crate::error::GraphqlError;
 
 /// GraphQL query wrapper.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct GraphqlQuery {
     query: String,
 }
@@ -70,7 +71,7 @@ pub struct GraphqlRequest<V> {
     /// Variables.
     pub variables: V,
     /// Optional operation name.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "operationName", skip_serializing_if = "Option::is_none")]
     pub operation_name: Option<String>,
 }
 
@@ -102,7 +103,7 @@ pub struct GraphqlBatchItem<V> {
     /// Variables payload.
     pub variables: V,
     /// Optional operation name.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "operationName", skip_serializing_if = "Option::is_none")]
     pub operation_name: Option<String>,
 }
 
@@ -171,6 +172,7 @@ mod tests {
     fn query_serde_roundtrip() {
         let q = GraphqlQuery::new("{ ping }");
         let json = serde_json::to_string(&q).unwrap();
+        assert_eq!(json, "\"{ ping }\"");
         let back: GraphqlQuery = serde_json::from_str(&json).unwrap();
         assert_eq!(q, back);
     }
@@ -205,6 +207,15 @@ mod tests {
         )
         .with_operation_name("Q");
         let json = serde_json::to_string(&req).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "query": "query Q($id: ID!) { user(id: $id) { name } }",
+                "variables": {"id": "123"},
+                "operationName": "Q"
+            })
+        );
         let back: GraphqlRequest<serde_json::Value> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.operation_name.as_deref(), Some("Q"));
         assert_eq!(back.variables["id"], "123");
@@ -215,6 +226,7 @@ mod tests {
         let req = GraphqlRequest::new(GraphqlQuery::new("{ x }"), serde_json::json!({}));
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("operation_name"));
+        assert!(!json.contains("operationName"));
     }
 
     // ---- GraphqlBatchItem ----
@@ -458,6 +470,15 @@ mod tests {
         )
         .with_operation_name("GetUsers");
         let json = serde_json::to_string(&item).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "query": "{ users { id } }",
+                "variables": {"limit": 10},
+                "operationName": "GetUsers"
+            })
+        );
         let back: GraphqlBatchItem<serde_json::Value> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.operation_name.as_deref(), Some("GetUsers"));
         assert_eq!(back.variables["limit"], 10);
@@ -468,6 +489,7 @@ mod tests {
         let item = GraphqlBatchItem::new(GraphqlQuery::new("{ x }"), serde_json::json!({}));
         let json = serde_json::to_string(&item).unwrap();
         assert!(!json.contains("operation_name"));
+        assert!(!json.contains("operationName"));
     }
 
     // ---- GraphqlResponse additional tests ----
@@ -603,7 +625,8 @@ mod tests {
             .with_operation_name("MyOp");
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("MyOp"));
-        assert!(json.contains("operation_name"));
+        assert!(json.contains("operationName"));
+        assert!(!json.contains("operation_name"));
     }
 
     // ---- GraphqlBatchItem edge cases ----
@@ -876,7 +899,8 @@ mod tests {
             .with_operation_name("");
         assert_eq!(req.operation_name.as_deref(), Some(""));
         let json = serde_json::to_string(&req).unwrap();
-        assert!(json.contains("operation_name"));
+        assert!(json.contains("operationName"));
+        assert!(!json.contains("operation_name"));
     }
 
     // ---- GraphqlBatchItem edge cases ----

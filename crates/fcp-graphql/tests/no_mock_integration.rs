@@ -516,6 +516,8 @@ fn batch_item_serde_roundtrip() {
     .with_operation_name("GetUser");
 
     let json = serde_json::to_string(&item).unwrap();
+    assert!(json.contains("operationName"));
+    assert!(!json.contains("operation_name"));
     let parsed: GraphqlBatchItem<GetUserVars> = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.query.as_str(), GetUser::QUERY);
     assert_eq!(parsed.variables.id, "user-1");
@@ -1131,6 +1133,7 @@ fn query_new_vs_from_static() {
 fn query_serde_roundtrip() {
     let q = GraphqlQuery::new("query Foo($id: ID!) { user(id: $id) { name } }");
     let json = serde_json::to_string(&q).unwrap();
+    assert_eq!(json, "\"query Foo($id: ID!) { user(id: $id) { name } }\"");
     let back: GraphqlQuery = serde_json::from_str(&json).unwrap();
     assert_eq!(q, back);
 }

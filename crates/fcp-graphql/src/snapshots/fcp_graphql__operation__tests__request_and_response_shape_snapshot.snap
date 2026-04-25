@@ -4,10 +4,8 @@ expression: "serde_json::json!({\n    \"request\": serde_json::to_value(&request
 ---
 {
   "request": {
-    "operation_name": "ViewerById",
-    "query": {
-      "query": "query ViewerById($id: ID!, $includeTeams: Boolean!) {\n  viewer(id: $id) {\n    id\n    teams @include(if: $includeTeams) {\n      id\n      slug\n    }\n  }\n}"
-    },
+    "operationName": "ViewerById",
+    "query": "query ViewerById($id: ID!, $includeTeams: Boolean!) {\n  viewer(id: $id) {\n    id\n    teams @include(if: $includeTeams) {\n      id\n      slug\n    }\n  }\n}",
     "variables": {
       "id": "[id]",
       "includeTeams": true

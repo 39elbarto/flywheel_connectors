@@ -23,6 +23,8 @@
 //!
 //! Any other change MUST fail these tests.
 
+use std::fmt::Write as _;
+
 use fcp_core::{EpochId, ObjectId, TailscaleNodeId, ZoneId};
 use fcp_mesh::gossip::{GossipSummary, RevocationPushMessage};
 
@@ -85,8 +87,8 @@ fn populated_revocation_push() -> RevocationPushMessage {
 fn dump(label: &str, bytes: &[u8]) -> String {
     let mut out = String::new();
     out.push_str(label);
-    out.push_str("\n");
-    out.push_str(&format!("len = {}\n", bytes.len()));
+    out.push('\n');
+    writeln!(&mut out, "len = {}", bytes.len()).expect("writing to String cannot fail");
     for (i, chunk) in bytes.chunks(16).enumerate() {
         let hex: String = chunk
             .iter()
@@ -103,7 +105,8 @@ fn dump(label: &str, bytes: &[u8]) -> String {
                 }
             })
             .collect();
-        out.push_str(&format!("{:04x}  {:48}  {}\n", i * 16, hex, ascii));
+        writeln!(&mut out, "{:04x}  {:48}  {}", i * 16, hex, ascii)
+            .expect("writing to String cannot fail");
     }
     out
 }

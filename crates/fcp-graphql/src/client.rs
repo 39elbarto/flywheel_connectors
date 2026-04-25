@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use chrono::Utc;
 use fcp_async_core::http::{HttpClient, HttpClientBuilder, Method};
 use fcp_async_core::{AsyncError, sync::Mutex, task, time};
 use futures_util::future::{BoxFuture, FutureExt, Shared};
@@ -775,7 +776,22 @@ fn map_request_async_error(error: AsyncError, timeout: Duration) -> GraphqlClien
 
 fn parse_retry_after(headers: &HeaderList) -> Option<Duration> {
     let value = header_value(headers, RETRY_AFTER_HEADER)?;
-    value.parse::<u64>().ok().map(Duration::from_secs)
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u128>() {
+        return Some(Duration::from_secs(
+            u64::try_from(seconds).unwrap_or(u64::MAX),
+        ));
+    }
+
+    let retry_at = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    let wait = retry_at
+        .with_timezone(&Utc)
+        .signed_duration_since(Utc::now());
+    if wait <= chrono::Duration::zero() {
+        Some(Duration::ZERO)
+    } else {
+        Some(wait.to_std().unwrap_or(Duration::from_secs(u64::MAX)))
+    }
 }
 
 fn truncate_body(bytes: &[u8]) -> String {
@@ -1153,6 +1169,38 @@ mod tests {
     fn parse_retry_after_with_seconds() {
         let headers = vec![(RETRY_AFTER_HEADER.to_string(), "30".to_string())];
         assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn parse_retry_after_trims_delta_seconds() {
+        let headers = vec![(RETRY_AFTER_HEADER.to_string(), " 30 ".to_string())];
+        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn parse_retry_after_with_http_date() {
+        let retry_at = (chrono::Utc::now() + chrono::Duration::seconds(120))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        let headers = vec![(RETRY_AFTER_HEADER.to_string(), retry_at)];
+
+        let retry_after =
+            parse_retry_after(&headers).expect("future Retry-After HTTP-date should parse");
+
+        assert!(
+            retry_after >= Duration::from_secs(118) && retry_after <= Duration::from_secs(121),
+            "retry_after={retry_after:?}"
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_past_http_date_is_zero() {
+        let retry_at = (chrono::Utc::now() - chrono::Duration::seconds(30))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        let headers = vec![(RETRY_AFTER_HEADER.to_string(), retry_at)];
+
+        assert_eq!(parse_retry_after(&headers), Some(Duration::ZERO));
     }
 
     #[test]

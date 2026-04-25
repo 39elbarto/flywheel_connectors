@@ -258,7 +258,7 @@ impl AuthorizationSession {
 
     /// Get the PKCE parameters for this session, if any.
     #[must_use]
-    pub fn pkce(&self) -> Option<&Pkce> {
+    pub const fn pkce(&self) -> Option<&Pkce> {
         self.pkce.as_ref()
     }
 
@@ -320,7 +320,7 @@ impl AuthorizationGrant {
 
     /// Get the PKCE verifier/challenge associated with this grant.
     #[must_use]
-    pub fn pkce(&self) -> Option<&Pkce> {
+    pub const fn pkce(&self) -> Option<&Pkce> {
         self.pkce.as_ref()
     }
 }
@@ -382,18 +382,18 @@ fn validate_oauth2_config(mut config: OAuth2Config) -> OAuthResult<OAuth2Config>
         .keys()
         .find(|key| reserved_extra_auth_param(key))
     {
-        return Err(OAuthError::InvalidConfig(
-            format!("extra auth param `{key}` is reserved by the OAuth 2.0 flow").into(),
-        ));
+        return Err(OAuthError::InvalidConfig(format!(
+            "extra auth param `{key}` is reserved by the OAuth 2.0 flow"
+        )));
     }
     if let Some(key) = config
         .extra_token_params
         .keys()
         .find(|key| reserved_extra_token_param(key))
     {
-        return Err(OAuthError::InvalidConfig(
-            format!("extra token param `{key}` is reserved by the OAuth 2.0 flow").into(),
-        ));
+        return Err(OAuthError::InvalidConfig(format!(
+            "extra token param `{key}` is reserved by the OAuth 2.0 flow"
+        )));
     }
     Ok(config)
 }
@@ -456,13 +456,15 @@ impl OAuth2Client {
         scopes: &[&str],
     ) -> OAuthResult<(String, String, Pkce)> {
         let session = self.authorization_session_with_pkce(scopes)?;
+        let pkce = session.pkce().cloned().ok_or_else(|| {
+            OAuthError::InvalidConfig(
+                "authorization session did not include PKCE material".to_string(),
+            )
+        })?;
         Ok((
             session.authorization_url().to_string(),
             session.state().to_string(),
-            session
-                .pkce()
-                .cloned()
-                .expect("PKCE session must carry PKCE material"),
+            pkce,
         ))
     }
 
@@ -679,6 +681,10 @@ impl OAuth2Client {
         let mut params = HashMap::new();
         params.insert("grant_type", GrantType::RefreshToken.to_string());
         params.insert("refresh_token", refresh_token.to_string());
+
+        if !self.config.default_scopes.is_empty() {
+            params.insert("scope", self.config.default_scopes.join(" "));
+        }
 
         // Extra parameters
         for (key, value) in &self.config.extra_token_params {
@@ -1288,15 +1294,10 @@ mod tests {
                 .refresh_tokens("")
                 .await
                 .expect_err("empty refresh token input must be rejected");
-            match err {
-                OAuthError::InvalidTokenResponse(msg) => {
-                    assert!(
-                        msg.contains("refresh token cannot be empty"),
-                        "unexpected message: {msg}"
-                    );
-                }
-                other => assert!(false, "expected InvalidTokenResponse, got {other:?}"),
-            }
+            assert!(
+                matches!(err, OAuthError::InvalidTokenResponse(ref msg) if msg.contains("refresh token cannot be empty")),
+                "expected InvalidTokenResponse for empty refresh token, got {err:?}"
+            );
         });
     }
 
@@ -1538,6 +1539,40 @@ mod tests {
             let tokens = client.refresh_tokens("refresh-token-xyz").await.unwrap();
             assert_eq!(tokens.access_token(), "fresh-access-token");
             assert_eq!(tokens.refresh_token(), Some("new-refresh-token"));
+        });
+    }
+
+    #[test]
+    fn test_refresh_tokens_with_default_scopes() {
+        run_with_test_runtime(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .and(body_string_contains("grant_type=refresh_token"))
+                .and(body_string_contains("refresh_token=refresh-token-xyz"))
+                .and(body_string_contains("scope=gmail.compose+gmail.modify"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "fresh-access-token",
+                    "token_type": "Bearer",
+                    "expires_in": 7200,
+                    "scope": "gmail.compose gmail.modify"
+                })))
+                .mount(&server)
+                .await;
+
+            let config = OAuth2Config::new(
+                "test_client_id",
+                "test_client_secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_scopes(vec!["gmail.compose".into(), "gmail.modify".into()]);
+            let client = OAuth2Client::new(config).unwrap();
+
+            let tokens = client.refresh_tokens("refresh-token-xyz").await.unwrap();
+            assert_eq!(tokens.access_token(), "fresh-access-token");
+            assert_eq!(tokens.refresh_token(), Some("refresh-token-xyz"));
+            assert_eq!(tokens.scopes(), &["gmail.compose", "gmail.modify"]);
         });
     }
 
@@ -2122,21 +2157,25 @@ mod tests {
             error_description: Some("Internal server error".into()),
             error_uri: Some("https://provider.com/errors/500".into()),
         };
-        let result = callback.validate("state");
-        match result {
-            Err(OAuthError::AuthorizationError {
-                error,
-                description,
+        let err = callback
+            .validate("state")
+            .expect_err("callback error must produce AuthorizationError");
+        assert!(
+            matches!(&err, OAuthError::AuthorizationError { .. }),
+            "expected AuthorizationError, got {err:?}"
+        );
+        if let OAuthError::AuthorizationError {
+            error,
+            description,
+            error_uri,
+        } = err
+        {
+            assert_eq!(error, "server_error");
+            assert_eq!(description, "Internal server error");
+            assert_eq!(
                 error_uri,
-            }) => {
-                assert_eq!(error, "server_error");
-                assert_eq!(description, "Internal server error");
-                assert_eq!(
-                    error_uri,
-                    Some("https://provider.com/errors/500".to_string())
-                );
-            }
-            other => assert!(false, "expected AuthorizationError, got {other:?}"),
+                Some("https://provider.com/errors/500".to_string())
+            );
         }
     }
 
@@ -2679,11 +2718,10 @@ mod tests {
             error_uri: None,
         };
         let err = callback.validate("state").unwrap_err();
-        if let OAuthError::AuthorizationError { description, .. } = err {
-            assert!(description.is_empty());
-        } else {
-            assert!(false, "wrong variant");
-        }
+        assert!(
+            matches!(err, OAuthError::AuthorizationError { ref description, .. } if description.is_empty()),
+            "expected AuthorizationError without description, got {err:?}"
+        );
     }
 
     // ── Expanded tests: generate_state ──
@@ -3128,6 +3166,10 @@ mod tests {
             error_uri: Some("https://docs.example.com/scopes".into()),
         };
         let err = callback.validate("s").unwrap_err();
+        assert!(
+            matches!(&err, OAuthError::AuthorizationError { .. }),
+            "expected AuthorizationError, got {err:?}"
+        );
         if let OAuthError::AuthorizationError {
             error,
             description,
@@ -3140,8 +3182,6 @@ mod tests {
                 error_uri,
                 Some("https://docs.example.com/scopes".to_string())
             );
-        } else {
-            assert!(false, "expected AuthorizationError");
         }
     }
 

@@ -616,20 +616,18 @@ mod adversarial {
         assert!(result.is_err(), "Forged approval should fail verification");
 
         // The error should indicate invalid signature
-        match result {
-            Err(FcpError::InvalidSignature) => {
-                log_test_event(
-                    "attack_forge_approval_wrong_signer",
-                    "attack_detected",
-                    &serde_json::json!({
-                        "detection_method": "signature_verification",
-                        "error": "InvalidSignature"
-                    }),
-                );
-            }
-            Err(e) => panic!("Unexpected error type: {e:?}"),
-            Ok(()) => panic!("Forged approval should not verify"),
-        }
+        assert!(
+            matches!(result, Err(FcpError::InvalidSignature)),
+            "forged approval should fail with InvalidSignature, got {result:?}"
+        );
+        log_test_event(
+            "attack_forge_approval_wrong_signer",
+            "attack_detected",
+            &serde_json::json!({
+                "detection_method": "signature_verification",
+                "error": "InvalidSignature"
+            }),
+        );
     }
 
     /// Attack: Impersonate `node_id` during enrollment.
@@ -1148,7 +1146,7 @@ mod enrollment_flow {
     }
 
     /// Enrollment with a wrong/tampered identity field (analogue of "wrong
-    /// NodeId type"): the request is signed for device A, but the
+    /// `NodeId` type"): the request is signed for device A, but the
     /// `device_id` on the wire has been rewritten to B. Verification MUST
     /// reject this — the proof-of-possession is bound to the canonical
     /// payload, which includes `device_id`.

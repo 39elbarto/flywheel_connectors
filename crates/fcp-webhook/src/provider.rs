@@ -278,7 +278,7 @@ impl StripeWebhook {
 
     #[cfg(test)]
     #[must_use]
-    fn with_fixed_now_for_tests(mut self, now: i64) -> Self {
+    const fn with_fixed_now_for_tests(mut self, now: i64) -> Self {
         self.clock_source = WebhookClockSource::Fixed(now);
         self
     }
@@ -343,17 +343,21 @@ impl StripeWebhook {
             .unwrap_or("unknown")
             .to_string();
 
-        let event_id = payload.get("id").and_then(Value::as_str).map_or_else(
-            || {
-                deterministic_event_id_with_context(
-                    "stripe",
-                    &event_type,
-                    body,
-                    Some(timestamp_str.as_str()),
-                )
-            },
-            ToString::to_string,
-        );
+        let event_id = payload
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map_or_else(
+                || {
+                    deterministic_event_id_with_context(
+                        "stripe",
+                        &event_type,
+                        body,
+                        Some(timestamp_str.as_str()),
+                    )
+                },
+                ToString::to_string,
+            );
 
         Ok(WebhookEvent::new(event_id, event_type, "stripe")
             .with_default_webhook_taint()
@@ -367,6 +371,7 @@ impl StripeWebhook {
     /// Parse Stripe signature header.
     fn parse_stripe_signature(header: &str) -> WebhookResult<(String, i64, Vec<String>)> {
         let mut timestamp = None;
+        let mut saw_timestamp = false;
         let mut signatures = Vec::new();
 
         for part in header.split(',') {
@@ -382,11 +387,12 @@ impl StripeWebhook {
                         "Stripe-Signature timestamp exceeds maximum length".into(),
                     ));
                 }
-                if timestamp.is_some() {
+                if saw_timestamp {
                     return Err(WebhookError::InvalidPayload(
                         "Stripe-Signature contains multiple timestamp values".into(),
                     ));
                 }
+                saw_timestamp = true;
                 timestamp = ts.parse().ok().map(|parsed| (ts.to_string(), parsed));
             } else if let Some(sig) = part.strip_prefix("v1=") {
                 if signatures.len() >= Self::MAX_STRIPE_SIGNATURES {
@@ -476,7 +482,7 @@ impl SlackWebhook {
 
     #[cfg(test)]
     #[must_use]
-    fn with_fixed_now_for_tests(mut self, now: i64) -> Self {
+    const fn with_fixed_now_for_tests(mut self, now: i64) -> Self {
         self.clock_source = WebhookClockSource::Fixed(now);
         self
     }
@@ -532,10 +538,21 @@ impl SlackWebhook {
 
         // Extract event details
         let event_type = Self::event_type(&payload).to_string();
-        let event_id = payload.get("event_id").and_then(Value::as_str).map_or_else(
-            || deterministic_event_id_with_context("slack", &event_type, body, Some(timestamp_str)),
-            ToString::to_string,
-        );
+        let event_id = payload
+            .get("event_id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map_or_else(
+                || {
+                    deterministic_event_id_with_context(
+                        "slack",
+                        &event_type,
+                        body,
+                        Some(timestamp_str),
+                    )
+                },
+                ToString::to_string,
+            );
 
         Ok(WebhookEvent::new(event_id, event_type, "slack")
             .with_default_webhook_taint()
@@ -648,6 +665,7 @@ impl LinearWebhook {
         let event_id = payload
             .get("webhookId")
             .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
             .map_or_else(
                 || deterministic_event_id("linear", &event_type, body),
                 ToString::to_string,
@@ -684,13 +702,14 @@ mod tests {
         headers.insert("x-hub-signature-256".into(), "sha256=deadbeef".into());
         headers.insert("x-github-event".into(), "push".into());
 
-        match handler.verify_and_parse(&headers, &body) {
-            Err(WebhookError::PayloadTooLarge { size, limit }) => {
-                assert_eq!(size, 128);
-                assert_eq!(limit, 64);
-            }
-            other => panic!("expected PayloadTooLarge, got {other:?}"),
-        }
+        let result = handler.verify_and_parse(&headers, &body);
+        assert!(matches!(
+            result,
+            Err(WebhookError::PayloadTooLarge {
+                size: 128,
+                limit: 64
+            })
+        ));
     }
 
     #[test]
@@ -704,13 +723,14 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("stripe-signature".into(), "t=1700000000,v1=deadbeef".into());
 
-        match handler.verify_and_parse(&headers, &body) {
-            Err(WebhookError::PayloadTooLarge { size, limit }) => {
-                assert_eq!(size, 128);
-                assert_eq!(limit, 32);
-            }
-            other => panic!("expected PayloadTooLarge, got {other:?}"),
-        }
+        let result = handler.verify_and_parse(&headers, &body);
+        assert!(matches!(
+            result,
+            Err(WebhookError::PayloadTooLarge {
+                size: 128,
+                limit: 32
+            })
+        ));
     }
 
     #[test]
@@ -722,15 +742,10 @@ mod tests {
         let huge_ts = "1".repeat(MAX_STRIPE_TIMESTAMP_LEN + 1);
         let header = format!("t={huge_ts},v1=abc");
         let err = StripeWebhook::parse_stripe_signature(&header).unwrap_err();
-        match err {
-            WebhookError::InvalidPayload(msg) => {
-                assert!(
-                    msg.contains("timestamp"),
-                    "message should name the field: {msg}"
-                );
-            }
-            other => panic!("expected InvalidPayload, got {other:?}"),
-        }
+        assert!(
+            matches!(err, WebhookError::InvalidPayload(ref msg) if msg.contains("timestamp")),
+            "message should name the field"
+        );
     }
 
     #[test]
@@ -740,15 +755,10 @@ mod tests {
         let huge_sig = "a".repeat(MAX_STRIPE_SIGNATURE_LEN + 1);
         let header = format!("t=1700000000,v1={huge_sig}");
         let err = StripeWebhook::parse_stripe_signature(&header).unwrap_err();
-        match err {
-            WebhookError::InvalidPayload(msg) => {
-                assert!(
-                    msg.contains("v1") || msg.contains("signature"),
-                    "message should name the field: {msg}"
-                );
-            }
-            other => panic!("expected InvalidPayload, got {other:?}"),
-        }
+        assert!(
+            matches!(err, WebhookError::InvalidPayload(ref msg) if msg.contains("v1") || msg.contains("signature")),
+            "message should name the field"
+        );
     }
 
     #[test]
@@ -778,13 +788,14 @@ mod tests {
         headers.insert("x-slack-signature".into(), "v0=deadbeef".into());
         headers.insert("x-slack-request-timestamp".into(), "1700000000".into());
 
-        match handler.verify_and_parse(&headers, &body) {
-            Err(WebhookError::PayloadTooLarge { size, limit }) => {
-                assert_eq!(size, 128);
-                assert_eq!(limit, 32);
-            }
-            other => panic!("expected PayloadTooLarge, got {other:?}"),
-        }
+        let result = handler.verify_and_parse(&headers, &body);
+        assert!(matches!(
+            result,
+            Err(WebhookError::PayloadTooLarge {
+                size: 128,
+                limit: 32
+            })
+        ));
     }
 
     #[test]
@@ -798,13 +809,14 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("linear-signature".into(), "deadbeef".into());
 
-        match handler.verify_and_parse(&headers, &body) {
-            Err(WebhookError::PayloadTooLarge { size, limit }) => {
-                assert_eq!(size, 128);
-                assert_eq!(limit, 64);
-            }
-            other => panic!("expected PayloadTooLarge, got {other:?}"),
-        }
+        let result = handler.verify_and_parse(&headers, &body);
+        assert!(matches!(
+            result,
+            Err(WebhookError::PayloadTooLarge {
+                size: 128,
+                limit: 64
+            })
+        ));
     }
 
     #[test]
@@ -1212,15 +1224,10 @@ mod tests {
         );
 
         let err = handler.verify_and_parse(&headers, b"{}").unwrap_err();
-        match err {
-            WebhookError::InvalidPayload(msg) => {
-                assert!(
-                    msg.contains("X-Slack-Request-Timestamp"),
-                    "message should name the bounded field: {msg}"
-                );
-            }
-            other => panic!("expected InvalidPayload, got {other:?}"),
-        }
+        assert!(
+            matches!(err, WebhookError::InvalidPayload(ref msg) if msg.contains("X-Slack-Request-Timestamp")),
+            "message should name the bounded field"
+        );
     }
 
     #[test]
@@ -1362,7 +1369,7 @@ mod tests {
         let handler = StripeWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(5));
         let old_ts = 1_000_000_000_i64;
         let verifier = HmacSha256Verifier::new("secret");
-        let signed_payload = format!("{old_ts}.{{}}",);
+        let signed_payload = format!("{old_ts}.{{}}");
         let sig = verifier.compute(signed_payload.as_bytes());
         let sig_header = format!("t={old_ts},v1={sig}");
 
@@ -1645,6 +1652,36 @@ mod tests {
     }
 
     #[test]
+    fn test_stripe_empty_event_id_uses_deterministic_fallback_id() {
+        let timestamp = Utc::now().timestamp();
+        let handler = StripeWebhook::new("secret").with_fixed_now_for_tests(timestamp);
+        let body = br#"{"id":"","type":"payment_intent.succeeded","data":{}}"#;
+
+        let mut signed_payload = timestamp.to_string().into_bytes();
+        signed_payload.push(b'.');
+        signed_payload.extend_from_slice(body);
+        let sig = handler.verifier.compute(&signed_payload);
+
+        let mut headers = HashMap::new();
+        headers.insert(
+            "stripe-signature".to_string(),
+            format!("t={timestamp},v1={sig}"),
+        );
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(
+            event.id,
+            deterministic_event_id_with_context(
+                "stripe",
+                "payment_intent.succeeded",
+                body,
+                Some(&timestamp.to_string())
+            )
+        );
+        assert!(!event.id.is_empty());
+    }
+
+    #[test]
     fn test_stripe_missing_event_id_uses_deterministic_fallback_without_aliasing_distinct_payloads()
     {
         let secret = "secret";
@@ -1754,6 +1791,37 @@ mod tests {
 
         let event = handler.verify_and_parse(&headers, body).unwrap();
         assert_eq!(event.id, "Ev12345");
+    }
+
+    #[test]
+    fn test_slack_empty_event_id_uses_deterministic_fallback_id() {
+        let signing_secret = "test-secret";
+        let timestamp = Utc::now().timestamp();
+        let handler = SlackWebhook::new(signing_secret).with_fixed_now_for_tests(timestamp);
+        let body = br#"{"type":"event_callback","event_id":"","event":{"type":"message"}}"#;
+
+        let mut base_string = format!("v0:{timestamp}:").into_bytes();
+        base_string.extend_from_slice(body);
+        let computed = handler.verifier.compute(&base_string);
+
+        let mut headers = HashMap::new();
+        headers.insert("x-slack-signature".to_string(), format!("v0={computed}"));
+        headers.insert(
+            "x-slack-request-timestamp".to_string(),
+            timestamp.to_string(),
+        );
+
+        let event = handler.verify_and_parse(&headers, body).unwrap();
+        assert_eq!(
+            event.id,
+            deterministic_event_id_with_context(
+                "slack",
+                "message",
+                body,
+                Some(&timestamp.to_string())
+            )
+        );
+        assert!(!event.id.is_empty());
     }
 
     #[test]
@@ -1995,7 +2063,7 @@ mod tests {
     }
 
     #[test]
-    fn test_linear_empty_payload_fields() {
+    fn test_linear_empty_webhook_id_uses_deterministic_fallback_id() {
         let handler = LinearWebhook::new("secret");
         let body = br#"{"type": "", "webhookId": ""}"#;
         let signature = handler.verifier.compute(body);
@@ -2005,7 +2073,8 @@ mod tests {
 
         let event = handler.verify_and_parse(&headers, body).unwrap();
         assert_eq!(event.event_type, "");
-        assert_eq!(event.id, "");
+        assert_eq!(event.id, deterministic_event_id("linear", "", body));
+        assert!(!event.id.is_empty());
     }
 
     #[test]
@@ -2722,15 +2791,10 @@ mod tests {
     #[test]
     fn test_stripe_parse_signature_v1_empty_value() {
         let result = StripeWebhook::parse_stripe_signature("t=123,v1=");
-        match result {
-            Err(WebhookError::InvalidPayload(msg)) => {
-                assert!(
-                    msg.contains("v1"),
-                    "error should name the malformed component: {msg}"
-                );
-            }
-            other => panic!("expected InvalidPayload, got {other:?}"),
-        }
+        assert!(
+            matches!(result, Err(WebhookError::InvalidPayload(ref msg)) if msg.contains("v1")),
+            "error should name the malformed component"
+        );
     }
 
     #[test]
@@ -2760,15 +2824,28 @@ mod tests {
     #[test]
     fn test_stripe_parse_signature_multiple_timestamps_rejected() {
         let result = StripeWebhook::parse_stripe_signature("t=100,t=200,v1=sig");
-        match result {
-            Err(WebhookError::InvalidPayload(msg)) => {
-                assert!(
-                    msg.contains("multiple timestamp"),
-                    "error should explain the ambiguity: {msg}"
-                );
-            }
-            other => panic!("expected InvalidPayload, got {other:?}"),
-        }
+        assert!(
+            matches!(result, Err(WebhookError::InvalidPayload(ref msg)) if msg.contains("multiple timestamp")),
+            "error should explain the ambiguity"
+        );
+    }
+
+    #[test]
+    fn test_stripe_parse_signature_rejects_duplicate_timestamp_after_invalid_first() {
+        let result = StripeWebhook::parse_stripe_signature("t=not-a-number,t=200,v1=sig");
+        assert!(
+            matches!(result, Err(WebhookError::InvalidPayload(ref msg)) if msg.contains("multiple timestamp")),
+            "duplicate timestamp must fail closed even when the first t= value is malformed; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_stripe_parse_signature_rejects_duplicate_timestamp_after_empty_first() {
+        let result = StripeWebhook::parse_stripe_signature("t=,t=200,v1=sig");
+        assert!(
+            matches!(result, Err(WebhookError::InvalidPayload(ref msg)) if msg.contains("multiple timestamp")),
+            "duplicate timestamp must fail closed even when the first t= value is empty; got {result:?}"
+        );
     }
 
     #[test]

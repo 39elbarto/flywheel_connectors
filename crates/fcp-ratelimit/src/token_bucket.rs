@@ -533,13 +533,11 @@ mod tests {
         limiter.try_acquire().await;
 
         let result = limiter.acquire(Duration::from_millis(5)).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            RateLimitError::WaitExceeded { max_wait, .. } => {
-                assert_eq!(max_wait, Duration::from_millis(5));
-            }
-            other => panic!("expected WaitExceeded, got {other:?}"),
-        }
+        assert!(matches!(
+            result,
+            Err(RateLimitError::WaitExceeded { max_wait, .. })
+                if max_wait == Duration::from_millis(5)
+        ));
     }
 
     // ── State snapshot details ──────────────────────────────────────────
@@ -700,7 +698,7 @@ mod tests {
 
     // ── Metamorphic relations ──────────────────────────────────────────
 
-    /// Metamorphic: try_acquire_n(0) is a no-op on state. Any number of
+    /// Metamorphic: `try_acquire_n(0)` is a no-op on state. Any number of
     /// zero-permit requests must leave `remaining()` unchanged from the
     /// pre-call value. This is the adjoint of the "permit-then-refund"
     /// idempotency relation — the bucket has no refund API, but a
@@ -731,7 +729,7 @@ mod tests {
     /// pure idle (no concurrent acquire). The refill hardening in
     /// 50f9e9d8 changed `remaining()` to actively pull refill credit;
     /// this test pins the invariant that back-to-back reads without
-    /// any try_acquire between them never regress the observable
+    /// any `try_acquire` between them never regress the observable
     /// token count — a refill-accounting regression that dropped
     /// tokens would surface here.
     #[fcp_async_core::runtime::test]

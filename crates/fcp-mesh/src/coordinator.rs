@@ -51,6 +51,23 @@ pub struct LeaseCoordinatorConfig {
 /// Maximum allowed drift for fencing tokens during rebase (prevents poisoning).
 const MAX_FENCING_TOKEN_DRIFT: u64 = 1_000_000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FencingRebaseStatus {
+    Ready,
+    Exhausted,
+    DriftTooLarge,
+}
+
+impl FencingRebaseStatus {
+    const fn rejection_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Ready => None,
+            Self::Exhausted => Some("fencing token space exhausted"),
+            Self::DriftTooLarge => Some("observed fencing token drift exceeds safety limit"),
+        }
+    }
+}
+
 impl Default for LeaseCoordinatorConfig {
     fn default() -> Self {
         Self {
@@ -198,14 +215,35 @@ impl LeaseCoordinator {
     ) -> (AcquireOutcome, Vec<AuthorityTimelineEvent>) {
         let mut timeline = Vec::new();
         let ttl = self.clamp_ttl(requested_ttl.unwrap_or(self.config.default_ttl_secs));
-        self.rebase_next_seq(existing_leases, now_secs);
+        let rebase_status = self.rebase_next_seq(existing_leases);
 
         // Filter to active leases for this subject/purpose
         let active =
-            canonical_active_leases_for_subject(existing_leases, subject_id, purpose, now_secs);
+            canonical_active_leases_for_subject(existing_leases, subject_id, *purpose, now_secs);
 
         // No active leases — grant immediately
         if active.is_empty() {
+            if let Some(reason) = rebase_status.rejection_reason() {
+                timeline.push(AuthorityTimelineEvent {
+                    observed_at_ms: now_secs * 1000,
+                    operation: "lease.acquire_refused".into(),
+                    subject_id: *subject_id,
+                    purpose: purpose.clone(),
+                    holder: None,
+                    coordinator: select_coordinator(zone_id, subject_id, eligible_nodes),
+                    reason_code: AuthorityReasonCode::LeaseAcquisitionRejected,
+                    fencing_token: None,
+                    expires_at: None,
+                    explanation: reason.to_string(),
+                });
+                return (
+                    AcquireOutcome::Rejected {
+                        reason: reason.to_string(),
+                    },
+                    timeline,
+                );
+            }
+
             let active_leases_for_requester =
                 canonical_active_lease_count_for_holder(existing_leases, requester, now_secs);
             if active_leases_for_requester >= self.config.max_leases_per_node {
@@ -400,6 +438,7 @@ impl LeaseCoordinator {
     /// 3. Renewal is monotonic: the new expiry never regresses below the
     ///    previously observed expiry, even if `now_secs` regresses (clock
     ///    skew, NTP step-back, or a malicious caller reporting a stale time).
+    #[allow(clippy::too_many_arguments)] // Lease renewal must bind caller, subject, fencing, observations, and time.
     pub fn renew(
         &self,
         requester: &TailscaleNodeId,
@@ -430,7 +469,7 @@ impl LeaseCoordinator {
                 observed_at_ms: now_secs * 1000,
                 operation: "lease.renew_denied".into(),
                 subject_id: *subject_id,
-                purpose: purpose.clone(),
+                purpose: *purpose,
                 holder: Some(requester.clone()),
                 coordinator: None,
                 reason_code: AuthorityReasonCode::LeaseNotHeld,
@@ -460,7 +499,7 @@ impl LeaseCoordinator {
                 observed_at_ms: now_secs * 1000,
                 operation: "lease.renew_denied".into(),
                 subject_id: *subject_id,
-                purpose: purpose.clone(),
+                purpose: *purpose,
                 holder: Some(requester.clone()),
                 coordinator: None,
                 reason_code: AuthorityReasonCode::SupersededByPreferredLease,
@@ -574,7 +613,7 @@ impl LeaseCoordinator {
         observed: &[ObservedLeaseAuthority],
         now_secs: u64,
     ) -> Option<LeaseConflict> {
-        let active = canonical_active_leases_for_subject(observed, subject_id, purpose, now_secs);
+        let active = canonical_active_leases_for_subject(observed, subject_id, *purpose, now_secs);
 
         if active.len() <= 1 {
             return None;
@@ -663,25 +702,30 @@ impl LeaseCoordinator {
         Some(token)
     }
 
-    fn rebase_next_seq(&mut self, existing_leases: &[ObservedLeaseAuthority], now_secs: u64) {
-        // Only rebase against active, verified leases to prevent replayed
-        // or poisoned history from pinning the local sequence counter.
+    fn rebase_next_seq(
+        &mut self,
+        existing_leases: &[ObservedLeaseAuthority],
+    ) -> FencingRebaseStatus {
+        // Rebase against observed history, not only active leases. Fencing
+        // tokens are monotonic authority guards; reusing a token lower than a
+        // previously observed expired lease can let stale holders look newer
+        // to downstream systems that compare only fencing tokens.
         if let Some(max_observed) = existing_leases
             .iter()
-            .filter(|obs| obs.lease.is_active(now_secs))
             .map(|observed| observed.lease.fencing_token)
             .max()
         {
-            // Enforce a maximum drift limit. If a peer reports a token that
-            // is too far ahead of our local counter, we suspect poisoning
-            // and ignore it for the purpose of rebasing our local sequence.
-            let next_candidate = max_observed.saturating_add(1);
-            if next_candidate > self.next_seq
-                && next_candidate.saturating_sub(self.next_seq) <= MAX_FENCING_TOKEN_DRIFT
-            {
+            let Some(next_candidate) = max_observed.checked_add(1) else {
+                return FencingRebaseStatus::Exhausted;
+            };
+            if next_candidate > self.next_seq {
+                if next_candidate.saturating_sub(self.next_seq) > MAX_FENCING_TOKEN_DRIFT {
+                    return FencingRebaseStatus::DriftTooLarge;
+                }
                 self.next_seq = next_candidate;
             }
         }
+        FencingRebaseStatus::Ready
     }
 
     fn clamp_ttl(&self, ttl: u32) -> u32 {
@@ -722,10 +766,10 @@ fn push_canonical_active<'a>(
     }
 }
 
-fn canonical_active_leases<'a>(
-    observed: &'a [ObservedLeaseAuthority],
+fn canonical_active_leases(
+    observed: &[ObservedLeaseAuthority],
     now_secs: u64,
-) -> Vec<&'a ObservedLeaseAuthority> {
+) -> Vec<&ObservedLeaseAuthority> {
     let mut canonical = Vec::new();
     for entry in observed
         .iter()
@@ -739,12 +783,12 @@ fn canonical_active_leases<'a>(
 fn canonical_active_leases_for_subject<'a>(
     observed: &'a [ObservedLeaseAuthority],
     subject_id: &ObjectId,
-    purpose: &LeasePurpose,
+    purpose: LeasePurpose,
     now_secs: u64,
 ) -> Vec<&'a ObservedLeaseAuthority> {
     canonical_active_leases(observed, now_secs)
         .into_iter()
-        .filter(|entry| entry.lease.subject_id == *subject_id && entry.lease.purpose == *purpose)
+        .filter(|entry| entry.lease.subject_id == *subject_id && entry.lease.purpose == purpose)
         .collect()
 }
 

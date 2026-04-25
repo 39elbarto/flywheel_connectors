@@ -227,7 +227,9 @@ const fn minimal_command_component() -> &'static [u8] {
 }
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
+    let mut path = std::env::temp_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::temp_dir());
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

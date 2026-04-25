@@ -199,7 +199,13 @@ impl FcpsFrameHeader {
         }
 
         let flags_bits = u16::from_le_bytes([bytes[6], bytes[7]]);
-        let flags = FrameFlags::from_bits_truncate(flags_bits);
+        let flags = FrameFlags::from_bits(flags_bits).ok_or_else(|| FrameError::InvalidFlags {
+            reason: format!(
+                "unknown flag bits 0x{:04x} outside known mask 0x{:04x}",
+                flags_bits,
+                FrameFlags::all().bits()
+            ),
+        })?;
 
         // Reject mutually exclusive flag combinations
         if flags.contains(FrameFlags::ERROR) && flags.contains(FrameFlags::RESPONSE) {
@@ -655,7 +661,7 @@ impl DecodeStatus {
     ///
     /// Rejects oversized `missing_hint` payloads *before* allocating the
     /// transcript so an unauthenticated sender cannot force a receiver to
-    /// materialize a multi-megabyte transcript on every verify(). The hint
+    /// materialize a multi-megabyte transcript on every `verify()`. The hint
     /// cap is already part of the NORMATIVE contract (see the struct-level
     /// "Anti-Amplification Rule") — so a legitimate signer would never emit
     /// a hint above `MAX_MISSING_HINT_ENTRIES`, and there is no interop
@@ -760,6 +766,7 @@ pub enum SymbolAckReason {
 impl SymbolAck {
     /// Create a new symbol acknowledgment.
     #[must_use]
+    #[allow(clippy::too_many_arguments)] // Wire-message constructor mirrors the signed transcript fields.
     pub fn new(
         header: ObjectHeader,
         object_id: ObjectId,
@@ -943,7 +950,7 @@ impl SymbolRequest {
     ///
     /// Rejects oversized `missing_hint` payloads *before* allocating the
     /// transcript so an unauthenticated sender cannot force a receiver to
-    /// materialize a multi-megabyte transcript on every verify(). The
+    /// materialize a multi-megabyte transcript on every `verify()`. The
     /// legitimate upper bound is already declared NORMATIVE via
     /// `validate_bounds`/`validate_hint_bounds`, so no honest signer will
     /// ever produce a request above the cap.
@@ -1273,6 +1280,17 @@ mod tests {
     }
 
     #[test]
+    fn header_decode_rejects_unknown_flag_bits() {
+        let header = test_header();
+        let mut encoded = header.encode();
+        encoded[6..8].copy_from_slice(&0x8000_u16.to_le_bytes());
+
+        let err = FcpsFrameHeader::decode(&encoded).expect_err("unknown flags");
+        assert!(matches!(err, FrameError::InvalidFlags { .. }));
+        assert!(err.to_string().contains("unknown flag bits 0x8000"));
+    }
+
+    #[test]
     fn symbol_record_encode_decode() {
         let record = test_symbol(5, 64);
         let encoded = record.encode();
@@ -1468,8 +1486,9 @@ mod tests {
         let symbols = vec![test_symbol(0, 64), test_symbol(1, 64)];
         let frame = FcpsFrame { header, symbols };
 
-        let err = SignedFcpsFrame::new(frame, TailscaleNodeId::new(""), 1_704_067_200, &signing_key)
-            .expect_err("empty source_id must be rejected at new()");
+        let err =
+            SignedFcpsFrame::new(frame, TailscaleNodeId::new(""), 1_704_067_200, &signing_key)
+                .expect_err("empty source_id must be rejected at new()");
         assert!(
             matches!(err, FrameError::SourceIdEmpty),
             "expected SourceIdEmpty, got {err:?}"
@@ -1495,7 +1514,9 @@ mod tests {
         // subsequently fails to decode on the wire.
         signed.source_id = TailscaleNodeId::new("");
 
-        let err = signed.encode().expect_err("mutated empty source_id must fail to encode");
+        let err = signed
+            .encode()
+            .expect_err("mutated empty source_id must fail to encode");
         assert!(matches!(err, FrameError::SourceIdEmpty), "got {err:?}");
     }
 

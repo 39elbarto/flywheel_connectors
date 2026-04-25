@@ -12,6 +12,14 @@ use async_trait::async_trait;
 
 use crate::{RateLimitError, RateLimitState, RateLimiter};
 
+const fn nonzero_window(window: Duration) -> Duration {
+    if window.is_zero() {
+        Duration::from_nanos(1)
+    } else {
+        window
+    }
+}
+
 /// Sliding window rate limiter.
 ///
 /// Tracks individual request timestamps for accurate rate limiting.
@@ -32,7 +40,7 @@ impl SlidingWindow {
     pub fn new(limit: u32, window: Duration) -> Self {
         Self {
             limit,
-            window,
+            window: nonzero_window(window),
             timestamps: Mutex::new(VecDeque::with_capacity((limit as usize).min(100_000))),
         }
     }
@@ -183,7 +191,7 @@ impl FixedWindow {
     pub fn new(limit: u32, window: Duration) -> Self {
         Self {
             limit,
-            window,
+            window: nonzero_window(window),
             state: Mutex::new(FixedWindowState {
                 count: 0,
                 window_start: Instant::now(),
@@ -443,13 +451,11 @@ mod tests {
         limiter.try_acquire().await;
 
         let result = limiter.acquire(Duration::from_millis(5)).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            RateLimitError::WaitExceeded { max_wait, .. } => {
-                assert_eq!(max_wait, Duration::from_millis(5));
-            }
-            other => panic!("expected WaitExceeded, got {other:?}"),
-        }
+        assert!(matches!(
+            result,
+            Err(RateLimitError::WaitExceeded { max_wait, .. })
+                if max_wait == Duration::from_millis(5)
+        ));
     }
 
     // ── SlidingWindow: wait_time edge cases ────────────────────────────
@@ -887,8 +893,7 @@ mod tests {
     #[test]
     fn sliding_window_zero_window() {
         let limiter = SlidingWindow::new(5, Duration::ZERO);
-        assert_eq!(limiter.window, Duration::ZERO);
-        // With zero window, all timestamps expire immediately
+        assert_eq!(limiter.window, Duration::from_nanos(1));
     }
 
     // ── Additional FixedWindow sync tests ───────────────────────────────
@@ -905,7 +910,7 @@ mod tests {
     #[test]
     fn fixed_window_zero_window() {
         let limiter = FixedWindow::new(5, Duration::ZERO);
-        assert_eq!(limiter.window, Duration::ZERO);
+        assert_eq!(limiter.window, Duration::from_nanos(1));
     }
 
     #[test]

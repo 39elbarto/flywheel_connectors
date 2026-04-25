@@ -48,6 +48,8 @@ pub enum RateLimitDeclarationError {
     EmptyPoolId,
     #[error("duplicate rate limit pool id `{id}`")]
     DuplicatePoolId { id: String },
+    #[error("tool `{tool}` references rate limit pool `{pool}` more than once")]
+    DuplicateToolPool { tool: String, pool: String },
     #[error("rate limit pool id must not be empty for tool `{tool}`")]
     EmptyToolPoolId { tool: String },
     #[error("tool name must not be empty")]
@@ -105,9 +107,16 @@ impl RateLimitDeclarations {
             if pools.is_empty() {
                 return Err(RateLimitDeclarationError::EmptyToolPools { tool: tool.clone() });
             }
+            let mut tool_pool_ids = HashSet::new();
             for pool_id in pools {
                 if pool_id.is_empty() {
                     return Err(RateLimitDeclarationError::EmptyToolPoolId { tool: tool.clone() });
+                }
+                if !tool_pool_ids.insert(pool_id) {
+                    return Err(RateLimitDeclarationError::DuplicateToolPool {
+                        tool: tool.clone(),
+                        pool: pool_id.clone(),
+                    });
                 }
                 if !pool_ids.contains(pool_id) {
                     return Err(RateLimitDeclarationError::UnknownPool {
@@ -533,6 +542,22 @@ mod declaration_tests {
         assert!(matches!(
             decls.validate().unwrap_err(),
             RateLimitDeclarationError::EmptyToolPoolId { .. }
+        ));
+    }
+
+    #[test]
+    fn test_validate_duplicate_tool_pool_id() {
+        let decls = RateLimitDeclarations {
+            limits: vec![sample_pool("p")],
+            tool_pool_map: HashMap::from([(
+                "tool".to_string(),
+                vec!["p".to_string(), "p".to_string()],
+            )]),
+        };
+        assert!(matches!(
+            decls.validate().unwrap_err(),
+            RateLimitDeclarationError::DuplicateToolPool { tool, pool }
+                if tool == "tool" && pool == "p"
         ));
     }
 
@@ -965,6 +990,18 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("mytool"));
         assert!(msg.contains("missing"));
+    }
+
+    #[test]
+    fn declaration_error_display_duplicate_tool_pool() {
+        let err = RateLimitDeclarationError::DuplicateToolPool {
+            tool: "mytool".to_string(),
+            pool: "shared".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("mytool"));
+        assert!(msg.contains("shared"));
+        assert!(msg.contains("more than once"));
     }
 
     #[test]

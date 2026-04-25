@@ -106,13 +106,13 @@ impl GraphqlSubscriptionClient {
             "operationName": O::OPERATION_NAME,
             "variables": variables,
         });
-        let connection = establish_subscription(
+        let connection = Box::pin(establish_subscription(
             &client,
             &self.service_name,
             self.config.init_payload.clone(),
             self.config.ack_timeout,
             &payload,
-        )
+        ))
         .await?;
 
         let (tx, rx) = mpsc::channel(16);
@@ -134,7 +134,7 @@ impl GraphqlSubscriptionClient {
                         let message = match recv {
                             Ok(Some(message)) => message,
                             Ok(None) => {
-                                match reconnect_connection(
+                                match Box::pin(reconnect_connection(
                                     &client,
                                     &service_name,
                                     init_payload.clone(),
@@ -142,7 +142,7 @@ impl GraphqlSubscriptionClient {
                                     &payload,
                                     &mut reconnect_handler,
                                     "connection closed",
-                                )
+                                ))
                                 .await
                                 {
                                     Ok(new_conn) => {
@@ -156,7 +156,7 @@ impl GraphqlSubscriptionClient {
                                 }
                             }
                             Err(err) => {
-                                match reconnect_connection(
+                                match Box::pin(reconnect_connection(
                                     &client,
                                     &service_name,
                                     init_payload.clone(),
@@ -164,7 +164,7 @@ impl GraphqlSubscriptionClient {
                                     &payload,
                                     &mut reconnect_handler,
                                     &format!("connection error: {err}"),
-                                )
+                                ))
                                 .await
                                 {
                                     Ok(new_conn) => {
@@ -190,7 +190,7 @@ impl GraphqlSubscriptionClient {
                             .map_or_else(|| "close frame".to_string(), |f| {
                                 format!("close frame {} {}", f.code, f.reason)
                             });
-                        match reconnect_connection(
+                        match Box::pin(reconnect_connection(
                             &client,
                             &service_name,
                             init_payload.clone(),
@@ -198,7 +198,7 @@ impl GraphqlSubscriptionClient {
                             &payload,
                             &mut reconnect_handler,
                             &close_detail,
-                        )
+                        ))
                         .await
                         {
                             Ok(new_conn) => {
@@ -337,7 +337,7 @@ async fn establish_subscription(
             message: format!("{service_name} connection_init failed: {err}"),
         })?;
 
-    let ack = time::timeout(ack_timeout, connection.recv()).await;
+    let ack = Box::pin(time::timeout(ack_timeout, connection.recv())).await;
     match ack {
         Ok(Ok(Some(message))) => {
             let ack_msg = decode_ws_message(message)?;
@@ -403,13 +403,13 @@ async fn reconnect_connection(
             .await
             .map_err(GraphqlClientError::from)?;
 
-        match establish_subscription(
+        match Box::pin(establish_subscription(
             client,
             service_name,
             init_payload.clone(),
             ack_timeout,
             payload,
-        )
+        ))
         .await
         {
             Ok(connection) => {
@@ -560,7 +560,7 @@ mod tests {
     #[test]
     fn decode_binary_message() {
         let json = r#"{"type":"connection_ack"}"#;
-        let msg = WsMessage::Binary(json.as_bytes().to_vec());
+        let msg = WsMessage::Binary(json.as_bytes().to_vec().into());
         let result = decode_ws_message(msg).unwrap();
         assert_eq!(result.message_type, "connection_ack");
     }
@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn decode_binary_invalid_json() {
-        let msg = WsMessage::Binary(b"not json".to_vec());
+        let msg = WsMessage::Binary(b"not json".to_vec().into());
         let result = decode_ws_message(msg);
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -589,7 +589,7 @@ mod tests {
 
     #[test]
     fn decode_ping_returns_protocol_error() {
-        let msg = WsMessage::Ping(vec![]);
+        let msg = WsMessage::Ping(vec![].into());
         let result = decode_ws_message(msg);
         match result.unwrap_err() {
             GraphqlClientError::Protocol { message } => {
@@ -601,7 +601,7 @@ mod tests {
 
     #[test]
     fn decode_pong_returns_protocol_error() {
-        let msg = WsMessage::Pong(vec![1, 2, 3]);
+        let msg = WsMessage::Pong(vec![1, 2, 3].into());
         let result = decode_ws_message(msg);
         match result.unwrap_err() {
             GraphqlClientError::Protocol { message } => {
@@ -949,7 +949,7 @@ mod tests {
     #[test]
     fn decode_binary_valid_next_msg() {
         let json = r#"{"type":"next","id":"1","payload":{"data":{"x":99}}}"#;
-        let msg = WsMessage::Binary(json.as_bytes().to_vec());
+        let msg = WsMessage::Binary(json.as_bytes().to_vec().into());
         let result = decode_ws_message(msg).unwrap();
         assert_eq!(result.message_type, "next");
         assert!(result.payload.is_some());
@@ -964,7 +964,7 @@ mod tests {
 
     #[test]
     fn decode_binary_empty() {
-        let msg = WsMessage::Binary(vec![]);
+        let msg = WsMessage::Binary(vec![].into());
         let result = decode_ws_message(msg);
         assert!(result.is_err());
     }
@@ -1074,7 +1074,7 @@ mod tests {
     #[test]
     fn decode_binary_with_connection_ack_payload() {
         let json = r#"{"type":"connection_ack","payload":{"version":"1.0"}}"#;
-        let msg = WsMessage::Binary(json.as_bytes().to_vec());
+        let msg = WsMessage::Binary(json.as_bytes().to_vec().into());
         let result = decode_ws_message(msg).unwrap();
         assert_eq!(result.message_type, "connection_ack");
         assert_eq!(result.payload.unwrap()["version"], "1.0");
@@ -1082,7 +1082,7 @@ mod tests {
 
     #[test]
     fn decode_binary_partial_json() {
-        let msg = WsMessage::Binary(b"{\"type\":".to_vec());
+        let msg = WsMessage::Binary(b"{\"type\":".to_vec().into());
         let result = decode_ws_message(msg);
         match result.unwrap_err() {
             GraphqlClientError::Json(s) => assert!(!s.is_empty()),
@@ -1094,7 +1094,7 @@ mod tests {
 
     #[test]
     fn decode_ping_with_payload_returns_protocol_error() {
-        let msg = WsMessage::Ping(vec![1, 2, 3, 4]);
+        let msg = WsMessage::Ping(vec![1, 2, 3, 4].into());
         let result = decode_ws_message(msg);
         match result.unwrap_err() {
             GraphqlClientError::Protocol { message } => {
@@ -1106,7 +1106,7 @@ mod tests {
 
     #[test]
     fn decode_pong_empty_payload_returns_protocol_error() {
-        let msg = WsMessage::Pong(vec![]);
+        let msg = WsMessage::Pong(vec![].into());
         let result = decode_ws_message(msg);
         match result.unwrap_err() {
             GraphqlClientError::Protocol { message } => {
@@ -1352,7 +1352,7 @@ mod tests {
     #[test]
     fn decode_binary_all_fields() {
         let json = r#"{"type":"next","id":"sub-1","payload":{"data":{"event":"tick"}}}"#;
-        let msg = WsMessage::Binary(json.as_bytes().to_vec());
+        let msg = WsMessage::Binary(json.as_bytes().to_vec().into());
         let result = decode_ws_message(msg).unwrap();
         assert_eq!(result.message_type, "next");
         assert_eq!(result.id.as_deref(), Some("sub-1"));

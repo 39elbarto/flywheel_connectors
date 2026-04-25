@@ -1058,13 +1058,27 @@ fn apply_payload(
 
 /// Extract the `Retry-After` header value in milliseconds.
 ///
-/// Supports the common integer-seconds format (RFC 7231 §7.1.3).
+/// Supports integer delta-seconds and HTTP-date values (RFC 7231 §7.1.3).
 fn parse_retry_after_header(headers: &[(String, String)]) -> Option<u64> {
-    headers
+    let value = headers
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-        .and_then(|(_, value)| value.trim().parse::<u64>().ok())
-        .map(|secs| secs.saturating_mul(1000))
+        .map(|(_, value)| value.trim())?;
+
+    if let Ok(secs) = value.parse::<u64>() {
+        return Some(secs.saturating_mul(1000));
+    }
+
+    let retry_at = chrono::DateTime::parse_from_rfc2822(value)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    let now = chrono::Utc::now();
+    if retry_at <= now {
+        return Some(0);
+    }
+
+    let delay_ms = retry_at.signed_duration_since(now).num_milliseconds();
+    Some(u64::try_from(delay_ms).unwrap_or(u64::MAX))
 }
 
 fn collect_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
@@ -1784,8 +1798,33 @@ mod tests {
     }
 
     #[test]
-    fn parse_retry_after_header_non_numeric_ignored() {
-        let headers = vec![("Retry-After".to_string(), "Thu, 01 Dec 1994".to_string())];
+    fn parse_retry_after_header_http_date() {
+        let retry_at = (chrono::Utc::now() + chrono::Duration::seconds(120))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        let headers = vec![("Retry-After".to_string(), retry_at)];
+
+        let retry_after =
+            parse_retry_after_header(&headers).expect("future Retry-After date should parse");
+        assert!(
+            (118_000..=121_000).contains(&retry_after),
+            "retry_after={retry_after}"
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_header_past_http_date_is_zero() {
+        let retry_at = (chrono::Utc::now() - chrono::Duration::seconds(30))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        let headers = vec![("Retry-After".to_string(), retry_at)];
+
+        assert_eq!(parse_retry_after_header(&headers), Some(0));
+    }
+
+    #[test]
+    fn parse_retry_after_header_invalid_value_ignored() {
+        let headers = vec![("Retry-After".to_string(), "not-a-date".to_string())];
         assert_eq!(parse_retry_after_header(&headers), None);
     }
 

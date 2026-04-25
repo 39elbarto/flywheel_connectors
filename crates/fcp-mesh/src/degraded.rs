@@ -21,14 +21,14 @@
 use std::collections::{BTreeMap, HashMap};
 
 use fcp_core::{
-    ObjectId, TailscaleNodeId, ZoneId, ZoneIdHash, ZoneKey, ZoneKeyAlgorithm as CoreZoneKeyAlgorithm,
-    ZoneKeyId,
+    ObjectId, TailscaleNodeId, ZoneId, ZoneIdHash, ZoneKey,
+    ZoneKeyAlgorithm as CoreZoneKeyAlgorithm, ZoneKeyId,
 };
 use fcp_crypto::{AeadKey, Ed25519SigningKey, Ed25519VerifyingKey};
 use fcp_protocol::{
-    decrypt_symbol, encrypt_symbol, FCPS_VERSION, FcpsFrame, FcpsFrameHeader, FrameError,
-    FrameFlags, SignedFcpsFrame, SymbolContext, SymbolEnvelopeError, SymbolRecord,
-    ZoneKeyAlgorithm as SymbolZoneKeyAlgorithm,
+    FCPS_VERSION, FcpsFrame, FcpsFrameHeader, FrameError, FrameFlags, SignedFcpsFrame,
+    SymbolContext, SymbolEnvelopeError, SymbolRecord, ZoneKeyAlgorithm as SymbolZoneKeyAlgorithm,
+    decrypt_symbol, encrypt_symbol,
 };
 use fcp_raptorq::{DecodeError, EncodeError, RaptorQConfig, RaptorQDecoder, RaptorQEncoder};
 use thiserror::Error;
@@ -250,8 +250,10 @@ impl DegradedModeEncoder {
                     self.sender_instance_id,
                     frame_seq,
                 );
-                let (data, auth_tag) = encrypt_symbol(&zone_key, algorithm, &context, &data)
-                    .map_err(|source| DegradedTransportError::SymbolEncryptFailed { esi, source })?;
+                let (data, auth_tag) =
+                    encrypt_symbol(&zone_key, algorithm, &context, &data).map_err(|source| {
+                        DegradedTransportError::SymbolEncryptFailed { esi, source }
+                    })?;
                 Ok::<SymbolRecord, DegradedTransportError>(SymbolRecord {
                     esi,
                     k,
@@ -297,6 +299,11 @@ impl DegradedModeEncoder {
         }])
     }
 
+    /// Encode a control-plane object with the test-only static zone key.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DegradedTransportError` if the object cannot be encoded.
     #[cfg(test)]
     pub fn encode(
         &mut self,
@@ -312,6 +319,12 @@ impl DegradedModeEncoder {
         )
     }
 
+    /// Encode a control-plane object without authenticated degraded transport.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`DegradedTransportError::SymbolCryptoUnavailable`] in
+    /// non-test builds because callers must use [`Self::encode_authenticated`].
     #[cfg(not(test))]
     pub fn encode(
         &mut self,
@@ -329,6 +342,7 @@ impl DegradedModeEncoder {
     /// # Errors
     ///
     /// Returns `DegradedTransportError::Encode` if encoding fails.
+    #[allow(clippy::too_many_arguments)] // Degraded bootstrap frames must bind zone crypto, source, timestamp, and signer.
     pub fn encode_signed_authenticated(
         &mut self,
         envelope: &ControlPlaneEnvelope,
@@ -349,6 +363,11 @@ impl DegradedModeEncoder {
         Ok(signed?)
     }
 
+    /// Encode and sign a control-plane object with the test-only static zone key.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DegradedTransportError` if encoding or signing fails.
     #[cfg(test)]
     pub fn encode_signed(
         &mut self,
@@ -369,6 +388,13 @@ impl DegradedModeEncoder {
         )
     }
 
+    /// Encode a signed control-plane object without authenticated degraded transport.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`DegradedTransportError::SymbolCryptoUnavailable`] in
+    /// non-test builds because callers must use
+    /// [`Self::encode_signed_authenticated`].
     #[cfg(not(test))]
     pub fn encode_signed(
         &mut self,
@@ -535,6 +561,11 @@ impl DegradedModeDecoder {
         })
     }
 
+    /// Process a frame with the test-only static zone key.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DegradedTransportError` if frame processing fails.
     #[cfg(test)]
     pub fn process_frame(
         &mut self,
@@ -552,6 +583,13 @@ impl DegradedModeDecoder {
         )
     }
 
+    /// Process a frame without authenticated degraded transport.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`DegradedTransportError::SymbolCryptoUnavailable`] in
+    /// non-test builds because callers must use
+    /// [`Self::process_frame_authenticated`].
     #[cfg(not(test))]
     pub fn process_frame(
         &mut self,
@@ -605,6 +643,12 @@ impl DegradedModeDecoder {
         )
     }
 
+    /// Process a signed frame with the test-only static zone key.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DegradedTransportError` if signature verification or frame
+    /// processing fails.
     #[cfg(test)]
     pub fn process_signed_frame(
         &mut self,
@@ -623,6 +667,13 @@ impl DegradedModeDecoder {
         )
     }
 
+    /// Process a signed frame without authenticated degraded transport.
+    ///
+    /// # Errors
+    ///
+    /// Always returns [`DegradedTransportError::SymbolCryptoUnavailable`] in
+    /// non-test builds because callers must use
+    /// [`Self::process_signed_frame_authenticated`].
     #[cfg(not(test))]
     pub fn process_signed_frame(
         &mut self,
@@ -874,6 +925,7 @@ fn protocol_zone_key_algorithm(algorithm: CoreZoneKeyAlgorithm) -> SymbolZoneKey
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Context binds every field included in per-symbol AEAD authentication.
 fn symbol_context(
     object_id: ObjectId,
     esi: u32,
@@ -1476,7 +1528,7 @@ mod tests {
         // with unique object_id/epoch_id tuples could exhaust memory — each
         // pending entry holds a multi-KiB RaptorQ decoder.
         let config = test_config();
-        let mut decoder = DegradedModeDecoder::with_max_pending(config.clone(), 2);
+        let mut decoder = DegradedModeDecoder::with_max_pending(config, 2);
         let zone_id = test_zone_id();
 
         // Build three distinct single-symbol frames (each with a unique
@@ -1583,25 +1635,25 @@ mod tests {
                 header: FcpsFrameHeader {
                     version: FCPS_VERSION,
                     flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE,
-                symbol_count: 1,
-                total_payload_len: u32::try_from(
-                    SymbolRecord {
-                        esi: 0,
-                        k: 1,
-                        data: malformed_payload.clone(),
-                        auth_tag: [0u8; 16],
-                    }
-                    .wire_size(),
-                )
-                .expect("symbol wire size should fit in u32"),
-                object_id: object_id.clone(),
-                symbol_size: 64,
-                zone_key_id: ZoneKeyId::from_bytes([0x11; 8]),
-                zone_id_hash: zone_id.hash(),
-                epoch_id: 9,
-                sender_instance_id: 1,
-                frame_seq: 0,
-            },
+                    symbol_count: 1,
+                    total_payload_len: u32::try_from(
+                        SymbolRecord {
+                            esi: 0,
+                            k: 1,
+                            data: malformed_payload.clone(),
+                            auth_tag: [0u8; 16],
+                        }
+                        .wire_size(),
+                    )
+                    .expect("symbol wire size should fit in u32"),
+                    object_id: object_id.clone(),
+                    symbol_size: 64,
+                    zone_key_id: ZoneKeyId::from_bytes([0x11; 8]),
+                    zone_id_hash: zone_id.hash(),
+                    epoch_id: 9,
+                    sender_instance_id: 1,
+                    frame_seq: 0,
+                },
                 symbols: vec![SymbolRecord {
                     esi: 0,
                     k: 1,
@@ -1637,46 +1689,46 @@ mod tests {
                 header: FcpsFrameHeader {
                     version: FCPS_VERSION,
                     flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE,
-                symbol_count: 2,
-                total_payload_len: u32::try_from(
+                    symbol_count: 2,
+                    total_payload_len: u32::try_from(
+                        SymbolRecord {
+                            esi: 0,
+                            k: 2,
+                            data: vec![0x11; 64],
+                            auth_tag: [0u8; 16],
+                        }
+                        .wire_size()
+                            + SymbolRecord {
+                                esi: 1,
+                                k: 3,
+                                data: vec![0x22; 64],
+                                auth_tag: [0u8; 16],
+                            }
+                            .wire_size(),
+                    )
+                    .expect("symbol wire size should fit in u32"),
+                    object_id: ObjectId::from_bytes([0x77; 32]),
+                    symbol_size: 64,
+                    zone_key_id: ZoneKeyId::from_bytes([0x33; 8]),
+                    zone_id_hash: zone_id.hash(),
+                    epoch_id: 10,
+                    sender_instance_id: 2,
+                    frame_seq: 7,
+                },
+                symbols: vec![
                     SymbolRecord {
                         esi: 0,
                         k: 2,
                         data: vec![0x11; 64],
                         auth_tag: [0u8; 16],
-                    }
-                    .wire_size()
-                        + SymbolRecord {
-                            esi: 1,
-                            k: 3,
-                            data: vec![0x22; 64],
-                            auth_tag: [0u8; 16],
-                        }
-                        .wire_size(),
-                )
-                .expect("symbol wire size should fit in u32"),
-                object_id: ObjectId::from_bytes([0x77; 32]),
-                symbol_size: 64,
-                zone_key_id: ZoneKeyId::from_bytes([0x33; 8]),
-                zone_id_hash: zone_id.hash(),
-                epoch_id: 10,
-                sender_instance_id: 2,
-                frame_seq: 7,
-            },
-            symbols: vec![
-                SymbolRecord {
-                    esi: 0,
-                    k: 2,
-                    data: vec![0x11; 64],
-                    auth_tag: [0u8; 16],
-                },
-                SymbolRecord {
-                    esi: 1,
-                    k: 3,
-                    data: vec![0x22; 64],
-                    auth_tag: [0u8; 16],
-                },
-            ],
+                    },
+                    SymbolRecord {
+                        esi: 1,
+                        k: 3,
+                        data: vec![0x22; 64],
+                        auth_tag: [0u8; 16],
+                    },
+                ],
             },
             &test_source_id(),
         );
@@ -1707,31 +1759,31 @@ mod tests {
                 header: FcpsFrameHeader {
                     version: FCPS_VERSION,
                     flags: FrameFlags::ENCRYPTED | FrameFlags::RAPTORQ | FrameFlags::CONTROL_PLANE,
-                symbol_count: 1,
-                total_payload_len: u32::try_from(
-                    SymbolRecord {
-                        esi: 0,
-                        k: 2,
-                        data: vec![0xAA; 64],
-                        auth_tag: [0u8; 16],
-                    }
-                    .wire_size(),
-                )
-                .expect("symbol wire size should fit in u32"),
-                object_id: object_id.clone(),
-                symbol_size: 64,
-                zone_key_id: zone_key_id.clone(),
-                zone_id_hash: zone_id.hash(),
-                epoch_id: 12,
-                sender_instance_id: 3,
-                frame_seq: 11,
-            },
-            symbols: vec![SymbolRecord {
-                esi: 0,
-                k: 2,
-                data: vec![0xAA; 64],
-                auth_tag: [0u8; 16],
-            }],
+                    symbol_count: 1,
+                    total_payload_len: u32::try_from(
+                        SymbolRecord {
+                            esi: 0,
+                            k: 2,
+                            data: vec![0xAA; 64],
+                            auth_tag: [0u8; 16],
+                        }
+                        .wire_size(),
+                    )
+                    .expect("symbol wire size should fit in u32"),
+                    object_id: object_id.clone(),
+                    symbol_size: 64,
+                    zone_key_id: zone_key_id.clone(),
+                    zone_id_hash: zone_id.hash(),
+                    epoch_id: 12,
+                    sender_instance_id: 3,
+                    frame_seq: 11,
+                },
+                symbols: vec![SymbolRecord {
+                    esi: 0,
+                    k: 2,
+                    data: vec![0xAA; 64],
+                    auth_tag: [0u8; 16],
+                }],
             },
             &test_source_id(),
         );

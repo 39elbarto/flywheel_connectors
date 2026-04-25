@@ -640,10 +640,7 @@ impl ExecutionPlanner {
             candidate.adjust(ScoreAdjustment::penalty(
                 AdjustmentFactor::ZoneRestriction,
                 ZONE_RESTRICTION_PENALTY,
-                format!(
-                    "target zone {} requested but node zone membership is unknown",
-                    target_zone
-                ),
+                format!("target zone {target_zone} requested but node zone membership is unknown"),
             ));
             candidate.mark_ineligible(DecisionReason::ZoneRestriction {
                 zone: target_zone.to_string(),

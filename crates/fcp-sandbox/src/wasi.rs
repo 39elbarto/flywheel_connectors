@@ -2308,12 +2308,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&file, b"data").unwrap();
 
-        let err = match WasiRuntime::new(WasiConfig {
+        let Err(err) = WasiRuntime::new(WasiConfig {
             readonly_paths: vec![file.clone()],
             ..WasiConfig::default()
-        }) {
-            Ok(_) => panic!("expected readonly file preopen to be rejected"),
-            Err(err) => err,
+        }) else {
+            panic!("expected readonly file preopen to be rejected");
         };
 
         assert!(matches!(err, WasiError::FsAccessDenied { .. }));
@@ -2339,12 +2338,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&file, b"data").unwrap();
 
-        let err = match WasiRuntime::new(WasiConfig {
+        let Err(err) = WasiRuntime::new(WasiConfig {
             writable_paths: vec![file.clone()],
             ..WasiConfig::default()
-        }) {
-            Ok(_) => panic!("expected writable file preopen to be rejected"),
-            Err(err) => err,
+        }) else {
+            panic!("expected writable file preopen to be rejected");
         };
 
         assert!(matches!(err, WasiError::FsAccessDenied { .. }));
@@ -2379,9 +2377,8 @@ mod tests {
             ..WasiConfig::default()
         })
         .expect("runtime construction should succeed before store creation");
-        let err = match runtime.create_store() {
-            Ok(_) => panic!("expected symlinked readonly preopen to be rejected"),
-            Err(err) => err,
+        let Err(err) = runtime.create_store() else {
+            panic!("expected symlinked readonly preopen to be rejected");
         };
 
         assert!(matches!(err, WasiError::FsAccessDenied { .. }));
@@ -2419,9 +2416,8 @@ mod tests {
             ..WasiConfig::default()
         })
         .expect("runtime construction should succeed before store creation");
-        let err = match runtime.create_store() {
-            Ok(_) => panic!("expected symlinked writable preopen to be rejected"),
-            Err(err) => err,
+        let Err(err) = runtime.create_store() else {
+            panic!("expected symlinked writable preopen to be rejected");
         };
 
         assert!(matches!(err, WasiError::FsAccessDenied { .. }));

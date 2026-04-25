@@ -14,9 +14,9 @@ use parking_lot::Mutex;
 
 /// Global metrics registry state.
 static METRICS_INITIALIZED: OnceLock<bool> = OnceLock::new();
-static LABEL_CARDINALITY_GUARD: OnceLock<
-    Mutex<HashMap<(&'static str, &'static str), HashSet<String>>>,
-> = OnceLock::new();
+type LabelCardinalityKey = (&'static str, &'static str);
+type LabelCardinalityMap = HashMap<LabelCardinalityKey, HashSet<String>>;
+static LABEL_CARDINALITY_GUARD: OnceLock<Mutex<LabelCardinalityMap>> = OnceLock::new();
 
 const MAX_DISTINCT_LABEL_VALUES_PER_METRIC: usize = 64;
 const MAX_LABEL_VALUE_BYTES: usize = 64;
@@ -271,16 +271,27 @@ fn guarded_label_value(metric_name: &'static str, label_key: &'static str, value
         return bounded;
     }
 
-    let guard = LABEL_CARDINALITY_GUARD.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = guard.lock();
-    let seen_values = guard.entry((metric_name, label_key)).or_default();
-    if seen_values.contains(&bounded) {
-        return bounded;
-    }
-    if seen_values.len() >= MAX_DISTINCT_LABEL_VALUES_PER_METRIC {
+    let overflowed_cardinality = {
+        let mut label_cardinality = LABEL_CARDINALITY_GUARD
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock();
+        let seen_values = label_cardinality
+            .entry((metric_name, label_key))
+            .or_default();
+        let overflowed = if seen_values.contains(&bounded) {
+            false
+        } else if seen_values.len() >= MAX_DISTINCT_LABEL_VALUES_PER_METRIC {
+            true
+        } else {
+            seen_values.insert(bounded.clone());
+            false
+        };
+        drop(label_cardinality);
+        overflowed
+    };
+    if overflowed_cardinality {
         return OVERFLOW_LABEL_BUCKET.to_string();
     }
-    seen_values.insert(bounded.clone());
     bounded
 }
 
@@ -831,10 +842,7 @@ mod tests {
     #[test]
     fn test_metric_labels_bucket_overlong_values() {
         let overlong = "x".repeat(MAX_LABEL_VALUE_BYTES + 1);
-        let labels = metric_labels(
-            "bucket_overlong_metric",
-            &[("reason", overlong.as_str())],
-        );
+        let labels = metric_labels("bucket_overlong_metric", &[("reason", overlong.as_str())]);
         assert_eq!(labels[0].1, TOO_LONG_LABEL_BUCKET);
     }
 

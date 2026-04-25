@@ -853,6 +853,8 @@ fn hash_bytes(bytes: &[u8], algorithm: HashAlgorithm) -> String {
 pub enum VerificationReasonCode {
     /// Attestation and SBOM verified successfully.
     Verified,
+    /// Artifact digest is not a supported canonical digest string.
+    ArtifactDigestInvalid,
     /// Attestation is missing and policy requires it.
     AttestationMissing,
     /// Attestation failed structural validation.
@@ -1004,6 +1006,7 @@ impl VerificationPipeline {
         let mut steps = Vec::new();
         let mut first_failure: Option<VerificationReasonCode> = None;
 
+        Self::check_artifact_digest(artifact_digest, &mut steps, &mut first_failure);
         self.check_attestation(attestation, artifact_digest, &mut steps, &mut first_failure);
         self.check_sbom(sbom, &mut steps, &mut first_failure);
 
@@ -1025,6 +1028,27 @@ impl VerificationPipeline {
             artifact_digest: artifact_digest.to_string(),
             steps,
             policy_snapshot: self.policy.clone(),
+        }
+    }
+
+    fn check_artifact_digest(
+        artifact_digest: &str,
+        steps: &mut Vec<VerificationStep>,
+        first_failure: &mut Option<VerificationReasonCode>,
+    ) {
+        let passed = digest_is_supported(artifact_digest);
+        steps.push(VerificationStep {
+            step: "artifact_digest_validation".to_string(),
+            passed,
+            detail: if passed {
+                "artifact_digest is a supported canonical digest".to_string()
+            } else {
+                "artifact_digest must use blake3-256 or sha256 with 64 lowercase hex chars"
+                    .to_string()
+            },
+        });
+        if !passed && first_failure.is_none() {
+            *first_failure = Some(VerificationReasonCode::ArtifactDigestInvalid);
         }
     }
 
@@ -2288,7 +2312,12 @@ mod tests {
             evidence.reason_code,
             VerificationReasonCode::AttestationMissing
         );
-        assert!(!evidence.steps[0].passed);
+        assert!(
+            evidence
+                .steps
+                .iter()
+                .any(|step| { step.step == "attestation_presence" && !step.passed })
+        );
     }
 
     #[test]
@@ -2304,6 +2333,30 @@ mod tests {
         assert_eq!(
             evidence.reason_code,
             VerificationReasonCode::AllowedUnsigned
+        );
+    }
+
+    #[test]
+    fn pipeline_denies_invalid_artifact_digest_even_when_unsigned_allowed() {
+        let policy = SupplyChainVerificationPolicy {
+            allow_unsigned: true,
+            require_attestation: false,
+            require_sbom: false,
+            ..Default::default()
+        };
+        let pipeline = VerificationPipeline::new(policy);
+        let evidence = pipeline.verify("not-a-digest", None, None);
+
+        assert_eq!(evidence.decision, VerificationDecision::Deny);
+        assert_eq!(
+            evidence.reason_code,
+            VerificationReasonCode::ArtifactDigestInvalid
+        );
+        assert!(
+            evidence
+                .steps
+                .iter()
+                .any(|step| { step.step == "artifact_digest_validation" && !step.passed })
         );
     }
 
@@ -2364,7 +2417,7 @@ mod tests {
         let pipeline = default_pipeline();
         let att = sample_attestation();
         let sbom = sample_sbom();
-        let mismatched_digest = format!("blake3-256:{}", "x".repeat(64));
+        let mismatched_digest = format!("blake3-256:{}", "0".repeat(64));
         let evidence = pipeline.verify(&mismatched_digest, Some(&att), Some(&sbom));
 
         assert_eq!(evidence.decision, VerificationDecision::Deny);
@@ -2424,14 +2477,15 @@ mod tests {
         let sbom = sample_sbom();
         let evidence = pipeline.verify(&artifact_digest(), Some(&att), Some(&sbom));
 
-        // Should have: attestation_presence, attestation_validation,
+        // Should have: artifact_digest_validation, attestation_presence, attestation_validation,
         // slsa_level_check, trusted_builder_check, subject_digest_match,
-        // sbom_presence, sbom_validation = 7 steps
-        assert_eq!(evidence.steps.len(), 7);
+        // sbom_presence, sbom_validation = 8 steps
+        assert_eq!(evidence.steps.len(), 8);
         let step_names: Vec<&str> = evidence.steps.iter().map(|s| s.step.as_str()).collect();
         assert_eq!(
             step_names,
             vec![
+                "artifact_digest_validation",
                 "attestation_presence",
                 "attestation_validation",
                 "slsa_level_check",
@@ -2513,13 +2567,19 @@ mod tests {
 
         assert_eq!(evidence.decision, VerificationDecision::Allow);
         assert_eq!(evidence.reason_code, VerificationReasonCode::Verified);
-        assert!(evidence.steps.is_empty());
+        assert_eq!(evidence.steps.len(), 1);
+        assert_eq!(evidence.steps[0].step, "artifact_digest_validation");
+        assert!(evidence.steps[0].passed);
     }
 
     #[test]
     fn verification_reason_code_display() {
         // Display uses serde's SCREAMING_SNAKE_CASE representation
         assert_eq!(VerificationReasonCode::Verified.to_string(), "VERIFIED");
+        assert_eq!(
+            VerificationReasonCode::ArtifactDigestInvalid.to_string(),
+            "ARTIFACT_DIGEST_INVALID"
+        );
         assert_eq!(
             VerificationReasonCode::AttestationMissing.to_string(),
             "ATTESTATION_MISSING"
@@ -3114,6 +3174,7 @@ mod tests {
     fn verification_reason_code_all_variants_serde_roundtrip() {
         let codes = [
             VerificationReasonCode::Verified,
+            VerificationReasonCode::ArtifactDigestInvalid,
             VerificationReasonCode::AttestationMissing,
             VerificationReasonCode::AttestationInvalid,
             VerificationReasonCode::SlsaLevelInsufficient,
@@ -3324,7 +3385,7 @@ mod tests {
         let pipeline = VerificationPipeline::new(policy);
         let att = sample_attestation();
         let sbom = sample_sbom();
-        let wrong_digest = format!("blake3-256:{}", "z".repeat(64));
+        let wrong_digest = format!("blake3-256:{}", "0".repeat(64));
         let evidence = pipeline.verify(&wrong_digest, Some(&att), Some(&sbom));
         // No subject_digest_match step should be present
         assert_eq!(evidence.decision, VerificationDecision::Allow);

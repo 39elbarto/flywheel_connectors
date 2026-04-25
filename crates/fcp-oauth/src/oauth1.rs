@@ -1315,23 +1315,37 @@ mod tests {
 
     #[test]
     fn test_request_token_debug() {
-        // Use distinctive multi-character sentinel values so the
-        // `!contains(...)` checks below cannot be coincidentally
-        // satisfied by overlap with field names like `token` /
-        // `RequestToken` (which both contain "t" — the prior single-
-        // letter sentinel made `!debug.contains("t")` always fail).
+        // Sentinel design notes:
+        //
+        // - Each value is a distinctive multi-character string. The prior
+        //   single-letter sentinel (`token = "t"`) made `!debug.contains("t")`
+        //   always fail because field names like `token`, `RequestToken`,
+        //   and `[REDACTED]` themselves contain the letter `t`.
+        //
+        // - The two sentinels share NO common substring with each other or
+        //   with any field name. A buggy Debug impl that leaks a partial
+        //   value (e.g. truncates to N chars) cannot satisfy both
+        //   `!contains(...)` checks coincidentally — the leaked prefix of
+        //   one value is still distinctive against the other.
+        //
+        // - Two `[REDACTED]` occurrences are explicitly required to prove
+        //   BOTH fields were redacted, not just one.
         let rt = RequestToken {
-            token: "request_token_sentinel_value_zzz".to_string(),
-            token_secret: "request_token_secret_sentinel_zzz".to_string(),
+            token: "alpha-marauder-3F2A1B0E".to_string(),
+            token_secret: "delta-pickle-9C7D6E5F".to_string(),
             callback_confirmed: false,
         };
         let debug = format!("{rt:?}");
         assert!(debug.contains("RequestToken"));
         assert!(debug.contains("callback_confirmed"));
-        // Both fields must be redacted.
-        assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("request_token_sentinel_value_zzz"));
-        assert!(!debug.contains("request_token_secret_sentinel_zzz"));
+        // Both fields must be redacted: at least two `[REDACTED]` must
+        // appear in the Debug output.
+        assert!(
+            debug.matches("[REDACTED]").count() >= 2,
+            "expected ≥2 [REDACTED] markers, got: {debug}"
+        );
+        assert!(!debug.contains("alpha-marauder-3F2A1B0E"));
+        assert!(!debug.contains("delta-pickle-9C7D6E5F"));
     }
 
     // ── Expanded tests: OAuth1Client debug ──

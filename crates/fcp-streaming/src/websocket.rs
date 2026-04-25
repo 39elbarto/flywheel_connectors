@@ -1341,23 +1341,28 @@ mod tests {
 
     #[test]
     fn ws_connection_recv_times_out_when_peer_blackholes_after_handshake() {
-        // Server blackholes for 500ms then drops TCP. We want recv() to
-        // observe the blackhole as a timeout BEFORE TCP close, so the
-        // test must:
+        // Server blackholes then drops TCP. We want recv() to observe
+        // the blackhole as a timeout BEFORE TCP close, so the test must:
         //
         //   - Drive the steady-state I/O budget (`io_timeout()`) below
-        //     500ms. That budget is `connect_timeout.max(ping_interval +
-        //     pong_timeout)` — both inputs need to be smaller than the
-        //     server stall.
+        //     the server stall. That budget is `connect_timeout.max(
+        //     ping_interval + pong_timeout)` — both inputs need to be
+        //     smaller than the stall.
         //   - Disable client-side keepalive pings so the budget collapses
         //     to `pong_timeout`. Otherwise the default
         //     `ping_interval = Some(30s)` swamps `pong_timeout`.
-        //   - Pin `connect_timeout` close to `pong_timeout` so the
-        //     `.max()` floor doesn't accidentally resurrect the longer
-        //     window. We use 100ms here; the actual recv timeout will
-        //     equal that (max of 100ms and pong_timeout=50ms).
-        let (url, server) = spawn_blackhole_websocket_server(Duration::from_millis(500));
-        let connect_timeout = Duration::from_millis(100);
+        //   - Choose `connect_timeout` loose enough to absorb dial jitter
+        //     on loaded CI runners (TCP + HTTP-upgrade roundtrip can
+        //     stretch past tens of milliseconds on shared infra), and the
+        //     server stall comfortably above it so the timeout window has
+        //     real headroom to fire before TCP close lands.
+        //
+        // Concretely: 300ms connect_timeout (≥3x typical local dial),
+        // 1500ms stall (5x connect_timeout). Total test runtime is bound
+        // by the stall (~1.5s) since `server.join()` blocks on the
+        // server thread.
+        let (url, server) = spawn_blackhole_websocket_server(Duration::from_millis(1500));
+        let connect_timeout = Duration::from_millis(300);
         let pong_timeout = Duration::from_millis(50);
 
         block_on(async {
@@ -1370,7 +1375,8 @@ mod tests {
             let mut connection = client.connect().await.expect("connect websocket");
             let err = connection.recv().await.expect_err("recv should time out");
             // Effective timeout is `connect_timeout.max(pong_timeout)`
-            // when `ping_interval = None`, i.e. 100ms here.
+            // when `ping_interval = None` — i.e. `connect_timeout` here
+            // since the floor is the longer of the two.
             let expected_timeout = connect_timeout.max(pong_timeout);
             assert!(
                 matches!(err, StreamError::Timeout(t) if t == expected_timeout),

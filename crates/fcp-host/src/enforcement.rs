@@ -2774,6 +2774,11 @@ mod tests {
 
     #[test]
     fn pipeline_default_check_order() {
+        // The revocation check's reported step name is `"revocation"`
+        // (see `RevocationCheck::name`) — not `"revocation_freshness"`.
+        // The test was stale relative to the production rename; the
+        // sibling assertion at `revocation_freshness_name` already
+        // pins the canonical name.
         let pipeline = EnforcementPipeline::new();
         let names = pipeline.check_names();
         assert_eq!(names[0], "canonical_decode");
@@ -2781,7 +2786,7 @@ mod tests {
         assert_eq!(names[2], "capability_verify");
         assert_eq!(names[3], "holder_proof");
         assert_eq!(names[4], "checkpoint_freshness");
-        assert_eq!(names[5], "revocation_freshness");
+        assert_eq!(names[5], "revocation");
         assert_eq!(names[6], "taint_approval");
         assert_eq!(names[7], "policy_ceiling");
         assert_eq!(names[8], "connector_manifest");
@@ -2900,13 +2905,18 @@ mod tests {
 
     #[test]
     fn pipeline_evaluate_deny_at_revocation_freshness() {
+        // The revocation check's `name()` is `"revocation"`, not
+        // `"revocation_freshness"`. The function name still reads as
+        // `_revocation_freshness` because the *condition under test*
+        // is the revocation freshness window — but the produced
+        // `check_name` field carries the canonical step name.
         let pipeline = EnforcementPipeline::new();
         let mut ctx = test_context();
         ctx.revocation_list_age_ms = Some(999_999);
         let decision = pipeline.evaluate(&ctx);
         assert!(!decision.is_allowed());
         if let PipelineOutcome::Deny { check_name, .. } = &decision.outcome {
-            assert_eq!(check_name, "revocation_freshness");
+            assert_eq!(check_name, "revocation");
         }
     }
 

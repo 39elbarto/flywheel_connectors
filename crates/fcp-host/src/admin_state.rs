@@ -7461,8 +7461,18 @@ mod tests {
 
     #[test]
     fn capability_issuance_request_default_ttl() {
+        // `capability_id` was added as a required field in
+        // CapabilityIssuanceRequest after the live invoke verifier
+        // started checking the operation's declared capability rather
+        // than just the operation id. The default-ttl test focuses on
+        // serde defaults for the TTL/dry_run/max_delegation_depth
+        // fields, but it still has to send a complete payload that
+        // satisfies the now-mandatory fields — otherwise serde fails
+        // with `missing field "capability_id"` before any default kicks
+        // in.
         let json = r#"{
             "connector_id": "test:saas:1.0.0",
+            "capability_id": "test.invoke",
             "zone_id": "z:work",
             "principal_id": "agent:test"
         }"#;

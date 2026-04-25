@@ -429,7 +429,13 @@ mod tests {
             signature: SupplyChainSignature {
                 algorithm: "ed25519".to_string(),
                 key_id: "key-001".to_string(),
-                signature: "sig-placeholder".to_string(),
+                // 64-byte Ed25519 signature shape, 128 hex chars. The
+                // upstream validator (fcp-evidence/-core) requires the
+                // `signature` field to parse as hex or base64; any free-
+                // form placeholder (e.g. "sig-placeholder") trips
+                // `attestation_validation`/`sbom_validation` with
+                // `signature must be valid hex or base64`.
+                signature: "f".repeat(128),
                 signed_fields: SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS
                     .iter()
                     .map(|s| (*s).to_string())
@@ -463,7 +469,13 @@ mod tests {
             signature: SupplyChainSignature {
                 algorithm: "ed25519".to_string(),
                 key_id: "key-002".to_string(),
-                signature: "sig-placeholder".to_string(),
+                // 64-byte Ed25519 signature shape, 128 hex chars. The
+                // upstream validator (fcp-evidence/-core) requires the
+                // `signature` field to parse as hex or base64; any free-
+                // form placeholder (e.g. "sig-placeholder") trips
+                // `attestation_validation`/`sbom_validation` with
+                // `signature must be valid hex or base64`.
+                signature: "f".repeat(128),
                 signed_fields: SBOM_SIGNED_FIELDS
                     .iter()
                     .map(|s| (*s).to_string())

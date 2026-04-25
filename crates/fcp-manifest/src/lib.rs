@@ -2748,7 +2748,7 @@ allowed_targets = ["z:community"]
 forbidden = ["z:public"]
 
 [capabilities]
-required = ["ipc.gateway", "network.dns", "network.egress", "network.tls.sni"]
+required = ["ipc.gateway", "network.dns", "network.egress", "network.tls.sni", "telegram.send_message"]
 optional = ["media.download"]
 forbidden = ["system.exec"]
 
@@ -3059,7 +3059,15 @@ deny_ptrace = true
         let with_hash = with_computed_hash(&raw);
         let parsed = ConnectorManifest::parse_str(&with_hash).expect("minimal manifest");
         assert_eq!(parsed.connector.id.as_str(), "fcp.minimal");
-        assert_eq!(parsed.capabilities.required.len(), 1);
+        // The minimal vector declares two required capabilities:
+        // `network.dns` (the connector's own dependency) and
+        // `minimal.op` (declared because the operation references it,
+        // and the validator added in commit d8dd6bb5a now enforces
+        // that every operation's `capability` must appear in either
+        // `capabilities.required` or `capabilities.optional`). The
+        // vector itself was updated for this rule in commit 9c3a290e;
+        // this test now checks the post-update floor.
+        assert_eq!(parsed.capabilities.required.len(), 2);
     }
 
     #[test]
@@ -3122,18 +3130,20 @@ deny_ptrace = true
             Some("2026.1.0"),
             Some(4),
         );
+        // Remove `telegram.send_message` from `capabilities.required` so
+        // the operation's capability is no longer declared. The
+        // operation itself is left untouched, so post-strip the validator
+        // sees op `telegram_send_message` referencing a capability that
+        // appears in neither `required` nor `optional` — the rule under
+        // test fires.
         let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
-        let toml = test_manifest_toml(&placeholder).replace(
-            "required = [\"telegram.send_message\"]",
-            "required = [\"telegram.read_message\"]",
-        );
+        let toml = test_manifest_toml(&placeholder)
+            .replace(", \"telegram.send_message\"", "");
 
         let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
         let hash = unchecked.compute_interface_hash().expect("compute hash");
-        let with_hash = test_manifest_toml(&hash.to_string()).replace(
-            "required = [\"telegram.send_message\"]",
-            "required = [\"telegram.read_message\"]",
-        );
+        let with_hash = test_manifest_toml(&hash.to_string())
+            .replace(", \"telegram.send_message\"", "");
 
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
         assert!(matches!(
@@ -3155,18 +3165,27 @@ deny_ptrace = true
             Some("2026.1.0"),
             Some(4),
         );
+        // Move `telegram.send_message` from `capabilities.required` to
+        // `capabilities.forbidden`. Required-and-forbidden simultaneously
+        // would trip the cross-list duplicate detector first (different
+        // error field); to isolate the per-operation-forbidden rule we
+        // strip from required AND add to forbidden in the same edit.
         let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
-        let toml = test_manifest_toml(&placeholder).replace(
-            "forbidden = [\"system.exec\"]",
-            "forbidden = [\"system.exec\", \"telegram.send_message\"]",
-        );
+        let toml = test_manifest_toml(&placeholder)
+            .replace(", \"telegram.send_message\"", "")
+            .replace(
+                "forbidden = [\"system.exec\"]",
+                "forbidden = [\"system.exec\", \"telegram.send_message\"]",
+            );
 
         let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
         let hash = unchecked.compute_interface_hash().expect("compute hash");
-        let with_hash = test_manifest_toml(&hash.to_string()).replace(
-            "forbidden = [\"system.exec\"]",
-            "forbidden = [\"system.exec\", \"telegram.send_message\"]",
-        );
+        let with_hash = test_manifest_toml(&hash.to_string())
+            .replace(", \"telegram.send_message\"", "")
+            .replace(
+                "forbidden = [\"system.exec\"]",
+                "forbidden = [\"system.exec\", \"telegram.send_message\"]",
+            );
 
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
         assert!(matches!(
@@ -6079,15 +6098,20 @@ deny_ptrace = true
     #[test]
     fn capabilities_section_duplicate_capability_rejected() {
         let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
+        // Inject a duplicate `network.dns` into the required list. The
+        // base fixture's required list (see `test_manifest_toml`) is
+        // `["ipc.gateway", "network.dns", "network.egress", "network.tls.sni",
+        // "telegram.send_message"]`; we replace `network.tls.sni` with a
+        // second `network.dns` so the duplicate detector fires.
         let toml = test_manifest_toml(&placeholder).replace(
-            "required = [\"ipc.gateway\", \"network.dns\", \"network.egress\", \"network.tls.sni\"]",
-            "required = [\"ipc.gateway\", \"network.dns\", \"network.egress\", \"network.dns\"]",
+            "\"network.tls.sni\"",
+            "\"network.dns\"",
         );
         let m = ConnectorManifest::parse_str_unchecked(&toml).unwrap();
         let hash = m.compute_interface_hash().unwrap();
         let with_hash = test_manifest_toml(&hash.to_string()).replace(
-            "required = [\"ipc.gateway\", \"network.dns\", \"network.egress\", \"network.tls.sni\"]",
-            "required = [\"ipc.gateway\", \"network.dns\", \"network.egress\", \"network.dns\"]",
+            "\"network.tls.sni\"",
+            "\"network.dns\"",
         );
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
         assert!(err.to_string().contains("duplicate"));

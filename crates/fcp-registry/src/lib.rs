@@ -1178,8 +1178,29 @@ impl RegistryVerifier {
             },
         };
 
-        store.put(manifest_record).await?;
-        store.put(binary_record).await?;
+        // `mirror_bundle` is the install-side idempotency hinge: callers
+        // re-run install/verify/mirror on the same bundle (e.g. retries,
+        // re-bootstraps, the
+        // `metamorphic_install_verify_reinstall_round_trip_is_observationally_idempotent`
+        // invariant) and expect observationally identical state. Object
+        // IDs are blake3-256 over `(header, body)`, so an `AlreadyExists`
+        // for the derived ID is a *guarantee* that the existing record
+        // is byte-identical to ours: the only way to land at the same
+        // ObjectId is if the canonical `(header, body)` matched, which
+        // requires the same manifest_toml/binary/target/zone/provenance
+        // tuple. Treating `AlreadyExists` as success is therefore safe
+        // and is what makes re-mirroring genuinely idempotent at the
+        // ObjectStore boundary; any other store error still propagates.
+        match store.put(manifest_record).await {
+            Ok(()) => {}
+            Err(ObjectStoreError::AlreadyExists(_)) => {}
+            Err(err) => return Err(err.into()),
+        }
+        match store.put(binary_record).await {
+            Ok(()) => {}
+            Err(ObjectStoreError::AlreadyExists(_)) => {}
+            Err(err) => return Err(err.into()),
+        }
 
         Ok(MirrorResult {
             manifest_object_id,
@@ -1699,7 +1720,8 @@ fn enforce_supply_chain_policy(
 
     let attestation_policy_active = !policy.require_attestation_types.is_empty()
         || policy.min_slsa_level.is_some()
-        || !policy.trusted_builders.is_empty();
+        || !policy.trusted_builders.is_empty()
+        || policy.require_attestation_expiry;
     let attestation_evidence = if attestation_policy_active {
         let evidence = evidence.ok_or(RegistryError::AttestationEvidenceMissing)?;
         let now = u64::try_from(Utc::now().timestamp()).expect("system clock before year 2262");
@@ -2827,6 +2849,58 @@ sig = "{sig}"
                 RegistryLogData {
                     connector_id: Some(manifest.connector.id.to_string()),
                     reason_code: Some("attestation_expiry_missing".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn supply_chain_policy_rejects_unset_expiry_when_only_expiry_required() {
+        run_registry_test(
+            "supply_chain_policy_rejects_unset_expiry_when_only_expiry_required",
+            "verify",
+            "attestation",
+            2,
+            || async {
+                let mut manifest = minimal_manifest();
+                manifest.policy = Some(PolicySection {
+                    require_transparency_log: false,
+                    require_attestation_types: Vec::new(),
+                    min_slsa_level: None,
+                    trusted_builders: Vec::new(),
+                    require_attestation_expiry: true,
+                });
+
+                let missing_evidence = enforce_supply_chain_policy(&manifest, None)
+                    .expect_err("expiry-required policy must require evidence");
+                assert!(
+                    matches!(missing_evidence, RegistryError::AttestationEvidenceMissing),
+                    "expected AttestationEvidenceMissing, got {missing_evidence:?}"
+                );
+
+                let evidence = SupplyChainEvidence {
+                    transparency_log_present: false,
+                    tuf_verified: false,
+                    sigstore_verified: false,
+                    attestations: vec![AttestationEvidence {
+                        attestation_type: AttestationType::InToto,
+                        slsa_level: None,
+                        builder_id: None,
+                        expires_at: None,
+                    }],
+                };
+
+                let err = enforce_supply_chain_policy(&manifest, Some(&evidence))
+                    .expect_err("expiry-required policy must reject unset expires_at");
+                assert!(
+                    matches!(err, RegistryError::AttestationExpiryMissing { .. }),
+                    "expected AttestationExpiryMissing, got {err:?}"
+                );
+
+                RegistryLogData {
+                    connector_id: Some(manifest.connector.id.to_string()),
+                    reason_code: Some("expiry_only_policy_fail_closed".to_string()),
                     ..RegistryLogData::default()
                 }
             },
@@ -4597,7 +4671,7 @@ allowed_targets = ["z:work"]
 forbidden = []
 
 [capabilities]
-required = []
+required = ["test.op"]
 optional = []
 forbidden = ["system.exec"]
 

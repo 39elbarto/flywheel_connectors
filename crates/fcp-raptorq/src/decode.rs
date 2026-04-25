@@ -146,7 +146,7 @@ impl RaptorQDecoder {
 
         // Ignore exact duplicates, but reject conflicting payloads for the same ESI.
         if let Some(existing) = self.received.get(&esi) {
-            self.validate_duplicate_symbol(esi, existing, &data)?;
+            Self::validate_duplicate_symbol(esi, existing, &data)?;
             return Ok(None);
         }
 
@@ -206,9 +206,10 @@ impl RaptorQDecoder {
             return true;
         }
         // Otherwise honor the backoff schedule.
-        count >= self
-            .last_attempted_at_count
-            .saturating_add(self.post_k_retry_step)
+        count
+            >= self
+                .last_attempted_at_count
+                .saturating_add(self.post_k_retry_step)
     }
 
     /// Attempt to reconstruct the payload from buffered symbols.
@@ -561,7 +562,7 @@ impl RaptorQDecoder {
     pub fn needed(&self) -> u32 {
         // K' ≈ ceil(K × 1.002) using integer arithmetic to avoid f64
         // precision loss for large K values.
-        let overhead = (u64::from(self.k) * 2 + 999) / 1000;
+        let overhead = (u64::from(self.k) * 2).div_ceil(1000);
         let k_prime = u32::try_from(u64::from(self.k) + overhead).unwrap_or(u32::MAX);
         k_prime.max(1)
     }
@@ -657,7 +658,6 @@ impl RaptorQDecoder {
     }
 
     fn validate_duplicate_symbol(
-        &self,
         esi: u32,
         existing: &[u8],
         incoming: &[u8],
@@ -868,14 +868,14 @@ impl DecodeAdmissionController {
         let mut ordered_symbols: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
         for (index, (esi, data)) in symbols.into_iter().enumerate() {
             if let Some(existing) = decoder.received.get(&esi) {
-                decoder.validate_duplicate_symbol(esi, existing, &data)?;
+                RaptorQDecoder::validate_duplicate_symbol(esi, existing, &data)?;
                 continue;
             }
             decoder.validate_symbol_ingress(data.len())?;
 
             match ordered_symbols.entry(esi) {
                 Entry::Occupied(existing) => {
-                    decoder.validate_duplicate_symbol(esi, existing.get(), &data)?;
+                    RaptorQDecoder::validate_duplicate_symbol(esi, existing.get(), &data)?;
                     continue;
                 }
                 Entry::Vacant(slot) => {
@@ -1445,12 +1445,24 @@ mod tests {
 
             let decode_task = fcp_async_core::task::spawn(async move {
                 // Feed fewer source symbols than K so the decoder never
-                // reconstructs, and stay within the 1MB buffer limit
-                // (10_000 * 64 = 640 KB < 1 MB). The loop runs long enough
-                // (312 yield points at interval 32) for cancellation to
-                // propagate through context.run's biased select.
+                // reconstructs. The loop runs long enough (312 yield
+                // points at interval 32) for cancellation to propagate
+                // through context.run's biased select.
+                //
+                // Use a per-test config with a larger `max_object_size`
+                // because `validate_decode_bounds()` (added in commit
+                // 9ce1cacc8 on 2026-04-20) now refuses to start a decode
+                // whose declared `transfer_length` exceeds
+                // `max_object_size` — the default test_config 1 MiB cap
+                // would short-circuit the decode BEFORE acquiring an
+                // admission slot, leaving `controller.active_count()`
+                // stuck at 0 and breaking the rendezvous below.
+                let test_cfg = RaptorQConfig {
+                    max_object_size: 4 * 1024 * 1024,
+                    ..test_config()
+                };
                 let mut decoder =
-                    RaptorQDecoder::with_expected_symbols(50_000, 3_200_000, 64, &test_config());
+                    RaptorQDecoder::with_expected_symbols(50_000, 3_200_000, 64, &test_cfg);
                 let symbols: Vec<(u32, Vec<u8>)> =
                     (0..10_000).map(|esi| (esi, vec![0u8; 64])).collect();
                 task_controller
@@ -1579,9 +1591,18 @@ mod tests {
             let context = ExecutionContext::request_scoped(Duration::from_secs(5));
             let mut decoder = RaptorQDecoder::with_expected_symbols(4, 256, 64, &config);
 
+            // Second symbol is a TRUE duplicate of the first (same ESI,
+            // same payload). The duplicate detector (line 871) ignores
+            // exact duplicates without consuming an admission permit
+            // and without bumping `received_count`. A conflicting
+            // duplicate (same ESI, different payload) is a separate
+            // class of error covered by
+            // `decoder_rejects_conflicting_duplicate_esi_payload` and
+            // would land InvalidSymbol here, masking the
+            // InsufficientSymbols outcome under test.
             let symbols = vec![
                 (7, vec![0xAA; 64]),
-                (7, vec![0xBB; 64]),
+                (7, vec![0xAA; 64]),
                 (8, vec![0xCC; 64]),
             ];
 
@@ -1943,8 +1964,13 @@ mod tests {
         let oti = ObjectTransmissionInformation::new(640, 64, 1, 1, 8);
         let mut decoder = RaptorQDecoder::new(oti, &config);
 
+        // True duplicate: same ESI AND same payload. Production
+        // ignores it without bumping `received_count`. Conflicting
+        // duplicates (same ESI, different payload) are a separate
+        // error class covered by
+        // `decoder_rejects_conflicting_duplicate_esi_payload`.
         decoder.add_symbol(0, vec![1u8; 64]).unwrap();
-        decoder.add_symbol(0, vec![2u8; 64]).unwrap(); // duplicate ESI
+        decoder.add_symbol(0, vec![1u8; 64]).unwrap(); // exact duplicate, ignored
         decoder.add_symbol(1, vec![3u8; 64]).unwrap();
 
         assert_eq!(decoder.received_count(), 2);
@@ -2095,24 +2121,37 @@ mod tests {
 
     #[test]
     fn decoder_direct_add_symbol_enforces_symbol_slot_cap() {
+        // transfer_length=10, symbol_size=1 ⇒ K=10. K=10 is the smallest
+        // RaptorQ K' value (per RFC 6330's K' table), so K_padded == K
+        // and the [K..K_padded) virtual-padding range collapses to
+        // empty. That matters because once `received_count() >= K`,
+        // every `add_symbol` triggers a `try_reconstruct` whose
+        // pre-flight check rejects any buffered ESI in the padding
+        // range. Earlier this test used K=1 (K_padded=10), so the second
+        // iteration (ESI=1) tripped the padding-range check before
+        // reaching the slot cap.
+        //
+        // With K=10 and repair_ratio_bps=0, the `max_symbols_with_headroom`
+        // budget is K + 0 + 1000 = 1010. The loop fills exactly that,
+        // then the 1011th add must fail with `SymbolBufferExceeded`.
         let config = RaptorQConfig {
             symbol_size: 1,
             max_object_size: 2000,
             repair_ratio_bps: 0,
             ..test_config()
         };
-        let oti = ObjectTransmissionInformation::new(1, 1, 1, 1, 8);
+        let oti = ObjectTransmissionInformation::new(10, 1, 1, 1, 8);
         let mut decoder = RaptorQDecoder::new(oti, &config);
 
-        for esi in 0..1001 {
+        for esi in 0..1010 {
             decoder.add_symbol(esi, vec![0xAA]).unwrap();
         }
         let err = decoder
-            .add_symbol(1001, vec![0xBB])
+            .add_symbol(1010, vec![0xBB])
             .expect_err("direct add_symbol must cap total buffered symbol slots");
 
         assert!(matches!(err, DecodeError::SymbolBufferExceeded { .. }));
-        assert_eq!(decoder.received_count(), 1001);
+        assert_eq!(decoder.received_count(), 1010);
     }
 
     #[test]
@@ -2643,12 +2682,8 @@ mod tests {
         decoder.last_attempted_at_count = decoder.k;
         decoder.post_k_retry_step = 2;
         // Simulate receiving 2 more symbols — exactly the threshold.
-        decoder
-            .received
-            .insert(decoder.k, vec![0u8; 64]);
-        decoder
-            .received
-            .insert(decoder.k + 1, vec![0u8; 64]);
+        decoder.received.insert(decoder.k, vec![0u8; 64]);
+        decoder.received.insert(decoder.k + 1, vec![0u8; 64]);
         assert!(
             decoder.should_attempt_decode(decoder.k - 1),
             "reaching last_attempted + retry_step MUST trigger"

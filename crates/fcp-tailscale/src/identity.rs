@@ -567,6 +567,10 @@ mod tests {
 
     #[test]
     fn test_fcp_tags_filter() {
+        // `fcp_tags()` requires a valid attestation post-8a0d49596;
+        // build one over the exact (node_id, tags, node_keys) we'll
+        // hand to `MeshIdentity::new` so the surfaced filter sees the
+        // expected 2 FCP tags.
         let (owner_key, node_keys) = create_test_keys();
         let node_id = NodeId::new("test-node");
 
@@ -577,6 +581,8 @@ mod tests {
             TailscaleTag::new("tag:fcp-private").unwrap(),
         ];
 
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
         let identity = MeshIdentity::new(
             node_id,
             "test-host".to_string(),
@@ -584,7 +590,8 @@ mod tests {
             tags,
             owner_key.verifying_key(),
             node_keys,
-        );
+        )
+        .with_attestation(attestation);
 
         let fcp_tags = identity.fcp_tags();
         assert_eq!(fcp_tags.len(), 2);
@@ -957,7 +964,9 @@ mod tests {
 
     #[test]
     fn test_fcp_tags_all_fcp() {
+        // `fcp_tags()` requires a valid attestation post-8a0d49596.
         let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("all-fcp");
         let tags = vec![
             TailscaleTag::fcp_tag("owner"),
             TailscaleTag::fcp_tag("private"),
@@ -965,14 +974,17 @@ mod tests {
             TailscaleTag::fcp_tag("community"),
             TailscaleTag::fcp_tag("public"),
         ];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
         let identity = MeshIdentity::new(
-            NodeId::new("all-fcp"),
+            node_id,
             "host".to_string(),
             vec![],
             tags,
             owner_key.verifying_key(),
             node_keys,
-        );
+        )
+        .with_attestation(attestation);
         let fcp_tags = identity.fcp_tags();
         assert_eq!(fcp_tags.len(), 5);
         // All should be FCP tags
@@ -1276,7 +1288,9 @@ mod tests {
 
     #[test]
     fn test_fcp_tags_preserves_insertion_order() {
+        // `fcp_tags()` requires a valid attestation post-8a0d49596.
         let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("order-test");
         let tags = vec![
             TailscaleTag::fcp_tag("public"),
             TailscaleTag::new("tag:server").unwrap(),
@@ -1284,14 +1298,17 @@ mod tests {
             TailscaleTag::new("tag:web").unwrap(),
             TailscaleTag::fcp_tag("work"),
         ];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
         let identity = MeshIdentity::new(
-            NodeId::new("order-test"),
+            node_id,
             "host".to_string(),
             vec![],
             tags,
             owner_key.verifying_key(),
             node_keys,
-        );
+        )
+        .with_attestation(attestation);
         let fcp_tags = identity.fcp_tags();
         assert_eq!(fcp_tags.len(), 3);
         assert_eq!(fcp_tags[0].as_str(), "tag:fcp-public");
@@ -1324,10 +1341,30 @@ mod tests {
 
     #[test]
     fn test_node_id_serde_roundtrip_unicode() {
+        // The constructor `NodeId::new` is permissive (it wraps any
+        // string), but the serde deserialize path goes through
+        // `TryFrom<String>` → `TailscaleNodeId::try_new`, which rejects
+        // any non-ASCII codepoint. That means a NodeId containing
+        // Unicode is *not* round-trippable — the deserialize side fails
+        // closed with `InvalidNodeId("identifier must be ASCII")`.
+        //
+        // The original test asserted the round-trip succeeded; that
+        // hasn't been true since the NodeId validation was tightened
+        // in fcp-core (commit 19745bc08). The test was born broken.
+        // Repurpose it to pin the actual contract: serialization of a
+        // permissively-constructed Unicode NodeId emits its bytes (so
+        // log/audit pipelines can still record the offending value),
+        // but deserialization rejects it. That's the security-relevant
+        // invariant — it prevents an untrusted CBOR/JSON wire payload
+        // from smuggling in a non-canonical node identity.
         let id = NodeId::new("nöde-日本語");
         let json = serde_json::to_string(&id).unwrap();
-        let decoded: NodeId = serde_json::from_str(&json).unwrap();
-        assert_eq!(id, decoded);
+        let err = serde_json::from_str::<NodeId>(&json)
+            .expect_err("non-ASCII node ID must be rejected on deserialize");
+        assert!(
+            err.to_string().contains("must be ASCII"),
+            "expected ASCII-rejection message, got {err}"
+        );
     }
 
     #[test]
@@ -1412,18 +1449,31 @@ mod tests {
 
     #[test]
     fn test_mesh_identity_many_tags() {
+        // `fcp_tags()` was tightened in commit 8a0d49596 to surface
+        // tags ONLY when `is_attestation_valid()` holds — without an
+        // attestation it returns the empty Vec. The legacy form of
+        // this test built `MeshIdentity::new(...)` without an
+        // attestation and asserted `fcp_tags().len() == 10`, which
+        // post-tightening is unconditionally 0. Real production
+        // identities always carry a verified attestation; the test
+        // now mirrors that by signing with the owner key before
+        // asserting the surface count.
         let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("many-tags");
         let tags: Vec<TailscaleTag> = (0..10)
             .map(|i| TailscaleTag::fcp_tag(&format!("zone{i}")))
             .collect();
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
         let identity = MeshIdentity::new(
-            NodeId::new("many-tags"),
+            node_id,
             "host".to_string(),
             vec![],
             tags,
             owner_key.verifying_key(),
             node_keys,
-        );
+        )
+        .with_attestation(attestation);
         assert_eq!(identity.tags.len(), 10);
         assert_eq!(identity.fcp_tags().len(), 10);
     }
@@ -1872,16 +1922,21 @@ mod tests {
 
     #[test]
     fn test_fcp_tags_returns_references() {
+        // `fcp_tags()` requires a valid attestation post-8a0d49596.
         let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("ref-test");
         let tags = vec![TailscaleTag::fcp_tag("work")];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
         let identity = MeshIdentity::new(
-            NodeId::new("ref-test"),
+            node_id,
             "host".to_string(),
             vec![],
             tags,
             owner_key.verifying_key(),
             node_keys,
-        );
+        )
+        .with_attestation(attestation);
         let fcp_tags = identity.fcp_tags();
         assert_eq!(fcp_tags.len(), 1);
         // The reference should point into identity.tags
@@ -2088,16 +2143,21 @@ mod tests {
 
     #[test]
     fn test_mesh_identity_fcp_tags_with_bare_fcp_prefix() {
+        // `fcp_tags()` requires a valid attestation post-8a0d49596.
         let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("bare-fcp");
         let tags = vec![TailscaleTag::new("tag:fcp-").unwrap()];
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
         let identity = MeshIdentity::new(
-            NodeId::new("bare-fcp"),
+            node_id,
             "host".to_string(),
             vec![],
             tags,
             owner_key.verifying_key(),
             node_keys,
-        );
+        )
+        .with_attestation(attestation);
         // "tag:fcp-" is technically an FCP tag (starts with tag:fcp-)
         assert_eq!(identity.fcp_tags().len(), 1);
     }

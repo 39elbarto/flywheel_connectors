@@ -4994,6 +4994,7 @@ fn host_discovered_connector(
         runtime_format: "host-admin-api".to_owned(),
         state_model: MetadataField::Unknown,
         supported_zones: Vec::new(),
+        forbidden_zones: Vec::new(),
         detail: ConnectorDetail {
             summary: ConnectorSummary {
                 id: connector.summary.id.as_str().to_owned(),
@@ -26474,7 +26475,7 @@ allowed_targets = ["z:work"]
 forbidden = []
 
 [capabilities]
-required = ["network.dns"]
+required = ["network.dns", "fixture.echo"]
 optional = []
 forbidden = ["system.exec"]
 

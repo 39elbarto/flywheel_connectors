@@ -1295,7 +1295,7 @@ mod tests {
                 .iter()
                 .filter(|c| std::mem::discriminant(&c.category()) == std::mem::discriminant(cat))
                 .count();
-            assert!(count > 0, "Category {:?} has no error codes", cat,);
+            assert!(count > 0, "Category {:?} has no error codes", cat);
         }
     }
 
@@ -1303,7 +1303,7 @@ mod tests {
     fn expanded_exit_codes_are_in_valid_range() {
         for code in ALL_CODES {
             let exit = code.exit_code();
-            assert!(exit <= 128, "{:?} has exit code {} > 128", code, exit,);
+            assert!(exit <= 128, "{:?} has exit code {} > 128", code, exit);
         }
     }
 

@@ -1738,6 +1738,7 @@ pub struct DiscoveredConnector {
     pub runtime_format: String,
     pub state_model: MetadataField<String>,
     pub supported_zones: Vec<String>,
+    pub forbidden_zones: Vec<String>,
     pub detail: ConnectorDetail,
     pub zones: Value,
     pub capabilities: Value,
@@ -1841,6 +1842,12 @@ impl DiscoveredConnector {
             .as_ref()
             .is_some_and(|caps| caps.streaming || caps.replay)
             || !manifest.provides.events.is_empty();
+        let forbidden_zones = manifest
+            .zones
+            .forbidden
+            .iter()
+            .map(|zone| zone.as_str().to_owned())
+            .collect::<BTreeSet<_>>();
         let mut supported_zone_set = manifest
             .zones
             .allowed_sources
@@ -1849,6 +1856,10 @@ impl DiscoveredConnector {
             .map(|zone| zone.as_str().to_owned())
             .collect::<BTreeSet<_>>();
         supported_zone_set.insert(manifest.zones.home.as_str().to_owned());
+        for forbidden in &forbidden_zones {
+            supported_zone_set.remove(forbidden);
+        }
+        let forbidden_zones = forbidden_zones.into_iter().collect::<Vec<_>>();
         let supported_zones = supported_zone_set.into_iter().collect::<Vec<_>>();
         let connector_rate_limits = manifest.rate_limits.as_ref().map(|rate_limits| {
             rate_limits
@@ -1951,6 +1962,7 @@ impl DiscoveredConnector {
             runtime_format,
             state_model: MetadataField::from_option(state_model),
             supported_zones,
+            forbidden_zones,
             detail: ConnectorDetail {
                 summary,
                 operations: operation_summaries,
@@ -2052,6 +2064,13 @@ impl DiscoveredConnector {
 
     #[must_use]
     pub fn matches_zone(&self, zone: &str) -> bool {
+        if self
+            .forbidden_zones
+            .iter()
+            .any(|candidate| zone_selector_matches(candidate, zone))
+        {
+            return false;
+        }
         self.supported_zones
             .iter()
             .any(|candidate| zone_selector_matches(candidate, zone))
@@ -2543,7 +2562,9 @@ fn discovered_connector_from_toml(
     } else {
         MetadataField::Unknown
     };
-    let supported_zones = extract_supported_zones_from_toml(document.get("zones"));
+    let zones_table = document.get("zones");
+    let supported_zones = extract_supported_zones_from_toml(zones_table);
+    let forbidden_zones = extract_forbidden_zones_from_toml(zones_table);
     let summary_archetypes = declared_metadata_field(archetypes);
     let connector_archetypes_schema = serde_json::to_value(summary_archetypes.as_known())?;
 
@@ -2634,6 +2655,7 @@ fn discovered_connector_from_toml(
         runtime_format,
         state_model: MetadataField::from_option(state_model),
         supported_zones,
+        forbidden_zones,
         detail: ConnectorDetail {
             summary,
             operations: operation_summaries,
@@ -2842,14 +2864,47 @@ fn extract_supported_zones_from_toml(zones: Option<&toml::Value>) -> Vec<String>
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let forbidden = extract_zone_string_array(zones, "forbidden")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
 
     allowed_sources
         .into_iter()
         .chain(allowed_targets)
         .chain(home)
+        .filter(|zone| !forbidden.contains(zone))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn extract_forbidden_zones_from_toml(zones: Option<&toml::Value>) -> Vec<String> {
+    let Some(zones) = zones.and_then(toml::Value::as_table) else {
+        return Vec::new();
+    };
+
+    extract_zone_string_array(zones, "forbidden")
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn extract_zone_string_array(
+    zones: &toml::map::Map<String, toml::Value>,
+    field: &str,
+) -> Vec<String> {
+    zones
+        .get(field)
+        .and_then(toml::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 fn normalize_archetype_labels_from_toml(labels: Vec<&str>) -> Vec<String> {
@@ -7613,7 +7668,7 @@ migration_hint = "init"
 
 [zones]
 home = "z:work"
-allowed_sources = ["z:work", "z:project:*"]
+allowed_sources = ["z:work"]
 allowed_targets = ["z:work"]
 forbidden = []
 
@@ -7739,9 +7794,9 @@ migration_hint = "init"
 
 [zones]
 home = "z:work"
-allowed_sources = ["z:work"]
+allowed_sources = ["z:work", "z:project:*"]
 allowed_targets = ["z:work"]
-forbidden = []
+forbidden = ["z:project:blocked"]
 
 [capabilities]
 required = ["network.dns"]
@@ -7791,7 +7846,12 @@ deny_ptrace = true
             discovered.supported_zones,
             vec!["z:project:*".to_owned(), "z:work".to_owned()]
         );
+        assert_eq!(
+            discovered.forbidden_zones,
+            vec!["z:project:blocked".to_owned()]
+        );
         assert!(discovered.matches_zone("z:project:alpha"));
+        assert!(!discovered.matches_zone("z:project:blocked"));
         assert!(!discovered.matches_zone("z:private"));
         assert_eq!(
             discovered.connector_schema["connector"]["archetypes"],
@@ -7818,9 +7878,9 @@ format = "wasi"
 
 [zones]
 home = "z:work"
-allowed_sources = ["z:work"]
+allowed_sources = ["z:work", "z:project:*"]
 allowed_targets = ["z:work"]
-forbidden = []
+forbidden = ["z:project:blocked"]
 
 [capabilities]
 required = []
@@ -7863,6 +7923,12 @@ deny_ptrace = true
         assert_eq!(discovered.detail.summary.has_events.status_tag(), "unknown");
         assert_eq!(discovered.manifest_status, Some(ConnectorStatus::Ready));
         assert!(!discovered.hidden_by_default);
+        assert_eq!(
+            discovered.forbidden_zones,
+            vec!["z:project:blocked".to_owned()]
+        );
+        assert!(discovered.matches_zone("z:project:alpha"));
+        assert!(!discovered.matches_zone("z:project:blocked"));
         assert_eq!(
             discovered.connector_schema["connector"]["archetypes"],
             Value::Null

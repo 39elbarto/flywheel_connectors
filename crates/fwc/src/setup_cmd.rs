@@ -889,7 +889,7 @@ fn probe_runtime() -> ComponentHealth {
 /// resolver or an HTTP stack for a setup-time check and is fast enough
 /// to be safe from the CLI default path.
 fn probe_connectivity() -> ComponentHealth {
-    use std::net::{SocketAddr, TcpStream};
+    use std::net::{Shutdown, SocketAddr, TcpStream};
     use std::time::Duration;
 
     // 1.1.1.1:53 — Cloudflare public DNS. Chosen because it is globally
@@ -897,8 +897,11 @@ fn probe_connectivity() -> ComponentHealth {
     // even when HTTP(S) is, and it's an IP literal so the probe itself
     // never depends on working DNS resolution.
     let addr: SocketAddr = "1.1.1.1:53".parse().expect("static socket address literal");
-    match TcpStream::connect_timeout(&addr, Duration::from_millis(1000)) {
-        Ok(_stream) => ComponentHealth::healthy(SetupComponent::Connectivity),
+    match TcpStream::connect_timeout(&addr, Duration::from_secs(1)) {
+        Ok(stream) => {
+            let _ = stream.shutdown(Shutdown::Both);
+            ComponentHealth::healthy(SetupComponent::Connectivity)
+        }
         Err(err) => ComponentHealth::degraded(
             SetupComponent::Connectivity,
             format!("unable to reach 1.1.1.1:53 within 1s: {err}"),
@@ -1047,10 +1050,8 @@ pub fn repair_setup(args: &SetupRepairArgs, check_result: &SetupCheckResult) -> 
     if args.auto_fix {
         // Apply only auto-safe (reversible) actions.
         for action in &mut actions {
-            if action.is_auto_safe() {
-                if execute_repair_action(action).is_err() {
-                    failure_count += 1;
-                }
+            if action.is_auto_safe() && execute_repair_action(action).is_err() {
+                failure_count += 1;
             }
         }
     } else {
@@ -1124,8 +1125,7 @@ fn execute_repair_action(action: &mut RepairAction) -> Result<(), String> {
 
 /// Create `$HOME/.fcp/` if missing. Returns the resolved path.
 fn ensure_fcp_home_dir() -> Result<PathBuf, String> {
-    let home =
-        fcp_home_dir().ok_or_else(|| "HOME environment variable is not set".to_owned())?;
+    let home = fcp_home_dir().ok_or_else(|| "HOME environment variable is not set".to_owned())?;
     std::fs::create_dir_all(&home)
         .map_err(|err| format!("failed to create {}: {err}", home.display()))?;
     Ok(home)
@@ -1134,7 +1134,8 @@ fn ensure_fcp_home_dir() -> Result<PathBuf, String> {
 /// Create `$HOME/.fcp/credentials/` if missing.
 fn ensure_credentials_dir(home: &std::path::Path) -> Result<(), String> {
     let dir = home.join("credentials");
-    std::fs::create_dir_all(&dir).map_err(|err| format!("failed to create {}: {err}", dir.display()))
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| format!("failed to create {}: {err}", dir.display()))
 }
 
 /// Create `./fcp.toml` marker + `./.fcp/` directory in the current
@@ -3266,8 +3267,11 @@ mod tests {
         // `cmd.exe`, skipped here.
         if !cfg!(windows) {
             let hit = which_binary("sh");
-            assert!(hit.is_some(), "which_binary('sh') returned None; PATH = {:?}",
-                std::env::var_os("PATH"));
+            assert!(
+                hit.is_some(),
+                "which_binary('sh') returned None; PATH = {:?}",
+                std::env::var_os("PATH")
+            );
         }
     }
 
@@ -3329,7 +3333,13 @@ mod tests {
 
         assert_eq!(health.component, SetupComponent::Context);
         assert_eq!(health.status, ComponentStatus::Missing);
-        assert!(health.remediation.as_deref().unwrap_or("").contains("setup init"));
+        assert!(
+            health
+                .remediation
+                .as_deref()
+                .unwrap_or("")
+                .contains("setup init")
+        );
     }
 
     #[test]
@@ -3337,8 +3347,7 @@ mod tests {
         let _guard = lock_cwd();
         let prev_cwd = std::env::current_dir().expect("read cwd");
         let tmp = tempfile::TempDir::new().expect("create tempdir");
-        std::fs::write(tmp.path().join("fcp.toml"), "# test marker")
-            .expect("write fcp.toml");
+        std::fs::write(tmp.path().join("fcp.toml"), "# test marker").expect("write fcp.toml");
         std::env::set_current_dir(tmp.path()).expect("chdir to tempdir");
 
         let health = probe_context();

@@ -3482,7 +3482,7 @@ fn run_prechecks(
     // Check 5: No secrets in generated files
     let has_secrets = files
         .iter()
-        .any(|(_, content, _)| content.contains("password") || content.contains("api_key"));
+        .any(|(_, content, _)| content_has_plaintext_secret_marker(content));
     checks.push(PrecheckItem {
         id: "scaffold.no_secrets".to_string(),
         description: "No plaintext secrets in generated files".to_string(),
@@ -3561,6 +3561,31 @@ fn run_prechecks(
     });
 
     PrecheckResults::passed(checks)
+}
+
+fn content_has_plaintext_secret_marker(content: &str) -> bool {
+    content.lines().any(|line| {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//")
+            || trimmed.starts_with("//!")
+            || trimmed.starts_with("///")
+            || trimmed.starts_with('#')
+        {
+            return false;
+        }
+
+        let lower = trimmed.to_ascii_lowercase();
+        [
+            "password =",
+            "password=",
+            "password:",
+            "api_key =",
+            "api_key=",
+            "api_key:",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+    })
 }
 
 /// Check an existing connector directory for compliance.
@@ -5876,7 +5901,7 @@ members = ["crates/alpha", "connectors/new"]
         )
         .unwrap();
         assert!(content.contains("status = \"incubating\""));
-        assert!(content.contains("required = []"));
+        assert!(content.contains("required = [\"test.scaffold_status\"]"));
         assert!(content.contains("test.scaffold_status"));
         assert!(!content.contains("network.outbound"));
     }

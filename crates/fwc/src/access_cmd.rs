@@ -29,6 +29,7 @@ pub enum BlockerSeverity {
 }
 
 impl BlockerSeverity {
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Info => "info",
@@ -38,6 +39,7 @@ impl BlockerSeverity {
         }
     }
 
+    #[must_use]
     pub const fn icon(self) -> &'static str {
         match self {
             Self::Info => "i",
@@ -48,6 +50,7 @@ impl BlockerSeverity {
     }
 
     /// Whether this severity blocks access.
+    #[must_use]
     pub const fn is_blocking(self) -> bool {
         matches!(self, Self::Error | Self::Critical)
     }
@@ -80,6 +83,7 @@ pub enum BundleStatus {
 }
 
 impl BundleStatus {
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -92,11 +96,13 @@ impl BundleStatus {
     }
 
     /// Whether grants in this bundle can be used.
+    #[must_use]
     pub const fn is_usable(self) -> bool {
         matches!(self, Self::Active | Self::Partial)
     }
 
     /// Whether this is a terminal state.
+    #[must_use]
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Revoked | Self::Expired | Self::Denied)
     }
@@ -125,6 +131,7 @@ pub enum GrantScope {
 }
 
 impl GrantScope {
+    #[must_use]
     pub const fn label(&self) -> &'static str {
         match self {
             Self::Operation => "operation",
@@ -166,6 +173,7 @@ pub enum AuditAction {
 }
 
 impl AuditAction {
+    #[must_use]
     pub const fn label(&self) -> &'static str {
         match self {
             Self::Check => "check",
@@ -211,17 +219,20 @@ impl AccessCheckArgs {
         }
     }
 
+    #[must_use]
     pub fn with_zone(mut self, zone: impl Into<String>) -> Self {
         self.zone = Some(zone.into());
         self
     }
 
+    #[must_use]
     pub fn with_context(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.context.insert(key.into(), value.into());
         self
     }
 
     /// Validate arguments, returning errors if invalid.
+    #[must_use]
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
         if self.connector.is_empty() {
@@ -262,16 +273,19 @@ impl AccessPlanArgs {
         }
     }
 
+    #[must_use]
     pub const fn with_dry_run(mut self) -> Self {
         self.dry_run = true;
         self
     }
 
+    #[must_use]
     pub fn with_context(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.context.insert(key.into(), value.into());
         self
     }
 
+    #[must_use]
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
         if self.connector.is_empty() {
@@ -308,6 +322,7 @@ impl AccessRequestArgs {
         }
     }
 
+    #[must_use]
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
         if self.connector.is_empty() {
@@ -337,6 +352,7 @@ impl AccessAttachArgs {
         }
     }
 
+    #[must_use]
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
         if self.handle.is_empty() {
@@ -363,6 +379,7 @@ impl AccessResumeArgs {
         }
     }
 
+    #[must_use]
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
         if self.handle.is_empty() {
@@ -395,16 +412,19 @@ impl AccessInspectArgs {
         }
     }
 
+    #[must_use]
     pub fn with_operation(mut self, op: impl Into<String>) -> Self {
         self.operation = Some(op.into());
         self
     }
 
+    #[must_use]
     pub const fn with_verbose(mut self) -> Self {
         self.verbose = true;
         self
     }
 
+    #[must_use]
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
         if self.connector.is_empty() {
@@ -448,12 +468,14 @@ impl AccessBlocker {
         }
     }
 
+    #[must_use]
     pub fn with_remediation(mut self, hint: impl Into<String>) -> Self {
         self.remediation = Some(hint.into());
         self
     }
 
     /// Whether this blocker actually prevents access.
+    #[must_use]
     pub const fn is_blocking(&self) -> bool {
         self.severity.is_blocking()
     }
@@ -506,16 +528,19 @@ impl AccessCheckResult {
     }
 
     /// Number of blocking issues (error or critical severity).
+    #[must_use]
     pub fn blocking_count(&self) -> usize {
         self.blockers.iter().filter(|b| b.is_blocking()).count()
     }
 
     /// Number of warnings (non-blocking).
+    #[must_use]
     pub fn warning_count(&self) -> usize {
         self.blockers.iter().filter(|b| !b.is_blocking()).count()
     }
 
     /// Whether the result has any blockers at all.
+    #[must_use]
     pub fn has_blockers(&self) -> bool {
         !self.blockers.is_empty()
     }
@@ -547,17 +572,20 @@ impl AccessPlanStep {
         }
     }
 
+    #[must_use]
     pub const fn with_approval(mut self) -> Self {
         self.requires_approval = true;
         self
     }
 
+    #[must_use]
     pub fn with_side_effect(mut self, effect: impl Into<String>) -> Self {
         self.side_effects.push(effect.into());
         self
     }
 
     /// Whether this step has side effects.
+    #[must_use]
     pub fn has_side_effects(&self) -> bool {
         !self.side_effects.is_empty()
     }
@@ -592,37 +620,44 @@ impl AccessPlan {
         }
     }
 
+    #[must_use]
     pub fn with_step(mut self, step: AccessPlanStep) -> Self {
         self.steps.push(step);
         self
     }
 
+    #[must_use]
     pub const fn with_estimated_duration(mut self, d: Duration) -> Self {
         self.estimated_duration = Some(d);
         self
     }
 
+    #[must_use]
     pub fn with_prerequisite(mut self, prereq: impl Into<String>) -> Self {
         self.prerequisites.push(prereq.into());
         self
     }
 
+    #[must_use]
     pub const fn with_dry_run(mut self) -> Self {
         self.dry_run = true;
         self
     }
 
     /// Total number of steps.
+    #[must_use]
     pub fn step_count(&self) -> usize {
         self.steps.len()
     }
 
     /// Number of steps requiring approval.
+    #[must_use]
     pub fn approval_steps(&self) -> usize {
         self.steps.iter().filter(|s| s.requires_approval).count()
     }
 
     /// Whether the plan has unmet prerequisites.
+    #[must_use]
     pub fn has_prerequisites(&self) -> bool {
         !self.prerequisites.is_empty()
     }
@@ -633,6 +668,7 @@ impl AccessPlan {
     }
 
     /// Validate step ordering — indices must be sequential from 0.
+    #[must_use]
     pub fn validate_step_order(&self) -> Vec<String> {
         let mut errors = Vec::new();
         for (i, step) in self.steps.iter().enumerate() {
@@ -679,22 +715,26 @@ impl AccessGrant {
         }
     }
 
+    #[must_use]
     pub const fn non_revocable(mut self) -> Self {
         self.revocable = false;
         self
     }
 
     /// Whether the grant has expired.
+    #[must_use]
     pub fn is_expired(&self) -> bool {
         Utc::now() >= self.expires_at
     }
 
     /// Whether the grant is still active.
+    #[must_use]
     pub fn is_active(&self) -> bool {
         !self.is_expired()
     }
 
     /// Remaining time until expiry. Returns zero if expired.
+    #[must_use]
     pub fn remaining(&self) -> chrono::Duration {
         let now = Utc::now();
         if now >= self.expires_at {
@@ -705,6 +745,7 @@ impl AccessGrant {
     }
 
     /// Human-readable remaining time.
+    #[must_use]
     pub fn remaining_display(&self) -> String {
         let remaining = self.remaining();
         if remaining.is_zero() {
@@ -750,42 +791,50 @@ impl AccessBundle {
         }
     }
 
+    #[must_use]
     pub fn with_grant(mut self, grant: AccessGrant) -> Self {
         self.grants.push(grant);
         self
     }
 
+    #[must_use]
     pub const fn with_status(mut self, status: BundleStatus) -> Self {
         self.status = status;
         self
     }
 
+    #[must_use]
     pub fn with_receipt(mut self, receipt: impl Into<String>) -> Self {
         self.receipt = Some(receipt.into());
         self
     }
 
+    #[must_use]
     pub fn with_justification(mut self, j: impl Into<String>) -> Self {
         self.justification = Some(j.into());
         self
     }
 
     /// Number of grants in the bundle.
+    #[must_use]
     pub fn grant_count(&self) -> usize {
         self.grants.len()
     }
 
     /// Number of active (non-expired) grants.
+    #[must_use]
     pub fn active_grant_count(&self) -> usize {
         self.grants.iter().filter(|g| g.is_active()).count()
     }
 
     /// Whether the bundle is usable (active or partial).
+    #[must_use]
     pub const fn is_usable(&self) -> bool {
         self.status.is_usable()
     }
 
     /// Whether the bundle is in a terminal state.
+    #[must_use]
     pub const fn is_terminal(&self) -> bool {
         self.status.is_terminal()
     }
@@ -814,6 +863,10 @@ impl AccessBundle {
     ///
     /// Sets the bundle to Denied status, effectively withdrawing the
     /// request before approval.  Only valid from Pending state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bundle is not pending.
     pub fn abandon(&mut self) -> Result<(), &'static str> {
         if self.status != BundleStatus::Pending {
             return Err("can only abandon a pending bundle");
@@ -826,6 +879,7 @@ impl AccessBundle {
     ///
     /// A bundle is stale when it was created too long ago (beyond the
     /// given max age) and is still pending.
+    #[must_use]
     pub fn is_stale_context(&self, max_age: chrono::Duration) -> bool {
         self.status == BundleStatus::Pending
             && Utc::now().signed_duration_since(self.created_at) > max_age
@@ -834,10 +888,13 @@ impl AccessBundle {
     /// Check whether a resume attempt is valid.
     ///
     /// Returns an error string if the bundle cannot be resumed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bundle is not active or partial.
     pub fn validate_resume(&self) -> Result<(), String> {
         match self.status {
-            BundleStatus::Active => Ok(()),
-            BundleStatus::Partial => Ok(()),
+            BundleStatus::Active | BundleStatus::Partial => Ok(()),
             BundleStatus::Pending => Err("bundle is still pending approval".into()),
             BundleStatus::Revoked => Err("bundle has been revoked — request a new one".into()),
             BundleStatus::Expired => Err("bundle has expired — request a new one".into()),
@@ -874,6 +931,7 @@ impl AuditEntry {
         }
     }
 
+    #[must_use]
     pub fn with_details(mut self, d: impl Into<String>) -> Self {
         self.details = Some(d.into());
         self
@@ -935,42 +993,50 @@ impl AccessInspection {
         }
     }
 
+    #[must_use]
     pub fn with_operation(mut self, op: impl Into<String>) -> Self {
         self.operation = Some(op.into());
         self
     }
 
+    #[must_use]
     pub fn with_grant(mut self, g: AccessGrant) -> Self {
         self.grants.push(g);
         self
     }
 
+    #[must_use]
     pub fn with_session(mut self, s: ActiveSession) -> Self {
         self.active_sessions.push(s);
         self
     }
 
+    #[must_use]
     pub fn with_audit_entry(mut self, e: AuditEntry) -> Self {
         self.audit_trail.push(e);
         self
     }
 
     /// Number of active grants.
+    #[must_use]
     pub fn active_grant_count(&self) -> usize {
         self.grants.iter().filter(|g| g.is_active()).count()
     }
 
     /// Total audit entries.
+    #[must_use]
     pub fn audit_count(&self) -> usize {
         self.audit_trail.len()
     }
 
     /// Whether there are any active sessions.
+    #[must_use]
     pub fn has_active_sessions(&self) -> bool {
         !self.active_sessions.is_empty()
     }
 
     /// Whether there are any grants.
+    #[must_use]
     pub fn has_grants(&self) -> bool {
         !self.grants.is_empty()
     }
@@ -979,6 +1045,7 @@ impl AccessInspection {
 // ── Handle validation ────────────────────────────────────────────────
 
 /// Valid handle format: non-empty, ASCII alphanumeric plus `_`, `-`, `.`.
+#[must_use]
 pub fn is_valid_handle(handle: &str) -> bool {
     if handle.is_empty() {
         return false;
@@ -989,6 +1056,7 @@ pub fn is_valid_handle(handle: &str) -> bool {
 }
 
 /// Generate a deterministic handle from components.
+#[must_use]
 pub fn generate_handle(prefix: &str, connector: &str, operation: &str) -> String {
     let hash_input = format!(
         "{prefix}:{connector}:{operation}:{}",
@@ -1006,6 +1074,7 @@ pub struct AccessBundleStore {
 
 impl AccessBundleStore {
     /// Create a store at the default location.
+    #[must_use]
     pub fn default_path() -> Self {
         if let Ok(dir) = std::env::var("FWC_ACCESS_BUNDLE_DIR")
             && !dir.trim().is_empty()
@@ -1056,11 +1125,17 @@ impl AccessBundleStore {
     }
 
     /// Create a store at a custom path.
+    #[must_use]
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
     }
 
     /// Save a bundle to disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the bundle directory cannot be created, the bundle
+    /// cannot be serialized, or the bundle file cannot be written.
     pub fn save(&self, bundle: &AccessBundle) -> Result<(), String> {
         std::fs::create_dir_all(&self.dir).map_err(|err| {
             format!(
@@ -1069,8 +1144,12 @@ impl AccessBundleStore {
             )
         })?;
         let path = self.bundle_path(&bundle.handle);
-        let json = serde_json::to_string_pretty(bundle)
-            .map_err(|err| format!("failed to serialize access bundle '{}': {err}", bundle.handle))?;
+        let json = serde_json::to_string_pretty(bundle).map_err(|err| {
+            format!(
+                "failed to serialize access bundle '{}': {err}",
+                bundle.handle
+            )
+        })?;
         std::fs::write(&path, json).map_err(|err| {
             format!(
                 "failed to write access bundle '{}' to '{}': {err}",
@@ -1082,6 +1161,11 @@ impl AccessBundleStore {
     }
 
     /// Load a bundle by handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the bundle file cannot be read, cannot be parsed, or
+    /// contains a handle that does not match the requested handle.
     pub fn load(&self, handle: &str) -> Result<Option<AccessBundle>, String> {
         let path = self.bundle_path(handle);
         if !path.exists() {
@@ -1130,6 +1214,10 @@ impl AccessBundleStore {
 ///
 /// Returns an `AccessCheckResult` indicating whether the specified
 /// operation is currently allowed and listing any blockers.
+///
+/// # Errors
+///
+/// Returns an error when the supplied arguments are invalid.
 pub fn check_access(args: &AccessCheckArgs) -> Result<AccessCheckResult, String> {
     let errors = args.validate();
     if !errors.is_empty() {
@@ -1184,6 +1272,10 @@ pub fn check_access(args: &AccessCheckArgs) -> Result<AccessCheckResult, String>
 ///
 /// Returns an `AccessPlan` describing the steps needed to gain access
 /// to the specified operation.
+///
+/// # Errors
+///
+/// Returns an error when the supplied arguments are invalid.
 pub fn plan_access(args: &AccessPlanArgs) -> Result<AccessPlan, String> {
     let errors = args.validate();
     if !errors.is_empty() {
@@ -1231,12 +1323,22 @@ pub fn plan_access(args: &AccessPlanArgs) -> Result<AccessPlan, String> {
 }
 
 /// Request access (side-effecting) — returns a bundle handle.
+///
+/// # Errors
+///
+/// Returns an error when the request arguments are invalid or the bundle cannot
+/// be persisted in the default store.
 pub fn request_access(args: &AccessRequestArgs) -> Result<AccessBundle, String> {
     let store = AccessBundleStore::default_path();
     request_access_with_store(args, &store)
 }
 
 /// Request access and persist the resulting bundle in the provided store.
+///
+/// # Errors
+///
+/// Returns an error when the request arguments are invalid or the bundle cannot
+/// be persisted in the provided store.
 pub fn request_access_with_store(
     args: &AccessRequestArgs,
     store: &AccessBundleStore,
@@ -1266,12 +1368,22 @@ pub fn request_access_with_store(
 }
 
 /// Attach a bundle or approval handle to the current session.
+///
+/// # Errors
+///
+/// Returns an error when the handle is invalid, missing from the default store,
+/// or cannot be loaded from disk.
 pub fn attach_bundle(args: &AccessAttachArgs) -> Result<AccessBundle, String> {
     let store = AccessBundleStore::default_path();
     attach_bundle_with_store(args, &store)
 }
 
 /// Attach a persisted bundle from the provided store.
+///
+/// # Errors
+///
+/// Returns an error when the handle is invalid, missing from the provided store,
+/// or cannot be loaded from disk.
 pub fn attach_bundle_with_store(
     args: &AccessAttachArgs,
     store: &AccessBundleStore,
@@ -1287,6 +1399,10 @@ pub fn attach_bundle_with_store(
 }
 
 /// Resume a previous access session from a handle.
+///
+/// # Errors
+///
+/// Returns an error when the handle is invalid or represents an expired session.
 pub fn resume_access(args: &AccessResumeArgs) -> Result<AccessBundle, String> {
     let errors = args.validate();
     if !errors.is_empty() {
@@ -1306,6 +1422,10 @@ pub fn resume_access(args: &AccessResumeArgs) -> Result<AccessBundle, String> {
 }
 
 /// Inspect access state for a connector.
+///
+/// # Errors
+///
+/// Returns an error when the supplied arguments are invalid.
 pub fn inspect_access(args: &AccessInspectArgs) -> Result<AccessInspection, String> {
     let errors = args.validate();
     if !errors.is_empty() {
@@ -1323,6 +1443,7 @@ pub fn inspect_access(args: &AccessInspectArgs) -> Result<AccessInspection, Stri
 // ── TOON formatters ──────────────────────────────────────────────────
 
 /// Format an access check result as TOON lines.
+#[must_use]
 pub fn format_check_toon(result: &AccessCheckResult) -> Vec<String> {
     let mut lines = Vec::new();
 
@@ -1363,6 +1484,7 @@ pub fn format_check_toon(result: &AccessCheckResult) -> Vec<String> {
 }
 
 /// Format an access plan as TOON lines.
+#[must_use]
 pub fn format_plan_toon(plan: &AccessPlan) -> Vec<String> {
     let mut lines = Vec::new();
 
@@ -1406,6 +1528,7 @@ pub fn format_plan_toon(plan: &AccessPlan) -> Vec<String> {
 }
 
 /// Format an access bundle as TOON lines.
+#[must_use]
 pub fn format_bundle_toon(bundle: &AccessBundle) -> Vec<String> {
     let mut lines = Vec::new();
 
@@ -1440,6 +1563,7 @@ pub fn format_bundle_toon(bundle: &AccessBundle) -> Vec<String> {
 }
 
 /// Format an access grant as TOON lines.
+#[must_use]
 pub fn format_grant_toon(grant: &AccessGrant) -> Vec<String> {
     let mut lines = Vec::new();
 
@@ -1463,6 +1587,7 @@ pub fn format_grant_toon(grant: &AccessGrant) -> Vec<String> {
 }
 
 /// Format a blocker as TOON lines.
+#[must_use]
 pub fn format_blocker_toon(blocker: &AccessBlocker) -> Vec<String> {
     let mut lines = Vec::new();
 
@@ -1480,6 +1605,7 @@ pub fn format_blocker_toon(blocker: &AccessBlocker) -> Vec<String> {
 }
 
 /// Format an inspection as TOON lines.
+#[must_use]
 pub fn format_inspection_toon(inspection: &AccessInspection) -> Vec<String> {
     let mut lines = Vec::new();
 
@@ -1551,6 +1677,7 @@ pub fn format_inspection_toon(inspection: &AccessInspection) -> Vec<String> {
 }
 
 /// Format an audit entry as TOON lines.
+#[must_use]
 pub fn format_audit_entry_toon(entry: &AuditEntry) -> Vec<String> {
     let mut lines = Vec::new();
 
@@ -1589,6 +1716,7 @@ pub enum RemedyFamily {
 }
 
 impl RemedyFamily {
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Refresh => "refresh",
@@ -1601,15 +1729,14 @@ impl RemedyFamily {
     }
 
     /// Classify a `BlockerType` into its remedy family.
+    #[must_use]
     pub const fn from_blocker(bt: BlockerType) -> Self {
         match bt {
-            BlockerType::MissingCapability => Self::ReApprove,
-            BlockerType::CeilingViolation => Self::PolicyChange,
-            BlockerType::ApprovalGated => Self::ReApprove,
+            BlockerType::MissingCapability | BlockerType::ApprovalGated => Self::ReApprove,
+            BlockerType::CeilingViolation | BlockerType::PolicyDenied => Self::PolicyChange,
             BlockerType::ZoneMismatch => Self::ZoneSwitch,
             BlockerType::OverBroadRequest => Self::ShrinkRequest,
             BlockerType::ExpiredCredential => Self::Refresh,
-            BlockerType::PolicyDenied => Self::PolicyChange,
         }
     }
 }
@@ -1626,7 +1753,7 @@ impl fmt::Display for RemedyFamily {
 pub struct BlockerDiagnosis {
     /// The blocker being diagnosed.
     pub blocker_type: BlockerType,
-    /// FCP_ERR code.
+    /// `FCP_ERR` code.
     pub fcp_err_code: String,
     /// Human-readable summary.
     pub summary: String,
@@ -1653,16 +1780,19 @@ impl BlockerDiagnosis {
         }
     }
 
+    #[must_use]
     pub fn with_next_command(mut self, cmd: impl Into<String>) -> Self {
         self.next_commands.push(cmd.into());
         self
     }
 
-    pub fn with_freshness_issue(mut self) -> Self {
+    #[must_use]
+    pub const fn with_freshness_issue(mut self) -> Self {
         self.is_freshness_issue = true;
         self
     }
 
+    #[must_use]
     pub fn with_failed_object(mut self, obj: impl Into<String>) -> Self {
         self.failed_object = Some(obj.into());
         self
@@ -1670,6 +1800,7 @@ impl BlockerDiagnosis {
 }
 
 /// Diagnose a typed blocker into a full structured explanation.
+#[must_use]
 pub fn diagnose_blocker(
     blocker: &TypedBlocker,
     connector: &str,
@@ -1735,6 +1866,7 @@ pub fn diagnose_blocker(
 }
 
 /// Format a blocker diagnosis as TOON lines.
+#[must_use]
 pub fn format_diagnosis_toon(diag: &BlockerDiagnosis) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(format!("[{}] {}", diag.fcp_err_code, diag.summary));
@@ -1771,6 +1903,7 @@ pub enum AuthorizationVerdict {
 }
 
 impl AuthorizationVerdict {
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::Allowed => "allowed",
@@ -1807,6 +1940,7 @@ pub enum BlockerType {
 }
 
 impl BlockerType {
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::MissingCapability => "FCP_ERR_MISSING_CAPABILITY",
@@ -1842,6 +1976,7 @@ pub struct GrantDiffEntry {
 }
 
 impl GrantDiffEntry {
+    #[must_use]
     pub fn new(
         capability: impl Into<String>,
         scope: GrantScope,
@@ -1857,6 +1992,7 @@ impl GrantDiffEntry {
         }
     }
 
+    #[must_use]
     pub fn with_rationale(mut self, rationale: impl Into<String>) -> Self {
         self.rationale = rationale.into();
         self
@@ -1897,7 +2033,8 @@ pub struct GrantDiff {
 }
 
 impl GrantDiff {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {
             entries: Vec::new(),
             is_minimal: true,
@@ -1905,11 +2042,13 @@ impl GrantDiff {
         }
     }
 
+    #[must_use]
     pub fn with_entry(mut self, entry: GrantDiffEntry) -> Self {
         self.entries.push(entry);
         self
     }
 
+    #[must_use]
     pub fn with_alternative(mut self, alt: GrantDiffAlternative) -> Self {
         self.alternatives.push(alt);
         self.is_minimal = false;
@@ -1917,11 +2056,13 @@ impl GrantDiff {
     }
 
     /// Total number of grants to add or modify.
+    #[must_use]
     pub fn change_count(&self) -> usize {
         self.entries.len()
     }
 
     /// Whether alternatives exist (over-broad request).
+    #[must_use]
     pub fn has_alternatives(&self) -> bool {
         !self.alternatives.is_empty()
     }
@@ -1947,6 +2088,7 @@ pub struct GrantDiffAlternative {
 }
 
 impl GrantDiffAlternative {
+    #[must_use]
     pub fn new(
         description: impl Into<String>,
         scope: GrantScope,
@@ -1967,7 +2109,7 @@ impl GrantDiffAlternative {
 pub struct CapabilityGapAnalysis {
     /// Authorization verdict.
     pub verdict: AuthorizationVerdict,
-    /// Typed blockers with FCP_ERR codes.
+    /// Typed blockers with `FCP_ERR` codes.
     pub blockers: Vec<TypedBlocker>,
     /// Least-privilege grant diff (empty if already allowed).
     pub grant_diff: GrantDiff,
@@ -1982,6 +2124,7 @@ pub struct CapabilityGapAnalysis {
 }
 
 impl CapabilityGapAnalysis {
+    #[must_use]
     pub fn allowed(
         connector: impl Into<String>,
         operation: impl Into<String>,
@@ -1998,6 +2141,7 @@ impl CapabilityGapAnalysis {
         }
     }
 
+    #[must_use]
     pub fn with_blocker(mut self, blocker: TypedBlocker) -> Self {
         if blocker.blocker_type == BlockerType::ApprovalGated {
             self.verdict = AuthorizationVerdict::ConditionallyAllowed;
@@ -2008,22 +2152,26 @@ impl CapabilityGapAnalysis {
         self
     }
 
+    #[must_use]
     pub fn with_diff(mut self, diff: GrantDiff) -> Self {
         self.grant_diff = diff;
         self
     }
 
+    #[must_use]
     pub fn with_follow_up(mut self, cmd: impl Into<String>) -> Self {
         self.follow_up_commands.push(cmd.into());
         self
     }
 
     /// Whether any blocker is of the given type.
+    #[must_use]
     pub fn has_blocker_type(&self, bt: BlockerType) -> bool {
         self.blockers.iter().any(|b| b.blocker_type == bt)
     }
 
     /// Count of blockers by type.
+    #[must_use]
     pub fn blocker_count_by_type(&self, bt: BlockerType) -> usize {
         self.blockers
             .iter()
@@ -2032,7 +2180,7 @@ impl CapabilityGapAnalysis {
     }
 }
 
-/// A blocker with a typed FCP_ERR code.
+/// A blocker with a typed `FCP_ERR` code.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TypedBlocker {
     /// Machine-readable blocker type.
@@ -2046,6 +2194,7 @@ pub struct TypedBlocker {
 }
 
 impl TypedBlocker {
+    #[must_use]
     pub fn new(
         blocker_type: BlockerType,
         message: impl Into<String>,
@@ -2059,6 +2208,7 @@ impl TypedBlocker {
         }
     }
 
+    #[must_use]
     pub fn with_remediation(mut self, step: impl Into<String>) -> Self {
         self.remediation.push(step.into());
         self
@@ -2069,10 +2219,7 @@ impl TypedBlocker {
 ///
 /// Returns a structured analysis with verdict, typed blockers,
 /// and least-privilege grant diff.
-///
-/// # Panics
-///
-/// Does not panic — returns structured errors via the Result type.
+#[must_use]
 pub fn analyze_capability_gap(
     connector: &str,
     operation: &str,
@@ -2157,7 +2304,7 @@ pub fn analyze_capability_gap(
             BlockerType::ZoneMismatch,
             format!("'{zone}' is not a recognized zone identifier"),
             BlockerSeverity::Error,
-        ).with_remediation(format!("Use a zone identifier starting with 'z:' (e.g., z:work). Run `fwc zones` to see available zones")));
+        ).with_remediation("Use a zone identifier starting with 'z:' (e.g., z:work). Run `fwc zones` to see available zones"));
     }
 
     analysis = analysis.with_diff(diff);
@@ -2176,6 +2323,7 @@ pub fn analyze_capability_gap(
 }
 
 /// Format a capability gap analysis as TOON.
+#[must_use]
 pub fn format_gap_analysis_toon(analysis: &CapabilityGapAnalysis) -> Vec<String> {
     let mut lines = Vec::new();
     lines.push(format!(
@@ -3118,10 +3266,9 @@ mod tests {
     #[test]
     fn request_access_basic() {
         let args = AccessRequestArgs::new("jira", "create_issue", "sprint planning");
-        let store = AccessBundleStore::new(std::env::temp_dir().join(format!(
-            "fwc-access-test-{}",
-            uuid::Uuid::new_v4().simple()
-        )));
+        let store = AccessBundleStore::new(
+            std::env::temp_dir().join(format!("fwc-access-test-{}", uuid::Uuid::new_v4().simple())),
+        );
         let bundle = request_access_with_store(&args, &store).unwrap();
         assert!(bundle.handle.starts_with("bnd-"));
         assert_eq!(bundle.status, BundleStatus::Pending);
@@ -3132,10 +3279,9 @@ mod tests {
     #[test]
     fn request_access_grant_handle() {
         let args = AccessRequestArgs::new("jira", "create_issue", "reason");
-        let store = AccessBundleStore::new(std::env::temp_dir().join(format!(
-            "fwc-access-test-{}",
-            uuid::Uuid::new_v4().simple()
-        )));
+        let store = AccessBundleStore::new(
+            std::env::temp_dir().join(format!("fwc-access-test-{}", uuid::Uuid::new_v4().simple())),
+        );
         let bundle = request_access_with_store(&args, &store).unwrap();
         let grant = &bundle.grants[0];
         assert!(grant.handle.starts_with("grt-"));
@@ -3146,10 +3292,9 @@ mod tests {
     #[test]
     fn request_access_validation_error() {
         let args = AccessRequestArgs::new("", "", "");
-        let store = AccessBundleStore::new(std::env::temp_dir().join(format!(
-            "fwc-access-test-{}",
-            uuid::Uuid::new_v4().simple()
-        )));
+        let store = AccessBundleStore::new(
+            std::env::temp_dir().join(format!("fwc-access-test-{}", uuid::Uuid::new_v4().simple())),
+        );
         let err = request_access_with_store(&args, &store).unwrap_err();
         assert!(err.contains("connector"));
     }
@@ -3157,10 +3302,9 @@ mod tests {
     #[test]
     fn request_access_grant_scope() {
         let args = AccessRequestArgs::new("jira", "create_issue", "reason");
-        let store = AccessBundleStore::new(std::env::temp_dir().join(format!(
-            "fwc-access-test-{}",
-            uuid::Uuid::new_v4().simple()
-        )));
+        let store = AccessBundleStore::new(
+            std::env::temp_dir().join(format!("fwc-access-test-{}", uuid::Uuid::new_v4().simple())),
+        );
         let bundle = request_access_with_store(&args, &store).unwrap();
         assert_eq!(bundle.grants[0].scope, GrantScope::Operation);
     }
@@ -3168,10 +3312,9 @@ mod tests {
     #[test]
     fn request_access_grant_expiry() {
         let args = AccessRequestArgs::new("jira", "create_issue", "reason");
-        let store = AccessBundleStore::new(std::env::temp_dir().join(format!(
-            "fwc-access-test-{}",
-            uuid::Uuid::new_v4().simple()
-        )));
+        let store = AccessBundleStore::new(
+            std::env::temp_dir().join(format!("fwc-access-test-{}", uuid::Uuid::new_v4().simple())),
+        );
         let bundle = request_access_with_store(&args, &store).unwrap();
         assert!(bundle.grants[0].is_active());
     }
@@ -3180,10 +3323,9 @@ mod tests {
 
     #[test]
     fn attach_bundle_loads_persisted_bundle() {
-        let store = AccessBundleStore::new(std::env::temp_dir().join(format!(
-            "fwc-access-test-{}",
-            uuid::Uuid::new_v4().simple()
-        )));
+        let store = AccessBundleStore::new(
+            std::env::temp_dir().join(format!("fwc-access-test-{}", uuid::Uuid::new_v4().simple())),
+        );
         let persisted = AccessBundle::new("bnd-abc123")
             .with_status(BundleStatus::Partial)
             .with_receipt("stored-receipt")
@@ -3199,10 +3341,9 @@ mod tests {
 
     #[test]
     fn attach_bundle_errors_for_unknown_handle() {
-        let store = AccessBundleStore::new(std::env::temp_dir().join(format!(
-            "fwc-access-test-{}",
-            uuid::Uuid::new_v4().simple()
-        )));
+        let store = AccessBundleStore::new(
+            std::env::temp_dir().join(format!("fwc-access-test-{}", uuid::Uuid::new_v4().simple())),
+        );
         let args = AccessAttachArgs::new("bnd-abc123");
         let err = attach_bundle_with_store(&args, &store).unwrap_err();
         assert!(err.contains("unknown bundle handle: bnd-abc123"));

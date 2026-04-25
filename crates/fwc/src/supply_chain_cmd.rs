@@ -1085,6 +1085,10 @@ mod tests {
         MINIMAL_MANIFEST.replace(PLACEHOLDER_INTERFACE_HASH, &computed.to_string())
     }
 
+    fn valid_artifact_digest(label: &str) -> String {
+        format!("blake3-256:{}", blake3::hash(label.as_bytes()).to_hex())
+    }
+
     // ── camel_to_snake_case ────────────────────────────────────────────
 
     #[test]
@@ -1431,9 +1435,10 @@ mod tests {
             require_digest_match: false,
         };
         let pipeline = VerificationPipeline::new(policy.clone());
-        let evidence = pipeline.verify("blake3-256:abc", None, None);
+        let artifact_digest = valid_artifact_digest("allow-unsigned");
+        let evidence = pipeline.verify(&artifact_digest, None, None);
         let evaluation = SupplyChainEvaluation {
-            artifact_digest: "blake3-256:abc".to_string(),
+            artifact_digest,
             attestation: None,
             sbom: None,
             policy,
@@ -1457,9 +1462,10 @@ mod tests {
             require_digest_match: false,
         };
         let pipeline = VerificationPipeline::new(policy.clone());
-        let evidence = pipeline.verify("blake3-256:abc", None, None);
+        let artifact_digest = valid_artifact_digest("report-no-artifacts");
+        let evidence = pipeline.verify(&artifact_digest, None, None);
         let evaluation = SupplyChainEvaluation {
-            artifact_digest: "blake3-256:abc".to_string(),
+            artifact_digest,
             attestation: None,
             sbom: None,
             policy,
@@ -1609,7 +1615,8 @@ mod tests {
             require_digest_match: false,
         };
         let pipeline = VerificationPipeline::new(policy);
-        let evidence = pipeline.verify("blake3-256:abcdef", None, None);
+        let artifact_digest = valid_artifact_digest("permissive-policy");
+        let evidence = pipeline.verify(&artifact_digest, None, None);
         assert_eq!(evidence.decision, VerificationDecision::Allow);
     }
 
@@ -2909,7 +2916,8 @@ mod tests {
 
     #[test]
     fn evaluate_allow_unsigned_result_decision() {
-        let result = evaluate_supply_chain(None, None, Some("blake3-256:test"), 0, true);
+        let artifact_digest = valid_artifact_digest("evaluate-allow-unsigned");
+        let result = evaluate_supply_chain(None, None, Some(&artifact_digest), 0, true);
         let eval = result.unwrap();
         assert_eq!(eval.evidence.decision, VerificationDecision::Allow);
     }
@@ -3144,7 +3152,8 @@ mod tests {
             require_digest_match: false,
         };
         let pipeline = VerificationPipeline::new(policy);
-        let evidence = pipeline.verify("blake3-256:permissive", None, None);
+        let artifact_digest = valid_artifact_digest("pipeline-permissive");
+        let evidence = pipeline.verify(&artifact_digest, None, None);
         assert_eq!(evidence.decision, VerificationDecision::Allow);
     }
 

@@ -499,6 +499,7 @@ mod tests {
             runtime_format: "wasi".to_owned(),
             state_model: crate::readiness::MetadataField::Unknown,
             supported_zones: vec!["z:work".to_owned()],
+            forbidden_zones: vec![],
             detail: ConnectorDetail {
                 summary: ConnectorSummary {
                     id: format!("fcp.{slug}"),

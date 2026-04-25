@@ -76,6 +76,7 @@ fn stub_connector(slug: &str, op_count: usize) -> DiscoveredConnector {
         runtime_format: "wasi".to_owned(),
         state_model: MetadataField::Unknown,
         supported_zones: vec!["z:work".to_owned()],
+        forbidden_zones: Vec::new(),
         detail: ConnectorDetail {
             summary: ConnectorSummary {
                 id: format!("fcp.{slug}"),

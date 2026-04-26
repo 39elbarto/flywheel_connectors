@@ -245,13 +245,17 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
     pub fn record_event(&self, event_id: &str) -> WebhookResult<()> {
         if self.config.idempotency_enabled {
             let mut state = self.seen_events.write();
+            let now = Utc::now();
             if state.events.len() >= MAX_SEEN_EVENTS && !state.events.contains_key(event_id) {
-                return Err(WebhookError::ReplayCacheFull {
-                    size: state.events.len(),
-                    limit: MAX_SEEN_EVENTS,
-                });
+                self.prune_expired_events_locked(&mut state, now);
+                if state.events.len() >= MAX_SEEN_EVENTS {
+                    return Err(WebhookError::ReplayCacheFull {
+                        size: state.events.len(),
+                        limit: MAX_SEEN_EVENTS,
+                    });
+                }
             }
-            state.events.insert(event_id.to_string(), Utc::now());
+            state.events.insert(event_id.to_string(), now);
         }
         Ok(())
     }
@@ -295,10 +299,13 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
             }
 
             if state.events.len() >= MAX_SEEN_EVENTS && !state.events.contains_key(event_id) {
-                return Err(WebhookError::ReplayCacheFull {
-                    size: state.events.len(),
-                    limit: MAX_SEEN_EVENTS,
-                });
+                self.prune_expired_events_locked(&mut state, now);
+                if state.events.len() >= MAX_SEEN_EVENTS {
+                    return Err(WebhookError::ReplayCacheFull {
+                        size: state.events.len(),
+                        limit: MAX_SEEN_EVENTS,
+                    });
+                }
             }
 
             state.events.insert(event_id.to_string(), now);
@@ -325,13 +332,16 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
             return;
         }
 
-        // Use saturating conversion to avoid panic on extreme durations
+        self.prune_expired_events_locked(&mut state, now);
+        drop(state);
+    }
+
+    fn prune_expired_events_locked(&self, state: &mut SeenEventsState, now: DateTime<Utc>) {
+        // Use saturating conversion to avoid panic on extreme durations.
         let ttl = chrono::Duration::from_std(self.config.idempotency_ttl)
             .unwrap_or(chrono::TimeDelta::MAX);
-
         state.events.retain(|_, time| now - *time < ttl);
         state.last_cleanup = now;
-        drop(state);
         self.next_cleanup_at_millis
             .store(next_cleanup_deadline(now), Ordering::Release);
     }
@@ -1123,6 +1133,28 @@ mod tests {
                 Err(WebhookError::ReplayDetected { .. })
             ));
         }
+    }
+
+    #[test]
+    fn test_claim_event_prunes_expired_entries_when_cache_is_full() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let config = WebhookConfig::new().with_idempotency_ttl(Duration::from_millis(1));
+        let handler = WebhookHandler::with_config(verifier, "test", config);
+        let expired = Utc::now() - chrono::Duration::seconds(1);
+
+        {
+            let mut state = handler.seen_events.write();
+            for i in 0..MAX_SEEN_EVENTS {
+                state.events.insert(format!("evt_{i}"), expired);
+            }
+            state.last_cleanup = Utc::now();
+        }
+        handler.next_cleanup_at_millis.store(0, Ordering::Release);
+
+        assert!(handler.claim_event("fresh").is_ok());
+        let state = handler.seen_events.read();
+        assert_eq!(state.events.len(), 1);
+        assert!(state.events.contains_key("fresh"));
     }
 
     #[test]

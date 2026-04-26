@@ -524,10 +524,20 @@ impl ObjectStore for MemoryObjectStore {
         let size = Self::object_size(&obj);
         let zone_id = &obj.header.zone_id;
 
-        // Remove from zone index.
-        if let Some(ids) = self.zone_index.write().get_mut(zone_id) {
+        // Remove from zone index. When the deletion empties the zone,
+        // drop the (zone_id, empty Vec) entry too — otherwise the
+        // zone_index map grows monotonically with the cardinality of
+        // ZoneIds ever seen, not currently-active zones. This is a
+        // bounded but permanent leak on long-running hosts that cycle
+        // zones in and out (br-A9 sweep).
+        let mut zone_index = self.zone_index.write();
+        if let Some(ids) = zone_index.get_mut(zone_id) {
             ids.retain(|oid| oid != id);
+            if ids.is_empty() {
+                zone_index.remove(zone_id);
+            }
         }
+        drop(zone_index);
 
         self.used_bytes
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
@@ -1660,6 +1670,48 @@ mod tests {
 
             StoreLogData::default()
         });
+    }
+
+    #[test]
+    fn delete_last_object_in_zone_drops_zone_index_entry() {
+        // br-A9 sweep: prior to the fix, deleting the last object in a
+        // zone left the (zone_id, empty Vec) entry resident in
+        // `zone_index`, so the map grew monotonically with the
+        // cardinality of zones ever seen rather than currently-active
+        // zones. The fix drops the entry once the Vec is empty.
+        run_store_test(
+            "delete_last_object_in_zone_drops_zone_index_entry",
+            "verify",
+            "delete",
+            1,
+            || async {
+                let store = MemoryObjectStore::new(MemoryObjectStoreConfig::default());
+                let obj = test_stored_object(7, b"only");
+                let id = obj.object_id;
+                let zone = obj.header.zone_id.clone();
+
+                store.put(obj).await.unwrap();
+                assert!(
+                    store.zone_index.read().contains_key(&zone),
+                    "zone_index should hold the zone after first put",
+                );
+
+                store.delete(&id).await.unwrap();
+
+                assert!(
+                    !store.zone_index.read().contains_key(&zone),
+                    "zone_index entry must be dropped once the zone has no objects",
+                );
+
+                // Re-inserting an object for the same zone must work
+                // (regression guard against accidentally treating
+                // the absent entry as "zone forever closed").
+                store.put(test_stored_object(8, b"again")).await.unwrap();
+                assert_eq!(store.list_zone(&zone).await.len(), 1);
+
+                StoreLogData::default()
+            },
+        );
     }
 
     #[test]

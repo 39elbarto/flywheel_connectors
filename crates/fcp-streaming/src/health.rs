@@ -131,7 +131,10 @@ impl StreamHealthTracker {
     /// Record that a heartbeat (or any meaningful message) was received.
     pub fn record_heartbeat(&mut self) {
         self.last_heartbeat = Some(Instant::now());
-        self.messages_received += 1;
+        // br-upgdb: saturating_add matches the existing reconnect_count
+        // discipline on line 148. Wrapping at u64::MAX would break
+        // monotonic-counter health telemetry after counter exhaustion.
+        self.messages_received = self.messages_received.saturating_add(1);
         // Heartbeat receipt can promote Degraded back to Connected.
         if self.state == StreamHealthState::Degraded {
             self.state = StreamHealthState::Connected;
@@ -316,6 +319,27 @@ mod tests {
         tracker.record_heartbeat();
         tracker.record_heartbeat();
         assert_eq!(tracker.snapshot().messages_received, 3);
+    }
+
+    #[test]
+    fn heartbeat_messages_received_saturates_at_u64_max() {
+        // br-upgdb: prior to the fix, record_heartbeat used `+= 1`
+        // which wraps at u64::MAX in release builds, breaking
+        // monotonic-counter health telemetry. saturating_add now
+        // pins the counter at u64::MAX. Same discipline as
+        // reconnect_count (line 148).
+        let mut tracker = default_tracker();
+        // Private-field access is permitted within the same module.
+        tracker.messages_received = u64::MAX;
+        tracker.record_heartbeat();
+        assert_eq!(
+            tracker.snapshot().messages_received,
+            u64::MAX,
+            "messages_received must saturate at u64::MAX, not wrap to 0"
+        );
+        // Subsequent heartbeats also stay pinned.
+        tracker.record_heartbeat();
+        assert_eq!(tracker.snapshot().messages_received, u64::MAX);
     }
 
     #[test]

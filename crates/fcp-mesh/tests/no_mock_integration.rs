@@ -176,6 +176,7 @@ fn admission_check_bytes_exceeds_budget() {
         require_authenticated_requests: false,
         max_amplification_factor: 10,
         strict_unauthenticated_limits: false,
+        ..AdmissionPolicy::default()
     };
     let mut ctrl = AdmissionController::new(policy);
     let peer = test_node("peer-1");
@@ -198,6 +199,7 @@ fn admission_check_symbols_exceeds_budget() {
         require_authenticated_requests: false,
         max_amplification_factor: 10,
         strict_unauthenticated_limits: false,
+        ..AdmissionPolicy::default()
     };
     let mut ctrl = AdmissionController::new(policy);
     let peer = test_node("peer-2");
@@ -218,6 +220,7 @@ fn admission_window_reset_allows_more() {
         require_authenticated_requests: false,
         max_amplification_factor: 10,
         strict_unauthenticated_limits: false,
+        ..AdmissionPolicy::default()
     };
     let mut ctrl = AdmissionController::new(policy);
     let peer = test_node("peer-1");

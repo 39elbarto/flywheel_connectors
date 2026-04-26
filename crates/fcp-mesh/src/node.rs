@@ -594,6 +594,7 @@ impl MeshNode {
             AdmissionError::ObjectQuarantined { .. } => "object_quarantined",
             AdmissionError::NotReachable { .. } => "not_reachable",
             AdmissionError::QuarantineQuotaExceeded { .. } => "quarantine_quota_exceeded",
+            AdmissionError::TrackingTableFull { .. } => "tracking_table_full",
         }
     }
 

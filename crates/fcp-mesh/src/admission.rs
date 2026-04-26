@@ -169,6 +169,22 @@ pub enum AdmissionError {
         /// Maximum quarantine bytes.
         limit_bytes: u64,
     },
+
+    /// Per-peer tracking table is at capacity; refusing to track a new
+    /// peer until existing entries are pruned. Resolves the
+    /// admission.peer_usage unbounded-allocation finding logged on
+    /// br-2ot4f (comment 53): on zones where
+    /// `require_authenticated_requests = false`, every distinct
+    /// attacker-controlled NodeId previously created a fresh
+    /// PeerUsage entry, so peer_usage could grow at
+    /// (insertion_rate × prune_interval) bytes between
+    /// gc_stale_peers cycles.
+    TrackingTableFull {
+        /// Current number of tracked peers.
+        current: u32,
+        /// Configured maximum.
+        limit: u32,
+    },
 }
 
 impl std::fmt::Display for AdmissionError {
@@ -236,6 +252,12 @@ impl std::fmt::Display for AdmissionError {
                     "quarantine quota exceeded: {current_bytes} bytes of {limit_bytes} limit"
                 )
             }
+            Self::TrackingTableFull { current, limit } => {
+                write!(
+                    f,
+                    "peer tracking table full: {current} tracked peers of {limit} limit"
+                )
+            }
         }
     }
 }
@@ -285,6 +307,7 @@ impl AdmissionError {
             Self::ObjectQuarantined { .. } => 6020,
             Self::NotReachable { .. } => 6021,
             Self::QuarantineQuotaExceeded { .. } => 6022,
+            Self::TrackingTableFull { .. } => 6030,
         }
     }
 }
@@ -388,7 +411,36 @@ pub struct AdmissionPolicy {
     /// If true, responses to unauthenticated requests are rate-limited
     /// more aggressively.
     pub strict_unauthenticated_limits: bool,
+
+    /// Maximum number of distinct peers tracked in the per-peer
+    /// admission table at once.
+    ///
+    /// Prevents unbounded growth of `AdmissionController.peer_usage`
+    /// when an attacker submits requests under many distinct (and on
+    /// public-ingress zones, unauthenticated) `NodeId`s. When the
+    /// table is at capacity and a not-yet-tracked peer is seen, the
+    /// admission methods return `AdmissionError::TrackingTableFull`
+    /// rather than allocating a new entry.
+    ///
+    /// Default: 10_000 entries (mesh.trusted_mesh and the
+    /// `Default::default()` policy). On `public_ingress`, defaulted
+    /// down to 1_000 because the NodeId namespace is attacker-
+    /// controlled and the only way to leave the table is via
+    /// `AdmissionController::gc_stale_peers` (5-minute stale
+    /// threshold by default). The 1_000-entry cap bounds peak
+    /// allocation at roughly 100–150 KB on public-ingress nodes
+    /// between prune cycles, while still leaving enough room for
+    /// realistic concurrent peer counts.
+    ///
+    /// Resolves the admission.peer_usage unbounded-allocation finding
+    /// logged on br-2ot4f (comment 53).
+    pub max_tracked_peers: u32,
 }
+
+/// Default tracking-table cap for trusted-mesh / default policy.
+const DEFAULT_MAX_TRACKED_PEERS: u32 = 10_000;
+/// Default tracking-table cap for public-ingress policy.
+const DEFAULT_MAX_TRACKED_PEERS_PUBLIC: u32 = 1_000;
 
 impl Default for AdmissionPolicy {
     fn default() -> Self {
@@ -397,6 +449,7 @@ impl Default for AdmissionPolicy {
             require_authenticated_requests: true,
             max_amplification_factor: DEFAULT_AMPLIFICATION_FACTOR,
             strict_unauthenticated_limits: true,
+            max_tracked_peers: DEFAULT_MAX_TRACKED_PEERS,
         }
     }
 }
@@ -413,6 +466,7 @@ impl AdmissionPolicy {
             require_authenticated_requests: false,
             max_amplification_factor: 2, // Very restrictive for public
             strict_unauthenticated_limits: true,
+            max_tracked_peers: DEFAULT_MAX_TRACKED_PEERS_PUBLIC,
         }
     }
 
@@ -424,6 +478,7 @@ impl AdmissionPolicy {
             require_authenticated_requests: true,
             max_amplification_factor: 100,
             strict_unauthenticated_limits: false,
+            max_tracked_peers: DEFAULT_MAX_TRACKED_PEERS,
         }
     }
 }
@@ -675,12 +730,38 @@ impl AdmissionController {
 
     /// Get or create usage tracker for a peer.
     ///
+    /// Refuses to allocate a new entry when the tracking table is at
+    /// `policy.max_tracked_peers` capacity (br-2ot4f). Existing entries
+    /// continue to be readable / writable; only first-time insertion
+    /// for a not-yet-tracked peer is gated.
+    ///
     /// Uses the raw entry API on Rust nightly to avoid cloning the `NodeId(String)`
     /// key on the hot path. Only clones once for first-time peer insertion.
-    fn get_or_create_usage(&mut self, peer: &NodeId, now_ms: u64) -> &mut PeerUsage {
-        self.peer_usage
+    fn get_or_create_usage(
+        &mut self,
+        peer: &NodeId,
+        now_ms: u64,
+    ) -> Result<&mut PeerUsage, AdmissionError> {
+        if !self.peer_usage.contains_key(peer)
+            && self.peer_usage.len() >= self.policy.max_tracked_peers as usize
+        {
+            return Err(AdmissionError::TrackingTableFull {
+                current: u32::try_from(self.peer_usage.len()).unwrap_or(u32::MAX),
+                limit: self.policy.max_tracked_peers,
+            });
+        }
+        Ok(self
+            .peer_usage
             .entry(peer.clone())
-            .or_insert_with(|| PeerUsage::new(now_ms))
+            .or_insert_with(|| PeerUsage::new(now_ms)))
+    }
+
+    /// Get a mutable reference to an EXISTING peer's usage tracker
+    /// without inserting a new entry. Used by release-side paths that
+    /// must not allocate (e.g. `release_decode`) — if the peer is not
+    /// already tracked, the caller treats the call as a no-op.
+    fn get_existing_usage(&mut self, peer: &NodeId) -> Option<&mut PeerUsage> {
+        self.peer_usage.get_mut(peer)
     }
 
     fn effective_byte_limit(&self, is_authenticated: bool) -> u64 {
@@ -718,7 +799,7 @@ impl AdmissionController {
         // window weighted by time remaining in current window) so a
         // peer cannot burst up to 2× its budget by scheduling traffic
         // at the seam between two fixed 60-second windows.
-        let usage = self.get_or_create_usage(peer, now_ms);
+        let usage = self.get_or_create_usage(peer, now_ms)?;
         usage.maybe_reset_window(now_ms);
 
         let effective = usage.effective_bytes_in_window(now_ms);
@@ -743,7 +824,7 @@ impl AdmissionController {
     ) -> Result<(), AdmissionError> {
         // L2-09 fix: sliding-window effective count, see
         // check_bytes_with_limit for rationale.
-        let usage = self.get_or_create_usage(peer, now_ms);
+        let usage = self.get_or_create_usage(peer, now_ms)?;
         usage.maybe_reset_window(now_ms);
 
         let effective = usage.effective_symbols_in_window(now_ms);
@@ -776,8 +857,16 @@ impl AdmissionController {
     }
 
     /// Record bytes received from peer.
+    ///
+    /// No-op if the peer is not already tracked AND the table is at
+    /// capacity — the matching `check_bytes` call would have already
+    /// rejected with `TrackingTableFull`, so silently dropping the
+    /// record here mirrors that rejection rather than secretly
+    /// allocating around the cap.
     pub fn record_bytes(&mut self, peer: &NodeId, bytes: u64, now_ms: u64) {
-        let usage = self.get_or_create_usage(peer, now_ms);
+        let Ok(usage) = self.get_or_create_usage(peer, now_ms) else {
+            return;
+        };
         usage.maybe_reset_window(now_ms);
         usage.bytes_in_window = usage.bytes_in_window.saturating_add(bytes);
     }
@@ -799,8 +888,13 @@ impl AdmissionController {
     }
 
     /// Record symbols received from peer.
+    ///
+    /// No-op if the peer is not already tracked AND the table is at
+    /// capacity (see `record_bytes` for rationale).
     pub fn record_symbols(&mut self, peer: &NodeId, symbols: u32, now_ms: u64) {
-        let usage = self.get_or_create_usage(peer, now_ms);
+        let Ok(usage) = self.get_or_create_usage(peer, now_ms) else {
+            return;
+        };
         usage.maybe_reset_window(now_ms);
         usage.symbols_in_window = usage.symbols_in_window.saturating_add(symbols);
     }
@@ -818,7 +912,7 @@ impl AdmissionController {
     ) -> Result<(), AdmissionError> {
         // Copy limit before mutable borrow
         let limit = self.policy.per_peer.max_failed_auth_per_min;
-        let usage = self.get_or_create_usage(peer, now_ms);
+        let usage = self.get_or_create_usage(peer, now_ms)?;
         usage.maybe_reset_window(now_ms);
 
         usage.failed_auth_in_window = usage.failed_auth_in_window.saturating_add(1);
@@ -844,7 +938,7 @@ impl AdmissionController {
     pub fn try_acquire_decode(&mut self, peer: &NodeId, now_ms: u64) -> Result<(), AdmissionError> {
         // Copy limit before mutable borrow
         let limit = self.policy.per_peer.max_inflight_decodes;
-        let usage = self.get_or_create_usage(peer, now_ms);
+        let usage = self.get_or_create_usage(peer, now_ms)?;
 
         if usage.inflight_decodes >= limit {
             return Err(AdmissionError::DecodeCapacityExceeded {
@@ -858,9 +952,17 @@ impl AdmissionController {
     }
 
     /// Release a decode slot.
-    pub fn release_decode(&mut self, peer: &NodeId, now_ms: u64) {
-        let usage = self.get_or_create_usage(peer, now_ms);
-        usage.inflight_decodes = usage.inflight_decodes.saturating_sub(1);
+    ///
+    /// No-op if the peer is not already tracked. We never allocate a
+    /// new tracking entry on the release path — `try_acquire_decode`
+    /// is the entry point that gates against the cap, so an unknown
+    /// peer here either never acquired or was already evicted by
+    /// `gc_stale_peers`. Either way, decrementing `inflight_decodes`
+    /// for an entry we've never seen is meaningless.
+    pub fn release_decode(&mut self, peer: &NodeId, _now_ms: u64) {
+        if let Some(usage) = self.get_existing_usage(peer) {
+            usage.inflight_decodes = usage.inflight_decodes.saturating_sub(1);
+        }
     }
 
     /// Record decode CPU usage (NORMATIVE).
@@ -877,7 +979,7 @@ impl AdmissionController {
     ) -> Result<(), AdmissionError> {
         // Copy limit before mutable borrow
         let limit_ms = self.policy.per_peer.max_decode_cpu_ms_per_min;
-        let usage = self.get_or_create_usage(peer, now_ms);
+        let usage = self.get_or_create_usage(peer, now_ms)?;
         usage.maybe_reset_window(now_ms);
 
         usage.decode_cpu_ms_in_window = usage.decode_cpu_ms_in_window.saturating_add(cpu_ms);
@@ -984,9 +1086,18 @@ impl AdmissionController {
     }
 
     /// Record authenticated status for a peer.
+    ///
+    /// No-op if the peer is not already tracked AND the table is at
+    /// capacity. set_authenticated is typically called on a peer that
+    /// has just successfully completed a handshake — that handshake
+    /// would have already triggered admission checks, so the entry
+    /// exists. A first-time authenticated peer hitting the cap here
+    /// is dropped from tracking; the next admission check will
+    /// surface the TrackingTableFull error explicitly.
     pub fn set_authenticated(&mut self, peer: &NodeId, authenticated: bool, now_ms: u64) {
-        let usage = self.get_or_create_usage(peer, now_ms);
-        usage.is_authenticated = authenticated;
+        if let Ok(usage) = self.get_or_create_usage(peer, now_ms) {
+            usage.is_authenticated = authenticated;
+        }
     }
 
     /// Check if a peer is currently authenticated.
@@ -1828,8 +1939,13 @@ mod tests {
         let mut controller = AdmissionController::with_default_policy();
         let peer = test_peer();
 
-        // Release without any acquired should not underflow
+        // br-2ot4f: release_decode is now a no-op for unknown peers
+        // (it must not allocate a tracking entry on the release path).
+        // For peers that DO acquire then release, inflight_decodes
+        // saturates at zero rather than underflowing.
+        controller.try_acquire_decode(&peer, 0).unwrap();
         controller.release_decode(&peer, 0);
+        controller.release_decode(&peer, 0); // second release: saturating_sub
         let usage = controller.get_usage(&peer).unwrap();
         assert_eq!(usage.inflight_decodes, 0);
     }
@@ -2649,12 +2765,18 @@ mod tests {
 
     #[test]
     fn release_decode_without_acquire_stays_at_zero() {
+        // br-2ot4f: release_decode for an unknown peer is now a
+        // no-op (must not allocate a tracking entry). The
+        // "inflight_decodes does not underflow" invariant is still
+        // covered by release_decode_saturates_at_zero on a peer that
+        // has actually acquired.
         let mut controller = AdmissionController::with_default_policy();
         let peer = test_peer();
-        // Release without acquire — should not underflow
         controller.release_decode(&peer, 0);
-        let usage = controller.get_usage(&peer).expect("usage");
-        assert_eq!(usage.inflight_decodes, 0);
+        assert!(
+            controller.get_usage(&peer).is_none(),
+            "release on unknown peer must not allocate a tracking entry"
+        );
     }
 
     // ── Strict unauthenticated symbol limits ─────────────────────
@@ -3107,5 +3229,124 @@ mod tests {
         // GC with threshold that keeps the entry
         controller.gc_stale_peers(100_500, 60_000);
         assert!(controller.get_usage(&peer).is_some());
+    }
+
+    // ── br-2ot4f: peer-tracking-table cap regression tests ──────────
+
+    #[test]
+    fn tracking_table_cap_rejects_new_peer_when_full() {
+        // Tight cap to make the test cheap and explicit.
+        let policy = AdmissionPolicy {
+            max_tracked_peers: 3,
+            require_authenticated_requests: false,
+            ..AdmissionPolicy::default()
+        };
+        let mut controller = AdmissionController::new(policy);
+
+        // First three distinct peers are admitted and tracked.
+        for i in 0..3 {
+            let peer = NodeId::new(format!("peer-{i}"));
+            controller
+                .check_bytes(&peer, 100, 1_000)
+                .expect("first three peers should be admitted");
+        }
+        assert_eq!(controller.peer_count(), 3);
+
+        // Fourth distinct peer overflows the cap → TrackingTableFull.
+        let overflow_peer = NodeId::new("overflow-peer");
+        let err = controller
+            .check_bytes(&overflow_peer, 100, 1_000)
+            .expect_err("fourth peer should be rejected");
+        match err {
+            AdmissionError::TrackingTableFull { current, limit } => {
+                assert_eq!(current, 3);
+                assert_eq!(limit, 3);
+            }
+            other => panic!("expected TrackingTableFull, got {other:?}"),
+        }
+        // The overflowing peer must NOT have been inserted.
+        assert_eq!(controller.peer_count(), 3);
+        assert!(controller.get_usage(&overflow_peer).is_none());
+    }
+
+    #[test]
+    fn tracking_table_cap_existing_peers_unaffected_when_full() {
+        // After the table fills, an EXISTING tracked peer must still
+        // be checkable / recordable / rejectable on its own budgets —
+        // the cap only gates first-time insertion.
+        let policy = AdmissionPolicy {
+            max_tracked_peers: 2,
+            require_authenticated_requests: false,
+            ..AdmissionPolicy::default()
+        };
+        let mut controller = AdmissionController::new(policy);
+        let peer_a = NodeId::new("peer-a");
+        let peer_b = NodeId::new("peer-b");
+
+        controller.check_bytes(&peer_a, 100, 1_000).unwrap();
+        controller.check_bytes(&peer_b, 100, 1_000).unwrap();
+        assert_eq!(controller.peer_count(), 2);
+
+        // peer-a is already tracked — further calls do NOT need to
+        // allocate, so the cap does not gate them.
+        controller
+            .check_bytes(&peer_a, 100, 1_000)
+            .expect("existing peer should still be admissible after cap");
+        controller.record_bytes(&peer_a, 100, 1_000);
+        assert_eq!(controller.peer_count(), 2);
+    }
+
+    #[test]
+    fn tracking_table_cap_release_decode_no_op_for_unknown_peer() {
+        // release_decode must not allocate a fresh tracking entry; it
+        // must be a no-op for a peer that has never appeared.
+        let policy = AdmissionPolicy {
+            max_tracked_peers: 1,
+            require_authenticated_requests: false,
+            ..AdmissionPolicy::default()
+        };
+        let mut controller = AdmissionController::new(policy);
+        assert_eq!(controller.peer_count(), 0);
+
+        let unknown = NodeId::new("never-seen");
+        controller.release_decode(&unknown, 1_000);
+
+        // No allocation happened — the cap is preserved for a real
+        // peer that arrives later.
+        assert_eq!(controller.peer_count(), 0);
+    }
+
+    #[test]
+    fn tracking_table_cap_drains_after_gc_stale_peers() {
+        // Once gc_stale_peers prunes old entries, new peers can be
+        // admitted again — verifying the cap is a soft limit tied to
+        // the prune lifecycle, not a permanent ceiling.
+        let policy = AdmissionPolicy {
+            max_tracked_peers: 1,
+            require_authenticated_requests: false,
+            ..AdmissionPolicy::default()
+        };
+        let mut controller = AdmissionController::new(policy);
+
+        let stale = NodeId::new("stale");
+        controller.check_bytes(&stale, 100, 1_000).unwrap();
+
+        // Cap reached — second peer rejected.
+        let fresh = NodeId::new("fresh");
+        assert!(matches!(
+            controller.check_bytes(&fresh, 100, 1_000),
+            Err(AdmissionError::TrackingTableFull { .. })
+        ));
+
+        // Prune stale entries (threshold 100ms, current time 200_000 →
+        // stale entry from 1_000 is evicted).
+        controller.gc_stale_peers(200_000, 100);
+        assert_eq!(controller.peer_count(), 0);
+
+        // Fresh peer now admitted.
+        controller
+            .check_bytes(&fresh, 100, 200_000)
+            .expect("fresh peer admissible after gc");
+        assert_eq!(controller.peer_count(), 1);
     }
 }

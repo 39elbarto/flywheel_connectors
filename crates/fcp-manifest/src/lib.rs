@@ -1544,6 +1544,7 @@ pub struct ProvidesSection {
 
 /// `[provides.events.<id>]` section.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventSection {
     pub description: String,
     /// Whether this event supports streaming delivery.
@@ -4477,6 +4478,16 @@ deny_ptrace = true
         assert_eq!(deserialized.description, "Roundtrip test");
         assert!(deserialized.streaming);
         assert!(!deserialized.replay);
+    }
+
+    #[test]
+    fn event_section_unknown_field_rejected() {
+        let err = serde_json::from_value::<EventSection>(json!({
+            "description": "Test event",
+            "unexpected": true
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
     }
 
     // ── EventCapsSection validation ────────────────────────────────────

@@ -1609,7 +1609,12 @@ impl MeshNode {
                 zone_id: request.zone_id.to_string(),
             });
         }
-        if now_secs.saturating_sub(request.timestamp) > self.gossip.summary_ttl_secs() {
+        if crate::gossip::is_outside_freshness_window(
+            request.timestamp,
+            now_secs,
+            self.gossip.summary_ttl_secs(),
+            self.gossip.max_future_skew_secs(),
+        ) {
             return Err(MeshNodeError::StaleGossipMessage {
                 peer: peer.as_str().to_string(),
                 message_kind: "gossip request",
@@ -1715,7 +1720,12 @@ impl MeshNode {
             }
         })?;
 
-        if now_secs.saturating_sub(push.timestamp) > self.gossip.summary_ttl_secs() {
+        if crate::gossip::is_outside_freshness_window(
+            push.timestamp,
+            now_secs,
+            self.gossip.summary_ttl_secs(),
+            self.gossip.max_future_skew_secs(),
+        ) {
             return Err(MeshNodeError::StaleGossipMessage {
                 peer: push.from.as_str().to_string(),
                 message_kind: "revocation push",
@@ -1743,6 +1753,7 @@ impl MeshNode {
     ///
     /// Returns an error when the requester is unknown, not authorized
     /// for the claimed zone, or the request timestamp is stale.
+    #[allow(clippy::needless_pass_by_value)] // by-value API mirrors handle_summary/handle_revocation_push
     pub fn handle_gossip_request(
         &mut self,
         request: GossipRequest,
@@ -3877,6 +3888,92 @@ mod tests {
             err,
             MeshNodeError::StaleGossipMessage {
                 message_kind: "revocation push",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn handle_revocation_push_rejects_future_dated_message() {
+        // Regression for br-flywheel_connectors-hawuq: a peer with a fast clock
+        // (or an adversary) could emit a RevocationPushMessage whose timestamp
+        // sits arbitrarily far in the future. Pre-fix, the freshness check
+        // computed `now.saturating_sub(future)` which collapses to 0, so the
+        // `age > ttl` gate trivially passed and let the push through after
+        // peer/owner signature verification.
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        let signing_key = Ed25519SigningKey::generate();
+        let owner_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.register_zone_owner_key(ZoneId::work(), owner_key.verifying_key());
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
+
+        let now = 1_000u64;
+        let future_skew = GossipConfig::default().max_future_skew_secs;
+        let future_timestamp = now + future_skew + 1;
+        let mut push = RevocationPushMessage::new(
+            TailscaleNodeId::new("peer-1"),
+            ZoneId::work(),
+            vec![ObjectId::from_bytes([0xCD; 32])],
+            7,
+            future_timestamp,
+        );
+        sign_push_with_owner(&mut push, &signing_key, &owner_key, future_timestamp);
+
+        let err = node
+            .handle_revocation_push(push, now)
+            .expect_err("future-dated push must be rejected");
+        assert!(matches!(
+            err,
+            MeshNodeError::StaleGossipMessage {
+                message_kind: "revocation push",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn handle_gossip_request_rejects_future_dated_message() {
+        // Regression for br-flywheel_connectors-hawuq, request side: an
+        // attacker-supplied request with a future-dated timestamp must be
+        // rejected by verify_gossip_request before the node enqueues a
+        // GossipResponse. Without the future-skew bound, the saturating-sub
+        // freshness check trivially passes for any future timestamp.
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
+
+        let now = 1_000u64;
+        let future_skew = GossipConfig::default().max_future_skew_secs;
+        let request = crate::gossip::GossipRequest::for_objects(
+            TailscaleNodeId::new("peer-1"),
+            ZoneId::work(),
+            vec![ObjectId::from_bytes([0xAB; 32])],
+            now + future_skew + 1,
+        );
+
+        let err = node
+            .handle_gossip_request(request, now)
+            .expect_err("future-dated gossip request must be rejected");
+        assert!(matches!(
+            err,
+            MeshNodeError::StaleGossipMessage {
+                message_kind: "gossip request",
                 ..
             }
         ));

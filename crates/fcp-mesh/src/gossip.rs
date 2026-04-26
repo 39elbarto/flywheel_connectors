@@ -43,6 +43,22 @@ pub const DEFAULT_MAX_SYMBOLS_PER_SUMMARY: usize = 100_000;
 /// Default gossip summary TTL in seconds.
 pub const DEFAULT_SUMMARY_TTL_SECS: u64 = 300;
 
+/// Default tolerance for a future-dated gossip timestamp, in seconds.
+///
+/// Without this floor a peer with a fast clock (or an adversary) could
+/// emit a `GossipSummary` / `GossipRequest` / `RevocationPushMessage`
+/// whose `timestamp` is far in the future. The age computation
+/// `now.saturating_sub(timestamp)` then collapses to `0`, so the
+/// freshness gate `age > ttl_secs` is always false and the message is
+/// treated as fresh — defeating the gate.
+///
+/// 30 seconds covers ordinary NTP drift between cooperating nodes
+/// while still rejecting deliberately-spoofed timestamps that could
+/// (a) bypass the freshness window, or (b) for `GossipSummary`,
+/// poison `peer_states[peer].last_updated` so legitimate later
+/// summaries appear "older" until wall-clock catches up.
+pub const DEFAULT_MAX_FUTURE_SKEW_SECS: u64 = 30;
+
 /// Default reconciliation batch size (bounded work).
 pub const DEFAULT_RECONCILIATION_BATCH_SIZE: usize = 1000;
 
@@ -51,6 +67,32 @@ pub const MIN_IBLT_BYTES_BUDGET: usize = 8192;
 
 /// Maximum object IDs in a single gossip request (anti-amplification).
 pub const MAX_OBJECT_IDS_PER_REQUEST: usize = 100;
+
+/// Bounded timestamp validator for gossip-class messages.
+///
+/// Rejects (returns `true`) when `timestamp` is either:
+///   * older than `ttl_secs` relative to `now`, or
+///   * more than `max_future_skew_secs` in the future relative to `now`.
+///
+/// The future-skew bound is the security-relevant half: without it,
+/// `now.saturating_sub(future_ts)` collapses to 0 and the
+/// `age > ttl_secs` gate trivially passes, letting a peer with a fast
+/// clock (or a malicious peer) bypass the freshness window or pin
+/// `peer_states[peer].last_updated` to a future value so subsequent
+/// legitimate updates compare older and are ignored until wall-clock
+/// catches up.
+#[must_use]
+pub const fn is_outside_freshness_window(
+    timestamp: u64,
+    now: u64,
+    ttl_secs: u64,
+    max_future_skew_secs: u64,
+) -> bool {
+    if timestamp > now && timestamp - now > max_future_skew_secs {
+        return true;
+    }
+    now.saturating_sub(timestamp) > ttl_secs
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Filter Types (XOR Filter + IBLT Placeholder)
@@ -750,10 +792,17 @@ impl GossipSummary {
             || self.symbol_filter_digest != other.symbol_filter_digest
     }
 
-    /// Check if summary is stale.
+    /// Check if the summary's timestamp falls outside the freshness window.
+    ///
+    /// Returns `true` for messages older than `ttl_secs` *or* dated more
+    /// than `max_future_skew_secs` in the future relative to `now`. The
+    /// future bound closes a gap where `now.saturating_sub(timestamp)`
+    /// returns `0` for any future timestamp, which previously made the
+    /// `age > ttl_secs` check accept arbitrarily future-dated summaries
+    /// as fresh.
     #[must_use]
-    pub const fn is_stale(&self, now: u64, ttl_secs: u64) -> bool {
-        now.saturating_sub(self.timestamp) > ttl_secs
+    pub const fn is_stale(&self, now: u64, ttl_secs: u64, max_future_skew_secs: u64) -> bool {
+        is_outside_freshness_window(self.timestamp, now, ttl_secs, max_future_skew_secs)
     }
 
     /// Get bytes for signing.
@@ -1353,6 +1402,12 @@ pub struct GossipConfig {
     pub max_symbols_per_request: usize,
     /// Summary TTL in seconds.
     pub summary_ttl_secs: u64,
+    /// Maximum tolerated future-dated skew on gossip timestamps, in seconds.
+    ///
+    /// Messages whose timestamp is more than this far in the future relative
+    /// to `now` are rejected as out-of-window — independent of `summary_ttl_secs`.
+    /// See [`is_outside_freshness_window`] for the rationale.
+    pub max_future_skew_secs: u64,
     /// Reconciliation batch size.
     pub reconciliation_batch_size: usize,
     /// Priority gossip interval for revocation events (milliseconds).
@@ -1386,6 +1441,7 @@ impl Default for GossipConfig {
             max_objects_per_request: MAX_OBJECT_IDS_PER_REQUEST,
             max_symbols_per_request: MAX_OBJECT_IDS_PER_REQUEST,
             summary_ttl_secs: DEFAULT_SUMMARY_TTL_SECS,
+            max_future_skew_secs: DEFAULT_MAX_FUTURE_SKEW_SECS,
             reconciliation_batch_size: DEFAULT_RECONCILIATION_BATCH_SIZE,
             priority_gossip_interval_ms: 100,
             max_revocation_push_peers: 32,
@@ -1477,6 +1533,12 @@ impl MeshGossip {
     #[must_use]
     pub const fn summary_ttl_secs(&self) -> u64 {
         self.config.summary_ttl_secs
+    }
+
+    /// Maximum tolerated future-dated skew on gossip timestamps, in seconds.
+    #[must_use]
+    pub const fn max_future_skew_secs(&self) -> u64 {
+        self.config.max_future_skew_secs
     }
 
     /// Maximum raw transport bytes accepted by the JSON gossip decoder.
@@ -1706,18 +1768,25 @@ impl MeshGossip {
     /// or `false` when it was rejected and ignored.
     #[allow(clippy::too_many_lines)] // Summary validation updates several independent gossip indexes atomically.
     pub fn handle_summary(&mut self, summary: GossipSummary, now: u64) -> bool {
-        if summary.is_stale(now, self.config.summary_ttl_secs) {
+        if summary.is_stale(
+            now,
+            self.config.summary_ttl_secs,
+            self.config.max_future_skew_secs,
+        ) {
             let age_secs = now.saturating_sub(summary.timestamp);
+            let future_skew_secs = summary.timestamp.saturating_sub(now);
             warn!(
                 component = "mesh.gossip",
                 event = "summary_rejected",
-                reason = "stale",
+                reason = if future_skew_secs > 0 { "future_dated" } else { "stale" },
                 peer_node_id = %summary.from.as_str(),
                 zone_id = %summary.zone_id,
                 object_count = summary.object_count,
                 symbol_count = summary.symbol_count,
                 age_seconds = age_secs,
-                ttl_seconds = self.config.summary_ttl_secs
+                future_skew_seconds = future_skew_secs,
+                ttl_seconds = self.config.summary_ttl_secs,
+                max_future_skew_seconds = self.config.max_future_skew_secs
             );
             return false;
         }
@@ -2417,8 +2486,13 @@ mod tests {
             signature: None,
         };
 
-        assert!(!summary.is_stale(1100, 300)); // Within TTL
-        assert!(summary.is_stale(1500, 300)); // Past TTL
+        assert!(!summary.is_stale(1100, 300, DEFAULT_MAX_FUTURE_SKEW_SECS)); // Within TTL
+        assert!(summary.is_stale(1500, 300, DEFAULT_MAX_FUTURE_SKEW_SECS)); // Past TTL
+        // Future-dated rejection: timestamp 1000 with now=900 => 100s ahead,
+        // beyond DEFAULT_MAX_FUTURE_SKEW_SECS (30s).
+        assert!(summary.is_stale(900, 300, DEFAULT_MAX_FUTURE_SKEW_SECS));
+        // Within future-skew tolerance still verifies as fresh.
+        assert!(!summary.is_stale(990, 300, DEFAULT_MAX_FUTURE_SKEW_SECS));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -2667,6 +2741,68 @@ mod tests {
 
         gossip.handle_summary(summary, now);
         assert_eq!(gossip.peer_count(), 0);
+    }
+
+    #[test]
+    fn mesh_gossip_ignores_future_dated_summary() {
+        // Regression for br-flywheel_connectors-hawuq: a peer (or a peer with
+        // a fast clock) that emits a summary with `timestamp` far in the future
+        // previously slipped past `is_stale` because `now.saturating_sub(future)`
+        // collapsed to 0. Once accepted, `peer_states[peer].last_updated` was
+        // pinned to that future value so legitimate later summaries appeared
+        // older and were ignored until wall-clock caught up. The bounded future
+        // skew rejects the summary before any peer state is mutated.
+        let mut gossip = MeshGossip::with_defaults(test_node("local"));
+        let now = 1000u64;
+        let future_skew = gossip.max_future_skew_secs();
+        let summary = GossipSummary {
+            from: test_node("peer-1"),
+            zone_id: test_zone(),
+            epoch_id: test_epoch(),
+            object_filter_digest: [0; 32],
+            symbol_filter_digest: [0; 32],
+            object_count: 50,
+            symbol_count: 500,
+            iblt: vec![],
+            timestamp: now + future_skew + 1,
+            signature: None,
+        };
+
+        let accepted = gossip.handle_summary(summary, now);
+        assert!(!accepted, "future-dated summary must be rejected");
+        assert_eq!(
+            gossip.peer_count(),
+            0,
+            "peer state must not be created from a rejected future-dated summary"
+        );
+    }
+
+    #[test]
+    fn mesh_gossip_accepts_summary_within_future_skew_tolerance() {
+        // Companion to the above: a summary inside the bounded future-skew
+        // window (typical NTP drift on cooperating nodes) must still verify.
+        let mut gossip = MeshGossip::with_defaults(test_node("local"));
+        let now = 1000u64;
+        let future_skew = gossip.max_future_skew_secs();
+        let summary = GossipSummary {
+            from: test_node("peer-1"),
+            zone_id: test_zone(),
+            epoch_id: test_epoch(),
+            object_filter_digest: [0; 32],
+            symbol_filter_digest: [0; 32],
+            object_count: 50,
+            symbol_count: 500,
+            iblt: vec![],
+            timestamp: now + future_skew,
+            signature: None,
+        };
+
+        let accepted = gossip.handle_summary(summary, now);
+        assert!(
+            accepted,
+            "summary at the upper edge of the future-skew window must verify"
+        );
+        assert_eq!(gossip.peer_count(), 1);
     }
 
     #[test]
@@ -3929,9 +4065,9 @@ mod tests {
         let state = GossipState::new(test_zone(), &config);
         let summary = state.create_summary(test_node("n"), test_epoch());
         // timestamp=0, now=0, ttl=300 → not stale
-        assert!(!summary.is_stale(0, 300));
+        assert!(!summary.is_stale(0, 300, DEFAULT_MAX_FUTURE_SKEW_SECS));
         // now=301 → stale
-        assert!(summary.is_stale(301, 300));
+        assert!(summary.is_stale(301, 300, DEFAULT_MAX_FUTURE_SKEW_SECS));
     }
 
     #[test]

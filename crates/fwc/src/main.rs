@@ -14728,6 +14728,109 @@ fn parse_registry_verifying_key(
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// br-n4429: test-only override for pinned registry publisher keys.
+    /// Mirrors the existing TEST_CONTEXT_CONFIG_PATH_OVERRIDE pattern;
+    /// production reads from FCP_REGISTRY_TRUST_ROOTS_FILE. Tests
+    /// install via [`install_test_registry_trust_roots`] rather than
+    /// mutating the process-global env (which would race across cargo
+    /// test parallelism).
+    static TEST_REGISTRY_TRUST_ROOTS_OVERRIDE:
+        std::cell::RefCell<Option<std::collections::HashMap<String, Ed25519VerifyingKey>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct RegistryTrustRootsOverrideGuard;
+
+#[cfg(test)]
+fn install_test_registry_trust_roots(
+    keys: std::collections::HashMap<String, Ed25519VerifyingKey>,
+) -> RegistryTrustRootsOverrideGuard {
+    TEST_REGISTRY_TRUST_ROOTS_OVERRIDE.with(|slot| {
+        *slot.borrow_mut() = Some(keys);
+    });
+    RegistryTrustRootsOverrideGuard
+}
+
+#[cfg(test)]
+impl Drop for RegistryTrustRootsOverrideGuard {
+    fn drop(&mut self) {
+        TEST_REGISTRY_TRUST_ROOTS_OVERRIDE.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+/// Load pinned publisher keys from local config (NOT from the registry
+/// response).
+///
+/// Resolves br-n4429 supply-chain CRITICAL — the prior code trusted
+/// whatever verifying_key the registry's signature artifact shipped,
+/// then verified the signature against that same key. A malicious
+/// registry endpoint or HTTP MITM could therefore serve {manifest,
+/// binary, signature, attacker_key} where the signature was produced
+/// by attacker_key, and the verification would pass trivially because
+/// the verifier was just handed the attacker's own public key as its
+/// trust root. This is a TOFU bypass that defeats the entire
+/// registry-signing supply-chain check.
+///
+/// The pinned set is the LOCAL trust anchor; it must be established
+/// out-of-band before any registry download. Resolution order:
+/// 1. (test-only) thread-local override.
+/// 2. `FCP_REGISTRY_TRUST_ROOTS_FILE` env var → JSON file with shape
+///    `{"publisher_keys": {"<key_id>": "<64-hex-char-ed25519-pk>"}}`.
+/// 3. Empty map.
+fn load_pinned_publisher_keys() -> Result<std::collections::HashMap<String, Ed25519VerifyingKey>> {
+    #[cfg(test)]
+    if let Some(map) = TEST_REGISTRY_TRUST_ROOTS_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return Ok(map);
+    }
+
+    let Ok(path) = std::env::var("FCP_REGISTRY_TRUST_ROOTS_FILE") else {
+        return Ok(std::collections::HashMap::new());
+    };
+    if path.trim().is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read FCP_REGISTRY_TRUST_ROOTS_FILE `{path}`"))?;
+
+    #[derive(serde::Deserialize)]
+    struct TrustRootsFile {
+        #[serde(default)]
+        publisher_keys: std::collections::HashMap<String, String>,
+    }
+
+    let parsed: TrustRootsFile = serde_json::from_str(&raw).with_context(|| {
+        format!(
+            "failed to parse FCP_REGISTRY_TRUST_ROOTS_FILE `{path}` as JSON \
+             (expected {{ \"publisher_keys\": {{ \"<key_id>\": \"<hex>\" }} }})"
+        )
+    })?;
+
+    let mut keys = std::collections::HashMap::with_capacity(parsed.publisher_keys.len());
+    for (key_id, hex_pk) in parsed.publisher_keys {
+        let bytes = hex::decode(hex_pk.trim()).with_context(|| {
+            format!("FCP_REGISTRY_TRUST_ROOTS_FILE `{path}` key `{key_id}` is not valid hex")
+        })?;
+        let raw: [u8; 32] = bytes.try_into().map_err(|_| {
+            anyhow::anyhow!(
+                "FCP_REGISTRY_TRUST_ROOTS_FILE `{path}` key `{key_id}` must decode to exactly 32 bytes"
+            )
+        })?;
+        let parsed_key = Ed25519VerifyingKey::from_bytes(&raw).with_context(|| {
+            format!(
+                "FCP_REGISTRY_TRUST_ROOTS_FILE `{path}` key `{key_id}` is not a valid Ed25519 public key"
+            )
+        })?;
+        keys.insert(key_id, parsed_key);
+    }
+    Ok(keys)
+}
+
 fn verify_registry_attestation(
     attestation: &SupplyChainAttestation,
     verifying_key: &Ed25519VerifyingKey,
@@ -14764,14 +14867,14 @@ fn verify_registry_attestation(
     // baseline; the verified flags are private and can only be set via
     // `with_*_verification_result(...)` after a real verifier adapter
     // succeeds.
-    Ok(RegistrySupplyChainEvidence::new()
-        .with_transparency_log_present(false)
-        .with_attestations(vec![RegistryAttestationEvidence {
+    Ok(
+        RegistrySupplyChainEvidence::new().with_attestations(vec![RegistryAttestationEvidence {
             attestation_type: fcp_manifest::AttestationType::InToto,
             slsa_level: Some(attestation.slsa_level),
             builder_id: Some(attestation.builder_id.clone()),
             expires_at: None,
-        }]))
+        }]),
+    )
 }
 
 fn build_registry_package_build_metadata(
@@ -15035,7 +15138,49 @@ fn prepare_registry_package_artifact(
         );
     }
 
-    let verifying_key = parse_registry_verifying_key(&signature_artifact)?;
+    let artifact_key = parse_registry_verifying_key(&signature_artifact)?;
+
+    // br-n4429 supply-chain CRITICAL fix: anchor verification on the
+    // LOCAL pinned trust root, NOT the registry-supplied verifying_key.
+    // A malicious registry endpoint (or HTTP MITM) could otherwise serve
+    // {manifest, binary, signature, attacker_key} signed by an
+    // attacker-controlled key and have the registry-signature check
+    // pass against the attacker's own root. Refuse to TOFU on any
+    // key_id that the operator has not pinned out-of-band via
+    // FCP_REGISTRY_TRUST_ROOTS_FILE.
+    let pinned_keys = load_pinned_publisher_keys()?;
+    let trusted_key = match pinned_keys.get(&signature_artifact.key_id) {
+        Some(pinned) => {
+            // Defense-in-depth: the artifact's claimed verifying_key
+            // bytes MUST equal the pinned bytes. A mismatch means
+            // either the publisher rotated keys without an updated
+            // pin (legitimate, but should be re-pinned out-of-band)
+            // or the registry shipped an attacker key under a pinned
+            // key_id label. Either way, refuse.
+            if pinned.to_bytes() != artifact_key.to_bytes() {
+                bail!(
+                    "registry signature artifact for `{registry_connector_id}` version `{}` \
+                     ships verifying_key bytes that differ from the pinned trust root for \
+                     key_id `{}`. Refusing to use registry-supplied bytes; update the pin \
+                     out-of-band (FCP_REGISTRY_TRUST_ROOTS_FILE) if the publisher rotated keys.",
+                    release.version,
+                    signature_artifact.key_id,
+                );
+            }
+            pinned.clone()
+        }
+        None => bail!(
+            "registry signature for `{registry_connector_id}` version `{}` is signed with \
+             key_id `{}`, which is NOT in the pinned trust roots. Refusing to TOFU on \
+             registry-supplied keys (br-n4429 supply-chain rule). Pin the publisher's \
+             verifying key by setting FCP_REGISTRY_TRUST_ROOTS_FILE to a JSON file of \
+             shape {{ \"publisher_keys\": {{ \"<key_id>\": \"<64-hex-ed25519-pk>\" }} }} \
+             before retrying the install/update.",
+            release.version,
+            signature_artifact.key_id,
+        ),
+    };
+
     let (attestation, attestation_json, supply_chain_evidence) =
         if let Some(attestation_location) = target_descriptor.attestation_url.as_deref() {
             let attestation_url =
@@ -15049,7 +15194,7 @@ fn prepare_registry_package_artifact(
             })?;
             let evidence = verify_registry_attestation(
                 &attestation,
-                &verifying_key,
+                &trusted_key,
                 &[binary_sha256.clone(), binary_blake3.clone()],
             )?;
             (Some(attestation), Some(raw), Some(evidence))
@@ -15060,7 +15205,7 @@ fn prepare_registry_package_artifact(
     let mut trust_policy = RegistryTrustPolicy::default();
     trust_policy
         .publisher_keys
-        .insert(signature_artifact.key_id.clone(), verifying_key);
+        .insert(signature_artifact.key_id.clone(), trusted_key);
     let bundle = ConnectorBundle {
         manifest_toml: manifest_toml.clone(),
         binary: binary_bytes.clone(),
@@ -26611,6 +26756,20 @@ deny_ptrace = true
         (tempdir, output_dir)
     }
 
+    /// br-n4429 helper: install a thread-local trust-root override
+    /// pinning the fixture's publisher key. Real fwc deployments must
+    /// set FCP_REGISTRY_TRUST_ROOTS_FILE; tests use this helper to
+    /// mirror that pin without racing on the global env.
+    fn pin_fixture_trust_root(
+        fixture: &SignedRegistryFixture,
+    ) -> super::RegistryTrustRootsOverrideGuard {
+        let key = super::parse_registry_verifying_key(&fixture.signature_artifact)
+            .expect("fixture verifying_key must parse");
+        let mut map = std::collections::HashMap::new();
+        map.insert(fixture.signature_artifact.key_id.clone(), key);
+        super::install_test_registry_trust_roots(map)
+    }
+
     fn load_signed_registry_fixture(package_dir: &std::path::Path) -> SignedRegistryFixture {
         let manifest_toml =
             fs::read_to_string(package_dir.join("manifest.toml")).expect("signed manifest");
@@ -37449,6 +37608,7 @@ require_attestation_types = ["in-toto"]"#,
             ),
         );
         let fixture = load_signed_registry_fixture(&signed_dir);
+        let _trust_guard = pin_fixture_trust_root(&fixture);
         let (registry, registry_server) = spawn_mock_http_server(
             registry_routes_for_fixture(&fixture, None, None, None, true),
             5,
@@ -37554,6 +37714,7 @@ require_attestation_types = ["in-toto"]"#,
             ),
         );
         let fixture = load_signed_registry_fixture(&signed_dir);
+        let _trust_guard = pin_fixture_trust_root(&fixture);
         let (registry, registry_server) = spawn_mock_http_server(
             registry_routes_for_fixture(&fixture, None, None, None, true),
             5,
@@ -37638,12 +37799,116 @@ require_attestation_types = ["in-toto"]"#,
         assert_evidence_handle(&payload, "host-inventory-apply");
     }
 
+    /// br-n4429 supply-chain CRITICAL regression: a registry response
+    /// signed with a key the operator has NOT pinned must be rejected,
+    /// even though the registry's signature verifies cryptographically
+    /// against its own attached `verifying_key`. Closes the TOFU bypass
+    /// where a malicious registry could self-attest by signing with
+    /// any attacker-controlled key and shipping that key in the
+    /// artifact.
+    #[test]
+    fn install_registry_rejects_unpinned_publisher_key() {
+        let (_context_dir, _context_path, _guard) = temp_context_config();
+        let (_signed_tempdir, signed_dir) =
+            write_test_signed_registry_package("fcp.github:enterprise:v1", "1.2.5", None);
+        let fixture = load_signed_registry_fixture(&signed_dir);
+        // INTENTIONALLY DO NOT pin the fixture's trust root — this is
+        // exactly the operator-side state where the publisher's
+        // signing key has not been pinned via FCP_REGISTRY_TRUST_ROOTS_FILE.
+        // Without the pin, the fixture's signature is well-formed and
+        // self-consistent, but the verifier MUST refuse rather than
+        // TOFU on the registry-supplied verifying_key.
+
+        let (registry, registry_server) = spawn_mock_http_server(
+            registry_routes_for_fixture(&fixture, None, None, None, false),
+            4,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "install",
+            "fcp.github:enterprise:v1",
+            "--registry",
+            &registry,
+            "--verify-only",
+        ]);
+
+        registry_server
+            .join()
+            .expect("registry mock thread should complete");
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "install");
+        assert_eq!(payload["error"]["type"], "invalid-install-source");
+        let message = payload["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            message.contains("pinned trust roots") || message.contains("br-n4429"),
+            "unpinned-key rejection must reference the pinned-trust-roots requirement; got: {message}"
+        );
+    }
+
+    /// br-n4429 defense-in-depth: when the operator HAS pinned a key
+    /// for a given key_id but the registry ships DIFFERENT
+    /// verifying_key bytes under that same key_id label, the verifier
+    /// must refuse rather than silently accept the registry-supplied
+    /// bytes. Catches a key-rotation-without-re-pinning attack.
+    #[test]
+    fn install_registry_rejects_pinned_kid_with_mismatched_key_bytes() {
+        let (_context_dir, _context_path, _guard) = temp_context_config();
+        let (_signed_tempdir, signed_dir) =
+            write_test_signed_registry_package("fcp.github:enterprise:v1", "1.2.5", None);
+        let fixture = load_signed_registry_fixture(&signed_dir);
+
+        // Pin the SAME key_id but DIFFERENT key bytes (a fresh
+        // keypair standing in for a key the operator pinned at some
+        // prior moment, before the registry rotated to different
+        // bytes under the same kid label).
+        let mut pinned_map = std::collections::HashMap::new();
+        let other_key = fcp_crypto::ed25519::Ed25519SigningKey::generate().verifying_key();
+        pinned_map.insert(fixture.signature_artifact.key_id.clone(), other_key);
+        let _trust_guard = super::install_test_registry_trust_roots(pinned_map);
+
+        let (registry, registry_server) = spawn_mock_http_server(
+            registry_routes_for_fixture(&fixture, None, None, None, false),
+            4,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "install",
+            "fcp.github:enterprise:v1",
+            "--registry",
+            &registry,
+            "--verify-only",
+        ]);
+
+        registry_server
+            .join()
+            .expect("registry mock thread should complete");
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        let message = payload["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            message.contains("differ from the pinned trust root"),
+            "kid-collision-with-bad-bytes rejection must name the pin mismatch; got: {message}"
+        );
+    }
+
     #[test]
     fn install_registry_verify_only_rejects_tampered_binary_signature_mismatch() {
         let (_context_dir, _context_path, _guard) = temp_context_config();
         let (_signed_tempdir, signed_dir) =
             write_test_signed_registry_package("fcp.github:enterprise:v1", "1.2.5", None);
         let fixture = load_signed_registry_fixture(&signed_dir);
+        let _trust_guard = pin_fixture_trust_root(&fixture);
         let mut tampered_binary = fixture.binary_bytes.clone();
         tampered_binary.extend_from_slice(b":tampered");
         let mut tampered_signature = fixture.signature_artifact.clone();
@@ -37693,6 +37958,7 @@ require_attestation_types = ["in-toto"]"#,
         let (_signed_tempdir, signed_dir) =
             write_test_signed_registry_package("fcp.github:enterprise:v1", "1.2.5", None);
         let fixture = load_signed_registry_fixture(&signed_dir);
+        let _trust_guard = pin_fixture_trust_root(&fixture);
         let expected_target = ConnectorTarget::from_env().as_string();
         let (registry, registry_server) = spawn_mock_http_server(
             registry_routes_for_fixture(
@@ -37745,6 +38011,7 @@ require_attestation_types = ["in-toto"]"#,
             ),
         );
         let fixture = load_signed_registry_fixture(&signed_dir);
+        let _trust_guard = pin_fixture_trust_root(&fixture);
         let (registry, registry_server) = spawn_mock_http_server(
             registry_routes_for_fixture(&fixture, None, None, None, false),
             4,

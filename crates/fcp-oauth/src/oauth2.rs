@@ -17,7 +17,7 @@ use url::Url;
 
 use crate::{
     GrantType, OAuthError, OAuthResult, OAuthTokens, Pkce, PkceMethod, ResponseMode, TokenResponse,
-    normalize_registered_redirect_uri,
+    is_secure_or_loopback_redirect, normalize_registered_redirect_uri,
 };
 
 const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
@@ -370,9 +370,37 @@ fn reserved_extra_token_param(key: &str) -> bool {
     )
 }
 
+fn validate_oauth_endpoint_url(raw: &str, field: &str) -> OAuthResult<String> {
+    let url = Url::parse(raw).map_err(|e| {
+        OAuthError::InvalidConfig(format!("{field} must be a valid absolute URL: {e}"))
+    })?;
+    if url.cannot_be_a_base() || url.host_str().is_none() {
+        return Err(OAuthError::InvalidConfig(format!(
+            "{field} must include a network host"
+        )));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(OAuthError::InvalidConfig(format!(
+            "{field} must not include embedded credentials"
+        )));
+    }
+    if url.fragment().is_some() {
+        return Err(OAuthError::InvalidConfig(format!(
+            "{field} must not include a fragment"
+        )));
+    }
+    if !is_secure_or_loopback_redirect(&url) {
+        return Err(OAuthError::InvalidConfig(format!(
+            "{field} must use https or loopback http"
+        )));
+    }
+    Ok(url.into())
+}
+
 fn validate_oauth2_config(mut config: OAuth2Config) -> OAuthResult<OAuth2Config> {
-    Url::parse(&config.authorization_url)?;
-    Url::parse(&config.token_url)?;
+    config.authorization_url =
+        validate_oauth_endpoint_url(&config.authorization_url, "authorization_url")?;
+    config.token_url = validate_oauth_endpoint_url(&config.token_url, "token_url")?;
     if let Some(redirect_uri) = config.redirect_uri.as_deref() {
         config.redirect_uri =
             Some(normalize_registered_redirect_uri(redirect_uri, "redirect_uri")?.into());
@@ -1867,6 +1895,70 @@ mod tests {
         );
         let result = OAuth2Client::new(config);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_client_rejects_non_loopback_http_authorization_url() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "http://auth.example.com/authorize",
+            "https://auth.example.com/token",
+        );
+        let err = OAuth2Client::new(config).unwrap_err();
+        assert!(matches!(
+            err,
+            OAuthError::InvalidConfig(ref m)
+                if m.contains("authorization_url") && m.contains("https or loopback http")
+        ));
+    }
+
+    #[test]
+    fn test_client_rejects_non_loopback_http_token_url() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://auth.example.com/authorize",
+            "http://auth.example.com/token",
+        );
+        let err = OAuth2Client::new(config).unwrap_err();
+        assert!(matches!(
+            err,
+            OAuthError::InvalidConfig(ref m)
+                if m.contains("token_url") && m.contains("https or loopback http")
+        ));
+    }
+
+    #[test]
+    fn test_client_rejects_oauth_endpoint_with_embedded_credentials() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://user:pass@auth.example.com/authorize",
+            "https://auth.example.com/token",
+        );
+        let err = OAuth2Client::new(config).unwrap_err();
+        assert!(matches!(
+            err,
+            OAuthError::InvalidConfig(ref m)
+                if m.contains("authorization_url") && m.contains("embedded credentials")
+        ));
+    }
+
+    #[test]
+    fn test_client_rejects_oauth_endpoint_with_fragment() {
+        let config = OAuth2Config::new(
+            "id",
+            "secret",
+            "https://auth.example.com/authorize",
+            "https://auth.example.com/token#frag",
+        );
+        let err = OAuth2Client::new(config).unwrap_err();
+        assert!(matches!(
+            err,
+            OAuthError::InvalidConfig(ref m)
+                if m.contains("token_url") && m.contains("fragment")
+        ));
     }
 
     #[test]

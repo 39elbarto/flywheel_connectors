@@ -319,6 +319,7 @@ mod tests {
             reason,
             cleanup: CleanupBehavior::default(),
             return_partial: false,
+            capability_token: None,
         }
     }
 
@@ -593,6 +594,7 @@ mod tests {
             reason: CancelReason::UserRequested,
             cleanup: CleanupBehavior::Checkpoint,
             return_partial: false,
+            capability_token: None,
         };
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
         assert_eq!(resp.outcome, CancellationOutcome::Cancelled);
@@ -621,6 +623,7 @@ mod tests {
             reason: CancelReason::UserRequested,
             cleanup: CleanupBehavior::Checkpoint,
             return_partial: false,
+            capability_token: None,
         };
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
         assert_eq!(resp.outcome, CancellationOutcome::TooLate);
@@ -726,6 +729,7 @@ mod tests {
             reason: CancelReason::UserRequested,
             cleanup: CleanupBehavior::Checkpoint,
             return_partial: false,
+            capability_token: None,
         };
         ctrl.cancel(&req, None, fixed_now()).unwrap();
         let events = ctrl.audit_events();
@@ -755,6 +759,7 @@ mod tests {
             reason: CancelReason::TimeoutApproaching { remaining_ms: 1000 },
             cleanup: CleanupBehavior::Full { timeout_ms: 5000 },
             return_partial: true,
+            capability_token: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: CancellationRequest = serde_json::from_str(&json).unwrap();
@@ -1066,6 +1071,7 @@ mod tests {
             reason: CancelReason::UserRequested,
             cleanup: CleanupBehavior::default(),
             return_partial: true,
+            capability_token: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("true"));
@@ -1080,6 +1086,7 @@ mod tests {
             reason: CancelReason::SessionClosing,
             cleanup: CleanupBehavior::Full { timeout_ms: 10000 },
             return_partial: false,
+            capability_token: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: CancellationRequest = serde_json::from_str(&json).unwrap();
@@ -1099,6 +1106,7 @@ mod tests {
             },
             cleanup: CleanupBehavior::Abandon,
             return_partial: false,
+            capability_token: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: CancellationRequest = serde_json::from_str(&json).unwrap();
@@ -1112,6 +1120,7 @@ mod tests {
             reason: CancelReason::TimeoutApproaching { remaining_ms: 500 },
             cleanup: CleanupBehavior::Checkpoint,
             return_partial: true,
+            capability_token: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: CancellationRequest = serde_json::from_str(&json).unwrap();
@@ -1417,6 +1426,7 @@ mod tests {
             reason: CancelReason::UserRequested,
             cleanup: CleanupBehavior::Full { timeout_ms: 3000 },
             return_partial: false,
+            capability_token: None,
         };
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
         assert_eq!(resp.outcome, CancellationOutcome::Cancelled);
@@ -1437,6 +1447,7 @@ mod tests {
             },
             cleanup: CleanupBehavior::Abandon,
             return_partial: false,
+            capability_token: None,
         };
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
         assert_eq!(resp.outcome, CancellationOutcome::Cancelled);
@@ -1626,6 +1637,7 @@ mod tests {
             reason: CancelReason::UserRequested,
             cleanup: CleanupBehavior::Checkpoint,
             return_partial: false,
+            capability_token: None,
         };
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
         let ckpt = resp.checkpoint.unwrap();
@@ -1642,6 +1654,7 @@ mod tests {
             reason: CancelReason::UserRequested,
             cleanup: CleanupBehavior::Checkpoint,
             return_partial: false,
+            capability_token: None,
         };
         let resp = ctrl.cancel(&req, None, now).unwrap();
         let ckpt = resp.checkpoint.unwrap();
@@ -1698,6 +1711,7 @@ mod tests {
             reason: CancelReason::UserRequested,
             cleanup: CleanupBehavior::default(),
             return_partial: true, // Even with return_partial=true
+            capability_token: None,
         };
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
         assert!(resp.partial_result.is_none());
@@ -1713,6 +1727,7 @@ mod tests {
             reason: CancelReason::UserRequested,
             cleanup: CleanupBehavior::default(),
             return_partial: true,
+            capability_token: None,
         };
         ctrl.cancel(&req, None, fixed_now()).unwrap();
         let events = ctrl.audit_events();
@@ -1837,6 +1852,7 @@ mod tests {
             reason: CancelReason::UserRequested,
             cleanup: CleanupBehavior::Checkpoint,
             return_partial: false,
+            capability_token: None,
         };
         // First cancel: Cancelled, should have checkpoint.
         let resp1 = ctrl.cancel(&req, None, fixed_now()).unwrap();
@@ -2566,6 +2582,7 @@ mod tests {
             reason: CancelReason::TimeoutApproaching { remaining_ms: 500 },
             cleanup: CleanupBehavior::Full { timeout_ms: 3000 },
             return_partial: true,
+            capability_token: None,
         };
         let cloned = req.clone();
         assert_eq!(req.operation_id, cloned.operation_id);
@@ -2775,6 +2792,7 @@ mod tests {
             reason: CancelReason::UserRequested,
             cleanup: CleanupBehavior::Checkpoint,
             return_partial: true,
+            capability_token: None,
         };
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
         assert_eq!(resp.outcome, CancellationOutcome::TooLate);

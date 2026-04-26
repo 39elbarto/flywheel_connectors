@@ -3358,6 +3358,7 @@ async fn fcp_host_binary_cancel_route_cancels_in_flight_invoke()
             reason: CancelReason::UserRequested,
             cleanup: CleanupBehavior::BestEffort,
             return_partial: true,
+            capability_token: None,
         },
     )
     .await?;
@@ -3456,6 +3457,7 @@ async fn fcp_host_binary_cancel_route_allows_follow_up_invoke_after_cleanup()
             reason: CancelReason::UserRequested,
             cleanup: CleanupBehavior::BestEffort,
             return_partial: true,
+            capability_token: None,
         },
     )
     .await?;
@@ -3551,6 +3553,7 @@ async fn fcp_host_binary_cancel_route_returns_too_late_for_completed_invoke()
             reason: CancelReason::UserRequested,
             cleanup: CleanupBehavior::BestEffort,
             return_partial: false,
+            capability_token: None,
         },
     )
     .await?;

@@ -1879,9 +1879,7 @@ async fn verified_cancellation_principal(
     request: &CancellationRequest,
 ) -> HostResult<String> {
     let capability_token = request.capability_token.as_ref().ok_or_else(|| {
-        HostError::PreflightFailed(
-            "capability token is required for /rpc/cancel-self".to_string(),
-        )
+        HostError::PreflightFailed("capability token is required for /rpc/cancel-self".to_string())
     })?;
     let persisted_verify = state
         .lifecycle
@@ -1907,11 +1905,14 @@ async fn verified_cancellation_principal(
         )));
     }
 
-    let verified_claims = capability_token.raw().claims_unverified().map_err(|error| {
-        HostError::PreflightFailed(format!(
-            "verified cancellation token lost readable capability claims: {error}"
-        ))
-    })?;
+    let verified_claims = capability_token
+        .raw()
+        .claims_unverified()
+        .map_err(|error| {
+            HostError::PreflightFailed(format!(
+                "verified cancellation token lost readable capability claims: {error}"
+            ))
+        })?;
     if let Some(expected_holder) = verified_claims.get_holder_node() {
         return Err(HostError::PreflightFailed(format!(
             "capability token is holder-bound to `{expected_holder}`, but /rpc/cancel-self does not accept holder-bound tokens"
@@ -4062,15 +4063,13 @@ async fn preflight_handler(
 ) -> Json<PreflightResponse> {
     let connector_id = request.connector_id.clone();
     let operation = request.operation.clone();
-    let asserted_principal = extract_principal_header(&headers).or_else(|| request.principal.clone());
+    let asserted_principal =
+        extract_principal_header(&headers).or_else(|| request.principal.clone());
     let started_at = Instant::now();
     let response = match invoke_request_from_preflight(&request) {
-        Ok(invoke_request) => evaluate_live_preflight(
-            &state,
-            &invoke_request,
-            asserted_principal.as_deref(),
-        )
-        .await,
+        Ok(invoke_request) => {
+            evaluate_live_preflight(&state, &invoke_request, asserted_principal.as_deref()).await
+        }
         Err(error) => preflight_response_from_error(error),
     };
     tracing::info!(
@@ -4094,7 +4093,8 @@ async fn simulate_handler(
     let connector_id = request.connector_id.clone();
     let operation = request.operation.clone();
     let request_id = request.request_id.clone();
-    let asserted_principal = extract_principal_header(&headers).or_else(|| request.principal.clone());
+    let asserted_principal =
+        extract_principal_header(&headers).or_else(|| request.principal.clone());
     let started_at = Instant::now();
 
     tracing::debug!(
@@ -6492,7 +6492,9 @@ mod tests {
             )
             .expect_err("mismatched principal should not cancel a headerless authenticated invoke");
         assert!(
-            error.to_string().contains("cancellation principal mismatch"),
+            error
+                .to_string()
+                .contains("cancellation principal mismatch"),
             "expected cancellation owner mismatch, got: {error}"
         );
     }
@@ -6619,7 +6621,9 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(PRINCIPAL_HEADER, HeaderValue::from_static("user:other"));
 
-        let response = preflight_handler(State(state), headers, Json(request)).await.0;
+        let response = preflight_handler(State(state), headers, Json(request))
+            .await
+            .0;
         assert!(!response.allowed, "{response:?}");
         assert!(
             response
@@ -8975,8 +8979,9 @@ done"#;
         let token_b64 = issued
             .token_cbor_b64
             .expect("non-dry-run issuance should return a token");
-        let token_bytes =
-            base64::engine::general_purpose::STANDARD.decode(token_b64).unwrap();
+        let token_bytes = base64::engine::general_purpose::STANDARD
+            .decode(token_b64)
+            .unwrap();
         fcp_core::CapabilityToken::from_raw(
             fcp_crypto::cose::CoseToken::from_cbor(&token_bytes)
                 .expect("issued cancel-self token should decode"),
@@ -9060,12 +9065,8 @@ done"#;
         // spoofed X-Principal — exactly the bypass shape from the
         // bead repro. Even a matching X-Principal value must be
         // rejected at the routing layer.
-        let status = post_cancel_with_headers(
-            app,
-            "/rpc/cancel",
-            &[("X-Principal", "user:test")],
-        )
-        .await;
+        let status =
+            post_cancel_with_headers(app, "/rpc/cancel", &[("X-Principal", "user:test")]).await;
         assert_eq!(
             status,
             axum::http::StatusCode::FORBIDDEN,

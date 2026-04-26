@@ -19317,6 +19317,7 @@ fn cancel_dispatch(args: &CancelArgs, explicit_host: Option<&str>) -> Result<Dis
         reason,
         cleanup,
         return_partial: args.return_partial,
+        capability_token: None,
     };
     let response = client.cancel(&request)?;
     let exit_code = if matches!(response.outcome, fcp_host::CancellationOutcome::Failed) {

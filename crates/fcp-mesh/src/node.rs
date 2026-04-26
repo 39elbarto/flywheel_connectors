@@ -42,7 +42,8 @@ use crate::degraded::{
 };
 use crate::device::DeviceProfile;
 use crate::gossip::{
-    GossipConfig, GossipMessage, GossipSummary, MeshGossip, RevocationPushMessage,
+    GossipConfig, GossipMessage, GossipRequest, GossipResponse, GossipSummary, MeshGossip,
+    RevocationPushMessage,
 };
 use crate::planner::{
     CandidateNode, ExecutionPlanner, HeldLease, LeasePurpose, NodeInfo, PlannerContext,
@@ -349,6 +350,33 @@ pub struct VerifiedRevocationPush {
     pub new_rev_seq: u64,
     /// Push timestamp.
     pub timestamp: u64,
+}
+
+/// Structured result of dispatching an inbound gossip message.
+#[derive(Debug, Clone, Default)]
+pub struct GossipDispatchOutcome {
+    /// Verified revocation push ready for registry application.
+    pub revocation_push: Option<VerifiedRevocationPush>,
+    /// Immediate response the transport should return to the requester.
+    pub response: Option<GossipResponse>,
+}
+
+impl GossipDispatchOutcome {
+    #[must_use]
+    fn with_revocation_push(revocation_push: VerifiedRevocationPush) -> Self {
+        Self {
+            revocation_push: Some(revocation_push),
+            response: None,
+        }
+    }
+
+    #[must_use]
+    fn with_response(response: GossipResponse) -> Self {
+        Self {
+            revocation_push: None,
+            response: Some(response),
+        }
+    }
 }
 
 /// MeshNode orchestration entrypoint.
@@ -1554,6 +1582,43 @@ impl MeshNode {
         Ok(peer)
     }
 
+    fn verify_gossip_request(
+        &self,
+        request: &GossipRequest,
+        now_secs: u64,
+    ) -> Result<NodeId, MeshNodeError> {
+        let peer = NodeId::new(request.from.as_str());
+
+        // `MeshGossip::create_request` currently emits unsigned
+        // request envelopes, so production dispatch has to rely on the
+        // transport-authenticated peer enrollment map here rather than
+        // a per-message signature. Keep this path fail-closed: the
+        // requester must already exist in peer state, be authorized
+        // for the target zone, and stay within the normal gossip
+        // freshness window.
+        let state = self
+            .peers
+            .get(&peer)
+            .ok_or_else(|| MeshNodeError::UnknownPeer {
+                peer: peer.as_str().to_string(),
+                message_kind: "gossip request",
+            })?;
+        if !state.zones.contains(&request.zone_id) {
+            return Err(MeshNodeError::UnauthorizedZone {
+                peer: peer.as_str().to_string(),
+                zone_id: request.zone_id.to_string(),
+            });
+        }
+        if now_secs.saturating_sub(request.timestamp) > self.gossip.summary_ttl_secs() {
+            return Err(MeshNodeError::StaleGossipMessage {
+                peer: peer.as_str().to_string(),
+                message_kind: "gossip request",
+            });
+        }
+
+        Ok(peer)
+    }
+
     async fn load_symbol_meta(
         &self,
         request: &SymbolRequest,
@@ -1666,30 +1731,77 @@ impl MeshNode {
         })
     }
 
-    /// Dispatch a gossip control-plane message through the verified node entrypoint.
+    /// Verify and answer a bounded gossip request.
     ///
-    /// Returns a verified revocation push when the message carries one.
+    /// Requests currently authenticate via the enrolled transport peer
+    /// state rather than a signed message transcript, so the claimed
+    /// `from` node must already exist in `self.peers`, be authorized
+    /// for the requested zone, and remain within the normal gossip
+    /// freshness window before the request reaches `MeshGossip`.
     ///
     /// # Errors
     ///
-    /// Returns `MeshNodeError` if summary or revocation-push verification fails.
+    /// Returns an error when the requester is unknown, not authorized
+    /// for the claimed zone, or the request timestamp is stale.
+    pub fn handle_gossip_request(
+        &mut self,
+        request: GossipRequest,
+        now_secs: u64,
+    ) -> Result<GossipResponse, MeshNodeError> {
+        self.verify_gossip_request(&request, now_secs)?;
+        Ok(self.gossip.handle_request(&request))
+    }
+
+    /// Dispatch a gossip control-plane message through the verified node entrypoint.
+    ///
+    /// Returns any verified revocation push plus an immediate gossip
+    /// response that the transport should return to the requester.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MeshNodeError` if summary, request, or revocation-push
+    /// verification fails.
     pub fn handle_gossip_message(
         &mut self,
         message: GossipMessage,
         now_secs: u64,
-    ) -> Result<Option<VerifiedRevocationPush>, MeshNodeError> {
+    ) -> Result<GossipDispatchOutcome, MeshNodeError> {
         match message {
             GossipMessage::Summary(summary) => {
                 self.handle_summary(summary, now_secs)?;
-                Ok(None)
+                Ok(GossipDispatchOutcome::default())
             }
             GossipMessage::RevocationPush(push) => {
-                self.handle_revocation_push(push, now_secs).map(Some)
+                self.handle_revocation_push(push, now_secs)
+                    .map(GossipDispatchOutcome::with_revocation_push)
             }
-            GossipMessage::Request(_)
-            | GossipMessage::Response(_)
-            | GossipMessage::ReconcileRequest(_)
-            | GossipMessage::ReconcileResponse(_) => Ok(None),
+            GossipMessage::Request(request) => self
+                .handle_gossip_request(request, now_secs)
+                .map(GossipDispatchOutcome::with_response),
+            GossipMessage::Response(response) => {
+                debug!(
+                    peer_id = %response.from.as_str(),
+                    zone_id = %response.zone_id,
+                    "gossip response is caller-managed; MeshNode has no inbound response state machine yet"
+                );
+                Ok(GossipDispatchOutcome::default())
+            }
+            GossipMessage::ReconcileRequest(request) => {
+                debug!(
+                    peer_id = %request.from.as_str(),
+                    zone_id = %request.zone_id,
+                    "reconcile request is deferred until the stateful reconcile dispatch path lands"
+                );
+                Ok(GossipDispatchOutcome::default())
+            }
+            GossipMessage::ReconcileResponse(response) => {
+                debug!(
+                    peer_id = %response.from.as_str(),
+                    zone_id = %response.zone_id,
+                    "reconcile response is deferred until the stateful reconcile dispatch path lands"
+                );
+                Ok(GossipDispatchOutcome::default())
+            }
         }
     }
 
@@ -1722,7 +1834,7 @@ impl MeshNode {
         &mut self,
         payload: &[u8],
         now_secs: u64,
-    ) -> Result<Option<VerifiedRevocationPush>, MeshNodeError> {
+    ) -> Result<GossipDispatchOutcome, MeshNodeError> {
         let max_payload = self.gossip.max_wire_payload_bytes();
         if payload.len() > max_payload {
             return Err(MeshNodeError::GossipPayloadTooLarge {
@@ -1748,7 +1860,7 @@ impl MeshNode {
         &mut self,
         message: GossipMessage,
         now_secs: u64,
-    ) -> Result<Option<VerifiedRevocationPush>, MeshNodeError> {
+    ) -> Result<GossipDispatchOutcome, MeshNodeError> {
         self.handle_gossip_message(message, now_secs)
     }
 
@@ -1765,7 +1877,7 @@ impl MeshNode {
         &mut self,
         envelope: &ControlPlaneEnvelope,
         now_secs: u64,
-    ) -> Result<Option<VerifiedRevocationPush>, MeshNodeError> {
+    ) -> Result<GossipDispatchOutcome, MeshNodeError> {
         self.dispatch_gossip_payload(&envelope.payload, now_secs)
     }
 
@@ -3807,9 +3919,76 @@ mod tests {
         let verified = node
             .dispatch_gossip_payload(&payload, 1_000)
             .expect("dispatch should succeed")
+            .revocation_push
             .expect("revocation push must produce a verified descriptor");
         assert_eq!(verified.new_rev_seq, 99);
         assert_eq!(verified.revoked_ids.len(), 1);
+    }
+
+    #[test]
+    fn dispatch_gossip_payload_routes_request_to_response() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-1");
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-1"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_zones(&peer, zone_set(ZoneId::work()));
+
+        let known_object = ObjectId::from_bytes([0x44; 32]);
+        assert!(node.announce_object(
+            &ZoneId::work(),
+            &known_object,
+            ObjectAdmissionClass::Admitted,
+            1_000,
+        ));
+
+        let request = GossipRequest::for_objects(
+            TailscaleNodeId::new("peer-1"),
+            ZoneId::work(),
+            vec![known_object, ObjectId::from_bytes([0x99; 32])],
+            1_000,
+        );
+        let payload = serde_json::to_vec(&GossipMessage::Request(request)).expect("JSON encode");
+
+        let outcome = node
+            .dispatch_gossip_payload(&payload, 1_000)
+            .expect("dispatch should succeed");
+        assert!(outcome.revocation_push.is_none());
+        let response = outcome
+            .response
+            .expect("request dispatch must surface an immediate response");
+        assert_eq!(response.from, TailscaleNodeId::new("node-1"));
+        assert_eq!(response.to, TailscaleNodeId::new("peer-1"));
+        assert_eq!(response.zone_id, ZoneId::work());
+        assert_eq!(response.have_objects, vec![known_object]);
+        assert!(response.have_symbols.is_empty());
+    }
+
+    #[test]
+    fn dispatch_gossip_payload_rejects_request_from_unknown_peer_without_peer_state() {
+        let mut node = test_node("node-1");
+        let request = GossipRequest::for_objects(
+            TailscaleNodeId::new("peer-1"),
+            ZoneId::work(),
+            vec![ObjectId::from_bytes([0xAA; 32])],
+            1_000,
+        );
+        let payload = serde_json::to_vec(&GossipMessage::Request(request)).expect("JSON encode");
+
+        let err = node
+            .dispatch_gossip_payload(&payload, 1_000)
+            .expect_err("request dispatch must fail closed for unknown peers");
+        assert!(matches!(
+            err,
+            MeshNodeError::UnknownPeer {
+                message_kind: "gossip request",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -3844,6 +4023,7 @@ mod tests {
         let verified = node
             .dispatch_gossip_message(GossipMessage::RevocationPush(push), 1_000)
             .expect("dispatch should succeed")
+            .revocation_push
             .expect("revocation push must produce a verified descriptor");
         assert_eq!(verified.new_rev_seq, 123);
     }

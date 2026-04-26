@@ -27,7 +27,7 @@ use base64::Engine;
 use chrono::{DateTime, Utc};
 use fcp_async_core::channel::{mpsc, oneshot};
 use fcp_async_core::hyper_bridge::{HyperExecutor, HyperIo};
-use fcp_async_core::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use fcp_async_core::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use fcp_async_core::net::TcpListener;
 #[cfg(unix)]
 use fcp_async_core::net::UnixListener;
@@ -740,6 +740,7 @@ enum ResponseIdDisposition {
 
 const CONNECTOR_RPC_QUEUE_CAPACITY: usize = 64;
 const CONNECTOR_RPC_IO_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECTOR_RPC_MAX_STDOUT_LINE_BYTES: usize = 64 * 1024;
 
 fn connector_io_timeout_error(phase: &'static str, timeout: Duration) -> std::io::Error {
     std::io::Error::new(
@@ -842,16 +843,46 @@ impl ConnectorProcessRunner {
     }
 
     async fn read_json(&mut self, io_timeout: Duration) -> std::io::Result<serde_json::Value> {
-        let mut line = String::new();
-        let bytes = fcp_async_core::time::timeout(io_timeout, self.stdout.read_line(&mut line))
-            .await
-            .map_err(|_| connector_io_timeout_error("stdout read", io_timeout))??;
+        let mut line = Vec::with_capacity(1024);
+        let bytes = fcp_async_core::time::timeout(io_timeout, async {
+            loop {
+                if line.len() > CONNECTOR_RPC_MAX_STDOUT_LINE_BYTES {
+                    return Ok(line.len());
+                }
+                match self.stdout.read_u8().await {
+                    Ok(byte) => {
+                        line.push(byte);
+                        if byte == b'\n' {
+                            return Ok(line.len());
+                        }
+                    }
+                    Err(err)
+                        if err.kind() == std::io::ErrorKind::UnexpectedEof && line.is_empty() =>
+                    {
+                        return Ok(0);
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        return Ok(line.len());
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+        })
+        .await
+        .map_err(|_| connector_io_timeout_error("stdout read", io_timeout))??;
         if bytes == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "connector closed stdout",
             ));
         }
+        if line.len() > CONNECTOR_RPC_MAX_STDOUT_LINE_BYTES {
+            return Err(connector_transport_desynchronized_error(format!(
+                "stdout frame exceeded {CONNECTOR_RPC_MAX_STDOUT_LINE_BYTES} bytes"
+            )));
+        }
+        let line = std::str::from_utf8(&line)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
         serde_json::from_str::<serde_json::Value>(line.trim())
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
     }
@@ -6954,6 +6985,43 @@ mod tests {
                 .contains("transport is desynchronized"),
             "unexpected retry error: {retry_error}"
         );
+    }
+
+    #[cfg(unix)]
+    #[fcp_async_core::runtime::test]
+    async fn connector_process_runner_rejects_oversized_stdout_line_and_poisoned_transport() {
+        let overlong_bytes = CONNECTOR_RPC_MAX_STDOUT_LINE_BYTES + 1;
+        let script = format!(
+            r#"while IFS= read -r _line; do
+  i=0
+  while [ "$i" -lt {overlong_bytes} ]; do
+    printf x
+    i=$((i + 1))
+  done
+  printf '\n'
+done"#
+        );
+        let args = vec!["-c".to_string(), script];
+        let mut runner = ConnectorProcessRunner::spawn("sh", &args, &BTreeMap::new())
+            .await
+            .expect("spawn overlong-line connector");
+
+        let error = runner
+            .request("health", json!({}))
+            .await
+            .expect_err("oversized stdout frame must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("stdout frame exceeded 65536 bytes"),
+            "unexpected error: {error}"
+        );
+
+        let retry_error = runner
+            .request("health", json!({}))
+            .await
+            .expect_err("oversized stdout frame must poison transport");
+        assert_eq!(retry_error.kind(), std::io::ErrorKind::BrokenPipe);
     }
 
     #[cfg(unix)]

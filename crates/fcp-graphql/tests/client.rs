@@ -29,7 +29,7 @@ use fcp_graphql::{
 };
 use fcp_streaming::WsConfig;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct EmptyVars {}
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -334,6 +334,103 @@ async fn close_test_websocket(ws: &mut TestServerWebSocket) {
     let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
 }
 
+async fn subscription_wrong_id_error(frame: serde_json::Value) -> GraphqlClientError {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    let server_task = task::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let mut ws = accept_test_websocket(stream).await;
+
+        let _init = recv_text(&mut ws, "init message").await;
+        send_json(
+            &mut ws,
+            serde_json::json!({ "type": "connection_ack" }),
+            "ack send",
+        )
+        .await;
+
+        let _subscribe = recv_text(&mut ws, "subscribe message").await;
+        send_json(&mut ws, frame, "wrong-id frame send").await;
+    });
+
+    let url = format!("ws://{}", addr);
+    let client = GraphqlSubscriptionClient::new(url, "test");
+    let mut stream = client
+        .subscribe::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect("subscribe");
+
+    let err = stream
+        .next()
+        .await
+        .expect("stream error item")
+        .expect_err("expected protocol error");
+
+    server_task.await.expect("server task");
+    err
+}
+
+#[fcp_async_core::runtime::test]
+async fn subscription_rejects_wrong_id_next_frame() {
+    let err = subscription_wrong_id_error(serde_json::json!({
+        "type": "next",
+        "id": "stale-99",
+        "payload": {
+            "data": { "viewer": { "id": "wrong" } }
+        }
+    }))
+    .await;
+
+    match err {
+        GraphqlClientError::Protocol { message } => {
+            assert!(message.contains("next"));
+            assert!(message.contains("1"));
+            assert!(message.contains("stale-99"));
+        }
+        other => panic!("expected Protocol error, got {other:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn subscription_rejects_wrong_id_error_frame() {
+    let err = subscription_wrong_id_error(serde_json::json!({
+        "type": "error",
+        "id": "stale-99",
+        "payload": [
+            { "message": "wrong subscription" }
+        ]
+    }))
+    .await;
+
+    match err {
+        GraphqlClientError::Protocol { message } => {
+            assert!(message.contains("error"));
+            assert!(message.contains("1"));
+            assert!(message.contains("stale-99"));
+        }
+        other => panic!("expected Protocol error, got {other:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn subscription_rejects_wrong_id_complete_frame() {
+    let err = subscription_wrong_id_error(serde_json::json!({
+        "type": "complete",
+        "id": "stale-99"
+    }))
+    .await;
+
+    match err {
+        GraphqlClientError::Protocol { message } => {
+            assert!(message.contains("complete"));
+            assert!(message.contains("1"));
+            assert!(message.contains("stale-99"));
+        }
+        other => panic!("expected Protocol error, got {other:?}"),
+    }
+}
+
 #[fcp_async_core::runtime::test]
 async fn execute_query_success() {
     let mut ctx = TestContext::new("execute_query_success");
@@ -507,26 +604,73 @@ async fn execute_batch_rejects_invalid_variables() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn execute_batch_success() {
-    let mut ctx = TestContext::new("execute_batch_success");
+async fn execute_batch_single_item_success() {
+    let mut ctx = TestContext::new("execute_batch_single_item_success");
+    let server = MockServer::start().await;
+
+    let expected_body = serde_json::json!([{
+        "query": ViewerByIdQuery::QUERY,
+        "operationName": ViewerByIdQuery::OPERATION_NAME,
+        "variables": { "id": "user-1" }
+    }]);
+
+    let response_body = serde_json::json!([{"data": {"viewer": {"id": "user-1"}}}]);
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_json(&expected_body))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_validation_mode(SchemaValidationMode::ResponseOnly)
+        .build()
+        .expect("client");
+
+    let responses = client
+        .execute_batch::<ViewerByIdQuery>(vec![IdVars {
+            id: "user-1".to_string(),
+        }])
+        .await
+        .expect("batch should succeed");
+
+    ctx.assert_eq(responses.len(), 1_usize, "expected one response");
+    let first = responses[0].data.as_ref().expect("missing data");
+    ctx.assert_eq(first.viewer.id.clone(), "user-1".to_string(), "viewer id");
+
+    ctx.finalize("pass", Some(serde_json::json!({"batch_size": 1})));
+}
+
+#[fcp_async_core::runtime::test]
+async fn execute_batch_multi_item_success_with_echoed_correlation() {
+    let mut ctx = TestContext::new("execute_batch_multi_item_success_with_echoed_correlation");
     let server = MockServer::start().await;
 
     let expected_body = serde_json::json!([
         {
             "query": ViewerByIdQuery::QUERY,
             "operationName": ViewerByIdQuery::OPERATION_NAME,
-            "variables": { "id": "user-1" }
+            "variables": { "id": "user-1" },
+            "extensions": { "fcpBatchIndex": 0 }
         },
         {
             "query": ViewerByIdQuery::QUERY,
             "operationName": ViewerByIdQuery::OPERATION_NAME,
-            "variables": { "id": "user-2" }
+            "variables": { "id": "user-2" },
+            "extensions": { "fcpBatchIndex": 1 }
         }
     ]);
 
     let response_body = serde_json::json!([
-        {"data": {"viewer": {"id": "user-1"}}},
-        {"data": {"viewer": {"id": "user-2"}}}
+        {
+            "data": {"viewer": {"id": "user-1"}},
+            "extensions": { "fcpBatchIndex": 0 }
+        },
+        {
+            "data": {"viewer": {"id": "user-2"}},
+            "extensions": { "fcpBatchIndex": 1 }
+        }
     ]);
 
     Mock::given(method("POST"))
@@ -566,21 +710,50 @@ async fn execute_batch_success() {
         "user-2".to_string(),
         "second viewer id",
     );
+    ctx.assert_true(
+        responses
+            .iter()
+            .all(|response| response.extensions.is_none()),
+        "batch correlation metadata should not leak to callers",
+    );
 
     ctx.finalize("pass", Some(serde_json::json!({"batch_size": 2})));
 }
 
 #[fcp_async_core::runtime::test]
-async fn execute_batch_rejects_response_count_mismatch() {
-    let mut ctx = TestContext::new("execute_batch_rejects_response_count_mismatch");
+async fn execute_batch_rejects_reordered_equal_length_response() {
+    let mut ctx = TestContext::new("execute_batch_rejects_reordered_equal_length_response");
     let server = MockServer::start().await;
 
+    let expected_body = serde_json::json!([
+        {
+            "query": ViewerByIdQuery::QUERY,
+            "operationName": ViewerByIdQuery::OPERATION_NAME,
+            "variables": { "id": "user-1" },
+            "extensions": { "fcpBatchIndex": 0 }
+        },
+        {
+            "query": ViewerByIdQuery::QUERY,
+            "operationName": ViewerByIdQuery::OPERATION_NAME,
+            "variables": { "id": "user-2" },
+            "extensions": { "fcpBatchIndex": 1 }
+        }
+    ]);
+
     let response_body = serde_json::json!([
-        {"data": {"viewer": {"id": "user-1"}}}
+        {
+            "data": {"viewer": {"id": "user-2"}},
+            "extensions": { "fcpBatchIndex": 1 }
+        },
+        {
+            "data": {"viewer": {"id": "user-1"}},
+            "extensions": { "fcpBatchIndex": 0 }
+        }
     ]);
 
     Mock::given(method("POST"))
         .and(path("/"))
+        .and(body_json(&expected_body))
         .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
         .mount(&server)
         .await;
@@ -600,12 +773,56 @@ async fn execute_batch_rejects_response_count_mismatch() {
             },
         ])
         .await
-        .expect_err("short batch response should fail closed");
+        .expect_err("reordered equal-length response should fail closed");
 
     match err {
         GraphqlClientError::Protocol { message } => {
             ctx.assert_true(
-                message.contains("expected 2, got 1"),
+                message.contains("correlation mismatch at position 0"),
+                "protocol error should mention batch correlation mismatch",
+            );
+        }
+        other => panic!("expected Protocol error, got {other:?}"),
+    }
+
+    ctx.finalize(
+        "pass",
+        Some(serde_json::json!({"validation": "batch_correlation"})),
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn execute_batch_rejects_response_count_mismatch() {
+    let mut ctx = TestContext::new("execute_batch_rejects_response_count_mismatch");
+    let server = MockServer::start().await;
+
+    let response_body = serde_json::json!([
+        {"data": {"viewer": {"id": "user-1"}}},
+        {"data": {"viewer": {"id": "user-2"}}}
+    ]);
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_validation_mode(SchemaValidationMode::ResponseOnly)
+        .build()
+        .expect("client");
+
+    let err = client
+        .execute_batch::<ViewerByIdQuery>(vec![IdVars {
+            id: "user-1".to_string(),
+        }])
+        .await
+        .expect_err("overlong batch response should fail closed");
+
+    match err {
+        GraphqlClientError::Protocol { message } => {
+            ctx.assert_true(
+                message.contains("expected 1, got 2"),
                 "protocol error should mention batch count mismatch",
             );
         }
@@ -695,6 +912,52 @@ async fn execute_query_dedup_in_flight() {
         "expected one HTTP request",
     );
     ctx.finalize("pass", Some(serde_json::json!({"dedup": true})));
+}
+
+#[fcp_async_core::runtime::test]
+async fn execute_request_dedup_splits_by_idempotence() {
+    let server = MockServer::start().await;
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(CountingResponder {
+            counter: counter.clone(),
+            body: serde_json::json!({
+                "data": {
+                    "viewer": {"id": "same-body"}
+                }
+            }),
+            delay: Some(Duration::from_millis(50)),
+        })
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_dedup_in_flight(true)
+        .with_retry_policy(RetryPolicy {
+            strategy: RetryStrategy::IdempotentOnly,
+            ..RetryPolicy::default()
+        })
+        .build()
+        .expect("client");
+
+    let request = GraphqlRequest::new(GraphqlQuery::from_static(ViewerQuery::QUERY), EmptyVars {})
+        .with_operation_name(ViewerQuery::OPERATION_NAME);
+
+    let (first, second) = futures_util::future::join(
+        client.execute_request::<_, ViewerResponse>(request.clone(), None, None, true),
+        client.execute_request::<_, ViewerResponse>(request, None, None, false),
+    )
+    .await;
+
+    first.expect("idempotent request should succeed");
+    second.expect("non-idempotent request should succeed");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        2,
+        "same-body callers with different idempotence must not share one in-flight future",
+    );
 }
 
 #[fcp_async_core::runtime::test]

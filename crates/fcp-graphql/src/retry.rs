@@ -297,6 +297,7 @@ mod tests {
     fn decide_retryable_http_status() {
         let p = RetryPolicy {
             max_jitter: Duration::ZERO,
+            max_delay: Duration::from_secs(30),
             ..RetryPolicy::default()
         };
         let err = GraphqlClientError::HttpStatus {

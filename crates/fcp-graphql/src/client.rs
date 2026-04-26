@@ -12,6 +12,7 @@ use fcp_async_core::{AsyncError, sync::Mutex, task, time};
 use futures_util::future::{BoxFuture, FutureExt, Shared};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde_json::{Number, Value};
 use tracing::debug;
 
 use crate::error::{GraphqlClientError, GraphqlError};
@@ -40,6 +41,7 @@ const AUTHORIZATION_HEADER: &str = "Authorization";
 const CONTENT_TYPE_HEADER: &str = "Content-Type";
 const JSON_CONTENT_TYPE: &str = "application/json";
 const RETRY_AFTER_HEADER: &str = "Retry-After";
+const BATCH_CORRELATION_EXTENSION: &str = "fcpBatchIndex";
 
 /// GraphQL client metrics.
 #[derive(Debug, Default)]
@@ -91,9 +93,22 @@ pub struct GraphqlClientMetricsSnapshot {
 /// collision-free: key equality is byte-for-byte request equality.
 /// The memory cost is one additional `Vec<u8>` per in-flight entry,
 /// bounded by concurrency and released by [`DedupGuard::drop`].
+/// Composite dedup key: (request body bytes, idempotent flag).
+///
+/// br-brq7n: keying on body alone collapses two concurrent callers
+/// with byte-identical bodies but DIFFERENT `idempotent` classifications
+/// onto the same in-flight `send_with_retry(payload, idempotent)`
+/// future. The future captures the FIRST caller's `idempotent` value;
+/// a non-idempotent second caller would then inherit retry semantics
+/// that replay their (unsafe) request. Including the idempotent flag
+/// in the key gives each retry-class its own future — same body +
+/// same retry classification still dedups; same body + different
+/// classification does not.
+type DedupKey = (Vec<u8>, bool);
+
 #[derive(Debug, Clone)]
 struct DedupState {
-    inner: Arc<Mutex<HashMap<Vec<u8>, SharedRequestFuture>>>,
+    inner: Arc<Mutex<HashMap<DedupKey, SharedRequestFuture>>>,
 }
 
 impl DedupState {
@@ -112,7 +127,7 @@ impl DedupState {
 /// monotonically with unique cancelled-request bodies.
 struct DedupGuard {
     state: DedupState,
-    key: Vec<u8>,
+    key: DedupKey,
 }
 
 impl Drop for DedupGuard {
@@ -131,7 +146,9 @@ impl Drop for DedupGuard {
         // map. `mem::take` is fine here: we're in Drop and the key slot
         // will never be read again.
         let state = self.state.clone();
-        let key = std::mem::take(&mut self.key);
+        // The body Vec<u8> is the expensive part to clone — `mem::take`
+        // it out without disturbing the bool tag.
+        let key = (std::mem::take(&mut self.key.0), self.key.1);
         task::spawn_detached(async move {
             state.inner.lock().await.remove(&key);
         });
@@ -175,6 +192,121 @@ fn is_sensitive_header_name(name: &str) -> bool {
         || normalized.contains("apikey")
         || normalized.contains("secret")
         || normalized.ends_with("-key")
+}
+
+fn batch_protocol_error(message: impl Into<String>) -> GraphqlClientError {
+    GraphqlClientError::Protocol {
+        message: message.into(),
+    }
+}
+
+fn batch_body_with_correlations<V>(
+    items: &[GraphqlBatchItem<V>],
+) -> Result<Value, GraphqlClientError>
+where
+    V: Serialize,
+{
+    let mut body = serde_json::to_value(items)?;
+    if items.len() > 1 {
+        attach_batch_correlations(&mut body)?;
+    }
+    Ok(body)
+}
+
+fn attach_batch_correlations(body: &mut Value) -> Result<(), GraphqlClientError> {
+    let Value::Array(items) = body else {
+        return Err(batch_protocol_error(
+            "GraphQL batch request did not encode as an array",
+        ));
+    };
+
+    for (index, item) in items.iter_mut().enumerate() {
+        let Value::Object(item_object) = item else {
+            return Err(batch_protocol_error(format!(
+                "GraphQL batch request item {index} did not encode as an object"
+            )));
+        };
+        let extensions = item_object
+            .entry("extensions")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        let Some(extensions_object) = extensions.as_object_mut() else {
+            return Err(batch_protocol_error(format!(
+                "GraphQL batch request item {index} has non-object extensions"
+            )));
+        };
+        let index = u64::try_from(index)
+            .map_err(|_| batch_protocol_error("GraphQL batch request index does not fit in u64"))?;
+        if extensions_object
+            .insert(
+                BATCH_CORRELATION_EXTENSION.to_string(),
+                Value::Number(Number::from(index)),
+            )
+            .is_some()
+        {
+            return Err(batch_protocol_error(format!(
+                "GraphQL batch request extensions already contain reserved {BATCH_CORRELATION_EXTENSION}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_batch_response_correlations<R>(
+    response: &[GraphqlResponse<R>],
+) -> Result<(), GraphqlClientError> {
+    if response.len() <= 1 {
+        return Ok(());
+    }
+
+    for (position, item) in response.iter().enumerate() {
+        let extensions = item.extensions.as_ref().ok_or_else(|| {
+            batch_protocol_error(format!(
+                "GraphQL batch response item {position} is missing {BATCH_CORRELATION_EXTENSION}"
+            ))
+        })?;
+        let correlation = extensions.get(BATCH_CORRELATION_EXTENSION).ok_or_else(|| {
+            batch_protocol_error(format!(
+                "GraphQL batch response item {position} is missing {BATCH_CORRELATION_EXTENSION}"
+            ))
+        })?;
+        let actual = correlation.as_u64().ok_or_else(|| {
+            batch_protocol_error(format!(
+                "GraphQL batch response item {position} has non-integer {BATCH_CORRELATION_EXTENSION}"
+            ))
+        })?;
+        let actual = usize::try_from(actual).map_err(|_| {
+            batch_protocol_error(format!(
+                "GraphQL batch response item {position} has out-of-range {BATCH_CORRELATION_EXTENSION}"
+            ))
+        })?;
+        if actual != position {
+            return Err(batch_protocol_error(format!(
+                "GraphQL batch response correlation mismatch at position {position}: expected {position}, got {actual}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn strip_batch_response_correlations<R>(response: &mut [GraphqlResponse<R>]) {
+    if response.len() <= 1 {
+        return;
+    }
+
+    for item in response {
+        let should_clear_extensions =
+            if let Some(Value::Object(extensions)) = item.extensions.as_mut() {
+                extensions.remove(BATCH_CORRELATION_EXTENSION);
+                extensions.is_empty()
+            } else {
+                false
+            };
+        if should_clear_extensions {
+            item.extensions = None;
+        }
+    }
 }
 
 /// GraphQL client configuration.
@@ -556,6 +688,12 @@ impl GraphqlClient {
     }
 
     /// Execute a batch of identical typed operations.
+    ///
+    /// Multi-item batches are correlated with the reserved
+    /// `extensions.fcpBatchIndex` field on both the request and response
+    /// items. Equal-length reordered, duplicated, or uncorrelated
+    /// responses therefore fail closed instead of being silently
+    /// misattributed to the wrong request.
     pub async fn execute_batch<O: GraphqlOperation>(
         &self,
         variables: Vec<O::Variables>,
@@ -598,7 +736,7 @@ impl GraphqlClient {
         }
 
         let expected_responses = items.len();
-        let body = serde_json::to_value(&items)?;
+        let body = batch_body_with_correlations(&items)?;
         let bytes = self.execute_bytes(body, idempotent).await?;
         let response = self.decode_batch_response(&bytes, expected_responses, response_schema)?;
 
@@ -622,7 +760,7 @@ impl GraphqlClient {
     where
         R: DeserializeOwned + Serialize,
     {
-        let response: Vec<GraphqlResponse<R>> = serde_json::from_slice(bytes)?;
+        let mut response: Vec<GraphqlResponse<R>> = serde_json::from_slice(bytes)?;
         if response.len() != expected_responses {
             return Err(GraphqlClientError::Protocol {
                 message: format!(
@@ -631,6 +769,8 @@ impl GraphqlClient {
                 ),
             });
         }
+        validate_batch_response_correlations(&response)?;
+        strip_batch_response_correlations(&mut response);
 
         if let (
             SchemaValidationMode::VariablesAndResponse | SchemaValidationMode::ResponseOnly,
@@ -657,20 +797,27 @@ impl GraphqlClient {
         self.metrics.requests_total.fetch_add(1, Ordering::Relaxed);
 
         if let Some(state) = &self.dedup_state {
-            // Key on the raw body bytes — collision-free. See DedupState
-            // docs for the rationale vs. the prior u64 SipHash key.
+            // br-brq7n: dedup key is (body_bytes, idempotent). Keying on
+            // body alone would let a non-idempotent caller hitchhike a
+            // prior idempotent caller's retried `send_with_retry`,
+            // replaying a request the spec says must not be replayed —
+            // and conversely, an idempotent caller's retries would be
+            // suppressed if a non-idempotent caller arrived first.
+            // Splitting by retry classification keeps each class on its
+            // own future without losing dedup for matched-class pairs.
+            let dedup_key: DedupKey = (body_bytes.clone(), idempotent);
             let mut guard = state.inner.lock().await;
-            if let Some(shared) = guard.get(&body_bytes).cloned() {
+            if let Some(shared) = guard.get(&dedup_key).cloned() {
                 drop(guard);
                 return shared.await;
             }
 
             let client = self.clone();
-            let payload = body_bytes.clone();
+            let payload = body_bytes;
             let future = async move { client.send_with_retry(payload, idempotent).await }
                 .boxed()
                 .shared();
-            guard.insert(body_bytes.clone(), future.clone());
+            guard.insert(dedup_key.clone(), future.clone());
             drop(guard);
 
             // The cleanup guard removes our entry from the dedup map no
@@ -681,7 +828,7 @@ impl GraphqlClient {
             // Shared<> indefinitely.
             let _cleanup = DedupGuard {
                 state: state.clone(),
-                key: body_bytes,
+                key: dedup_key,
             };
             return future.await;
         }
@@ -1776,11 +1923,36 @@ mod tests {
     }
 
     #[test]
+    fn batch_body_with_correlations_adds_indices_for_multi_item_batches() {
+        let items = vec![
+            GraphqlBatchItem::new(
+                GraphqlQuery::new("{ viewer { id } }"),
+                serde_json::json!({}),
+            ),
+            GraphqlBatchItem::new(
+                GraphqlQuery::new("{ viewer { id } }"),
+                serde_json::json!({}),
+            ),
+        ];
+
+        let body = batch_body_with_correlations(&items).expect("batch body");
+
+        assert_eq!(body[0]["extensions"][BATCH_CORRELATION_EXTENSION], 0);
+        assert_eq!(body[1]["extensions"][BATCH_CORRELATION_EXTENSION], 1);
+    }
+
+    #[test]
     fn decode_batch_response_accepts_matching_count() {
         let client = GraphqlClient::new("https://api.test.com/graphql");
         let bytes = serde_json::to_vec(&serde_json::json!([
-            {"data": {"viewer": {"id": "user-1"}}},
-            {"data": {"viewer": {"id": "user-2"}}}
+            {
+                "data": {"viewer": {"id": "user-1"}},
+                "extensions": {"fcpBatchIndex": 0}
+            },
+            {
+                "data": {"viewer": {"id": "user-2"}},
+                "extensions": {"fcpBatchIndex": 1}
+            }
         ]))
         .expect("serialize response");
 
@@ -1789,6 +1961,7 @@ mod tests {
             .expect("matching batch response should parse");
 
         assert_eq!(response.len(), 2);
+        assert!(response.iter().all(|item| item.extensions.is_none()));
     }
 
     #[test]
@@ -1806,6 +1979,87 @@ mod tests {
         match err {
             GraphqlClientError::Protocol { message } => {
                 assert!(message.contains("expected 2, got 1"), "got: {message}");
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_batch_response_rejects_missing_correlation_for_multi_item_batch() {
+        let client = GraphqlClient::new("https://api.test.com/graphql");
+        let bytes = serde_json::to_vec(&serde_json::json!([
+            {"data": {"viewer": {"id": "user-1"}}},
+            {"data": {"viewer": {"id": "user-2"}}}
+        ]))
+        .expect("serialize response");
+
+        let err = client
+            .decode_batch_response::<serde_json::Value>(&bytes, 2, None)
+            .expect_err("uncorrelated multi-item batch should fail closed");
+
+        match err {
+            GraphqlClientError::Protocol { message } => {
+                assert!(message.contains("missing fcpBatchIndex"), "got: {message}");
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_batch_response_rejects_reordered_equal_count_response() {
+        let client = GraphqlClient::new("https://api.test.com/graphql");
+        let bytes = serde_json::to_vec(&serde_json::json!([
+            {
+                "data": {"viewer": {"id": "user-2"}},
+                "extensions": {"fcpBatchIndex": 1}
+            },
+            {
+                "data": {"viewer": {"id": "user-1"}},
+                "extensions": {"fcpBatchIndex": 0}
+            }
+        ]))
+        .expect("serialize response");
+
+        let err = client
+            .decode_batch_response::<serde_json::Value>(&bytes, 2, None)
+            .expect_err("reordered equal-count batch response should fail closed");
+
+        match err {
+            GraphqlClientError::Protocol { message } => {
+                assert!(
+                    message.contains("correlation mismatch at position 0"),
+                    "got: {message}"
+                );
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decode_batch_response_rejects_duplicated_equal_count_response() {
+        let client = GraphqlClient::new("https://api.test.com/graphql");
+        let bytes = serde_json::to_vec(&serde_json::json!([
+            {
+                "data": {"viewer": {"id": "user-1"}},
+                "extensions": {"fcpBatchIndex": 0}
+            },
+            {
+                "data": {"viewer": {"id": "user-1"}},
+                "extensions": {"fcpBatchIndex": 0}
+            }
+        ]))
+        .expect("serialize response");
+
+        let err = client
+            .decode_batch_response::<serde_json::Value>(&bytes, 2, None)
+            .expect_err("duplicated equal-count batch response should fail closed");
+
+        match err {
+            GraphqlClientError::Protocol { message } => {
+                assert!(
+                    message.contains("correlation mismatch at position 1"),
+                    "got: {message}"
+                );
             }
             other => panic!("expected Protocol error, got {other:?}"),
         }
@@ -1987,7 +2241,7 @@ mod tests {
         // the guard's job is only to remove the key, not to drive the
         // future.
         let fut = async { Ok(Vec::<u8>::new()) }.boxed().shared();
-        let key = b"{\"query\":\"{ seeded }\"}".to_vec();
+        let key: DedupKey = (b"{\"query\":\"{ seeded }\"}".to_vec(), true);
         state.inner.lock().await.insert(key.clone(), fut);
         assert_eq!(state.inner.lock().await.len(), 1);
 
@@ -2016,10 +2270,62 @@ mod tests {
         {
             let _guard = DedupGuard {
                 state: state.clone(),
-                key: b"never-inserted".to_vec(),
+                key: (b"never-inserted".to_vec(), true),
             };
         }
         assert!(state.inner.lock().await.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn dedup_guard_keys_separate_idempotent_classifications() {
+        // br-brq7n regression: two callers with the same body but
+        // different idempotent classifications must NOT collide on the
+        // same dedup entry. The composite (Vec<u8>, bool) key keeps
+        // them separate so the non-idempotent caller cannot inherit
+        // the idempotent caller's retry behavior (or vice versa).
+        let state = DedupState::new();
+        let body = b"{\"query\":\"{ shared }\"}".to_vec();
+
+        let fut_idem = async { Ok(Vec::<u8>::new()) }.boxed().shared();
+        let fut_nonidem = async { Ok(b"different-result".to_vec()) }.boxed().shared();
+
+        state
+            .inner
+            .lock()
+            .await
+            .insert((body.clone(), true), fut_idem);
+        state
+            .inner
+            .lock()
+            .await
+            .insert((body.clone(), false), fut_nonidem);
+
+        // Both entries coexist — two distinct futures, one map.
+        assert_eq!(state.inner.lock().await.len(), 2);
+
+        // Lookups by class return distinct futures.
+        let guard = state.inner.lock().await;
+        assert!(guard.contains_key(&(body.clone(), true)));
+        assert!(guard.contains_key(&(body.clone(), false)));
+        drop(guard);
+
+        // Drop one guard; only that classification's entry is removed.
+        {
+            let _g = DedupGuard {
+                state: state.clone(),
+                key: (body.clone(), true),
+            };
+        }
+        let guard = state.inner.lock().await;
+        assert_eq!(guard.len(), 1);
+        assert!(
+            !guard.contains_key(&(body.clone(), true)),
+            "idempotent entry must be removed"
+        );
+        assert!(
+            guard.contains_key(&(body.clone(), false)),
+            "non-idempotent entry must remain — separate dedup class"
+        );
     }
 
     // ---- br-flywheel_connectors-jdhaw: shared HttpClient pool ----
@@ -2129,11 +2435,13 @@ mod tests {
 
         let fut_a = async { Ok(b"RESPONSE-A".to_vec()) }.boxed().shared();
         let fut_b = async { Ok(b"RESPONSE-B".to_vec()) }.boxed().shared();
+        let key_a: DedupKey = (body_a.clone(), true);
+        let key_b: DedupKey = (body_b.clone(), true);
 
         {
             let mut inner = state.inner.lock().await;
-            inner.insert(body_a.clone(), fut_a);
-            inner.insert(body_b.clone(), fut_b);
+            inner.insert(key_a.clone(), fut_a);
+            inner.insert(key_b.clone(), fut_b);
             assert_eq!(
                 inner.len(),
                 2,
@@ -2145,7 +2453,7 @@ mod tests {
             .inner
             .lock()
             .await
-            .get(&body_a)
+            .get(&key_a)
             .cloned()
             .expect("a present")
             .await
@@ -2154,7 +2462,7 @@ mod tests {
             .inner
             .lock()
             .await
-            .get(&body_b)
+            .get(&key_b)
             .cloned()
             .expect("b present")
             .await

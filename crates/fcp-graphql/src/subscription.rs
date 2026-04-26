@@ -217,6 +217,10 @@ impl GraphqlSubscriptionClient {
                 match decode_ws_message(message) {
                     Ok(ws_msg) => match ws_msg.message_type.as_str() {
                         "next" => {
+                            if let Err(err) = validate_subscription_message_id(&ws_msg) {
+                                let _ = tx.send(Err(err)).await;
+                                break;
+                            }
                             if let Some(payload) = ws_msg.payload {
                                 let parsed: Result<GraphqlResponse<O::ResponseData>, _> =
                                     serde_json::from_value(payload);
@@ -241,6 +245,10 @@ impl GraphqlSubscriptionClient {
                             }
                         }
                         "error" => {
+                            if let Err(err) = validate_subscription_message_id(&ws_msg) {
+                                let _ = tx.send(Err(err)).await;
+                                break;
+                            }
                             let errors = ws_msg
                                 .payload
                                 .and_then(|value| {
@@ -258,7 +266,12 @@ impl GraphqlSubscriptionClient {
                                 .await;
                             break;
                         }
-                        "complete" => break,
+                        "complete" => {
+                            if let Err(err) = validate_subscription_message_id(&ws_msg) {
+                                let _ = tx.send(Err(err)).await;
+                            }
+                            break;
+                        }
                         "ping" => {
                             let pong = GraphqlWsMessage {
                                 message_type: "pong".to_string(),
@@ -442,6 +455,24 @@ async fn send_complete_and_close(connection: &mut WsConnection) {
     let _ = connection.close().await;
 }
 
+fn validate_subscription_message_id(ws_msg: &GraphqlWsMessage) -> Result<(), GraphqlClientError> {
+    match ws_msg.id.as_deref() {
+        Some(SUBSCRIPTION_ID) => Ok(()),
+        Some(actual_id) => Err(GraphqlClientError::Protocol {
+            message: format!(
+                "subscription {} frame id mismatch: expected `{SUBSCRIPTION_ID}`, got `{actual_id}`",
+                ws_msg.message_type
+            ),
+        }),
+        None => Err(GraphqlClientError::Protocol {
+            message: format!(
+                "subscription {} frame missing id `{SUBSCRIPTION_ID}`",
+                ws_msg.message_type
+            ),
+        }),
+    }
+}
+
 fn decode_ws_message(message: WsMessage) -> Result<GraphqlWsMessage, GraphqlClientError> {
     match message {
         WsMessage::Text(text) => {
@@ -544,6 +575,51 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let back: GraphqlWsMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.message_type, "ping");
+    }
+
+    // ---- validate_subscription_message_id ----
+
+    #[test]
+    fn subscription_message_id_accepts_expected_id() {
+        let msg = GraphqlWsMessage {
+            message_type: "next".to_string(),
+            id: Some(SUBSCRIPTION_ID.to_string()),
+            payload: None,
+        };
+        assert!(validate_subscription_message_id(&msg).is_ok());
+    }
+
+    #[test]
+    fn subscription_message_id_rejects_wrong_id() {
+        let msg = GraphqlWsMessage {
+            message_type: "error".to_string(),
+            id: Some("stale-99".to_string()),
+            payload: None,
+        };
+        match validate_subscription_message_id(&msg).unwrap_err() {
+            GraphqlClientError::Protocol { message } => {
+                assert!(message.contains("error"));
+                assert!(message.contains(SUBSCRIPTION_ID));
+                assert!(message.contains("stale-99"));
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subscription_message_id_rejects_missing_id() {
+        let msg = GraphqlWsMessage {
+            message_type: "complete".to_string(),
+            id: None,
+            payload: None,
+        };
+        match validate_subscription_message_id(&msg).unwrap_err() {
+            GraphqlClientError::Protocol { message } => {
+                assert!(message.contains("complete"));
+                assert!(message.contains("missing id"));
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
     }
 
     // ---- decode_ws_message ----

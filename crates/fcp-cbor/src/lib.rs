@@ -459,6 +459,18 @@ fn canonicalize_map_with_limit(
     depth: usize,
     byte_limit: usize,
 ) -> Result<(), SerializationError> {
+    // Even the smallest definite-length CBOR map needs a 1-byte header plus
+    // 2 bytes per entry (1-byte key + 1-byte value). Reject impossible
+    // high-cardinality maps before allocating the second per-entry scratch
+    // vector so hostile input cannot amplify heap usage beyond the byte limit.
+    let minimum_possible_len = 1usize.saturating_add(entries.len().saturating_mul(2));
+    if minimum_possible_len > byte_limit {
+        return Err(SerializationError::PayloadTooLarge {
+            len: minimum_possible_len,
+            max: byte_limit,
+        });
+    }
+
     // Pre-allocate scratch buffer. Typical CBOR map keys are 10-50 bytes each.
     // Cap allocation to prevent memory amplification from maps with many tiny entries.
     let scratch_cap = canonicalize_map_scratch_capacity_with_limit(entries.len(), byte_limit);
@@ -2556,6 +2568,20 @@ mod tests {
         let mut entries: Vec<(Value, Value)> = vec![];
         canonicalize_map(&mut entries, 0).unwrap();
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn canonicalize_map_rejects_impossible_entry_cardinality_before_extra_allocation() {
+        let mut entries = vec![
+            (Value::Integer(0.into()), Value::Integer(0.into())),
+            (Value::Integer(1.into()), Value::Integer(1.into())),
+        ];
+
+        let err = canonicalize_map_with_limit(&mut entries, 0, 4).unwrap_err();
+        assert!(matches!(
+            err,
+            SerializationError::PayloadTooLarge { len: 5, max: 4 }
+        ));
     }
 
     // ========================================================================

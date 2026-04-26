@@ -1264,26 +1264,10 @@ fn prepare_preopened_dir(path: &Path, writable: bool) -> WasiResult<Option<PathB
     let pre_create = ensure_preopen_path_is_stable(path, writable)?;
 
     if writable && !path.exists() {
-        std::fs::create_dir_all(path).map_err(|error| WasiError::FsAccessDenied {
+        return Err(WasiError::FsAccessDenied {
             path: path.display().to_string(),
-            reason: format!("failed to create writable preopen directory: {error}"),
-        })?;
-        // Re-verify after the FS mutation. create_dir_all walks the
-        // declared path component-by-component; an attacker with write
-        // access to an ancestor can race a regular directory for a
-        // symlink between our first check and the completed mkdir. If
-        // the post-create resolved path does not match what the pre-
-        // create check predicted, refuse instead of mounting the
-        // attacker-chosen target.
-        let post_create = ensure_preopen_path_is_stable(path, writable)?;
-        if post_create != pre_create {
-            return Err(WasiError::FsAccessDenied {
-                path: path.display().to_string(),
-                reason:
-                    "preopen path resolved to a different location after create_dir_all (symlink race)"
-                        .into(),
-            });
-        }
+            reason: "writable WASI preopens must already exist as directories; refusing to widen a missing path into a writable directory grant".into(),
+        });
     }
 
     if !path.exists() {
@@ -2348,6 +2332,39 @@ mod tests {
         assert!(matches!(err, WasiError::FsAccessDenied { .. }));
         assert!(err.to_string().contains("must be directories"));
         assert!(err.to_string().contains(&file.display().to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_wasi_runtime_rejects_missing_writable_file_like_preopen() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "fcp-wasi-missing-writable-file-{}-{unique}",
+            std::process::id()
+        ));
+        let missing = dir.join("state.json");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let runtime = WasiRuntime::new(WasiConfig {
+            writable_paths: vec![missing.clone()],
+            ..WasiConfig::default()
+        })
+        .expect("runtime construction should succeed before store creation");
+        let Err(err) = runtime.create_store() else {
+            panic!("expected missing writable file-like preopen to be rejected");
+        };
+
+        assert!(matches!(err, WasiError::FsAccessDenied { .. }));
+        assert!(err.to_string().contains("must already exist as directories"));
+        assert!(err.to_string().contains(&missing.display().to_string()));
+        assert!(!missing.exists(), "missing file-like preopen should not be auto-created");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

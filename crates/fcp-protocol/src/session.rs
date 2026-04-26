@@ -14,6 +14,7 @@ use rand::RngCore;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::collections::{HashSet, VecDeque};
 use std::io::Cursor;
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -38,6 +39,9 @@ pub const DEFAULT_MAX_DATAGRAM_BYTES: u16 = 1200;
 
 /// Maximum handshake payload size in bytes (defensive limit).
 pub const MAX_HANDSHAKE_BYTES: usize = 16 * 1024;
+
+/// Default number of accepted hello nonces to retain for replay rejection.
+pub const DEFAULT_HELLO_REPLAY_WINDOW_SIZE: usize = 1024;
 
 /// Errors for session handshake and FCPS datagram handling.
 #[derive(Debug, Error)]
@@ -95,6 +99,9 @@ pub enum SessionError {
 
     #[error("timestamp skew too large (delta {delta} > max {max})")]
     TimestampSkew { delta: u64, max: u64 },
+
+    #[error("duplicate hello nonce still tracked by the active replay window")]
+    DuplicateHelloNonce,
 
     #[error(transparent)]
     Cbor(#[from] fcp_cbor::SerializationError),
@@ -535,12 +542,78 @@ pub fn current_timestamp() -> u64 {
         .as_secs()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HelloReplayKey {
+    from: TailscaleNodeId,
+    nonce: SessionNonce,
+}
+
+/// Responder-side tracker for accepted hello nonces inside the active replay window.
+#[derive(Debug, Clone)]
+pub struct HelloReplayWindow {
+    capacity: usize,
+    order: VecDeque<HelloReplayKey>,
+    seen: HashSet<HelloReplayKey>,
+}
+
+impl HelloReplayWindow {
+    /// Create a new hello replay window with bounded FIFO retention.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
+        Self {
+            capacity,
+            order: VecDeque::with_capacity(capacity),
+            seen: HashSet::with_capacity(capacity),
+        }
+    }
+
+    fn key_for(hello: &MeshSessionHello) -> HelloReplayKey {
+        HelloReplayKey {
+            from: hello.from.clone(),
+            nonce: hello.nonce,
+        }
+    }
+
+    /// Return whether this hello would be accepted without mutating the window.
+    #[must_use]
+    pub fn check(&self, hello: &MeshSessionHello) -> bool {
+        !self.seen.contains(&Self::key_for(hello))
+    }
+
+    /// Record a verified hello and reject duplicates that remain inside the active window.
+    pub fn check_and_update(&mut self, hello: &MeshSessionHello) -> bool {
+        let key = Self::key_for(hello);
+        if !self.seen.insert(key.clone()) {
+            return false;
+        }
+
+        self.order.push_back(key);
+        while self.order.len() > self.capacity {
+            if let Some(evicted) = self.order.pop_front() {
+                self.seen.remove(&evicted);
+            }
+        }
+        true
+    }
+}
+
+impl Default for HelloReplayWindow {
+    fn default() -> Self {
+        Self::new(DEFAULT_HELLO_REPLAY_WINDOW_SIZE)
+    }
+}
+
 /// Verify a hello signature against a peer identity and attestation.
 ///
 /// # Errors
 /// Returns `SessionError::AttestationNodeMismatch` if the node id differs,
 /// `SessionError::TimestampSkew` if timestamp is outside policy window,
 /// or the relevant `SessionError` if attestation/signature verification fails.
+///
+/// This helper intentionally does not track accepted nonces. Responder call sites that
+/// admit new hellos should use [`verify_hello_attested_with_replay`] so duplicate hello
+/// nonces are rejected while they remain inside the active replay window.
 pub fn verify_hello_attested(
     hello: &MeshSessionHello,
     identity: &MeshIdentity,
@@ -566,6 +639,26 @@ pub fn verify_hello_attested(
         .map_err(map_attestation_error)?;
     hello.verify(&identity.node_keys.signing_key)?;
     Ok(())
+}
+
+/// Verify a hello and reject duplicate nonces still retained by the active replay window.
+///
+/// # Errors
+/// Returns any error from [`verify_hello_attested`] or [`SessionError::DuplicateHelloNonce`]
+/// when the responder has already accepted the same `(from, nonce)` tuple within the
+/// currently retained active window.
+pub fn verify_hello_attested_with_replay(
+    hello: &MeshSessionHello,
+    identity: &MeshIdentity,
+    time_policy: &TimePolicy,
+    replay_window: &mut HelloReplayWindow,
+) -> Result<(), SessionError> {
+    verify_hello_attested(hello, identity, time_policy)?;
+    if replay_window.check_and_update(hello) {
+        Ok(())
+    } else {
+        Err(SessionError::DuplicateHelloNonce)
+    }
 }
 
 /// Verify an ack signature against a peer identity and attestation.
@@ -1882,6 +1975,51 @@ mod tests {
         });
     }
 
+    fn make_attested_hello_identity(
+        from: &str,
+        nonce: [u8; 16],
+    ) -> (MeshSessionHello, MeshIdentity) {
+        let owner_key = Ed25519SigningKey::generate();
+        let node_signing = Ed25519SigningKey::generate();
+        let node_issuance = Ed25519SigningKey::generate();
+        let node_encryption = X25519SecretKey::generate();
+        let node_id = NodeId::new(from);
+        let tags = vec![TailscaleTag::fcp_tag("work")];
+
+        let node_keys = NodeKeys::new(
+            node_signing.verifying_key(),
+            node_encryption.public_key(),
+            node_issuance.verifying_key(),
+        );
+
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).expect("attest");
+
+        let identity = MeshIdentity::new(
+            node_id,
+            "host".to_string(),
+            Vec::new(),
+            tags,
+            owner_key.verifying_key(),
+            node_keys,
+        )
+        .with_attestation(attestation);
+
+        let mut hello = MeshSessionHello {
+            from: TailscaleNodeId::new(from),
+            to: TailscaleNodeId::new("node-responder"),
+            eph_pubkey: node_encryption.public_key(),
+            nonce: SessionNonce(nonce),
+            cookie: None,
+            timestamp: current_timestamp(),
+            suites: vec![SessionCryptoSuite::Suite1],
+            transport_limits: None,
+            signature: None,
+        };
+        hello.sign(&node_signing).expect("sign hello");
+        (hello, identity)
+    }
+
     #[test]
     fn hello_attestation_verifies_and_expired_fails() {
         let owner_key = Ed25519SigningKey::generate();
@@ -2007,6 +2145,54 @@ mod tests {
                 Err(SessionError::AttestationNodeMismatch)
             ));
         });
+    }
+
+    #[test]
+    fn hello_replay_window_rejects_duplicate_nonce_from_same_peer() {
+        let (hello, identity) = make_attested_hello_identity("node-initiator", [0x55; 16]);
+        let replayed_hello = hello.clone();
+        let mut replay_window = HelloReplayWindow::new(8);
+
+        verify_hello_attested_with_replay(
+            &hello,
+            &identity,
+            &TimePolicy::default(),
+            &mut replay_window,
+        )
+        .expect("first hello accepted");
+
+        assert!(matches!(
+            verify_hello_attested_with_replay(
+                &replayed_hello,
+                &identity,
+                &TimePolicy::default(),
+                &mut replay_window,
+            ),
+            Err(SessionError::DuplicateHelloNonce)
+        ));
+    }
+
+    #[test]
+    fn hello_replay_window_allows_same_nonce_from_distinct_peers() {
+        let (hello_a, identity_a) = make_attested_hello_identity("node-a", [0x66; 16]);
+        let (hello_b, identity_b) = make_attested_hello_identity("node-b", [0x66; 16]);
+        let mut replay_window = HelloReplayWindow::new(8);
+
+        verify_hello_attested_with_replay(
+            &hello_a,
+            &identity_a,
+            &TimePolicy::default(),
+            &mut replay_window,
+        )
+        .expect("first peer accepted");
+
+        verify_hello_attested_with_replay(
+            &hello_b,
+            &identity_b,
+            &TimePolicy::default(),
+            &mut replay_window,
+        )
+        .expect("same nonce from a different peer should remain distinct");
     }
 
     // ── Batch 2: SunnyMoose test expansion ──

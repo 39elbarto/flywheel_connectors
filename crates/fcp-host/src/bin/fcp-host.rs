@@ -1874,6 +1874,61 @@ fn track_verified_cancellation_owner(
     Ok(())
 }
 
+async fn verified_cancellation_principal(
+    state: &AppState,
+    request: &CancellationRequest,
+) -> HostResult<String> {
+    let capability_token = request.capability_token.as_ref().ok_or_else(|| {
+        HostError::PreflightFailed(
+            "capability token is required for /rpc/cancel-self".to_string(),
+        )
+    })?;
+    let persisted_verify = state
+        .lifecycle
+        .verify_capability_token(&CapabilityTokenVerifyRequest {
+            token_cbor_b64: capability_token_b64(capability_token)?,
+            operation_id: None,
+            connector_id: None,
+        })
+        .await
+        .map_err(|error| {
+            HostError::PreflightFailed(format!("persisted capability verification failed: {error}"))
+        })?;
+    if !persisted_verify.valid {
+        let reason = persisted_verify
+            .rejection_reasons
+            .first()
+            .cloned()
+            .unwrap_or_else(|| {
+                "persisted capability verification rejected the cancel-self request".to_string()
+            });
+        return Err(HostError::PreflightFailed(format!(
+            "capability token rejected by host state: {reason}"
+        )));
+    }
+
+    let verified_claims = capability_token.raw().claims_unverified().map_err(|error| {
+        HostError::PreflightFailed(format!(
+            "verified cancellation token lost readable capability claims: {error}"
+        ))
+    })?;
+    if let Some(expected_holder) = verified_claims.get_holder_node() {
+        return Err(HostError::PreflightFailed(format!(
+            "capability token is holder-bound to `{expected_holder}`, but /rpc/cancel-self does not accept holder-bound tokens"
+        )));
+    }
+
+    let principal = claims_principal(&verified_claims)
+        .map(str::trim)
+        .filter(|principal| !principal.is_empty())
+        .ok_or_else(|| {
+            HostError::PreflightFailed(
+                "capability token missing subject/principal_id claim".to_string(),
+            )
+        })?;
+    Ok(principal.to_string())
+}
+
 async fn evaluate_live_preflight(
     state: &AppState,
     request: &InvokeRequest,
@@ -2731,7 +2786,11 @@ async fn async_main() -> HostResult<()> {
         .route("/rpc/introspect/{connector_id}", get(introspect_handler))
         .route("/rpc/invoke", post(invoke_handler))
         // /rpc/cancel and /rpc/operations/cancel moved into
-        // protected_routes (br-71lku — see comment there).
+        // protected_routes (br-71lku — see comment there). Public
+        // owner-scoped self-cancel now lives at /rpc/cancel-self and
+        // authenticates from a verified capability token rather than
+        // X-Principal.
+        .route("/rpc/cancel-self", post(cancel_self_handler))
         .route("/rpc/batch", post(batch_invoke_handler))
         .route("/rpc/batch-invoke", post(batch_invoke_handler))
         .route("/rpc/preflight", post(preflight_handler))
@@ -4279,6 +4338,41 @@ async fn cancel_handler(
         outcome = ?response.outcome,
         duration_ms = started_at.elapsed().as_millis() as u64,
         "cancellation request complete"
+    );
+    Ok(Json(response))
+}
+
+async fn cancel_self_handler(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<CancellationRequest>,
+) -> Result<Json<CancellationResponse>, (StatusCode, String)> {
+    let operation_id = request.operation_id.clone();
+    let verified_principal = verified_cancellation_principal(state.as_ref(), &request)
+        .await
+        .map_err(map_host_error)?;
+    let started_at = Instant::now();
+    tracing::debug!(
+        event = "cancel_self_request",
+        operation_id = %operation_id,
+        principal = %verified_principal,
+        reason = %request.reason.label(),
+        cleanup = ?request.cleanup,
+        return_partial = request.return_partial,
+        "processing owner-scoped cancellation request"
+    );
+
+    let response = state
+        .cancellation
+        .cancel(&request, Some(verified_principal.as_str()), Utc::now())
+        .map_err(map_host_error)?;
+
+    tracing::info!(
+        event = "cancel_self_response",
+        operation_id = %operation_id,
+        principal = %verified_principal,
+        outcome = ?response.outcome,
+        duration_ms = started_at.elapsed().as_millis() as u64,
+        "owner-scoped cancellation request complete"
     );
     Ok(Json(response))
 }
@@ -6391,6 +6485,7 @@ mod tests {
                     reason: CancelReason::UserRequested,
                     cleanup: CleanupBehavior::default(),
                     return_partial: false,
+                    capability_token: None,
                 },
                 Some("user:other"),
                 Utc::now(),
@@ -8849,12 +8944,52 @@ done"#;
         })
     }
 
+    async fn issue_cancel_self_test_token(
+        lifecycle: &HostAdminStateStore,
+        principal_id: &str,
+    ) -> fcp_core::CapabilityToken {
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let issued = lifecycle
+            .issue_capability_token(
+                &fcp_host::CapabilityIssuanceRequest {
+                    connector_id: "fcp.host.cancel-self:test:1.0.0".to_string(),
+                    capability_id: "host.cancel-self".to_string(),
+                    zone_id: ZoneId::work().to_string(),
+                    principal_id: principal_id.to_string(),
+                    operations: Vec::new(),
+                    ttl_secs: 3600,
+                    not_before_delay_secs: None,
+                    holder_node: None,
+                    max_delegation_depth: 0,
+                    resource_allow: Vec::new(),
+                    resource_deny: Vec::new(),
+                    max_calls: None,
+                    max_bytes: None,
+                    credential_allow: Vec::new(),
+                    dry_run: false,
+                },
+                &signing_key,
+            )
+            .await
+            .expect("issue cancel-self capability token");
+        let token_b64 = issued
+            .token_cbor_b64
+            .expect("non-dry-run issuance should return a token");
+        let token_bytes =
+            base64::engine::general_purpose::STANDARD.decode(token_b64).unwrap();
+        fcp_core::CapabilityToken::from_raw(
+            fcp_crypto::cose::CoseToken::from_cbor(&token_bytes)
+                .expect("issued cancel-self token should decode"),
+        )
+    }
+
     /// Construct a minimal app router that mirrors the production
-    /// /rpc/cancel mount: cancel routes live in `protected_routes`
-    /// behind `admin_auth_middleware`, then `protected_routes` is
-    /// merged into the public app router. This is the exact wiring
-    /// pattern from the production `main()` builder, scoped down to
-    /// the cancel routes for the regression test.
+    /// cancel mounts: admin cancel routes live in `protected_routes`
+    /// behind `admin_auth_middleware`, while `/rpc/cancel-self`
+    /// remains public and authenticates via capability token. This
+    /// is the exact wiring pattern from the production `main()`
+    /// builder, scoped down to the cancellation routes for the
+    /// regression tests.
     fn cancel_test_app(state: Arc<AppState>) -> axum::Router {
         let protected = axum::Router::new()
             .route("/rpc/cancel", post(cancel_handler))
@@ -8864,23 +8999,21 @@ done"#;
                 admin_auth_middleware,
             ));
         axum::Router::new()
+            .route("/rpc/cancel-self", post(cancel_self_handler))
             .merge(protected)
             .with_state(Arc::clone(&state))
     }
 
-    async fn post_cancel_with_headers(
+    async fn send_cancel_request(
         app: axum::Router,
         path: &str,
+        body: serde_json::Value,
         extra_headers: &[(&str, &str)],
-    ) -> axum::http::StatusCode {
+    ) -> axum::response::Response {
         use axum::body::Body;
         use axum::http::{Request, header::CONTENT_TYPE};
         use tower::util::ServiceExt;
 
-        let body = serde_json::json!({
-            "operation_id": "op-71lku-test",
-            "reason": "user_requested",
-        });
         let mut builder = Request::builder()
             .method("POST")
             .uri(path)
@@ -8892,8 +9025,25 @@ done"#;
             .body(Body::from(body.to_string()))
             .expect("build cancel request");
 
-        let response = app.oneshot(req).await.expect("router response");
-        response.status()
+        app.oneshot(req).await.expect("router response")
+    }
+
+    async fn post_cancel_with_headers(
+        app: axum::Router,
+        path: &str,
+        extra_headers: &[(&str, &str)],
+    ) -> axum::http::StatusCode {
+        send_cancel_request(
+            app,
+            path,
+            serde_json::json!({
+                "operation_id": "op-71lku-test",
+                "reason": "user_requested",
+            }),
+            extra_headers,
+        )
+        .await
+        .status()
     }
 
     #[fcp_async_core::runtime::test]
@@ -8954,5 +9104,69 @@ done"#;
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn rpc_cancel_self_allows_verified_owner_without_admin_auth() {
+        let state = cancel_route_test_state();
+        state
+            .cancellation
+            .track_with_owner("op-self-owner", Some("user:test"));
+        let token = issue_cancel_self_test_token(state.lifecycle.as_ref(), "user:test").await;
+        let app = cancel_test_app(Arc::clone(&state));
+        let response = send_cancel_request(
+            app,
+            "/rpc/cancel-self",
+            serde_json::to_value(CancellationRequest {
+                operation_id: "op-self-owner".to_string(),
+                reason: CancelReason::UserRequested,
+                cleanup: CleanupBehavior::BestEffort,
+                return_partial: false,
+                capability_token: Some(token),
+            })
+            .expect("serialize cancel-self request"),
+            &[],
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read cancel-self body");
+        let parsed: CancellationResponse =
+            serde_json::from_slice(&body).expect("parse cancel-self response");
+        assert_eq!(parsed.operation_id, "op-self-owner");
+        assert_eq!(parsed.outcome, fcp_host::CancellationOutcome::Cancelled);
+        assert!(state.cancellation.is_cancel_requested("op-self-owner"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn rpc_cancel_self_rejects_verified_non_owner() {
+        let state = cancel_route_test_state();
+        state
+            .cancellation
+            .track_with_owner("op-self-owner", Some("user:test"));
+        let token = issue_cancel_self_test_token(state.lifecycle.as_ref(), "user:other").await;
+        let app = cancel_test_app(Arc::clone(&state));
+        let response = send_cancel_request(
+            app,
+            "/rpc/cancel-self",
+            serde_json::to_value(CancellationRequest {
+                operation_id: "op-self-owner".to_string(),
+                reason: CancelReason::UserRequested,
+                cleanup: CleanupBehavior::BestEffort,
+                return_partial: false,
+                capability_token: Some(token),
+            })
+            .expect("serialize cancel-self request"),
+            &[],
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read cancel-self rejection body");
+        let message = String::from_utf8(body.to_vec()).expect("cancel-self rejection text");
+        assert!(message.contains("cancellation principal mismatch"));
+        assert!(!state.cancellation.is_cancel_requested("op-self-owner"));
     }
 }

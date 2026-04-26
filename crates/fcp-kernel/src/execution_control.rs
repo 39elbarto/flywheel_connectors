@@ -2,7 +2,9 @@
 
 use blake3::hash;
 use chrono::{DateTime, Utc};
-use fcp_core::{ConnectorId, LifecycleRecord, LifecycleState, RolloutPolicy, SelfCheckStatus};
+use fcp_core::{
+    CapabilityToken, ConnectorId, LifecycleRecord, LifecycleState, RolloutPolicy, SelfCheckStatus,
+};
 use serde::{Deserialize, Serialize};
 
 /// Why an operation was cancelled.
@@ -182,6 +184,12 @@ pub struct CancellationRequest {
     /// Whether to return partial results if available.
     #[serde(default)]
     pub return_partial: bool,
+    /// Verified capability token for owner-scoped self-cancel.
+    ///
+    /// Admin/operator cancel paths may omit this and rely on their
+    /// out-of-band admin authentication instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_token: Option<CapabilityToken>,
 }
 
 /// Result of a cancellation attempt.

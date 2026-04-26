@@ -200,6 +200,13 @@ impl ZapierClient {
         action_id: &str,
         params: &serde_json::Value,
     ) -> ZapierResult<serde_json::Value> {
+        // br-62aa3: validate action_id is a single safe path component
+        // before interpolating into /exposed/{action_id}/execute/. The
+        // action_id flows from invoke input via require_str, so a
+        // string like `..%2Fadmin%2Fdelete` or `id/../../foo` would
+        // otherwise alter the API path on the configured host.
+        validate_action_id(action_id)?;
+
         let mut body = if let Some(obj) = params.as_object() {
             let mut merged = serde_json::Map::new();
             for (k, v) in obj {
@@ -218,6 +225,49 @@ impl ZapierClient {
         self.post(&format!("/exposed/{action_id}/execute/"), &body)
             .await
     }
+}
+
+/// Maximum byte length for a Zapier action_id. Zapier's NLA action
+/// ids in practice are short (UUIDs or 12-32 char slugs); a 128-byte
+/// cap is well above any legitimate value and bounds the worst case
+/// for path-injection payloads.
+const MAX_ACTION_ID_LEN: usize = 128;
+
+/// Validate that an action_id is safe to interpolate into the
+/// /exposed/{action_id}/execute/ URL path.
+///
+/// Allowed: ASCII alphanumeric + `-` + `_`. Disallowed: any path
+/// separator, query / fragment delimiter, percent-encoded byte,
+/// dot-segment, leading/trailing whitespace, empty string.
+///
+/// Resolves br-62aa3 — `execute_action` previously interpolated
+/// caller-controlled `action_id` directly into the URL, so an input
+/// like `id/../../admin/users` (or its percent-encoded variants)
+/// could redirect the POST to a different endpoint on the same host.
+fn validate_action_id(action_id: &str) -> ZapierResult<()> {
+    if action_id.is_empty() {
+        return Err(ZapierError::InvalidInput(
+            "action_id must not be empty".into(),
+        ));
+    }
+    if action_id.len() > MAX_ACTION_ID_LEN {
+        return Err(ZapierError::InvalidInput(format!(
+            "action_id is {} bytes; max {MAX_ACTION_ID_LEN}",
+            action_id.len(),
+        )));
+    }
+    // Reject any byte outside the alphanumeric + `-` + `_` allow-set.
+    // This implicitly rejects `/`, `?`, `#`, `%`, `.`, whitespace,
+    // null, control characters, and any non-ASCII byte.
+    for (idx, ch) in action_id.char_indices() {
+        if !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_') {
+            return Err(ZapierError::InvalidInput(format!(
+                "action_id contains forbidden character {ch:?} at byte offset {idx}; \
+                 only ASCII alphanumeric, '-', and '_' are allowed"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -388,5 +438,82 @@ mod tests {
         let auth = ZapierAuth::CredentialId(CredentialId::new());
         let dbg = format!("{auth:?}");
         assert!(dbg.contains("CredentialId"));
+    }
+
+    // ── br-62aa3: action_id path-injection rejection ────────────────
+
+    #[test]
+    fn validate_action_id_accepts_well_formed_ids() {
+        // Real Zapier action ids are short slugs / UUID-likes — all
+        // covered by the alphanumeric + `-` + `_` allow-set.
+        validate_action_id("abc123").expect("plain alphanumeric");
+        validate_action_id("zap-alpha-beta").expect("dashed slug");
+        validate_action_id("my_zap_v2").expect("underscored slug");
+        validate_action_id("00000000-1111-2222-3333-444444444444")
+            .expect("uuid-like with dashes");
+        validate_action_id("A").expect("single character");
+    }
+
+    #[test]
+    fn validate_action_id_rejects_path_separator() {
+        // The exact attack shape from the bead repro: an action_id
+        // that climbs out of `/exposed/{id}/execute/` into a
+        // sibling path on the same host.
+        let err = validate_action_id("id/../admin/delete")
+            .expect_err("path separator must be rejected");
+        assert!(format!("{err:?}").contains("forbidden character"));
+    }
+
+    #[test]
+    fn validate_action_id_rejects_dot_segment() {
+        // Even a bare `.` or `..` is rejected — dot-only or
+        // dot-leading ids would otherwise round-trip through naive
+        // path normalization on the server side.
+        validate_action_id(".").expect_err(". must be rejected");
+        validate_action_id("..").expect_err(".. must be rejected");
+        validate_action_id("foo.bar").expect_err("foo.bar must be rejected (dot)");
+    }
+
+    #[test]
+    fn validate_action_id_rejects_query_and_fragment() {
+        validate_action_id("id?admin=true").expect_err("? must be rejected");
+        validate_action_id("id#frag").expect_err("# must be rejected");
+        validate_action_id("id&inject=1").expect_err("& must be rejected");
+    }
+
+    #[test]
+    fn validate_action_id_rejects_percent_encoding() {
+        // Percent-encoded path separators must also be rejected,
+        // since Zapier (or an intermediate proxy) may decode them
+        // before routing.
+        validate_action_id("id%2Fadmin").expect_err("%2F (encoded /) must be rejected");
+        validate_action_id("id%2e%2e").expect_err("%2e%2e (encoded ..) must be rejected");
+    }
+
+    #[test]
+    fn validate_action_id_rejects_empty_and_whitespace() {
+        validate_action_id("").expect_err("empty must be rejected");
+        validate_action_id(" ").expect_err("space must be rejected");
+        validate_action_id("\tid").expect_err("leading tab must be rejected");
+        validate_action_id("id\n").expect_err("trailing newline must be rejected");
+    }
+
+    #[test]
+    fn validate_action_id_rejects_oversized_payload() {
+        // br-62aa3 secondary guard: a multi-MB action_id is bounded
+        // even though it would also be rejected by the character
+        // check on the first non-allowlist byte. The size check
+        // exists so a multi-MB ALL-alphanumeric payload doesn't
+        // squeak through.
+        let huge = "a".repeat(MAX_ACTION_ID_LEN + 1);
+        validate_action_id(&huge).expect_err("oversized action_id must be rejected");
+    }
+
+    #[test]
+    fn validate_action_id_rejects_non_ascii() {
+        // Unicode normalization on the server side could produce
+        // surprising path components. Restrict to ASCII alphanumeric.
+        validate_action_id("café").expect_err("non-ASCII must be rejected");
+        validate_action_id("zap\u{200B}id").expect_err("zero-width space must be rejected");
     }
 }

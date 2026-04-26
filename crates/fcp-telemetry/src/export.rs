@@ -3,7 +3,7 @@
 //! Supports Prometheus exposition format and OTLP export.
 
 use std::{
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::OnceLock,
     thread,
@@ -148,26 +148,70 @@ fn render_prometheus_handle(handle: &PrometheusHandle) -> String {
     handle.render()
 }
 
+/// Maximum bytes accepted for the HTTP request line before the
+/// scrape handler rejects with `414 URI Too Long`. 8 KiB matches
+/// common HTTP server defaults (nginx `large_client_header_buffers`
+/// 8k, Apache `LimitRequestLine` 8190, golang net/http
+/// `DefaultMaxHeaderBytes`/8 = 128 KiB but the request line slice
+/// is bounded much tighter in practice). 8 KiB is far above the
+/// length any legitimate Prometheus scrape needs (`GET /metrics
+/// HTTP/1.1\r\n` is < 32 bytes) and well below a memory-pressure
+/// threshold for the scrape thread.
+///
+/// br-87yi2: prior code used `BufRead::read_line` into an
+/// unbounded `String`, so a hostile peer could stream a multi-MB
+/// request line without `\n` and force proportional heap growth
+/// on the metrics exporter before the handler ever decided whether
+/// to serve `/metrics`.
+const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
+
 fn serve_prometheus_connection(mut stream: TcpStream, handle: &PrometheusHandle) -> io::Result<()> {
-    let request_line = {
+    let request_line_result = {
         let mut reader = BufReader::new(stream.try_clone()?);
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        line
+        // Read at most MAX_REQUEST_LINE_BYTES + 1 — the +1 lets us
+        // distinguish "exactly at the cap, line ended" from "ran past
+        // the cap, line never ended". `take` short-circuits the
+        // underlying read, so a peer that streams gigabytes without
+        // `\n` only consumes 8 KiB+1 of buffer before we surface the
+        // rejection.
+        let mut line = Vec::with_capacity(128);
+        let limit = u64::try_from(MAX_REQUEST_LINE_BYTES + 1).unwrap_or(u64::MAX);
+        let mut bounded = (&mut reader).take(limit);
+        bounded.read_until(b'\n', &mut line)?;
+        if line.len() > MAX_REQUEST_LINE_BYTES
+            || (line.len() == MAX_REQUEST_LINE_BYTES + 1 && !line.ends_with(b"\n"))
+            || (!line.is_empty() && !line.ends_with(b"\n"))
+        {
+            // Either: (a) we read more than the cap (impossible because
+            // of `take`, but defensive); (b) we hit the cap+1 byte and
+            // the last byte was NOT `\n`, meaning the peer's line is
+            // longer than the cap; or (c) the peer closed the
+            // connection mid-line.
+            Err(())
+        } else {
+            // SAFETY: HTTP request lines are ASCII per RFC 7230 §3.1.1.
+            // A non-UTF8 byte sequence here is a malformed request
+            // and is rejected the same way an oversized line is.
+            String::from_utf8(line).map_err(|_| ())
+        }
     };
 
-    let (status_line, content_type, body) = if request_line.starts_with("GET /metrics ") {
-        (
+    let (status_line, content_type, body) = match request_line_result {
+        Err(()) => (
+            "HTTP/1.1 414 URI Too Long",
+            "text/plain; charset=utf-8",
+            "Request line too long\n".to_string(),
+        ),
+        Ok(request_line) if request_line.starts_with("GET /metrics ") => (
             "HTTP/1.1 200 OK",
             "text/plain; version=0.0.4; charset=utf-8",
             render_prometheus_handle(handle),
-        )
-    } else {
-        (
+        ),
+        Ok(_) => (
             "HTTP/1.1 404 Not Found",
             "text/plain; charset=utf-8",
             "Not Found\n".to_string(),
-        )
+        ),
     };
 
     write!(
@@ -529,12 +573,205 @@ mod tests {
         client.shutdown(std::net::Shutdown::Write).unwrap();
 
         let mut response = String::new();
-        client.read_to_string(&mut response).unwrap();
+        // ConnectionReset on read is a tolerable outcome here — it
+        // means the server flushed its small reject/404 response and
+        // closed before the client finished reading. We care about
+        // the bytes that DID arrive matching the expected status line.
+        match client.read_to_string(&mut response) {
+            Ok(_) => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::UnexpectedEof
+                ) => {}
+            Err(err) => panic!("unexpected read error: {err:?}"),
+        }
         server.join().unwrap();
 
         assert!(response.contains("HTTP/1.1 200 OK"));
         assert!(response.contains("# TYPE fcp_http_counter counter"));
         assert!(response.contains("fcp_http_counter 7"));
+    }
+
+    /// Write `payload` to `stream` tolerating early-close errors. The
+    /// 414/404 fast-reject path closes the socket as soon as the
+    /// server's response is flushed, so a client streaming a large
+    /// payload may see `ConnectionReset` or `BrokenPipe` mid-write —
+    /// that is the success signal for the cap, not a failure.
+    fn write_tolerating_close(stream: &mut TcpStream, payload: &[u8]) {
+        if let Err(err) = stream.write_all(payload) {
+            match err.kind() {
+                io::ErrorKind::ConnectionReset
+                | io::ErrorKind::BrokenPipe
+                | io::ErrorKind::ConnectionAborted => {}
+                _ => panic!("unexpected write error: {err:?}"),
+            }
+        }
+    }
+
+    /// br-87yi2: an oversized request line (> MAX_REQUEST_LINE_BYTES)
+    /// must be rejected with `414 URI Too Long` instead of allocating
+    /// proportionally on the scrape thread. The serve handler MUST
+    /// stop reading at the cap so a hostile peer that streams
+    /// gigabytes without `\n` only consumes ~8 KiB before responding.
+    #[test]
+    fn test_prometheus_oversized_request_line_rejected_with_414() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            serve_prometheus_connection(stream, &handle).unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        // Build a request line that exceeds MAX_REQUEST_LINE_BYTES
+        // (8 KiB) by ~16 KiB of `A` padding inside the path. No `\n`
+        // is sent before the cap is hit — the server reads
+        // MAX_REQUEST_LINE_BYTES + 1 bytes via `take`, sees no
+        // newline, and rejects with 414.
+        let mut payload = b"GET /".to_vec();
+        payload.extend(std::iter::repeat_n(b'A', 16 * 1024));
+        payload.extend(b" HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+        write_tolerating_close(&mut client, &payload);
+        // Best-effort shutdown — may fail if peer already closed.
+        let _ = client.shutdown(std::net::Shutdown::Write);
+
+        let mut response = String::new();
+        // ConnectionReset on read is a tolerable outcome here — it
+        // means the server flushed its small reject/404 response and
+        // closed before the client finished reading. We care about
+        // the bytes that DID arrive matching the expected status line.
+        match client.read_to_string(&mut response) {
+            Ok(_) => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::UnexpectedEof
+                ) => {}
+            Err(err) => panic!("unexpected read error: {err:?}"),
+        }
+        server.join().unwrap();
+
+        // Status-line check is the load-bearing assertion. The body
+        // sentinel ("Request line too long") MAY arrive too if the
+        // client drains the kernel buffer fully before the server's
+        // RST reaches it, but is not required — we only need to
+        // confirm the 414 fast-reject path was taken.
+        assert!(
+            response.contains("HTTP/1.1 414 URI Too Long"),
+            "oversized request line must yield 414, got: {response}"
+        );
+    }
+
+    /// br-87yi2: a normal-sized request line for a non-`/metrics`
+    /// path still produces 404, not 414 — proving the cap doesn't
+    /// false-trigger on legitimate requests.
+    #[test]
+    fn test_prometheus_normal_unknown_path_yields_404_not_414() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            serve_prometheus_connection(stream, &handle).unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        client
+            .write_all(b"GET /unknown HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let mut response = String::new();
+        // ConnectionReset on read is a tolerable outcome here — it
+        // means the server flushed its small reject/404 response and
+        // closed before the client finished reading. We care about
+        // the bytes that DID arrive matching the expected status line.
+        match client.read_to_string(&mut response) {
+            Ok(_) => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::UnexpectedEof
+                ) => {}
+            Err(err) => panic!("unexpected read error: {err:?}"),
+        }
+        server.join().unwrap();
+
+        assert!(response.contains("HTTP/1.1 404 Not Found"));
+        assert!(!response.contains("414"));
+    }
+
+    /// br-87yi2: a request line at EXACTLY the cap with `\n` at the
+    /// last byte must NOT be rejected. The cap is inclusive of the
+    /// trailing newline; only lines that exceed it are 414. This
+    /// guards against off-by-one false-positives.
+    #[test]
+    fn test_prometheus_request_line_at_exact_cap_accepted() {
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            serve_prometheus_connection(stream, &handle).unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        // Construct a line of length MAX_REQUEST_LINE_BYTES ending in
+        // `\n`. The path is padded with `A` so the line is well-formed
+        // but unknown — server should respond 404, not 414.
+        let prefix = b"GET /".to_vec();
+        let suffix = b" HTTP/1.1\r\n";
+        let pad_len = MAX_REQUEST_LINE_BYTES - prefix.len() - suffix.len();
+        let mut payload = prefix;
+        payload.extend(std::iter::repeat_n(b'A', pad_len));
+        payload.extend(suffix);
+        assert_eq!(payload.len(), MAX_REQUEST_LINE_BYTES);
+        // Add header tail so the connection drains cleanly.
+        payload.extend(b"Host: 127.0.0.1\r\n\r\n");
+        write_tolerating_close(&mut client, &payload);
+        let _ = client.shutdown(std::net::Shutdown::Write);
+
+        let mut response = String::new();
+        // ConnectionReset on read is a tolerable outcome here — it
+        // means the server flushed its small reject/404 response and
+        // closed before the client finished reading. We care about
+        // the bytes that DID arrive matching the expected status line.
+        match client.read_to_string(&mut response) {
+            Ok(_) => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::UnexpectedEof
+                ) => {}
+            Err(err) => panic!("unexpected read error: {err:?}"),
+        }
+        server.join().unwrap();
+
+        assert!(
+            response.contains("HTTP/1.1 404 Not Found"),
+            "exact-cap line must be 404, got: {response}"
+        );
+        assert!(!response.contains("414"));
     }
 
     #[test]

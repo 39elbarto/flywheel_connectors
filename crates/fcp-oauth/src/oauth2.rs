@@ -1404,6 +1404,41 @@ mod tests {
     }
 
     #[test]
+    fn test_token_store_get_or_refresh_keeps_valid_non_refreshable_token() {
+        run_with_test_runtime(async {
+            let config = OAuth2Config::new(
+                "cid",
+                "csec",
+                "https://example.com/authorize",
+                "https://example.com/token",
+            )
+            .with_redirect_uri("https://localhost:3000/callback");
+            let client = OAuth2Client::new(config).unwrap();
+            let store = TokenStore::new();
+            store.store(
+                "user",
+                OAuthTokens::from_response(TokenResponse {
+                    access_token: "access-still-valid".into(),
+                    token_type: "Bearer".into(),
+                    expires_in: Some(120),
+                    refresh_token: None,
+                    scope: None,
+                    id_token: None,
+                })
+                .expect("valid token fixture must construct"),
+            );
+
+            let current = store.get_or_refresh("user", &client).await.unwrap();
+            assert_eq!(current.access_token(), "access-still-valid");
+            assert_eq!(current.refresh_token(), None);
+
+            let stored = store.get("user").unwrap();
+            assert_eq!(stored.access_token(), "access-still-valid");
+            assert_eq!(stored.refresh_token(), None);
+        });
+    }
+
+    #[test]
     fn test_token_store_get_or_refresh_is_single_flight_per_key() {
         run_with_test_runtime(async {
             let server = MockServer::start().await;

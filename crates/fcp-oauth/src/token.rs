@@ -524,7 +524,8 @@ impl TokenStore {
     ///
     /// # Errors
     /// Returns [`OAuthError::TokenNotFound`] when `key` is unknown,
-    /// [`OAuthError::NoRefreshToken`] when refresh is required but unavailable,
+    /// [`OAuthError::NoRefreshToken`] when an expired token must be refreshed
+    /// but no refresh token is available,
     /// or [`OAuthError::RefreshFailed`] when the provider refresh request fails.
     pub async fn get_or_refresh(
         &self,
@@ -536,6 +537,12 @@ impl TokenStore {
                 .get(key)
                 .ok_or_else(|| OAuthError::TokenNotFound(key.to_string()))?;
             if snapshot.has_authorization_material() && !snapshot.needs_refresh() {
+                return Ok(snapshot);
+            }
+            if snapshot.has_authorization_material()
+                && snapshot.refresh_token().is_none()
+                && !snapshot.is_expired()
+            {
                 return Ok(snapshot);
             }
 

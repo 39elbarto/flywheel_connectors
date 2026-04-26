@@ -94,7 +94,7 @@ jobs:
 
       - name: Build release binaries (fwc + fcp-host)
         run: |
-          cargo build --release --package fwc --target ${{ matrix.target }}
+          cargo build --release --package fwc --bin fwc --target ${{ matrix.target }}
           cargo build --release --package fcp-host --bin fcp-host --target ${{ matrix.target }}
 
       - name: Package binaries (Unix)

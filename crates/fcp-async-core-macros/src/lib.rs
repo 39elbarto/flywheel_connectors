@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 use proc_macro::TokenStream;
+use proc_macro2::Span;
 use quote::quote;
 use syn::parse::Parser;
 use syn::{Expr, ItemFn, Lit, Meta};
@@ -146,16 +147,17 @@ fn expand_runtime_fn(
     sig.asyncness = None;
     let builder = builder_tokens(flavor);
     let maybe_test_attr = add_test_attr.then(|| quote!(#[test]));
+    let runtime_ident = syn::Ident::new("__fcp_async_core_runtime", Span::mixed_site());
 
     Ok(quote! {
         #(#attrs)*
         #maybe_test_attr
         #vis #sig {
-            let runtime = #builder
+            let #runtime_ident = #builder
                 .enable_all()
                 .build()
                 .expect("failed to build fcp_async_core runtime");
-            runtime.block_on(async move #block)
+            #runtime_ident.block_on(async move #block)
         }
     })
 }
@@ -235,5 +237,25 @@ mod tests {
         assert!(expanded.contains("# [test]"));
         assert!(expanded.contains("Builder :: new_current_thread"));
         assert!(expanded.contains("runtime . block_on"));
+    }
+
+    #[test]
+    fn expand_runtime_fn_uses_reserved_runtime_binding() {
+        let expanded = expand_runtime_fn(
+            quote!(flavor = "current_thread"),
+            quote!(
+                async fn sample() {
+                    runtime::spawn(async {});
+                }
+            ),
+            Flavor::CurrentThread,
+            false,
+        )
+        .expect("expansion should succeed")
+        .to_string();
+
+        assert!(expanded.contains("__fcp_async_core_runtime"));
+        assert!(!expanded.contains("let runtime ="));
+        assert!(expanded.contains("runtime :: spawn"));
     }
 }

@@ -73,6 +73,23 @@ impl ZapierConfig {
             .unwrap_or(DEFAULT_BASE_URL)
             .to_string();
 
+        // br-898o4: enforce endpoint policy at the configure boundary.
+        // Previously `from_params` accepted arbitrary base_url and the
+        // connector constructed a `ZapierClient` (carrying the api_key
+        // bearer token) BEFORE any policy check fired —
+        // `provisioning_readiness` reported the rejection but did not
+        // fail configuration, so a malicious config could route the
+        // bearer token to an attacker-controlled endpoint. The policy
+        // gate must be a hard refuse, not a status indicator. localhost
+        // / 127.0.0.1 stay allowed for tests via `is_local_test_host`.
+        let (network_ok, network_message) = base_url_policy(&base_url);
+        if !network_ok {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: network_message,
+            });
+        }
+
         Ok(Self { auth, base_url })
     }
 
@@ -658,13 +675,19 @@ mod tests {
     }
 
     #[test]
-    fn config_custom_base_url() {
+    fn config_custom_base_url_within_policy() {
+        // br-898o4: from_params accepts policy-conforming hosts
+        // (api.zapier.com / nla.zapier.com over https) when the
+        // caller overrides base_url. The old test asserted
+        // `https://zapier.example.com/v1` was accepted — that was
+        // the bug; `zapier.example.com` is NOT a zapier.com host
+        // and must be refused.
         let config = ZapierConfig::from_params(&json!({
             "api_key": "tok",
-            "base_url": "https://zapier.example.com/v1",
+            "base_url": "https://api.zapier.com/v1",
         }))
-        .unwrap();
-        assert_eq!(config.base_url, "https://zapier.example.com/v1");
+        .expect("api.zapier.com must be accepted");
+        assert_eq!(config.base_url, "https://api.zapier.com/v1");
     }
 
     #[test]
@@ -1498,15 +1521,68 @@ mod tests {
     }
 
     #[test]
-    fn provisioning_readiness_network_rejected_custom_url() {
-        let config = ZapierConfig::from_params(&json!({
+    fn from_params_rejects_non_zapier_https_host() {
+        // br-898o4: from_params previously accepted ANY base_url and
+        // only surfaced the rejection through `provisioning_readiness`,
+        // which did not fail configuration — so a `configure()` call
+        // with `base_url: https://evil.example.com` would still
+        // construct a ZapierClient and route the bearer token there.
+        // The fix promotes the policy check to a hard refuse at the
+        // construction boundary.
+        let err = ZapierConfig::from_params(&json!({
             "api_key": "tok",
             "base_url": "https://evil.example.com",
         }))
-        .unwrap();
-        let readiness = config.provisioning_readiness();
-        assert!(!readiness.network_ok);
-        assert!(readiness.network_message.contains("zapier.com"));
+        .expect_err("non-zapier base_url must be rejected at from_params");
+        match err {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert!(
+                    message.contains("zapier.com"),
+                    "rejection must name the policy: {message}"
+                );
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_params_rejects_http_non_local_host() {
+        // br-898o4: even an otherwise-allowed-shaped host must be
+        // rejected if not over https. Catches downgrade attempts.
+        let err = ZapierConfig::from_params(&json!({
+            "api_key": "tok",
+            "base_url": "http://api.zapier.com",
+        }))
+        .expect_err("http://api.zapier.com must be rejected (https required)");
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn from_params_accepts_localhost_for_tests() {
+        // br-898o4: localhost stays allowed for tests so this fix
+        // does not break the existing test fixture path. Same
+        // allowance as base_url_policy_accepts_localhost.
+        let config = ZapierConfig::from_params(&json!({
+            "api_key": "tok",
+            "base_url": "http://localhost:8080",
+        }))
+        .expect("localhost must be accepted");
+        assert_eq!(config.base_url, "http://localhost:8080");
+    }
+
+    #[test]
+    fn from_params_accepts_default_zapier_url() {
+        // Regression guard: omitting base_url uses DEFAULT_BASE_URL,
+        // which must be accepted by the policy. If the default URL
+        // ever drifts off-policy, this test fails immediately.
+        let config = ZapierConfig::from_params(&json!({ "api_key": "tok" }))
+            .expect("default base_url must be accepted");
+        assert!(
+            config.base_url.contains("zapier.com"),
+            "default base_url must be a zapier.com host: {}",
+            config.base_url
+        );
     }
 
     #[test]

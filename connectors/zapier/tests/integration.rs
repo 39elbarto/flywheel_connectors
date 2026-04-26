@@ -117,17 +117,28 @@ async fn lifecycle_self_check_credential_id() {
 }
 
 #[fcp_async_core::runtime::test]
-async fn lifecycle_self_check_bad_network() {
+async fn lifecycle_configure_rejects_off_policy_base_url() {
+    // br-898o4: configure() now refuses out-of-policy base_url
+    // (e.g. https://evil.example.com) at the construction boundary,
+    // so the connector never reaches a configured-but-bad-network
+    // state. Previously this test asserted that self_check would
+    // surface the rejection AFTER configure succeeded — that was
+    // the bug; an attacker-controlled base_url could route the
+    // bearer token before any policy enforcement fired. The
+    // inverted assertion locks in the hard-refuse contract.
     let mut c = ZapierConnector::new();
-    c.handle_configure(json!({
-        "api_key": "tok",
-        "base_url": "https://evil.example.com"
-    }))
-    .await
-    .unwrap();
-    let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "failed");
-    assert_eq!(check["reason_code"], "network_constraints_invalid");
+    let err = c
+        .handle_configure(json!({
+            "api_key": "tok",
+            "base_url": "https://evil.example.com"
+        }))
+        .await
+        .expect_err("off-policy base_url must be rejected at configure");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("zapier.com"),
+        "configure rejection must reference the endpoint policy: {msg}"
+    );
 }
 
 #[fcp_async_core::runtime::test]

@@ -50,18 +50,58 @@ pub struct SchemaId {
 
 impl SchemaId {
     /// Create a new `SchemaId`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `namespace` or `name` contains a reserved separator (`:` or `@`).
+    /// These characters delimit fields in the canonical string form
+    /// (`{namespace}:{name}@{version}`); allowing them in the components would let
+    /// distinct schema tuples alias to the same canonical bytes (e.g. `("a:b","c")`
+    /// and `("a","b:c")` both produce `a:b:c@…`). Use [`SchemaId::try_new`] to
+    /// validate at runtime instead of panicking.
     #[must_use]
     pub fn new(namespace: impl Into<String>, name: impl Into<String>, version: Version) -> Self {
-        Self {
-            namespace: namespace.into(),
-            name: name.into(),
+        Self::try_new(namespace, name, version)
+            .expect("SchemaId namespace and name must not contain reserved separators ':' or '@'")
+    }
+
+    /// Fallible constructor that rejects reserved separators in `namespace`/`name`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaIdError::ReservedSeparator`] if `namespace` or `name`
+    /// contains `:` or `@`.
+    pub fn try_new(
+        namespace: impl Into<String>,
+        name: impl Into<String>,
+        version: Version,
+    ) -> Result<Self, SchemaIdError> {
+        let namespace = namespace.into();
+        let name = name.into();
+        Self::reject_reserved("namespace", &namespace)?;
+        Self::reject_reserved("name", &name)?;
+        Ok(Self {
+            namespace,
+            name,
             version,
+        })
+    }
+
+    fn reject_reserved(field: &'static str, value: &str) -> Result<(), SchemaIdError> {
+        if let Some(c) = value.chars().find(|c| matches!(c, ':' | '@')) {
+            return Err(SchemaIdError::ReservedSeparator {
+                field,
+                separator: c,
+            });
         }
+        Ok(())
     }
 
     /// Canonical string representation (NORMATIVE).
     ///
-    /// Format: `{namespace}:{name}@{version}`.
+    /// Format: `{namespace}:{name}@{version}`. Constructors enforce that
+    /// `namespace` and `name` do not contain `:` or `@`, so this string is
+    /// unambiguous and round-trippable.
     #[must_use]
     pub fn as_bytes(&self) -> Vec<u8> {
         format!("{}:{}@{}", self.namespace, self.name, self.version).into_bytes()
@@ -72,21 +112,46 @@ impl SchemaId {
     /// Uses BLAKE3 with fixed-size output to prevent `DoS` via maliciously large schema strings.
     /// The domain separator `"FCP2-SCHEMA-V1"` ensures hash isolation from other uses.
     ///
-    /// Feeds schema components directly into the hasher to avoid the temporary
-    /// `Vec<u8>` allocation that `as_bytes()` would incur.
+    /// Each component is length-prefixed (u64 little-endian) before being fed into
+    /// the hasher. This makes the hash injective in `(namespace, name, version)`:
+    /// distinct tuples cannot alias to the same hash even if a `SchemaId` is
+    /// constructed directly via the public fields, bypassing [`SchemaId::new`].
+    /// Without length-prefixing, the historical encoding `namespace || ':' || name
+    /// || '@' || version` would collide when separators appeared inside components
+    /// (e.g. namespace=`a:b`,name=`c` vs namespace=`a`,name=`b:c`).
     #[must_use]
     pub fn hash(&self) -> SchemaHash {
         let mut hasher = blake3::Hasher::new();
         hasher.update(SCHEMA_HASH_DOMAIN_SEPARATOR);
-        hasher.update(self.namespace.as_bytes());
-        hasher.update(b":");
-        hasher.update(self.name.as_bytes());
-        hasher.update(b"@");
-        // Write version directly into the hasher via io::Write to avoid
-        // the String allocation from version.to_string().
-        let _ = std::io::Write::write_fmt(&mut hasher, format_args!("{}", self.version));
+        Self::feed_length_prefixed(&mut hasher, self.namespace.as_bytes());
+        Self::feed_length_prefixed(&mut hasher, self.name.as_bytes());
+        // Length-prefixing requires a known byte length up front; pay the small
+        // String allocation rather than streaming the version into the hasher,
+        // because `Display::fmt` on `Version` can write arbitrarily many chunks
+        // and we'd otherwise have to buffer them anyway.
+        let version_str = self.version.to_string();
+        Self::feed_length_prefixed(&mut hasher, version_str.as_bytes());
         SchemaHash(*hasher.finalize().as_bytes())
     }
+
+    fn feed_length_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        hasher.update(&len.to_le_bytes());
+        hasher.update(bytes);
+    }
+}
+
+/// Errors raised when constructing a [`SchemaId`].
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum SchemaIdError {
+    /// `namespace` or `name` contained a reserved separator (`:` or `@`).
+    #[error("SchemaId {field} contains reserved separator {separator:?}")]
+    ReservedSeparator {
+        /// Which field rejected the input (`"namespace"` or `"name"`).
+        field: &'static str,
+        /// The offending character.
+        separator: char,
+    },
 }
 
 /// 32-byte schema hash (NORMATIVE).
@@ -1572,6 +1637,172 @@ mod tests {
         let cloned = schema.clone();
         assert_eq!(schema, cloned);
         assert_eq!(schema.hash(), cloned.hash());
+    }
+
+    // ============================================================================
+    // SchemaId Separator-Collision Regression (REVIEW-A9, mzi9x)
+    // ============================================================================
+    //
+    // The historical hash() encoding concatenated `namespace || ':' || name || '@'
+    // || version` raw, so namespace=`a:b`,name=`c` and namespace=`a`,name=`b:c`
+    // (and analogous `@` variants) hashed the same byte string. The fix uses
+    // length-prefixing in hash() and rejects `:`/`@` at construction time. These
+    // tests pin both layers so the alias can never come back.
+
+    #[test]
+    fn schema_id_new_rejects_colon_in_namespace() {
+        let err = std::panic::catch_unwind(|| {
+            let _ = SchemaId::new("fcp:core", "Object", Version::new(1, 0, 0));
+        })
+        .expect_err("SchemaId::new must panic on ':' in namespace");
+        let msg = err
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| err.downcast_ref::<&'static str>().copied())
+            .unwrap_or("");
+        assert!(
+            msg.contains("reserved separator"),
+            "panic message should mention reserved separator, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn schema_id_new_rejects_at_in_name() {
+        let err = std::panic::catch_unwind(|| {
+            let _ = SchemaId::new("fcp.core", "Obj@ct", Version::new(1, 0, 0));
+        })
+        .expect_err("SchemaId::new must panic on '@' in name");
+        let _ = err;
+    }
+
+    #[test]
+    fn schema_id_try_new_rejects_reserved_separators() {
+        // `:` in namespace.
+        let err = SchemaId::try_new("a:b", "c", Version::new(1, 0, 0)).unwrap_err();
+        assert_eq!(
+            err,
+            SchemaIdError::ReservedSeparator {
+                field: "namespace",
+                separator: ':',
+            }
+        );
+
+        // `:` in name.
+        let err = SchemaId::try_new("a", "b:c", Version::new(1, 0, 0)).unwrap_err();
+        assert_eq!(
+            err,
+            SchemaIdError::ReservedSeparator {
+                field: "name",
+                separator: ':',
+            }
+        );
+
+        // `@` in namespace.
+        let err = SchemaId::try_new("a@b", "c", Version::new(1, 0, 0)).unwrap_err();
+        assert_eq!(
+            err,
+            SchemaIdError::ReservedSeparator {
+                field: "namespace",
+                separator: '@',
+            }
+        );
+
+        // `@` in name.
+        let err = SchemaId::try_new("a", "b@c", Version::new(1, 0, 0)).unwrap_err();
+        assert_eq!(
+            err,
+            SchemaIdError::ReservedSeparator {
+                field: "name",
+                separator: '@',
+            }
+        );
+    }
+
+    #[test]
+    fn schema_id_try_new_accepts_clean_inputs() {
+        let schema = SchemaId::try_new("fcp.core", "Object", Version::new(1, 0, 0)).unwrap();
+        assert_eq!(schema.namespace, "fcp.core");
+        assert_eq!(schema.name, "Object");
+    }
+
+    #[test]
+    fn schema_id_hash_does_not_collide_across_separator_aliases() {
+        // Build collision candidates by direct struct construction so we bypass the
+        // constructor's reserved-separator check — this is precisely the path the
+        // length-prefixed hash() must defend against.
+        let version = Version::new(1, 0, 0);
+
+        let colon_left = SchemaId {
+            namespace: "a:b".to_string(),
+            name: "c".to_string(),
+            version: version.clone(),
+        };
+        let colon_right = SchemaId {
+            namespace: "a".to_string(),
+            name: "b:c".to_string(),
+            version: version.clone(),
+        };
+        // Sanity: as_bytes() shows why the historical hash collided.
+        assert_eq!(colon_left.as_bytes(), b"a:b:c@1.0.0".to_vec());
+        assert_eq!(colon_right.as_bytes(), b"a:b:c@1.0.0".to_vec());
+        // Hash MUST NOT collide.
+        assert_ne!(
+            colon_left.hash(),
+            colon_right.hash(),
+            "SchemaId::hash collided on `:` separator alias — REVIEW-A9 regression"
+        );
+
+        let at_left = SchemaId {
+            namespace: "a".to_string(),
+            name: "b@1.0.0".to_string(),
+            version: version.clone(),
+        };
+        let at_right = SchemaId {
+            namespace: "a".to_string(),
+            name: "b".to_string(),
+            version,
+        };
+        // as_bytes() form: "a:b@1.0.0@1.0.0" vs "a:b@1.0.0" — distinct here, but the
+        // raw-concat hash variants `a` || ':' || `b@1.0.0` || '@' || `1.0.0` and
+        // `a` || ':' || `b` || '@' || `1.0.0` differ only in length, which a non-
+        // length-prefixed hash treats the same as any other byte difference. The
+        // real risk is the `:` family above; we keep this `@` case to lock in that
+        // length-prefixing also separates these tuples.
+        assert_ne!(at_left.hash(), at_right.hash());
+    }
+
+    #[test]
+    fn schema_id_hash_uses_length_prefixed_encoding() {
+        // Empty-component pairs that would collide under raw concatenation must
+        // now produce distinct hashes under length-prefixed encoding.
+        let a = SchemaId {
+            namespace: "ab".to_string(),
+            name: String::new(),
+            version: Version::new(0, 0, 0),
+        };
+        let b = SchemaId {
+            namespace: "a".to_string(),
+            name: "b".to_string(),
+            version: Version::new(0, 0, 0),
+        };
+        // Under the old encoding both became "ab:@0.0.0" / "a:b@0.0.0" — different
+        // here, but the broader principle is that lengths participate in the hash.
+        assert_ne!(a.hash(), b.hash());
+
+        // Truly aliasing under raw concat: namespace+":"+name where the ":" lands
+        // identically. Build via direct construction.
+        let lhs = SchemaId {
+            namespace: "x:".to_string(),
+            name: "y".to_string(),
+            version: Version::new(1, 0, 0),
+        };
+        let rhs = SchemaId {
+            namespace: "x".to_string(),
+            name: ":y".to_string(),
+            version: Version::new(1, 0, 0),
+        };
+        assert_eq!(lhs.as_bytes(), rhs.as_bytes());
+        assert_ne!(lhs.hash(), rhs.hash());
     }
 
     // ============================================================================
@@ -4734,17 +4965,30 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn schema_id_as_bytes_colon_in_namespace() {
-        let schema = SchemaId::new("ns:inner", "Type", Version::new(1, 0, 0));
-        let canonical = String::from_utf8(schema.as_bytes()).unwrap();
-        assert_eq!(canonical, "ns:inner:Type@1.0.0");
+    fn schema_id_try_new_rejects_colon_in_namespace() {
+        // Pre-fix this construction succeeded and produced an aliased canonical
+        // string ("ns:inner:Type@1.0.0"), allowing distinct schemas to share a
+        // SchemaHash. The validated constructor must now reject it.
+        let err = SchemaId::try_new("ns:inner", "Type", Version::new(1, 0, 0)).unwrap_err();
+        assert_eq!(
+            err,
+            SchemaIdError::ReservedSeparator {
+                field: "namespace",
+                separator: ':',
+            }
+        );
     }
 
     #[test]
-    fn schema_id_as_bytes_at_sign_in_name() {
-        let schema = SchemaId::new("ns", "Type@Extra", Version::new(0, 1, 0));
-        let canonical = String::from_utf8(schema.as_bytes()).unwrap();
-        assert_eq!(canonical, "ns:Type@Extra@0.1.0");
+    fn schema_id_try_new_rejects_at_in_name_field() {
+        let err = SchemaId::try_new("ns", "Type@Extra", Version::new(0, 1, 0)).unwrap_err();
+        assert_eq!(
+            err,
+            SchemaIdError::ReservedSeparator {
+                field: "name",
+                separator: '@',
+            }
+        );
     }
 
     #[test]
@@ -5864,12 +6108,25 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn schema_id_as_bytes_with_only_separator_chars() {
-        // Namespace and name consist only of separators.
-        let schema = SchemaId::new(":", "@", Version::new(0, 0, 0));
-        let canonical = String::from_utf8(schema.as_bytes()).unwrap();
-        assert_eq!(canonical, "::@@0.0.0");
-        assert_eq!(schema.hash().as_bytes().len(), 32);
+    fn schema_id_try_new_rejects_separator_only_components() {
+        // Pre-fix this produced "::@@0.0.0" — a self-aliased canonical form. The
+        // validated constructor now refuses both components.
+        let err = SchemaId::try_new(":", "Type", Version::new(0, 0, 0)).unwrap_err();
+        assert!(matches!(
+            err,
+            SchemaIdError::ReservedSeparator {
+                field: "namespace",
+                separator: ':',
+            }
+        ));
+        let err = SchemaId::try_new("ns", "@", Version::new(0, 0, 0)).unwrap_err();
+        assert!(matches!(
+            err,
+            SchemaIdError::ReservedSeparator {
+                field: "name",
+                separator: '@',
+            }
+        ));
     }
 
     #[test]

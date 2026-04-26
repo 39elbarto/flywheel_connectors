@@ -47,8 +47,13 @@ impl CanonicalPayloadGoldenVector {
             id: 12_345,
             name: "test".into(),
             active: true,
+            // Length-prefixed BLAKE3 over (SCHEMA_HASH_DOMAIN_SEPARATOR ||
+            // len(ns)||ns || len(name)||name || len(version)||version) where each
+            // length is u64-LE. Updated 2026-04-26 (REVIEW-A9 / mzi9x) to fix
+            // SchemaId separator-collision; the prior raw-concat hash aliased
+            // distinct schema tuples.
             expected_schema_hash:
-                "91cf785e23bc5e918538f21cadcc7a1356b64426b10e6a34eb4bbc92ff9def23".into(),
+                "824698784c7724fe18470ecdd2c2199abb4632c25998c9d143adab875e8ca5d7".into(),
             expected_cbor: "a3626964193039646e616d65647465737466616374697665f5".into(),
         }]
     }
@@ -158,7 +163,9 @@ impl ObjectIdGoldenVector {
             schema_version_patch: 0,
             key: "0000000000000000000000000000000000000000000000000000000000000000".into(),
             content: "68656c6c6f".into(),
-            expected_object_id: "5fc04a5e6c6b549580a78b9dd99d7f92208022873def22441f58b8df8dd84f7e"
+            // Updated 2026-04-26 (REVIEW-A9 / mzi9x) alongside SchemaId::hash
+            // length-prefixing fix; ObjectId derivation feeds the schema hash.
+            expected_object_id: "6d766e3dd7615531c490254cf35644c0c21bb734cbaf26938a8edcf2da6ca36a"
                 .into(),
         }]
     }
@@ -217,6 +224,7 @@ mod tests {
         let vectors = CanonicalPayloadGoldenVector::load_all();
         assert!(!vectors.is_empty(), "vectors should be populated");
     }
+
 
     #[test]
     fn canonical_vectors_match() {

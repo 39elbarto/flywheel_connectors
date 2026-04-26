@@ -34,11 +34,12 @@
 //! assert!(result.passed);
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::Instant;
 
 use chrono::Utc;
+use fcp_testkit::{LogRedactionScanner, ScanFinding};
 use serde::{Deserialize, Serialize};
 
 use crate::evidence::{
@@ -361,23 +362,35 @@ impl SessionE2eRunner {
 
     fn run_verify_phase(&mut self, transcript: &SessionTranscript) -> (bool, u64) {
         let phase_start = Instant::now();
-        let passed = transcript.outcome == StepOutcome::Pass && transcript.summary.failed == 0;
+        let transcript_passed =
+            transcript.outcome == StepOutcome::Pass && transcript.summary.failed == 0;
+        let phase_logs_jsonl = self.logs_to_jsonl();
+        let transcript_jsonl = transcript.to_jsonl();
+        let log_jsonl = match (phase_logs_jsonl.is_empty(), transcript_jsonl.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => phase_logs_jsonl,
+            (true, false) => transcript_jsonl,
+            (false, false) => format!("{phase_logs_jsonl}\n{transcript_jsonl}"),
+        };
+        let scan = crate::scan_log_jsonl(&log_jsonl);
+        let passed = transcript_passed && scan.passed();
         self.log(
             SessionPhase::Verify,
             if passed { "info" } else { "error" },
             &format!("Verification: {}", if passed { "PASS" } else { "FAIL" }),
             Some(serde_json::json!({
                 "passed": passed,
+                "transcript_passed": transcript_passed,
                 "transcript_outcome": format!("{:?}", transcript.outcome),
                 "failed_steps": transcript.summary.failed,
+                "scan_error_count": scan.error_count,
+                "scan_warn_count": scan.warn_count,
             })),
         );
-        let log_jsonl = self.logs_to_jsonl();
-        let scan = crate::scan_log_jsonl(&log_jsonl);
         if !scan.passed() {
             self.log(
                 SessionPhase::Verify,
-                "warn",
+                "error",
                 &format!(
                     "Log scan found {} findings ({} errors, {} warnings)",
                     scan.findings.len(),
@@ -503,7 +516,51 @@ impl SessionE2eRunner {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
 
+/// Scan `input` for secret/PII patterns and return the input with every
+/// matched substring replaced by `<redacted>`. When at least one
+/// substitution fires, push `field_path` onto `redacted_fields` so the
+/// emitted [`EvidenceBundle`] carries an audit trail of what was
+/// suppressed (br-rl1oh).
+///
+/// `scanner` is borrowed because callers typically run several redaction
+/// passes against the same scanner instance per bundle build.
+fn redact_with_scanner(
+    input: &str,
+    field_path: &str,
+    scanner: &LogRedactionScanner,
+    redacted_fields: &mut Vec<String>,
+) -> String {
+    if input.is_empty() {
+        return String::new();
+    }
+    let findings = scanner.scan_jsonl(input);
+    if findings.is_empty() {
+        return input.to_string();
+    }
+    let mut redacted = input.to_string();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut applied = false;
+    for ScanFinding { snippet, .. } in findings {
+        if snippet.is_empty() {
+            continue;
+        }
+        if !seen.insert(snippet.clone()) {
+            continue;
+        }
+        if redacted.contains(&snippet) {
+            redacted = redacted.replace(&snippet, "<redacted>");
+            applied = true;
+        }
+    }
+    if applied {
+        redacted_fields.push(field_path.to_string());
+    }
+    redacted
+}
+
+impl SessionE2eRunner {
     /// Execute a session script by walking steps and producing a transcript.
     ///
     /// This is a deterministic "dry-run" execution that records expected
@@ -589,6 +646,21 @@ impl SessionE2eRunner {
             author: self.config.author.clone(),
         };
 
+        // br-rl1oh: scan transcript-derived material for secrets BEFORE
+        // it lands in any persisted bundle field. Both `entry.detail`
+        // and the failure-reason string flow into archive evidence
+        // (via EvidenceItem::Log lines and ScenarioOutcome::Fail.reason
+        // respectively). The verify-phase scanner only inspects the
+        // runner's own `logs_to_jsonl` payload, so a secret-bearing
+        // transcript would otherwise reach the bundle raw with
+        // `redacted_fields` empty. Fail-closed semantics here: any
+        // matched substring is replaced with `<redacted>` in the
+        // outgoing field, and the field path is recorded in
+        // `redacted_fields` so downstream consumers can audit what
+        // was suppressed.
+        let scanner = LogRedactionScanner::new();
+        let mut redacted_fields: Vec<String> = Vec::new();
+
         let mut steps = Vec::new();
         for (idx, entry) in transcript.entries.iter().enumerate() {
             let step_passed = entry.outcome == StepOutcome::Pass;
@@ -597,6 +669,12 @@ impl SessionE2eRunner {
                 .as_ref()
                 .map(std::string::ToString::to_string)
                 .unwrap_or_default();
+            let detail_str = redact_with_scanner(
+                &detail_str,
+                &format!("script.steps[{idx}].evidence[0].lines[0]"),
+                &scanner,
+                &mut redacted_fields,
+            );
             steps.push(ScenarioStep {
                 index: idx as u32,
                 kind: StepKind::Action,
@@ -623,11 +701,24 @@ impl SessionE2eRunner {
             });
         }
 
-        let phase_log_lines = self
+        // br-rl1oh: even though phase logs are runner-authored and
+        // should never embed transcript secrets directly, run them
+        // through the same redaction filter as a defense-in-depth
+        // check. A future caller that hooks `log()` to surface raw
+        // payloads would otherwise re-introduce the leak silently.
+        let phase_log_lines: Vec<String> = self
             .logs_to_jsonl()
             .lines()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>();
+            .enumerate()
+            .map(|(line_idx, line)| {
+                redact_with_scanner(
+                    line,
+                    &format!("script.steps[checkpoint].evidence[0].lines[{line_idx}]"),
+                    &scanner,
+                    &mut redacted_fields,
+                )
+            })
+            .collect();
         if !phase_log_lines.is_empty() {
             steps.push(ScenarioStep {
                 index: steps.len() as u32,
@@ -698,13 +789,27 @@ impl SessionE2eRunner {
                 .enumerate()
                 .find(|(_, e)| e.outcome != StepOutcome::Pass);
             match first_fail {
-                Some((idx, entry)) => ScenarioOutcome::Fail {
-                    step_index: idx as u32,
-                    reason: entry.detail.as_ref().map_or_else(
+                Some((idx, entry)) => {
+                    let raw_reason = entry.detail.as_ref().map_or_else(
                         || format!("Step {idx} failed: {:?}", entry.outcome),
                         std::string::ToString::to_string,
-                    ),
-                },
+                    );
+                    // br-rl1oh: redact the failure-reason path the
+                    // same way as the per-step detail. The reason
+                    // field is even higher-risk because it is
+                    // surfaced in summary banners that callers tend
+                    // to forward into chat/slack/issue trackers.
+                    let reason = redact_with_scanner(
+                        &raw_reason,
+                        "script.outcome.reason",
+                        &scanner,
+                        &mut redacted_fields,
+                    );
+                    ScenarioOutcome::Fail {
+                        step_index: idx as u32,
+                        reason,
+                    }
+                }
                 None => ScenarioOutcome::Fail {
                     step_index: 0,
                     reason: "Transcript marked as failed".to_string(),
@@ -728,7 +833,7 @@ impl SessionE2eRunner {
             layer: EvidenceLayer::E2e,
             artifact_paths: canonical_e2e_artifact_paths(),
             script: scenario_script,
-            redacted_fields: Vec::new(),
+            redacted_fields,
             replay_instructions,
             commands: VerificationCommands {
                 local: self.replay_invocation_command(script),
@@ -969,6 +1074,154 @@ mod tests {
         assert!(result.passed);
         assert_eq!(result.transcript_summary.as_ref().unwrap().total, 3);
         assert!(result.evidence.script.outcome == ScenarioOutcome::Pass);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // Multi-field assertions intentionally enumerate every redaction path.
+    fn evidence_bundle_redacts_secrets_in_transcript_detail_and_failure_reason() {
+        // br-rl1oh regression: a TranscriptEntry whose `detail`
+        // payload (or whose presence drives the failure-reason field
+        // for a failed step) carries a secret-shaped token must not
+        // land raw in the EvidenceBundle that downstream archival
+        // tooling persists.
+        //
+        // Pre-fix behavior: build_evidence_bundle stuffed
+        // `entry.detail.to_string()` directly into
+        // EvidenceItem::Log.lines AND used the same string verbatim
+        // as the ScenarioOutcome::Fail.reason, while
+        // `redacted_fields` stayed empty. The verify-phase scanner
+        // only inspected `logs_to_jsonl` (the runner's own phase
+        // logs), so a secret embedded purely in the transcript
+        // never reached the scanner and reached the bundle raw.
+        //
+        // Fix: redact_with_scanner runs over both fields before
+        // they enter the bundle, replaces matched substrings with
+        // `<redacted>`, and records the field path in
+        // bundle.redacted_fields so the suppression is auditable.
+        const SECRET_TOKEN: &str = "sk-abc123def456ghi789jkl012mno345pqr";
+
+        let mut runner = SessionE2eRunner::new(SessionE2eConfig {
+            connector_id: "openai".into(),
+            scenario_id: "ws.token_leak_regression".into(),
+            ..Default::default()
+        });
+
+        let script = SessionScript::new("ws.token_leak_regression");
+        let now = Utc::now();
+        let transcript = SessionTranscript {
+            scenario_id: "ws.token_leak_regression".into(),
+            run_id: runner.run_id.clone(),
+            transport: Some(Transport::WebSocket),
+            started_at: now,
+            finished_at: now + chrono::Duration::milliseconds(50),
+            total_duration: Duration::from_millis(50),
+            entries: vec![TranscriptEntry {
+                timestamp: now,
+                step_index: 0,
+                step: ScriptStep::assert_health(ScriptHealthState::Connected),
+                outcome: StepOutcome::Fail,
+                duration: Duration::from_millis(50),
+                // Inline the leaked secret in BOTH the detail
+                // payload and (transitively) the failure-reason
+                // string the bundle synthesizes from
+                // entry.detail.to_string() on Fail.
+                detail: Some(serde_json::json!({
+                    "error": "auth callback returned secret",
+                    "token": SECRET_TOKEN,
+                })),
+                correlation_id: None,
+            }],
+            outcome: StepOutcome::Fail,
+            summary: TranscriptSummary {
+                total: 1,
+                passed: 0,
+                failed: 1,
+                skipped: 0,
+                timed_out: 0,
+            },
+        };
+
+        let result = runner.record_external_transcript(&script, transcript);
+
+        // The transcript still failed — that contract is unchanged.
+        assert!(!result.passed);
+        assert!(matches!(
+            result.evidence.script.outcome,
+            ScenarioOutcome::Fail { .. }
+        ));
+
+        // The persisted bundle MUST NOT contain the raw secret in
+        // any field. Serialize it the same way an archival writer
+        // would and grep for the token.
+        let serialized =
+            serde_json::to_string(&result.evidence).expect("evidence bundle serializes");
+        assert!(
+            !serialized.contains(SECRET_TOKEN),
+            "raw secret must not appear in serialized evidence bundle: {serialized}"
+        );
+
+        // Both the per-step evidence line AND the failure-reason
+        // path must be present in redacted_fields so downstream
+        // consumers can audit what was suppressed.
+        assert!(
+            result
+                .evidence
+                .redacted_fields
+                .iter()
+                .any(|f| f == "script.steps[0].evidence[0].lines[0]"),
+            "redacted_fields missing per-step detail path: {:?}",
+            result.evidence.redacted_fields
+        );
+        assert!(
+            result
+                .evidence
+                .redacted_fields
+                .iter()
+                .any(|f| f == "script.outcome.reason"),
+            "redacted_fields missing failure-reason path: {:?}",
+            result.evidence.redacted_fields
+        );
+
+        // The placeholder must appear in BOTH redacted fields so we
+        // know the substitution actually fired (not just that the
+        // raw substring was missing for some other reason).
+        if let ScenarioOutcome::Fail { reason, .. } = &result.evidence.script.outcome {
+            assert!(
+                reason.contains("<redacted>"),
+                "failure reason must carry the redaction marker: {reason}"
+            );
+            assert!(
+                !reason.contains(SECRET_TOKEN),
+                "failure reason must not contain the raw secret: {reason}"
+            );
+        } else {
+            panic!("expected ScenarioOutcome::Fail");
+        }
+        let step_evidence = result
+            .evidence
+            .script
+            .steps
+            .iter()
+            .find_map(|s| {
+                s.evidence.iter().find_map(|e| {
+                    if let EvidenceItem::Log { lines } = e {
+                        Some(lines.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .expect("expected at least one EvidenceItem::Log in the bundle");
+        assert!(
+            step_evidence.iter().any(|line| line.contains("<redacted>")),
+            "step evidence must carry the redaction marker: {step_evidence:?}"
+        );
+        for line in &step_evidence {
+            assert!(
+                !line.contains(SECRET_TOKEN),
+                "step evidence line must not contain the raw secret: {line}"
+            );
+        }
     }
 
     #[test]
@@ -1265,5 +1518,76 @@ mod tests {
             roundtrip.replay_test_filter.as_deref(),
             Some("host_e2e::tests::execute_basic_sse_script_passes")
         );
+    }
+
+    #[test]
+    fn record_external_transcript_secret_scan_errors_fail_run() {
+        let mut runner = SessionE2eRunner::new(SessionE2eConfig {
+            connector_id: "slack".into(),
+            scenario_id: "ws.secret_leak".into(),
+            ..Default::default()
+        });
+
+        let script = SessionScript::new("ws.secret_leak")
+            .step(ScriptStep::connect(Transport::WebSocket, "/events"))
+            .step(ScriptStep::expect_any_message())
+            .step(ScriptStep::disconnect());
+
+        let now = Utc::now();
+        let transcript = SessionTranscript {
+            scenario_id: "ws.secret_leak".into(),
+            run_id: runner.run_id.clone(),
+            transport: Some(Transport::WebSocket),
+            started_at: now,
+            finished_at: now + chrono::Duration::milliseconds(15),
+            total_duration: Duration::from_millis(15),
+            entries: vec![
+                TranscriptEntry {
+                    timestamp: now,
+                    step_index: 0,
+                    step: ScriptStep::connect(Transport::WebSocket, "/events"),
+                    outcome: StepOutcome::Pass,
+                    duration: Duration::from_millis(5),
+                    detail: None,
+                    correlation_id: None,
+                },
+                TranscriptEntry {
+                    timestamp: now,
+                    step_index: 1,
+                    step: ScriptStep::expect_any_message(),
+                    outcome: StepOutcome::Pass,
+                    duration: Duration::from_millis(5),
+                    detail: Some(serde_json::json!({
+                        "token": "sk-abc123def456ghi789jkl012mno345pqr"
+                    })),
+                    correlation_id: None,
+                },
+                TranscriptEntry {
+                    timestamp: now,
+                    step_index: 2,
+                    step: ScriptStep::disconnect(),
+                    outcome: StepOutcome::Pass,
+                    duration: Duration::from_millis(5),
+                    detail: None,
+                    correlation_id: None,
+                },
+            ],
+            outcome: StepOutcome::Pass,
+            summary: TranscriptSummary {
+                total: 3,
+                passed: 3,
+                failed: 0,
+                skipped: 0,
+                timed_out: 0,
+            },
+        };
+
+        let result = runner.record_external_transcript(&script, transcript);
+        assert!(!result.passed);
+        assert!(result.phase_logs.iter().any(|entry| {
+            entry.phase == SessionPhase::Verify
+                && entry.message.contains("Log scan found 1 findings")
+                && entry.level == "error"
+        }));
     }
 }

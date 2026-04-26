@@ -845,36 +845,77 @@ pub mod channel {
             depth: Arc<AtomicUsize>,
         }
 
+        struct UnboundedState<T> {
+            queue: VecDeque<T>,
+            closed: bool,
+        }
+
+        #[cfg(test)]
+        static UNBOUNDED_SEND_HOOK: std::sync::OnceLock<
+            StdMutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>,
+        > = std::sync::OnceLock::new();
+
+        #[cfg(test)]
+        pub(crate) fn unbounded_send_hook_cell()
+        -> &'static StdMutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>> {
+            UNBOUNDED_SEND_HOOK.get_or_init(|| StdMutex::new(None))
+        }
+
+        #[cfg(test)]
+        fn run_unbounded_send_hook() {
+            let hook = unbounded_send_hook_cell()
+                .lock()
+                .expect("unbounded send hook poisoned")
+                .clone();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+
         struct UnboundedShared<T> {
-            queue: StdMutex<VecDeque<T>>,
-            closed: AtomicBool,
+            state: StdMutex<UnboundedState<T>>,
             sender_count: AtomicUsize,
             notify: asupersync::sync::Notify,
         }
 
         impl<T> std::fmt::Debug for UnboundedShared<T> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let state = self.state.lock().expect("unbounded queue poisoned");
                 f.debug_struct("UnboundedShared")
-                    .field("closed", &self.closed.load(Ordering::Relaxed))
+                    .field("closed", &state.closed)
                     .field("sender_count", &self.sender_count.load(Ordering::Relaxed))
                     .finish_non_exhaustive()
             }
         }
 
         impl<T> UnboundedShared<T> {
-            fn push(&self, value: T) {
-                self.queue
-                    .lock()
-                    .expect("unbounded queue poisoned")
-                    .push_back(value);
+            fn send(&self, value: T) -> Result<(), SendError<T>> {
+                let mut state = self.state.lock().expect("unbounded queue poisoned");
+                if state.closed {
+                    return Err(SendError(value));
+                }
+                #[cfg(test)]
+                run_unbounded_send_hook();
+                state.queue.push_back(value);
+                drop(state);
                 self.notify.notify_one();
+                Ok(())
             }
 
-            fn pop(&self) -> Option<T> {
-                self.queue
-                    .lock()
-                    .expect("unbounded queue poisoned")
-                    .pop_front()
+            fn pop_or_closed(&self) -> Result<Option<T>, ()> {
+                let mut state = self.state.lock().expect("unbounded queue poisoned");
+                if let Some(value) = state.queue.pop_front() {
+                    return Ok(Some(value));
+                }
+                if state.closed {
+                    return Err(());
+                }
+                Ok(None)
+            }
+
+            fn close(&self) {
+                self.state.lock().expect("unbounded queue poisoned").closed = true;
+                self.notify.notify_waiters();
             }
         }
 
@@ -896,8 +937,7 @@ pub mod channel {
         impl<T> Drop for UnboundedSender<T> {
             fn drop(&mut self) {
                 if self.shared.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
-                    self.shared.closed.store(true, Ordering::Release);
-                    self.shared.notify.notify_waiters();
+                    self.shared.close();
                 }
             }
         }
@@ -1035,24 +1075,20 @@ pub mod channel {
             /// # Errors
             /// Returns `SendError` when the receiver has already been closed.
             pub fn send(&self, value: T) -> Result<(), SendError<T>> {
-                if self.shared.closed.load(Ordering::Acquire) {
-                    return Err(SendError(value));
-                }
-                self.shared.push(value);
-                Ok(())
+                self.shared.send(value)
             }
         }
 
         impl<T> UnboundedReceiver<T> {
             pub async fn recv(&mut self) -> Option<T> {
                 loop {
-                    if let Some(value) = self.shared.pop() {
-                        return Some(value);
+                    match self.shared.pop_or_closed() {
+                        Ok(Some(value)) => return Some(value),
+                        Err(()) => return None,
+                        Ok(None) => {}
                     }
 
-                    if self.shared.closed.load(Ordering::Acquire)
-                        || self.shared.sender_count.load(Ordering::Acquire) == 0
-                    {
+                    if self.shared.sender_count.load(Ordering::Acquire) == 0 {
                         return None;
                     }
 
@@ -1061,8 +1097,7 @@ pub mod channel {
             }
 
             pub fn close(&mut self) {
-                self.shared.closed.store(true, Ordering::Release);
-                self.shared.notify.notify_waiters();
+                self.shared.close();
             }
         }
 
@@ -1089,8 +1124,10 @@ pub mod channel {
         #[must_use]
         pub fn unbounded_channel<T>() -> (UnboundedSender<T>, UnboundedReceiver<T>) {
             let shared = Arc::new(UnboundedShared {
-                queue: StdMutex::new(VecDeque::new()),
-                closed: AtomicBool::new(false),
+                state: StdMutex::new(UnboundedState {
+                    queue: VecDeque::new(),
+                    closed: false,
+                }),
                 sender_count: AtomicUsize::new(1),
                 notify: asupersync::sync::Notify::new(),
             });
@@ -3948,6 +3985,75 @@ mod tests {
         let (tx, _rx) = channel::mpsc::unbounded_channel::<u32>();
         let dbg = format!("{tx:?}");
         assert!(dbg.contains("UnboundedSender"));
+    }
+
+    #[test]
+    fn mpsc_unbounded_close_waits_for_send_critical_section() {
+        use std::sync::mpsc;
+        use std::thread;
+
+        let (tx, rx) = channel::mpsc::unbounded_channel::<u32>();
+        let rx = Arc::new(std::sync::Mutex::new(rx));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Arc::new(std::sync::Mutex::new(release_rx));
+        let (close_done_tx, close_done_rx) = mpsc::channel();
+
+        {
+            let release_rx = Arc::clone(&release_rx);
+            let mut hook = channel::mpsc::unbounded_send_hook_cell()
+                .lock()
+                .expect("unbounded send hook poisoned");
+            *hook = Some(Arc::new(move || {
+                entered_tx.send(()).expect("entered signal");
+                release_rx
+                    .lock()
+                    .expect("release receiver mutex poisoned")
+                    .recv()
+                    .expect("release signal");
+            }));
+        }
+
+        thread::scope(|scope| {
+            let sender = scope.spawn(|| tx.send(42));
+            entered_rx.recv().expect("sender reached critical section");
+
+            let rx_for_close = Arc::clone(&rx);
+            let closer = scope.spawn(move || {
+                let mut receiver = rx_for_close.lock().expect("receiver mutex poisoned");
+                receiver.close();
+                close_done_tx.send(()).expect("close done signal");
+            });
+
+            assert!(
+                close_done_rx
+                    .recv_timeout(Duration::from_millis(50))
+                    .is_err(),
+                "close should block while send holds the queue state lock"
+            );
+
+            release_tx.send(()).expect("release sender");
+            assert_eq!(sender.join().expect("sender thread join"), Ok(()));
+            closer.join().expect("closer thread join");
+        });
+
+        {
+            let mut hook = channel::mpsc::unbounded_send_hook_cell()
+                .lock()
+                .expect("unbounded send hook poisoned");
+            *hook = None;
+        }
+
+        let rx = Arc::into_inner(rx)
+            .expect("receiver arc should be unique")
+            .into_inner()
+            .expect("receiver mutex poisoned");
+        let mut rx = rx;
+        let rt = runtime::Runtime::new().expect("runtime");
+        rt.block_on(async {
+            assert_eq!(rx.recv().await, Some(42));
+            assert_eq!(rx.recv().await, None);
+        });
     }
 
     // ─────────────────────────────────────────────────────────────────────

@@ -313,7 +313,7 @@ pub struct RegistryTrustPolicy {
 /// visible to downstream crates outside a `--features test-mocks` build.
 #[derive(Debug, Clone, Default)]
 pub struct SupplyChainEvidence {
-    pub transparency_log_present: bool,
+    transparency_log_present: bool,
     tuf_verified: bool,
     sigstore_verified: bool,
     pub attestations: Vec<AttestationEvidence>,
@@ -333,15 +333,15 @@ impl SupplyChainEvidence {
     }
 
     #[must_use]
-    pub fn with_transparency_log_present(mut self, present: bool) -> Self {
-        self.transparency_log_present = present;
-        self
-    }
-
-    #[must_use]
     pub fn with_attestations(mut self, attestations: Vec<AttestationEvidence>) -> Self {
         self.attestations = attestations;
         self
+    }
+
+    /// Whether a transparency log verifier adapter found and verified an entry.
+    #[must_use]
+    pub const fn transparency_log_present(&self) -> bool {
+        self.transparency_log_present
     }
 
     /// Whether a TUF verifier adapter has validated the bundle.
@@ -365,7 +365,7 @@ impl SupplyChainEvidence {
 
     /// Promote this evidence with a TUF verification result.
     ///
-    /// Sets `tuf_verified = result.verified`. Callers obtain `result`
+    /// Sets `tuf_verified = result.verified()`. Callers obtain `result`
     /// from a real [`TufVerifier::verify_target`] invocation; a result
     /// with `verified == false` leaves the flag untouched so a failed
     /// verification cannot silently upgrade the evidence.
@@ -373,6 +373,18 @@ impl SupplyChainEvidence {
     pub fn with_tuf_verification_result(mut self, result: &TufVerificationResult) -> Self {
         if result.verified {
             self.tuf_verified = true;
+        }
+        self
+    }
+
+    /// Promote this evidence with a transparency-log verification result.
+    #[must_use]
+    pub fn with_transparency_verification_result(
+        mut self,
+        result: &TransparencyVerificationResult,
+    ) -> Self {
+        if result.verified {
+            self.transparency_log_present = true;
         }
         self
     }
@@ -518,35 +530,101 @@ pub struct SigstoreBundle {
 #[derive(Debug, Clone)]
 pub struct TransparencyVerificationResult {
     /// Whether the entry was found and verified.
-    pub verified: bool,
+    verified: bool,
     /// Log index of the verified entry.
-    pub log_index: Option<u64>,
+    log_index: Option<u64>,
     /// Timestamp when entry was logged.
-    pub logged_at: Option<u64>,
+    logged_at: Option<u64>,
+}
+
+impl TransparencyVerificationResult {
+    /// Whether the entry was found and verified.
+    #[must_use]
+    pub const fn verified(&self) -> bool {
+        self.verified
+    }
+
+    /// Log index of the verified entry.
+    #[must_use]
+    pub const fn log_index(&self) -> Option<u64> {
+        self.log_index
+    }
+
+    /// Timestamp when entry was logged.
+    #[must_use]
+    pub const fn logged_at(&self) -> Option<u64> {
+        self.logged_at
+    }
 }
 
 /// Result of TUF verification.
 #[derive(Debug, Clone)]
 pub struct TufVerificationResult {
     /// Whether the target was found in valid TUF metadata.
-    pub verified: bool,
+    verified: bool,
     /// Root version used for verification.
-    pub root_version: u32,
+    root_version: u32,
     /// Target info if found.
-    pub target: Option<TufTargetInfo>,
+    target: Option<TufTargetInfo>,
+}
+
+impl TufVerificationResult {
+    /// Whether the target was found in valid TUF metadata.
+    #[must_use]
+    pub const fn verified(&self) -> bool {
+        self.verified
+    }
+
+    /// Root version used for verification.
+    #[must_use]
+    pub const fn root_version(&self) -> u32 {
+        self.root_version
+    }
+
+    /// Target info if found.
+    #[must_use]
+    pub fn target(&self) -> Option<&TufTargetInfo> {
+        self.target.as_ref()
+    }
 }
 
 /// Result of Sigstore bundle verification.
 #[derive(Debug, Clone)]
 pub struct SigstoreVerificationResult {
     /// Whether the signature is valid.
-    pub verified: bool,
+    verified: bool,
     /// OIDC identity from certificate.
-    pub identity: Option<String>,
+    identity: Option<String>,
     /// OIDC issuer from certificate.
-    pub issuer: Option<String>,
+    issuer: Option<String>,
     /// Rekor log index if available.
-    pub rekor_log_index: Option<u64>,
+    rekor_log_index: Option<u64>,
+}
+
+impl SigstoreVerificationResult {
+    /// Whether the signature is valid.
+    #[must_use]
+    pub const fn verified(&self) -> bool {
+        self.verified
+    }
+
+    /// OIDC identity from certificate.
+    #[must_use]
+    pub fn identity(&self) -> Option<&str> {
+        self.identity.as_deref()
+    }
+
+    /// OIDC issuer from certificate.
+    #[must_use]
+    pub fn issuer(&self) -> Option<&str> {
+        self.issuer.as_deref()
+    }
+
+    /// Rekor log index if available.
+    #[must_use]
+    pub const fn rekor_log_index(&self) -> Option<u64> {
+        self.rekor_log_index
+    }
 }
 
 /// Errors specific to supply-chain verification adapters.
@@ -871,6 +949,24 @@ impl MockSigstoreVerifier {
             .lock()
             .unwrap()
             .insert(artifact_hash, result);
+    }
+
+    pub fn add_valid_bundle_claims(
+        &self,
+        artifact_hash: String,
+        identity: Option<String>,
+        issuer: Option<String>,
+        rekor_log_index: Option<u64>,
+    ) {
+        self.add_valid_bundle(
+            artifact_hash,
+            SigstoreVerificationResult {
+                verified: true,
+                identity,
+                issuer,
+                rekor_log_index,
+            },
+        );
     }
 }
 

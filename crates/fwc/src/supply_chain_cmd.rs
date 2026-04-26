@@ -658,14 +658,12 @@ fn build_registry_supply_chain_evidence(
     // returns an unverified baseline; there is no public way to set
     // tuf_verified / sigstore_verified here since we never ran a
     // verifier adapter.
-    SupplyChainEvidence::new()
-        .with_transparency_log_present(false)
-        .with_attestations(vec![AttestationEvidence {
-            attestation_type: AttestationType::InToto,
-            slsa_level: Some(attestation.slsa_level),
-            builder_id: Some(attestation.builder_id.clone()),
-            expires_at: None,
-        }])
+    SupplyChainEvidence::new().with_attestations(vec![AttestationEvidence {
+        attestation_type: AttestationType::InToto,
+        slsa_level: Some(attestation.slsa_level),
+        builder_id: Some(attestation.builder_id.clone()),
+        expires_at: None,
+    }])
 }
 
 fn verify_attestation_signature(

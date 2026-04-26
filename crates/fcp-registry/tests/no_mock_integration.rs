@@ -1657,8 +1657,8 @@ async fn mock_transparency_verifier_accepts_valid_entry() {
         .verify_entry("sha256:abc", None)
         .await
         .expect("mock verify");
-    assert!(result.verified);
-    assert_eq!(result.log_index, Some(42));
+    assert!(result.verified());
+    assert_eq!(result.log_index(), Some(42));
 }
 
 #[fcp_async_core::runtime::test]
@@ -1735,9 +1735,9 @@ async fn mock_tuf_verifier_accepts_valid_target() {
         .verify_target(&root, "connectors/test")
         .await
         .expect("mock verify");
-    assert!(result.verified);
-    assert_eq!(result.root_version, 5);
-    assert!(result.target.is_some());
+    assert!(result.verified());
+    assert_eq!(result.root_version(), 5);
+    assert!(result.target().is_some());
 }
 
 #[fcp_async_core::runtime::test]
@@ -1758,19 +1758,14 @@ async fn mock_tuf_verifier_rejects_unknown_target() {
 
 #[fcp_async_core::runtime::test]
 async fn mock_sigstore_verifier_accepts_valid_bundle() {
-    use fcp_registry::{
-        MockSigstoreVerifier, SigstoreBundle, SigstoreVerificationResult, SigstoreVerifier,
-    };
+    use fcp_registry::{MockSigstoreVerifier, SigstoreBundle, SigstoreVerifier};
 
     let verifier = MockSigstoreVerifier::new();
-    verifier.add_valid_bundle(
+    verifier.add_valid_bundle_claims(
         "sha256:artifact".to_string(),
-        SigstoreVerificationResult {
-            verified: true,
-            identity: Some("github-actions".to_string()),
-            issuer: Some("https://token.actions.githubusercontent.com".to_string()),
-            rekor_log_index: Some(12345),
-        },
+        Some("github-actions".to_string()),
+        Some("https://token.actions.githubusercontent.com".to_string()),
+        Some(12345),
     );
 
     let bundle = SigstoreBundle {
@@ -1784,8 +1779,8 @@ async fn mock_sigstore_verifier_accepts_valid_bundle() {
         .verify_bundle(&bundle, "sha256:artifact", &[], &[])
         .await
         .expect("mock verify");
-    assert!(result.verified);
-    assert_eq!(result.identity.as_deref(), Some("github-actions"));
+    assert!(result.verified());
+    assert_eq!(result.identity(), Some("github-actions"));
 }
 
 #[fcp_async_core::runtime::test]
@@ -2142,7 +2137,7 @@ fn registry_trust_policy_default() {
 #[test]
 fn supply_chain_evidence_default() {
     let evidence = SupplyChainEvidence::default();
-    assert!(!evidence.transparency_log_present);
+    assert!(!evidence.transparency_log_present());
     assert!(evidence.attestations.is_empty());
 }
 

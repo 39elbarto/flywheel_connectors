@@ -1226,6 +1226,19 @@ impl PriorityGossipPolicy {
     }
 }
 
+/// Observable planning result for a direct revocation-push fanout attempt.
+///
+/// Transport/orchestration layers can use this boundary type to decide whether
+/// a `RevocationPushMessage` should be emitted immediately, suppressed until a
+/// later deadline, or trimmed to the configured amplification cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevocationPushFanoutPlan {
+    /// Peers selected for immediate direct push, in caller-provided order.
+    pub selected_peers: Vec<TailscaleNodeId>,
+    /// Earliest millisecond timestamp when another direct push may proceed.
+    pub next_allowed_at_ms: Option<u64>,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Peer Gossip State
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1321,6 +1334,8 @@ pub struct MeshGossip {
     zone_states: HashMap<ZoneId, GossipState>,
     /// Known peer states.
     peer_states: HashMap<TailscaleNodeId, PeerGossipState>,
+    /// Last successful direct revocation-push fanout per zone, in ms.
+    last_priority_push_at_ms: HashMap<ZoneId, u64>,
     /// Configuration.
     config: GossipConfig,
 }
@@ -1447,6 +1462,7 @@ impl MeshGossip {
             local_node,
             zone_states: HashMap::new(),
             peer_states: HashMap::new(),
+            last_priority_push_at_ms: HashMap::new(),
             config,
         }
     }
@@ -1467,6 +1483,56 @@ impl MeshGossip {
     #[must_use]
     pub const fn max_wire_payload_bytes(&self) -> usize {
         self.config.max_wire_payload_bytes()
+    }
+
+    /// Plan a direct revocation-push fanout at the transport boundary.
+    ///
+    /// Enforces the configured interval backoff for repeated direct pushes in
+    /// the same zone and caps fanout to
+    /// [`GossipConfig::max_revocation_push_peers`] to bound amplification.
+    ///
+    /// `PriorityInterval` and `Standard` do not emit direct pushes; callers
+    /// should rely on their normal summary/request cadence instead.
+    #[must_use]
+    pub fn plan_revocation_push_fanout(
+        &mut self,
+        zone_id: &ZoneId,
+        peers: &[TailscaleNodeId],
+        policy: PriorityGossipPolicy,
+        now_ms: u64,
+    ) -> RevocationPushFanoutPlan {
+        if !policy.uses_direct_push() {
+            return RevocationPushFanoutPlan {
+                selected_peers: Vec::new(),
+                next_allowed_at_ms: None,
+            };
+        }
+
+        let interval_ms = policy.interval_ms(&self.config);
+        if let Some(last_push_at_ms) = self.last_priority_push_at_ms.get(zone_id).copied() {
+            let next_allowed_at_ms = last_push_at_ms.saturating_add(interval_ms);
+            if now_ms < next_allowed_at_ms {
+                return RevocationPushFanoutPlan {
+                    selected_peers: Vec::new(),
+                    next_allowed_at_ms: Some(next_allowed_at_ms),
+                };
+            }
+        }
+
+        let selected_peers = peers
+            .iter()
+            .take(self.config.max_revocation_push_peers)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !selected_peers.is_empty() {
+            self.last_priority_push_at_ms
+                .insert(zone_id.clone(), now_ms);
+        }
+
+        RevocationPushFanoutPlan {
+            selected_peers,
+            next_allowed_at_ms: Some(now_ms.saturating_add(interval_ms)),
+        }
     }
 
     /// Get or create zone state.

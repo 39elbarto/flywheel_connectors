@@ -13,7 +13,9 @@ use fcp_core::{
     RevocationFreshnessClass, RevocationObject, RevocationRegistry, RevocationScope,
     RevocationSlaChecker, RevocationSlaStatus, TailscaleNodeId, ZoneId,
 };
-use fcp_mesh::gossip::{GossipConfig, GossipMessage, PriorityGossipPolicy, RevocationPushMessage};
+use fcp_mesh::gossip::{
+    GossipConfig, GossipMessage, MeshGossip, PriorityGossipPolicy, RevocationPushMessage,
+};
 use semver::Version;
 
 fn test_header() -> ObjectHeader {
@@ -37,6 +39,10 @@ fn make_id_from_u32(i: u32) -> ObjectId {
     let mut b = [0u8; 32];
     b[..4].copy_from_slice(&i.to_le_bytes());
     ObjectId::from_bytes(b)
+}
+
+fn test_peer(name: &str) -> TailscaleNodeId {
+    TailscaleNodeId::new(name)
 }
 
 fn make_revocation(revoked_ids: &[ObjectId]) -> RevocationObject {
@@ -290,4 +296,73 @@ fn scenario_priority_policy_interval_comparison() {
     assert_eq!(standard.interval_ms(&config), 300);
     assert!(direct.uses_direct_push());
     assert!(!standard.uses_direct_push());
+}
+
+// ── Scenario 11: Direct revocation push fanout rate-limit ──────────────────
+
+#[test]
+fn scenario_priority_push_fanout_caps_peers_and_preserves_order() {
+    let mut gossip = MeshGossip::new(
+        test_peer("local-node"),
+        GossipConfig {
+            max_revocation_push_peers: 2,
+            ..GossipConfig::default()
+        },
+    );
+    let peers = vec![test_peer("peer-a"), test_peer("peer-b"), test_peer("peer-c")];
+
+    let plan = gossip.plan_revocation_push_fanout(
+        &ZoneId::work(),
+        &peers,
+        PriorityGossipPolicy::DirectPush,
+        1_000,
+    );
+
+    assert_eq!(plan.selected_peers, peers[..2].to_vec());
+    assert_eq!(plan.next_allowed_at_ms, Some(1_100));
+}
+
+#[test]
+fn scenario_priority_push_fanout_collapses_within_interval() {
+    let mut gossip = MeshGossip::new(test_peer("local-node"), GossipConfig::default());
+    let peers = vec![test_peer("peer-a"), test_peer("peer-b")];
+
+    let first = gossip.plan_revocation_push_fanout(
+        &ZoneId::work(),
+        &peers,
+        PriorityGossipPolicy::DirectPush,
+        1_000,
+    );
+    assert_eq!(first.selected_peers, peers);
+
+    let collapsed = gossip.plan_revocation_push_fanout(
+        &ZoneId::work(),
+        &peers,
+        PriorityGossipPolicy::DirectPush,
+        1_050,
+    );
+    assert!(collapsed.selected_peers.is_empty());
+    assert_eq!(collapsed.next_allowed_at_ms, Some(1_100));
+}
+
+#[test]
+fn scenario_priority_push_fanout_resumes_after_interval() {
+    let mut gossip = MeshGossip::new(test_peer("local-node"), GossipConfig::default());
+    let peers = vec![test_peer("peer-a"), test_peer("peer-b")];
+
+    let _ = gossip.plan_revocation_push_fanout(
+        &ZoneId::work(),
+        &peers,
+        PriorityGossipPolicy::DirectPush,
+        1_000,
+    );
+    let resumed = gossip.plan_revocation_push_fanout(
+        &ZoneId::work(),
+        &peers,
+        PriorityGossipPolicy::DirectPush,
+        1_100,
+    );
+
+    assert_eq!(resumed.selected_peers, peers);
+    assert_eq!(resumed.next_allowed_at_ms, Some(1_200));
 }

@@ -78,7 +78,7 @@ impl RetryPolicy {
                     ..
                 } = error
                 {
-                    return RetryDecision::RetryAfter(*delay);
+                    return RetryDecision::RetryAfter((*delay).min(self.max_delay));
                 }
 
                 let base_ms = u64::try_from(self.base_delay.as_millis()).unwrap_or(u64::MAX);
@@ -308,6 +308,24 @@ mod tests {
             RetryDecision::RetryAfter(delay) => assert_eq!(delay, Duration::from_secs(10)),
             RetryDecision::DoNotRetry => panic!("429 should be retryable"),
         }
+    }
+
+    #[test]
+    fn decide_retry_after_is_capped_by_max_delay() {
+        let p = RetryPolicy {
+            max_delay: Duration::from_secs(5),
+            ..RetryPolicy::default()
+        };
+        let err = GraphqlClientError::HttpStatus {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            body: String::new(),
+            retry_after: Some(Duration::from_secs(60)),
+        };
+
+        assert_eq!(
+            p.decide(&err, 1, true),
+            RetryDecision::RetryAfter(Duration::from_secs(5))
+        );
     }
 
     #[test]

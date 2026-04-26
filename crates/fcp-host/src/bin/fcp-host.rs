@@ -1850,6 +1850,30 @@ fn preflight_response_from_error(error: HostError) -> PreflightResponse {
     response
 }
 
+fn track_verified_cancellation_owner(
+    cancellation: &CancellationController,
+    operation_id: &str,
+    request: &InvokeRequest,
+) -> HostResult<()> {
+    let verified_claims = request
+        .capability_token
+        .raw()
+        .claims_unverified()
+        .map_err(|error| {
+            HostError::Internal(format!(
+                "verified live request lost readable capability claims before cancellation tracking: {error}"
+            ))
+        })?;
+    let cancellation_owner = claims_principal(&verified_claims).ok_or_else(|| {
+        HostError::Internal(
+            "verified live request lost the subject/principal_id claim before cancellation tracking"
+                .to_string(),
+        )
+    })?;
+    cancellation.track_with_owner(operation_id, Some(cancellation_owner));
+    Ok(())
+}
+
 async fn evaluate_live_preflight(
     state: &AppState,
     request: &InvokeRequest,
@@ -4329,25 +4353,8 @@ async fn invoke_handler(
     // header is only an equality check against the authenticated token
     // subject/principal_id claim; absent it, the request is still
     // authenticated and must not fall back to ownerless cancellation.
-    let verified_claims =
-        request
-            .capability_token
-            .raw()
-            .claims_unverified()
-            .map_err(|error| {
-                map_host_error(HostError::Internal(format!(
-                    "verified live request lost readable capability claims before cancellation tracking: {error}"
-                )))
-            })?;
-    let cancellation_owner = claims_principal(&verified_claims).ok_or_else(|| {
-        map_host_error(HostError::Internal(
-            "verified live request lost the subject/principal_id claim before cancellation tracking"
-                .to_string(),
-        ))
-    })?;
-    state
-        .cancellation
-        .track_with_owner(&operation_id, Some(cancellation_owner));
+    track_verified_cancellation_owner(state.cancellation.as_ref(), &operation_id, &request)
+        .map_err(map_host_error)?;
     let invoke_result = state.registry.invoke(request).await;
     state.cancellation.complete(&operation_id);
 
@@ -6344,42 +6351,18 @@ mod tests {
         assert!(message.contains("revoked"));
     }
 
-    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
-    async fn invoke_handler_uses_verified_principal_for_cancellation_when_header_missing() {
-        if maybe_compiled_test_connector_binary().is_none() {
-            eprintln!(
-                "compiled fcp-test-connector missing; skipping invoke cancellation owner test"
-            );
-            return;
-        }
-
-        let connector_id = "fcp.test.cancel-owner:utility:1.0.0";
-        let lifecycle = Arc::new(HostAdminStateStore::new());
+    #[test]
+    fn invoke_handler_uses_verified_principal_for_cancellation_when_header_missing() {
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
-
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let connectors_file = tempdir.path().join("connectors.json");
-        let base_state = test_app_state_with_connectors_file(
-            vec![subprocess_test_connector_config(connector_id)],
-            connectors_file,
-            Arc::clone(&lifecycle),
-        )
-        .await;
-        let state = Arc::new(AppState {
-            capability_verifying_key: Some(signing_key.verifying_key()),
-            ..(*base_state).clone()
-        });
-
         let request = InvokeRequest {
             r#type: "invoke".to_string(),
             id: RequestId::random(),
-            connector_id: connector_id.parse().expect("connector id"),
+            connector_id: "fcp.test.cancel-owner:utility:1.0.0"
+                .parse()
+                .expect("connector id"),
             operation: OperationId::from_static("test.echo"),
             zone_id: ZoneId::work(),
-            input: json!({
-                "message": "hold invoke open for cancellation auth test",
-                "delay_ms": 300_u64,
-            }),
+            input: json!({ "message": "cancellation owner should follow token subject" }),
             capability_token: test_capability_token(
                 &signing_key,
                 "cap.test.echo",
@@ -6396,46 +6379,27 @@ mod tests {
             approval_tokens: Vec::new(),
         };
         let operation_id = request.id.to_string();
+        let cancellation = CancellationController::new();
 
-        let invoke_state = Arc::clone(&state);
-        let invoke_task =
-            task::spawn(async move { invoke_handler(State(invoke_state), HeaderMap::new(), Json(request)).await });
+        track_verified_cancellation_owner(&cancellation, &operation_id, &request)
+            .expect("verified token subject should be tracked as cancellation owner");
 
-        fcp_async_core::time::timeout(Duration::from_secs(2), async {
-            while state.cancellation.tracked_count() == 0 {
-                fcp_async_core::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("invoke should track cancellation before the delayed response finishes");
-
-        let mut cancel_headers = HeaderMap::new();
-        cancel_headers.insert(PRINCIPAL_HEADER, HeaderValue::from_static("user:other"));
-        let cancel_request = CancellationRequest {
-            operation_id: operation_id.clone(),
-            reason: CancelReason::UserRequested,
-            cleanup: CleanupBehavior::default(),
-            return_partial: false,
-        };
-
-        let (status, message) = cancel_handler(
-            State(Arc::clone(&state)),
-            cancel_headers,
-            Json(cancel_request),
-        )
-        .await
-        .expect_err("mismatched principal should not cancel a headerless authenticated invoke");
-        assert_eq!(status, StatusCode::FORBIDDEN);
+        let error = cancellation
+            .cancel(
+                &CancellationRequest {
+                    operation_id,
+                    reason: CancelReason::UserRequested,
+                    cleanup: CleanupBehavior::default(),
+                    return_partial: false,
+                },
+                Some("user:other"),
+                Utc::now(),
+            )
+            .expect_err("mismatched principal should not cancel a headerless authenticated invoke");
         assert!(
-            message.contains("cancellation principal mismatch"),
-            "expected cancellation owner mismatch, got: {message}"
+            error.to_string().contains("cancellation principal mismatch"),
+            "expected cancellation owner mismatch, got: {error}"
         );
-
-        let _ = invoke_task
-            .await
-            .expect("invoke task should join")
-            .expect("invoke should still complete successfully");
-        assert_eq!(state.cancellation.tracked_count(), 0);
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

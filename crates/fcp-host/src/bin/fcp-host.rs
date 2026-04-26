@@ -2671,6 +2671,21 @@ async fn async_main() -> HostResult<()> {
             "/rpc/admin/events/acknowledge",
             post(event_acknowledge_handler),
         )
+        // br-71lku: /rpc/cancel and /rpc/operations/cancel were
+        // previously mounted on the public app router below, where
+        // cancel_handler trusted only the spoofable X-Principal
+        // header for principal assertion. Any unauthenticated caller
+        // could therefore POST a cancel for a known operation_id +
+        // matching X-Principal value and have
+        // CancellationController::cancel accept it on plain string
+        // equality. Moving both routes into protected_routes gates
+        // them behind admin_auth_middleware (Bearer token + owner
+        // zone header), closing the auth-bypass vector flagged in
+        // the bead. Tenant self-cancel via capability-token-driven
+        // principal is tracked as separate follow-up work — the
+        // immediate fix is to deny the spoofed-header path.
+        .route("/rpc/cancel", post(cancel_handler))
+        .route("/rpc/operations/cancel", post(cancel_handler))
         .route_layer(from_fn_with_state(
             Arc::clone(&state),
             admin_auth_middleware,
@@ -2691,8 +2706,8 @@ async fn async_main() -> HostResult<()> {
         // flywheel_connectors-qeapt.
         .route("/rpc/introspect/{connector_id}", get(introspect_handler))
         .route("/rpc/invoke", post(invoke_handler))
-        .route("/rpc/cancel", post(cancel_handler))
-        .route("/rpc/operations/cancel", post(cancel_handler))
+        // /rpc/cancel and /rpc/operations/cancel moved into
+        // protected_routes (br-71lku — see comment there).
         .route("/rpc/batch", post(batch_invoke_handler))
         .route("/rpc/batch-invoke", post(batch_invoke_handler))
         .route("/rpc/preflight", post(preflight_handler))
@@ -4212,10 +4227,11 @@ async fn cancel_handler(
 ) -> Result<Json<CancellationResponse>, (StatusCode, String)> {
     let operation_id = request.operation_id.clone();
     // br-jdaro: extract the asserted principal from the same header
-    // invoke_handler writes (`X-Principal`). When the tracked operation
+    // invoke_handler accepts (`X-Principal`). When the tracked operation
     // has an owner, CancellationController::cancel enforces match and
     // returns HostError::PreflightFailed (→ 403) on mismatch. Operations
-    // tracked without an owner stay permissive for backward compat.
+    // tracked without an owner stay permissive only for legacy/manual
+    // controller callers that intentionally opted into ownerless tracking.
     let asserted_principal = extract_principal_header(&headers);
     let started_at = Instant::now();
     tracing::debug!(
@@ -4308,13 +4324,30 @@ async fn invoke_handler(
         return Err(map_host_error(HostError::PreflightFailed(reason)));
     }
 
-    // br-jdaro: record the asserted principal as the operation owner so
-    // cancel_handler can authorize cancellation. When asserted_principal
-    // is None (no X-Principal header), the operation is tracked
-    // owner-less — any caller may cancel, matching legacy behavior.
+    // br-ug5fk: cancellation ownership must follow the verified token
+    // principal, not the optional X-Principal override header. The
+    // header is only an equality check against the authenticated token
+    // subject/principal_id claim; absent it, the request is still
+    // authenticated and must not fall back to ownerless cancellation.
+    let verified_claims =
+        request
+            .capability_token
+            .raw()
+            .claims_unverified()
+            .map_err(|error| {
+                map_host_error(HostError::Internal(format!(
+                    "verified live request lost readable capability claims before cancellation tracking: {error}"
+                )))
+            })?;
+    let cancellation_owner = claims_principal(&verified_claims).ok_or_else(|| {
+        map_host_error(HostError::Internal(
+            "verified live request lost the subject/principal_id claim before cancellation tracking"
+                .to_string(),
+        ))
+    })?;
     state
         .cancellation
-        .track_with_owner(&operation_id, asserted_principal.as_deref());
+        .track_with_owner(&operation_id, Some(cancellation_owner));
     let invoke_result = state.registry.invoke(request).await;
     state.cancellation.complete(&operation_id);
 
@@ -5442,6 +5475,7 @@ fn map_host_error(err: HostError) -> (StatusCode, String) {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use fcp_host::{CancelReason, CleanupBehavior};
     use fcp_kernel::{
         BudgetEnforcement, HealthState, LifecycleRecord, OperationId, SelfCheckStatus,
         TransitionReason, UsageBudgetLimit, UsageBudgetPolicy, UsageMetric, UsageMetricKind,
@@ -6308,6 +6342,100 @@ mod tests {
         assert!(message.contains("preflight failed"));
         assert!(message.contains("capability token rejected by host state"));
         assert!(message.contains("revoked"));
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn invoke_handler_uses_verified_principal_for_cancellation_when_header_missing() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!(
+                "compiled fcp-test-connector missing; skipping invoke cancellation owner test"
+            );
+            return;
+        }
+
+        let connector_id = "fcp.test.cancel-owner:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![subprocess_test_connector_config(connector_id)],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            ..(*base_state).clone()
+        });
+
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({
+                "message": "hold invoke open for cancellation auth test",
+                "delay_ms": 300_u64,
+            }),
+            capability_token: test_capability_token(
+                &signing_key,
+                "cap.test.echo",
+                "test.echo",
+                ZoneId::work().as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+        let operation_id = request.id.to_string();
+
+        let invoke_state = Arc::clone(&state);
+        let invoke_task =
+            task::spawn(async move { invoke_handler(State(invoke_state), HeaderMap::new(), Json(request)).await });
+
+        fcp_async_core::time::timeout(Duration::from_secs(2), async {
+            while state.cancellation.tracked_count() == 0 {
+                fcp_async_core::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("invoke should track cancellation before the delayed response finishes");
+
+        let mut cancel_headers = HeaderMap::new();
+        cancel_headers.insert(PRINCIPAL_HEADER, HeaderValue::from_static("user:other"));
+        let cancel_request = CancellationRequest {
+            operation_id: operation_id.clone(),
+            reason: CancelReason::UserRequested,
+            cleanup: CleanupBehavior::default(),
+            return_partial: false,
+        };
+
+        let (status, message) = cancel_handler(
+            State(Arc::clone(&state)),
+            cancel_headers,
+            Json(cancel_request),
+        )
+        .await
+        .expect_err("mismatched principal should not cancel a headerless authenticated invoke");
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            message.contains("cancellation principal mismatch"),
+            "expected cancellation owner mismatch, got: {message}"
+        );
+
+        let _ = invoke_task
+            .await
+            .expect("invoke task should join")
+            .expect("invoke should still complete successfully");
+        assert_eq!(state.cancellation.tracked_count(), 0);
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
@@ -8725,5 +8853,142 @@ done"#;
             .expect("HeaderValue accepts arbitrary bytes");
         headers.insert(PRINCIPAL_HEADER, bad);
         assert_eq!(extract_principal_header(&headers), None);
+    }
+
+    // ── br-71lku: /rpc/cancel auth-bypass regression ──────────────
+
+    fn cancel_route_test_state() -> Arc<AppState> {
+        let registry = Arc::new(empty_registry(1));
+        let budget = Arc::new(BudgetPolicyEngine::new());
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        Arc::new(AppState {
+            registry: Arc::clone(&registry),
+            doctor: DoctorService::new(Arc::clone(&registry)),
+            budget: Arc::clone(&budget),
+            discovery: Arc::new(DiscoveryEndpoint::new(
+                Arc::clone(&registry),
+                Arc::clone(&budget),
+            )),
+            cancellation: Arc::new(CancellationController::new()),
+            lifecycle: Arc::clone(&lifecycle),
+            rollout: Arc::new(RolloutController::new(
+                Arc::clone(&registry),
+                Arc::clone(&lifecycle),
+            )),
+            supply_chain: Arc::new(SupplyChainGate::default()),
+            capability_verifying_key: None,
+            approval_verifying_key: None,
+            admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
+            connectors_file: None,
+            zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            started_at: Instant::now(),
+        })
+    }
+
+    /// Construct a minimal app router that mirrors the production
+    /// /rpc/cancel mount: cancel routes live in `protected_routes`
+    /// behind `admin_auth_middleware`, then `protected_routes` is
+    /// merged into the public app router. This is the exact wiring
+    /// pattern from the production `main()` builder, scoped down to
+    /// the cancel routes for the regression test.
+    fn cancel_test_app(state: Arc<AppState>) -> axum::Router {
+        let protected = axum::Router::new()
+            .route("/rpc/cancel", post(cancel_handler))
+            .route("/rpc/operations/cancel", post(cancel_handler))
+            .route_layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                admin_auth_middleware,
+            ));
+        axum::Router::new()
+            .merge(protected)
+            .with_state(Arc::clone(&state))
+    }
+
+    async fn post_cancel_with_headers(
+        app: axum::Router,
+        path: &str,
+        extra_headers: &[(&str, &str)],
+    ) -> axum::http::StatusCode {
+        use axum::body::Body;
+        use axum::http::{Request, header::CONTENT_TYPE};
+        use tower::util::ServiceExt;
+
+        let body = serde_json::json!({
+            "operation_id": "op-71lku-test",
+            "reason": "user_requested",
+        });
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(CONTENT_TYPE, "application/json");
+        for (k, v) in extra_headers {
+            builder = builder.header(*k, *v);
+        }
+        let req = builder
+            .body(Body::from(body.to_string()))
+            .expect("build cancel request");
+
+        let response = app.oneshot(req).await.expect("router response");
+        response.status()
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn rpc_cancel_rejects_unauthenticated_request() {
+        // br-71lku: a public caller with no Authorization header must
+        // not be able to cancel another principal's operation by
+        // setting a spoofable `X-Principal` header. The route is now
+        // gated by admin_auth_middleware so the request is rejected
+        // before it reaches cancel_handler / CancellationController.
+        let state = cancel_route_test_state();
+        let app = cancel_test_app(state);
+
+        // No Authorization header, no admin zone header, but a
+        // spoofed X-Principal — exactly the bypass shape from the
+        // bead repro. Even a matching X-Principal value must be
+        // rejected at the routing layer.
+        let status = post_cancel_with_headers(
+            app,
+            "/rpc/cancel",
+            &[("X-Principal", "user:test")],
+        )
+        .await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::FORBIDDEN,
+            "unauthenticated cancel must be rejected at the routing layer"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn rpc_operations_cancel_rejects_unauthenticated_request() {
+        // Same regression for the alias path /rpc/operations/cancel.
+        let state = cancel_route_test_state();
+        let app = cancel_test_app(state);
+        let status = post_cancel_with_headers(
+            app,
+            "/rpc/operations/cancel",
+            &[("X-Principal", "user:test")],
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn rpc_cancel_rejects_wrong_admin_bearer_token() {
+        // Even with an Authorization header, a wrong bearer must be
+        // rejected — locks in that the gate is the actual bearer
+        // check, not just header presence.
+        let state = cancel_route_test_state();
+        let app = cancel_test_app(state);
+        let status = post_cancel_with_headers(
+            app,
+            "/rpc/cancel",
+            &[
+                ("Authorization", "Bearer wrong-token"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
     }
 }

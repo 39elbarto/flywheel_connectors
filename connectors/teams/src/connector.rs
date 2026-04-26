@@ -225,6 +225,19 @@ fn is_local_test_host(host: &str) -> bool {
     host == "localhost" || host == "127.0.0.1" || host.ends_with(".localhost")
 }
 
+const MICROSOFT_GRAPH_HOSTS: &[&str] = &[
+    "graph.microsoft.com",
+    "graph.microsoft.us",
+    "dod-graph.microsoft.us",
+    "microsoftgraph.chinacloudapi.cn",
+];
+
+fn is_allowed_graph_host(host: &str) -> bool {
+    MICROSOFT_GRAPH_HOSTS
+        .iter()
+        .any(|allowed| host.eq_ignore_ascii_case(allowed))
+}
+
 const fn auth_mode_label(auth: &TeamsAuth) -> &'static str {
     match auth {
         TeamsAuth::AccessToken { .. } => "access_token",
@@ -248,6 +261,7 @@ fn graph_base_url_policy(base_url: &str) -> (bool, String) {
         return (false, "graph_base_url must include a host".into());
     };
 
+    #[cfg(test)]
     if is_local_test_host(host) {
         return (
             true,
@@ -259,8 +273,20 @@ fn graph_base_url_policy(base_url: &str) -> (bool, String) {
     if parsed.scheme() != "https" {
         problems.push(format!("scheme must be https, got {}", parsed.scheme()));
     }
-    if host != "graph.microsoft.com" {
-        problems.push(format!("host must be graph.microsoft.com, got {host}"));
+    if !is_allowed_graph_host(host) {
+        problems.push(format!(
+            "host must be one of {}, got {host}",
+            MICROSOFT_GRAPH_HOSTS.join(", ")
+        ));
+    }
+    if parsed.port().is_some_and(|port| port != 443) {
+        problems.push(format!(
+            "port must be 443 when specified, got {}",
+            parsed.port().unwrap_or_default()
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        problems.push("userinfo is not allowed in graph_base_url".into());
     }
     if !matches!(parsed.path(), "/v1.0" | "/v1.0/" | "/beta" | "/beta/") {
         problems.push(format!(
@@ -276,7 +302,7 @@ fn graph_base_url_policy(base_url: &str) -> (bool, String) {
     }
 
     if problems.is_empty() {
-        (true, "Microsoft Graph production endpoint accepted".into())
+        (true, "Microsoft Graph endpoint accepted".into())
     } else {
         (false, problems.join("; "))
     }
@@ -1823,6 +1849,14 @@ impl FcpConnector for TeamsConnector {
                 code: 1001,
                 message: format!("Invalid Teams config: {e}"),
             })?;
+        let (graph_base_url_ok, graph_base_url_message) =
+            graph_base_url_policy(&config.graph_base_url);
+        if !graph_base_url_ok {
+            return Err(FcpError::InvalidRequest {
+                code: 1002,
+                message: format!("Invalid Teams graph_base_url: {graph_base_url_message}"),
+            });
+        }
 
         self.retry_config = config.retry.clone();
         self.runtime = Some(ConnectorRuntime::new(
@@ -2535,6 +2569,68 @@ mod tests {
         assert!(result.is_ok());
         assert!(connector.config.is_some());
         assert!(connector.client.is_some());
+    }
+
+    #[test]
+    fn test_graph_base_url_policy_accepts_microsoft_clouds() {
+        for graph_base_url in [
+            "https://graph.microsoft.com/v1.0",
+            "https://graph.microsoft.com/beta",
+            "https://graph.microsoft.us/v1.0",
+            "https://dod-graph.microsoft.us/v1.0",
+            "https://microsoftgraph.chinacloudapi.cn/v1.0",
+        ] {
+            let (accepted, message) = graph_base_url_policy(graph_base_url);
+            assert!(accepted, "{graph_base_url} rejected: {message}");
+        }
+    }
+
+    #[test]
+    fn test_graph_base_url_policy_rejects_untrusted_endpoint() {
+        let (accepted, message) = graph_base_url_policy("https://graph.microsoft.com.evil/v1.0");
+        assert!(!accepted);
+        assert!(message.contains("host must be one of"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_malicious_graph_endpoint_access_token() {
+        let mut connector = TeamsConnector::new();
+        let result = connector
+            .configure(json!({
+                "graph_base_url": "https://graph.microsoft.com.evil/v1.0",
+                "auth": { "mode": "access_token", "access_token": "tok_123" }
+            }))
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(FcpError::InvalidRequest { code: 1002, .. })
+        ));
+        assert!(connector.config.is_none());
+        assert!(connector.client.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_malicious_graph_endpoint_client_credentials() {
+        let mut connector = TeamsConnector::new();
+        let result = connector
+            .configure(json!({
+                "graph_base_url": "https://evil.example/v1.0",
+                "auth": {
+                    "mode": "client_credentials",
+                    "client_id": "app_id",
+                    "client_secret": "secret",
+                    "tenant_id": "550e8400-e29b-41d4-a716-446655440000"
+                }
+            }))
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(FcpError::InvalidRequest { code: 1002, .. })
+        ));
+        assert!(connector.config.is_none());
+        assert!(connector.client.is_none());
     }
 
     #[fcp_async_core::runtime::test]

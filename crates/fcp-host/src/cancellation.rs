@@ -33,12 +33,12 @@ struct TrackedOperation {
     /// Whether a cancellation has been requested.
     cancel_requested: bool,
     /// Principal that initiated this operation (from the invoke-time
-    /// `X-Principal` header). `None` preserves legacy untracked-owner
-    /// behavior: any caller may cancel. When `Some`, `cancel` MUST be
-    /// called with a matching `asserted_principal`, otherwise the
-    /// call is rejected — this closes br-jdaro, where knowing the
-    /// client-chosen operation ID was sufficient to cancel any
-    /// in-flight operation.
+    /// `X-Principal` header). `None` means the caller intentionally
+    /// opted into unowned tracking, so any caller may cancel. When
+    /// `Some`, `cancel` MUST be called with a matching
+    /// `asserted_principal`, otherwise the call is rejected — this
+    /// closes br-jdaro, where knowing the client-chosen operation ID
+    /// was sufficient to cancel any in-flight operation.
     owner: Option<String>,
 }
 
@@ -80,9 +80,9 @@ impl CancellationController {
     /// does not match — closes br-jdaro (cross-principal cancel via
     /// guessed operation ID).
     ///
-    /// Callers that cannot attribute a principal at invoke time should
-    /// use [`Self::track`], which preserves legacy behavior (any caller
-    /// may cancel). New authenticated routes MUST use this method.
+    /// Callers that intentionally allow unauthenticated cancellation
+    /// must pass `None` explicitly. New authenticated routes MUST use
+    /// this method with a real owner.
     ///
     /// # Panics
     ///
@@ -97,20 +97,6 @@ impl CancellationController {
                 owner: owner.map(str::to_string),
             },
         );
-    }
-
-    /// Register an operation for tracking.
-    ///
-    /// Legacy shim — equivalent to `track_with_owner(id, None)`.
-    /// Callers that have a principal should use
-    /// [`Self::track_with_owner`] instead so cancellations can be
-    /// authorized.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
-    pub fn track(&self, operation_id: &str) {
-        self.track_with_owner(operation_id, None);
     }
 
     /// Mark an operation as completed.
@@ -149,9 +135,8 @@ impl CancellationController {
     /// which the HTTP handler maps to 403 Forbidden. This closes
     /// br-jdaro (cross-principal cancel via guessed operation ID).
     ///
-    /// Operations tracked without an owner (legacy path) remain
-    /// cancellable by any caller — existing integration tests and
-    /// unauthenticated flows keep working.
+    /// Operations explicitly tracked without an owner remain
+    /// cancellable by any caller.
     ///
     /// # Errors
     ///
@@ -468,9 +453,9 @@ mod tests {
     fn track_and_count() {
         let ctrl = CancellationController::new();
         assert_eq!(ctrl.tracked_count(), 0);
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
         assert_eq!(ctrl.tracked_count(), 1);
-        ctrl.track("op2");
+        ctrl.track_with_owner("op2", None);
         assert_eq!(ctrl.tracked_count(), 2);
     }
 
@@ -517,7 +502,7 @@ mod tests {
     #[test]
     fn cancel_allows_any_principal_when_no_owner_recorded() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_legacy"); // no owner
+        ctrl.track_with_owner("op_legacy", None);
         let req = cancel_request("op_legacy", CancelReason::UserRequested);
 
         let resp = ctrl
@@ -529,7 +514,7 @@ mod tests {
     #[test]
     fn cancel_active_operation_succeeds() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
         let req = cancel_request("op1", CancelReason::UserRequested);
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
         assert_eq!(resp.outcome, CancellationOutcome::Cancelled);
@@ -539,7 +524,7 @@ mod tests {
     #[test]
     fn cancel_completed_operation_returns_too_late() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
         ctrl.complete("op1");
         let req = cancel_request("op1", CancelReason::UserRequested);
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
@@ -549,7 +534,7 @@ mod tests {
     #[test]
     fn cancel_already_cancelled_returns_pending() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
         let req = cancel_request("op1", CancelReason::UserRequested);
         ctrl.cancel(&req, None, fixed_now()).unwrap();
         // Second cancellation attempt.
@@ -560,14 +545,14 @@ mod tests {
     #[test]
     fn is_cancel_requested_false_initially() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
         assert!(!ctrl.is_cancel_requested("op1"));
     }
 
     #[test]
     fn is_cancel_requested_true_after_cancel() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
         let req = cancel_request("op1", CancelReason::UserRequested);
         ctrl.cancel(&req, None, fixed_now()).unwrap();
         assert!(ctrl.is_cancel_requested("op1"));
@@ -582,8 +567,8 @@ mod tests {
     #[test]
     fn remove_decreases_count() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
-        ctrl.track("op2");
+        ctrl.track_with_owner("op1", None);
+        ctrl.track_with_owner("op2", None);
         assert_eq!(ctrl.tracked_count(), 2);
         ctrl.remove("op1");
         assert_eq!(ctrl.tracked_count(), 1);
@@ -592,7 +577,7 @@ mod tests {
     #[test]
     fn remove_unknown_is_noop() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
         ctrl.remove("nonexistent");
         assert_eq!(ctrl.tracked_count(), 1);
     }
@@ -602,7 +587,7 @@ mod tests {
     #[test]
     fn checkpoint_created_on_checkpoint_cleanup() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
         let req = CancellationRequest {
             operation_id: "op1".into(),
             reason: CancelReason::UserRequested,
@@ -620,7 +605,7 @@ mod tests {
     #[test]
     fn no_checkpoint_on_best_effort() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
         let req = cancel_request("op1", CancelReason::UserRequested);
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
         assert!(resp.checkpoint.is_none());
@@ -629,7 +614,7 @@ mod tests {
     #[test]
     fn no_checkpoint_on_too_late() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
         ctrl.complete("op1");
         let req = CancellationRequest {
             operation_id: "op1".into(),
@@ -647,7 +632,7 @@ mod tests {
     #[test]
     fn cleanup_result_present_on_cancel() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
         let req = cancel_request("op1", CancelReason::UserRequested);
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
         let cleanup = resp.cleanup_result.unwrap();
@@ -659,7 +644,7 @@ mod tests {
     #[test]
     fn no_cleanup_result_on_too_late() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
         ctrl.complete("op1");
         let req = cancel_request("op1", CancelReason::UserRequested);
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
@@ -671,7 +656,7 @@ mod tests {
     #[test]
     fn audit_event_recorded_on_cancel() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
         let req = cancel_request("op1", CancelReason::UserRequested);
         ctrl.cancel(&req, None, fixed_now()).unwrap();
         let events = ctrl.audit_events();
@@ -684,7 +669,7 @@ mod tests {
     #[test]
     fn audit_event_recorded_on_too_late() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
         ctrl.complete("op1");
         let req = cancel_request("op1", CancelReason::SessionClosing);
         ctrl.cancel(&req, None, fixed_now()).unwrap();
@@ -696,8 +681,8 @@ mod tests {
     #[test]
     fn audit_multiple_events() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
-        ctrl.track("op2");
+        ctrl.track_with_owner("op1", None);
+        ctrl.track_with_owner("op2", None);
         ctrl.cancel(
             &cancel_request("op1", CancelReason::UserRequested),
             None,
@@ -720,7 +705,7 @@ mod tests {
     #[test]
     fn clear_audit_log() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
         ctrl.cancel(
             &cancel_request("op1", CancelReason::UserRequested),
             None,
@@ -735,7 +720,7 @@ mod tests {
     #[test]
     fn audit_checkpoint_flag_set() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
         let req = CancellationRequest {
             operation_id: "op1".into(),
             reason: CancelReason::UserRequested,
@@ -750,7 +735,7 @@ mod tests {
     #[test]
     fn audit_no_checkpoint_flag() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
         ctrl.cancel(
             &cancel_request("op1", CancelReason::UserRequested),
             None,
@@ -827,7 +812,7 @@ mod tests {
     #[test]
     fn controller_debug() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
         let dbg = format!("{ctrl:?}");
         assert!(dbg.contains("CancellationController"));
         assert!(dbg.contains("operations"));
@@ -872,8 +857,8 @@ mod tests {
     #[test]
     fn track_same_id_overwrites() {
         let ctrl = CancellationController::new();
-        ctrl.track("op1");
-        ctrl.track("op1");
+        ctrl.track_with_owner("op1", None);
+        ctrl.track_with_owner("op1", None);
         assert_eq!(ctrl.tracked_count(), 1);
     }
 
@@ -898,7 +883,7 @@ mod tests {
         ];
         for (i, reason) in reasons.into_iter().enumerate() {
             let id = format!("op{i}");
-            ctrl.track(&id);
+            ctrl.track_with_owner(&id, None);
             let req = cancel_request(&id, reason);
             let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
             assert_eq!(resp.outcome, CancellationOutcome::Cancelled);
@@ -912,7 +897,7 @@ mod tests {
     fn operation_id_interop() {
         let op_id = OperationId::from_static("test.cancel.op");
         let ctrl = CancellationController::new();
-        ctrl.track(op_id.as_str());
+        ctrl.track_with_owner(op_id.as_str(), None);
         assert!(ctrl.tracked_count() == 1);
         let req = cancel_request(op_id.as_str(), CancelReason::UserRequested);
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
@@ -1402,7 +1387,7 @@ mod tests {
     fn controller_track_many_cancel_some() {
         let ctrl = CancellationController::new();
         for i in 0..20 {
-            ctrl.track(&format!("op_{i}"));
+            ctrl.track_with_owner(&format!("op_{i}"), None);
         }
         assert_eq!(ctrl.tracked_count(), 20);
 
@@ -1426,7 +1411,7 @@ mod tests {
     #[test]
     fn controller_cancel_with_full_cleanup() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_full_cleanup");
+        ctrl.track_with_owner("op_full_cleanup", None);
         let req = CancellationRequest {
             operation_id: "op_full_cleanup".into(),
             reason: CancelReason::UserRequested,
@@ -1444,7 +1429,7 @@ mod tests {
     #[test]
     fn controller_cancel_with_abandon() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_abandon");
+        ctrl.track_with_owner("op_abandon", None);
         let req = CancellationRequest {
             operation_id: "op_abandon".into(),
             reason: CancelReason::AgentAbort {
@@ -1463,7 +1448,7 @@ mod tests {
     #[test]
     fn controller_retrack_after_remove() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_reuse");
+        ctrl.track_with_owner("op_reuse", None);
         let req = cancel_request("op_reuse", CancelReason::UserRequested);
         ctrl.cancel(&req, None, fixed_now()).unwrap();
         assert!(ctrl.is_cancel_requested("op_reuse"));
@@ -1473,7 +1458,7 @@ mod tests {
         assert!(!ctrl.is_cancel_requested("op_reuse"));
 
         // Re-track the same ID; it should be fresh.
-        ctrl.track("op_reuse");
+        ctrl.track_with_owner("op_reuse", None);
         assert_eq!(ctrl.tracked_count(), 1);
         assert!(!ctrl.is_cancel_requested("op_reuse"));
 
@@ -1487,7 +1472,7 @@ mod tests {
         let ctrl = CancellationController::new();
         let ids: Vec<String> = (0..10).map(|i| format!("seq_{i}")).collect();
         for id in &ids {
-            ctrl.track(id);
+            ctrl.track_with_owner(id, None);
         }
         for id in &ids {
             let req = cancel_request(id, CancelReason::SessionClosing);
@@ -1503,7 +1488,7 @@ mod tests {
     #[test]
     fn controller_clear_audit_then_add_more() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_a");
+        ctrl.track_with_owner("op_a", None);
         ctrl.cancel(
             &cancel_request("op_a", CancelReason::UserRequested),
             None,
@@ -1515,7 +1500,7 @@ mod tests {
         ctrl.clear_audit_log();
         assert!(ctrl.audit_events().is_empty());
 
-        ctrl.track("op_b");
+        ctrl.track_with_owner("op_b", None);
         ctrl.cancel(
             &cancel_request("op_b", CancelReason::SessionClosing),
             None,
@@ -1532,7 +1517,7 @@ mod tests {
         let ctrl = CancellationController::new();
 
         // Phase 1: Track and cancel.
-        ctrl.track("lifecycle_op");
+        ctrl.track_with_owner("lifecycle_op", None);
         assert_eq!(ctrl.tracked_count(), 1);
         let req = cancel_request("lifecycle_op", CancelReason::UserRequested);
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
@@ -1547,7 +1532,7 @@ mod tests {
         assert!(err.to_string().contains("operation not found"));
 
         // Phase 3: Re-track.
-        ctrl.track("lifecycle_op");
+        ctrl.track_with_owner("lifecycle_op", None);
         assert!(!ctrl.is_cancel_requested("lifecycle_op"));
 
         // Phase 4: Complete then try cancel.
@@ -1565,7 +1550,7 @@ mod tests {
     #[test]
     fn empty_string_operation_id() {
         let ctrl = CancellationController::new();
-        ctrl.track("");
+        ctrl.track_with_owner("", None);
         assert_eq!(ctrl.tracked_count(), 1);
         let req = cancel_request("", CancelReason::UserRequested);
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
@@ -1579,7 +1564,7 @@ mod tests {
     fn very_long_operation_id() {
         let long_id = "x".repeat(10000);
         let ctrl = CancellationController::new();
-        ctrl.track(&long_id);
+        ctrl.track_with_owner(&long_id, None);
         let req = cancel_request(&long_id, CancelReason::UserRequested);
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
         assert_eq!(resp.outcome, CancellationOutcome::Cancelled);
@@ -1590,7 +1575,7 @@ mod tests {
     fn many_cancellations_of_same_op_after_retracks() {
         let ctrl = CancellationController::new();
         for _ in 0..50 {
-            ctrl.track("repeated");
+            ctrl.track_with_owner("repeated", None);
             let req = cancel_request("repeated", CancelReason::UserRequested);
             let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
             assert_eq!(resp.outcome, CancellationOutcome::Cancelled);
@@ -1603,7 +1588,7 @@ mod tests {
     #[test]
     fn cancel_with_superseded_preserves_by_operation_id_in_audit() {
         let ctrl = CancellationController::new();
-        ctrl.track("old_op");
+        ctrl.track_with_owner("old_op", None);
         let req = cancel_request(
             "old_op",
             CancelReason::Superseded {
@@ -1623,7 +1608,7 @@ mod tests {
     #[test]
     fn cancel_pending_has_cleanup_result() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_pending");
+        ctrl.track_with_owner("op_pending", None);
         let req = cancel_request("op_pending", CancelReason::UserRequested);
         ctrl.cancel(&req, None, fixed_now()).unwrap(); // First: Cancelled
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap(); // Second: Pending
@@ -1635,7 +1620,7 @@ mod tests {
     #[test]
     fn checkpoint_id_format_includes_operation_id() {
         let ctrl = CancellationController::new();
-        ctrl.track("my_special_op");
+        ctrl.track_with_owner("my_special_op", None);
         let req = CancellationRequest {
             operation_id: "my_special_op".into(),
             reason: CancelReason::UserRequested,
@@ -1651,7 +1636,7 @@ mod tests {
     fn checkpoint_expires_24h_from_now() {
         let now = fixed_now();
         let ctrl = CancellationController::new();
-        ctrl.track("op_expiry");
+        ctrl.track_with_owner("op_expiry", None);
         let req = CancellationRequest {
             operation_id: "op_expiry".into(),
             reason: CancelReason::UserRequested,
@@ -1678,7 +1663,7 @@ mod tests {
     #[test]
     fn controller_remove_cancelled_does_not_affect_audit() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_logged");
+        ctrl.track_with_owner("op_logged", None);
         ctrl.cancel(
             &cancel_request("op_logged", CancelReason::UserRequested),
             None,
@@ -1696,7 +1681,7 @@ mod tests {
     #[test]
     fn controller_complete_does_not_record_audit() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_complete_only");
+        ctrl.track_with_owner("op_complete_only", None);
         ctrl.complete("op_complete_only");
         // Completing without cancelling should produce no audit events.
         assert!(ctrl.audit_events().is_empty());
@@ -1707,7 +1692,7 @@ mod tests {
         // The controller always sets partial_result to None.
         // Callers are responsible for attaching partial results.
         let ctrl = CancellationController::new();
-        ctrl.track("op_no_partial");
+        ctrl.track_with_owner("op_no_partial", None);
         let req = CancellationRequest {
             operation_id: "op_no_partial".into(),
             reason: CancelReason::UserRequested,
@@ -1722,7 +1707,7 @@ mod tests {
     fn audit_had_partial_result_always_false_from_controller() {
         // The controller always sets had_partial_result to false.
         let ctrl = CancellationController::new();
-        ctrl.track("op_audit_partial");
+        ctrl.track_with_owner("op_audit_partial", None);
         let req = CancellationRequest {
             operation_id: "op_audit_partial".into(),
             reason: CancelReason::UserRequested,
@@ -1737,13 +1722,13 @@ mod tests {
     #[test]
     fn controller_track_overwrites_cancelled_state() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_overwrite");
+        ctrl.track_with_owner("op_overwrite", None);
         let req = cancel_request("op_overwrite", CancelReason::UserRequested);
         ctrl.cancel(&req, None, fixed_now()).unwrap();
         assert!(ctrl.is_cancel_requested("op_overwrite"));
 
         // Re-tracking should reset the state (overwrite).
-        ctrl.track("op_overwrite");
+        ctrl.track_with_owner("op_overwrite", None);
         assert!(!ctrl.is_cancel_requested("op_overwrite"));
         assert_eq!(ctrl.tracked_count(), 1);
     }
@@ -1751,7 +1736,7 @@ mod tests {
     #[test]
     fn controller_track_overwrites_completed_state() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_reset");
+        ctrl.track_with_owner("op_reset", None);
         ctrl.complete("op_reset");
         // Cancel returns TooLate.
         let req = cancel_request("op_reset", CancelReason::UserRequested);
@@ -1759,7 +1744,7 @@ mod tests {
         assert_eq!(resp.outcome, CancellationOutcome::TooLate);
 
         // Re-track resets; cancel should now succeed.
-        ctrl.track("op_reset");
+        ctrl.track_with_owner("op_reset", None);
         let resp2 = ctrl.cancel(&req, None, fixed_now()).unwrap();
         assert_eq!(resp2.outcome, CancellationOutcome::Cancelled);
     }
@@ -1782,9 +1767,9 @@ mod tests {
     #[test]
     fn multiple_ops_different_reasons_in_audit() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_user");
-        ctrl.track("op_timeout");
-        ctrl.track("op_resource");
+        ctrl.track_with_owner("op_user", None);
+        ctrl.track_with_owner("op_timeout", None);
+        ctrl.track_with_owner("op_resource", None);
 
         ctrl.cancel(
             &cancel_request("op_user", CancelReason::UserRequested),
@@ -1835,7 +1820,7 @@ mod tests {
     #[test]
     fn cleanup_result_on_pending_contains_operation_state() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_pending_cleanup");
+        ctrl.track_with_owner("op_pending_cleanup", None);
         let req = cancel_request("op_pending_cleanup", CancelReason::UserRequested);
         ctrl.cancel(&req, None, fixed_now()).unwrap(); // Cancelled
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap(); // Pending
@@ -1846,7 +1831,7 @@ mod tests {
     #[test]
     fn no_checkpoint_on_pending_even_with_checkpoint_cleanup() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_ckpt_pending");
+        ctrl.track_with_owner("op_ckpt_pending", None);
         let req = CancellationRequest {
             operation_id: "op_ckpt_pending".into(),
             reason: CancelReason::UserRequested,
@@ -1869,7 +1854,7 @@ mod tests {
     fn audit_timestamp_matches_provided_now() {
         let now = Utc.with_ymd_and_hms(2025, 1, 15, 8, 30, 0).unwrap();
         let ctrl = CancellationController::new();
-        ctrl.track("op_ts");
+        ctrl.track_with_owner("op_ts", None);
         ctrl.cancel(
             &cancel_request("op_ts", CancelReason::UserRequested),
             None,
@@ -2662,9 +2647,9 @@ mod tests {
     fn controller_interleaved_track_complete_cancel() {
         let ctrl = CancellationController::new();
         // Track three ops
-        ctrl.track("a");
-        ctrl.track("b");
-        ctrl.track("c");
+        ctrl.track_with_owner("a", None);
+        ctrl.track_with_owner("b", None);
+        ctrl.track_with_owner("c", None);
 
         // Complete b, cancel a, then try to cancel b (too late)
         ctrl.complete("b");
@@ -2703,7 +2688,7 @@ mod tests {
             "\u{00DF}tra\u{00DF}e",
         ];
         for id in &ids {
-            ctrl.track(id);
+            ctrl.track_with_owner(id, None);
         }
         assert_eq!(ctrl.tracked_count(), 4);
         for id in &ids {
@@ -2718,7 +2703,7 @@ mod tests {
     #[test]
     fn controller_remove_then_cancel_errors() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_remove_cancel");
+        ctrl.track_with_owner("op_remove_cancel", None);
         ctrl.remove("op_remove_cancel");
         let req = cancel_request("op_remove_cancel", CancelReason::UserRequested);
         let err = ctrl.cancel(&req, None, fixed_now()).unwrap_err();
@@ -2728,11 +2713,11 @@ mod tests {
     #[test]
     fn controller_complete_then_retrack_then_cancel() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_reborn");
+        ctrl.track_with_owner("op_reborn", None);
         ctrl.complete("op_reborn");
 
         // Retrack the same ID — should be fresh
-        ctrl.track("op_reborn");
+        ctrl.track_with_owner("op_reborn", None);
         let req = cancel_request("op_reborn", CancelReason::UserRequested);
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
         assert_eq!(resp.outcome, CancellationOutcome::Cancelled);
@@ -2741,7 +2726,7 @@ mod tests {
     #[test]
     fn controller_cancel_then_complete_then_retrack() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_flow");
+        ctrl.track_with_owner("op_flow", None);
         // Cancel
         let req = cancel_request("op_flow", CancelReason::UserRequested);
         ctrl.cancel(&req, None, fixed_now()).unwrap();
@@ -2751,7 +2736,7 @@ mod tests {
         ctrl.complete("op_flow");
 
         // Retrack resets
-        ctrl.track("op_flow");
+        ctrl.track_with_owner("op_flow", None);
         assert!(!ctrl.is_cancel_requested("op_flow"));
     }
 
@@ -2764,7 +2749,7 @@ mod tests {
     #[test]
     fn controller_audit_events_returns_clone() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_audit_clone");
+        ctrl.track_with_owner("op_audit_clone", None);
         ctrl.cancel(
             &cancel_request("op_audit_clone", CancelReason::UserRequested),
             None,
@@ -2783,7 +2768,7 @@ mod tests {
         // The controller never produces Failed outcome directly, but verify
         // that TooLate (which is produced) never gets a checkpoint
         let ctrl = CancellationController::new();
-        ctrl.track("op_ckpt_fail");
+        ctrl.track_with_owner("op_ckpt_fail", None);
         ctrl.complete("op_ckpt_fail");
         let req = CancellationRequest {
             operation_id: "op_ckpt_fail".into(),
@@ -2800,8 +2785,8 @@ mod tests {
     #[test]
     fn controller_cancel_with_different_timestamps() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_t1");
-        ctrl.track("op_t2");
+        ctrl.track_with_owner("op_t1", None);
+        ctrl.track_with_owner("op_t2", None);
         let t1 = Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
         let t2 = Utc.with_ymd_and_hms(2026, 12, 31, 23, 59, 59).unwrap();
 
@@ -2827,7 +2812,7 @@ mod tests {
     #[test]
     fn controller_cleanup_result_cleaned_contains_operation_state() {
         let ctrl = CancellationController::new();
-        ctrl.track("op_verify_cleanup");
+        ctrl.track_with_owner("op_verify_cleanup", None);
         let req = cancel_request("op_verify_cleanup", CancelReason::UserRequested);
         let resp = ctrl.cancel(&req, None, fixed_now()).unwrap();
         let cleanup = resp.cleanup_result.unwrap();

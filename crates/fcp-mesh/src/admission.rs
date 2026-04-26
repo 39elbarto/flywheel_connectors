@@ -1100,6 +1100,27 @@ impl AdmissionController {
         }
     }
 
+    /// Clear authentication state for a peer WITHOUT allocating a new
+    /// tracking entry. Used by cleanup paths (`remove_peer`,
+    /// `remove_session`) where calling the allocating
+    /// [`Self::set_authenticated`] for an untracked peer would create
+    /// a fresh `PeerUsage` entry just to flip `is_authenticated`
+    /// from its default `false` value to … `false` — net: a leak that
+    /// wastes one cap slot per ghost-peer cleanup.
+    ///
+    /// br-llfi4: a caller doing repeated `MeshNode::remove_peer` for
+    /// peers that were never tracked could otherwise fill
+    /// `policy.max_tracked_peers` (10 000 by default; 1 000 on
+    /// `public_ingress`) and start rejecting real peers with
+    /// `AdmissionError::TrackingTableFull`. Mirrors the
+    /// no-allocation discipline added in 60921c7f for
+    /// `release_decode`.
+    pub fn clear_authenticated(&mut self, peer: &NodeId) {
+        if let Some(usage) = self.get_existing_usage(peer) {
+            usage.is_authenticated = false;
+        }
+    }
+
     /// Check if a peer is currently authenticated.
     #[must_use]
     pub fn is_authenticated(&self, peer: &NodeId) -> bool {

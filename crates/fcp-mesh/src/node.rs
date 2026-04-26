@@ -799,8 +799,15 @@ impl MeshNode {
         if self.sessions.contains_key(node_id) {
             self.remove_session(node_id, now_ms);
         } else {
-            // Even without a session, clear admission auth state.
-            self.admission.set_authenticated(node_id, false, now_ms);
+            // br-llfi4: clear admission auth state without allocating
+            // a tracking entry for an untracked peer. The previous
+            // `set_authenticated(_, false, _)` call would
+            // `get_or_create_usage` and silently insert a fresh
+            // PeerUsage entry on the cleanup path, which can fill
+            // `policy.max_tracked_peers` and start rejecting real
+            // peers with `TrackingTableFull` after enough
+            // ghost-peer removals.
+            self.admission.clear_authenticated(node_id);
         }
         self.peers.remove(node_id);
         self.peer_signing_keys.remove(node_id);
@@ -874,7 +881,10 @@ impl MeshNode {
                 }));
             }
         }
-        self.admission.set_authenticated(peer_id, false, now_ms);
+        // br-llfi4: same no-allocation discipline as remove_peer —
+        // closing a non-existent session must not allocate an
+        // admission entry just to flip is_authenticated.
+        self.admission.clear_authenticated(peer_id);
     }
 
     /// Check whether a peer is authenticated.
@@ -2871,6 +2881,51 @@ mod tests {
         let mut node = test_node("node-1");
         node.remove_peer(&NodeId::new("ghost"));
         assert_eq!(node.peer_count(), 0);
+    }
+
+    #[test]
+    fn remove_nonexistent_peer_does_not_allocate_admission_entry() {
+        // br-llfi4: prior to the clear_authenticated fix,
+        // remove_peer for an untracked peer hit the no-session
+        // branch and called set_authenticated(_, false, _), which
+        // allocated a fresh admission PeerUsage entry just to flip
+        // is_authenticated. Repeating that call could fill
+        // policy.max_tracked_peers and start rejecting real peers
+        // with TrackingTableFull. The fix routes through
+        // clear_authenticated which uses get_existing_usage and
+        // returns without allocating when the peer is unknown.
+        let mut node = test_node("node-1");
+        let admission = node.admission_mut();
+        // Establish baseline: empty admission table.
+        assert!(admission.get_usage(&NodeId::new("ghost")).is_none());
+
+        node.remove_peer(&NodeId::new("ghost"));
+
+        // After removal of an untracked peer, the admission table
+        // must still be empty — no ghost PeerUsage entry leaked.
+        assert!(
+            node.admission_mut()
+                .get_usage(&NodeId::new("ghost"))
+                .is_none(),
+            "remove_peer must not allocate an admission entry for an untracked peer"
+        );
+    }
+
+    #[test]
+    fn remove_session_for_untracked_peer_does_not_allocate_admission_entry() {
+        // br-llfi4: same no-allocation invariant for
+        // MeshNode::remove_session — closing a non-existent
+        // session must not allocate an admission entry.
+        let mut node = test_node("node-1");
+        let ghost = NodeId::new("ghost-session");
+        assert!(node.admission_mut().get_usage(&ghost).is_none());
+
+        node.remove_session(&ghost, 12_345);
+
+        assert!(
+            node.admission_mut().get_usage(&ghost).is_none(),
+            "remove_session must not allocate an admission entry for an unknown peer"
+        );
     }
 
     // ---- Local state tests ----

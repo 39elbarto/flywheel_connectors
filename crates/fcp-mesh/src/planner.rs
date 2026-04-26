@@ -925,14 +925,38 @@ impl ExecutionPlanner {
     }
 }
 
-/// Compare semver strings (simple comparison).
+/// Compare semver-style version strings numerically.
+///
+/// Returns `true` when `installed >= required` for purely-numeric
+/// dot-separated components. **All** segments must parse as `u32` —
+/// any non-numeric segment causes the comparison to return `false`
+/// (br-2ot4f comment 41 finding: previously, a `filter_map` silently
+/// dropped non-numeric segments, so a string like `"1.2-rc.99"`
+/// parsed as `[1, 99]` and tested as `>= "1.2.3"` because the second
+/// segment compared `99 > 2`. That is wrong — a pre-release must not
+/// satisfy a stable-version requirement, and any node self-reporting
+/// a non-purely-numeric version should be treated as ineligible
+/// rather than silently mis-ranked).
+///
+/// An empty version string on either side is treated as "no version
+/// asserted" and yields `true` (preserving the prior contract for
+/// the no-version-requirement path).
 fn version_gte(installed: &str, required: &str) -> bool {
-    // Parse as semver-like: split on dots and compare numerically
-    let parse =
-        |s: &str| -> Vec<u32> { s.split('.').filter_map(|p| p.parse::<u32>().ok()).collect() };
+    let parse = |s: &str| -> Option<Vec<u32>> {
+        if s.is_empty() {
+            return Some(Vec::new());
+        }
+        // Collect into Option<Vec<u32>>: any segment that fails to
+        // parse short-circuits the whole collect to None.
+        s.split('.').map(|p| p.parse::<u32>().ok()).collect()
+    };
 
-    let inst = parse(installed);
-    let req = parse(required);
+    let Some(inst) = parse(installed) else {
+        return false;
+    };
+    let Some(req) = parse(required) else {
+        return false;
+    };
 
     for (i, r) in req.iter().enumerate() {
         let i_val = inst.get(i).copied().unwrap_or(0);
@@ -1567,10 +1591,40 @@ mod tests {
     }
 
     #[test]
-    fn version_gte_non_numeric_parts() {
-        // Non-numeric parts are filtered out by parse::<u32>().ok()
-        // "1.2.beta" → [1, 2], "1.2.0" → [1, 2, 0]
-        assert!(version_gte("1.2.beta", "1.2.0"));
+    fn version_gte_non_numeric_parts_rejected() {
+        // br-2ot4f comment 41: previously this returned true because
+        // the parser silently dropped "beta", leaving [1, 2] vs
+        // [1, 2, 0] — equal up to length-of-shorter, then default-0
+        // for the missing trailing segment. That made every
+        // pre-release string compare-equal to its stable counterpart.
+        // The new strict parser treats any non-numeric segment as
+        // ineligible.
+        assert!(!version_gte("1.2.beta", "1.2.0"));
+    }
+
+    #[test]
+    fn version_gte_pre_release_does_not_satisfy_stable() {
+        // br-2ot4f comment 41: the worst case the prior parser
+        // allowed — "1.2-rc.99" parsed as [1, 99] and at index 1 the
+        // 99 > 2 comparison made it look like a satisfying version
+        // for a "1.2.3" requirement. Strict parsing rejects this.
+        assert!(!version_gte("1.2-rc.99", "1.2.3"));
+        assert!(!version_gte("1.2-rc.99", "1.0.0"));
+    }
+
+    #[test]
+    fn version_gte_v_prefix_rejected() {
+        // Common error case: "v1.2.3" prefix is not a valid numeric
+        // component. Reject rather than silently parsing as [2, 3]
+        // and over-counting eligibility.
+        assert!(!version_gte("v1.2.3", "1.0.0"));
+    }
+
+    #[test]
+    fn version_gte_required_non_numeric_rejected() {
+        // Symmetric: a non-numeric REQUIRED string also yields false
+        // — we never confidently accept against a malformed bound.
+        assert!(!version_gte("1.2.3", "1.2.beta"));
     }
 
     #[test]
@@ -2268,9 +2322,13 @@ mod tests {
     }
 
     #[test]
-    fn version_gte_all_non_numeric() {
-        // "alpha.beta" => [] vs [] => true (vacuously)
-        assert!(version_gte("alpha.beta", "gamma.delta"));
+    fn version_gte_all_non_numeric_rejected() {
+        // br-2ot4f comment 41: previously, both sides parsed to []
+        // (after silent-dropping every non-numeric segment) and the
+        // comparison vacuously returned true. Strict parsing now
+        // rejects any non-numeric input, so two unparseable strings
+        // do not compare-equal.
+        assert!(!version_gte("alpha.beta", "gamma.delta"));
     }
 
     #[test]

@@ -19,10 +19,10 @@
 //! ```
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::{
@@ -125,12 +125,19 @@ impl RateLimitCheckpointFile {
 #[derive(Debug, Clone)]
 struct RateLimitCheckpointStore {
     path: PathBuf,
+    // br-ogeov: serialize tempfile-write+rename so concurrent persists
+    // never race on the same target path. Without this, two threads
+    // truncating the file via File::create can produce torn or
+    // interleaved bytes that fail JSON parse on next startup, silently
+    // discarding all rate-limit state.
+    io_lock: Arc<Mutex<()>>,
 }
 
 impl RateLimitCheckpointStore {
     fn from_state_dir(state_dir: impl AsRef<Path>) -> Self {
         Self {
             path: state_dir.as_ref().join(RATE_LIMIT_CHECKPOINT_FILE),
+            io_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -188,12 +195,80 @@ impl RateLimitCheckpointStore {
         fs::create_dir_all(parent)?;
 
         let bytes = serde_json::to_vec_pretty(checkpoint_file)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-        let mut file = File::create(&self.path)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        Ok(())
+            .map_err(|err| std::io::Error::new(ErrorKind::InvalidData, err))?;
+
+        // br-ogeov: hold the I/O lock across tempfile-write+rename so
+        // (a) only one writer races for the target path at a time and
+        // (b) a fresh-then-aborted writer can never expose the empty
+        // truncated file. The unique-name temp suffix also defends
+        // against races on the same `parent` from independent stores
+        // pointed at the same directory.
+        let _guard = self
+            .io_lock
+            .lock()
+            .map_err(|_| std::io::Error::other("rate limit checkpoint io lock poisoned"))?;
+
+        let temp_path = open_unique_checkpoint_temp_file(&self.path, &bytes)?;
+        match fs::rename(&temp_path, &self.path) {
+            Ok(()) => Ok(()),
+            Err(rename_err) => {
+                let _ = fs::remove_file(&temp_path);
+                Err(rename_err)
+            }
+        }
     }
+}
+
+fn open_unique_checkpoint_temp_file(path: &Path, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    const MAX_TEMP_FILE_RETRIES: u32 = 32;
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidInput, "invalid checkpoint path"))?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let base_name = format!("{file_name}.tmp.{}.{nanos}", std::process::id());
+
+    for suffix in 0..=MAX_TEMP_FILE_RETRIES {
+        let candidate = if suffix == 0 {
+            path.with_file_name(&base_name)
+        } else {
+            path.with_file_name(format!("{base_name}.{suffix}"))
+        };
+
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&candidate)
+        {
+            Ok(mut file) => {
+                if let Err(write_err) = file.write_all(bytes) {
+                    drop(file);
+                    let _ = fs::remove_file(&candidate);
+                    return Err(write_err);
+                }
+                if let Err(sync_err) = file.sync_all() {
+                    drop(file);
+                    let _ = fs::remove_file(&candidate);
+                    return Err(sync_err);
+                }
+                drop(file);
+                return Ok(candidate);
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(std::io::Error::new(
+        ErrorKind::AlreadyExists,
+        format!(
+            "exhausted unique-name retries for checkpoint temp file {}",
+            path.display()
+        ),
+    ))
 }
 
 fn resolve_rate_limit_state_dir_from_env() -> Option<PathBuf> {
@@ -2647,6 +2722,106 @@ mod tests {
             .pool_status("shared")
             .expect("instance pool should be registered");
         assert_eq!(status.remaining, 2);
+    }
+
+    // ── br-ogeov: concurrent persist must not corrupt checkpoint file ──
+
+    #[test]
+    fn concurrent_try_consume_keeps_checkpoint_file_valid_json() {
+        // br-ogeov regression: prior implementation released the
+        // pools.write() lock before calling persist_file, which used
+        // File::create + write_all on a single shared path with no
+        // tempfile + rename and no I/O serialization. Two concurrent
+        // try_consume calls could race and produce a torn or
+        // interleaved checkpoint file that fails JSON parse on the
+        // next startup, silently dropping all rate-limit state.
+        //
+        // The fix routes every persist through a unique temp file
+        // followed by an atomic rename, with the rename body held
+        // under an I/O Mutex on the store. This test spins many
+        // threads racing on the same tracker and asserts that on
+        // every iteration the file is still valid JSON of the
+        // expected shape.
+        const THREADS: usize = 16;
+        const ITERS_PER_THREAD: usize = 250;
+
+        let state_dir = unique_state_dir("concurrent-persist");
+        let decls = RateLimitDeclarations {
+            limits: vec![test_pool("api", 1_000_000, 60)],
+            tool_pool_map: HashMap::from([("op".to_string(), vec!["api".to_string()])]),
+        };
+        let tracker = Arc::new(RateLimitTracker::from_declarations_with_state_dir(
+            &decls, &state_dir,
+        ));
+        let checkpoint_path = state_dir.join(RATE_LIMIT_CHECKPOINT_FILE);
+
+        let mut handles = Vec::with_capacity(THREADS);
+        for _ in 0..THREADS {
+            let tracker = Arc::clone(&tracker);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..ITERS_PER_THREAD {
+                    assert!(tracker.try_consume("op", 1).is_none());
+                }
+            }));
+        }
+
+        // Reader thread continuously parses the file while writers
+        // race. Any torn write surfaces as a parse failure here.
+        let reader_path = checkpoint_path.clone();
+        let reader_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_stop_clone = Arc::clone(&reader_stop);
+        let reader = std::thread::spawn(move || {
+            let mut observed_max_total: u64 = 0;
+            while !reader_stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                let bytes = match std::fs::read(&reader_path) {
+                    Ok(bytes) => bytes,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(err) => panic!("reader hit unexpected io error: {err}"),
+                };
+                if bytes.is_empty() {
+                    continue;
+                }
+                let parsed: RateLimitCheckpointFile = serde_json::from_slice(&bytes)
+                    .expect("checkpoint file must always remain valid JSON under concurrent persist");
+                assert_eq!(parsed.version, RATE_LIMIT_CHECKPOINT_VERSION);
+                let pool = parsed
+                    .pools
+                    .values()
+                    .next()
+                    .expect("expected one pool in checkpoint");
+                let total = u64::from(pool.prev_count) + u64::from(pool.curr_count);
+                observed_max_total = observed_max_total.max(total);
+            }
+            observed_max_total
+        });
+
+        for handle in handles {
+            handle.join().expect("writer thread");
+        }
+        reader_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let observed_max_total = reader.join().expect("reader thread");
+
+        // Final on-disk state must also be valid and reflect every
+        // accepted request (no lost writes after the storm settles).
+        let final_bytes = std::fs::read(&checkpoint_path).expect("final checkpoint should exist");
+        let final_parsed: RateLimitCheckpointFile = serde_json::from_slice(&final_bytes)
+            .expect("final checkpoint must be valid JSON");
+        let final_pool = final_parsed
+            .pools
+            .values()
+            .next()
+            .expect("expected one pool");
+        let final_total = u64::from(final_pool.prev_count) + u64::from(final_pool.curr_count);
+        let expected = (THREADS * ITERS_PER_THREAD) as u64;
+        assert_eq!(
+            final_total, expected,
+            "every accepted try_consume must be reflected in the final persisted snapshot"
+        );
+        assert!(
+            observed_max_total <= expected,
+            "reader observed total {observed_max_total} exceeding the expected {expected}; \
+             that would indicate uninitialized data leaked into the parsed JSON"
+        );
     }
 
     // ── br-flywheel_connectors-83xt1: fail-closed on unregistered pool ──

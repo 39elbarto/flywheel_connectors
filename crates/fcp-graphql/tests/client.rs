@@ -604,6 +604,39 @@ async fn execute_batch_rejects_invalid_variables() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn execute_batch_empty_list_short_circuits_without_request() {
+    let server = MockServer::start().await;
+    let counter = Arc::new(AtomicUsize::new(0));
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(CountingResponder {
+            counter: counter.clone(),
+            body: serde_json::json!([]),
+            delay: None,
+        })
+        .mount(&server)
+        .await;
+
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_validation_mode(SchemaValidationMode::ResponseOnly)
+        .build()
+        .expect("client");
+
+    let responses = client
+        .execute_batch::<ViewerQuery>(Vec::<EmptyVars>::new())
+        .await
+        .expect("empty batch should succeed locally");
+
+    assert!(responses.is_empty());
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "empty batch must not emit an external request",
+    );
+}
+
+#[fcp_async_core::runtime::test]
 async fn execute_batch_single_item_success() {
     let mut ctx = TestContext::new("execute_batch_single_item_success");
     let server = MockServer::start().await;

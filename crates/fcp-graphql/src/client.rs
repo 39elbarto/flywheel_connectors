@@ -726,6 +726,10 @@ impl GraphqlClient {
         V: Serialize,
         R: DeserializeOwned + Serialize,
     {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+
         if let (SchemaValidationMode::VariablesAndResponse, Some(schema)) =
             (self.config.validation, variables_schema)
         {

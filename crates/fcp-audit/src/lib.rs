@@ -735,7 +735,7 @@ impl ChainHead {
     ///    || u32(zone_id_len, LE)   || zone_id
     ///    || u32(head_entry_len, LE) || head_entry
     ///    || u64(head_seq, LE)
-    ///    || u64(coverage_bps, LE)   // coverage in basis points [0, 10_000]
+    ///    || u64(coverage_bits, LE)  // exact `f64::to_bits()` representation
     ///    || u32(epoch_id_len, LE)   || epoch_id
     ///    || u32(signature_count, LE)`
     ///
@@ -743,20 +743,15 @@ impl ChainHead {
     /// recursion (a signature cannot commit to itself). The transcript
     /// DOES commit to `signature_count` so a producer cannot silently
     /// add or drop a signature entry after the quorum signs.
-    /// `coverage` is converted to basis points so the transcript is
-    /// deterministic across f64 round-trips.
+    /// `coverage` is bound as its exact IEEE-754 bit pattern so out-of-range
+    /// or non-finite values cannot be retargeted to a different semantic
+    /// value (for example `1.5 -> 1.0`) without invalidating signatures.
     #[must_use]
     pub fn signing_bytes(&self) -> Vec<u8> {
         let zone_bytes = self.zone_id.as_bytes();
         let head_entry_bytes = self.head_entry.as_bytes();
         let epoch_bytes = self.epoch_id.as_bytes();
-        let normalized_coverage = if self.coverage.is_finite() {
-            self.coverage.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let coverage_bps = (normalized_coverage * 10_000.0).round() as u64;
+        let coverage_bits = self.coverage.to_bits();
 
         let mut bytes = Vec::with_capacity(
             CHAIN_HEAD_SIG_DOMAIN.len()
@@ -784,7 +779,7 @@ impl ChainHead {
         );
         bytes.extend_from_slice(head_entry_bytes);
         bytes.extend_from_slice(&self.head_seq.to_le_bytes());
-        bytes.extend_from_slice(&coverage_bps.to_le_bytes());
+        bytes.extend_from_slice(&coverage_bits.to_le_bytes());
         bytes.extend_from_slice(
             &u32::try_from(epoch_bytes.len())
                 .unwrap_or(u32::MAX)
@@ -3042,6 +3037,25 @@ mod tests {
     }
 
     #[test]
+    fn verify_chain_with_signers_rejects_head_coverage_tamper_from_out_of_range_to_in_range() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let (entries, mut head) = signed_chain_and_head(&signing_key);
+        head.coverage = 1.5;
+        sign_head(&mut head, &signing_key);
+
+        let mut tampered = head.clone();
+        tampered.coverage = 1.0;
+
+        let resolver =
+            |_kid: &KeyId| -> Option<Ed25519VerifyingKey> { Some(verifying_key.clone()) };
+        match verify_chain_with_signers(&entries, Some(&tampered), Some("z:work"), resolver) {
+            Err(AuditError::SignatureInvalid { .. }) => {}
+            other => panic!("expected SignatureInvalid after coverage retargeting, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn verify_chain_with_signers_rejects_head_signed_by_unknown_issuer() {
         // head signed by a rotating-out issuer whose kid is not in
         // the resolver map. Must surface UnknownIssuer.
@@ -3087,6 +3101,16 @@ mod tests {
         let mut tampered_entry = head;
         tampered_entry.head_entry = "forged-tip".into();
         assert_ne!(tampered_entry.signing_bytes(), baseline);
+    }
+
+    #[test]
+    fn chain_head_signing_bytes_distinguish_out_of_range_coverage_from_clamped_in_range_value() {
+        let (_, mut head) = signed_chain_and_head(&Ed25519SigningKey::generate());
+        head.coverage = 1.5;
+        let out_of_range = head.signing_bytes();
+        head.coverage = 1.0;
+        let in_range = head.signing_bytes();
+        assert_ne!(out_of_range, in_range);
     }
 
     // ── AuditEntryBuilder ────────────────────────────────────────────────

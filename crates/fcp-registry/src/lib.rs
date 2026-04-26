@@ -2114,6 +2114,28 @@ impl LocalRegistryCatalog {
         }
 
         let binary_path = package_dir.join(binary_file);
+        let binary_metadata = std::fs::symlink_metadata(&binary_path).map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                RegistryCatalogError::MissingBinary {
+                    path: package_dir.to_path_buf(),
+                    binary_name: signature.binary_name.clone(),
+                }
+            } else {
+                RegistryCatalogError::ReadFile {
+                    path: binary_path.clone(),
+                    source,
+                }
+            }
+        })?;
+        if binary_metadata.file_type().is_symlink()
+            || !binary_metadata.is_file()
+            || file_has_multiple_links(&binary_metadata)
+        {
+            return Err(RegistryCatalogError::LinkedBinary {
+                path: package_dir.to_path_buf(),
+                binary_name: signature.binary_name.clone(),
+            });
+        }
         let canonical_package_dir =
             package_dir
                 .canonicalize()
@@ -2136,18 +2158,6 @@ impl LocalRegistryCatalog {
         })?;
         if !canonical_binary_path.starts_with(&canonical_package_dir) {
             return Err(RegistryCatalogError::PathTraversal {
-                binary_name: signature.binary_name.clone(),
-            });
-        }
-        let binary_metadata = std::fs::metadata(&canonical_binary_path).map_err(|source| {
-            RegistryCatalogError::ReadFile {
-                path: canonical_binary_path.clone(),
-                source,
-            }
-        })?;
-        if !binary_metadata.is_file() || file_has_multiple_links(&binary_metadata) {
-            return Err(RegistryCatalogError::LinkedBinary {
-                path: package_dir.to_path_buf(),
                 binary_name: signature.binary_name.clone(),
             });
         }
@@ -12422,8 +12432,40 @@ trusted_builders = ["trusted-ci"]
             .expect_err("symlink escape should be rejected");
         let msg = err.to_string();
         assert!(
-            msg.contains("path traversal"),
-            "expected PathTraversal error, got: {msg}",
+            msg.contains("standalone regular file"),
+            "expected LinkedBinary error, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn local_registry_catalog_rejects_symlinked_binary_inside_package_dir() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let target = ConnectorTarget {
+            os: "linux".to_string(),
+            arch: "amd64".to_string(),
+        };
+
+        let package_dir = write_signed_package_dir(
+            temp.path(),
+            "fcp.symlink-sibling-test",
+            "1.0.0",
+            target,
+            "connector-bin",
+            b"sibling-binary",
+        );
+        let sibling_binary = package_dir.join("real-binary");
+        std::fs::write(&sibling_binary, b"sibling-binary").expect("write sibling binary");
+
+        let package_binary = package_dir.join("connector-bin");
+        std::fs::remove_file(&package_binary).expect("remove package binary");
+        symlink_file(&sibling_binary, &package_binary);
+
+        let err = LocalRegistryCatalog::from_signed_package_dirs(&[package_dir])
+            .expect_err("symlinked sibling binary should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("standalone regular file"),
+            "expected LinkedBinary error, got: {msg}",
         );
     }
 

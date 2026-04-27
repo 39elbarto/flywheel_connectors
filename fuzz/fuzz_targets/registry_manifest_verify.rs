@@ -13,7 +13,7 @@ use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_manifest::ConnectorManifest;
 use fcp_registry::{
     ConnectorBundle, ConnectorTarget, MANIFEST_SIGNATURE_CONTEXT, RegistryTrustPolicy,
-    RegistryVerifier, manifest_signing_bytes,
+    RegistryVerifier, manifest_signing_bytes, signature_message,
 };
 use libfuzzer_sys::fuzz_target;
 use serde::Deserialize;
@@ -82,11 +82,7 @@ fn sign_manifest_toml(
 ) -> String {
     let manifest = ConnectorManifest::parse_str(manifest_toml).expect("manifest");
     let signing_bytes = manifest_signing_bytes(&manifest).expect("signing bytes");
-    let mut message = Vec::with_capacity(signing_bytes.len() + binary_hash.len() + 16);
-    message.extend_from_slice(&(signing_bytes.len() as u64).to_be_bytes());
-    message.extend_from_slice(&signing_bytes);
-    message.extend_from_slice(&(binary_hash.len() as u64).to_be_bytes());
-    message.extend_from_slice(binary_hash.as_bytes());
+    let message = signature_message(&signing_bytes, binary_hash);
     let signature = signing_key.sign_with_context(MANIFEST_SIGNATURE_CONTEXT, &message);
     format!(
         "base64:{}",
@@ -167,8 +163,10 @@ fn verify_valid_signed_bundle(seed: &RegistryManifestSeed) {
             assert_eq!(again.target, verified.target);
         }
         Err(_) => {
-            // Tampered bundles are allowed to reject; the harness only cares that
-            // the verifier stays panic-free on attacker-controlled inputs.
+            assert!(
+                seed.tamper_binary_after_sign,
+                "generated non-tampered bundle must reach the valid verification path"
+            );
         }
     }
 }

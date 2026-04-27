@@ -204,6 +204,26 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
     CapabilityToken::from_raw(raw)
 }
 
+fn cohorts_list_invoke(signing_key: &Ed25519SigningKey, id: &'static str) -> InvokeRequest {
+    InvokeRequest {
+        r#type: "invoke".into(),
+        id: RequestId::new(id),
+        connector_id: ConnectorId::from_static("fcp.amplitude"),
+        operation: OperationId::from_static(OP_COHORTS_LIST),
+        zone_id: ZoneId::work(),
+        input: json!({}),
+        capability_token: build_token(signing_key),
+        holder_proof: None,
+        context: None,
+        idempotency_key: None,
+        lease_seq: None,
+        deadline_ms: None,
+        correlation_id: None,
+        provenance: None,
+        approval_tokens: Vec::new(),
+    }
+}
+
 #[fcp_async_core::runtime::test]
 async fn connector_suite_happy_path_lists_localhost_cohorts() {
     let server = MockServer::start().await;
@@ -222,23 +242,7 @@ async fn connector_suite_happy_path_lists_localhost_cohorts() {
 
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes());
-    let invoke = InvokeRequest {
-        r#type: "invoke".into(),
-        id: RequestId::new("amplitude-connector-suite"),
-        connector_id: ConnectorId::from_static("fcp.amplitude"),
-        operation: OperationId::from_static(OP_COHORTS_LIST),
-        zone_id: ZoneId::work(),
-        input: json!({}),
-        capability_token: build_token(&signing_key),
-        holder_proof: None,
-        context: None,
-        idempotency_key: None,
-        lease_seq: None,
-        deadline_ms: None,
-        correlation_id: None,
-        provenance: None,
-        approval_tokens: Vec::new(),
-    };
+    let invoke = cohorts_list_invoke(&signing_key, "amplitude-connector-suite");
 
     let suite = ConnectorSuite {
         test_name: "amplitude_cohorts_list_happy_path".into(),
@@ -268,4 +272,83 @@ async fn connector_suite_happy_path_lists_localhost_cohorts() {
 
     assert!(report.passed, "connector suite should pass");
     assert!(!report.logs.is_empty(), "structured logs should be present");
+}
+
+#[fcp_async_core::runtime::test]
+async fn connector_suite_error_path_reports_rate_limited_cohorts() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/cohorts"))
+        .and(header("Authorization", expected_auth_header().as_str()))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "0")
+                .set_body_json(json!({
+                    "error": "Rate limit exceeded"
+                })),
+        )
+        .expect(3)
+        .mount(&server)
+        .await;
+
+    let signing_key = Ed25519SigningKey::generate();
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes());
+    let invoke = cohorts_list_invoke(&signing_key, "amplitude-connector-suite-rate-limited");
+
+    let suite = ConnectorSuite {
+        test_name: "amplitude_cohorts_list_rate_limited".into(),
+        config: json!({
+            "api_key": "test_api_key",
+            "secret_key": "test_secret_key",
+            "base_url": server.uri()
+        }),
+        handshake,
+        invoke: Some(invoke),
+        invoke_expectations: InvokeExpectations {
+            expect_error: true,
+            ..InvokeExpectations::default()
+        },
+    };
+
+    let mut connector = AmplitudeSuiteAdapter::new();
+    let mut runner = E2eRunner::new("fcp-amplitude");
+    let report = runner
+        .run_connector_suite(&mut connector, suite)
+        .await
+        .expect("connector suite run");
+
+    for entry in &report.logs {
+        println!(
+            "{}",
+            serde_json::to_string(entry).expect("serialize report log")
+        );
+    }
+
+    assert!(report.passed, "connector suite should pass");
+    let execute = report
+        .logs
+        .iter()
+        .map(|entry| serde_json::to_value(entry).expect("serialize report log"))
+        .find(|entry| {
+            matches!(
+                entry.get("phase").and_then(serde_json::Value::as_str),
+                Some("execute")
+            )
+        })
+        .expect("execute log entry");
+    assert_eq!(
+        execute["context"]["expected_error"],
+        json!(true),
+        "suite must assert the expected error path"
+    );
+    assert_eq!(
+        execute["context"]["retryable"],
+        json!(true),
+        "429 responses should be reported as retryable"
+    );
+    assert_eq!(
+        execute["context"]["retry_after_ms"],
+        json!(0),
+        "retry-after header should be preserved as milliseconds"
+    );
 }

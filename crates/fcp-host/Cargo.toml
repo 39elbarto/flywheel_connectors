@@ -71,5 +71,9 @@ name = "local_invoke"
 harness = false
 
 [[bench]]
+name = "tailnet_invoke"
+harness = false
+
+[[bench]]
 name = "cpu_overhead"
 harness = false

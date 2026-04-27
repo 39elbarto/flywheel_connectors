@@ -597,5 +597,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_symbol_envelope_layout"
+path = "fuzz_targets/symbol_envelope_layout.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

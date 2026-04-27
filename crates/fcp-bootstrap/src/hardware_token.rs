@@ -2022,6 +2022,41 @@ mod tests {
     }
 
     #[test]
+    fn hardware_token_pin_preserves_surrounding_whitespace() {
+        let raw = HardwareTokenPin::new("123456");
+        let padded = HardwareTokenPin::new(" 123456 ");
+
+        assert!(!padded.is_empty());
+        assert_ne!(raw, padded);
+        assert_eq!(padded.value.as_bytes(), b" 123456 ");
+    }
+
+    #[test]
+    fn hardware_token_pin_preserves_unicode_byte_identity() {
+        let composed = HardwareTokenPin::new("\u{00e9}");
+        let decomposed = HardwareTokenPin::new("e\u{0301}");
+
+        assert!(!composed.is_empty());
+        assert!(!decomposed.is_empty());
+        assert_ne!(composed, decomposed);
+        assert_ne!(composed.value.as_bytes(), decomposed.value.as_bytes());
+    }
+
+    #[test]
+    fn hardware_token_pin_counts_nul_as_secret_material() {
+        let empty = HardwareTokenPin::new("");
+        let nul = HardwareTokenPin::new("\0");
+        let embedded_nul = HardwareTokenPin::new("12\0");
+
+        assert!(empty.is_empty());
+        assert!(!nul.is_empty());
+        assert!(!embedded_nul.is_empty());
+        assert_ne!(empty, nul);
+        assert_eq!(nul.value.as_bytes(), b"\0");
+        assert_eq!(embedded_nul.value.as_bytes(), b"12\0");
+    }
+
+    #[test]
     fn rank_detected_tokens_prefers_fcp_capabilities_and_stable_order() {
         let mut weaker = test_token();
         weaker.slot = 9;

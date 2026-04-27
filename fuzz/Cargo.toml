@@ -33,6 +33,7 @@ fcp-dingtalk = { path = "../connectors/dingtalk" }
 fcp-gmail = { path = "../connectors/gmail" }
 fcp-graphql = { path = "../crates/fcp-graphql" }
 fcp-github = { path = "../connectors/github" }
+fcp-monday = { path = "../connectors/monday" }
 fcp-mesh = { path = "../crates/fcp-mesh" }
 fcp-manifest = { path = "../crates/fcp-manifest" }
 fcp-host = { path = "../crates/fcp-host" }
@@ -286,6 +287,13 @@ bench = false
 [[bin]]
 name = "fuzz_gmail_path_segment"
 path = "fuzz_targets/gmail_path_segment.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_monday_graphql_response"
+path = "fuzz_targets/monday_graphql_response.rs"
 test = false
 doc = false
 bench = false
@@ -615,6 +623,13 @@ bench = false
 [[bin]]
 name = "fuzz_fcpc_seal_open"
 path = "fuzz_targets/fcpc_seal_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_retention_for_schema"
+path = "fuzz_targets/retention_for_schema.rs"
 test = false
 doc = false
 bench = false

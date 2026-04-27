@@ -461,5 +461,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_session_cookie_binding"
+path = "fuzz_targets/session_cookie_binding.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

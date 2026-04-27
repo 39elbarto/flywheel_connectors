@@ -2,12 +2,15 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use chrono::Utc;
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
-    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+    ConnectorId, ConnectorMetrics, CredentialId, EventCaps, FcpConnector, FcpError, FcpResult,
+    HandshakeRequest, HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass,
+    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RiskLevel,
+    SafetyTier, SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
+    SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -1259,6 +1262,110 @@ impl QdrantConnector {
 impl Default for QdrantConnector {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fcp_core::impl_fcp_sealed!(QdrantConnector);
+
+#[async_trait]
+impl FcpConnector for QdrantConnector {
+    fn id(&self) -> &ConnectorId {
+        &self.base.id
+    }
+
+    async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
+        self.handle_configure(config).await.map(|_| ())
+    }
+
+    async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        let request = serde_json::to_value(req).map_err(|error| FcpError::Internal {
+            message: format!("Failed to serialize Qdrant handshake request: {error}"),
+        })?;
+        let response = self.handle_handshake(request).await?;
+        serde_json::from_value(response).map_err(|error| FcpError::Internal {
+            message: format!("Failed to deserialize Qdrant handshake response: {error}"),
+        })
+    }
+
+    async fn health(&self) -> HealthSnapshot {
+        let (status, details) = if self.client.is_some() {
+            (
+                HealthState::Ready,
+                Some(json!({ "status": "healthy", "auth_mode": "api_key" })),
+            )
+        } else if self.config.is_some() {
+            (
+                HealthState::Degraded {
+                    reason: "credential materialization pending".into(),
+                },
+                Some(json!({ "status": "degraded_pending_credential_materialization" })),
+            )
+        } else {
+            (
+                HealthState::Starting,
+                Some(json!({ "status": "not_configured" })),
+            )
+        };
+        HealthSnapshot {
+            status,
+            uptime_ms: 0,
+            load: None,
+            details,
+            rate_limit: None,
+        }
+    }
+
+    fn metrics(&self) -> ConnectorMetrics {
+        self.base.metrics()
+    }
+
+    async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
+        self.handle_shutdown(json!({})).await.map(|_| ())
+    }
+
+    fn introspect(&self) -> Introspection {
+        Introspection {
+            operations: vec![op_info(
+                "qdrant.list_collections",
+                "List all collections",
+                json!({ "type": "object", "properties": {} }),
+                json!({ "type": "object", "properties": { "collections": { "type": "array" } } }),
+                "qdrant.collections.read",
+                RiskLevel::Low,
+                SafetyTier::Safe,
+                IdempotencyClass::Strict,
+                AgentHint {
+                    when_to_use: "List all collections in the Qdrant instance.".into(),
+                    common_mistakes: vec![],
+                    examples: vec![r"{}".into()],
+                    related: vec![CapabilityId::from_static("qdrant.collection_info")],
+                },
+            )],
+            events: vec![],
+            resource_types: vec![],
+            auth_caps: None,
+            event_caps: None,
+        }
+    }
+
+    async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
+        let id = req.id.clone();
+        let output = self
+            .handle_invoke(json!({
+                "operation": req.operation,
+                "input": req.input,
+                "capability_token": req.capability_token,
+            }))
+            .await?;
+        Ok(InvokeResponse::ok(id, output))
+    }
+
+    async fn subscribe(&self, _req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
+        Err(FcpError::StreamingNotSupported)
+    }
+
+    async fn unsubscribe(&self, _req: UnsubscribeRequest) -> FcpResult<()> {
+        Err(FcpError::StreamingNotSupported)
     }
 }
 

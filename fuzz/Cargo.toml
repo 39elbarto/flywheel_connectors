@@ -794,5 +794,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_cbor_max_object_bytes_boundary"
+path = "fuzz_targets/cbor_max_object_bytes_boundary.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

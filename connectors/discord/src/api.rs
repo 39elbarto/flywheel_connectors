@@ -17,6 +17,55 @@ use crate::{
 
 const JSON_CONTENT_TYPE: &str = "application/json";
 const STATUS_TOO_MANY_REQUESTS: u16 = 429;
+const DEFAULT_RETRY_AFTER_SECONDS: f64 = 30.0;
+const MAX_RETRY_AFTER_SECONDS: f64 = 3600.0;
+
+#[derive(Deserialize)]
+struct DiscordApiErrorBody {
+    code: Option<i32>,
+    message: Option<String>,
+    retry_after: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct DiscordRateLimitBody {
+    retry_after: Option<f64>,
+}
+
+fn sanitize_retry_after_seconds(value: f64) -> Option<f64> {
+    value
+        .is_finite()
+        .then_some(value.clamp(0.0, MAX_RETRY_AFTER_SECONDS))
+}
+
+pub(crate) fn parse_api_error_response(status: u16, body: &[u8]) -> DiscordError {
+    let error = serde_json::from_slice::<DiscordApiErrorBody>(body).unwrap_or_else(|_| {
+        DiscordApiErrorBody {
+            code: Some(i32::from(status)),
+            message: Some(String::from_utf8_lossy(body).into_owned()),
+            retry_after: None,
+        }
+    });
+
+    DiscordError::Api {
+        code: error.code.unwrap_or_else(|| i32::from(status)),
+        message: error.message.unwrap_or_else(|| "Unknown error".into()),
+        retry_after: error.retry_after.and_then(sanitize_retry_after_seconds),
+    }
+}
+
+pub(crate) fn parse_rate_limit_retry_after_seconds(header_value: Option<&str>, body: &[u8]) -> f64 {
+    header_value
+        .and_then(|value| value.parse::<f64>().ok())
+        .and_then(sanitize_retry_after_seconds)
+        .or_else(|| {
+            serde_json::from_slice::<DiscordRateLimitBody>(body)
+                .ok()
+                .and_then(|body| body.retry_after)
+                .and_then(sanitize_retry_after_seconds)
+        })
+        .unwrap_or(DEFAULT_RETRY_AFTER_SECONDS)
+}
 
 /// Validate that a Discord snowflake ID is a non-empty, all-digit string.
 /// Prevents URL path injection via crafted IDs containing `/`, `..`, etc.
@@ -284,43 +333,11 @@ impl DiscordApiClient {
     }
 
     fn api_error_from_response(response: &HttpResponse) -> DiscordError {
-        #[derive(Deserialize)]
-        struct DiscordApiError {
-            code: Option<i32>,
-            message: Option<String>,
-            retry_after: Option<f64>,
-        }
-
-        let body = response.bytes();
-        let error: DiscordApiError =
-            serde_json::from_slice(body).unwrap_or_else(|_| DiscordApiError {
-                code: Some(i32::from(response.status)),
-                message: Some(String::from_utf8_lossy(body).into_owned()),
-                retry_after: None,
-            });
-
-        DiscordError::Api {
-            code: error.code.unwrap_or_else(|| i32::from(response.status)),
-            message: error.message.unwrap_or_else(|| "Unknown error".into()),
-            retry_after: error.retry_after,
-        }
+        parse_api_error_response(response.status, response.bytes())
     }
 
     fn rate_limit_retry_after_seconds(response: &HttpResponse) -> f64 {
-        #[derive(Deserialize)]
-        struct DiscordRateLimitBody {
-            retry_after: Option<f64>,
-        }
-
-        response
-            .header_value("retry-after")
-            .and_then(|value| value.parse::<f64>().ok())
-            .or_else(|| {
-                serde_json::from_slice::<DiscordRateLimitBody>(response.bytes())
-                    .ok()
-                    .and_then(|body| body.retry_after)
-            })
-            .unwrap_or(30.0)
+        parse_rate_limit_retry_after_seconds(response.header_value("retry-after"), response.bytes())
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -843,6 +860,62 @@ mod tests {
             err,
             DiscordError::RateLimited { retry_after }
             if (retry_after - 1.5).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn test_rate_limit_parser_clamps_negative_retry_after() {
+        let body = br#"{"retry_after":-1.25}"#;
+
+        let retry_after = parse_rate_limit_retry_after_seconds(None, body);
+
+        assert_eq!(retry_after, 0.0);
+        let error = DiscordError::RateLimited { retry_after };
+        assert_eq!(error.retry_after(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn test_rate_limit_parser_clamps_large_retry_after() {
+        let retry_after =
+            parse_rate_limit_retry_after_seconds(Some("7200"), br#"{"retry_after":1}"#);
+
+        assert_eq!(retry_after, MAX_RETRY_AFTER_SECONDS);
+        let error = DiscordError::RateLimited { retry_after };
+        assert_eq!(
+            error.retry_after(),
+            Some(Duration::from_secs_f64(MAX_RETRY_AFTER_SECONDS))
+        );
+    }
+
+    #[test]
+    fn test_api_error_parser_clamps_retry_after_before_duration() {
+        let error = parse_api_error_response(
+            429,
+            br#"{"code":429,"message":"slow down","retry_after":-7}"#,
+        );
+
+        assert!(matches!(
+            error,
+            DiscordError::Api {
+                retry_after: Some(0.0),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_api_error_parser_drops_non_finite_retry_after() {
+        let error = parse_api_error_response(
+            429,
+            br#"{"code":429,"message":"slow down","retry_after":1e309}"#,
+        );
+
+        assert!(matches!(
+            error,
+            DiscordError::Api {
+                retry_after: None,
+                ..
+            }
         ));
     }
 

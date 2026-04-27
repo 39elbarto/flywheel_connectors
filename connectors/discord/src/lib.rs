@@ -52,3 +52,27 @@ pub use error::DiscordError;
 
 // Re-export for integration tests
 pub use api::DiscordApiClient;
+
+/// Fuzz-only entry points for Discord REST response parsers.
+///
+/// Exposed for `fuzz_discord_rest_error_response` so the fuzz crate can drive
+/// the private parser boundary without constructing an HTTP client.
+///
+/// Bead flywheel_connectors-h5124.
+#[doc(hidden)]
+pub mod __fuzz {
+    use crate::{
+        api::{parse_api_error_response, parse_rate_limit_retry_after_seconds},
+        error::DiscordError,
+    };
+
+    /// Parse a raw Discord API error body with a caller-supplied HTTP status.
+    pub fn parse_rest_api_error_response(status_code: u16, body: &[u8]) -> DiscordError {
+        parse_api_error_response(status_code, body)
+    }
+
+    /// Parse a Discord rate-limit delay from an optional header and raw body.
+    pub fn parse_rest_retry_after_seconds(header_value: Option<&str>, body: &[u8]) -> f64 {
+        parse_rate_limit_retry_after_seconds(header_value, body)
+    }
+}

@@ -686,5 +686,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_cbor_tag_rejection"
+path = "fuzz_targets/cbor_tag_rejection.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

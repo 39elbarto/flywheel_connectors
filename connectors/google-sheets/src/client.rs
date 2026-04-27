@@ -272,8 +272,8 @@ fn map_api_error(error: ApiErrorDetail) -> SheetsError {
 
 /// Validate that a user-supplied ID is safe to interpolate into a URL path segment.
 ///
-/// Rejects empty strings, path separators (`/`, `\`), traversal sequences (`..`),
-/// and percent-encoded variants (`%2f`, `%5c`).
+/// Rejects empty strings, path/query separators, traversal sequences (`..`),
+/// and percent-encoded variants.
 fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> SheetsResult<&'a str> {
     if value.trim().is_empty() {
         return Err(SheetsError::Api {
@@ -285,8 +285,12 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> SheetsResult<&'a st
     if value.contains('/')
         || value.contains('\\')
         || value.contains("..")
+        || value.contains('?')
+        || value.contains('#')
         || lower.contains("%2f")
         || lower.contains("%5c")
+        || lower.contains("%3f")
+        || lower.contains("%23")
     {
         return Err(SheetsError::Api {
             status_code: 400,
@@ -352,6 +356,10 @@ mod tests {
         assert!(sanitize_path_segment("foo\\bar", "spreadsheet_id").is_err());
         assert!(sanitize_path_segment("foo%2fbar", "spreadsheet_id").is_err());
         assert!(sanitize_path_segment("foo%5Cbar", "spreadsheet_id").is_err());
+        assert!(sanitize_path_segment("sheet?alt=media", "spreadsheet_id").is_err());
+        assert!(sanitize_path_segment("sheet#frag", "spreadsheet_id").is_err());
+        assert!(sanitize_path_segment("sheet%3Falt=media", "spreadsheet_id").is_err());
+        assert!(sanitize_path_segment("sheet%23frag", "spreadsheet_id").is_err());
         assert!(sanitize_path_segment("", "spreadsheet_id").is_err());
         assert!(sanitize_path_segment("  ", "spreadsheet_id").is_err());
     }

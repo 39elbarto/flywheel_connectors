@@ -264,8 +264,8 @@ impl DocsClient {
 
 /// Validate that a user-supplied ID is safe to interpolate into a URL path segment.
 ///
-/// Rejects empty strings, path separators (`/`, `\`), traversal sequences (`..`),
-/// and percent-encoded variants (`%2f`, `%5c`).
+/// Rejects empty strings, path/query separators, traversal sequences (`..`),
+/// and percent-encoded variants.
 fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> DocsResult<&'a str> {
     if value.trim().is_empty() {
         return Err(DocsError::Api {
@@ -277,8 +277,12 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> DocsResult<&'a str>
     if value.contains('/')
         || value.contains('\\')
         || value.contains("..")
+        || value.contains('?')
+        || value.contains('#')
         || lower.contains("%2f")
         || lower.contains("%5c")
+        || lower.contains("%3f")
+        || lower.contains("%23")
     {
         return Err(DocsError::Api {
             status_code: 400,
@@ -431,6 +435,10 @@ mod tests {
         assert!(sanitize_path_segment("foo\\bar", "document_id").is_err());
         assert!(sanitize_path_segment("foo%2fbar", "document_id").is_err());
         assert!(sanitize_path_segment("foo%5Cbar", "document_id").is_err());
+        assert!(sanitize_path_segment("doc?alt=media", "document_id").is_err());
+        assert!(sanitize_path_segment("doc#frag", "document_id").is_err());
+        assert!(sanitize_path_segment("doc%3Falt=media", "document_id").is_err());
+        assert!(sanitize_path_segment("doc%23frag", "document_id").is_err());
         assert!(sanitize_path_segment("", "document_id").is_err());
         assert!(sanitize_path_segment("  ", "document_id").is_err());
     }

@@ -71,6 +71,18 @@ fn validate_jira_endpoint_url(
         code: 1003,
         message: format!("{field} must include a host"),
     })?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must not include userinfo"),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must not include a query string or fragment"),
+        });
+    }
     let local = is_local_test_host(host);
     if parsed.scheme() == "http" && !local {
         return Err(FcpError::InvalidRequest {
@@ -3680,6 +3692,44 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_jira_endpoint_rejects_userinfo_query_and_fragment() {
+        let invalid_message = |err| match err {
+            FcpError::InvalidRequest { message, .. } => message,
+            _ => String::new(),
+        };
+
+        let err = validate_jira_endpoint_url(
+            "https://token@acme.atlassian.net",
+            "base_url",
+            JiraDeployment::Cloud,
+            "acme",
+        )
+        .unwrap_err();
+        let message = invalid_message(err);
+        assert!(message.contains("userinfo"), "got: {message}");
+
+        let err = validate_jira_endpoint_url(
+            "https://acme.atlassian.net?path=/rest/api/3",
+            "base_url",
+            JiraDeployment::Cloud,
+            "acme",
+        )
+        .unwrap_err();
+        let message = invalid_message(err);
+        assert!(message.contains("query string"), "got: {message}");
+
+        let err = validate_jira_endpoint_url(
+            "https://acme.atlassian.net#fragment",
+            "base_url",
+            JiraDeployment::Cloud,
+            "acme",
+        )
+        .unwrap_err();
+        let message = invalid_message(err);
+        assert!(message.contains("fragment"), "got: {message}");
     }
 
     #[test]

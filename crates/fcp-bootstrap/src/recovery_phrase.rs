@@ -72,7 +72,7 @@ impl RecoveryPhrase {
         rand::thread_rng().fill_bytes(&mut entropy);
 
         let mnemonic = Mnemonic::from_entropy(&entropy)
-            .map_err(|e| RecoveryPhraseError::InvalidMnemonic(e.to_string()))?;
+            .map_err(|e| RecoveryPhraseError::InvalidMnemonic(redact_bip39_error(e)))?;
 
         // Zeroize the local entropy copy
         entropy.zeroize();
@@ -96,7 +96,7 @@ impl RecoveryPhrase {
         }
 
         let mnemonic = Mnemonic::parse_in(Language::English, phrase)
-            .map_err(|e| RecoveryPhraseError::InvalidMnemonic(e.to_string()))?;
+            .map_err(|e| RecoveryPhraseError::InvalidMnemonic(redact_bip39_error(e)))?;
 
         Ok(Self {
             entropy: mnemonic.to_entropy(),
@@ -177,6 +177,16 @@ impl RecoveryPhrase {
     #[must_use]
     pub fn entropy(&self) -> &[u8] {
         &self.entropy
+    }
+}
+
+fn redact_bip39_error(error: bip39::Error) -> String {
+    match error {
+        bip39::Error::BadWordCount(count) => format!("invalid word count: {count}"),
+        bip39::Error::UnknownWord(index) => format!("unknown word at position {}", index + 1),
+        bip39::Error::BadEntropyBitCount(bits) => format!("invalid entropy bit count: {bits}"),
+        bip39::Error::InvalidChecksum => "invalid checksum".to_string(),
+        bip39::Error::AmbiguousLanguages(_) => "ambiguous word list".to_string(),
     }
 }
 
@@ -277,6 +287,41 @@ mod tests {
             result,
             Err(RecoveryPhraseError::InvalidMnemonic(_))
         ));
+    }
+
+    #[test]
+    fn test_invalid_mnemonic_error_redacts_unknown_words() {
+        let secret_like_word = "correct-horse-battery-staple";
+        let invalid_phrase = format!(
+            "{} abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art",
+            secret_like_word
+        );
+
+        let err = RecoveryPhrase::from_mnemonic(&invalid_phrase).unwrap_err();
+        let rendered = err.to_string();
+
+        assert!(matches!(err, RecoveryPhraseError::InvalidMnemonic(_)));
+        assert!(!rendered.contains(secret_like_word));
+        assert!(!rendered.contains("correct"));
+        assert!(
+            rendered.contains("unknown word at position 1"),
+            "unexpected redacted error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn test_invalid_checksum_error_redacts_recovery_words() {
+        let invalid_checksum_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon";
+
+        let err = RecoveryPhrase::from_mnemonic(invalid_checksum_phrase).unwrap_err();
+        let rendered = err.to_string();
+
+        assert!(matches!(err, RecoveryPhraseError::InvalidMnemonic(_)));
+        assert!(!rendered.contains("abandon"));
+        assert!(
+            rendered.contains("invalid checksum"),
+            "unexpected redacted error: {rendered}"
+        );
     }
 
     // ---- from_words ----

@@ -1909,6 +1909,13 @@ mod tests {
         generate_token_with_cap(signing_key, connector, cap.as_str(), &[op])
     }
 
+    fn invalid_request_message(error: FcpError) -> String {
+        match error {
+            FcpError::InvalidRequest { message, .. } => message,
+            other => format!("unexpected error variant: {other:?}"),
+        }
+    }
+
     fn simulate_request(
         operation: &'static str,
         input: serde_json::Value,
@@ -2460,6 +2467,61 @@ mod tests {
             }
             other => panic!("expected Unauthorized, got {other:?}"),
         }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_process_webhook_rejects_missing_signature_gate() {
+        let connector = GitHubConnector::new();
+        let err = connector
+            .invoke_process_webhook(json!({
+                "payload": {
+                    "event_type": "issues",
+                    "delivery_id": "missing-sig-1",
+                    "repository": {
+                        "id": 1,
+                        "full_name": "octocat/hello-world",
+                        "html_url": "https://github.com/octocat/hello-world",
+                        "private": false
+                    },
+                    "data": {
+                        "action": "opened",
+                        "issue": { "number": 7 }
+                    }
+                }
+            }))
+            .await
+            .unwrap_err();
+
+        let message = invalid_request_message(err);
+        assert!(message.contains("signature_validated must be a boolean"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_process_webhook_rejects_non_boolean_signature_gate() {
+        let connector = GitHubConnector::new();
+        let err = connector
+            .invoke_process_webhook(json!({
+                "signature_validated": "true",
+                "payload": {
+                    "event_type": "issues",
+                    "delivery_id": "bad-sig-1",
+                    "repository": {
+                        "id": 1,
+                        "full_name": "octocat/hello-world",
+                        "html_url": "https://github.com/octocat/hello-world",
+                        "private": false
+                    },
+                    "data": {
+                        "action": "opened",
+                        "issue": { "number": 7 }
+                    }
+                }
+            }))
+            .await
+            .unwrap_err();
+
+        let message = invalid_request_message(err);
+        assert!(message.contains("signature_validated must be a boolean"));
     }
 
     #[test]

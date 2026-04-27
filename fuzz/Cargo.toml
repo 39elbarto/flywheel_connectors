@@ -780,5 +780,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_cbor_simple_value_canonical"
+path = "fuzz_targets/cbor_simple_value_canonical.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

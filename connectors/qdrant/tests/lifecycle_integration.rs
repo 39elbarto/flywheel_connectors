@@ -46,9 +46,9 @@ use fcp_qdrant::client::QdrantClient;
 use fcp_qdrant::error::QdrantError;
 use serde_json::json;
 use testcontainers::{
+    GenericImage,
     core::{IntoContainerPort, WaitFor},
     runners::AsyncRunner,
-    GenericImage,
 };
 
 /// Qdrant's REST HTTP port inside the container. Host port is mapped
@@ -117,7 +117,7 @@ async fn wait_for_exact_count(client: &QdrantClient, name: &str, expected: u64) 
                 count.count
             );
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        fcp_async_core::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
 
@@ -138,7 +138,7 @@ async fn create_ready_collection(client: &QdrantClient, name: &str) {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn create_and_delete_collection_round_trip_against_live_server() {
     let (client, _container) = bring_up().await;
     let name = "fcp_r16hf_roundtrip";
@@ -150,11 +150,18 @@ async fn create_and_delete_collection_round_trip_against_live_server() {
     assert!(
         listed.collections.iter().any(|c| c.name == name),
         "freshly created collection must appear in list_collections; got {:?}",
-        listed.collections.iter().map(|c| &c.name).collect::<Vec<_>>()
+        listed
+            .collections
+            .iter()
+            .map(|c| &c.name)
+            .collect::<Vec<_>>()
     );
 
     // And its info must come back with a healthy status.
-    let info = client.collection_info(name).await.expect("info after create");
+    let info = client
+        .collection_info(name)
+        .await
+        .expect("info after create");
     assert!(
         info.status == "green" || info.status == "yellow",
         "collection status must be green/yellow immediately after create, got {:?}",
@@ -173,7 +180,7 @@ async fn create_and_delete_collection_round_trip_against_live_server() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn upsert_points_persist_and_count_reflects_inventory() {
     let (client, _container) = bring_up().await;
     let name = "fcp_r16hf_upsert";
@@ -226,7 +233,10 @@ async fn upsert_points_persist_and_count_reflects_inventory() {
         .collect();
     assert_eq!(
         kinds,
-        ["alpha", "beta", "gamma"].iter().map(|s| (*s).to_string()).collect(),
+        ["alpha", "beta", "gamma"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
         "payload `kind` fields must round-trip intact; got {kinds:?}"
     );
 
@@ -238,7 +248,7 @@ async fn upsert_points_persist_and_count_reflects_inventory() {
     wait_for_exact_count(&client, name, 2).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn search_ranks_points_by_true_cosine_similarity() {
     // Proves the connector is not silently mangling the vector on the
     // wire or reversing result order. A query vector aligned with the
@@ -295,7 +305,7 @@ async fn search_ranks_points_by_true_cosine_similarity() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn scroll_paginates_with_advancing_offset() {
     // Proves the paging cursor survives the envelope round-trip.
     let (client, _container) = bring_up().await;
@@ -318,10 +328,7 @@ async fn scroll_paginates_with_advancing_offset() {
     wait_for_exact_count(&client, name, 5).await;
 
     let first = client
-        .scroll(
-            name,
-            &json!({ "limit": 2, "with_payload": true }),
-        )
+        .scroll(name, &json!({ "limit": 2, "with_payload": true }))
         .await
         .expect("scroll page 1");
     assert_eq!(first.points.len(), 2, "page 1 must honor limit=2");
@@ -357,7 +364,7 @@ async fn scroll_paginates_with_advancing_offset() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn reading_deleted_collection_surfaces_404_terminal_error() {
     // Regression guard: a 404 must NOT be swallowed as a silent empty
     // success. The retry policy must flag it as a terminal

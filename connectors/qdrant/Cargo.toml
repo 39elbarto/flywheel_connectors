@@ -43,7 +43,6 @@ uuid.workspace = true
 # `optional = true` on dev-dependencies; they are feature-gated so
 # default builds stay offline-friendly and docker-less.
 testcontainers = { version = "0.23", optional = true }
-tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 ciborium.workspace = true
@@ -57,4 +56,4 @@ fcp-testkit = { path = "../../crates/fcp-testkit" }
 default = []
 # Enable real-Qdrant testcontainer integration tests. Requires a
 # running Docker daemon. See tests/lifecycle_integration.rs.
-integration-testcontainer = ["dep:testcontainers", "dep:tokio"]
+integration-testcontainer = ["dep:testcontainers"]

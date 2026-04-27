@@ -568,5 +568,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_hello_transcript_binding"
+path = "fuzz_targets/hello_transcript_binding.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

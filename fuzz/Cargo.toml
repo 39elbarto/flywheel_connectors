@@ -715,5 +715,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_decode_hello_ack_canonical"
+path = "fuzz_targets/decode_hello_ack_canonical.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

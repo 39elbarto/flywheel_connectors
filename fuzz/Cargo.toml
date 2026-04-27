@@ -126,6 +126,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_object_id_verifier"
+path = "fuzz_targets/object_id_verifier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_audit_verify_chain"
 path = "fuzz_targets/audit_verify_chain.rs"
 test = false

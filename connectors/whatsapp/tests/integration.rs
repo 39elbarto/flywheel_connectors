@@ -776,8 +776,8 @@ async fn webhook_receive_invalid_signature_is_rejected() {
 
     assert!(matches!(
         result,
-        Err(FcpError::InvalidRequest { ref message, .. })
-            if message.contains("Webhook verification failed")
+        Err(FcpError::Unauthorized { code: 2002, ref message })
+            if message.contains("Webhook signature verification failed")
     ));
 }
 

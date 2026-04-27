@@ -35,6 +35,7 @@ chrono = { workspace = true, features = ["serde"] }
 [dev-dependencies]
 ciborium.workspace = true
 chrono.workspace = true
+fcp-e2e = { path = "../../crates/fcp-e2e" }
 fcp-crypto.workspace = true
 fcp-testkit.workspace = true
 wiremock.workspace = true

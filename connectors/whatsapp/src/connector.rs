@@ -850,13 +850,22 @@ impl WhatsAppConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, Utc};
+    use fcp_core::CapabilityConstraints;
+    use fcp_crypto::cose::CapabilityTokenBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
 
     fn base_handshake() -> HandshakeRequest {
+        let signing_key = Ed25519SigningKey::generate();
+        base_handshake_for_key(&signing_key)
+    }
+
+    fn base_handshake_for_key(signing_key: &Ed25519SigningKey) -> HandshakeRequest {
         HandshakeRequest {
             protocol_version: "2.0.0".into(),
             zone: ZoneId::work(),
             zone_dir: None,
-            host_public_key: [0u8; 32],
+            host_public_key: signing_key.verifying_key().to_bytes(),
             nonce: [0u8; 32],
             capabilities_requested: vec![
                 CapabilityId::from_static(CAP_SEND),
@@ -867,6 +876,32 @@ mod tests {
             transport_caps: None,
             requested_instance_id: None,
         }
+    }
+
+    fn signed_capability_token(
+        signing_key: &Ed25519SigningKey,
+        capability: &str,
+        operation: &str,
+    ) -> CapabilityToken {
+        let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+        let raw = CapabilityTokenBuilder::new()
+            .capability_id(capability)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&[operation])
+            .issuer("node:test")
+            .validity(now, now + Duration::hours(1))
+            .try_constraints_cbor(&cbor)
+            .expect("valid constraints cbor")
+            .sign(signing_key)
+            .expect("capability token");
+        CapabilityToken::from_raw(raw)
     }
 
     fn base_invoke(connector_id: &ConnectorId, operation: &'static str) -> InvokeRequest {
@@ -1251,9 +1286,15 @@ mod tests {
             }))
             .await
             .unwrap();
-        connector.handshake(base_handshake()).await.unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(base_handshake_for_key(&signing_key))
+            .await
+            .unwrap();
 
         let mut req = base_invoke(connector.id(), OP_WEBHOOK_RECEIVE);
+        req.capability_token =
+            signed_capability_token(&signing_key, CAP_WEBHOOK, OP_WEBHOOK_RECEIVE);
         req.input = json!({
             "headers": {
                 "x-hub-signature-256": "sha256=deadbeef"

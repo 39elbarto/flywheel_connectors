@@ -64,13 +64,13 @@ impl<'de> Deserialize<'de> for Update {
             .ok_or_else(|| de::Error::missing_field("update_id"))
             .and_then(|value| i64::deserialize(value).map_err(de::Error::custom))?;
 
-        let known_kind_count = TELEGRAM_UPDATE_KIND_FIELDS
+        let update_kind_count = KNOWN_ALLOWED_UPDATES
             .iter()
             .filter(|field| object.get(**field).is_some_and(|value| !value.is_null()))
             .count();
-        if known_kind_count > 1 {
+        if update_kind_count > 1 {
             return Err(de::Error::custom(
-                "Telegram update includes multiple known update kinds",
+                "Telegram update includes multiple update payload kinds",
             ));
         }
 
@@ -103,14 +103,6 @@ impl<'de> Deserialize<'de> for Update {
         Ok(Self { update_id, kind })
     }
 }
-
-const TELEGRAM_UPDATE_KIND_FIELDS: &[&str] = &[
-    "message",
-    "edited_message",
-    "channel_post",
-    "edited_channel_post",
-    "callback_query",
-];
 
 /// Different kinds of updates.
 #[derive(Debug, Clone, Deserialize)]
@@ -1598,7 +1590,7 @@ mod tests {
     }
 
     #[test]
-    fn update_rejects_multiple_known_kinds() {
+    fn update_rejects_multiple_implemented_kinds() {
         let json = json!({
             "update_id": 203,
             "message": {
@@ -1619,7 +1611,36 @@ mod tests {
         assert!(result.is_err(), "ambiguous update must be rejected");
         let error_message = result.err().map_or_else(String::new, |err| err.to_string());
         assert!(
-            error_message.contains("multiple known update kinds"),
+            error_message.contains("multiple update payload kinds"),
+            "unexpected error: {error_message}"
+        );
+    }
+
+    #[test]
+    fn update_rejects_implemented_plus_unsupported_kind() {
+        let json = json!({
+            "update_id": 203,
+            "message": {
+                "message_id": 1,
+                "chat": {"id": 100, "type": "private"},
+                "date": 1_700_000_000,
+                "text": "primary"
+            },
+            "poll": {
+                "id": "poll1",
+                "question": "ready?",
+                "options": []
+            }
+        });
+        let result = serde_json::from_value::<Update>(json);
+
+        assert!(
+            result.is_err(),
+            "mixed known update payloads must be rejected"
+        );
+        let error_message = result.err().map_or_else(String::new, |err| err.to_string());
+        assert!(
+            error_message.contains("multiple update payload kinds"),
             "unexpected error: {error_message}"
         );
     }

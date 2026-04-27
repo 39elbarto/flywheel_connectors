@@ -547,5 +547,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_hello_replay_window"
+path = "fuzz_targets/hello_replay_window.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

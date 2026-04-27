@@ -28,6 +28,7 @@ fcp-bootstrap = { path = "../crates/fcp-bootstrap" }
 fcp-cbor = { path = "../crates/fcp-cbor" }
 fcp-core = { path = "../crates/fcp-core" }
 fcp-crypto = { path = "../crates/fcp-crypto" }
+fcp-dingtalk = { path = "../connectors/dingtalk" }
 fcp-gmail = { path = "../connectors/gmail" }
 fcp-graphql = { path = "../crates/fcp-graphql" }
 fcp-github = { path = "../connectors/github" }
@@ -263,6 +264,13 @@ bench = false
 [[bin]]
 name = "fuzz_github_webhook_payload"
 path = "fuzz_targets/github_webhook_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_dingtalk_callback_event"
+path = "fuzz_targets/dingtalk_callback_event.rs"
 test = false
 doc = false
 bench = false
@@ -571,6 +579,13 @@ bench = false
 [[bin]]
 name = "fuzz_hello_transcript_binding"
 path = "fuzz_targets/hello_transcript_binding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ack_transcript_binding"
+path = "fuzz_targets/ack_transcript_binding.rs"
 test = false
 doc = false
 bench = false

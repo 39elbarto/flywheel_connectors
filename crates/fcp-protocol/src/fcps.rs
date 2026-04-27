@@ -839,6 +839,25 @@ impl SymbolAck {
 /// Default maximum symbols for authenticated requests (NORMATIVE).
 pub const DEFAULT_MAX_SYMBOLS_AUTHENTICATED: u32 = 1000;
 
+/// Absolute hard cap on `SymbolRequest::max_symbols`, above which NO request
+/// (authenticated or not, regardless of zone policy) should be accepted at
+/// the wire boundary (NORMATIVE; br-7p8rd anti-amplification floor).
+///
+/// Sized to the RaptorQ decode-buffer headroom of one source-symbol plus
+/// roughly the repair-tail capacity — see `max_symbols_with_headroom` in
+/// fcp-raptorq's decoder. A request asking for more than this many symbols
+/// cannot be satisfied by a single legitimate decode budget on the responder
+/// side, so accepting one only burns the responder's CPU/Ed25519-verify
+/// cycles and amplifies the attacker's payload.
+///
+/// Pre-fix, `SymbolRequest::new` accepted any caller-supplied `max_symbols`
+/// (up to `u32::MAX`) and `verify()` only validated `missing_hint` size. A
+/// peer with a valid signing key could mint and sign `max_symbols = u32::MAX`
+/// requests; the deeper `validate_request` enforced the per-tier cap, but
+/// that's defense in depth, not the primary gate. This cap closes the
+/// SignedTranscript-side hole.
+pub const MAX_SYMBOLS_HARD_CAP: u32 = 2001;
+
 /// Bounded symbol request (NORMATIVE).
 ///
 /// A requester MUST bound requests with `max_symbols` and/or `missing_hint`.
@@ -879,6 +898,14 @@ pub struct SymbolRequest {
 
 impl SymbolRequest {
     /// Create a new symbol request.
+    ///
+    /// **Note (br-7p8rd):** this constructor remains infallible for backward
+    /// compatibility with the existing test/conformance fixtures that
+    /// deliberately mint out-of-policy values to exercise rejection paths.
+    /// Callers minting requests for **production transmission** should use
+    /// [`Self::try_new`] instead, which enforces [`MAX_SYMBOLS_HARD_CAP`] at
+    /// construction time and refuses to build a request that the receiver's
+    /// `verify()` would reject anyway.
     #[must_use]
     pub fn new(
         header: ObjectHeader,
@@ -900,6 +927,41 @@ impl SymbolRequest {
             current_symbols,
             signature: Ed25519Signature::from_bytes(&[0u8; 64]),
         }
+    }
+
+    /// Fail-closed constructor that rejects out-of-policy `max_symbols` at
+    /// build time (br-7p8rd).
+    ///
+    /// Use this for any caller minting a request intended to actually go on
+    /// the wire — it refuses to build a request that the receiver's
+    /// [`Self::verify`] would now reject. Returns
+    /// [`FrameError::SymbolCountOverflow`] when `max_symbols` exceeds
+    /// [`MAX_SYMBOLS_HARD_CAP`].
+    ///
+    /// # Errors
+    /// Returns `FrameError::SymbolCountOverflow` if `max_symbols >
+    /// MAX_SYMBOLS_HARD_CAP`.
+    pub fn try_new(
+        header: ObjectHeader,
+        object_id: ObjectId,
+        zone_id: ZoneId,
+        zone_key_id: ZoneKeyId,
+        epoch_id: u64,
+        max_symbols: u32,
+        current_symbols: u32,
+    ) -> Result<Self, FrameError> {
+        if max_symbols > MAX_SYMBOLS_HARD_CAP {
+            return Err(FrameError::SymbolCountOverflow);
+        }
+        Ok(Self::new(
+            header,
+            object_id,
+            zone_id,
+            zone_key_id,
+            epoch_id,
+            max_symbols,
+            current_symbols,
+        ))
     }
 
     /// Create a request with specific missing symbols (targeted repair).
@@ -948,18 +1010,27 @@ impl SymbolRequest {
 
     /// Verify the symbol request signature.
     ///
-    /// Rejects oversized `missing_hint` payloads *before* allocating the
-    /// transcript so an unauthenticated sender cannot force a receiver to
-    /// materialize a multi-megabyte transcript on every `verify()`. The
-    /// legitimate upper bound is already declared NORMATIVE via
-    /// `validate_bounds`/`validate_hint_bounds`, so no honest signer will
-    /// ever produce a request above the cap.
+    /// Rejects oversized `missing_hint` payloads AND oversized `max_symbols`
+    /// (above [`MAX_SYMBOLS_HARD_CAP`]) *before* allocating the transcript so
+    /// an attacker holding a valid peer-signing key cannot force a receiver
+    /// to materialize a multi-megabyte transcript or burn an Ed25519-verify
+    /// cycle on a request that would be rejected by deeper admission control
+    /// anyway (br-7p8rd).
+    ///
+    /// The legitimate upper bound is already declared NORMATIVE via
+    /// `validate_bounds`/`validate_hint_bounds` and the per-tier defaults
+    /// (`DEFAULT_MAX_SYMBOLS_AUTHENTICATED` = 1000); no honest signer will
+    /// ever produce a request above [`MAX_SYMBOLS_HARD_CAP`] = 2001.
     ///
     /// # Errors
     /// Returns `CryptoError::SignatureVerificationFailed` if the hint is
-    /// oversized or the Ed25519 signature does not validate.
+    /// oversized, `max_symbols` exceeds [`MAX_SYMBOLS_HARD_CAP`], or the
+    /// Ed25519 signature does not validate.
     pub fn verify(&self, verifying_key: &Ed25519VerifyingKey) -> Result<(), CryptoError> {
         if self.validate_hint_bounds().is_err() {
+            return Err(CryptoError::SignatureVerificationFailed);
+        }
+        if self.max_symbols > MAX_SYMBOLS_HARD_CAP {
             return Err(CryptoError::SignatureVerificationFailed);
         }
         let transcript = self.transcript_bytes();
@@ -1771,6 +1842,129 @@ mod tests {
             .verify(&signing_key.verifying_key())
             .expect_err("oversized hint must not verify even with valid signature");
         assert!(matches!(err, CryptoError::SignatureVerificationFailed));
+    }
+
+    /// br-7p8rd: `verify()` must reject `max_symbols > MAX_SYMBOLS_HARD_CAP`
+    /// BEFORE materializing the transcript or burning an Ed25519-verify
+    /// cycle, even when the signature is otherwise valid. This closes the
+    /// SignedTranscript-side anti-amplification hole the bead identified.
+    #[test]
+    fn symbol_request_verify_rejects_max_symbols_above_hard_cap() {
+        use fcp_cbor::SchemaId;
+        use fcp_core::Provenance;
+        use semver::Version;
+
+        let signing_key = Ed25519SigningKey::generate();
+        let zone_id: ZoneId = "z:hard-cap".parse().expect("zone parse");
+
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.protocol", "SymbolRequest", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 1_704_067_200,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let mut request = SymbolRequest::new(
+            header,
+            ObjectId::from_bytes([0x33; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0x44; 8]),
+            7,
+            MAX_SYMBOLS_HARD_CAP + 1, // one above the hard cap
+            0,
+        );
+        request.sign(&signing_key);
+
+        let err = request
+            .verify(&signing_key.verifying_key())
+            .expect_err("max_symbols above hard cap must not verify, even with a valid signature");
+        assert!(matches!(err, CryptoError::SignatureVerificationFailed));
+    }
+
+    /// br-7p8rd: `verify()` must accept `max_symbols == MAX_SYMBOLS_HARD_CAP`
+    /// (boundary inclusive). The cap is "above which", not "at or above".
+    #[test]
+    fn symbol_request_verify_accepts_max_symbols_at_hard_cap() {
+        use fcp_cbor::SchemaId;
+        use fcp_core::Provenance;
+        use semver::Version;
+
+        let signing_key = Ed25519SigningKey::generate();
+        let zone_id: ZoneId = "z:hard-cap-edge".parse().expect("zone parse");
+
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.protocol", "SymbolRequest", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 1_704_067_200,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+        let mut request = SymbolRequest::new(
+            header,
+            ObjectId::from_bytes([0x55; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0x66; 8]),
+            8,
+            MAX_SYMBOLS_HARD_CAP, // exactly at the cap
+            0,
+        );
+        request.sign(&signing_key);
+        request
+            .verify(&signing_key.verifying_key())
+            .expect("max_symbols == hard cap must verify");
+    }
+
+    /// br-7p8rd: the fail-closed `try_new` constructor must refuse to build
+    /// a request that the receiver's `verify()` would now reject. Pairs with
+    /// the verify-side gate so honest callers get an early failure instead
+    /// of a deferred wire-time rejection.
+    #[test]
+    fn symbol_request_try_new_rejects_above_hard_cap() {
+        use fcp_cbor::SchemaId;
+        use fcp_core::Provenance;
+        use semver::Version;
+
+        let zone_id: ZoneId = "z:try-new-cap".parse().expect("zone parse");
+        let header = ObjectHeader {
+            schema: SchemaId::new("fcp.protocol", "SymbolRequest", Version::new(1, 0, 0)),
+            zone_id: zone_id.clone(),
+            created_at: 1_704_067_200,
+            provenance: Provenance::new(zone_id.clone()),
+            refs: vec![],
+            foreign_refs: vec![],
+            ttl_secs: None,
+            placement: None,
+        };
+
+        let err = SymbolRequest::try_new(
+            header.clone(),
+            ObjectId::from_bytes([0x77; 32]),
+            zone_id.clone(),
+            ZoneKeyId::from_bytes([0x88; 8]),
+            9,
+            MAX_SYMBOLS_HARD_CAP + 1,
+            0,
+        )
+        .expect_err("try_new must refuse max_symbols above the hard cap");
+        assert!(matches!(err, FrameError::SymbolCountOverflow));
+
+        // Boundary-inclusive: at the cap must succeed.
+        SymbolRequest::try_new(
+            header,
+            ObjectId::from_bytes([0x99; 32]),
+            zone_id,
+            ZoneKeyId::from_bytes([0xAA; 8]),
+            10,
+            MAX_SYMBOLS_HARD_CAP,
+            0,
+        )
+        .expect("try_new must accept max_symbols at exactly the hard cap");
     }
 
     // ─────────────────────────────────────────────────────────────────────────

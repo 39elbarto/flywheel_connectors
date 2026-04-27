@@ -28,6 +28,7 @@ fcp-bootstrap = { path = "../crates/fcp-bootstrap" }
 fcp-cbor = { path = "../crates/fcp-cbor" }
 fcp-core = { path = "../crates/fcp-core" }
 fcp-crypto = { path = "../crates/fcp-crypto" }
+fcp-gmail = { path = "../connectors/gmail" }
 fcp-graphql = { path = "../crates/fcp-graphql" }
 fcp-github = { path = "../connectors/github" }
 fcp-mesh = { path = "../crates/fcp-mesh" }
@@ -262,6 +263,13 @@ bench = false
 [[bin]]
 name = "fuzz_github_webhook_payload"
 path = "fuzz_targets/github_webhook_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_gmail_path_segment"
+path = "fuzz_targets/gmail_path_segment.rs"
 test = false
 doc = false
 bench = false
@@ -528,6 +536,13 @@ bench = false
 [[bin]]
 name = "fuzz_cbor_decode_recursion_limit"
 path = "fuzz_targets/cbor_decode_recursion_limit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_store_coverage_eval"
+path = "fuzz_targets/store_coverage_eval.rs"
 test = false
 doc = false
 bench = false

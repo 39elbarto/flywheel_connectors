@@ -621,6 +621,9 @@ impl BootstrapWorkflow {
             .hardware_token_pin
             .as_ref()
             .ok_or(BootstrapError::HardwareTokenPinRequired)?;
+        if pin.is_empty() {
+            return Err(BootstrapError::HardwareTokenPinRequired);
+        }
 
         self.phase = BootstrapPhase::KeyGeneration;
         write_phase_lock(&self.config.data_dir, &self.phase)?;
@@ -1914,6 +1917,50 @@ mod tests {
         assert!(
             BootstrapWorkflow::new(retry_config).is_ok(),
             "a missing-PIN refusal should allow a fresh retry without resume"
+        );
+    }
+
+    #[test]
+    fn test_hardware_token_empty_pin_refuses_before_phase_lock() {
+        let dir = tempdir().unwrap();
+        let token = DetectedToken {
+            provider: std::path::PathBuf::from("/test/pkcs11.so"),
+            slot: 0,
+            label: "TestToken".to_string(),
+            manufacturer: "TestMfg".to_string(),
+            serial: "SN123".to_string(),
+            mechanisms: vec!["CKM_ED25519".to_string()],
+        };
+        let config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::HardwareToken {
+                token: token.clone(),
+            })
+            .hardware_token_pin("")
+            .skip_time_validation(true)
+            .build()
+            .unwrap();
+
+        let workflow = BootstrapWorkflow::new(config).unwrap();
+        let result = workflow.run();
+        assert!(matches!(
+            result,
+            Err(BootstrapError::HardwareTokenPinRequired)
+        ));
+        assert!(
+            crate::phase::detect_partial_state(dir.path()).is_none(),
+            "empty PIN should not leave a partial-state marker behind"
+        );
+
+        let retry_config = BootstrapConfig::builder()
+            .data_dir(dir.path())
+            .mode(BootstrapMode::HardwareToken { token })
+            .skip_time_validation(true)
+            .build()
+            .unwrap();
+        assert!(
+            BootstrapWorkflow::new(retry_config).is_ok(),
+            "an empty-PIN refusal should allow a fresh retry without resume"
         );
     }
 

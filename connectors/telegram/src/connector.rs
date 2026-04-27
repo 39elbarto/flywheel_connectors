@@ -30,6 +30,8 @@ use crate::types::*;
 
 const TELEGRAM_POLL_CURSOR_FILE: &str = "telegram_poll_cursor.json";
 const TELEGRAM_POLL_LEASE_FILE: &str = "telegram_poll_lease.json";
+const TELEGRAM_BOT_ID_MAX_DIGITS: usize = 20;
+const TELEGRAM_BOT_SECRET_MAX_CHARS: usize = 128;
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 fn current_unix_timestamp_secs() -> u64 {
@@ -287,13 +289,17 @@ fn validate_bot_token_syntax(token: &str) -> FcpResult<()> {
         message: "Telegram bot token must be in '<bot_id>:<secret>' format".into(),
     })?;
 
-    if bot_id.len() < 6 || !bot_id.chars().all(|c| c.is_ascii_digit()) {
+    if bot_id.len() < 6
+        || bot_id.len() > TELEGRAM_BOT_ID_MAX_DIGITS
+        || !bot_id.chars().all(|c| c.is_ascii_digit())
+    {
         return Err(FcpError::InvalidRequest {
             code: 1004,
             message: "Telegram bot token has invalid bot_id prefix".into(),
         });
     }
     if secret.len() < 20
+        || secret.len() > TELEGRAM_BOT_SECRET_MAX_CHARS
         || !secret
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
@@ -2138,6 +2144,20 @@ mod tests {
         assert!(validate_bot_token_syntax("123:too_short").is_err());
     }
 
+    #[test]
+    fn test_validate_bot_token_rejects_oversized_segments() {
+        let oversized_bot_id = "1".repeat(TELEGRAM_BOT_ID_MAX_DIGITS + 1);
+        let oversized_suffix = "A".repeat(TELEGRAM_BOT_SECRET_MAX_CHARS + 1);
+
+        assert!(
+            validate_bot_token_syntax(&format!("{}:{}", oversized_bot_id, TEST_BOT_PARTS.concat()))
+                .is_err()
+        );
+        assert!(
+            validate_bot_token_syntax(&format!("{}:{}", TEST_BOT_ID, oversized_suffix)).is_err()
+        );
+    }
+
     #[fcp_async_core::runtime::test]
     async fn test_configure_rejects_ambiguous_auth_mode() {
         let mut connector = TelegramConnector::new();
@@ -2157,6 +2177,19 @@ mod tests {
         let result = connector
             .handle_configure(json!({
                 "credential": "not-a-token"
+            }))
+            .await;
+
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_oversized_bot_token() {
+        let mut connector = TelegramConnector::new();
+        let oversized_suffix = "A".repeat(TELEGRAM_BOT_SECRET_MAX_CHARS + 1);
+        let result = connector
+            .handle_configure(json!({
+                "credential": format!("{TEST_BOT_ID}:{oversized_suffix}")
             }))
             .await;
 

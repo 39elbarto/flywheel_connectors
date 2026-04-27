@@ -61,6 +61,7 @@ fcp-host = { path = "../fcp-host" }
 fcp-oauth = { path = "../fcp-oauth" }
 fcp-sandbox = { path = "../fcp-sandbox" }
 fcp-streaming = { path = "../fcp-streaming" }
+futures-util = { workspace = true }
 url.workspace = true
 criterion.workspace = true
 wasmtime.workspace = true

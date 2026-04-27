@@ -8,12 +8,13 @@ use std::collections::HashSet;
 
 use fcp_core::{CredentialId, FcpError, FcpResult};
 use reqwest::Url;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
 pub const DEFAULT_TELEGRAM_BASE_URL: &str = "https://api.telegram.org";
 pub const MIN_POLL_TIMEOUT_SECS: i32 = 1;
 pub const MAX_POLL_TIMEOUT_SECS: i32 = 50;
 pub const MIN_POLL_LEASE_TTL_SECS: u64 = 10;
+const MAX_REPLY_TO_MESSAGE_DEPTH: usize = 8;
 pub const KNOWN_ALLOWED_UPDATES: &[&str] = &[
     "message",
     "edited_message",
@@ -76,8 +77,39 @@ pub struct Message {
     pub audio: Option<Audio>,
     pub video: Option<Video>,
     pub voice: Option<Voice>,
+    #[serde(default, deserialize_with = "deserialize_reply_to_message")]
     pub reply_to_message: Option<Box<Message>>,
     pub message_thread_id: Option<i64>,
+}
+
+fn deserialize_reply_to_message<'de, D>(deserializer: D) -> Result<Option<Box<Message>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<serde_json::Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+
+    ensure_reply_to_message_depth(&value, 1).map_err(de::Error::custom)?;
+    let message = Message::deserialize(value).map_err(de::Error::custom)?;
+    Ok(Some(Box::new(message)))
+}
+
+fn ensure_reply_to_message_depth(
+    value: &serde_json::Value,
+    depth: usize,
+) -> Result<(), &'static str> {
+    if depth > MAX_REPLY_TO_MESSAGE_DEPTH {
+        return Err("reply_to_message nesting exceeds Telegram parser limit");
+    }
+
+    if let Some(reply) = value.get("reply_to_message") {
+        if !reply.is_null() {
+            ensure_reply_to_message_depth(reply, depth + 1)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Telegram User object.
@@ -526,7 +558,7 @@ impl Serialize for SendMediaRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     // ---- TelegramResponse ----
 
@@ -599,6 +631,59 @@ mod tests {
         assert_eq!(msg.text.as_deref(), Some("Hello!"));
         assert!(msg.from.is_none());
         assert!(msg.photo.is_none());
+    }
+
+    fn minimal_message_value(message_id: i64, reply_to_message: Option<Value>) -> Value {
+        let mut message = json!({
+            "message_id": message_id,
+            "chat": {"id": 123, "type": "private"},
+            "date": 1_700_000_000,
+            "text": format!("message {message_id}")
+        });
+
+        if let Some(reply) = reply_to_message {
+            if let Value::Object(fields) = &mut message {
+                fields.insert("reply_to_message".into(), reply);
+            }
+        }
+
+        message
+    }
+
+    fn reply_chain_value(depth: usize) -> Value {
+        let mut reply = None;
+        for idx in (0..depth).rev() {
+            let message_id = i64::try_from(idx).map_or(i64::MAX, |value| value);
+            reply = Some(minimal_message_value(message_id, reply));
+        }
+        match reply {
+            Some(value) => value,
+            None => minimal_message_value(0, None),
+        }
+    }
+
+    #[test]
+    fn message_deserialize_accepts_bounded_reply_chain() {
+        let json = minimal_message_value(1, Some(reply_chain_value(MAX_REPLY_TO_MESSAGE_DEPTH)));
+        let result = serde_json::from_value::<Message>(json);
+
+        assert!(result.is_ok(), "bounded reply chain must parse: {result:?}");
+        let has_reply = result.ok().and_then(|msg| msg.reply_to_message).is_some();
+        assert!(has_reply);
+    }
+
+    #[test]
+    fn message_deserialize_rejects_overdeep_reply_chain() {
+        let json =
+            minimal_message_value(1, Some(reply_chain_value(MAX_REPLY_TO_MESSAGE_DEPTH + 1)));
+        let result = serde_json::from_value::<Message>(json);
+
+        assert!(result.is_err(), "overdeep reply chain must be rejected");
+        let error_message = result.err().map_or_else(String::new, |err| err.to_string());
+        assert!(
+            error_message.contains("reply_to_message nesting exceeds Telegram parser limit"),
+            "unexpected error: {error_message}"
+        );
     }
 
     // ---- PhotoSize ----

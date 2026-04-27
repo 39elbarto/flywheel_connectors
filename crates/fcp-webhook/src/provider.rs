@@ -33,6 +33,7 @@ const MAX_STRIPE_SIGNATURE_LEN: usize = 128;
 /// decimal digits until the year 2286, so 20 allows legitimate leading-zero
 /// variants while fail-closing multi-megabyte attacker-controlled values.
 const MAX_SLACK_TIMESTAMP_LEN: usize = 20;
+const HMAC_SHA256_SIGNATURE_HEX_LEN: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
 enum WebhookClockSource {
@@ -115,6 +116,10 @@ fn deterministic_event_id_with_context(
     hasher.update(body);
     let digest = hasher.finalize();
     format!("{provider}:{}", hex::encode(digest))
+}
+
+fn is_hex_signature(value: &str, expected_len: usize) -> bool {
+    value.len() == expected_len && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Webhook provider.
@@ -654,6 +659,9 @@ impl LinearWebhook {
         // Get signature
         let signature = header_value_case_insensitive(headers, "linear-signature")?
             .ok_or_else(|| WebhookError::MissingSignature("Linear-Signature".into()))?;
+        if !is_hex_signature(signature, HMAC_SHA256_SIGNATURE_HEX_LEN) {
+            return Err(WebhookError::InvalidSignature);
+        }
 
         // Verify signature
         self.verifier.verify(body, signature)?;
@@ -919,6 +927,34 @@ mod tests {
                 .contains(TaintFlag::WebhookInjected)
         );
         assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
+    }
+
+    #[test]
+    fn linear_rejects_cross_provider_signature_prefixes() {
+        let handler = LinearWebhook::new("secret");
+        let body = br#"{"type":"Issue","webhookId":"wh_linear_prefix"}"#;
+        let raw_signature = handler.verifier.compute(body);
+
+        for prefix in ["sha256=", "v0=", "v1="] {
+            let mut headers = HashMap::new();
+            headers.insert(
+                "linear-signature".to_string(),
+                format!("{prefix}{raw_signature}"),
+            );
+
+            let result = handler.verify_and_parse(&headers, body);
+            assert!(
+                matches!(result, Err(WebhookError::InvalidSignature)),
+                "Linear-Signature prefix {prefix:?} must fail closed; got {result:?}"
+            );
+        }
+
+        let mut valid_headers = HashMap::new();
+        valid_headers.insert("linear-signature".to_string(), raw_signature);
+
+        handler
+            .verify_and_parse(&valid_headers, body)
+            .expect("raw hex Linear-Signature must still verify");
     }
 
     // ── New tests ──

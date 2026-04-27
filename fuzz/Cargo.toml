@@ -294,6 +294,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_x25519_dh"
+path = "fuzz_targets/x25519_dh.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_crypto_shamir_reconstruct"
 path = "fuzz_targets/crypto_shamir_reconstruct.rs"
 test = false

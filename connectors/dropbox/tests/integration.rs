@@ -72,6 +72,42 @@ async fn lifecycle_reconfigure_invalidates_handshake() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn lifecycle_configure_rejects_off_policy_base_url() {
+    let mut c = DropboxConnector::new();
+    let err = c
+        .handle_configure(json!({
+            "access_token": "tok",
+            "base_url": "https://evil.example.com",
+            "content_url": "https://content.dropboxapi.com/2",
+        }))
+        .await
+        .expect_err("off-policy base_url must be rejected at configure");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("api.dropboxapi.com"),
+        "configure rejection must reference the Dropbox endpoint policy: {msg}"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn lifecycle_configure_rejects_off_policy_content_url() {
+    let mut c = DropboxConnector::new();
+    let err = c
+        .handle_configure(json!({
+            "access_token": "tok",
+            "base_url": "https://api.dropboxapi.com/2",
+            "content_url": "https://evil.example.com",
+        }))
+        .await
+        .expect_err("off-policy content_url must be rejected at configure");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("content.dropboxapi.com"),
+        "configure rejection must reference the Dropbox content endpoint policy: {msg}"
+    );
+}
+
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;

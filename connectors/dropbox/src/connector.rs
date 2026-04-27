@@ -75,6 +75,7 @@ impl DropboxConfig {
             .unwrap_or(DEFAULT_BASE_URL)
             .to_string();
         reject_base_url_qfu("base_url", &base_url)?;
+        enforce_endpoint_policy("base_url", &base_url)?;
 
         let content_url = params
             .get("content_url")
@@ -82,6 +83,7 @@ impl DropboxConfig {
             .unwrap_or(DEFAULT_CONTENT_URL)
             .to_string();
         reject_base_url_qfu("content_url", &content_url)?;
+        enforce_endpoint_policy("content_url", &content_url)?;
 
         Ok(Self {
             auth,
@@ -614,6 +616,18 @@ fn reject_base_url_qfu(field: &str, url: &str) -> FcpResult<()> {
     Ok(())
 }
 
+fn enforce_endpoint_policy(field: &str, url: &str) -> FcpResult<()> {
+    let (network_ok, network_message) = base_url_policy(url);
+    if network_ok {
+        return Ok(());
+    }
+
+    Err(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} rejected by Dropbox endpoint policy: {network_message}"),
+    })
+}
+
 fn base_url_policy(base_url: &str) -> (bool, String) {
     let parsed = match Url::parse(base_url) {
         Ok(parsed) => parsed,
@@ -1017,23 +1031,26 @@ mod tests {
     }
 
     #[test]
-    fn config_custom_base_url() {
+    fn config_custom_base_url_within_policy() {
         let config = DropboxConfig::from_params(&json!({
             "access_token": "tok",
-            "base_url": "https://dropbox.example.com/2",
+            "base_url": "https://api.dropboxapi.com/2/custom",
         }))
         .unwrap();
-        assert_eq!(config.base_url, "https://dropbox.example.com/2");
+        assert_eq!(config.base_url, "https://api.dropboxapi.com/2/custom");
     }
 
     #[test]
-    fn config_custom_content_url() {
+    fn config_custom_content_url_within_policy() {
         let config = DropboxConfig::from_params(&json!({
             "access_token": "tok",
-            "content_url": "https://content.example.com/2",
+            "content_url": "https://content.dropboxapi.com/2/custom",
         }))
         .unwrap();
-        assert_eq!(config.content_url, "https://content.example.com/2");
+        assert_eq!(
+            config.content_url,
+            "https://content.dropboxapi.com/2/custom"
+        );
     }
 
     #[test]
@@ -1107,12 +1124,15 @@ mod tests {
     fn config_both_custom_urls() {
         let config = DropboxConfig::from_params(&json!({
             "access_token": "tok",
-            "base_url": "https://custom.api.dropbox.com",
-            "content_url": "https://custom.content.dropbox.com",
+            "base_url": "https://api.dropboxapi.com/2/custom",
+            "content_url": "https://content.dropboxapi.com/2/custom",
         }))
         .unwrap();
-        assert_eq!(config.base_url, "https://custom.api.dropbox.com");
-        assert_eq!(config.content_url, "https://custom.content.dropbox.com");
+        assert_eq!(config.base_url, "https://api.dropboxapi.com/2/custom");
+        assert_eq!(
+            config.content_url,
+            "https://content.dropboxapi.com/2/custom"
+        );
     }
 
     #[test]
@@ -1584,8 +1604,8 @@ mod tests {
     fn config_clone_preserves_fields() {
         let config = DropboxConfig::from_params(&json!({
             "access_token": "tok_clone_test",
-            "base_url": "https://custom.dbx.com/2",
-            "content_url": "https://content.dbx.com/2",
+            "base_url": "https://api.dropboxapi.com/2/clone",
+            "content_url": "https://content.dropboxapi.com/2/clone",
         }))
         .unwrap();
         let cloned = config.clone();
@@ -1855,15 +1875,69 @@ mod tests {
     }
 
     #[test]
-    fn provisioning_readiness_custom_base_url_rejected() {
-        let config = DropboxConfig::from_params(&json!({
+    fn from_params_rejects_non_dropbox_https_base_url_host() {
+        let err = DropboxConfig::from_params(&json!({
             "access_token": "tok",
             "base_url": "https://evil.example.com",
         }))
-        .unwrap();
-        let readiness = config.provisioning_readiness();
-        assert!(!readiness.network_ok);
-        assert!(readiness.network_message.contains("api.dropboxapi.com"));
+        .expect_err("off-policy base_url must be rejected");
+        match err {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert!(message.contains("base_url"), "got: {message}");
+                assert!(message.contains("api.dropboxapi.com"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_params_rejects_non_dropbox_https_content_url_host() {
+        let err = DropboxConfig::from_params(&json!({
+            "access_token": "tok",
+            "content_url": "https://evil.example.com",
+        }))
+        .expect_err("off-policy content_url must be rejected");
+        match err {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert!(message.contains("content_url"), "got: {message}");
+                assert!(message.contains("content.dropboxapi.com"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_params_rejects_http_non_local_base_url() {
+        let err = DropboxConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "http://api.dropboxapi.com/2",
+        }))
+        .expect_err("http base_url must be rejected");
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn from_params_rejects_http_non_local_content_url() {
+        let err = DropboxConfig::from_params(&json!({
+            "access_token": "tok",
+            "content_url": "http://content.dropboxapi.com/2",
+        }))
+        .expect_err("http content_url must be rejected");
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn from_params_accepts_localhost_for_tests() {
+        let config = DropboxConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "http://localhost:8080",
+            "content_url": "http://127.0.0.1:9090",
+        }))
+        .expect("localhost endpoints must stay allowed for deterministic tests");
+        assert_eq!(config.base_url, "http://localhost:8080");
+        assert_eq!(config.content_url, "http://127.0.0.1:9090");
     }
 
     #[test]

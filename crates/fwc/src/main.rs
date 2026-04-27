@@ -18156,9 +18156,7 @@ fn invoke_dispatch_host(
     });
 
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "invoke");
-    if matches!(response.status, InvokeStatus::Ok) {
-        envelope.inject_into(&mut payload);
-    }
+    envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
         payload,
         exit_code: match response.status {
@@ -36346,6 +36344,8 @@ depends_on = ["missing"]
         assert_eq!(payload["status"], "error");
         assert_eq!(payload["phase"], "execution");
         assert_eq!(payload["command"], "invoke");
+        assert_eq!(payload["availability"]["availability"], "live-runtime");
+        assert_eq!(payload["availability"]["authoritative"], true);
         assert!(payload["response"]["error"].is_object());
     }
 

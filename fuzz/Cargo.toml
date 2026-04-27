@@ -298,6 +298,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_anthropic_error_response"
+path = "fuzz_targets/anthropic_error_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_arxiv_atom_parser"
 path = "fuzz_targets/arxiv_atom_parser.rs"
 test = false
@@ -762,6 +769,13 @@ bench = false
 [[bin]]
 name = "fuzz_cbor_string_canonical_length"
 path = "fuzz_targets/cbor_string_canonical_length.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_cbor_map_array_canonical_length"
+path = "fuzz_targets/cbor_map_array_canonical_length.rs"
 test = false
 doc = false
 bench = false

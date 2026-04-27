@@ -534,8 +534,9 @@ async fn list_channels_happy_path() {
             .split_once('?')
             .expect("list_channels should include query params");
         assert_eq!(path, "/conversations.list");
-        let query_params: HashMap<String, String> =
-            form_urlencoded::parse(query.as_bytes()).into_owned().collect();
+        let query_params: HashMap<String, String> = form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect();
         assert_eq!(
             query_params.get("types").map(String::as_str),
             Some("public_channel")
@@ -2222,11 +2223,7 @@ async fn ok_true_with_missing_payload_is_mapped_to_api_error_not_panic() {
     let err = result.expect_err("ok=true without payload must not succeed");
 
     match &err {
-        fcp_slack::error::SlackError::Api {
-            error,
-            ok,
-            code: _,
-        } => {
+        fcp_slack::error::SlackError::Api { error, ok, code: _ } => {
             assert!(
                 *ok,
                 "error must mark ok=true so callers can distinguish partial \

@@ -659,11 +659,7 @@ async fn discord_rate_limit_surfaces_correctly() {
         .expect("handshake should succeed");
 
     // Build valid token and invoke -- should get rate limited
-    let token = build_token(
-        &signing_key,
-        "discord.send",
-        &["discord.send_message"],
-    );
+    let token = build_token(&signing_key, "discord.send", &["discord.send_message"]);
     let result = connector
         .handle_invoke(json!({
             "operation": "discord.send_message",

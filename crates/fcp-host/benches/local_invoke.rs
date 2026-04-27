@@ -61,7 +61,9 @@ fn cargo_bin(env_name: &str, binary_name: &str) -> PathBuf {
 
 fn free_loopback_addr() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral loopback port");
-    listener.local_addr().expect("read loopback listener address")
+    listener
+        .local_addr()
+        .expect("read loopback listener address")
 }
 
 fn connector_inventory(connector_binary: &str) -> String {
@@ -151,8 +153,7 @@ fn write_zone_policies_file(dir: &Path, zone_id: ZoneId) -> PathBuf {
     let mut policies = HashMap::new();
     policies.insert(policy.zone_id.as_str().to_string(), policy);
     let path = dir.join("zone-policies.json");
-    let bytes =
-        serde_json::to_vec_pretty(&policies).expect("serialize bench zone policies");
+    let bytes = serde_json::to_vec_pretty(&policies).expect("serialize bench zone policies");
     std::fs::write(&path, bytes).expect("write bench zone policies");
     path
 }

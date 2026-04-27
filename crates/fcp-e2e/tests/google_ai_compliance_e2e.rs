@@ -218,8 +218,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let resolved_capability = match capability {
         "google-ai.get_usage" => "google-ai.usage",
         "google-ai.generate_content" => "google-ai.generate",
@@ -442,8 +441,7 @@ async fn google_ai_allow_valid_token_connector_suite_passes() {
         .filter(|request| request.url.path() == "/v1beta/models/gemini-2.0-flash:generateContent")
         .count();
     assert_eq!(
-        hits,
-        1,
+        hits, 1,
         "expected exactly one POST to /v1beta/models/gemini-2.0-flash:generateContent"
     );
 }

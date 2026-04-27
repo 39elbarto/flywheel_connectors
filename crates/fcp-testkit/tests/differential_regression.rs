@@ -536,7 +536,10 @@ async fn retry_under_deadline_stops_on_timeout() {
     };
 
     assert_eq!(ctx_count, 1, "ctx retry should stop after first timeout");
-    assert_eq!(timeout_count, 1, "manual retry should stop after first timeout");
+    assert_eq!(
+        timeout_count, 1,
+        "manual retry should stop after first timeout"
+    );
     assert!(matches!(ctx_err, AsyncError::Timeout { .. }));
     assert!(matches!(timeout_err, AsyncError::Timeout { .. }));
 }

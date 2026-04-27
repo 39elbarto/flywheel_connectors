@@ -1235,7 +1235,9 @@ mod tests {
             .unwrap()
             .with_api_url("http://localhost:1234/v1");
 
-        let result = client.query_database("db-1", None, Some("cursor\nnext")).await;
+        let result = client
+            .query_database("db-1", None, Some("cursor\nnext"))
+            .await;
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -1250,7 +1252,9 @@ mod tests {
             .with_api_url("http://localhost:1234/v1");
         let cursor = "a".repeat(MAX_PAGINATION_CURSOR_BYTES + 1);
 
-        let result = client.query_database("db-1", None, Some(cursor.as_str())).await;
+        let result = client
+            .query_database("db-1", None, Some(cursor.as_str()))
+            .await;
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),

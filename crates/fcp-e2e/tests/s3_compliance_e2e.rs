@@ -72,7 +72,12 @@ impl FcpConnector for S3ConnectorAdapter {
         let request = serde_json::to_value(req).map_err(|err| FcpError::Internal {
             message: format!("failed to serialize handshake request: {err}"),
         })?;
-        let response = self.connector.lock().await.handle_handshake(request).await?;
+        let response = self
+            .connector
+            .lock()
+            .await
+            .handle_handshake(request)
+            .await?;
         serde_json::from_value(response).map_err(|err| FcpError::Internal {
             message: format!("failed to deserialize handshake response: {err}"),
         })
@@ -210,8 +215,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let resolved_capability = match capability {
         "s3.get_object" => "s3.read",
         _ => capability,

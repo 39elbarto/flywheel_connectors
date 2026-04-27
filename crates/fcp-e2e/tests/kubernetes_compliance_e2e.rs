@@ -327,8 +327,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let cose = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -523,7 +522,10 @@ async fn kubernetes_allow_valid_token_connector_suite_passes() {
         .iter()
         .filter(|request| request.url.path() == "/api/v1/namespaces/default/pods")
         .count();
-    assert_eq!(hits, 1, "expected exactly one GET to /api/v1/namespaces/default/pods");
+    assert_eq!(
+        hits, 1,
+        "expected exactly one GET to /api/v1/namespaces/default/pods"
+    );
 }
 
 // ============================================================================

@@ -426,10 +426,10 @@ mod tests {
 
         assert_eq!(sealed.enc, parsed.enc);
         assert_eq!(sealed.ciphertext, parsed.ciphertext);
-        }
+    }
 
-        #[test]
-        fn hpke_sealed_box_trailing_junk_included_in_ciphertext() {
+    #[test]
+    fn hpke_sealed_box_trailing_junk_included_in_ciphertext() {
         // from_bytes currently treats everything after HPKE_ENC_SIZE as ciphertext.
         // If there's junk, it's included, and opening will fail due to AEAD tag mismatch.
         let recipient_sk = X25519SecretKey::generate();

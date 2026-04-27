@@ -353,8 +353,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let token = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -577,8 +576,7 @@ async fn bigquery_happy_path_compliance_suite_passes() {
         .filter(|request| request.url.path() == "/projects/test-project/datasets")
         .count();
     assert_eq!(
-        hits,
-        1,
+        hits, 1,
         "expected exactly one GET to /projects/test-project/datasets"
     );
     assert_report_logs_validate(&report);

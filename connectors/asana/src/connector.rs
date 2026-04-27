@@ -1448,9 +1448,18 @@ mod tests {
             .find(|o| o["id"].as_str() == Some("asana.tasks.update"))
             .unwrap();
 
-        assert_eq!(delete_op["capability"].as_str().unwrap(), "asana.tasks.delete");
-        assert_eq!(create_op["capability"].as_str().unwrap(), "asana.tasks.write");
-        assert_eq!(update_op["capability"].as_str().unwrap(), "asana.tasks.write");
+        assert_eq!(
+            delete_op["capability"].as_str().unwrap(),
+            "asana.tasks.delete"
+        );
+        assert_eq!(
+            create_op["capability"].as_str().unwrap(),
+            "asana.tasks.write"
+        );
+        assert_eq!(
+            update_op["capability"].as_str().unwrap(),
+            "asana.tasks.write"
+        );
     }
 
     #[test]
@@ -1477,11 +1486,13 @@ mod tests {
         assert_eq!(delete_op.capability.as_str(), "asana.tasks.delete");
         assert_eq!(create_op.capability.as_str(), "asana.tasks.write");
         assert_eq!(update_op.capability.as_str(), "asana.tasks.write");
-        assert!(manifest
-            .capabilities
-            .optional
-            .iter()
-            .any(|cap| cap.as_str() == "asana.tasks.delete"));
+        assert!(
+            manifest
+                .capabilities
+                .optional
+                .iter()
+                .any(|cap| cap.as_str() == "asana.tasks.delete")
+        );
         assert_eq!(
             manifest
                 .rate_limits
@@ -1510,8 +1521,16 @@ mod tests {
             .unwrap();
         let capabilities = response["capabilities"].as_array().unwrap();
 
-        assert!(capabilities.iter().any(|cap| cap.as_str() == Some("asana.tasks.write")));
-        assert!(capabilities.iter().any(|cap| cap.as_str() == Some("asana.tasks.delete")));
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("asana.tasks.write"))
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("asana.tasks.delete"))
+        );
     }
 
     #[test]

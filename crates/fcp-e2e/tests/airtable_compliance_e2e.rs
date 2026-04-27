@@ -16,12 +16,11 @@ use chrono::{Duration as ChronoDuration, Utc};
 use fcp_async_core::sync::Mutex;
 use fcp_conformance::DynamicSuite;
 use fcp_core::{
-    AgentHint, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId,
-    ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse,
-    InvokeStatus, OperationId, OperationInfo, RequestId, RiskLevel, SafetyTier, ShutdownRequest,
-    SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
-    ZoneId,
+    AgentHint, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics,
+    FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
+    InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
+    OperationInfo, RequestId, RiskLevel, SafetyTier, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
@@ -74,7 +73,12 @@ impl FcpConnector for AirtableConnectorAdapter {
         let request = serde_json::to_value(req).map_err(|err| FcpError::Internal {
             message: format!("failed to serialize handshake request: {err}"),
         })?;
-        let response = self.connector.lock().await.handle_handshake(request).await?;
+        let response = self
+            .connector
+            .lock()
+            .await
+            .handle_handshake(request)
+            .await?;
         serde_json::from_value(response).map_err(|err| FcpError::Internal {
             message: format!("failed to deserialize handshake response: {err}"),
         })

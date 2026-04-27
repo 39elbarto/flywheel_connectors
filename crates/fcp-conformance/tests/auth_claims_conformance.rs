@@ -13,11 +13,7 @@
 //! `docs/architecture/adr/8n0rm-claim-schema-versioning.md`).
 
 use chrono::{TimeZone, Utc};
-use fcp_auth_schema::{
-    AuthClaims,
-    claims::CURRENT_SCHEMA_VERSION,
-    labels::fcp2_claims,
-};
+use fcp_auth_schema::{AuthClaims, claims::CURRENT_SCHEMA_VERSION, labels::fcp2_claims};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 
 /// Builder-output bytes must match the schema-crate's canonical CBOR.
@@ -94,8 +90,8 @@ fn minimal_claims_golden_vector() {
     assert_eq!(
         keys,
         vec![
-            fcp2_claims::CAPABILITY_ID, // -65537 → `3A 00 01 00 00`
-            fcp2_claims::ZONE_ID,       // -65538 → `3A 00 01 00 01`
+            fcp2_claims::CAPABILITY_ID,  // -65537 → `3A 00 01 00 00`
+            fcp2_claims::ZONE_ID,        // -65538 → `3A 00 01 00 01`
             fcp2_claims::SCHEMA_VERSION, // -65552 → `3A 00 01 00 0F`
         ],
         "canonical CBOR must emit keys in RFC 8949 bytewise order"
@@ -168,8 +164,14 @@ fn canonical_cbor_is_byte_deterministic() {
     let a = claims.to_canonical_cbor().unwrap();
     let b = claims.to_canonical_cbor().unwrap();
     let c = claims.to_canonical_cbor().unwrap();
-    assert_eq!(a, b, "two encodes of same AuthClaims must be byte-identical");
-    assert_eq!(b, c, "three encodes of same AuthClaims must be byte-identical");
+    assert_eq!(
+        a, b,
+        "two encodes of same AuthClaims must be byte-identical"
+    );
+    assert_eq!(
+        b, c,
+        "three encodes of same AuthClaims must be byte-identical"
+    );
 }
 
 // ── Edge-case coverage (br-8n0rm.7 follow-up) ────────────────────────

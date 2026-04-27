@@ -11,13 +11,13 @@
 //! that's the diagnostic value over plain randomized testing.
 
 use ciborium::value::{Integer, Value as CborValue};
+use fcp_crypto::AeadKey;
 use fcp_crypto::aead::XChaCha20Poly1305Cipher;
 use fcp_crypto::canonicalize::to_deterministic_cbor;
 use fcp_crypto::ed25519::{Ed25519Signature, Ed25519SigningKey};
 use fcp_crypto::hkdf::hkdf_sha256_array;
 use fcp_crypto::hpke_seal::{Fcp2Aad, HpkeSealedBox, hpke_open, hpke_seal};
 use fcp_crypto::x25519::X25519SecretKey;
-use fcp_crypto::AeadKey;
 use proptest::prelude::*;
 
 // ─── Shared strategies ────────────────────────────────────────────────────
@@ -39,7 +39,9 @@ fn cbor_value_strategy() -> impl Strategy<Value = CborValue> {
         Just(CborValue::Null),
         any::<bool>().prop_map(CborValue::Bool),
         any::<i64>().prop_map(|i| CborValue::Integer(Integer::from(i))),
-        any::<f64>().prop_filter("finite", |f| f.is_finite()).prop_map(CborValue::Float),
+        any::<f64>()
+            .prop_filter("finite", |f| f.is_finite())
+            .prop_map(CborValue::Float),
         "[ -~]{0,32}".prop_map(CborValue::Text),
         prop::collection::vec(any::<u8>(), 0..32).prop_map(CborValue::Bytes),
     ];
@@ -523,4 +525,3 @@ proptest! {
         );
     }
 }
-

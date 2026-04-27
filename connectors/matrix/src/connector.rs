@@ -1442,7 +1442,12 @@ impl MatrixConnector {
             message: "connector ready state missing capability verifier".into(),
         })?;
         let resource_uris = resource_uris_for_operation(operation, &req.input)?;
-        verifier.verify(req.capability_token, &required_cap, &req.operation, &resource_uris)?;
+        verifier.verify(
+            req.capability_token,
+            &required_cap,
+            &req.operation,
+            &resource_uris,
+        )?;
 
         let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
             message: "connector ready state missing Matrix client".into(),
@@ -1710,7 +1715,10 @@ mod tests {
         resource_allow: &[&str],
     ) -> CapabilityToken {
         let constraints = fcp_core::CapabilityConstraints {
-            resource_allow: resource_allow.iter().map(|value| (*value).to_string()).collect(),
+            resource_allow: resource_allow
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
             ..Default::default()
         };
         let mut cbor = Vec::new();

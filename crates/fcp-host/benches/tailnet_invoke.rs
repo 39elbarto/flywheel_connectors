@@ -77,7 +77,9 @@ fn cargo_bin(env_name: &str, binary_name: &str) -> PathBuf {
 
 fn free_loopback_addr() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral loopback port");
-    listener.local_addr().expect("read loopback listener address")
+    listener
+        .local_addr()
+        .expect("read loopback listener address")
 }
 
 fn connector_inventory(connector_binary: &str) -> String {
@@ -372,12 +374,9 @@ fn tailnet_invoke(c: &mut Criterion) {
                     for _ in 0..iterations {
                         let payload = harness.build_payload();
                         let started = Instant::now();
-                        let response = invoke_once_with_simulated_rtt(
-                            harness.addr,
-                            &payload,
-                            *profile,
-                        )
-                        .expect("invoke roundtrip with simulated RTT");
+                        let response =
+                            invoke_once_with_simulated_rtt(harness.addr, &payload, *profile)
+                                .expect("invoke roundtrip with simulated RTT");
                         total += started.elapsed();
                         assert!(
                             response.starts_with("HTTP/1.1 200"),

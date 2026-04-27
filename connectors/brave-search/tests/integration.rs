@@ -192,10 +192,16 @@ async fn web_search_401_unauthorized_maps_to_non_retryable_external_error() {
                 retry_after = ?retry_after,
                 "got external error",
             );
-            assert_eq!(service, "brave-search", "service label must be brave-search");
+            assert_eq!(
+                service, "brave-search",
+                "service label must be brave-search"
+            );
             assert_eq!(status_code, Some(401), "status_code must be 401");
             assert!(!retryable, "401 is an auth problem, not a transient one");
-            assert!(retry_after.is_none(), "401 without Retry-After must not fabricate one");
+            assert!(
+                retry_after.is_none(),
+                "401 without Retry-After must not fabricate one"
+            );
             assert!(
                 message.contains("401"),
                 "error message should carry the HTTP status for diagnosability; got {message:?}",

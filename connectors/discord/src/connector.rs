@@ -2366,19 +2366,16 @@ mod tests {
 
     #[test]
     fn validate_discord_endpoint_url_rejects_fragment() {
-        let err =
-            validate_discord_endpoint_url("https://discord.com/api/v10#frag", "api_url")
-                .unwrap_err();
+        let err = validate_discord_endpoint_url("https://discord.com/api/v10#frag", "api_url")
+            .unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
     #[test]
     fn validate_discord_endpoint_url_rejects_userinfo() {
-        let err = validate_discord_endpoint_url(
-            "https://attacker:pw@discord.com/api/v10",
-            "api_url",
-        )
-        .unwrap_err();
+        let err =
+            validate_discord_endpoint_url("https://attacker:pw@discord.com/api/v10", "api_url")
+                .unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("userinfo"), "got: {message}");
@@ -2389,8 +2386,7 @@ mod tests {
 
     #[test]
     fn validate_discord_endpoint_url_rejects_bad_scheme() {
-        let err = validate_discord_endpoint_url("ftp://discord.com/api", "api_url")
-            .unwrap_err();
+        let err = validate_discord_endpoint_url("ftp://discord.com/api", "api_url").unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
@@ -2408,8 +2404,8 @@ mod tests {
 
     #[test]
     fn validate_discord_endpoint_url_rejects_plain_http_on_public_host() {
-        let err = validate_discord_endpoint_url("http://discord.com/api/v10", "api_url")
-            .unwrap_err();
+        let err =
+            validate_discord_endpoint_url("http://discord.com/api/v10", "api_url").unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 

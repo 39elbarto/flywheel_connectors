@@ -216,8 +216,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let cose = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -312,11 +311,7 @@ async fn google_drive_default_deny_compliance_suite_passes() {
     // Token grants `drive.write` but invoke targets `drive.get_file`
     // (which requires `drive.read`) → denial.
     let token = build_token(&signing_key, "drive.write", &["drive.upload_file"]);
-    let invoke = invoke_request(
-        "drive.get_file",
-        json!({ "file_id": "file_123" }),
-        token,
-    );
+    let invoke = invoke_request("drive.get_file", json!({ "file_id": "file_123" }), token);
 
     let dynamic = DynamicSuite {
         config: drive_config(&mock.base_url()),
@@ -361,11 +356,7 @@ async fn google_drive_happy_path_connector_suite_passes() {
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["drive.read"]);
     let token = build_token(&signing_key, "drive.read", &["drive.get_file"]);
-    let invoke = invoke_request(
-        "drive.get_file",
-        json!({ "file_id": "file_123" }),
-        token,
-    );
+    let invoke = invoke_request("drive.get_file", json!({ "file_id": "file_123" }), token);
 
     let suite = ConnectorSuite {
         test_name: "google_drive_happy_path".to_string(),

@@ -15667,7 +15667,8 @@ fn managed_connector_from_artifact(
         // Preserve any zone binding the operator has pinned for this
         // connector; default (empty) keeps pre-binding behavior.
         allowed_zones: existing.map_or_else(Vec::new, |entry| entry.allowed_zones.clone()),
-        allowed_operations: existing.map_or_else(Vec::new, |entry| entry.allowed_operations.clone()),
+        allowed_operations: existing
+            .map_or_else(Vec::new, |entry| entry.allowed_operations.clone()),
     }
 }
 

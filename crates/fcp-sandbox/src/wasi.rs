@@ -2362,9 +2362,15 @@ mod tests {
         };
 
         assert!(matches!(err, WasiError::FsAccessDenied { .. }));
-        assert!(err.to_string().contains("must already exist as directories"));
+        assert!(
+            err.to_string()
+                .contains("must already exist as directories")
+        );
         assert!(err.to_string().contains(&missing.display().to_string()));
-        assert!(!missing.exists(), "missing file-like preopen should not be auto-created");
+        assert!(
+            !missing.exists(),
+            "missing file-like preopen should not be auto-created"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

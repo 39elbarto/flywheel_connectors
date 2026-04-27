@@ -202,7 +202,6 @@ pub struct BootstrapOutcome {
     // encourages silent phrase-drop. Test callers use
     // `.into_genesis()` or `outcome.genesis.method()` explicitly so
     // the discard of `recovery_phrase` is visible in the code.)
-
     /// Freshly-generated recovery phrase for single-device bootstrap
     /// mode. `None` for every other mode:
     ///
@@ -484,9 +483,7 @@ impl BootstrapWorkflow {
     /// which the regression test at
     /// `single_device_bootstrap_outcome_carries_recovery_phrase`
     /// pins against accidental regression.
-    fn run_single_device_bootstrap(
-        &mut self,
-    ) -> BootstrapResult<(GenesisState, RecoveryPhrase)> {
+    fn run_single_device_bootstrap(&mut self) -> BootstrapResult<(GenesisState, RecoveryPhrase)> {
         self.phase = BootstrapPhase::KeyGeneration;
         write_phase_lock(&self.config.data_dir, &self.phase)?;
 
@@ -505,9 +502,7 @@ impl BootstrapWorkflow {
         // responsible for the display-and-acknowledge cycle. This
         // tracing::info is intentionally word-free — the real phrase
         // must never reach the tracing sink.
-        tracing::info!(
-            "Recovery phrase generated and handed to caller for out-of-band storage"
-        );
+        tracing::info!("Recovery phrase generated and handed to caller for out-of-band storage");
 
         self.phase = BootstrapPhase::GenesisCreate;
         write_phase_lock(&self.config.data_dir, &self.phase)?;
@@ -1834,7 +1829,11 @@ mod tests {
             .build()
             .unwrap();
 
-        let genesis = BootstrapWorkflow::new(config).unwrap().run().unwrap().into_genesis();
+        let genesis = BootstrapWorkflow::new(config)
+            .unwrap()
+            .run()
+            .unwrap()
+            .into_genesis();
 
         // Read back the saved genesis and verify
         let cbor = std::fs::read(dir.path().join("genesis.cbor")).unwrap();
@@ -1856,7 +1855,11 @@ mod tests {
             .build()
             .unwrap();
 
-        BootstrapWorkflow::new(config).unwrap().run().unwrap().into_genesis();
+        BootstrapWorkflow::new(config)
+            .unwrap()
+            .run()
+            .unwrap()
+            .into_genesis();
 
         let dir_mode = std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700);
@@ -1982,7 +1985,11 @@ mod tests {
             .build()
             .unwrap();
 
-        let genesis2 = BootstrapWorkflow::new(config).unwrap().run().unwrap().into_genesis();
+        let genesis2 = BootstrapWorkflow::new(config)
+            .unwrap()
+            .run()
+            .unwrap()
+            .into_genesis();
         // New genesis should have a different fingerprint (different key)
         assert_ne!(fp1, genesis2.fingerprint());
     }

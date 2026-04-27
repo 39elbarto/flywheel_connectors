@@ -22,10 +22,10 @@ use fcp_async_core::sync::Mutex;
 use fcp_async_core::task::JoinHandle as AsyncJoinHandle;
 use fcp_core::{
     AttestationMaterial, AttestationMetadata, AttestationPredicateType, CapabilityConstraints,
-    CapabilityToken, CorrelationId, DecisionReceiptPolicy, ObjectHeader, Provenance,
-    RollbackRules, RolloutPolicy, SBOM_SIGNED_FIELDS, SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS,
-    SbomComponent, SbomDependency, SuccessThresholds, TransitionReason, ZoneId,
-    ZonePolicyObject, ZoneTransportPolicy,
+    CapabilityToken, CorrelationId, DecisionReceiptPolicy, ObjectHeader, Provenance, RollbackRules,
+    RolloutPolicy, SBOM_SIGNED_FIELDS, SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent,
+    SbomDependency, SuccessThresholds, TransitionReason, ZoneId, ZonePolicyObject,
+    ZoneTransportPolicy,
 };
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;

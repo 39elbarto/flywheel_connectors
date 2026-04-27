@@ -24,7 +24,12 @@ fn obj(label: &str) -> ObjectId {
 fn build_gossip_with_objects(node: &str, zone: &ZoneId, items: &[&str]) -> MeshGossip {
     let mut gossip = MeshGossip::with_defaults(TailscaleNodeId::new(node));
     for (idx, name) in items.iter().enumerate() {
-        gossip.announce_object(zone, &obj(name), ObjectAdmissionClass::Admitted, 1_000 + idx as u64);
+        gossip.announce_object(
+            zone,
+            &obj(name),
+            ObjectAdmissionClass::Admitted,
+            1_000 + idx as u64,
+        );
     }
     gossip
 }

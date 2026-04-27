@@ -73,10 +73,7 @@ fn hex_to_bytes(hex: &str) -> Vec<u8> {
 fn signature_byte_range(token_bytes: &[u8]) -> std::ops::Range<usize> {
     assert!(token_bytes.len() >= 66, "token too short to contain sig");
     let start_marker = token_bytes.len() - 66;
-    assert_eq!(
-        token_bytes[start_marker], 0x58,
-        "expected bstr marker 0x58"
-    );
+    assert_eq!(token_bytes[start_marker], 0x58, "expected bstr marker 0x58");
     assert_eq!(token_bytes[start_marker + 1], 0x40, "expected length 64");
     (start_marker + 2)..token_bytes.len()
 }
@@ -486,8 +483,7 @@ fn capability_token_cbor_roundtrip_preserves_signature() {
     // does, it must not verify. Strip the last byte of the signature.
     let mut truncated = bytes.clone();
     truncated.pop();
-    let verdict = CoseToken::from_cbor(&truncated)
-        .and_then(|t| t.verify(&issuer.verifying_key()));
+    let verdict = CoseToken::from_cbor(&truncated).and_then(|t| t.verify(&issuer.verifying_key()));
     assert!(
         verdict.is_err(),
         "truncated token MUST fail either decode or verify (cannot silently \

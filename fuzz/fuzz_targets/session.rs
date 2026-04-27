@@ -16,9 +16,7 @@
 #![no_main]
 
 use fcp_cbor::to_canonical_cbor;
-use fcp_protocol::{
-    SESSION_COOKIE_SIZE, decode_ack_cbor, decode_cookie_bytes, decode_hello_cbor,
-};
+use fcp_protocol::{SESSION_COOKIE_SIZE, decode_ack_cbor, decode_cookie_bytes, decode_hello_cbor};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -45,13 +43,13 @@ fuzz_target!(|data: &[u8]| {
         // Redecode the re-encoded bytes and require structural
         // equality: the public Serialize/Deserialize contract is what
         // every session peer relies on.
-        let round_trip = decode_hello_cbor(&re_canonical)
-            .expect("canonically re-encoded hello must redecode");
+        let round_trip =
+            decode_hello_cbor(&re_canonical).expect("canonically re-encoded hello must redecode");
         // MeshSessionHello doesn't derive PartialEq, so compare via the
         // canonical byte-projection (the same projection peers use to
         // recognise the structure on the wire).
-        let round_trip_bytes = to_canonical_cbor(&round_trip)
-            .expect("round-tripped hello must re-canonicalize");
+        let round_trip_bytes =
+            to_canonical_cbor(&round_trip).expect("round-tripped hello must re-canonicalize");
         assert_eq!(
             round_trip_bytes, re_canonical,
             "decode(encode(hello)) must be canonically identical to hello",
@@ -94,10 +92,10 @@ fuzz_target!(|data: &[u8]| {
             "decode_ack_cbor accepted input differs from its canonical re-encoding",
         );
 
-        let round_trip = decode_ack_cbor(&re_canonical)
-            .expect("canonically re-encoded ack must redecode");
-        let round_trip_bytes = to_canonical_cbor(&round_trip)
-            .expect("round-tripped ack must re-canonicalize");
+        let round_trip =
+            decode_ack_cbor(&re_canonical).expect("canonically re-encoded ack must redecode");
+        let round_trip_bytes =
+            to_canonical_cbor(&round_trip).expect("round-tripped ack must re-canonicalize");
         assert_eq!(
             round_trip_bytes, re_canonical,
             "decode(encode(ack)) must be canonically identical to ack",

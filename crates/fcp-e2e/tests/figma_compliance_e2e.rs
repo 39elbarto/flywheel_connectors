@@ -242,8 +242,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let resolved_capability = match capability {
         "figma.get_file" => "figma.read",
         "figma.delete_webhook" => "figma.delete",

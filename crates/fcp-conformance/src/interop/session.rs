@@ -423,7 +423,11 @@ fn test_nonce_freshness() -> Result<(), String> {
         HelloReplayWindow, MeshSessionHello, SessionCryptoSuite, SessionNonce, current_timestamp,
     };
 
-    fn signed_hello(from: &str, nonce: [u8; 16], signing_key: &Ed25519SigningKey) -> MeshSessionHello {
+    fn signed_hello(
+        from: &str,
+        nonce: [u8; 16],
+        signing_key: &Ed25519SigningKey,
+    ) -> MeshSessionHello {
         let eph_key = X25519SecretKey::generate();
         let mut hello = MeshSessionHello {
             from: TailscaleNodeId::new(from),

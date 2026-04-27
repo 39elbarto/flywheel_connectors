@@ -225,7 +225,6 @@ mod tests {
         assert!(!vectors.is_empty(), "vectors should be populated");
     }
 
-
     #[test]
     fn canonical_vectors_match() {
         for vector in CanonicalPayloadGoldenVector::load_all() {

@@ -1442,8 +1442,7 @@ mod tests {
     #[test]
     fn validate_api_url_for_auth_accepts_api_linear_app_with_api_key() {
         let auth = LinearAuth::ApiKey("lin_api_test".into());
-        let out =
-            validate_api_url_for_auth("https://api.linear.app/graphql", &auth).unwrap();
+        let out = validate_api_url_for_auth("https://api.linear.app/graphql", &auth).unwrap();
         assert_eq!(out, "https://api.linear.app/graphql");
     }
 
@@ -1451,8 +1450,7 @@ mod tests {
     fn validate_api_url_for_auth_rejects_query_string_with_api_key() {
         let auth = LinearAuth::ApiKey("lin_api_test".into());
         let err =
-            validate_api_url_for_auth("https://api.linear.app/graphql?leak=x", &auth)
-                .unwrap_err();
+            validate_api_url_for_auth("https://api.linear.app/graphql?leak=x", &auth).unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("query"), "got: {message}");
@@ -1464,19 +1462,16 @@ mod tests {
     #[test]
     fn validate_api_url_for_auth_rejects_fragment_with_api_key() {
         let auth = LinearAuth::ApiKey("lin_api_test".into());
-        let err = validate_api_url_for_auth("https://api.linear.app/graphql#frag", &auth)
-            .unwrap_err();
+        let err =
+            validate_api_url_for_auth("https://api.linear.app/graphql#frag", &auth).unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
     #[test]
     fn validate_api_url_for_auth_rejects_userinfo_with_api_key() {
         let auth = LinearAuth::ApiKey("lin_api_test".into());
-        let err = validate_api_url_for_auth(
-            "https://attacker:pw@api.linear.app/graphql",
-            &auth,
-        )
-        .unwrap_err();
+        let err = validate_api_url_for_auth("https://attacker:pw@api.linear.app/graphql", &auth)
+            .unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("userinfo"), "got: {message}");
@@ -1489,11 +1484,8 @@ mod tests {
     fn validate_api_url_for_auth_rejects_query_string_with_credential_id() {
         let cid = fcp_core::CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let auth = LinearAuth::CredentialId(cid);
-        let err = validate_api_url_for_auth(
-            "https://vault-proxy.example/graphql?leak=x",
-            &auth,
-        )
-        .unwrap_err();
+        let err = validate_api_url_for_auth("https://vault-proxy.example/graphql?leak=x", &auth)
+            .unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
@@ -1501,9 +1493,8 @@ mod tests {
     fn validate_api_url_for_auth_rejects_substring_smuggle_with_api_key() {
         // Parsed host is evil.com, not api.linear.app — rejected.
         let auth = LinearAuth::ApiKey("lin_api_test".into());
-        let err =
-            validate_api_url_for_auth("https://evil.com/api.linear.app/graphql", &auth)
-                .unwrap_err();
+        let err = validate_api_url_for_auth("https://evil.com/api.linear.app/graphql", &auth)
+            .unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
@@ -1645,25 +1636,19 @@ mod tests {
 
     #[test]
     fn test_resource_uris_for_issue_operations() {
-        let get_issue = resource_uris_for_operation(
-            "linear.get_issue",
-            &json!({ "issue_id": "issue-42" }),
-        )
-        .unwrap();
+        let get_issue =
+            resource_uris_for_operation("linear.get_issue", &json!({ "issue_id": "issue-42" }))
+                .unwrap();
         assert_eq!(get_issue, vec!["linear://issue/issue-42"]);
 
-        let create_issue = resource_uris_for_operation(
-            "linear.create_issue",
-            &json!({ "team_id": "team-7" }),
-        )
-        .unwrap();
+        let create_issue =
+            resource_uris_for_operation("linear.create_issue", &json!({ "team_id": "team-7" }))
+                .unwrap();
         assert_eq!(create_issue, vec!["linear://team/team-7/issues"]);
 
-        let add_comment = resource_uris_for_operation(
-            "linear.add_comment",
-            &json!({ "issue_id": "issue-42" }),
-        )
-        .unwrap();
+        let add_comment =
+            resource_uris_for_operation("linear.add_comment", &json!({ "issue_id": "issue-42" }))
+                .unwrap();
         assert_eq!(add_comment, vec!["linear://issue/issue-42/comments"]);
     }
 

@@ -337,8 +337,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let token = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -562,7 +561,10 @@ async fn snowflake_allow_valid_token_connector_suite_passes() {
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
     );
     let received = mock.received_requests().await;
-    let hits = received.iter().filter(|r| r.url.path() == "/databases").count();
+    let hits = received
+        .iter()
+        .filter(|r| r.url.path() == "/databases")
+        .count();
     assert_eq!(hits, 1, "expected exactly one GET to /databases");
 }
 
@@ -650,7 +652,10 @@ async fn snowflake_dangerous_execute_emits_receipt_audit_and_stable_evidence() {
         ))
     );
     let received = mock.received_requests().await;
-    let hits = received.iter().filter(|r| r.url.path() == "/statements").count();
+    let hits = received
+        .iter()
+        .filter(|r| r.url.path() == "/statements")
+        .count();
     assert_eq!(hits, 1, "expected exactly one POST to /statements");
 }
 

@@ -211,8 +211,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let cose = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -424,8 +423,7 @@ async fn gmail_allow_valid_token_connector_suite_passes() {
         .filter(|request| request.url.path() == "/users/me/messages/18d1234abc567890")
         .count();
     assert_eq!(
-        hits,
-        1,
+        hits, 1,
         "expected exactly one GET to /users/me/messages/18d1234abc567890"
     );
 }

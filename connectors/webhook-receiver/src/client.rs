@@ -654,8 +654,12 @@ mod tests {
             "bounded event retention should evict the oldest event body"
         );
 
-        let mut replay =
-            WebhookEvent::new(ep.endpoint_id.clone(), json!({"index": "replay"}), true, None);
+        let mut replay = WebhookEvent::new(
+            ep.endpoint_id.clone(),
+            json!({"index": "replay"}),
+            true,
+            None,
+        );
         replay.event_id = "evt_replay".into();
         let err = store
             .record_event(replay)

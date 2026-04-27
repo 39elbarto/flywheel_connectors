@@ -1249,8 +1249,14 @@ mod tests {
             .find(|o| o["id"].as_str() == Some("clickup.tasks.create"))
             .unwrap();
 
-        assert_eq!(delete_op["capability"].as_str().unwrap(), "clickup.tasks.delete");
-        assert_eq!(create_op["capability"].as_str().unwrap(), "clickup.tasks.write");
+        assert_eq!(
+            delete_op["capability"].as_str().unwrap(),
+            "clickup.tasks.delete"
+        );
+        assert_eq!(
+            create_op["capability"].as_str().unwrap(),
+            "clickup.tasks.write"
+        );
     }
 
     #[test]
@@ -1271,11 +1277,13 @@ mod tests {
 
         assert_eq!(delete_op.capability.as_str(), "clickup.tasks.delete");
         assert_eq!(create_op.capability.as_str(), "clickup.tasks.write");
-        assert!(manifest
-            .capabilities
-            .optional
-            .iter()
-            .any(|cap| cap.as_str() == "clickup.tasks.delete"));
+        assert!(
+            manifest
+                .capabilities
+                .optional
+                .iter()
+                .any(|cap| cap.as_str() == "clickup.tasks.delete")
+        );
         assert_eq!(
             manifest
                 .rate_limits
@@ -1304,8 +1312,16 @@ mod tests {
             .unwrap();
         let capabilities = response["capabilities"].as_array().unwrap();
 
-        assert!(capabilities.iter().any(|cap| cap.as_str() == Some("clickup.tasks.write")));
-        assert!(capabilities.iter().any(|cap| cap.as_str() == Some("clickup.tasks.delete")));
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("clickup.tasks.write"))
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("clickup.tasks.delete"))
+        );
     }
 
     // ── require_str edge cases ────────────────────────────────────
@@ -1657,8 +1673,7 @@ mod tests {
     fn validate_base_url_for_auth_rejects_query_string_with_token() {
         let auth = ClickUpAuth::ApiToken("pk_test".into());
         let err =
-            validate_base_url_for_auth("https://api.clickup.com/api/v2?leak=x", &auth)
-                .unwrap_err();
+            validate_base_url_for_auth("https://api.clickup.com/api/v2?leak=x", &auth).unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("query"), "got: {message}");
@@ -1671,19 +1686,15 @@ mod tests {
     fn validate_base_url_for_auth_rejects_fragment_with_token() {
         let auth = ClickUpAuth::ApiToken("pk_test".into());
         let err =
-            validate_base_url_for_auth("https://api.clickup.com/api/v2#frag", &auth)
-                .unwrap_err();
+            validate_base_url_for_auth("https://api.clickup.com/api/v2#frag", &auth).unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
     #[test]
     fn validate_base_url_for_auth_rejects_userinfo_with_token() {
         let auth = ClickUpAuth::ApiToken("pk_test".into());
-        let err = validate_base_url_for_auth(
-            "https://attacker:pw@api.clickup.com/api/v2",
-            &auth,
-        )
-        .unwrap_err();
+        let err = validate_base_url_for_auth("https://attacker:pw@api.clickup.com/api/v2", &auth)
+            .unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("userinfo"), "got: {message}");
@@ -1696,19 +1707,15 @@ mod tests {
     fn validate_base_url_for_auth_rejects_query_string_with_credential_id() {
         let auth = ClickUpAuth::CredentialId(CredentialId::new());
         let err =
-            validate_base_url_for_auth("https://vault-proxy.example/v2?leak=x", &auth)
-                .unwrap_err();
+            validate_base_url_for_auth("https://vault-proxy.example/v2?leak=x", &auth).unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
     #[test]
     fn validate_base_url_for_auth_rejects_substring_smuggle_with_token() {
         let auth = ClickUpAuth::ApiToken("pk_test".into());
-        let err = validate_base_url_for_auth(
-            "https://evil.com/api.clickup.com/api/v2",
-            &auth,
-        )
-        .unwrap_err();
+        let err = validate_base_url_for_auth("https://evil.com/api.clickup.com/api/v2", &auth)
+            .unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 }

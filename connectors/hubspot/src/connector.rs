@@ -2277,8 +2277,7 @@ mod tests {
     #[test]
     fn validate_base_url_for_auth_rejects_query_string_with_token() {
         let auth = HubSpotAuth::BearerToken("pat-na1-test".into());
-        let err =
-            validate_base_url_for_auth("https://api.hubapi.com/?leak=x", &auth).unwrap_err();
+        let err = validate_base_url_for_auth("https://api.hubapi.com/?leak=x", &auth).unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("query"), "got: {message}");
@@ -2290,8 +2289,7 @@ mod tests {
     #[test]
     fn validate_base_url_for_auth_rejects_fragment_with_token() {
         let auth = HubSpotAuth::BearerToken("pat-na1-test".into());
-        let err =
-            validate_base_url_for_auth("https://api.hubapi.com/#frag", &auth).unwrap_err();
+        let err = validate_base_url_for_auth("https://api.hubapi.com/#frag", &auth).unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
@@ -2299,8 +2297,7 @@ mod tests {
     fn validate_base_url_for_auth_rejects_userinfo_with_token() {
         let auth = HubSpotAuth::BearerToken("pat-na1-test".into());
         let err =
-            validate_base_url_for_auth("https://attacker:pw@api.hubapi.com/", &auth)
-                .unwrap_err();
+            validate_base_url_for_auth("https://attacker:pw@api.hubapi.com/", &auth).unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("userinfo"), "got: {message}");
@@ -2314,8 +2311,7 @@ mod tests {
         let cid = CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let auth = HubSpotAuth::CredentialId(cid);
         let err =
-            validate_base_url_for_auth("https://vault-proxy.example/?leak=x", &auth)
-                .unwrap_err();
+            validate_base_url_for_auth("https://vault-proxy.example/?leak=x", &auth).unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
@@ -2787,9 +2783,18 @@ mod tests {
             .find(|o| o["id"] == "hubspot.contacts.update")
             .unwrap();
 
-        assert_eq!(delete["capability"].as_str().unwrap(), "hubspot.contacts.delete");
-        assert_eq!(create["capability"].as_str().unwrap(), "hubspot.contacts.write");
-        assert_eq!(update["capability"].as_str().unwrap(), "hubspot.contacts.write");
+        assert_eq!(
+            delete["capability"].as_str().unwrap(),
+            "hubspot.contacts.delete"
+        );
+        assert_eq!(
+            create["capability"].as_str().unwrap(),
+            "hubspot.contacts.write"
+        );
+        assert_eq!(
+            update["capability"].as_str().unwrap(),
+            "hubspot.contacts.write"
+        );
         assert_ne!(
             delete["capability"].as_str().unwrap(),
             create["capability"].as_str().unwrap()
@@ -2821,11 +2826,13 @@ mod tests {
         assert_eq!(create_op.capability.as_str(), "hubspot.contacts.write");
         assert_eq!(update_op.capability.as_str(), "hubspot.contacts.write");
 
-        assert!(manifest
-            .capabilities
-            .optional
-            .iter()
-            .any(|cap| cap.as_str() == "hubspot.contacts.delete"));
+        assert!(
+            manifest
+                .capabilities
+                .optional
+                .iter()
+                .any(|cap| cap.as_str() == "hubspot.contacts.delete")
+        );
 
         let rate_limits = manifest
             .rate_limits

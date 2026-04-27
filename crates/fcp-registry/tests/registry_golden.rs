@@ -33,12 +33,10 @@ fn deterministic_signature_artifact(
             .to_string(),
         context: "fcp.registry.manifest.v1".to_string(),
         manifest_signing_hash:
-            "sha256:9b4b2e6bb4c26f6d7466f4b9ce43d1d9d6f4a0d1fc88d5c1b5cdb9f11ecf7a21"
-                .to_string(),
+            "sha256:9b4b2e6bb4c26f6d7466f4b9ce43d1d9d6f4a0d1fc88d5c1b5cdb9f11ecf7a21".to_string(),
         binary_hash: "sha256:46fbcf3f0f0d3e6f8c0c8060c0b881f3d25b235fc31dd8206dfa81857232ece2"
             .to_string(),
-        signature:
-            "base64:Z29sZGVuLXJlZ2lzdHJ5LXNpZ25hdHVyZS1wYXlsb2FkLWRlbW8=".to_string(),
+        signature: "base64:Z29sZGVuLXJlZ2lzdHJ5LXNpZ25hdHVyZS1wYXlsb2FkLWRlbW8=".to_string(),
         target,
         binary_name: binary_name.to_string(),
     }
@@ -82,9 +80,8 @@ fn registry_golden_manifest_lookup_response() {
                 manifest_url:
                     "/v1/connectors/fcp.minimal/versions/0.1.0/targets/linux/amd64/manifest"
                         .to_string(),
-                binary_url:
-                    "/v1/connectors/fcp.minimal/versions/0.1.0/targets/linux/amd64/binary"
-                        .to_string(),
+                binary_url: "/v1/connectors/fcp.minimal/versions/0.1.0/targets/linux/amd64/binary"
+                    .to_string(),
                 signature_url:
                     "/v1/connectors/fcp.minimal/versions/0.1.0/targets/linux/amd64/signature"
                         .to_string(),
@@ -97,10 +94,7 @@ fn registry_golden_manifest_lookup_response() {
         }],
     };
 
-    insta::assert_snapshot!(
-        "manifest_lookup_response",
-        pretty_json(&descriptor)
-    );
+    insta::assert_snapshot!("manifest_lookup_response", pretty_json(&descriptor));
 }
 
 #[test]
@@ -123,10 +117,7 @@ fn registry_golden_supply_chain_verification_config() {
         require_sigstore: true,
     };
 
-    insta::assert_snapshot!(
-        "supply_chain_verification_config",
-        pretty_json(&config)
-    );
+    insta::assert_snapshot!("supply_chain_verification_config", pretty_json(&config));
 }
 
 #[test]
@@ -139,17 +130,17 @@ fn registry_golden_signed_artifact_descriptor() {
         "registry-golden",
     );
 
-    insta::assert_snapshot!(
-        "signed_artifact_descriptor",
-        pretty_json(&artifact)
-    );
+    insta::assert_snapshot!("signed_artifact_descriptor", pretty_json(&artifact));
 }
 
 #[test]
 fn registry_golden_revocation_list_format() {
     let revocation_a = RevocationObject {
         header: revocation_header("RevocationObject", 1_730_000_000),
-        revoked: vec![ObjectId::from_bytes([0x11; 32]), ObjectId::from_bytes([0x22; 32])],
+        revoked: vec![
+            ObjectId::from_bytes([0x11; 32]),
+            ObjectId::from_bytes([0x22; 32]),
+        ],
         scope: RevocationScope::ConnectorBinary,
         reason: "registry bundle superseded by security release".to_string(),
         effective_at: 1_730_000_120,
@@ -190,8 +181,5 @@ fn registry_golden_revocation_list_format() {
         revocations: vec![revocation_a, revocation_b],
     };
 
-    insta::assert_snapshot!(
-        "revocation_list_format",
-        pretty_json(&list)
-    );
+    insta::assert_snapshot!("revocation_list_format", pretty_json(&list));
 }

@@ -852,9 +852,9 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
 /// br-gs71m: allow-listed Intercom API hosts. Intercom regions per
 /// https://developers.intercom.com/docs/build-an-integration/learn-more/rest-apis/api-base-urls/
 const ALLOWED_INTERCOM_HOSTS: &[&str] = &[
-    "api.intercom.io",      // US (default)
-    "api.eu.intercom.io",   // EU region
-    "api.au.intercom.io",   // AU region
+    "api.intercom.io",    // US (default)
+    "api.eu.intercom.io", // EU region
+    "api.au.intercom.io", // AU region
 ];
 
 fn is_local_test_host(host: &str) -> bool {
@@ -1453,7 +1453,6 @@ mod tests {
             delete["capability"].as_str().unwrap(),
             "create and delete must require different capabilities",
         );
-
     }
 
     #[test]

@@ -435,8 +435,7 @@ mod tests {
 
     #[test]
     fn normalize_base_url_rejects_userinfo() {
-        let err = normalize_base_url("https://attacker:pw@graph.facebook.com/v21.0")
-            .unwrap_err();
+        let err = normalize_base_url("https://attacker:pw@graph.facebook.com/v21.0").unwrap_err();
         match err {
             WhatsAppError::Config(msg) => assert!(msg.contains("userinfo"), "got: {msg}"),
             other => panic!("expected Config, got {other:?}"),

@@ -1413,8 +1413,8 @@ deny_ptrace = true
             "[timeouts]\nrequest_timeout_ms = 48000\nconnect_timeout_ms = 8000\nwall_clock_timeout_ms = 95000\n\n",
         )))
         .expect("manifest should parse");
-        let config = ConnectorRuntimeConfig::from_manifest(&manifest)
-            .expect("opt-in path should succeed");
+        let config =
+            ConnectorRuntimeConfig::from_manifest(&manifest).expect("opt-in path should succeed");
         assert_eq!(
             config.request_timeout,
             Duration::from_secs(99),

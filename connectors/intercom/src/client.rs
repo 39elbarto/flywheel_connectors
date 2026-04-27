@@ -553,9 +553,7 @@ mod tests {
     #[test]
     fn sanitize_path_segment_rejects_non_ascii() {
         assert!(IntercomClient::sanitize_path_segment("café", "contact_id").is_err());
-        assert!(
-            IntercomClient::sanitize_path_segment("id\u{200B}admin", "contact_id").is_err(),
-        );
+        assert!(IntercomClient::sanitize_path_segment("id\u{200B}admin", "contact_id").is_err(),);
     }
 
     /// br-low9w: oversized payload bounded by MAX_PATH_SEGMENT_LEN

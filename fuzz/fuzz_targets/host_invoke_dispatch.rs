@@ -104,7 +104,8 @@ fn capability_id_from_seed(seed: u32) -> CapabilityId {
 
 fn operation_id_from_seed(seed: u32) -> OperationId {
     let suffix = format!("{seed:08x}");
-    OperationId::new(format!("fuzz.op.{suffix}")).expect("hex-suffixed operation id must be canonical")
+    OperationId::new(format!("fuzz.op.{suffix}"))
+        .expect("hex-suffixed operation id must be canonical")
 }
 
 fn connector_id_from_seed(seed: u32) -> ConnectorId {
@@ -170,16 +171,28 @@ fn build_zone_policy(input: &FuzzInput, zone_id: ZoneId) -> ZonePolicyObject {
     let allow_seed = format!("user:{:08x}", input.connector_seed);
     let principal_allow = match input.policy_mode % 4 {
         0 => Vec::new(), // no allow list
-        1 => vec![PolicyPattern { pattern: "*".into() }],
-        2 => vec![PolicyPattern { pattern: allow_seed.clone() }],
+        1 => vec![PolicyPattern {
+            pattern: "*".into(),
+        }],
+        2 => vec![PolicyPattern {
+            pattern: allow_seed.clone(),
+        }],
         _ => vec![
-            PolicyPattern { pattern: "user:*".into() },
-            PolicyPattern { pattern: "agent:*".into() },
+            PolicyPattern {
+                pattern: "user:*".into(),
+            },
+            PolicyPattern {
+                pattern: "agent:*".into(),
+            },
         ],
     };
     let principal_deny = match input.policy_mode % 7 {
-        3 => vec![PolicyPattern { pattern: "*:fuzz".into() }],
-        5 => vec![PolicyPattern { pattern: format!("{}-deny", allow_seed) }],
+        3 => vec![PolicyPattern {
+            pattern: "*:fuzz".into(),
+        }],
+        5 => vec![PolicyPattern {
+            pattern: format!("{}-deny", allow_seed),
+        }],
         _ => Vec::new(),
     };
     ZonePolicyObject {
@@ -286,12 +299,8 @@ fuzz_target!(|data: &[u8]| {
     // Snapshot before consuming `token`.
     let token_for_simulation = token.clone();
 
-    let verify_result = verifier.verify_unbound(
-        token,
-        &required_capability,
-        &required_operation,
-        &resources,
-    );
+    let verify_result =
+        verifier.verify_unbound(token, &required_capability, &required_operation, &resources);
 
     // Invariant: when verify_unbound returns Ok, the produced
     // UnboundVerified token must carry verified claims and the request
@@ -391,7 +400,9 @@ fuzz_target!(|data: &[u8]| {
                 );
             }
             (Err(_), Err(_)) => {}
-            other => panic!("simulate_policy_decision changed Ok/Err shape across re-run: {other:?}"),
+            other => {
+                panic!("simulate_policy_decision changed Ok/Err shape across re-run: {other:?}")
+            }
         }
     }
 });

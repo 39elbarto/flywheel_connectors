@@ -644,9 +644,8 @@ mod tests {
     use fcp_core::{
         CapabilityToken, ConnectorId, ConnectorMetrics, FcpError, FcpResult, HandshakeRequest,
         HandshakeResponse, HealthSnapshot, HealthState, Introspection, InvokeRequest,
-        InvokeResponse, OperationId, RequestId, ShutdownRequest, SimulateRequest,
-        SimulateResponse, SubscribeRequest, SubscribeResponse, SubscribeResult,
-        UnsubscribeRequest,
+        InvokeResponse, OperationId, RequestId, ShutdownRequest, SimulateRequest, SimulateResponse,
+        SubscribeRequest, SubscribeResponse, SubscribeResult, UnsubscribeRequest,
     };
 
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -804,18 +803,16 @@ mod tests {
                     capability: "cap.read".into(),
                     reason: "missing capability".into(),
                 }),
-                MockInvokeBehavior::CapabilityDeniedResponse => Ok(
-                    InvokeResponse::error(
-                        req.id,
-                        FcpError::CapabilityDenied {
-                            capability: "cap.read".into(),
-                            reason: "missing capability".into(),
-                        },
-                    )
-                    .with_decision_receipt_id(fcp_core::ObjectId::from_unscoped_bytes(
-                        b"dr_lib_capability_deny_001",
-                    )),
-                ),
+                MockInvokeBehavior::CapabilityDeniedResponse => Ok(InvokeResponse::error(
+                    req.id,
+                    FcpError::CapabilityDenied {
+                        capability: "cap.read".into(),
+                        reason: "missing capability".into(),
+                    },
+                )
+                .with_decision_receipt_id(fcp_core::ObjectId::from_unscoped_bytes(
+                    b"dr_lib_capability_deny_001",
+                ))),
                 MockInvokeBehavior::UnauthorizedError => Err(FcpError::Unauthorized {
                     code: 401,
                     message: "invalid bearer".into(),

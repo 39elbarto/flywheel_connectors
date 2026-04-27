@@ -227,8 +227,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let resolved_capability = match capability {
         "browser.evaluate_js" => "browser.execute",
         "browser.extract_text" => "browser.extract",
@@ -599,11 +598,7 @@ async fn browser_dangerous_operation_allows_with_approval_token() {
         .await
         .expect("handshake");
 
-    let token = build_token(
-        &signing_key,
-        "browser.execute",
-        &["browser.evaluate_js"],
-    );
+    let token = build_token(&signing_key, "browser.execute", &["browser.evaluate_js"]);
     let approval = build_execution_approval("browser.evaluate_js");
     let req = invoke_request(
         "browser.evaluate_js",

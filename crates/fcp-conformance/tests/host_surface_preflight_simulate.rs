@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, to_bytes};
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, Request, StatusCode};
 use axum::routing::post;
@@ -16,15 +16,15 @@ use axum::{Json, Router};
 use base64::Engine;
 use fcp_async_core::sync::RwLock;
 use fcp_core::{
-    simulate_policy_decision, AgentHint, ApprovalMode, CapabilityToken, ConnectorHealth,
-    ConnectorId, Decision, DecisionReceiptPolicy, IdempotencyClass, Introspection, InvokeRequest,
-    ObjectHeader, OperationId, OperationInfo, PolicySimulationInput, Provenance, RequestId,
-    RiskLevel, SafetyTier, SelfCheckReport, SimulateRequest, SimulateResponse,
-    TransportMode, ZoneId, ZonePolicyObject, ZoneTransportPolicy,
+    AgentHint, ApprovalMode, CapabilityToken, ConnectorHealth, ConnectorId, Decision,
+    DecisionReceiptPolicy, IdempotencyClass, Introspection, InvokeRequest, ObjectHeader,
+    OperationId, OperationInfo, PolicySimulationInput, Provenance, RequestId, RiskLevel,
+    SafetyTier, SelfCheckReport, SimulateRequest, SimulateResponse, TransportMode, ZoneId,
+    ZonePolicyObject, ZoneTransportPolicy, simulate_policy_decision,
 };
 use fcp_crypto::cose::CoseToken;
-use fcp_crypto::ed25519::Ed25519VerifyingKey;
 use fcp_crypto::ed25519::Ed25519SigningKey;
+use fcp_crypto::ed25519::Ed25519VerifyingKey;
 use fcp_host::{
     BudgetPolicyEngine, CapabilityIssuanceRequest, CapabilityTokenVerifyRequest,
     ConnectorArchetype, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint,
@@ -32,7 +32,7 @@ use fcp_host::{
     HostSimulateResponse, PreflightRequest, PreflightResponse, SimulatePhase, SimulateReceipt,
 };
 use serde::de::DeserializeOwned;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::util::ServiceExt;
 
 const TEST_PRINCIPAL: &str = "user:test";
@@ -232,7 +232,9 @@ fn extract_principal_header(headers: &HeaderMap) -> Option<String> {
     }
 }
 
-fn invoke_request_from_preflight(request: &HostPreflightRequest) -> Result<InvokeRequest, HostError> {
+fn invoke_request_from_preflight(
+    request: &HostPreflightRequest,
+) -> Result<InvokeRequest, HostError> {
     let capability_token = request.capability_token.clone().ok_or_else(|| {
         HostError::PreflightFailed("capability token is required for live preflight".to_string())
     })?;
@@ -420,7 +422,9 @@ async fn verify_live_request(
             &request.operation,
             &[],
         )
-        .map_err(|error| HostError::PreflightFailed(format!("capability token rejected: {error}")))?;
+        .map_err(|error| {
+            HostError::PreflightFailed(format!("capability token rejected: {error}"))
+        })?;
     let verified_claims = verified_token.claims();
 
     let persisted_verify = state
@@ -525,7 +529,11 @@ async fn evaluate_live_preflight(
 
     match verify_live_request(state, request, principal_override).await {
         Ok(verified) => {
-            let _ = (&verified.principal, verified.approval_required, verified.safety_tier);
+            let _ = (
+                &verified.principal,
+                verified.approval_required,
+                verified.safety_tier,
+            );
             response
         }
         Err(error) => {
@@ -810,10 +818,7 @@ where
     Ok((status, serde_json::from_slice(&bytes)?))
 }
 
-fn test_state(
-    connector_id: ConnectorId,
-    signing_key: &Ed25519SigningKey,
-) -> Arc<TestAppState> {
+fn test_state(connector_id: ConnectorId, signing_key: &Ed25519SigningKey) -> Arc<TestAppState> {
     let registry = Arc::new(TestRegistry::new(connector_id));
     let budget = Arc::new(BudgetPolicyEngine::new());
     let discovery = Arc::new(DiscoveryEndpoint::new(
@@ -862,8 +867,8 @@ async fn deny_test_connector_in_work_zone(state: &Arc<TestAppState>, connector_i
 }
 
 #[fcp_async_core::runtime::test(flavor = "multi_thread")]
-async fn conformance_preflight_surface_covers_allow_missing_capability_and_principal_mismatch(
-) -> TestResult<()> {
+async fn conformance_preflight_surface_covers_allow_missing_capability_and_principal_mismatch()
+-> TestResult<()> {
     let connector_id = route_test_connector_id("preflight-surface");
     let signing_key = Ed25519SigningKey::generate();
     let state = test_state(connector_id.clone(), &signing_key);
@@ -925,8 +930,8 @@ async fn conformance_preflight_surface_covers_allow_missing_capability_and_princ
 }
 
 #[fcp_async_core::runtime::test(flavor = "multi_thread")]
-async fn conformance_simulate_surface_covers_allow_missing_capability_and_principal_mismatch(
-) -> TestResult<()> {
+async fn conformance_simulate_surface_covers_allow_missing_capability_and_principal_mismatch()
+-> TestResult<()> {
     let connector_id = route_test_connector_id("simulate-surface");
     let signing_key = Ed25519SigningKey::generate();
     let state = test_state(connector_id.clone(), &signing_key);
@@ -964,7 +969,10 @@ async fn conformance_simulate_surface_covers_allow_missing_capability_and_princi
         None,
     )
     .await?;
-    assert!(!missing_capability.preflight_allowed, "{missing_capability:?}");
+    assert!(
+        !missing_capability.preflight_allowed,
+        "{missing_capability:?}"
+    );
     assert!(!missing_capability.would_succeed, "{missing_capability:?}");
     assert_eq!(missing_capability.phase, SimulatePhase::PreflightOnly);
     assert!(
@@ -974,13 +982,20 @@ async fn conformance_simulate_surface_covers_allow_missing_capability_and_princi
             .is_some_and(|reason| reason.contains("capability token is required")),
         "{missing_capability:?}"
     );
-    assert_eq!(missing_capability.receipt.phase, SimulatePhase::PreflightOnly);
+    assert_eq!(
+        missing_capability.receipt.phase,
+        SimulatePhase::PreflightOnly
+    );
     assert!(!missing_capability.receipt.would_succeed);
 
     let (_, forged_principal): (_, HostSimulateResponse) = post_json_response(
         &app,
         "/rpc/simulate",
-        simulate_request(&connector_id, Some(valid_token), "simulate-forged-principal"),
+        simulate_request(
+            &connector_id,
+            Some(valid_token),
+            "simulate-forged-principal",
+        ),
         Some(principal_header(TEST_FORGED_PRINCIPAL)),
     )
     .await?;
@@ -1027,13 +1042,10 @@ async fn conformance_host_surfaces_fail_closed_on_zone_policy_capability_deny() 
     .await?;
     assert!(!preflight_denied.allowed, "{preflight_denied:?}");
     assert!(
-        preflight_denied
-            .reason
-            .as_deref()
-            .is_some_and(|reason| {
-                reason.contains("policy denied live request")
-                    && reason.contains("zone_policy.capability_denied")
-            }),
+        preflight_denied.reason.as_deref().is_some_and(|reason| {
+            reason.contains("policy denied live request")
+                && reason.contains("zone_policy.capability_denied")
+        }),
         "{preflight_denied:?}"
     );
 
@@ -1094,13 +1106,10 @@ async fn conformance_host_surfaces_fail_closed_on_zone_policy_principal_deny() -
     .await?;
     assert!(!preflight_denied.allowed, "{preflight_denied:?}");
     assert!(
-        preflight_denied
-            .reason
-            .as_deref()
-            .is_some_and(|reason| {
-                reason.contains("policy denied live request")
-                    && reason.contains("zone_policy.principal_denied")
-            }),
+        preflight_denied.reason.as_deref().is_some_and(|reason| {
+            reason.contains("policy denied live request")
+                && reason.contains("zone_policy.principal_denied")
+        }),
         "{preflight_denied:?}"
     );
 
@@ -1161,13 +1170,10 @@ async fn conformance_host_surfaces_fail_closed_on_zone_policy_connector_deny() -
     .await?;
     assert!(!preflight_denied.allowed, "{preflight_denied:?}");
     assert!(
-        preflight_denied
-            .reason
-            .as_deref()
-            .is_some_and(|reason| {
-                reason.contains("policy denied live request")
-                    && reason.contains("zone_policy.connector_denied")
-            }),
+        preflight_denied.reason.as_deref().is_some_and(|reason| {
+            reason.contains("policy denied live request")
+                && reason.contains("zone_policy.connector_denied")
+        }),
         "{preflight_denied:?}"
     );
 

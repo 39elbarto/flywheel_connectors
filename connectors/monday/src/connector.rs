@@ -1739,19 +1739,15 @@ mod tests {
     #[test]
     fn validate_base_url_for_auth_rejects_fragment_with_token() {
         let auth = MondayAuth::ApiToken("mtok".into());
-        let err =
-            validate_base_url_for_auth("https://api.monday.com/v2#frag", &auth).unwrap_err();
+        let err = validate_base_url_for_auth("https://api.monday.com/v2#frag", &auth).unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
     #[test]
     fn validate_base_url_for_auth_rejects_userinfo_with_token() {
         let auth = MondayAuth::ApiToken("mtok".into());
-        let err = validate_base_url_for_auth(
-            "https://attacker:pw@api.monday.com/v2",
-            &auth,
-        )
-        .unwrap_err();
+        let err =
+            validate_base_url_for_auth("https://attacker:pw@api.monday.com/v2", &auth).unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("userinfo"), "got: {message}");
@@ -1764,8 +1760,7 @@ mod tests {
     fn validate_base_url_for_auth_rejects_query_string_with_credential_id() {
         let auth = MondayAuth::CredentialId(CredentialId::new());
         let err =
-            validate_base_url_for_auth("https://vault-proxy.example/v2?leak=x", &auth)
-                .unwrap_err();
+            validate_base_url_for_auth("https://vault-proxy.example/v2?leak=x", &auth).unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 

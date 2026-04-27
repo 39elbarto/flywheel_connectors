@@ -1824,8 +1824,8 @@ mod tests {
         let mut encoded = Vec::new();
         ciborium::into_writer(&nonces, &mut encoded).expect("nonce serialization should succeed");
 
-        let err = ciborium::de::from_reader::<FrostSigningNonces, _>(encoded.as_slice())
-            .unwrap_err();
+        let err =
+            ciborium::de::from_reader::<FrostSigningNonces, _>(encoded.as_slice()).unwrap_err();
         assert!(
             err.to_string()
                 .contains("deserialization is disabled to enforce single-use")

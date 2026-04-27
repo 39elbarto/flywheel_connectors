@@ -346,8 +346,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let token = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -517,7 +516,10 @@ async fn zapier_allow_valid_token_connector_suite_passes() {
         Some(&json!(format!("{:?}", InvokeStatus::Ok)))
     );
     let received = mock.received_requests().await;
-    let hits = received.iter().filter(|r| r.url.path() == "/exposed/").count();
+    let hits = received
+        .iter()
+        .filter(|r| r.url.path() == "/exposed/")
+        .count();
     assert_eq!(hits, 1, "expected exactly one GET to /exposed/");
 }
 

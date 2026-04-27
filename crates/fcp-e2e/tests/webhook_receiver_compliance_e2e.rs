@@ -357,8 +357,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let token = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -444,8 +443,7 @@ fn assert_endpoint_listing_schema(endpoint: &serde_json::Value) {
         .get("created_at")
         .and_then(serde_json::Value::as_str)
         .expect("created_at should be present");
-    chrono::DateTime::parse_from_rfc3339(created_at)
-        .expect("created_at should be RFC3339");
+    chrono::DateTime::parse_from_rfc3339(created_at).expect("created_at should be RFC3339");
 }
 
 fn operation_network_constraints<'a>(

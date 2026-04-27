@@ -2781,8 +2781,9 @@ mod tests {
                 if bytes.is_empty() {
                     continue;
                 }
-                let parsed: RateLimitCheckpointFile = serde_json::from_slice(&bytes)
-                    .expect("checkpoint file must always remain valid JSON under concurrent persist");
+                let parsed: RateLimitCheckpointFile = serde_json::from_slice(&bytes).expect(
+                    "checkpoint file must always remain valid JSON under concurrent persist",
+                );
                 assert_eq!(parsed.version, RATE_LIMIT_CHECKPOINT_VERSION);
                 let pool = parsed
                     .pools
@@ -2804,8 +2805,8 @@ mod tests {
         // Final on-disk state must also be valid and reflect every
         // accepted request (no lost writes after the storm settles).
         let final_bytes = std::fs::read(&checkpoint_path).expect("final checkpoint should exist");
-        let final_parsed: RateLimitCheckpointFile = serde_json::from_slice(&final_bytes)
-            .expect("final checkpoint must be valid JSON");
+        let final_parsed: RateLimitCheckpointFile =
+            serde_json::from_slice(&final_bytes).expect("final checkpoint must be valid JSON");
         let final_pool = final_parsed
             .pools
             .values()

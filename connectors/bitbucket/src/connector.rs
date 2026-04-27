@@ -1439,10 +1439,7 @@ mod tests {
             "base_url": "http://api.bitbucket.org/2.0",
         }))
         .expect_err("http to api.bitbucket.org must be rejected (downgrade)");
-        assert!(matches!(
-            err,
-            FcpError::InvalidRequest { code: 1003, .. }
-        ));
+        assert!(matches!(err, FcpError::InvalidRequest { code: 1003, .. }));
     }
 
     #[test]

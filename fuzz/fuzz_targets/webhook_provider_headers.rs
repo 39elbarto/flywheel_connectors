@@ -18,9 +18,7 @@ use std::collections::HashMap;
 
 use arbitrary::{Arbitrary, Unstructured};
 use chrono::Utc;
-use fcp_webhook::{
-    GitHubWebhook, HmacSha256Verifier, LinearWebhook, SlackWebhook, StripeWebhook,
-};
+use fcp_webhook::{GitHubWebhook, HmacSha256Verifier, LinearWebhook, SlackWebhook, StripeWebhook};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_BODY_BYTES: usize = 8 * 1024;
@@ -174,11 +172,7 @@ fn exercise_stripe_negative(input: &ProviderHeaderFuzz<'_>) {
 }
 
 fn github_positive_body(input: &ProviderHeaderFuzz<'_>) -> Vec<u8> {
-    format!(
-        r#"{{"fuzz":"{}"}}"#,
-        lossy_id(input.body, "github-payload")
-    )
-    .into_bytes()
+    format!(r#"{{"fuzz":"{}"}}"#, lossy_id(input.body, "github-payload")).into_bytes()
 }
 
 fn stripe_positive_body(input: &ProviderHeaderFuzz<'_>) -> Vec<u8> {

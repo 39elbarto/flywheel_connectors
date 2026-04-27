@@ -133,9 +133,10 @@ impl fmt::Debug for OAuthError {
             Self::RefreshFailed(message) => f.debug_tuple("RefreshFailed").field(message).finish(),
             Self::TokenExpired(duration) => f.debug_tuple("TokenExpired").field(duration).finish(),
             Self::NoRefreshToken => f.write_str("NoRefreshToken"),
-            Self::InvalidTokenResponse(message) => {
-                f.debug_tuple("InvalidTokenResponse").field(message).finish()
-            }
+            Self::InvalidTokenResponse(message) => f
+                .debug_tuple("InvalidTokenResponse")
+                .field(message)
+                .finish(),
             Self::EmptyTokenField(field) => f.debug_tuple("EmptyTokenField").field(field).finish(),
             Self::HttpError(message) => f.debug_tuple("HttpError").field(message).finish(),
             Self::JsonError(error) => f.debug_tuple("JsonError").field(error).finish(),
@@ -143,9 +144,10 @@ impl fmt::Debug for OAuthError {
             Self::SignatureError(message) => {
                 f.debug_tuple("SignatureError").field(message).finish()
             }
-            Self::UnsupportedProvider(provider) => {
-                f.debug_tuple("UnsupportedProvider").field(provider).finish()
-            }
+            Self::UnsupportedProvider(provider) => f
+                .debug_tuple("UnsupportedProvider")
+                .field(provider)
+                .finish(),
             Self::TokenNotFound(key) => f.debug_tuple("TokenNotFound").field(key).finish(),
             Self::PkceError(message) => f.debug_tuple("PkceError").field(message).finish(),
         }

@@ -142,11 +142,9 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let max_frame_size = bounded_nonzero(input.max_frame_size_raw as usize, MAX_FRAME_SIZE_CAP);
-    let max_message_size = bounded_nonzero(
-        input.max_message_size_raw as usize,
-        MAX_MESSAGE_SIZE_CAP,
-    )
-    .max(max_frame_size);
+    let max_message_size =
+        bounded_nonzero(input.max_message_size_raw as usize, MAX_MESSAGE_SIZE_CAP)
+            .max(max_frame_size);
     let max_read_chunk = bounded_nonzero(input.read_chunk_raw as usize, MAX_READ_CHUNK_CAP);
 
     exercise_wire(input.wire, max_frame_size, max_message_size, max_read_chunk);

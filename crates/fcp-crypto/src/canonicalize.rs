@@ -689,33 +689,33 @@ mod tests {
         // In RFC 8949 (bytewise lexicographic), "aa" comes BEFORE "z".
         // encoded "aa" is 0x62 0x61 0x61
         // encoded "z"  is 0x61 0x7a
-        // 0x61 < 0x62, so "z" actually comes first in bytewise lexicographic too? 
-        // Wait. 
+        // 0x61 < 0x62, so "z" actually comes first in bytewise lexicographic too?
+        // Wait.
         // "z" is 0x61 0x7a
         // "aa" is 0x62 0x61 0x61
         // Yes, 0x61 < 0x62.
-        
+
         // Let's find keys where length-first and bytewise-lexicographic differ.
         // RFC 7049: shorter keys first.
         // RFC 8949: bytewise comparison of encoded bytes.
-        
+
         // Key A: 100 (encoded: 0x18 0x64) - length 2
         // Key B: -1 (encoded: 0x20) - length 1
-        
+
         // RFC 7049: B then A (1 < 2)
         // RFC 8949: A then B (0x18 < 0x20)
-        
+
         let mut map = HashMap::new();
         map.insert(100i32, "a");
         map.insert(-1i32, "b");
-        
+
         let cbor = to_deterministic_cbor(&map).unwrap();
         // Expected order (RFC 8949): 100 then -1
         // 100 encoded: 18 64
         // -1 encoded: 20
         // Total map: bf 18 64 ... 20 ... ff (if indefinite)
         // Or definite: a2 18 64 ... 20 ...
-        
+
         assert_eq!(cbor[0], 0xa2); // Map of 2
         assert_eq!(cbor[1], 0x18); // First key 100
         assert_eq!(cbor[2], 0x64);

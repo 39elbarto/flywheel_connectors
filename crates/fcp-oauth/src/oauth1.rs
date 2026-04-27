@@ -443,9 +443,7 @@ fn response_text(response: &HttpResponse) -> String {
 }
 
 fn token_exchange_error(step: &str) -> OAuthError {
-    OAuthError::TokenExchangeFailed(format!(
-        "{step} endpoint returned an unsuccessful response"
-    ))
+    OAuthError::TokenExchangeFailed(format!("{step} endpoint returned an unsuccessful response"))
 }
 
 /// Parse request token response.

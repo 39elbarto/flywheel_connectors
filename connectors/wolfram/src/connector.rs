@@ -621,8 +621,8 @@ fn required_capability_for_operation(operation: &str) -> Option<CapabilityId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ciborium::into_writer;
     use chrono::{Duration, Utc};
+    use ciborium::into_writer;
     use fcp_core::{CapabilityConstraints, InstanceId, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;

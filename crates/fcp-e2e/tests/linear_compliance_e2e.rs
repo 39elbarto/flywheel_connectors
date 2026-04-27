@@ -389,10 +389,7 @@ async fn linear_allow_valid_token_connector_suite_passes() {
     let signing_key = Ed25519SigningKey::generate();
     // Introspection declares `linear.get_issue` requires capability
     // `linear.read` (permission class), not the op id itself.
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["linear.read"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["linear.read"]);
     let token = build_token(&signing_key, "linear.read", &["linear.get_issue"]);
     let invoke = invoke_request("linear.get_issue", json!({ "issue_id": "LIN-42" }), token);
     let suite = ConnectorSuite {

@@ -356,8 +356,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let token = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -539,10 +538,7 @@ async fn salesforce_happy_path_compliance_suite_passes() {
         .iter()
         .filter(|r| r.url.path() == expected_path)
         .count();
-    assert_eq!(
-        hits, 1,
-        "expected exactly one GET to {expected_path}"
-    );
+    assert_eq!(hits, 1, "expected exactly one GET to {expected_path}");
 }
 
 #[test]

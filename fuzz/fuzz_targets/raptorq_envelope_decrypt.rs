@@ -74,7 +74,11 @@ fn derive_zone_key(seed: [u8; 32], domain: &[u8]) -> ZoneKey {
 fn build_plaintext(input: &EnvelopeDecryptInput) -> Vec<u8> {
     let len = usize::from(input.plaintext_len).min(MAX_PLAINTEXT_LEN);
     (0..len)
-        .map(|i| input.plaintext_fill.wrapping_add(u8::try_from(i & 0xFF).unwrap_or(0)))
+        .map(|i| {
+            input
+                .plaintext_fill
+                .wrapping_add(u8::try_from(i & 0xFF).unwrap_or(0))
+        })
         .collect()
 }
 
@@ -167,7 +171,9 @@ fuzz_target!(|data: &[u8]| {
             if envelope.data.is_empty() {
                 envelope.data.push(mutation_mask(mutation_index));
             } else {
-                envelope.data.truncate(envelope.data.len().saturating_sub(1));
+                envelope
+                    .data
+                    .truncate(envelope.data.len().saturating_sub(1));
             }
         }
         MutationKind::AuthTagBitflip => {

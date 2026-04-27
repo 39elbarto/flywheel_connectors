@@ -1721,9 +1721,7 @@ fn authoritative_persisted_capability_rejection_reason(
         .iter()
         .find(|reason| !reason.starts_with(HOST_STATE_MISSING_VERIFYING_KEY_REASON_PREFIX))
         .cloned()
-        .or_else(|| {
-            (!verify.temporally_valid || !verify.scope_valid).then(|| fallback.to_string())
-        })
+        .or_else(|| (!verify.temporally_valid || !verify.scope_valid).then(|| fallback.to_string()))
 }
 
 const CANCEL_SELF_CONNECTOR_ID: &str = "fcp.host.cancel-self:test:1.0.0";
@@ -5877,8 +5875,7 @@ mod tests {
             ..Default::default()
         };
         let mut cbor = Vec::new();
-        ciborium::into_writer(&constraints, &mut cbor)
-            .expect("test constraints should serialize");
+        ciborium::into_writer(&constraints, &mut cbor).expect("test constraints should serialize");
         cbor
     }
 
@@ -5892,8 +5889,7 @@ mod tests {
             ),
         };
         let mut cbor = Vec::new();
-        ciborium::into_writer(&vec![grant], &mut cbor)
-            .expect("test grants should serialize");
+        ciborium::into_writer(&vec![grant], &mut cbor).expect("test grants should serialize");
         ciborium::from_reader(&cbor[..]).expect("test grants should decode to CBOR value")
     }
 
@@ -6225,9 +6221,7 @@ mod tests {
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
     async fn verify_live_request_rejects_operation_outside_pinned_allowed_operations() {
         if maybe_compiled_test_connector_binary().is_none() {
-            eprintln!(
-                "compiled fcp-test-connector missing; skipping allowed_operations test"
-            );
+            eprintln!("compiled fcp-test-connector missing; skipping allowed_operations test");
             return;
         }
 

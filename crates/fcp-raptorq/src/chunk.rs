@@ -308,7 +308,10 @@ mod tests {
         // Out-of-bounds index still wins over chunk_size check.
         assert!(matches!(
             multi.chunk_size_at(99).unwrap_err(),
-            ChunkError::InvalidChunkIndex { index: 99, count: 2 }
+            ChunkError::InvalidChunkIndex {
+                index: 99,
+                count: 2
+            }
         ));
     }
 

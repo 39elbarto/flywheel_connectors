@@ -36,8 +36,8 @@ use fcp_core::{
     ApprovalScope, ApprovalToken, CapabilityId, ConfidentialityLevel, ConnectorId, Decision,
     DecisionReasonCode, DecisionReceiptPolicy, DeclassificationScope, ElevationScope,
     IntegrityLevel, ObjectHeader, ObjectId, OperationId, PolicyDecisionInput, PolicyEngine,
-    PrincipalId, Provenance, ProvenanceRecord, SafetyTier, SanitizerReceipt, TransportMode,
-    ZoneId, ZonePolicyObject, ZoneTransportPolicy,
+    PrincipalId, Provenance, ProvenanceRecord, SafetyTier, SanitizerReceipt, TransportMode, ZoneId,
+    ZonePolicyObject, ZoneTransportPolicy,
 };
 
 const NOW_MS: u64 = 1_700_000_000_000;

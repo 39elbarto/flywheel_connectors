@@ -192,7 +192,8 @@ fn mr4_random_pattern_loss_recovery_across_rates() {
 
             let decoded = decode_payload(&config, &encoder, &surviving);
             assert_eq!(
-                decoded, payload,
+                decoded,
+                payload,
                 "MR4 failed: payload_len={payload_len}, loss_bps={loss_bps}, \
                  K={k}, surviving={} out of {}",
                 surviving.len(),

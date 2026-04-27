@@ -220,10 +220,18 @@ pub trait Polling: FcpConnector {
     ) -> FcpResult<()>;
 
     /// Stop polling a target.
-    async fn stop_polling(&self, target: &str, token: &CapabilityToken<BoundVerified>) -> FcpResult<()>;
+    async fn stop_polling(
+        &self,
+        target: &str,
+        token: &CapabilityToken<BoundVerified>,
+    ) -> FcpResult<()>;
 
     /// Trigger immediate poll.
-    async fn poll_now(&self, target: &str, token: &CapabilityToken<BoundVerified>) -> FcpResult<usize>;
+    async fn poll_now(
+        &self,
+        target: &str,
+        token: &CapabilityToken<BoundVerified>,
+    ) -> FcpResult<usize>;
 
     /// Get event stream.
     fn events(&self) -> EventStream;

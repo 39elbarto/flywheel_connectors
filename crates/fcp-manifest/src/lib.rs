@@ -3153,13 +3153,12 @@ deny_ptrace = true
         // appears in neither `required` nor `optional` — the rule under
         // test fires.
         let placeholder = format!("blake3-256:{INTERFACE_HASH_DOMAIN}:{}", "0".repeat(64));
-        let toml = test_manifest_toml(&placeholder)
-            .replace(", \"telegram.send_message\"", "");
+        let toml = test_manifest_toml(&placeholder).replace(", \"telegram.send_message\"", "");
 
         let unchecked = ConnectorManifest::parse_str_unchecked(&toml).expect("unchecked parse");
         let hash = unchecked.compute_interface_hash().expect("compute hash");
-        let with_hash = test_manifest_toml(&hash.to_string())
-            .replace(", \"telegram.send_message\"", "");
+        let with_hash =
+            test_manifest_toml(&hash.to_string()).replace(", \"telegram.send_message\"", "");
 
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
         assert!(matches!(
@@ -6129,16 +6128,12 @@ deny_ptrace = true
         // `["ipc.gateway", "network.dns", "network.egress", "network.tls.sni",
         // "telegram.send_message"]`; we replace `network.tls.sni` with a
         // second `network.dns` so the duplicate detector fires.
-        let toml = test_manifest_toml(&placeholder).replace(
-            "\"network.tls.sni\"",
-            "\"network.dns\"",
-        );
+        let toml =
+            test_manifest_toml(&placeholder).replace("\"network.tls.sni\"", "\"network.dns\"");
         let m = ConnectorManifest::parse_str_unchecked(&toml).unwrap();
         let hash = m.compute_interface_hash().unwrap();
-        let with_hash = test_manifest_toml(&hash.to_string()).replace(
-            "\"network.tls.sni\"",
-            "\"network.dns\"",
-        );
+        let with_hash =
+            test_manifest_toml(&hash.to_string()).replace("\"network.tls.sni\"", "\"network.dns\"");
         let err = ConnectorManifest::parse_str(&with_hash).unwrap_err();
         assert!(err.to_string().contains("duplicate"));
     }

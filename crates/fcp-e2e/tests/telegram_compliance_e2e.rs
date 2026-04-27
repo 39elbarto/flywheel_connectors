@@ -403,15 +403,8 @@ async fn telegram_allow_valid_token_connector_suite_passes() {
     // fallback, the verifier checks the GRANTS shape strictly: each
     // grant's `capability` field must equal the operation's required
     // capability. So the token must grant `telegram.send`, not the op id.
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["telegram.send"],
-    );
-    let token = build_token(
-        &signing_key,
-        "telegram.send",
-        &["telegram.send_message"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["telegram.send"]);
+    let token = build_token(&signing_key, "telegram.send", &["telegram.send_message"]);
     let invoke = invoke_request(
         "telegram.send_message",
         json!({
@@ -459,7 +452,11 @@ async fn telegram_allow_valid_token_connector_suite_passes() {
                 && request.url.path() == format!("/bot{TEST_BOT_TOKEN}/sendMessage")
         })
         .collect();
-    assert_eq!(send_requests.len(), 1, "expected exactly one sendMessage POST");
+    assert_eq!(
+        send_requests.len(),
+        1,
+        "expected exactly one sendMessage POST"
+    );
     let send_body: serde_json::Value =
         serde_json::from_slice(&send_requests[0].body).expect("telegram send body json");
     assert_eq!(send_body.get("chat_id"), Some(&json!("987654321")));
@@ -553,11 +550,7 @@ async fn telegram_send_message_returns_message_id() {
 
     // Build valid token and invoke (capability class is `telegram.send`,
     // see test 2's comment for the C3.4 / br-8n0rm.6 rationale).
-    let token = build_token(
-        &signing_key,
-        "telegram.send",
-        &["telegram.send_message"],
-    );
+    let token = build_token(&signing_key, "telegram.send", &["telegram.send_message"]);
     let result = connector
         .handle_invoke(json!({
             "operation": "telegram.send_message",

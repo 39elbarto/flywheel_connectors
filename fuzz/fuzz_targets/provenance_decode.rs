@@ -113,7 +113,6 @@ fuzz_target!(|data: &[u8]| {
         let mut framed = Vec::with_capacity(fcp_cbor::SCHEMA_HASH_LEN + data.len());
         framed.extend_from_slice(schema.hash().as_bytes());
         framed.extend_from_slice(data);
-        let _ =
-            fcp_cbor::CanonicalSerializer::deserialize::<ProvenanceRecord>(&framed, &schema);
+        let _ = fcp_cbor::CanonicalSerializer::deserialize::<ProvenanceRecord>(&framed, &schema);
     }
 });

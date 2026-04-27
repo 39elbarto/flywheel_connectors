@@ -21,10 +21,10 @@
 //! score directly.
 
 use fcp_conformance::{
-    CanonicalPayloadGoldenVector, CapabilityTokenGoldenVector, FcpcGoldenVector,
-    FcpsGoldenVector, HelloRetryGoldenVector, HolderProofGoldenVector, HpkeSealedBoxGoldenVector,
-    ObjectIdGoldenVector, QuorumSortGoldenVector, SessionGoldenVector,
-    SigningBytesGoldenVector, TransportLimitsGoldenVector,
+    CanonicalPayloadGoldenVector, CapabilityTokenGoldenVector, FcpcGoldenVector, FcpsGoldenVector,
+    HelloRetryGoldenVector, HolderProofGoldenVector, HpkeSealedBoxGoldenVector,
+    ObjectIdGoldenVector, QuorumSortGoldenVector, SessionGoldenVector, SigningBytesGoldenVector,
+    TransportLimitsGoldenVector,
 };
 
 /// Compliance report row for one vector category.
@@ -358,7 +358,8 @@ fn serialization_conformance_matrix() {
 
     let total_failures: usize = reports.iter().map(|r| r.failures.len()).sum();
     assert_eq!(
-        total_failures, 0,
+        total_failures,
+        0,
         "{total_failures} conformance vectors failed across {} categories",
         reports.iter().filter(|r| !r.ok()).count()
     );

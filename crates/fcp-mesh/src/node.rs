@@ -1783,10 +1783,9 @@ impl MeshNode {
                 self.handle_summary(summary, now_secs)?;
                 Ok(GossipDispatchOutcome::default())
             }
-            GossipMessage::RevocationPush(push) => {
-                self.handle_revocation_push(push, now_secs)
-                    .map(GossipDispatchOutcome::with_revocation_push)
-            }
+            GossipMessage::RevocationPush(push) => self
+                .handle_revocation_push(push, now_secs)
+                .map(GossipDispatchOutcome::with_revocation_push),
             GossipMessage::Request(request) => self
                 .handle_gossip_request(request, now_secs)
                 .map(GossipDispatchOutcome::with_response),

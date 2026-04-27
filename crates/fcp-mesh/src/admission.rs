@@ -629,7 +629,11 @@ impl PeerUsage {
         // `u64::min` calls `Ord::min`, which isn't stable as a const trait
         // method yet (rust-lang #143874). Inline the comparison so this
         // function and its const callers continue to compile.
-        let clamped = if elapsed < WINDOW_MS { elapsed } else { WINDOW_MS };
+        let clamped = if elapsed < WINDOW_MS {
+            elapsed
+        } else {
+            WINDOW_MS
+        };
         WINDOW_MS.saturating_sub(clamped)
     }
 
@@ -638,10 +642,7 @@ impl PeerUsage {
     pub const fn effective_bytes_in_window(&self, now_ms: u64) -> u64 {
         let weight = self.prev_window_weight(now_ms);
         // prev * weight / WINDOW_MS + current
-        let weighted_prev = self
-            .prev_bytes_in_window
-            .saturating_mul(weight)
-            / WINDOW_MS;
+        let weighted_prev = self.prev_bytes_in_window.saturating_mul(weight) / WINDOW_MS;
         weighted_prev.saturating_add(self.bytes_in_window)
     }
 
@@ -650,8 +651,7 @@ impl PeerUsage {
     pub const fn effective_symbols_in_window(&self, now_ms: u64) -> u32 {
         let weight = self.prev_window_weight(now_ms);
         // Use u64 arithmetic to avoid u32 overflow, then clamp.
-        let weighted_prev =
-            (self.prev_symbols_in_window as u64).saturating_mul(weight) / WINDOW_MS;
+        let weighted_prev = (self.prev_symbols_in_window as u64).saturating_mul(weight) / WINDOW_MS;
         let weighted_prev_u32 = if weighted_prev > u32::MAX as u64 {
             u32::MAX
         } else {
@@ -679,10 +679,7 @@ impl PeerUsage {
     #[must_use]
     pub const fn effective_decode_cpu_ms_in_window(&self, now_ms: u64) -> u64 {
         let weight = self.prev_window_weight(now_ms);
-        let weighted_prev = self
-            .prev_decode_cpu_ms_in_window
-            .saturating_mul(weight)
-            / WINDOW_MS;
+        let weighted_prev = self.prev_decode_cpu_ms_in_window.saturating_mul(weight) / WINDOW_MS;
         weighted_prev.saturating_add(self.decode_cpu_ms_in_window)
     }
 

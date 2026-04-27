@@ -43,10 +43,7 @@ fn execute_bound_op(_token: CapabilityToken<BoundVerified>, _op: &OperationId) -
     true
 }
 
-fn mk_signed_token(
-    signing_key: &Ed25519SigningKey,
-    instance: &InstanceId,
-) -> CapabilityToken {
+fn mk_signed_token(signing_key: &Ed25519SigningKey, instance: &InstanceId) -> CapabilityToken {
     let now = Utc::now();
     let cose = CapabilityTokenBuilder::new()
         .capability_id("cap.test")
@@ -74,8 +71,7 @@ fn gateway_to_connector_handoff_end_to_end() {
     let op = OperationId::new("op.read").unwrap();
 
     // Phase 1: gateway vantage (no connector InstanceId known).
-    let gateway_verifier =
-        CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
+    let gateway_verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
     let unbound: CapabilityToken<UnboundVerified> = gateway_verifier
         .verify_unbound(token, &cap, &op, &[])
         .expect("gateway unbound verify");
@@ -103,8 +99,7 @@ fn gateway_handoff_rejects_wrong_connector_instance() {
     let cap = CapabilityId::new("cap.test").unwrap();
     let op = OperationId::new("op.read").unwrap();
 
-    let gateway_verifier =
-        CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
+    let gateway_verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
     let unbound = gateway_verifier
         .verify_unbound(token, &cap, &op, &[])
         .expect("gateway unbound verify");
@@ -141,8 +136,7 @@ fn direct_bound_verify_matches_unbound_plus_promote() {
         .expect("direct bound verify");
 
     // Path B: unbound verify then promote
-    let unbound_verifier =
-        CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
+    let unbound_verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
     let via_promote = unbound_verifier
         .verify_unbound(token_b, &cap, &op, &[])
         .expect("unbound verify")

@@ -46,7 +46,10 @@ fn msh_iblt_1_exact_recovery_when_difference_within_capacity() {
     let diff = left.subtract(&right).expect("matching cell counts");
     let result = diff.decode();
 
-    assert!(result.is_complete(), "MSH-IBLT-1: decode must peel to empty");
+    assert!(
+        result.is_complete(),
+        "MSH-IBLT-1: decode must peel to empty"
+    );
     assert_eq!(
         result.only_left.iter().copied().collect::<Vec<_>>(),
         {
@@ -99,7 +102,10 @@ fn msh_iblt_2_over_capacity_decode_reports_incomplete_not_silent_truncation() {
 #[test]
 fn msh_iblt_3_subtraction_is_antisymmetric_for_decode() {
     let left_items: Vec<_> = ["alpha", "beta", "gamma"].iter().map(|s| obj(s)).collect();
-    let right_items: Vec<_> = ["beta", "delta", "epsilon"].iter().map(|s| obj(s)).collect();
+    let right_items: Vec<_> = ["beta", "delta", "epsilon"]
+        .iter()
+        .map(|s| obj(s))
+        .collect();
     let cells = Iblt::recommended_cell_count(4);
     let left = build_sketch(&left_items, cells);
     let right = build_sketch(&right_items, cells);
@@ -127,10 +133,7 @@ fn msh_iblt_4_mismatched_cell_counts_return_structured_error() {
         .subtract(&right)
         .expect_err("MSH-IBLT-4: different cell counts MUST NOT silently align");
     match err {
-        IbltError::CellCountMismatch {
-            left: l,
-            right: r,
-        } => {
+        IbltError::CellCountMismatch { left: l, right: r } => {
             assert_eq!(l, 64);
             assert_eq!(r, 96);
         }

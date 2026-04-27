@@ -307,8 +307,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let resolved_capability = match capability {
         "hubspot.contacts.list" => "hubspot.contacts.read",
         _ => capability,
@@ -511,7 +510,10 @@ async fn hubspot_allow_valid_token_connector_suite_passes() {
         .iter()
         .filter(|request| request.url.path() == "/crm/v3/objects/contacts")
         .count();
-    assert_eq!(hits, 1, "expected exactly one GET to /crm/v3/objects/contacts");
+    assert_eq!(
+        hits, 1,
+        "expected exactly one GET to /crm/v3/objects/contacts"
+    );
 }
 
 // ============================================================================

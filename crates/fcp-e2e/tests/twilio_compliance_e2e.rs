@@ -255,8 +255,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let resolved_capability = match capability {
         "twilio.get_account" => "twilio.read",
         _ => capability,
@@ -470,10 +469,7 @@ async fn twilio_allow_valid_token_connector_suite_passes() {
     let received = mock.received_requests().await;
     let hits = received
         .iter()
-        .filter(|r| {
-            r.url.path()
-                == format!("/2010-04-01/Accounts/{TEST_ACCOUNT_SID}.json")
-        })
+        .filter(|r| r.url.path() == format!("/2010-04-01/Accounts/{TEST_ACCOUNT_SID}.json"))
         .count();
     assert_eq!(
         hits, 1,

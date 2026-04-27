@@ -211,8 +211,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let resolved_capability = match capability {
         "twitter.tweet.get" => "twitter.read",
         _ => capability,
@@ -473,10 +472,7 @@ async fn twitter_allow_valid_token_connector_suite_passes() {
         .iter()
         .filter(|r| r.url.path() == "/2/users/me")
         .count();
-    assert_eq!(
-        users_me_hits, 1,
-        "expected exactly one GET to /2/users/me"
-    );
+    assert_eq!(users_me_hits, 1, "expected exactly one GET to /2/users/me");
     let tweet_hits = received
         .iter()
         .filter(|r| r.url.path() == "/2/tweets/1234567890123456789")

@@ -339,7 +339,10 @@ mod tests {
             sig_bytes[32 + i] = (sum & 0xff) as u8;
             carry = sum >> 8;
         }
-        assert_eq!(carry, 0, "S + L overflowed 256 bits; signing-key rolled bad S");
+        assert_eq!(
+            carry, 0,
+            "S + L overflowed 256 bits; signing-key rolled bad S"
+        );
         assert_ne!(
             &sig_bytes[32..64],
             &canonical.to_bytes()[32..64],
@@ -350,7 +353,9 @@ mod tests {
 
         // Sanity: the canonical signature must still verify.
         let canonical_hex = hex::encode(canonical.to_bytes());
-        verifier.verify(payload, &canonical_hex).expect("canonical signature must still verify");
+        verifier
+            .verify(payload, &canonical_hex)
+            .expect("canonical signature must still verify");
 
         // Core assertion: the S + L malleation MUST be rejected.
         let malleated_hex = hex::encode(sig_bytes);

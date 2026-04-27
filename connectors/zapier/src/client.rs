@@ -449,8 +449,7 @@ mod tests {
         validate_action_id("abc123").expect("plain alphanumeric");
         validate_action_id("zap-alpha-beta").expect("dashed slug");
         validate_action_id("my_zap_v2").expect("underscored slug");
-        validate_action_id("00000000-1111-2222-3333-444444444444")
-            .expect("uuid-like with dashes");
+        validate_action_id("00000000-1111-2222-3333-444444444444").expect("uuid-like with dashes");
         validate_action_id("A").expect("single character");
     }
 
@@ -459,8 +458,8 @@ mod tests {
         // The exact attack shape from the bead repro: an action_id
         // that climbs out of `/exposed/{id}/execute/` into a
         // sibling path on the same host.
-        let err = validate_action_id("id/../admin/delete")
-            .expect_err("path separator must be rejected");
+        let err =
+            validate_action_id("id/../admin/delete").expect_err("path separator must be rejected");
         assert!(format!("{err:?}").contains("forbidden character"));
     }
 

@@ -472,14 +472,9 @@ impl SlackClient {
     /// maps the `None` case to a terminal `SlackError::Api` instead so
     /// the connector surfaces it as a normal FCP External error.
     /// See flywheel_connectors-g37n0.
-    fn expect_data<T>(
-        data: Option<T>,
-        method: &'static str,
-    ) -> SlackResult<T> {
+    fn expect_data<T>(data: Option<T>, method: &'static str) -> SlackResult<T> {
         data.ok_or_else(|| SlackError::Api {
-            error: format!(
-                "Slack API method `{method}` returned ok=true with no payload"
-            ),
+            error: format!("Slack API method `{method}` returned ok=true with no payload"),
             code: None,
             ok: true,
         })

@@ -107,5 +107,4 @@ fuzz_target!(|input: Input| {
             }
         }
     }
-
 });

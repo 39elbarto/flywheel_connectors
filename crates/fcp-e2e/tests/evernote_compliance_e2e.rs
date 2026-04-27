@@ -491,8 +491,7 @@ async fn evernote_allow_valid_token_connector_suite_passes() {
     let notebooks_hits = received
         .iter()
         .filter(|r| {
-            r.method == wiremock::http::Method::GET
-                && r.url.path().starts_with("/notebooks")
+            r.method == wiremock::http::Method::GET && r.url.path().starts_with("/notebooks")
         })
         .count();
     assert_eq!(

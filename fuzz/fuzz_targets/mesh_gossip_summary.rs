@@ -134,7 +134,10 @@ fuzz_target!(|data: &[u8]| {
             ));
         }
         2 => {
-            assert!(matches!(result, Err(MeshNodeError::SignatureNodeMismatch { .. })));
+            assert!(matches!(
+                result,
+                Err(MeshNodeError::SignatureNodeMismatch { .. })
+            ));
         }
         _ => unreachable!(),
     }

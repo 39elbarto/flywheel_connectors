@@ -332,8 +332,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let cose = CapabilityTokenBuilder::new()
         .capability_id(capability)
         .zone_id("z:work")
@@ -513,7 +512,10 @@ async fn allow_valid_token_connector_suite_passes() {
 
     assert!(report.passed, "allow suite should pass");
     let received = mock.received_requests().await;
-    let hits = received.iter().filter(|r| r.url.path() == "/search").count();
+    let hits = received
+        .iter()
+        .filter(|r| r.url.path() == "/search")
+        .count();
     assert_eq!(hits, 1, "expected exactly one GET to /search");
     let invoke_entry = report
         .logs

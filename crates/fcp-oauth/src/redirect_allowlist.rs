@@ -399,10 +399,16 @@ mod tests {
         // The registered redirect MUST NOT collide with an OAuth
         // response parameter name, or the callback split later
         // becomes ambiguous.
-        for param in &["code", "state", "error", "error_description", "error_uri", "iss"] {
+        for param in &[
+            "code",
+            "state",
+            "error",
+            "error_description",
+            "error_uri",
+            "iss",
+        ] {
             let raw = format!("https://example.com/cb?{param}=x");
-            let err =
-                normalize_registered_redirect_uri(&raw, "allowed_redirect_uris").unwrap_err();
+            let err = normalize_registered_redirect_uri(&raw, "allowed_redirect_uris").unwrap_err();
             assert!(
                 matches!(err, OAuthError::InvalidConfig(ref m) if m.contains("OAuth response parameter")),
                 "parameter {param:?} should collide, got {err:?}"

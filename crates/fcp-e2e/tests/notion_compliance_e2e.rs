@@ -430,7 +430,8 @@ async fn notion_allow_valid_token_connector_suite_passes() {
 
     // br-7e15h: independently verify the connector actually hit the
     // mock API, not just that the runner's report says passed.
-    mock.assert_received("/pages/a1b2c3d4-e5f6-7890-abcd-ef1234567890").await;
+    mock.assert_received("/pages/a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+        .await;
 }
 
 // ============================================================================

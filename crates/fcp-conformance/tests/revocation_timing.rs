@@ -309,7 +309,11 @@ fn scenario_priority_push_fanout_caps_peers_and_preserves_order() {
             ..GossipConfig::default()
         },
     );
-    let peers = vec![test_peer("peer-a"), test_peer("peer-b"), test_peer("peer-c")];
+    let peers = vec![
+        test_peer("peer-a"),
+        test_peer("peer-b"),
+        test_peer("peer-c"),
+    ];
 
     let plan = gossip.plan_revocation_push_fanout(
         &ZoneId::work(),

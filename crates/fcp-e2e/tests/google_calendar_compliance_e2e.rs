@@ -234,8 +234,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let resolved_capability = match capability {
         "gcal.get_event" => "gcal.read",
         _ => capability,
@@ -364,10 +363,7 @@ async fn gcal_default_deny_compliance_suite_passes() {
 
     let mut connector = GoogleCalendarConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["gcal.write"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["gcal.write"]);
     // Token grants "gcal.write" but invoke targets "gcal.get_event" -> denial
     let token = build_token(&signing_key, "gcal.write", &["gcal.write"]);
     let invoke = invoke_request(

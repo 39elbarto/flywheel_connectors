@@ -32,8 +32,8 @@ fuzz_target!(|data: &[u8]| {
         "COSE re-encoding must be byte-stable across parse roundtrips"
     );
 
-    let fixed_key = Ed25519SigningKey::from_bytes(&[0x41; 32])
-        .expect("static fuzz signing key must parse");
+    let fixed_key =
+        Ed25519SigningKey::from_bytes(&[0x41; 32]).expect("static fuzz signing key must parse");
     let verify_pk = fixed_key.verifying_key();
 
     let _ = token.verify(&verify_pk);

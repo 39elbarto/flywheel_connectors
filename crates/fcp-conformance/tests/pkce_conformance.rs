@@ -68,7 +68,9 @@ fn rfc7636_4_1_verifier_rejects_reserved_and_special_chars() {
         '+', '/', '=', '@', '#', '%', ' ', '\\', '|', '{', '}', '[', ']', '!', '$', '&', '*', '(',
         ')', '?', ',', ';', ':', '\'', '"', '<', '>', '\n', '\t',
     ] {
-        let verifier: String = std::iter::repeat_n('a', 42).chain(Some(forbidden)).collect();
+        let verifier: String = std::iter::repeat_n('a', 42)
+            .chain(Some(forbidden))
+            .collect();
         assert_eq!(verifier.chars().count(), 43);
         let err = Pkce::from_verifier(&verifier, PkceMethod::S256)
             .expect_err("forbidden char must be rejected by from_verifier");

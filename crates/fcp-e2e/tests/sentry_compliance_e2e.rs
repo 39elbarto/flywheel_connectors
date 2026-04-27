@@ -268,8 +268,7 @@ fn build_token(
         ..Default::default()
     };
     let mut constraints_cbor = Vec::new();
-    ciborium::into_writer(&constraints, &mut constraints_cbor)
-        .expect("serialize test constraints");
+    ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize test constraints");
     let resolved_capability = match capability {
         "sentry.list_projects" => "sentry.read",
         _ => capability,
@@ -421,15 +420,8 @@ async fn sentry_allow_valid_token_connector_suite_passes() {
 
     let mut connector = SentryConnectorAdapter::new();
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["sentry.read"],
-    );
-    let token = build_token(
-        &signing_key,
-        "sentry.read",
-        &["sentry.list_projects"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["sentry.read"]);
+    let token = build_token(&signing_key, "sentry.read", &["sentry.list_projects"]);
     let invoke = invoke_request(
         "sentry.list_projects",
         json!({ "organization_slug": "test-org" }),
@@ -465,16 +457,9 @@ async fn sentry_allow_valid_token_connector_suite_passes() {
     let expected_path = "/organizations/test%2Dorg/projects";
     let hits = received
         .iter()
-        .filter(|r| {
-            r.url.path()
-                .trim_end_matches('/')
-                .ends_with(expected_path)
-        })
+        .filter(|r| r.url.path().trim_end_matches('/').ends_with(expected_path))
         .count();
-    assert_eq!(
-        hits, 1,
-        "expected exactly one GET to {expected_path}[/]"
-    );
+    assert_eq!(hits, 1, "expected exactly one GET to {expected_path}[/]");
     let invoke_entry = report
         .logs
         .iter()

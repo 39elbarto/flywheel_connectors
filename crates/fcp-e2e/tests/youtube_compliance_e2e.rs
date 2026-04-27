@@ -393,10 +393,7 @@ async fn youtube_allow_valid_token_connector_suite_passes() {
     let signing_key = Ed25519SigningKey::generate();
     // Introspection declares `youtube.get_video` requires capability
     // `youtube.read` (permission class), not the op id itself.
-    let handshake = handshake_request(
-        signing_key.verifying_key().to_bytes(),
-        &["youtube.read"],
-    );
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), &["youtube.read"]);
     let token = build_token(&signing_key, "youtube.read", &["youtube.get_video"]);
     let invoke = invoke_request(
         "youtube.get_video",
@@ -445,16 +442,17 @@ async fn youtube_allow_valid_token_connector_suite_passes() {
     let received = mock.received_requests().await;
     let videos_hits = received
         .iter()
-        .filter(|r| {
-            r.method == wiremock::http::Method::GET
-                && r.url.path().starts_with("/videos")
-        })
+        .filter(|r| r.method == wiremock::http::Method::GET && r.url.path().starts_with("/videos"))
         .count();
     assert_eq!(
-        videos_hits, 1,
+        videos_hits,
+        1,
         "expected exactly one GET to /videos*; got {videos_hits} \
          (received: {:?})",
-        received.iter().map(|r| r.url.path().to_string()).collect::<Vec<_>>()
+        received
+            .iter()
+            .map(|r| r.url.path().to_string())
+            .collect::<Vec<_>>()
     );
 }
 

@@ -99,10 +99,7 @@ impl NotionConfig {
     }
 }
 
-fn optional_nonempty_string(
-    params: &serde_json::Value,
-    field: &str,
-) -> FcpResult<Option<String>> {
+fn optional_nonempty_string(params: &serde_json::Value, field: &str) -> FcpResult<Option<String>> {
     let Some(value) = params.get(field) else {
         return Ok(None);
     };
@@ -175,9 +172,7 @@ fn optional_safe_cursor(input: &serde_json::Value, field: &str) -> FcpResult<Opt
     if raw.len() > MAX_NOTION_CURSOR_BYTES {
         return Err(FcpError::InvalidRequest {
             code: 1003,
-            message: format!(
-                "{field} exceeds maximum length of {MAX_NOTION_CURSOR_BYTES} bytes"
-            ),
+            message: format!("{field} exceeds maximum length of {MAX_NOTION_CURSOR_BYTES} bytes"),
         });
     }
     if raw.chars().any(char::is_control) {

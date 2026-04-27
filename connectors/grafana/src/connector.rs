@@ -119,18 +119,14 @@ fn validate_base_url(base_url: &str) -> FcpResult<()> {
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(FcpError::InvalidRequest {
             code: 1003,
-            message: format!(
-                "base_url must not contain userinfo (username/password): {base_url}"
-            ),
+            message: format!("base_url must not contain userinfo (username/password): {base_url}"),
         });
     }
 
     if parsed.query().is_some() || parsed.fragment().is_some() {
         return Err(FcpError::InvalidRequest {
             code: 1003,
-            message: format!(
-                "base_url must not contain query or fragment components: {base_url}"
-            ),
+            message: format!("base_url must not contain query or fragment components: {base_url}"),
         });
     }
 

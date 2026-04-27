@@ -51,11 +51,11 @@ pub use error::{
     GcError, LifecycleSnapshotError, ObjectStoreError, QuarantineError, RepairError,
     SymbolStoreError,
 };
-pub use object_id_verifier::{KeyedObjectIdVerifier, ObjectIdVerifier};
 pub use gc::{
     GarbageCollector, GcConfig, GcDecision, GcDecisionAction, GcReasonCode, GcResult, GcRoots,
     GcRunReport, GcTranscript,
 };
+pub use object_id_verifier::{KeyedObjectIdVerifier, ObjectIdVerifier};
 pub use object_store::{
     LifecycleRootObservation, LifecycleRootRole, LifecycleRootStatus, MemoryObjectStore,
     MemoryObjectStoreConfig, ObjectLeaseState, ObjectLifecycleSnapshot, ObjectStore,

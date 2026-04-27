@@ -513,6 +513,9 @@ impl SlackWebhook {
         // Get headers
         let signature = header_value_case_insensitive(headers, "x-slack-signature")?
             .ok_or_else(|| WebhookError::MissingSignature("X-Slack-Signature".into()))?;
+        if !signature.starts_with("v0=") {
+            return Err(WebhookError::InvalidSignature);
+        }
 
         let timestamp_str = header_value_case_insensitive(headers, "x-slack-request-timestamp")?
             .ok_or_else(|| WebhookError::MissingSignature("X-Slack-Request-Timestamp".into()))?;
@@ -1321,6 +1324,39 @@ mod tests {
 
         let event = handler.verify_and_parse(&headers, body).unwrap();
         assert_eq!(event.event_type, "message");
+    }
+
+    #[test]
+    fn slack_rejects_non_v0_signature_version() {
+        let signing_secret = "test-secret";
+        let fixed_now = 1_700_000_000_i64;
+        let timestamp = fixed_now;
+        let handler = SlackWebhook::new(signing_secret)
+            .with_timestamp_tolerance(Duration::from_secs(300))
+            .with_fixed_now_for_tests(fixed_now);
+        let body = br#"{"event":{"type":"message"}}"#;
+
+        let base_string = format!("v0:{timestamp}:{}", String::from_utf8_lossy(body));
+        let verifier = HmacSha256Verifier::new(signing_secret);
+        let computed = verifier.compute(base_string.as_bytes());
+
+        for prefix in ["v1=", "sha256=", ""] {
+            let mut headers = HashMap::new();
+            headers.insert(
+                "x-slack-signature".to_string(),
+                format!("{prefix}{computed}"),
+            );
+            headers.insert(
+                "x-slack-request-timestamp".to_string(),
+                timestamp.to_string(),
+            );
+
+            let result = handler.verify_and_parse(&headers, body);
+            assert!(
+                matches!(result, Err(WebhookError::InvalidSignature)),
+                "Slack signature prefix {prefix:?} must fail closed; got {result:?}"
+            );
+        }
     }
 
     #[test]

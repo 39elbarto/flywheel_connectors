@@ -1,15 +1,25 @@
+#[cfg(not(test))]
 use std::io::{Read, Write};
+#[cfg(not(test))]
 use std::net::{SocketAddr, TcpListener, TcpStream};
+#[cfg(not(test))]
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(not(test))]
+use std::time::Instant;
 
+#[cfg(not(test))]
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+#[cfg(not(test))]
 use serde_json::json;
 
+#[cfg(not(test))]
 const CONNECTOR_ID: &str = "fcp.bench.cold-start:utility:1.0.0";
+#[cfg(not(test))]
 const READINESS_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[cfg(not(test))]
 fn cargo_bin(env_name: &str, binary_name: &str) -> PathBuf {
     if let Some(path) = std::env::var_os(env_name) {
         return PathBuf::from(path);
@@ -31,11 +41,15 @@ fn cargo_bin(env_name: &str, binary_name: &str) -> PathBuf {
     candidate
 }
 
+#[cfg(not(test))]
 fn free_loopback_addr() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral loopback port");
-    listener.local_addr().expect("read loopback listener address")
+    listener
+        .local_addr()
+        .expect("read loopback listener address")
 }
 
+#[cfg(not(test))]
 fn connector_inventory(connector_binary: &str) -> String {
     serde_json::to_string(&vec![json!({
         "id": CONNECTOR_ID,
@@ -51,6 +65,7 @@ fn connector_inventory(connector_binary: &str) -> String {
     .expect("serialize connector inventory")
 }
 
+#[cfg(not(test))]
 fn spawn_host(addr: SocketAddr, connector_binary: &str, state_file: &std::path::Path) -> Child {
     let host_binary = cargo_bin("CARGO_BIN_EXE_fcp-host", "fcp-host");
     Command::new(host_binary)
@@ -63,6 +78,29 @@ fn spawn_host(addr: SocketAddr, connector_binary: &str, state_file: &std::path::
         .expect("spawn fcp-host")
 }
 
+struct ChildGuard {
+    child: Child,
+}
+
+impl ChildGuard {
+    const fn new(child: Child) -> Self {
+        Self { child }
+    }
+
+    #[cfg(not(test))]
+    fn child_mut(&mut self) -> &mut Child {
+        &mut self.child
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(not(test))]
 fn request_health(addr: SocketAddr) -> std::io::Result<String> {
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(100))?;
     stream.set_read_timeout(Some(Duration::from_millis(250)))?;
@@ -76,6 +114,7 @@ fn request_health(addr: SocketAddr) -> std::io::Result<String> {
     Ok(response)
 }
 
+#[cfg(not(test))]
 fn wait_for_connector_ready(child: &mut Child, addr: SocketAddr) {
     let deadline = Instant::now() + READINESS_TIMEOUT;
     let mut last_response = String::new();
@@ -102,21 +141,21 @@ fn wait_for_connector_ready(child: &mut Child, addr: SocketAddr) {
     );
 }
 
+#[cfg(not(test))]
 fn activate_connector_to_ready_once(connector_binary: &str) -> Duration {
     let addr = free_loopback_addr();
     let state_dir = tempfile::tempdir().expect("create host state tempdir");
     let state_file = state_dir.path().join("lifecycle-state.json");
 
     let started = Instant::now();
-    let mut child = spawn_host(addr, connector_binary, &state_file);
-    wait_for_connector_ready(&mut child, addr);
+    let mut child = ChildGuard::new(spawn_host(addr, connector_binary, &state_file));
+    wait_for_connector_ready(child.child_mut(), addr);
     let elapsed = started.elapsed();
 
-    let _ = child.kill();
-    let _ = child.wait();
     elapsed
 }
 
+#[cfg(not(test))]
 fn cold_start(c: &mut Criterion) {
     let connector_binary = cargo_bin("CARGO_BIN_EXE_fcp-test-connector", "fcp-test-connector");
     let connector_binary = connector_binary
@@ -144,5 +183,49 @@ fn cold_start(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(not(test))]
 criterion_group!(benches, cold_start);
+#[cfg(not(test))]
 criterion_main!(benches);
+
+#[cfg(all(test, unix))]
+fn main() {
+    tests::child_guard_kills_child_when_scope_panics();
+}
+
+#[cfg(all(test, not(unix)))]
+fn main() {}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    pub(super) fn child_guard_kills_child_when_scope_panics() {
+        let tempdir = tempfile::tempdir().expect("create marker tempdir");
+        let marker = tempdir.path().join("survived");
+        let script = format!("sleep 2; printf survived > {}", marker.display());
+
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(|| {
+            let child = Command::new("sh")
+                .arg("-c")
+                .arg(script)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn marker child");
+            let _guard = ChildGuard::new(child);
+            std::panic::panic_any("simulated readiness panic");
+        });
+        std::panic::set_hook(previous_hook);
+
+        assert!(result.is_err());
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(
+            !marker.exists(),
+            "child survived guard drop long enough to write marker"
+        );
+    }
+}

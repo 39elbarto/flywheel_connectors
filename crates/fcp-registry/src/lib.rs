@@ -1635,13 +1635,20 @@ fn summarize_publishers(
     }
     let mut valid = 0u8;
     let mut first_error = None;
+    let mut seen_valid_keys = HashSet::new();
 
     for entry in &sigs.publisher_signatures {
         // Tolerate individual publisher failures while a trusted subset can still
         // satisfy the declared threshold, but preserve the first concrete error if
         // nothing verifies successfully.
         match verify_signature_entry(trust, entry, signing_bytes, binary_hash, true) {
-            Ok(true) => valid = valid.saturating_add(1),
+            Ok(true) => {
+                if let Some(key) = trust.publisher_keys.get(&entry.kid)
+                    && seen_valid_keys.insert(key.to_bytes())
+                {
+                    valid = valid.saturating_add(1);
+                }
+            }
             Ok(false) => {} // signature did not match — skip without counting
             Err(err) => {
                 if first_error.is_none() {

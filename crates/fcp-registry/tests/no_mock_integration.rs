@@ -1570,6 +1570,69 @@ sig = "{}"
     );
 }
 
+#[test]
+fn verify_bundle_publisher_threshold_counts_unique_verifiers() {
+    let signing_key = Ed25519SigningKey::generate();
+
+    let binary = test_binary();
+    let b_hash = binary_hash(&binary);
+    let unsigned = unsigned_manifest_toml("");
+    let manifest = ConnectorManifest::parse_str(&unsigned).expect("parse");
+    let signing_bytes = fcp_registry::manifest_signing_bytes(&manifest).expect("signing bytes");
+    let message = fcp_registry::signature_message(&signing_bytes, &b_hash);
+    let signature =
+        signing_key.sign_with_context(fcp_registry::MANIFEST_SIGNATURE_CONTEXT, &message);
+    let b64_signature = Base64Bytes::try_from(format!(
+        "base64:{}",
+        base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+    ))
+    .expect("b64");
+
+    let sig_section = format!(
+        r#"[signatures]
+publisher_threshold = "2-of-2"
+
+[[signatures.publisher_signatures]]
+kid = "key1"
+sig = "{sig}"
+
+[[signatures.publisher_signatures]]
+kid = "key2"
+sig = "{sig}"
+"#,
+        sig = String::from(b64_signature),
+    );
+    let manifest_toml = format!("{unsigned}\n{sig_section}");
+
+    let bundle = ConnectorBundle {
+        manifest_toml,
+        binary,
+        target: test_target(),
+    };
+
+    let verifying_key = signing_key.verifying_key();
+    let mut trust = RegistryTrustPolicy::default();
+    trust
+        .publisher_keys
+        .insert("key1".to_string(), verifying_key.clone());
+    trust
+        .publisher_keys
+        .insert("key2".to_string(), verifying_key);
+
+    let verifier = RegistryVerifier::new(trust);
+    let result = verifier.verify_bundle(&bundle, None, None, None);
+    assert!(
+        matches!(
+            result,
+            Err(RegistryError::PublisherThresholdUnmet {
+                required: 2,
+                valid: 1,
+            })
+        ),
+        "one verifier registered under two kids must not satisfy a 2-of-2 threshold: {result:?}"
+    );
+}
+
 // ── NoOp verifiers ──
 
 #[fcp_async_core::runtime::test]

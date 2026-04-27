@@ -41,6 +41,8 @@ struct DeploymentProfile {
     default_model: Option<Model>,
 }
 
+const ALLOWED_BASE_URL_HOSTS: &[&str] = &["api.openai.com", "api.deepseek.com"];
+
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DeploymentProfileObject {
@@ -196,21 +198,56 @@ fn normalize_base_url(base_url: &str) -> FcpResult<String> {
         message: format!("Invalid base_url: {e}"),
     })?;
 
-    if !matches!(parsed.scheme(), "https" | "http") {
+    let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "base_url must include a host".into(),
+    })?;
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(FcpError::InvalidRequest {
             code: 1003,
-            message: "base_url must be http or https".into(),
+            message: "base_url must not include userinfo".into(),
         });
     }
 
-    if parsed.host_str().is_none() {
+    if parsed.query().is_some() || parsed.fragment().is_some() {
         return Err(FcpError::InvalidRequest {
             code: 1003,
-            message: "base_url must include a host".into(),
+            message: "base_url must not include query or fragment components".into(),
         });
     }
 
-    Ok(trimmed.trim_end_matches('/').to_string())
+    let normalized_host = host
+        .trim()
+        .trim_end_matches('.')
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase();
+    let is_localhost = matches!(normalized_host.as_str(), "localhost" | "127.0.0.1" | "::1");
+    let valid_scheme = if is_localhost {
+        matches!(parsed.scheme(), "http" | "https")
+    } else {
+        parsed.scheme() == "https"
+    };
+
+    if !valid_scheme {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must use https (or http only for localhost tests)".into(),
+        });
+    }
+
+    if !is_localhost
+        && !ALLOWED_BASE_URL_HOSTS
+            .iter()
+            .any(|allowed_host| normalized_host == *allowed_host)
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("base_url host {normalized_host} is not allowed"),
+        });
+    }
+
+    Ok(parsed.to_string().trim_end_matches('/').to_string())
 }
 
 fn capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
@@ -3710,7 +3747,7 @@ mod tests {
         let result = normalize_base_url("ftp://api.openai.com");
         assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
         if let Err(FcpError::InvalidRequest { message, .. }) = result {
-            assert!(message.contains("http or https"));
+            assert!(message.contains("https"));
         }
     }
 
@@ -3736,6 +3773,59 @@ mod tests {
     fn normalize_base_url_http_allowed() {
         let result = normalize_base_url("http://localhost:8080").unwrap();
         assert_eq!(result, "http://localhost:8080");
+    }
+
+    #[test]
+    fn normalize_base_url_https_localhost_allowed() {
+        let result = normalize_base_url("https://localhost:8443").unwrap();
+        assert_eq!(result, "https://localhost:8443");
+    }
+
+    #[test]
+    fn normalize_base_url_http_non_local_rejected() {
+        let result = normalize_base_url("http://api.openai.com/v1");
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+        if let Err(FcpError::InvalidRequest { message, .. }) = result {
+            assert!(message.contains("https"));
+        }
+    }
+
+    #[test]
+    fn normalize_base_url_unapproved_host_rejected() {
+        let result = normalize_base_url("https://evil.example.com/v1");
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+        if let Err(FcpError::InvalidRequest { message, .. }) = result {
+            assert!(message.contains("not allowed"));
+        }
+    }
+
+    #[test]
+    fn normalize_base_url_compatible_host_allowed() {
+        let result =
+            normalize_base_url("https://api.deepseek.com/v3.2_speciale_expires_on_20251215")
+                .unwrap();
+        assert_eq!(
+            result,
+            "https://api.deepseek.com/v3.2_speciale_expires_on_20251215"
+        );
+    }
+
+    #[test]
+    fn normalize_base_url_rejects_userinfo() {
+        let result = normalize_base_url("https://user:secret@api.openai.com/v1");
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+        if let Err(FcpError::InvalidRequest { message, .. }) = result {
+            assert!(message.contains("userinfo"));
+        }
+    }
+
+    #[test]
+    fn normalize_base_url_rejects_query() {
+        let result = normalize_base_url("https://api.openai.com/v1?proxy=evil");
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+        if let Err(FcpError::InvalidRequest { message, .. }) = result {
+            assert!(message.contains("query or fragment"));
+        }
     }
 
     #[test]
@@ -3895,10 +3985,10 @@ mod tests {
     fn config_from_params_with_custom_base_url() {
         let params = json!({
             "api_key": "sk-test",
-            "base_url": "https://custom.api.com/v1"
+            "base_url": "https://api.deepseek.com/v1"
         });
         let config = OpenAIConfig::from_params(&params).unwrap();
-        assert_eq!(config.base_url, "https://custom.api.com/v1");
+        assert_eq!(config.base_url, "https://api.deepseek.com/v1");
     }
 
     #[test]
@@ -3906,24 +3996,37 @@ mod tests {
         let params = json!({
             "api_key": "sk-test",
             "deployment_profile": {
-                "base_url": "https://profile.api.com"
+                "base_url": "https://api.deepseek.com/v1"
             }
         });
         let config = OpenAIConfig::from_params(&params).unwrap();
-        assert_eq!(config.base_url, "https://profile.api.com");
+        assert_eq!(config.base_url, "https://api.deepseek.com/v1");
     }
 
     #[test]
     fn config_from_params_base_url_overrides_profile() {
         let params = json!({
             "api_key": "sk-test",
-            "base_url": "https://explicit.api.com",
+            "base_url": "https://api.deepseek.com/v1",
             "deployment_profile": {
-                "base_url": "https://profile.api.com"
+                "base_url": "https://api.openai.com/v1"
             }
         });
         let config = OpenAIConfig::from_params(&params).unwrap();
-        assert_eq!(config.base_url, "https://explicit.api.com");
+        assert_eq!(config.base_url, "https://api.deepseek.com/v1");
+    }
+
+    #[test]
+    fn config_from_params_rejects_unapproved_base_url() {
+        let params = json!({
+            "api_key": "sk-test",
+            "base_url": "https://evil.example.com/v1"
+        });
+        let result = OpenAIConfig::from_params(&params);
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+        if let Err(FcpError::InvalidRequest { message, .. }) = result {
+            assert!(message.contains("not allowed"));
+        }
     }
 
     #[test]

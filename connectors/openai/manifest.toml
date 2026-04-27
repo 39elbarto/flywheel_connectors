@@ -176,7 +176,7 @@ description = "Estimated cost in USD"
 type = "number"
 
 [provides.operations.chat.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -280,7 +280,7 @@ description = "Estimated cost in USD"
 type = "number"
 
 [provides.operations.simple_chat.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -436,7 +436,7 @@ description = "Estimated cost in USD"
 type = "number"
 
 [provides.operations.embeddings.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -539,7 +539,7 @@ description = "Revised prompt (DALL-E 3)"
 type = "string"
 
 [provides.operations.images_generate.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -615,7 +615,7 @@ description = "Transcribed text"
 type = "string"
 
 [provides.operations.audio_transcribe.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -714,7 +714,7 @@ description = "Number of input characters"
 type = "integer"
 
 [provides.operations.audio_tts.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -807,7 +807,7 @@ description = "Unix timestamp of creation"
 type = "integer"
 
 [provides.operations.finetune_create.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -878,7 +878,7 @@ description = "Whether there are more results"
 type = "boolean"
 
 [provides.operations.finetune_list.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -962,7 +962,7 @@ description = "Number of tokens trained"
 type = "integer"
 
 [provides.operations.finetune_get.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -1023,7 +1023,7 @@ description = "Job status after cancellation"
 type = "string"
 
 [provides.operations.finetune_cancel.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -1095,7 +1095,7 @@ description = "Whether there are more results"
 type = "boolean"
 
 [provides.operations.finetune_events.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -1182,7 +1182,7 @@ description = "Unix timestamp of creation"
 type = "integer"
 
 [provides.operations.assistants_create.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -1249,7 +1249,7 @@ description = "Whether there are more results"
 type = "boolean"
 
 [provides.operations.assistants_list.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -1318,7 +1318,7 @@ description = "Unix timestamp of creation"
 type = "integer"
 
 [provides.operations.assistants_get.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -1377,7 +1377,7 @@ description = "Whether deletion succeeded"
 type = "boolean"
 
 [provides.operations.assistants_delete.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -1441,7 +1441,7 @@ description = "Unix timestamp of creation"
 type = "integer"
 
 [provides.operations.threads_create.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -1502,7 +1502,7 @@ description = "Unix timestamp of creation"
 type = "integer"
 
 [provides.operations.threads_get.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -1585,7 +1585,7 @@ description = "Unix timestamp of creation"
 type = "integer"
 
 [provides.operations.threads_messages_create.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -1657,7 +1657,7 @@ description = "Whether there are more results"
 type = "boolean"
 
 [provides.operations.threads_messages_list.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -1743,7 +1743,7 @@ description = "Unix timestamp of creation"
 type = "integer"
 
 [provides.operations.threads_runs_create.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -1825,7 +1825,7 @@ description = "Unix timestamp of creation"
 type = "integer"
 
 [provides.operations.threads_runs_get.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []
@@ -1888,7 +1888,7 @@ description = "Run status after cancellation"
 type = "string"
 
 [provides.operations.threads_runs_cancel.network_constraints]
-host_allow = ["api.openai.com"]
+host_allow = ["api.openai.com", "api.deepseek.com"]
 port_allow = [443]
 ip_allow = []
 cidr_deny = []

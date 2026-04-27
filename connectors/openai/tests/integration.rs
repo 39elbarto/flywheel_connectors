@@ -14,7 +14,7 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration, Utc};
-use fcp_core::CapabilityConstraints;
+use fcp_core::{CapabilityConstraints, FcpError};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_testkit::{AsyncTestContext, MockApiServer};
@@ -1010,6 +1010,26 @@ async fn lifecycle_health_after_configure() {
     let result = connector.handle_health().await.unwrap();
     assert_eq!(result["status"], "healthy");
     assert!(result.get("metrics").is_some());
+}
+
+/// Configure rejects off-policy public hosts before any bearer token can be used.
+#[fcp_async_core::runtime::test]
+async fn lifecycle_configure_rejects_untrusted_base_url() {
+    let mut connector = OpenAIConnector::new();
+    let error = connector
+        .handle_configure(json!({
+            "api_key": "test-api-key-xyz",
+            "base_url": "https://evil.example.com/v1"
+        }))
+        .await
+        .expect_err("configure should reject untrusted hosts");
+
+    match error {
+        FcpError::InvalidRequest { message, .. } => {
+            assert!(message.contains("not allowed"));
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
 }
 
 /// Handshake grants capabilities.

@@ -43,6 +43,7 @@ uuid.workspace = true
 [dev-dependencies]
 ciborium.workspace = true
 wiremock.workspace = true
+fcp-e2e = { path = "../../crates/fcp-e2e" }
 fcp-async-core = { path = "../../crates/fcp-async-core" }
 fcp-crypto = { path = "../../crates/fcp-crypto" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }

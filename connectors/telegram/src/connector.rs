@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use fcp_async_core::channel::{broadcast, watch};
 use fcp_async_core::sync::RwLock;
 use fcp_core::*;
@@ -1783,6 +1784,178 @@ fn message_to_json(msg: &Message) -> serde_json::Value {
 impl Default for TelegramConnector {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fcp_core::impl_fcp_sealed!(TelegramConnector);
+
+#[async_trait]
+impl FcpConnector for TelegramConnector {
+    fn id(&self) -> &ConnectorId {
+        &self.base.id
+    }
+
+    async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
+        self.handle_configure(config).await.map(|_| ())
+    }
+
+    async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        let request = serde_json::to_value(req).map_err(|error| FcpError::Internal {
+            message: format!("Failed to serialize Telegram handshake request: {error}"),
+        })?;
+        let response = self.handle_handshake(request).await?;
+        serde_json::from_value(response).map_err(|error| FcpError::Internal {
+            message: format!("Failed to deserialize Telegram handshake response: {error}"),
+        })
+    }
+
+    async fn health(&self) -> HealthSnapshot {
+        let (status, details) = if self.client.is_some() {
+            (HealthState::Ready, Some(json!({ "status": "healthy" })))
+        } else if self.config.is_some() {
+            (
+                HealthState::Degraded {
+                    reason: "credential materialization pending".into(),
+                },
+                Some(json!({ "status": "degraded_pending_credential_materialization" })),
+            )
+        } else {
+            (
+                HealthState::Starting,
+                Some(json!({ "status": "not_configured" })),
+            )
+        };
+
+        HealthSnapshot {
+            status,
+            uptime_ms: self.start_time.elapsed().as_millis() as u64,
+            load: None,
+            details,
+            rate_limit: None,
+        }
+    }
+
+    fn metrics(&self) -> ConnectorMetrics {
+        self.base.metrics()
+    }
+
+    async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
+        self.handle_shutdown(json!({})).await.map(|_| ())
+    }
+
+    fn introspect(&self) -> Introspection {
+        let operation = |id: &'static str,
+                         summary: &'static str,
+                         input_schema: serde_json::Value,
+                         output_schema: serde_json::Value,
+                         capability: &'static str,
+                         risk_level: RiskLevel,
+                         safety_tier: SafetyTier,
+                         idempotency: IdempotencyClass| {
+            OperationInfo {
+                id: OperationId::from_static(id),
+                summary: summary.into(),
+                description: None,
+                input_schema,
+                output_schema,
+                capability: CapabilityId::from_static(capability),
+                risk_level,
+                safety_tier,
+                idempotency,
+                ai_hints: AgentHint {
+                    when_to_use: summary.into(),
+                    common_mistakes: Vec::new(),
+                    examples: Vec::new(),
+                    related: Vec::new(),
+                },
+                rate_limit: None,
+                requires_approval: None,
+            }
+        };
+
+        Introspection {
+            operations: vec![
+                operation(
+                    "telegram.send_message",
+                    "Send a text message to a Telegram chat",
+                    Self::send_message_input_schema(),
+                    Self::send_message_output_schema(),
+                    "telegram.send",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::None,
+                ),
+                operation(
+                    "telegram.send_media",
+                    "Send media to a Telegram chat",
+                    Self::send_media_input_schema(),
+                    Self::send_media_output_schema(),
+                    "telegram.send",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::None,
+                ),
+                operation(
+                    "telegram.get_file",
+                    "Get Telegram file information",
+                    Self::get_file_input_schema(),
+                    Self::get_file_output_schema(),
+                    "telegram.read",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                ),
+                operation(
+                    "telegram.answer_callback_query",
+                    "Answer a Telegram callback query",
+                    Self::answer_callback_query_input_schema(),
+                    Self::answer_callback_query_output_schema(),
+                    "telegram.send",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::None,
+                ),
+            ],
+            events: Vec::new(),
+            resource_types: Vec::new(),
+            auth_caps: None,
+            event_caps: Some(EventCaps {
+                streaming: true,
+                replay: false,
+                min_buffer_events: 1000,
+                requires_ack: false,
+            }),
+        }
+    }
+
+    async fn invoke(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
+        let id = req.id.clone();
+        let output = self
+            .handle_invoke(json!({
+                "operation": req.operation,
+                "input": req.input,
+                "capability_token": req.capability_token,
+            }))
+            .await?;
+        Ok(InvokeResponse::ok(id, output))
+    }
+
+    async fn simulate(&self, req: SimulateRequest) -> FcpResult<SimulateResponse> {
+        let request = serde_json::to_value(req).map_err(|error| FcpError::Internal {
+            message: format!("Failed to serialize Telegram simulate request: {error}"),
+        })?;
+        let response = self.handle_simulate(request).await?;
+        serde_json::from_value(response).map_err(|error| FcpError::Internal {
+            message: format!("Failed to deserialize Telegram simulate response: {error}"),
+        })
+    }
+
+    async fn subscribe(&self, _req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
+        Err(FcpError::StreamingNotSupported)
+    }
+
+    async fn unsubscribe(&self, _req: UnsubscribeRequest) -> FcpResult<()> {
+        Err(FcpError::StreamingNotSupported)
     }
 }
 

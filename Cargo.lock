@@ -5874,6 +5874,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
+ "fcp-e2e",
  "fcp-sdk",
  "fcp-testkit",
  "futures-util",

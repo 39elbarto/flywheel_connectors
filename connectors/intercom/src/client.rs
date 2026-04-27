@@ -16,6 +16,14 @@ use crate::{
 /// Default `Intercom` API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.intercom.io";
 
+/// Maximum byte length for an Intercom path-segment value
+/// (`contact_id`, `conversation_id`). Intercom's internal ids are
+/// 24-char MongoDB ObjectIds; `external_id` is customer-controlled
+/// but bounded in practice. 256 bytes is well above any legitimate
+/// value and bounds the worst case for path-injection payloads.
+/// br-low9w.
+const MAX_PATH_SEGMENT_LEN: usize = 256;
+
 /// Authentication mode for the `Intercom` API.
 #[derive(Clone)]
 pub enum IntercomAuth {
@@ -194,23 +202,43 @@ impl IntercomClient {
         self.handle_response(resp).await
     }
 
-    /// Reject path-segment values that contain traversal characters.
+    /// Validate that a value is safe to interpolate as a SINGLE path
+    /// segment in an Intercom API URL.
+    ///
+    /// Allowed: ASCII alphanumeric + `-` + `_`. Disallowed: any path
+    /// separator, query / fragment delimiter, percent-encoded byte,
+    /// dot-segment, leading/trailing whitespace, empty string, or
+    /// non-ASCII byte.
+    ///
+    /// br-low9w: the prior denylist-shaped check rejected `/`, `\`,
+    /// `..`, `%2f`, `%5c` but ALLOWED `?`, `#`, `&`, percent-encoded
+    /// equivalents like `%3f`/`%23`, whitespace-mid-segment, and
+    /// non-ASCII bytes that proxies / Intercom may decode or
+    /// normalize before routing. A `contact_id` like
+    /// `id?admin=true` would interpolate into
+    /// `/contacts/id?admin=true` — adding a query parameter to the
+    /// DELETE call. Switch to an allow-list (matches the zapier
+    /// `validate_action_id` fix in br-62aa3) so the strict shape is
+    /// enforced regardless of what byte the attacker sends.
     fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> IntercomResult<&'a str> {
-        if value.trim().is_empty() {
+        if value.is_empty() {
             return Err(IntercomError::InvalidInput(format!(
                 "{field} must not be empty",
             )));
         }
-        let lower = value.to_ascii_lowercase();
-        if value.contains('/')
-            || value.contains('\\')
-            || value.contains("..")
-            || lower.contains("%2f")
-            || lower.contains("%5c")
-        {
+        if value.len() > MAX_PATH_SEGMENT_LEN {
             return Err(IntercomError::InvalidInput(format!(
-                "{field} contains path traversal characters",
+                "{field} is {} bytes; max {MAX_PATH_SEGMENT_LEN}",
+                value.len(),
             )));
+        }
+        for (idx, ch) in value.char_indices() {
+            if !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_') {
+                return Err(IntercomError::InvalidInput(format!(
+                    "{field} contains forbidden character {ch:?} at byte offset {idx}; \
+                     only ASCII alphanumeric, '-', and '_' are allowed"
+                )));
+            }
         }
         Ok(value)
     }
@@ -447,6 +475,8 @@ mod tests {
 
     #[test]
     fn sanitize_path_segment_rejects_traversal() {
+        // br-low9w: original denylist cases — still rejected by the
+        // new allow-list (any non-alphanumeric/dash/underscore byte).
         assert!(IntercomClient::sanitize_path_segment("../admin", "contact_id").is_err());
         assert!(IntercomClient::sanitize_path_segment("foo/bar", "contact_id").is_err());
         assert!(IntercomClient::sanitize_path_segment("foo\\bar", "contact_id").is_err());
@@ -466,5 +496,77 @@ mod tests {
             IntercomClient::sanitize_path_segment("contact-id-42", "contact_id").unwrap(),
             "contact-id-42"
         );
+        // MongoDB-style ObjectId (Intercom's internal id format).
+        assert_eq!(
+            IntercomClient::sanitize_path_segment("5f0c8b1234567890abcdef12", "contact_id")
+                .unwrap(),
+            "5f0c8b1234567890abcdef12"
+        );
+        // Underscored (common in external_id customer payloads).
+        assert_eq!(
+            IntercomClient::sanitize_path_segment("user_42_v2", "contact_id").unwrap(),
+            "user_42_v2"
+        );
+    }
+
+    /// br-low9w regression: query and fragment delimiters were
+    /// previously NOT rejected by the denylist-shaped check, so a
+    /// `contact_id` like `id?admin=true` would interpolate into
+    /// `/contacts/id?admin=true` — the DELETE call gains a query
+    /// parameter the caller did not authorize. The strict allow-list
+    /// rejects ALL non-alphanumeric/dash/underscore bytes.
+    #[test]
+    fn sanitize_path_segment_rejects_query_and_fragment() {
+        assert!(IntercomClient::sanitize_path_segment("id?admin=true", "contact_id").is_err());
+        assert!(IntercomClient::sanitize_path_segment("id#frag", "contact_id").is_err());
+        assert!(IntercomClient::sanitize_path_segment("id&inject=1", "contact_id").is_err());
+        assert!(IntercomClient::sanitize_path_segment("id;param=v", "contact_id").is_err());
+    }
+
+    /// br-low9w regression: percent-encoded delimiters must also be
+    /// rejected — the original check caught only `%2f`/`%5c`,
+    /// missing `%3f` (`?`), `%23` (`#`), `%26` (`&`), and any other
+    /// reserved-character percent-encoding. Allow-list approach
+    /// rejects the `%` character itself, covering all variants.
+    #[test]
+    fn sanitize_path_segment_rejects_percent_encoded_delimiters() {
+        assert!(IntercomClient::sanitize_path_segment("id%3fadmin", "contact_id").is_err());
+        assert!(IntercomClient::sanitize_path_segment("id%23frag", "contact_id").is_err());
+        assert!(IntercomClient::sanitize_path_segment("id%26inject", "contact_id").is_err());
+        assert!(IntercomClient::sanitize_path_segment("id%2Fadmin", "contact_id").is_err());
+    }
+
+    /// br-low9w: dot in any position is rejected (the original check
+    /// only caught `..` substrings — single `.` like `foo.bar`
+    /// passed). Server-side path normalization could surprise.
+    #[test]
+    fn sanitize_path_segment_rejects_any_dot() {
+        assert!(IntercomClient::sanitize_path_segment(".", "contact_id").is_err());
+        assert!(IntercomClient::sanitize_path_segment("..", "contact_id").is_err());
+        assert!(IntercomClient::sanitize_path_segment("foo.bar", "contact_id").is_err());
+        assert!(IntercomClient::sanitize_path_segment("user.42", "contact_id").is_err());
+    }
+
+    /// br-low9w: non-ASCII bytes can be Unicode-normalized on the
+    /// server side into surprising path components. Strict
+    /// alphanumeric ASCII only.
+    #[test]
+    fn sanitize_path_segment_rejects_non_ascii() {
+        assert!(IntercomClient::sanitize_path_segment("café", "contact_id").is_err());
+        assert!(
+            IntercomClient::sanitize_path_segment("id\u{200B}admin", "contact_id").is_err(),
+        );
+    }
+
+    /// br-low9w: oversized payload bounded by MAX_PATH_SEGMENT_LEN
+    /// even when the bytes themselves would individually pass the
+    /// allow-list.
+    #[test]
+    fn sanitize_path_segment_rejects_oversized_payload() {
+        let huge = "a".repeat(MAX_PATH_SEGMENT_LEN + 1);
+        assert!(IntercomClient::sanitize_path_segment(&huge, "contact_id").is_err());
+        // Right at the cap stays accepted.
+        let exact = "a".repeat(MAX_PATH_SEGMENT_LEN);
+        assert!(IntercomClient::sanitize_path_segment(&exact, "contact_id").is_ok());
     }
 }

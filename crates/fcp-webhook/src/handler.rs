@@ -2,7 +2,7 @@
 //!
 //! Provides a unified interface for handling webhooks from any provider.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
@@ -425,7 +425,7 @@ impl EventRouter {
 /// Dead letter queue for failed webhooks.
 #[derive(Debug, Default)]
 pub struct DeadLetterQueue {
-    events: RwLock<Vec<WebhookEvent>>,
+    events: RwLock<VecDeque<WebhookEvent>>,
     max_size: usize,
 }
 
@@ -434,7 +434,7 @@ impl DeadLetterQueue {
     #[must_use]
     pub const fn new(max_size: usize) -> Self {
         Self {
-            events: RwLock::new(Vec::new()),
+            events: RwLock::new(VecDeque::new()),
             max_size,
         }
     }
@@ -448,15 +448,15 @@ impl DeadLetterQueue {
         event.metadata.status = DeliveryStatus::DeadLettered;
         let mut events = self.events.write();
         if events.len() >= self.max_size {
-            events.remove(0); // Remove oldest
+            events.pop_front();
         }
-        events.push(event);
+        events.push_back(event);
     }
 
     /// Get all events in the queue.
     #[must_use]
     pub fn all(&self) -> Vec<WebhookEvent> {
-        self.events.read().clone()
+        self.events.read().iter().cloned().collect()
     }
 
     /// Get the queue size.
@@ -475,7 +475,7 @@ impl DeadLetterQueue {
     pub fn remove(&self, event_id: &str) -> Option<WebhookEvent> {
         let mut events = self.events.write();
         let pos = events.iter().position(|e| e.id == event_id)?;
-        Some(events.remove(pos))
+        events.remove(pos)
     }
 
     /// Clear the queue.
@@ -1621,6 +1621,21 @@ mod tests {
         dlq.push(event);
         let all = dlq.all();
         assert_eq!(all[0].metadata.status, DeliveryStatus::DeadLettered);
+    }
+
+    #[test]
+    fn test_dead_letter_queue_evicts_oldest_when_full() {
+        let dlq = DeadLetterQueue::new(2);
+        dlq.push(crate::WebhookEvent::new("oldest", "test", "p"));
+        dlq.push(crate::WebhookEvent::new("middle", "test", "p"));
+        dlq.push(crate::WebhookEvent::new("newest", "test", "p"));
+
+        let ids = dlq
+            .all()
+            .into_iter()
+            .map(|event| event.id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, ["middle", "newest"]);
     }
 
     #[test]

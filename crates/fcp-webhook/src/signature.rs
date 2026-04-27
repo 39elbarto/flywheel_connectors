@@ -8,8 +8,12 @@ use sha2::Sha256;
 
 use crate::{WebhookError, WebhookResult};
 
-const HMAC_SHA256_SIGNATURE_HEX_LEN: usize = 64;
-const HMAC_SHA1_SIGNATURE_HEX_LEN: usize = 40;
+const HMAC_SHA256_SIGNATURE_BYTES_LEN: usize = 32;
+#[cfg(test)]
+const HMAC_SHA256_SIGNATURE_HEX_LEN: usize = HMAC_SHA256_SIGNATURE_BYTES_LEN * 2;
+const HMAC_SHA1_SIGNATURE_BYTES_LEN: usize = 20;
+#[cfg(test)]
+const HMAC_SHA1_SIGNATURE_HEX_LEN: usize = HMAC_SHA1_SIGNATURE_BYTES_LEN * 2;
 const ED25519_SIGNATURE_HEX_LEN: usize = 128;
 
 fn decode_fixed_hex(signature: &str, expected_hex_len: usize) -> WebhookResult<Vec<u8>> {
@@ -17,6 +21,33 @@ fn decode_fixed_hex(signature: &str, expected_hex_len: usize) -> WebhookResult<V
         return Err(WebhookError::InvalidSignature);
     }
     hex::decode(signature).map_err(|_| WebhookError::InvalidSignature)
+}
+
+fn hex_nibble(byte: u8) -> (u8, bool) {
+    match byte {
+        b'0'..=b'9' => (byte - b'0', true),
+        b'a'..=b'f' => (byte - b'a' + 10, true),
+        b'A'..=b'F' => (byte - b'A' + 10, true),
+        _ => (0, false),
+    }
+}
+
+fn decode_hmac_hex_candidate<const N: usize>(signature: &str) -> ([u8; N], bool) {
+    let bytes = signature.as_bytes();
+    let mut decoded = [0; N];
+    let mut valid = signature.len() == N * 2;
+
+    for (index, slot) in decoded.iter_mut().enumerate() {
+        let (high, high_valid) = bytes.get(index * 2).copied().map_or((0, false), hex_nibble);
+        let (low, low_valid) = bytes
+            .get(index * 2 + 1)
+            .copied()
+            .map_or((0, false), hex_nibble);
+        valid &= high_valid & low_valid;
+        *slot = (high << 4) | low;
+    }
+
+    (decoded, valid)
 }
 
 /// Signature algorithm.
@@ -90,14 +121,19 @@ impl SignatureVerifier for HmacSha256Verifier {
             .or_else(|| signature.strip_prefix("v0="))
             .unwrap_or(signature);
 
-        let sig_bytes = decode_fixed_hex(sig_hex, HMAC_SHA256_SIGNATURE_HEX_LEN)?;
+        let (sig_bytes, well_formed) =
+            decode_hmac_hex_candidate::<HMAC_SHA256_SIGNATURE_BYTES_LEN>(sig_hex);
 
         let mut mac =
             Hmac::<Sha256>::new_from_slice(&self.secret).expect("HMAC can take key of any size");
         mac.update(payload);
 
-        mac.verify_slice(&sig_bytes)
-            .map_err(|_| WebhookError::InvalidSignature)
+        let verified = mac.verify_slice(&sig_bytes).is_ok();
+        if well_formed & verified {
+            Ok(())
+        } else {
+            Err(WebhookError::InvalidSignature)
+        }
     }
 
     fn algorithm(&self) -> SignatureAlgorithm {
@@ -144,14 +180,19 @@ impl HmacSha1Verifier {
 impl SignatureVerifier for HmacSha1Verifier {
     fn verify(&self, payload: &[u8], signature: &str) -> WebhookResult<()> {
         let sig_hex = signature.strip_prefix("sha1=").unwrap_or(signature);
-        let sig_bytes = decode_fixed_hex(sig_hex, HMAC_SHA1_SIGNATURE_HEX_LEN)?;
+        let (sig_bytes, well_formed) =
+            decode_hmac_hex_candidate::<HMAC_SHA1_SIGNATURE_BYTES_LEN>(sig_hex);
 
         let mut mac =
             Hmac::<Sha1>::new_from_slice(&self.secret).expect("HMAC can take key of any size");
         mac.update(payload);
 
-        mac.verify_slice(&sig_bytes)
-            .map_err(|_| WebhookError::InvalidSignature)
+        let verified = mac.verify_slice(&sig_bytes).is_ok();
+        if well_formed & verified {
+            Ok(())
+        } else {
+            Err(WebhookError::InvalidSignature)
+        }
     }
 
     fn algorithm(&self) -> SignatureAlgorithm {
@@ -631,6 +672,30 @@ mod tests {
     }
 
     #[test]
+    fn test_hmac_sha256_malformed_signature_candidates_fail_closed() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let payload = b"timing-edge-payload";
+        let valid = verifier.compute(payload);
+
+        let malformed = [
+            String::new(),
+            valid[..HMAC_SHA256_SIGNATURE_HEX_LEN - 2].to_string(),
+            format!("{valid}00"),
+            "g".repeat(HMAC_SHA256_SIGNATURE_HEX_LEN),
+        ];
+
+        for candidate in malformed {
+            assert!(
+                matches!(
+                    verifier.verify(payload, &candidate),
+                    Err(WebhookError::InvalidSignature)
+                ),
+                "malformed HMAC-SHA256 candidate must fail closed: {candidate:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_signature_algorithm_equality() {
         assert_eq!(
             SignatureAlgorithm::HmacSha256,
@@ -808,6 +873,30 @@ mod tests {
     fn test_hmac_sha1_invalid_hex_in_signature() {
         let verifier = HmacSha1Verifier::new("secret");
         assert!(verifier.verify(b"test", "not-valid-hex!").is_err());
+    }
+
+    #[test]
+    fn test_hmac_sha1_malformed_signature_candidates_fail_closed() {
+        let verifier = HmacSha1Verifier::new("secret");
+        let payload = b"timing-edge-payload";
+        let valid = verifier.compute(payload);
+
+        let malformed = [
+            String::new(),
+            valid[..HMAC_SHA1_SIGNATURE_HEX_LEN - 2].to_string(),
+            format!("{valid}00"),
+            "g".repeat(HMAC_SHA1_SIGNATURE_HEX_LEN),
+        ];
+
+        for candidate in malformed {
+            assert!(
+                matches!(
+                    verifier.verify(payload, &candidate),
+                    Err(WebhookError::InvalidSignature)
+                ),
+                "malformed HMAC-SHA1 candidate must fail closed: {candidate:?}"
+            );
+        }
     }
 
     // ── Batch 4: SunnyMoose additional test expansion ──

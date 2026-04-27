@@ -130,8 +130,7 @@ impl WhatsAppWebhook {
         }
 
         // Get and verify signature
-        let signature = header_value_case_insensitive(headers, SIGNATURE_HEADER)
-            .ok_or_else(|| WebhookError::MissingSignature("X-Hub-Signature-256".into()))?;
+        let signature = single_header_value_case_insensitive(headers, SIGNATURE_HEADER)?;
 
         self.verifier.verify(body, signature)?;
 
@@ -352,14 +351,25 @@ impl WhatsAppWebhook {
     }
 }
 
-fn header_value_case_insensitive<'a>(
+fn single_header_value_case_insensitive<'a>(
     headers: &'a HashMap<String, String>,
     name: &str,
-) -> Option<&'a str> {
-    headers
+) -> WebhookResult<&'a str> {
+    let mut matches = headers
         .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case(name))
-        .map(|(_, value)| value.as_str())
+        .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str());
+
+    let Some(value) = matches.next() else {
+        return Err(WebhookError::MissingSignature("X-Hub-Signature-256".into()));
+    };
+    if matches.next().is_some() {
+        return Err(WebhookError::InvalidPayload(format!(
+            "duplicate logical header: {name}"
+        )));
+    }
+
+    Ok(value)
 }
 
 /// Generate a deterministic event ID from provider, event type, payload, and
@@ -632,6 +642,31 @@ mod tests {
         assert!(matches!(
             result.unwrap_err(),
             WebhookError::MissingSignature(_)
+        ));
+    }
+
+    #[test]
+    fn verify_duplicate_logical_signature_headers_rejected() {
+        let wh = make_webhook();
+        let body = serde_json::to_vec(&sample_text_notification());
+        assert!(body.is_ok(), "sample notification must serialize: {body:?}");
+        let body = body.unwrap_or_default();
+        let sig = sign_payload(&body);
+        let headers = HashMap::from([
+            ("x-hub-signature-256".to_string(), sig),
+            (
+                "X-Hub-Signature-256".to_string(),
+                "sha256=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+                    .to_string(),
+            ),
+        ]);
+
+        let result = wh.verify_and_parse(&headers, &body);
+
+        assert!(matches!(
+            result,
+            Err(WebhookError::InvalidPayload(message))
+                if message.contains("duplicate logical header")
         ));
     }
 

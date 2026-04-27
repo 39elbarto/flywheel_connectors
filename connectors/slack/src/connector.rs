@@ -696,6 +696,9 @@ impl SlackConnector {
         if self.client.is_none() {
             return Err(FcpError::NotConfigured);
         }
+        if self.verifier.is_none() {
+            return Err(FcpError::NotHandshaken);
+        }
 
         let topics = parse_subscribe_topics(&params);
         {
@@ -2003,6 +2006,26 @@ mod tests {
 
         assert!(!response.would_succeed);
         assert_eq!(response.denial_code.as_deref(), Some("FCP-5003"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_subscribe_before_handshake_denied() {
+        let mut connector = SlackConnector::new();
+        connector.client = Some(
+            SlackClient::new("fake_key")
+                .unwrap()
+                .with_base_url("http://localhost:9999"),
+        );
+        connector.socket_mode_token = Some("xapp-test-token".to_string());
+        connector.base.set_configured(true);
+
+        let err = connector
+            .handle_subscribe(json!({ "topics": ["slack.message.new"] }))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, FcpError::NotHandshaken));
+        assert!(!*connector.socket_mode_running.read().await);
     }
 
     #[fcp_async_core::runtime::test]

@@ -244,6 +244,7 @@ impl MailchimpConnector {
                 "mailchimp.lists.read",
                 "mailchimp.members.read",
                 "mailchimp.members.write",
+                "mailchimp.members.delete",
                 "mailchimp.campaigns.read",
                 "mailchimp.campaigns.write"
             ]
@@ -426,7 +427,7 @@ impl MailchimpConnector {
                         }
                     }),
                     output_schema: json!({"type": "object"}),
-                    capability: CapabilityId::from_static("mailchimp.members.write"),
+                    capability: CapabilityId::from_static("mailchimp.members.delete"),
                     risk_level: RiskLevel::High,
                     description: None,
                     rate_limit: None,
@@ -697,7 +698,7 @@ fn operations_info() -> serde_json::Value {
         {
             "id": "mailchimp.members.delete",
             "summary": "Delete a member from an audience",
-            "capability": "mailchimp.members.write",
+            "capability": "mailchimp.members.delete",
             "risk_level": "high",
             "safety_tier": "dangerous",
             "idempotency": "strict",
@@ -820,6 +821,14 @@ fn is_local_test_host(host: &str) -> bool {
 mod tests {
     use super::*;
     use crate::client::MailchimpAuth;
+
+    fn operation_capability<'a>(ops: &'a serde_json::Value, id: &str) -> Option<&'a str> {
+        ops.as_array()?
+            .iter()
+            .find(|op| op["id"] == id)?
+            .get("capability")?
+            .as_str()
+    }
 
     #[test]
     fn config_from_api_key() {
@@ -1014,6 +1023,52 @@ mod tests {
         assert!(ids.contains(&"mailchimp.members.delete"));
         assert!(ids.contains(&"mailchimp.campaigns.list"));
         assert!(ids.contains(&"mailchimp.campaigns.send"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn operations_members_delete_requires_dedicated_capability() {
+        let ops = operations_info();
+        let delete = operation_capability(&ops, "mailchimp.members.delete");
+
+        assert_eq!(delete, Some("mailchimp.members.delete"));
+        assert_ne!(delete, Some("mailchimp.members.write"));
+
+        let typed = MailchimpConnector::new().handle_introspect().await.unwrap();
+        let typed_delete = typed["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["id"] == "mailchimp.members.delete")
+            .unwrap();
+        assert_eq!(typed_delete["capability"], "mailchimp.members.delete");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_advertises_dedicated_members_delete_capability() {
+        let mut connector = MailchimpConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "testkey-us1",
+            }))
+            .await
+            .unwrap();
+
+        let handshake = connector
+            .handle_handshake(json!({"session_id": "test-session"}))
+            .await
+            .unwrap();
+        let capabilities = handshake["capabilities"].as_array().unwrap();
+
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("mailchimp.members.write"))
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("mailchimp.members.delete"))
+        );
     }
 
     #[test]

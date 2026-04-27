@@ -46,6 +46,7 @@ required = [
 optional = [
     "todoist.projects.read",
     "todoist.tasks.write",
+    "todoist.tasks.delete",
     "todoist.tasks.read",
 ]
 forbidden = [
@@ -207,7 +208,7 @@ related = [
 
 [provides.operations."todoist.tasks.delete"]
 description = "Delete a task"
-capability = "todoist.tasks.write"
+capability = "todoist.tasks.delete"
 risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
@@ -333,9 +334,16 @@ window_ms = 60000
 burst = 10
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "todoist.tasks.delete"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
 [rate_limits.operation_pools]
 "todoist.tasks.create" = ["todoist.tasks.write"]
 "todoist.tasks.complete" = ["todoist.tasks.write"]
 "todoist.projects.list" = ["todoist.projects.read"]
-"todoist.tasks.delete" = ["todoist.tasks.write"]
+"todoist.tasks.delete" = ["todoist.tasks.delete"]
 "todoist.tasks.list" = ["todoist.tasks.read"]

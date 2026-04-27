@@ -43,6 +43,9 @@ required = [
 optional = [
     "sendgrid.contacts.write",
     "sendgrid.contacts.read",
+    "sendgrid.lists.read",
+    "sendgrid.lists.write",
+    "sendgrid.lists.delete",
     "sendgrid.mail.write",
     "sendgrid.stats.read",
     "sendgrid.templates.read",
@@ -54,30 +57,26 @@ forbidden = [
     "media.download",
 ]
 
-[provides.operations."sendgrid.contacts.delete"]
-description = "Delete marketing contacts"
-capability = "sendgrid.contacts.write"
+[provides.operations."sendgrid.lists.delete"]
+description = "Delete a marketing list"
+capability = "sendgrid.lists.delete"
 risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "strict"
 
-[provides.operations."sendgrid.contacts.delete".input_schema]
-required = ["ids"]
+[provides.operations."sendgrid.lists.delete".input_schema]
+required = ["list_id"]
 type = "object"
 
-[provides.operations."sendgrid.contacts.delete".input_schema.properties.ids]
-description = "Array of contact IDs to delete"
-type = "array"
-
-[provides.operations."sendgrid.contacts.delete".output_schema]
-required = ["job_id"]
-type = "object"
-
-[provides.operations."sendgrid.contacts.delete".output_schema.properties.job_id]
+[provides.operations."sendgrid.lists.delete".input_schema.properties.list_id]
+description = "List UUID to delete"
 type = "string"
 
-[provides.operations."sendgrid.contacts.delete".network_constraints]
+[provides.operations."sendgrid.lists.delete".output_schema]
+type = "object"
+
+[provides.operations."sendgrid.lists.delete".network_constraints]
 host_allow = ["api.sendgrid.com"]
 port_allow = [443]
 ip_allow = []
@@ -95,13 +94,13 @@ connect_timeout_ms = 10000
 total_timeout_ms = 30000
 max_response_bytes = 1048576
 
-[provides.operations."sendgrid.contacts.delete".ai_hints]
-when_to_use = "Delete marketing contacts. Cannot be undone."
+[provides.operations."sendgrid.lists.delete".ai_hints]
+when_to_use = "Delete a marketing list. Cannot be undone."
 common_mistakes = [
-    "Passing email addresses instead of SendGrid contact IDs.",
-    "Not realizing the delete is asynchronous — use the returned job_id to poll for completion status.",
+    "Deleting a list does not delete the contacts in it.",
+    "Using a list name instead of the SendGrid list UUID.",
 ]
-examples = ['{"ids": ["abc123", "def456"]}']
+examples = ['{"list_id": "list_abc123"}']
 related = ["sendgrid.contacts.list"]
 
 [provides.operations."sendgrid.contacts.list"]
@@ -148,7 +147,7 @@ common_mistakes = [
     "Confusing marketing contacts with transactional email recipients, which are separate in SendGrid.",
 ]
 examples = ["{}"]
-related = ["sendgrid.contacts.delete"]
+related = ["sendgrid.lists.delete"]
 
 [provides.operations."sendgrid.mail.send"]
 description = "Send an email"
@@ -353,6 +352,13 @@ burst = 5
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "sendgrid.lists.delete"
+requests = 50
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "sendgrid.templates.read"
 requests = 100
 window_ms = 60000
@@ -370,5 +376,5 @@ scope = "instance"
 "sendgrid.stats.get" = ["sendgrid.stats.read"]
 "sendgrid.contacts.list" = ["sendgrid.contacts.read"]
 "sendgrid.mail.send" = ["sendgrid.mail.write"]
-"sendgrid.contacts.delete" = ["sendgrid.contacts.write"]
+"sendgrid.lists.delete" = ["sendgrid.lists.delete"]
 "sendgrid.templates.list" = ["sendgrid.templates.read"]

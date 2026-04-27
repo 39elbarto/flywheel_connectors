@@ -45,6 +45,7 @@ optional = [
     "mailchimp.campaigns.write",
     "mailchimp.lists.read",
     "mailchimp.members.write",
+    "mailchimp.members.delete",
     "mailchimp.members.read",
 ]
 forbidden = [
@@ -193,7 +194,7 @@ related = [
 
 [provides.operations."mailchimp.members.delete"]
 description = "Permanently delete a member from an audience"
-capability = "mailchimp.members.write"
+capability = "mailchimp.members.delete"
 risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
@@ -328,6 +329,13 @@ burst = 5
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "mailchimp.members.delete"
+requests = 50
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "mailchimp.campaigns.read"
 requests = 100
 window_ms = 60000
@@ -345,5 +353,5 @@ scope = "instance"
 "mailchimp.campaigns.list" = ["mailchimp.campaigns.read"]
 "mailchimp.campaigns.send" = ["mailchimp.campaigns.write"]
 "mailchimp.lists.list" = ["mailchimp.lists.read"]
-"mailchimp.members.delete" = ["mailchimp.members.write"]
+"mailchimp.members.delete" = ["mailchimp.members.delete"]
 "mailchimp.members.list" = ["mailchimp.members.read"]

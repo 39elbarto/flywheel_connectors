@@ -242,6 +242,7 @@ impl ElasticsearchConnector {
                 "elasticsearch.index.write",
                 "elasticsearch.indices.read",
                 "elasticsearch.indices.write",
+                "elasticsearch.indices.delete",
                 "elasticsearch.cluster.read"
             ]
         }))
@@ -552,7 +553,7 @@ impl ElasticsearchConnector {
                             "acknowledged": { "type": "boolean" }
                         }
                     }),
-                    capability: CapabilityId::from_static("elasticsearch.indices.write"),
+                    capability: CapabilityId::from_static("elasticsearch.indices.delete"),
                     risk_level: RiskLevel::High,
                     description: None,
                     rate_limit: None,
@@ -826,7 +827,7 @@ fn operations_info() -> serde_json::Value {
         {
             "id": "elasticsearch.indices.delete",
             "summary": "Delete an index",
-            "capability": "elasticsearch.indices.write",
+            "capability": "elasticsearch.indices.delete",
             "risk_level": "high",
             "safety_tier": "dangerous",
             "idempotency": "strict",
@@ -886,6 +887,14 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn operation_capability<'a>(ops: &'a serde_json::Value, id: &str) -> Option<&'a str> {
+        ops.as_array()?
+            .iter()
+            .find(|op| op["id"] == id)?
+            .get("capability")?
+            .as_str()
+    }
 
     // ── ElasticsearchConfig::from_params ────────────────────────────
 
@@ -1315,6 +1324,55 @@ mod tests {
             .unwrap();
         assert_eq!(op["safety_tier"], "dangerous");
         assert_eq!(op["risk_level"], "high");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn operations_indices_delete_requires_dedicated_capability() {
+        let ops = operations_info();
+        let delete = operation_capability(&ops, "elasticsearch.indices.delete");
+
+        assert_eq!(delete, Some("elasticsearch.indices.delete"));
+        assert_ne!(delete, Some("elasticsearch.indices.write"));
+
+        let typed = ElasticsearchConnector::new()
+            .handle_introspect()
+            .await
+            .unwrap();
+        let typed_delete = typed["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["id"] == "elasticsearch.indices.delete")
+            .unwrap();
+        assert_eq!(typed_delete["capability"], "elasticsearch.indices.delete");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_advertises_dedicated_indices_delete_capability() {
+        let mut connector = ElasticsearchConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "base64encodedkey",
+            }))
+            .await
+            .unwrap();
+
+        let handshake = connector
+            .handle_handshake(json!({"session_id": "test-session"}))
+            .await
+            .unwrap();
+        let capabilities = handshake["capabilities"].as_array().unwrap();
+
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("elasticsearch.indices.write"))
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("elasticsearch.indices.delete"))
+        );
     }
 
     #[test]

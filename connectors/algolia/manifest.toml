@@ -45,6 +45,7 @@ optional = [
     "algolia.search.read",
     "algolia.records.read",
     "algolia.records.write",
+    "algolia.records.delete",
 ]
 forbidden = [
     "system.exec",
@@ -101,7 +102,7 @@ related = ["algolia.search"]
 
 [provides.operations."algolia.records.delete"]
 description = "Delete a record"
-capability = "algolia.records.write"
+capability = "algolia.records.delete"
 risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
@@ -308,8 +309,15 @@ window_ms = 60000
 burst = 10
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "algolia.records.delete"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
 [rate_limits.operation_pools]
 "algolia.records.get" = ["algolia.records.read"]
-"algolia.records.delete" = ["algolia.records.write"]
+"algolia.records.delete" = ["algolia.records.delete"]
 "algolia.indices.list" = ["algolia.indices.read"]
 "algolia.search" = ["algolia.search.read"]

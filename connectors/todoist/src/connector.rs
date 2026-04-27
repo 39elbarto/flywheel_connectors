@@ -223,7 +223,8 @@ impl TodoistConnector {
             "capabilities": [
                 "todoist.projects.read",
                 "todoist.tasks.read",
-                "todoist.tasks.write"
+                "todoist.tasks.write",
+                "todoist.tasks.delete"
             ]
         }))
     }
@@ -681,7 +682,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             "Delete a task",
             json!({"type": "object", "required": ["task_id"], "properties": {"task_id": {"type": "string", "description": "Task ID to delete"}}}),
             json!({"type": "object"}),
-            "todoist.tasks.write",
+            "todoist.tasks.delete",
             RiskLevel::High,
             SafetyTier::Dangerous,
             IdempotencyClass::Strict,
@@ -733,7 +734,7 @@ fn operations_info() -> serde_json::Value {
         {
             "id": "todoist.tasks.delete",
             "summary": "Delete a task",
-            "capability": "todoist.tasks.write",
+            "capability": "todoist.tasks.delete",
             "risk_level": "high",
             "safety_tier": "dangerous",
             "idempotency": "strict",
@@ -744,6 +745,14 @@ fn operations_info() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn operation_capability<'a>(ops: &'a serde_json::Value, id: &str) -> Option<&'a str> {
+        ops.as_array()?
+            .iter()
+            .find(|op| op["id"] == id)?
+            .get("capability")?
+            .as_str()
+    }
 
     #[test]
     fn config_from_api_token() {
@@ -936,6 +945,63 @@ mod tests {
         assert!(ids.contains(&"todoist.tasks.create"));
         assert!(ids.contains(&"todoist.tasks.complete"));
         assert!(ids.contains(&"todoist.tasks.delete"));
+    }
+
+    #[test]
+    fn operations_tasks_delete_requires_dedicated_capability() {
+        let ops = operations_info();
+        let delete = operation_capability(&ops, "todoist.tasks.delete");
+        let create = operation_capability(&ops, "todoist.tasks.create");
+        let complete = operation_capability(&ops, "todoist.tasks.complete");
+
+        assert_eq!(delete, Some("todoist.tasks.delete"));
+        assert_eq!(create, Some("todoist.tasks.write"));
+        assert_eq!(complete, Some("todoist.tasks.write"));
+        assert_ne!(delete, create);
+
+        let typed = typed_operations_info();
+        let typed_delete = typed
+            .iter()
+            .find(|op| op.id.as_str() == "todoist.tasks.delete")
+            .unwrap();
+        let typed_create = typed
+            .iter()
+            .find(|op| op.id.as_str() == "todoist.tasks.create")
+            .unwrap();
+        assert_eq!(typed_delete.capability.as_str(), "todoist.tasks.delete");
+        assert_eq!(typed_create.capability.as_str(), "todoist.tasks.write");
+        assert_ne!(
+            typed_delete.capability.as_str(),
+            typed_create.capability.as_str()
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_advertises_dedicated_tasks_delete_capability() {
+        let mut connector = TodoistConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_token": "tok",
+            }))
+            .await
+            .unwrap();
+
+        let handshake = connector
+            .handle_handshake(json!({"session_id": "test-session"}))
+            .await
+            .unwrap();
+        let capabilities = handshake["capabilities"].as_array().unwrap();
+
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("todoist.tasks.write"))
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("todoist.tasks.delete"))
+        );
     }
 
     #[test]

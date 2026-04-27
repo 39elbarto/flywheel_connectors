@@ -210,7 +210,8 @@ impl AlgoliaConnector {
                 "algolia.indices.read",
                 "algolia.search.read",
                 "algolia.records.read",
-                "algolia.records.write"
+                "algolia.records.write",
+                "algolia.records.delete"
             ]
         }))
     }
@@ -432,7 +433,7 @@ impl AlgoliaConnector {
                         }
                     }),
                     output_schema: json!({"type": "object"}),
-                    capability: CapabilityId::from_static("algolia.records.write"),
+                    capability: CapabilityId::from_static("algolia.records.delete"),
                     risk_level: RiskLevel::High,
                     description: None,
                     rate_limit: None,
@@ -619,7 +620,7 @@ fn operations_info() -> serde_json::Value {
         {
             "id": "algolia.records.delete",
             "summary": "Delete a record",
-            "capability": "algolia.records.write",
+            "capability": "algolia.records.delete",
             "risk_level": "high",
             "safety_tier": "dangerous",
             "idempotency": "strict",
@@ -735,6 +736,14 @@ fn is_local_test_host(host: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn operation_capability<'a>(ops: &'a serde_json::Value, id: &str) -> Option<&'a str> {
+        ops.as_array()?
+            .iter()
+            .find(|op| op["id"] == id)?
+            .get("capability")?
+            .as_str()
+    }
 
     #[test]
     fn config_from_valid_params() {
@@ -1024,6 +1033,53 @@ mod tests {
             .unwrap();
         assert_eq!(delete_op["safety_tier"], "dangerous");
         assert_eq!(delete_op["risk_level"], "high");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn operations_records_delete_requires_dedicated_capability() {
+        let ops = operations_info();
+        let delete = operation_capability(&ops, "algolia.records.delete");
+
+        assert_eq!(delete, Some("algolia.records.delete"));
+        assert_ne!(delete, Some("algolia.records.write"));
+
+        let typed = AlgoliaConnector::new().handle_introspect().await.unwrap();
+        let typed_delete = typed["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|op| op["id"] == "algolia.records.delete")
+            .unwrap();
+        assert_eq!(typed_delete["capability"], "algolia.records.delete");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_advertises_dedicated_records_delete_capability() {
+        let mut connector = AlgoliaConnector::new();
+        connector
+            .handle_configure(json!({
+                "application_id": "APP123",
+                "api_key": "key456",
+            }))
+            .await
+            .unwrap();
+
+        let handshake = connector
+            .handle_handshake(json!({"session_id": "test-session"}))
+            .await
+            .unwrap();
+        let capabilities = handshake["capabilities"].as_array().unwrap();
+
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("algolia.records.write"))
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("algolia.records.delete"))
+        );
     }
 
     #[test]

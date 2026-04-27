@@ -46,6 +46,7 @@ required = [
 optional = [
     "trello.boards.read",
     "trello.cards.write",
+    "trello.cards.delete",
     "trello.cards.read",
 ]
 forbidden = [
@@ -162,7 +163,7 @@ related = [
 
 [provides.operations."trello.cards.delete"]
 description = "Delete a card"
-capability = "trello.cards.write"
+capability = "trello.cards.delete"
 risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
@@ -337,9 +338,16 @@ window_ms = 60000
 burst = 10
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "trello.cards.delete"
+requests = 100
+window_ms = 60000
+burst = 10
+scope = "instance"
+
 [rate_limits.operation_pools]
 "trello.cards.list" = ["trello.cards.read"]
 "trello.lists.get" = ["trello.boards.read"]
-"trello.cards.delete" = ["trello.cards.write"]
+"trello.cards.delete" = ["trello.cards.delete"]
 "trello.boards.list" = ["trello.boards.read"]
 "trello.cards.create" = ["trello.cards.write"]

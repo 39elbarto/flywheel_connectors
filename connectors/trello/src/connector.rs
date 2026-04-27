@@ -241,6 +241,7 @@ impl TrelloConnector {
                 "trello.boards.read",
                 "trello.cards.read",
                 "trello.cards.write",
+                "trello.cards.delete",
                 "trello.labels.read",
                 "trello.members.read"
             ]
@@ -773,7 +774,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             "Delete a card",
             json!({"type": "object", "required": ["card_id"], "properties": {"card_id": {"type": "string"}}}),
             json!({"type": "object"}),
-            "trello.cards.write",
+            "trello.cards.delete",
             RiskLevel::High,
             SafetyTier::Dangerous,
             IdempotencyClass::None,
@@ -955,7 +956,7 @@ fn operations_info() -> serde_json::Value {
         {
             "id": "trello.cards.delete",
             "summary": "Delete a card",
-            "capability": "trello.cards.write",
+            "capability": "trello.cards.delete",
             "risk_level": "high",
             "safety_tier": "dangerous",
             "idempotency": "none",
@@ -982,6 +983,14 @@ fn operations_info() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn operation_capability<'a>(ops: &'a serde_json::Value, id: &str) -> Option<&'a str> {
+        ops.as_array()?
+            .iter()
+            .find(|op| op["id"] == id)?
+            .get("capability")?
+            .as_str()
+    }
 
     #[test]
     fn config_from_api_key_token() {
@@ -1209,6 +1218,64 @@ mod tests {
         assert!(ids.contains(&"trello.cards.delete"));
         assert!(ids.contains(&"trello.labels.list"));
         assert!(ids.contains(&"trello.members.list"));
+    }
+
+    #[test]
+    fn operations_cards_delete_requires_dedicated_capability() {
+        let ops = operations_info();
+        let delete = operation_capability(&ops, "trello.cards.delete");
+        let create = operation_capability(&ops, "trello.cards.create");
+        let update = operation_capability(&ops, "trello.cards.update");
+
+        assert_eq!(delete, Some("trello.cards.delete"));
+        assert_eq!(create, Some("trello.cards.write"));
+        assert_eq!(update, Some("trello.cards.write"));
+        assert_ne!(delete, create);
+
+        let typed = typed_operations_info();
+        let typed_delete = typed
+            .iter()
+            .find(|op| op.id.as_str() == "trello.cards.delete")
+            .unwrap();
+        let typed_create = typed
+            .iter()
+            .find(|op| op.id.as_str() == "trello.cards.create")
+            .unwrap();
+        assert_eq!(typed_delete.capability.as_str(), "trello.cards.delete");
+        assert_eq!(typed_create.capability.as_str(), "trello.cards.write");
+        assert_ne!(
+            typed_delete.capability.as_str(),
+            typed_create.capability.as_str()
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_advertises_dedicated_cards_delete_capability() {
+        let mut connector = TrelloConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "key",
+                "token": "tok",
+            }))
+            .await
+            .unwrap();
+
+        let handshake = connector
+            .handle_handshake(json!({"session_id": "test-session"}))
+            .await
+            .unwrap();
+        let capabilities = handshake["capabilities"].as_array().unwrap();
+
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("trello.cards.write"))
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("trello.cards.delete"))
+        );
     }
 
     #[test]

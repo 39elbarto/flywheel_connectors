@@ -415,7 +415,7 @@ impl SendGridConnector {
                         }
                     }),
                     output_schema: json!({ "type": "object" }),
-                    capability: CapabilityId::from_static("sendgrid.lists.write"),
+                    capability: CapabilityId::from_static("sendgrid.lists.delete"),
                     risk_level: RiskLevel::High,
                     description: None,
                     rate_limit: None,
@@ -601,6 +601,7 @@ impl SendGridConnector {
                 "sendgrid.contacts.read",
                 "sendgrid.lists.read",
                 "sendgrid.lists.write",
+                "sendgrid.lists.delete",
                 "sendgrid.templates.read",
                 "sendgrid.stats.read"
             ]
@@ -1095,7 +1096,7 @@ fn operations_info() -> serde_json::Value {
         {
             "id": "sendgrid.lists.delete",
             "summary": "Delete a marketing list",
-            "capability": "sendgrid.lists.write",
+            "capability": "sendgrid.lists.delete",
             "risk_level": "high",
             "safety_tier": "dangerous",
             "idempotency": "none",
@@ -1130,6 +1131,14 @@ fn operations_info() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn operation_capability<'a>(ops: &'a serde_json::Value, id: &str) -> Option<&'a str> {
+        ops.as_array()?
+            .iter()
+            .find(|op| op["id"] == id)?
+            .get("capability")?
+            .as_str()
+    }
 
     #[test]
     fn config_from_api_key() {
@@ -1355,6 +1364,63 @@ mod tests {
         assert!(ids.contains(&"sendgrid.templates.list"));
         assert!(ids.contains(&"sendgrid.templates.get"));
         assert!(ids.contains(&"sendgrid.stats.get"));
+    }
+
+    #[test]
+    fn operations_lists_delete_requires_dedicated_capability() {
+        let ops = operations_info();
+        let delete = operation_capability(&ops, "sendgrid.lists.delete");
+        let create = operation_capability(&ops, "sendgrid.lists.create");
+
+        assert_eq!(delete, Some("sendgrid.lists.delete"));
+        assert_eq!(create, Some("sendgrid.lists.write"));
+        assert_ne!(delete, create);
+
+        let typed = SendGridConnector::introspection();
+        let typed_delete = typed
+            .operations
+            .iter()
+            .find(|op| op.id.as_str() == "sendgrid.lists.delete")
+            .unwrap();
+        let typed_create = typed
+            .operations
+            .iter()
+            .find(|op| op.id.as_str() == "sendgrid.lists.create")
+            .unwrap();
+        assert_eq!(typed_delete.capability.as_str(), "sendgrid.lists.delete");
+        assert_eq!(typed_create.capability.as_str(), "sendgrid.lists.write");
+        assert_ne!(
+            typed_delete.capability.as_str(),
+            typed_create.capability.as_str()
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_advertises_dedicated_lists_delete_capability() {
+        let mut connector = SendGridConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "SG.test-api-key-12345",
+            }))
+            .await
+            .unwrap();
+
+        let handshake = connector
+            .handle_handshake(json!({"session_id": "test-session"}))
+            .await
+            .unwrap();
+        let capabilities = handshake["capabilities"].as_array().unwrap();
+
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("sendgrid.lists.write"))
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("sendgrid.lists.delete"))
+        );
     }
 
     #[test]

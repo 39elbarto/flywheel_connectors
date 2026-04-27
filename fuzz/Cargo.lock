@@ -1531,6 +1531,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-discord"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "asupersync",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-sdk",
+ "fcp-streaming",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.17",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "fcp-evidence"
 version = "0.1.0"
 dependencies = [
@@ -1556,6 +1580,7 @@ dependencies = [
  "fcp-core",
  "fcp-crypto",
  "fcp-dingtalk",
+ "fcp-discord",
  "fcp-github",
  "fcp-gmail",
  "fcp-graphql",

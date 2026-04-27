@@ -43,7 +43,7 @@ mod connector;
 mod error;
 mod gateway;
 pub mod limits;
-mod types;
+pub mod types;
 
 pub use client::DiscordClient;
 pub use config::DiscordConfig;

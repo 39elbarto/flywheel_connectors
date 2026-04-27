@@ -23,7 +23,7 @@ use crate::{
     error::{DiscordError, DiscordResult},
     types::{
         GatewayHello, GatewayIdentify, GatewayPayload, GatewayProperties, GatewayReady,
-        GatewayResume,
+        GatewayResume, validate_gateway_hello,
     },
 };
 
@@ -1109,10 +1109,13 @@ async fn run_gateway_loop_inner(
                 if payload.op != GatewayOpcode::Hello as i32 {
                     return Err(DiscordError::Gateway("Expected Hello opcode".into()));
                 }
-                match serde_json::from_value::<GatewayHello>(payload.d.unwrap_or_default()) {
-                    Ok(h) => h,
-                    Err(e) => return Err(e.into()),
-                }
+                let hello =
+                    match serde_json::from_value::<GatewayHello>(payload.d.unwrap_or_default()) {
+                        Ok(h) => h,
+                        Err(e) => return Err(e.into()),
+                    };
+                validate_gateway_hello(hello)
+                    .map_err(|error| DiscordError::Gateway(error.to_string()))?
             }
             Err(e) => return Err(e.into()),
         },

@@ -30,6 +30,7 @@ fcp-core = { path = "../crates/fcp-core" }
 fcp-crypto = { path = "../crates/fcp-crypto" }
 fcp-arxiv = { path = "../connectors/arxiv" }
 fcp-dingtalk = { path = "../connectors/dingtalk" }
+fcp-discord = { path = "../connectors/discord" }
 fcp-gmail = { path = "../connectors/gmail" }
 fcp-graphql = { path = "../crates/fcp-graphql" }
 fcp-github = { path = "../connectors/github" }
@@ -280,6 +281,13 @@ bench = false
 [[bin]]
 name = "fuzz_dingtalk_callback_event"
 path = "fuzz_targets/dingtalk_callback_event.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_discord_gateway_payload"
+path = "fuzz_targets/discord_gateway_payload.rs"
 test = false
 doc = false
 bench = false

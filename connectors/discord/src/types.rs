@@ -329,6 +329,64 @@ pub struct GatewayHello {
     pub heartbeat_interval: u64,
 }
 
+/// Smallest accepted Discord Gateway heartbeat interval.
+pub const MIN_GATEWAY_HEARTBEAT_INTERVAL_MS: u64 = 1;
+
+/// Largest accepted Discord Gateway heartbeat interval.
+///
+/// Real Discord gateway intervals are tens of seconds. Five minutes keeps the
+/// parser tolerant while preventing hostile frames from driving unbounded timer
+/// arithmetic in the gateway loop.
+pub const MAX_GATEWAY_HEARTBEAT_INTERVAL_MS: u64 = 5 * 60 * 1000;
+
+/// Validation failure for a parsed Discord Gateway Hello frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayHelloValidationError {
+    /// A zero interval would create a hot heartbeat loop.
+    ZeroHeartbeatInterval,
+    /// An oversized interval can overflow or stall timer arithmetic.
+    HeartbeatIntervalTooLarge { interval_ms: u64, max_ms: u64 },
+}
+
+impl std::fmt::Display for GatewayHelloValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZeroHeartbeatInterval => {
+                f.write_str("gateway Hello heartbeat_interval must be greater than zero")
+            }
+            Self::HeartbeatIntervalTooLarge {
+                interval_ms,
+                max_ms,
+            } => write!(
+                f,
+                "gateway Hello heartbeat_interval {interval_ms}ms exceeds the {max_ms}ms limit"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GatewayHelloValidationError {}
+
+/// Validate an untrusted Discord Gateway Hello frame before timer use.
+///
+/// The WebSocket peer controls this value, so parsing alone is not enough: the
+/// gateway loop later converts it into a [`std::time::Duration`] and schedules
+/// heartbeat deadlines from it.
+pub fn validate_gateway_hello(
+    hello: GatewayHello,
+) -> Result<GatewayHello, GatewayHelloValidationError> {
+    match hello.heartbeat_interval {
+        0 => Err(GatewayHelloValidationError::ZeroHeartbeatInterval),
+        interval_ms if interval_ms > MAX_GATEWAY_HEARTBEAT_INTERVAL_MS => {
+            Err(GatewayHelloValidationError::HeartbeatIntervalTooLarge {
+                interval_ms,
+                max_ms: MAX_GATEWAY_HEARTBEAT_INTERVAL_MS,
+            })
+        }
+        _ => Ok(hello),
+    }
+}
+
 /// Gateway resume payload.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GatewayResume {
@@ -601,6 +659,42 @@ mod tests {
         let json = serde_json::to_string(&hello).unwrap();
         let back: GatewayHello = serde_json::from_str(&json).unwrap();
         assert_eq!(back.heartbeat_interval, 41250);
+    }
+
+    #[test]
+    fn validate_gateway_hello_accepts_normal_interval() {
+        let hello = validate_gateway_hello(GatewayHello {
+            heartbeat_interval: 45_000,
+        })
+        .expect("normal gateway heartbeat interval should validate");
+
+        assert_eq!(hello.heartbeat_interval, 45_000);
+    }
+
+    #[test]
+    fn validate_gateway_hello_rejects_zero_interval() {
+        let err = validate_gateway_hello(GatewayHello {
+            heartbeat_interval: 0,
+        })
+        .expect_err("zero heartbeat interval should be rejected");
+
+        assert_eq!(err, GatewayHelloValidationError::ZeroHeartbeatInterval);
+    }
+
+    #[test]
+    fn validate_gateway_hello_rejects_oversized_interval() {
+        let err = validate_gateway_hello(GatewayHello {
+            heartbeat_interval: MAX_GATEWAY_HEARTBEAT_INTERVAL_MS + 1,
+        })
+        .expect_err("oversized heartbeat interval should be rejected");
+
+        assert_eq!(
+            err,
+            GatewayHelloValidationError::HeartbeatIntervalTooLarge {
+                interval_ms: MAX_GATEWAY_HEARTBEAT_INTERVAL_MS + 1,
+                max_ms: MAX_GATEWAY_HEARTBEAT_INTERVAL_MS,
+            }
+        );
     }
 
     // ---- GatewayResume ----

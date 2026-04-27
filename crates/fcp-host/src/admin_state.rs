@@ -66,6 +66,31 @@ pub struct ManagedConnectorConfig {
     /// br-flywheel_connectors-by4vu.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_zones: Vec<String>,
+    /// Allowed connector operations — when non-empty, the host gateway
+    /// rejects any `InvokeRequest` whose `operation` is not in this
+    /// list, even if the connector's runtime introspection advertises
+    /// the operation and the capability token's `capability` claim
+    /// matches what the connector self-reports.
+    ///
+    /// Closes the manifest-allowed-operations enforcement gap on
+    /// `br-ike8x` (which itself was a follow-up from the br-2ot4f
+    /// cross-crate audit pass). Without this list, the operation
+    /// gate runs entirely off `tool.capability` from the connector's
+    /// own introspection — so a connector that decides to expose a
+    /// new operation under a permissive capability id can be invoked
+    /// through it as long as the caller holds a token for THAT id.
+    /// Operators that pin the operation list per connector
+    /// (mirroring the `[provides.operations]` section of the
+    /// manifest TOML) get defense-in-depth: even a malicious or
+    /// drifted connector binary cannot expose an op the operator
+    /// did not approve.
+    ///
+    /// Empty (the default) preserves pre-pinning behavior so
+    /// existing inventories don't break. Production deployments
+    /// should pin the list per connector. Same shape as
+    /// `allowed_zones`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_operations: Vec<String>,
 }
 
 /// Live connector inventory mutation kind handled by the host admin plane.
@@ -10405,6 +10430,7 @@ mod tests {
             categories: vec!["test".to_string()],
             version: Some("1.0.0".to_string()),
             allowed_zones: Vec::new(),
+            allowed_operations: Vec::new(),
         };
         let json = serde_json::to_string(&config).unwrap();
         let back: ManagedConnectorConfig = serde_json::from_str(&json).unwrap();
@@ -10441,6 +10467,7 @@ mod tests {
                 categories: vec!["issues".to_string(), "scm".to_string()],
                 version: Some("1.2.3".to_string()),
                 allowed_zones: Vec::new(),
+                allowed_operations: Vec::new(),
             },
         };
 

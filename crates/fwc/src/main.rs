@@ -15667,6 +15667,7 @@ fn managed_connector_from_artifact(
         // Preserve any zone binding the operator has pinned for this
         // connector; default (empty) keeps pre-binding behavior.
         allowed_zones: existing.map_or_else(Vec::new, |entry| entry.allowed_zones.clone()),
+        allowed_operations: existing.map_or_else(Vec::new, |entry| entry.allowed_operations.clone()),
     }
 }
 
@@ -29757,6 +29758,7 @@ deny_ptrace = true
                             categories: vec!["code".to_string()],
                             version: Some("1.2.4".to_string()),
                             allowed_zones: Vec::new(),
+                            allowed_operations: Vec::new(),
                         },
                         None,
                     ),
@@ -29860,6 +29862,7 @@ deny_ptrace = true
                             categories: vec!["code".to_string()],
                             version: Some("1.2.4".to_string()),
                             allowed_zones: Vec::new(),
+                            allowed_operations: Vec::new(),
                         },
                         None,
                     ),
@@ -29945,6 +29948,7 @@ deny_ptrace = true
                         categories: vec!["code".to_string()],
                         version: Some("1.2.4".to_string()),
                         allowed_zones: Vec::new(),
+                        allowed_operations: Vec::new(),
                     },
                     None,
                 ),
@@ -30035,6 +30039,7 @@ deny_ptrace = true
             categories: vec!["code".to_string(), "dev-tools".to_string()],
             version: Some("1.2.3".to_string()),
             allowed_zones: Vec::new(),
+            allowed_operations: Vec::new(),
         };
         let planned = ManagedConnectorConfig {
             id: "fcp.github:enterprise:v1".to_string(),
@@ -30047,6 +30052,7 @@ deny_ptrace = true
             categories: previous.categories.clone(),
             version: Some("1.2.4".to_string()),
             allowed_zones: previous.allowed_zones.clone(),
+            allowed_operations: previous.allowed_operations.clone(),
         };
         let (host, server) = spawn_mock_host(
             StdBTreeMap::from([
@@ -30116,6 +30122,7 @@ deny_ptrace = true
             categories: vec!["code".to_string(), "dev-tools".to_string()],
             version: Some("1.2.3".to_string()),
             allowed_zones: Vec::new(),
+            allowed_operations: Vec::new(),
         };
         let updated = ManagedConnectorConfig {
             id: "fcp.github:enterprise:v1".to_string(),
@@ -30128,6 +30135,7 @@ deny_ptrace = true
             categories: previous.categories.clone(),
             version: Some("1.2.4".to_string()),
             allowed_zones: previous.allowed_zones.clone(),
+            allowed_operations: previous.allowed_operations.clone(),
         };
         let (host, server) = spawn_mock_host(
             StdBTreeMap::from([
@@ -37631,6 +37639,7 @@ require_attestation_types = ["in-toto"]"#,
                             categories: vec!["code".to_string()],
                             version: Some("1.2.5".to_string()),
                             allowed_zones: Vec::new(),
+                            allowed_operations: Vec::new(),
                         },
                         None,
                     ),
@@ -37730,6 +37739,7 @@ require_attestation_types = ["in-toto"]"#,
             categories: vec!["code".to_string(), "dev-tools".to_string()],
             version: Some("1.2.3".to_string()),
             allowed_zones: Vec::new(),
+            allowed_operations: Vec::new(),
         };
         let updated = ManagedConnectorConfig {
             id: "fcp.github:enterprise:v1".to_string(),
@@ -37742,6 +37752,7 @@ require_attestation_types = ["in-toto"]"#,
             categories: previous.categories.clone(),
             version: Some("1.2.5".to_string()),
             allowed_zones: previous.allowed_zones.clone(),
+            allowed_operations: previous.allowed_operations.clone(),
         };
         let (host, host_server) = spawn_mock_host(
             StdBTreeMap::from([

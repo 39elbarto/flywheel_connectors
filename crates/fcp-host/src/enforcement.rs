@@ -1090,6 +1090,30 @@ impl EnforcementCheck for RevocationCheck {
 ///
 /// Runs each check in sequence and short-circuits on the first denial.
 /// Skipped checks are recorded but do not block.
+///
+/// # Production usage
+///
+/// **This pipeline is not currently wired into the production invoke
+/// path.** The canonical enforcement flow runs as ad-hoc gates
+/// inside `crates/fcp-host/src/bin/fcp-host.rs::verify_live_request`
+/// and `evaluate_live_preflight`:
+///
+/// - Zone binding: `allowed_zones` check (verify_live_request line ~1735).
+/// - Operation allow-list: `allowed_operations` check
+///   (verify_live_request line ~1747, br-ike8x).
+/// - Capability token: `CapabilityVerifier::verify_unbound` at
+///   gateway vantage (line ~1785).
+/// - Holder proof: explicit holder_node + holder_proof match
+///   (line ~1800), fail-closed pending live signature verification.
+/// - Persisted lifecycle verify: `state.lifecycle.verify_capability_token`.
+///
+/// The pipeline + its 11 checks remain useful as a structural
+/// reference for the canonical check ordering and for callers that
+/// want to run a check in isolation (e.g.,
+/// `ConnectorManifestCheck.check(&ctx, &config)` directly). The
+/// architectural decision of whether to migrate the production path
+/// to the pipeline OR retire the pipeline entirely is tracked
+/// separately; both options are valid resolutions of br-ike8x.
 pub struct EnforcementPipeline {
     checks: Vec<Box<dyn EnforcementCheck>>,
     config: EnforcementConfig,

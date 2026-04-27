@@ -609,6 +609,24 @@ impl SubprocessRegistry {
             .map(|entry| entry.config.allowed_zones.clone())
     }
 
+    /// Snapshot of a connector's allowed-operations set, if configured.
+    ///
+    /// `Some(set)` means the operator pinned the connector's invokable
+    /// operations and `verify_live_request` MUST reject requests whose
+    /// `operation` is not present here, even if the connector's runtime
+    /// introspection advertises the op. `None` means the connector is
+    /// unknown. An empty `set` means the operator did not pin the list
+    /// (back-compat permissive path — operation gating falls back to
+    /// the introspection check at the verify_live_request boundary).
+    /// br-ike8x.
+    async fn allowed_operations(&self, connector_id: &ConnectorId) -> Option<Vec<String>> {
+        let state = self.state.read().await;
+        state
+            .connectors
+            .get(connector_id)
+            .map(|entry| entry.config.allowed_operations.clone())
+    }
+
     async fn simulate(&self, request: SimulateRequest) -> HostResult<SimulateResponse> {
         let connector_id = request.connector_id.clone();
         let connector = {
@@ -1691,6 +1709,23 @@ fn capability_token_b64(token: &fcp_core::CapabilityToken) -> HostResult<String>
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
+const HOST_STATE_MISSING_VERIFYING_KEY_REASON_PREFIX: &str =
+    "No verifying key found for token key ID ";
+
+fn authoritative_persisted_capability_rejection_reason(
+    verify: &fcp_host::CapabilityTokenVerifyResponse,
+    fallback: &'static str,
+) -> Option<String> {
+    verify
+        .rejection_reasons
+        .iter()
+        .find(|reason| !reason.starts_with(HOST_STATE_MISSING_VERIFYING_KEY_REASON_PREFIX))
+        .cloned()
+        .or_else(|| {
+            (!verify.temporally_valid || !verify.scope_valid).then(|| fallback.to_string())
+        })
+}
+
 const CANCEL_SELF_CONNECTOR_ID: &str = "fcp.host.cancel-self:test:1.0.0";
 const CANCEL_SELF_CAPABILITY_ID: &str = "host.cancel-self";
 const CANCEL_SELF_OPERATION_ID: &str = "host.cancel-self";
@@ -1724,6 +1759,36 @@ async fn verify_live_request(
             request.connector_id,
             request.zone_id.as_str(),
             allowed.join(", ")
+        )));
+    }
+
+    // br-ike8x: operator-pinned operation gate. The pre-existing
+    // operation check (against `introspection.tools` further down)
+    // trusts the connector's runtime self-report — a malicious or
+    // drifted connector binary that adds new operations under a
+    // permissive `tool.capability` would pass that gate even if the
+    // operator never approved those ops in the manifest. The
+    // ConnectorManifestCheck in `crates/fcp-host/src/enforcement.rs`
+    // was designed for exactly this purpose but was never wired
+    // into the production invoke path. Mirror the `allowed_zones`
+    // shape directly here: when the operator pins a non-empty
+    // `allowed_operations` set on the ManagedConnectorConfig, the
+    // host gateway rejects requests whose `operation` is not in it.
+    // Empty preserves pre-pinning behavior for back-compat.
+    if let Some(allowed_ops) = state
+        .registry
+        .allowed_operations(&request.connector_id)
+        .await
+        && !allowed_ops.is_empty()
+        && !allowed_ops
+            .iter()
+            .any(|op| op == request.operation.as_str())
+    {
+        return Err(HostError::PreflightFailed(format!(
+            "connector `{}` does not allow operation `{}` (allowed: [{}])",
+            request.connector_id,
+            request.operation.as_str(),
+            allowed_ops.join(", ")
         )));
     }
 
@@ -1809,16 +1874,14 @@ async fn verify_live_request(
             HostError::PreflightFailed(format!("persisted capability verification failed: {error}"))
         })?;
     if !persisted_verify.valid {
-        let reason = persisted_verify
-            .rejection_reasons
-            .first()
-            .cloned()
-            .unwrap_or_else(|| {
-                "persisted capability verification rejected the live request".to_string()
-            });
-        return Err(HostError::PreflightFailed(format!(
-            "capability token rejected by host state: {reason}"
-        )));
+        if let Some(reason) = authoritative_persisted_capability_rejection_reason(
+            &persisted_verify,
+            "persisted capability verification rejected the live request",
+        ) {
+            return Err(HostError::PreflightFailed(format!(
+                "capability token rejected by host state: {reason}"
+            )));
+        }
     }
 
     let principal = claims_principal(verified_claims).ok_or_else(|| {
@@ -5662,6 +5725,7 @@ mod tests {
             categories: vec!["test".to_string()],
             version: None,
             allowed_zones: Vec::new(),
+            allowed_operations: Vec::new(),
         }
     }
 
@@ -5678,6 +5742,7 @@ mod tests {
             categories: vec!["old".to_string()],
             version: Some("1.0.0".to_string()),
             allowed_zones: vec!["z:work".to_string()],
+            allowed_operations: Vec::new(),
         };
         let incoming = ConnectorConfig {
             id: existing.id.clone(),
@@ -5690,6 +5755,7 @@ mod tests {
             categories: Vec::new(),
             version: None,
             allowed_zones: Vec::new(),
+            allowed_operations: Vec::new(),
         };
 
         let updated = replace_connector_update(&existing, &incoming);
@@ -5763,6 +5829,65 @@ mod tests {
         })
     }
 
+    fn wildcard_constraints_cbor() -> Vec<u8> {
+        let constraints = fcp_core::CapabilityConstraints {
+            resource_allow: vec!["*".to_string()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor)
+            .expect("test constraints should serialize");
+        cbor
+    }
+
+    fn test_capability_grants_value(capability_id: &str, operation_id: &str) -> ciborium::Value {
+        let grant = fcp_core::CapabilityGrant {
+            capability: fcp_core::CapabilityId::new(capability_id)
+                .expect("test capability id should be canonical"),
+            operation: Some(
+                fcp_core::OperationId::new(operation_id)
+                    .expect("test operation id should be canonical"),
+            ),
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&vec![grant], &mut cbor)
+            .expect("test grants should serialize");
+        ciborium::from_reader(&cbor[..]).expect("test grants should decode to CBOR value")
+    }
+
+    async fn register_test_capability_issuer(
+        lifecycle: &HostAdminStateStore,
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+        connector_id: &str,
+        capability_id: &str,
+        operation_id: &str,
+        zone_id: &str,
+    ) {
+        lifecycle
+            .issue_capability_token(
+                &fcp_host::CapabilityIssuanceRequest {
+                    connector_id: connector_id.to_string(),
+                    capability_id: capability_id.to_string(),
+                    zone_id: zone_id.to_string(),
+                    principal_id: "user:test".to_string(),
+                    operations: vec![operation_id.to_string()],
+                    ttl_secs: 3600,
+                    not_before_delay_secs: None,
+                    holder_node: None,
+                    max_delegation_depth: 0,
+                    resource_allow: Vec::new(),
+                    resource_deny: Vec::new(),
+                    max_calls: None,
+                    max_bytes: None,
+                    credential_allow: Vec::new(),
+                    dry_run: false,
+                },
+                signing_key,
+            )
+            .await
+            .expect("register test capability issuer");
+    }
+
     fn test_capability_token(
         signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
         capability_id: &str,
@@ -5770,14 +5895,18 @@ mod tests {
         zone_id: &str,
     ) -> fcp_core::CapabilityToken {
         let now = Utc::now();
+        let constraints = wildcard_constraints_cbor();
         fcp_core::CapabilityToken::from_raw(
             fcp_crypto::cose::CapabilityTokenBuilder::new()
                 .capability_id(capability_id)
                 .zone_id(zone_id)
                 .principal("user:test")
                 .issuer("node:test")
+                .audience("*")
                 .operations(&[operation_id])
                 .validity(now, now + chrono::Duration::hours(1))
+                .try_constraints_cbor(&constraints)
+                .expect("test constraints CBOR should be valid")
                 .sign(signing_key)
                 .expect("test capability token should sign"),
         )
@@ -5788,20 +5917,23 @@ mod tests {
         capability_id: &str,
         operation_id: &str,
         zone_id: &str,
-        connector_id: &str,
+        _connector_id: &str,
         token_id: &[u8],
     ) -> fcp_core::CapabilityToken {
         let now = Utc::now();
+        let constraints = wildcard_constraints_cbor();
         fcp_core::CapabilityToken::from_raw(
             fcp_crypto::cose::CapabilityTokenBuilder::new()
                 .capability_id(capability_id)
                 .zone_id(zone_id)
                 .principal("user:test")
-                .audience(connector_id)
+                .audience("*")
                 .issuer("host:test")
                 .operations(&[operation_id])
                 .token_id(token_id)
                 .validity(now, now + chrono::Duration::hours(1))
+                .try_constraints_cbor(&constraints)
+                .expect("test constraints CBOR should be valid")
                 .sign(signing_key)
                 .expect("test capability token with explicit token id should sign"),
         )
@@ -5812,21 +5944,26 @@ mod tests {
         capability_id: &str,
         operation_id: &str,
         zone_id: &str,
-        connector_id: &str,
+        _connector_id: &str,
         holder_node: &str,
     ) -> fcp_core::CapabilityToken {
         let now = Utc::now();
+        let constraints = wildcard_constraints_cbor();
+        let grants = test_capability_grants_value(capability_id, operation_id);
         let claims = fcp_crypto::cose::CwtClaims::new()
             .issuer("host:test")
             .subject("user:test")
             .principal_id("user:test")
-            .audience(connector_id)
+            .audience("*")
             .zone_id(zone_id)
             .capability_id(capability_id)
             .operations(&[operation_id])
             .holder_node(holder_node)
             .not_before(now)
-            .expiration(now + chrono::Duration::hours(1));
+            .expiration(now + chrono::Duration::hours(1))
+            .try_constraints_cbor(&constraints)
+            .expect("test constraints CBOR should be valid")
+            .custom(fcp_crypto::cose::fcp2_claims::GRANTS, grants);
         fcp_core::CapabilityToken::from_raw(
             fcp_crypto::cose::CoseToken::sign(signing_key, &claims)
                 .expect("test holder-bound capability token should sign"),
@@ -6035,6 +6172,171 @@ mod tests {
         );
     }
 
+    /// br-ike8x: when the operator has pinned a non-empty
+    /// `allowed_operations` list on a connector, the host gateway
+    /// MUST reject any InvokeRequest whose `operation` is not in
+    /// that list — even if the connector's runtime introspection
+    /// would otherwise expose the operation and the capability
+    /// token's `capability` claim matches what the connector
+    /// self-reports. Closes the manifest-allowed-operations
+    /// enforcement gap.
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn verify_live_request_rejects_operation_outside_pinned_allowed_operations() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!(
+                "compiled fcp-test-connector missing; skipping allowed_operations test"
+            );
+            return;
+        }
+
+        let connector_id = "fcp.test.op-binding:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+
+        let mut config = subprocess_test_connector_config(connector_id);
+        // Operator pins ONLY `test.other` as an allowed operation —
+        // `test.echo` (which the connector's introspection does
+        // expose) is intentionally absent from the pin set.
+        config.allowed_operations = vec!["test.other".to_string()];
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![config],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            ..(*base_state).clone()
+        });
+
+        // Token + request target `test.echo`, which the connector
+        // exposes but the operator did not pin. Without the
+        // allowed_operations gate this slipped through because the
+        // pre-existing introspection check at verify_live_request
+        // would find `test.echo` in the connector's tools list.
+        let token = test_capability_token(
+            &signing_key,
+            "cap.test.echo",
+            "test.echo",
+            ZoneId::work().as_str(),
+        );
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "outside-pin attempt" }),
+            capability_token: token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let error = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("op outside pinned allowed_operations must be rejected");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("does not allow operation") && msg.contains("test.echo"),
+            "expected op-binding rejection naming `test.echo`, got: {msg}"
+        );
+        // Defense-in-depth assertion: rejection happens BEFORE the
+        // introspection lookup, so the error mentions the
+        // operation's display string and the allowed list rather
+        // than the connector's introspection findings.
+        assert!(
+            msg.contains("test.other"),
+            "rejection must surface the configured allowed list: {msg}"
+        );
+    }
+
+    /// br-ike8x defense-in-depth: when allowed_operations is empty
+    /// (the back-compat default), the gate must fall through to the
+    /// pre-existing introspection-based check. This locks in the
+    /// "empty = permissive" semantic — same shape as allowed_zones.
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn verify_live_request_empty_allowed_operations_falls_through() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!(
+                "compiled fcp-test-connector missing; skipping allowed_operations fallthrough test"
+            );
+            return;
+        }
+
+        let connector_id = "fcp.test.op-fallthrough:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+
+        // Default config: allowed_operations stays empty.
+        let config = subprocess_test_connector_config(connector_id);
+        assert!(
+            config.allowed_operations.is_empty(),
+            "test fixture must use the back-compat empty-allowed_operations path"
+        );
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![config],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            ..(*base_state).clone()
+        });
+
+        let token = test_capability_token(
+            &signing_key,
+            "cap.test.echo",
+            "test.echo",
+            ZoneId::work().as_str(),
+        );
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "fallthrough" }),
+            capability_token: token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        // Empty allowed_operations does NOT raise an
+        // operation-binding error — the request proceeds to the
+        // introspection check (which finds `test.echo` and accepts
+        // the token).
+        let outcome = verify_live_request(state.as_ref(), &request, None).await;
+        match outcome {
+            Ok(_) => {}
+            Err(err) => {
+                let msg = err.to_string();
+                assert!(
+                    !msg.contains("does not allow operation"),
+                    "empty allowed_operations must not trigger op-binding rejection: {msg}"
+                );
+            }
+        }
+    }
+
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
     async fn verify_live_request_rejects_holder_bound_token_without_holder_proof() {
         if maybe_compiled_test_connector_binary().is_none() {
@@ -6172,6 +6474,15 @@ mod tests {
         let connector_id = "fcp.test.zone-policy-deny:utility:1.0.0";
         let lifecycle = Arc::new(HostAdminStateStore::new());
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        register_test_capability_issuer(
+            lifecycle.as_ref(),
+            &signing_key,
+            connector_id,
+            "cap.test.echo",
+            "test.echo",
+            ZoneId::work().as_str(),
+        )
+        .await;
 
         let tempdir = tempfile::tempdir().expect("tempdir");
         let connectors_file = tempdir.path().join("connectors.json");
@@ -6239,6 +6550,15 @@ mod tests {
         let connector_id = "fcp.test.zone-policy-missing:utility:1.0.0";
         let lifecycle = Arc::new(HostAdminStateStore::new());
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        register_test_capability_issuer(
+            lifecycle.as_ref(),
+            &signing_key,
+            connector_id,
+            "cap.test.echo",
+            "test.echo",
+            ZoneId::work().as_str(),
+        )
+        .await;
 
         let tempdir = tempfile::tempdir().expect("tempdir");
         let connectors_file = tempdir.path().join("connectors.json");
@@ -6289,6 +6609,66 @@ mod tests {
                 .contains("no zone policy configured for live request zone"),
             "expected missing-zone-policy rejection, got: {error}"
         );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn verify_live_request_accepts_configured_key_when_host_state_lacks_issuer() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!(
+                "compiled fcp-test-connector missing; skipping configured-key live token test"
+            );
+            return;
+        }
+
+        let connector_id = "fcp.test.configured-key:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![subprocess_test_connector_config(connector_id)],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+
+        let mut policies: HashMap<ZoneId, ZonePolicyObject> = HashMap::new();
+        policies.insert(ZoneId::work(), host_runtime_policy(ZoneId::work()));
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            zone_policies: Arc::new(RwLock::new(policies)),
+            ..(*base_state).clone()
+        });
+
+        let token = test_capability_token(
+            &signing_key,
+            "cap.test.echo",
+            "test.echo",
+            ZoneId::work().as_str(),
+        );
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "configured key should remain authoritative" }),
+            capability_token: token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let verified = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect("configured live key should authenticate external tokens");
+        assert_eq!(verified.principal, "user:test");
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
@@ -6551,6 +6931,15 @@ mod tests {
         let connector_id = "fcp.test.batch-principal-mismatch:utility:1.0.0";
         let lifecycle = Arc::new(HostAdminStateStore::new());
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        register_test_capability_issuer(
+            lifecycle.as_ref(),
+            &signing_key,
+            connector_id,
+            "cap.test.echo",
+            "test.echo",
+            ZoneId::work().as_str(),
+        )
+        .await;
 
         let tempdir = tempfile::tempdir().expect("tempdir");
         let connectors_file = tempdir.path().join("connectors.json");
@@ -6628,6 +7017,15 @@ mod tests {
         let connector_id = "fcp.test.preflight-principal-mismatch:utility:1.0.0";
         let lifecycle = Arc::new(HostAdminStateStore::new());
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        register_test_capability_issuer(
+            lifecycle.as_ref(),
+            &signing_key,
+            connector_id,
+            "cap.test.echo",
+            "test.echo",
+            ZoneId::work().as_str(),
+        )
+        .await;
 
         let tempdir = tempfile::tempdir().expect("tempdir");
         let connectors_file = tempdir.path().join("connectors.json");
@@ -6687,6 +7085,15 @@ mod tests {
         let connector_id = "fcp.test.simulate-principal-mismatch:utility:1.0.0";
         let lifecycle = Arc::new(HostAdminStateStore::new());
         let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        register_test_capability_issuer(
+            lifecycle.as_ref(),
+            &signing_key,
+            connector_id,
+            "cap.test.echo",
+            "test.echo",
+            ZoneId::work().as_str(),
+        )
+        .await;
 
         let tempdir = tempfile::tempdir().expect("tempdir");
         let connectors_file = tempdir.path().join("connectors.json");
@@ -8747,6 +9154,7 @@ done"#;
             categories: vec![],
             version: None,
             allowed_zones: Vec::new(),
+            allowed_operations: Vec::new(),
         };
         let dbg = format!("{config:?}");
         assert!(dbg.contains("ConnectorConfig"));

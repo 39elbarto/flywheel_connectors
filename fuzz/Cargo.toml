@@ -28,6 +28,7 @@ fcp-bootstrap = { path = "../crates/fcp-bootstrap" }
 fcp-cbor = { path = "../crates/fcp-cbor" }
 fcp-core = { path = "../crates/fcp-core" }
 fcp-crypto = { path = "../crates/fcp-crypto" }
+fcp-amplitude = { path = "../connectors/amplitude" }
 fcp-arxiv = { path = "../connectors/arxiv" }
 fcp-dingtalk = { path = "../connectors/dingtalk" }
 fcp-discord = { path = "../connectors/discord" }
@@ -42,6 +43,7 @@ fcp-oauth = { path = "../crates/fcp-oauth" }
 fcp-protocol = { path = "../crates/fcp-protocol" }
 fcp-raptorq = { path = "../crates/fcp-raptorq" }
 fcp-ratelimit = { path = "../crates/fcp-ratelimit" }
+fcp-registry = { path = "../crates/fcp-registry" }
 fcp-store = { path = "../crates/fcp-store" }
 fcp-streaming = { path = "../crates/fcp-streaming" }
 fcp-tailscale = { path = "../crates/fcp-tailscale" }
@@ -274,6 +276,13 @@ bench = false
 [[bin]]
 name = "fuzz_github_api_error_response"
 path = "fuzz_targets/github_api_error_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_amplitude_response_types"
+path = "fuzz_targets/amplitude_response_types.rs"
 test = false
 doc = false
 bench = false
@@ -666,6 +675,13 @@ bench = false
 [[bin]]
 name = "fuzz_taint_flags"
 path = "fuzz_targets/taint_flags.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_pcs_group_state"
+path = "fuzz_targets/pcs_group_state.rs"
 test = false
 doc = false
 bench = false

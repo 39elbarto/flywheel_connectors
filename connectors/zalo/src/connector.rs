@@ -272,4 +272,49 @@ mod tests {
         assert_eq!(simulate["allowed"], false);
         assert_eq!(simulate["simulate_capability"], "unsupported");
     }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_error_paths_are_ordered_and_specific() {
+        let mut connector = ZaloConnector::new();
+
+        let unconfigured = connector
+            .handle_invoke(json!({"operation_id": "zalo.messages.send"}))
+            .await
+            .expect_err("invoke should require configure first");
+        assert!(matches!(unconfigured, FcpError::NotConfigured));
+
+        connector
+            .handle_configure(json!({}))
+            .await
+            .expect("configure should succeed");
+        let not_handshaken = connector
+            .handle_invoke(json!({"operation_id": "zalo.messages.send"}))
+            .await
+            .expect_err("invoke should require handshake after configure");
+        assert!(matches!(not_handshaken, FcpError::NotHandshaken));
+
+        connector
+            .handle_handshake(json!({}))
+            .await
+            .expect("handshake should succeed");
+        let missing_operation = connector
+            .handle_invoke(json!({}))
+            .await
+            .expect_err("invoke should reject missing operation id");
+        assert!(matches!(
+            missing_operation,
+            FcpError::InvalidRequest { code: 1003, ref message }
+                if message.contains("Missing operation_id")
+        ));
+
+        let unknown_operation = connector
+            .handle_invoke(json!({"operation_id": "zalo.unknown"}))
+            .await
+            .expect_err("invoke should reject unknown operations");
+        assert!(matches!(
+            unknown_operation,
+            FcpError::InvalidRequest { code: 1002, ref message }
+                if message.contains("Unknown operation: zalo.unknown")
+        ));
+    }
 }

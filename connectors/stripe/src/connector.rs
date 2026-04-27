@@ -1675,11 +1675,8 @@ impl StripeConnector {
         let delivery_id = non_empty_trimmed(input.get("delivery_id").and_then(|v| v.as_str()))
             .map_or_else(|| event.id.clone(), str::to_owned);
 
-        self.register_webhook_delivery(
-            &delivery_id,
-            received_at,
-            config.webhook_tolerance_seconds,
-        )?;
+        // Only event.id is covered by Stripe's signature; host delivery metadata is not.
+        self.register_webhook_delivery(&event.id, received_at, config.webhook_tolerance_seconds)?;
 
         let object_type = event
             .data
@@ -2779,6 +2776,78 @@ mod tests {
         connector.handle_invoke(invoke.clone()).await.unwrap();
         let err = connector.handle_invoke(invoke).await.unwrap_err();
         assert!(matches!(err, FcpError::Conflict { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_replay_rejects_delivery_id_substitution() {
+        let mut connector = StripeConnector::new();
+        connector
+            .handle_configure(json!({
+                "secret_key": "sk_test",
+                "webhook_signing_secret": "whsec_test",
+            }))
+            .await
+            .unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["stripe.ingest_webhook_event"]
+            }))
+            .await
+            .unwrap();
+
+        let payload = r#"{"id":"evt_replay_delivery_substitution","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
+        let header = build_test_webhook_signature("whsec_test", payload, 1_700_000_000);
+        let capability = generate_valid_token(
+            &signing_key,
+            "stripe.webhook",
+            &["stripe.ingest_webhook_event"],
+        );
+
+        connector
+            .handle_invoke(json!({
+                "operation": "stripe.ingest_webhook_event",
+                "input": {
+                    "payload": payload,
+                    "stripe_signature": header,
+                    "delivery_id": "delivery-first",
+                    "received_at": 1_700_000_005
+                },
+                "capability_token": capability
+            }))
+            .await
+            .unwrap();
+
+        let replay_capability = generate_valid_token(
+            &signing_key,
+            "stripe.webhook",
+            &["stripe.ingest_webhook_event"],
+        );
+        let err = connector
+            .handle_invoke(json!({
+                "operation": "stripe.ingest_webhook_event",
+                "input": {
+                    "payload": payload,
+                    "stripe_signature": header,
+                    "delivery_id": "delivery-second",
+                    "received_at": 1_700_000_006
+                },
+                "capability_token": replay_capability
+            }))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, FcpError::Conflict { .. }),
+            "expected replay Conflict for same signed event id with substituted delivery_id, got {err:?}"
+        );
     }
 
     #[fcp_async_core::runtime::test]

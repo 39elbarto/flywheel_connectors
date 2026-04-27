@@ -402,14 +402,47 @@ impl PostgreSqlConnector {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        if operation.is_empty() {
+            let error = FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing operation_id".into(),
+            };
+            return Ok(simulate_denied(error.to_string(), error.error_code()));
+        }
+
+        let Some(operation_info) = typed_operations_info()
+            .into_iter()
+            .find(|info| info.id.as_str() == operation)
+        else {
+            let error = FcpError::InvalidRequest {
+                code: 1004,
+                message: format!("Unknown operation: {operation}"),
+            };
+            return Ok(simulate_denied(error.to_string(), error.error_code()));
+        };
+
+        let input = params.get("input").unwrap_or(&serde_json::Value::Null);
+        if let Err(message) = validate_simulate_input(operation, input) {
+            let error = FcpError::InvalidRequest {
+                code: 1003,
+                message,
+            };
+            return Ok(simulate_denied(error.to_string(), error.error_code()));
+        }
+
+        if let Err(error) = self.base.check_ready() {
+            return Ok(simulate_denied(error.to_string(), error.error_code()));
+        }
+
+        if self.client.is_none() {
+            let error = FcpError::NotConfigured;
+            return Ok(simulate_denied(error.to_string(), error.error_code()));
+        }
 
         Ok(json!({
-            "allowed": allowed,
-            "reason": if allowed { "Operation supported" } else { "Unknown operation" },
+            "allowed": true,
+            "reason": "Operation supported",
+            "capability": operation_info.capability.as_str(),
         }))
     }
 
@@ -599,6 +632,49 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         .get(field)
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| PostgresError::Query(format!("Missing required field: {field}")))
+}
+
+fn simulate_denied(reason: impl Into<String>, error_code: String) -> serde_json::Value {
+    json!({
+        "allowed": false,
+        "reason": reason.into(),
+        "error_code": error_code,
+    })
+}
+
+fn require_simulate_str(input: &serde_json::Value, field: &str) -> Result<(), String> {
+    input
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(|_| ())
+        .ok_or_else(|| format!("Missing required field: {field}"))
+}
+
+fn require_simulate_statements(input: &serde_json::Value) -> Result<(), String> {
+    let statements = input
+        .get("statements")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "Missing required field: statements".to_string())?;
+
+    if statements.iter().all(serde_json::Value::is_string) {
+        Ok(())
+    } else {
+        Err("All statements must be strings".to_string())
+    }
+}
+
+fn validate_simulate_input(operation: &str, input: &serde_json::Value) -> Result<(), String> {
+    match operation {
+        "pg.query" | "pg.execute" | "pg.explain" => require_simulate_str(input, "sql"),
+        "pg.schema.columns" | "pg.schema.indexes" => require_simulate_str(input, "table"),
+        "pg.transaction.commit" | "pg.transaction.rollback" => {
+            require_simulate_str(input, "txn_id")
+        }
+        "pg.batch" => require_simulate_statements(input),
+        "pg.prepared" => require_simulate_str(input, "name"),
+        "pg.schema.tables" | "pg.transaction.begin" | "pg.health" => Ok(()),
+        _ => Err(format!("Unknown operation: {operation}")),
+    }
 }
 
 /// Build typed operations info for introspection.

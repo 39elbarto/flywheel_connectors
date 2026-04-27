@@ -906,12 +906,63 @@ mod tests {
 
     #[test]
     fn simulate_known_operation() {
+        let c = ready_connector();
+        let rt = tokio_runtime();
+        let result = rt
+            .block_on(c.handle_simulate(json!({
+                "operation_id": "pg.query",
+                "input": {"sql": "SELECT 1"}
+            })))
+            .unwrap();
+        assert_eq!(result["allowed"], true);
+        assert_eq!(result["capability"], "pg.read");
+    }
+
+    #[test]
+    fn simulate_before_configure_denied() {
         let c = PostgreSqlConnector::new();
+        let rt = tokio_runtime();
+        let result = rt
+            .block_on(c.handle_simulate(json!({
+                "operation_id": "pg.query",
+                "input": {"sql": "SELECT 1"}
+            })))
+            .unwrap();
+        assert_eq!(result["allowed"], false);
+        assert_eq!(result["error_code"], "FCP-5002");
+        assert!(
+            result["reason"]
+                .as_str()
+                .unwrap()
+                .contains("not configured")
+        );
+    }
+
+    #[test]
+    fn simulate_before_handshake_denied() {
+        let c = configured_connector();
+        let rt = tokio_runtime();
+        let result = rt
+            .block_on(c.handle_simulate(json!({
+                "operation_id": "pg.query",
+                "input": {"sql": "SELECT 1"}
+            })))
+            .unwrap();
+        assert_eq!(result["allowed"], false);
+        assert_eq!(result["error_code"], "FCP-5003");
+        assert!(result["reason"].as_str().unwrap().contains("handshaken"));
+    }
+
+    #[test]
+    fn simulate_missing_required_input_denied() {
+        let c = ready_connector();
         let rt = tokio_runtime();
         let result = rt
             .block_on(c.handle_simulate(json!({"operation_id": "pg.query"})))
             .unwrap();
-        assert_eq!(result["allowed"], true);
+        assert_eq!(result["allowed"], false);
+        assert_eq!(result["error_code"], "FCP-1003");
+        assert!(result["reason"].as_str().unwrap().contains("sql"));
     }
 
     #[test]
@@ -926,25 +977,25 @@ mod tests {
 
     #[test]
     fn simulate_all_operations() {
-        let c = PostgreSqlConnector::new();
+        let c = ready_connector();
         let rt = tokio_runtime();
         let all_ops = [
-            "pg.query",
-            "pg.execute",
-            "pg.explain",
-            "pg.schema.tables",
-            "pg.schema.columns",
-            "pg.schema.indexes",
-            "pg.transaction.begin",
-            "pg.transaction.commit",
-            "pg.transaction.rollback",
-            "pg.batch",
-            "pg.prepared",
-            "pg.health",
+            ("pg.query", json!({"sql": "SELECT 1"})),
+            ("pg.execute", json!({"sql": "UPDATE things SET n = 1"})),
+            ("pg.explain", json!({"sql": "SELECT 1"})),
+            ("pg.schema.tables", json!({})),
+            ("pg.schema.columns", json!({"table": "things"})),
+            ("pg.schema.indexes", json!({"table": "things"})),
+            ("pg.transaction.begin", json!({})),
+            ("pg.transaction.commit", json!({"txn_id": "txn-1"})),
+            ("pg.transaction.rollback", json!({"txn_id": "txn-1"})),
+            ("pg.batch", json!({"statements": ["SELECT 1", "SELECT 2"]})),
+            ("pg.prepared", json!({"name": "lookup_thing"})),
+            ("pg.health", json!({})),
         ];
-        for op in all_ops {
+        for (op, input) in all_ops {
             let result = rt
-                .block_on(c.handle_simulate(json!({"operation_id": op})))
+                .block_on(c.handle_simulate(json!({"operation_id": op, "input": input})))
                 .unwrap();
             assert_eq!(result["allowed"], true, "simulate should allow {op}");
         }

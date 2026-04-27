@@ -154,6 +154,7 @@ fn validate_base_url_for_auth(base_url: &str, auth: &MondayAuth) -> FcpResult<St
 }
 
 #[derive(Debug, Clone, Serialize)]
+// Readiness output exposes independent operator-facing booleans in doctor responses.
 #[allow(clippy::struct_excessive_bools)]
 struct ProvisioningReadiness {
     auth_mode: &'static str,
@@ -674,6 +675,7 @@ fn is_local_test_host(host: &str) -> bool {
 }
 
 /// Build a single typed `OperationInfo`.
+// Explicit metadata parameters keep each operation declaration complete at its call site.
 #[allow(clippy::too_many_arguments)]
 fn op_info(
     id: &'static str,

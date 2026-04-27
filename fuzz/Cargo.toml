@@ -29,6 +29,7 @@ fcp-cbor = { path = "../crates/fcp-cbor" }
 fcp-core = { path = "../crates/fcp-core" }
 fcp-crypto = { path = "../crates/fcp-crypto" }
 fcp-amplitude = { path = "../connectors/amplitude" }
+fcp-anthropic = { path = "../connectors/anthropic" }
 fcp-arxiv = { path = "../connectors/arxiv" }
 fcp-dingtalk = { path = "../connectors/dingtalk" }
 fcp-discord = { path = "../connectors/discord" }
@@ -283,6 +284,13 @@ bench = false
 [[bin]]
 name = "fuzz_amplitude_response_types"
 path = "fuzz_targets/amplitude_response_types.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_anthropic_response_events"
+path = "fuzz_targets/anthropic_response_events.rs"
 test = false
 doc = false
 bench = false
@@ -689,6 +697,13 @@ bench = false
 [[bin]]
 name = "fuzz_cbor_tag_rejection"
 path = "fuzz_targets/cbor_tag_rejection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_provenance_record_merge"
+path = "fuzz_targets/provenance_record_merge.rs"
 test = false
 doc = false
 bench = false

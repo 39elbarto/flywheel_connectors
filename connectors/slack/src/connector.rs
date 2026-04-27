@@ -57,6 +57,18 @@ fn validate_slack_base_url(raw: &str) -> FcpResult<String> {
         code: 1003,
         message: "base_url must include a host".into(),
     })?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
     let local = is_local_test_host(host);
     let host_ok = host.eq_ignore_ascii_case(SLACK_API_HOST) || local;
     let scheme_ok = parsed.scheme() == "https" || local;
@@ -1660,6 +1672,27 @@ mod tests {
         // "api.slack.com" subdomain-like smuggling via evil host containing the string
         let err = validate_slack_base_url("https://evil.com/slack.com").unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn validate_slack_base_url_rejects_userinfo_query_and_fragment() {
+        let userinfo = validate_slack_base_url("https://bot:secret@slack.com/api").unwrap_err();
+        assert!(matches!(
+            userinfo,
+            FcpError::InvalidRequest { ref message, .. } if message.contains("userinfo")
+        ));
+
+        let query = validate_slack_base_url("https://slack.com/api?trace=1").unwrap_err();
+        assert!(matches!(
+            query,
+            FcpError::InvalidRequest { ref message, .. } if message.contains("query")
+        ));
+
+        let fragment = validate_slack_base_url("https://slack.com/api#token").unwrap_err();
+        assert!(matches!(
+            fragment,
+            FcpError::InvalidRequest { ref message, .. } if message.contains("fragment")
+        ));
     }
 
     #[test]

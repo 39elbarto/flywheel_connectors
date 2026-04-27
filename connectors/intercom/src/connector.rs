@@ -75,6 +75,25 @@ impl IntercomConfig {
             .to_string();
         reject_base_url_qfu(&base_url)?;
 
+        // br-gs71m: enforce endpoint policy at the configure boundary.
+        // Mirrors the zapier (63493e6e) / teams (9a2aabd2) / datadog
+        // (c2339e04) fixes. The pre-existing reject_base_url_qfu only
+        // refused userinfo/query/fragment shapes — `https://intercom.example.com`
+        // would still pass it AND construct an IntercomClient carrying
+        // the bearer token. base_url_policy was already informational
+        // (network_ok=false on self_check) but did not fail
+        // configuration. Promoting it to a hard refuse closes the
+        // bearer-token-routing-to-attacker vector. localhost /
+        // 127.0.0.1 / ::1 stay allowed for tests via
+        // is_local_test_host.
+        let (network_ok, network_message) = base_url_policy(&base_url);
+        if !network_ok {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: network_message,
+            });
+        }
+
         Ok(Self { auth, base_url })
     }
 
@@ -789,7 +808,15 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
     };
 
     let local = is_local_test_host(host);
-    let allowed_host = host.eq_ignore_ascii_case("api.intercom.io") || local;
+    // br-gs71m: exact-host equality against the Intercom regional API
+    // hosts. Substring matching (`contains("intercom.io")`) is unsafe
+    // because `intercom.io.evil.example` would pass. Intercom
+    // currently exposes three regional API endpoints — US (default),
+    // EU, and AU — per https://developers.intercom.com/docs/references/rest-api/api-references.
+    let allowed_host = local
+        || ALLOWED_INTERCOM_HOSTS
+            .iter()
+            .any(|allowed| host.eq_ignore_ascii_case(allowed));
     let secure_or_local = parsed.scheme() == "https" || local;
 
     if allowed_host && secure_or_local {
@@ -801,11 +828,20 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
         (
             false,
             format!(
-                "Endpoint must use https and api.intercom.io (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+                "Endpoint must use https and one of {:?} (localhost/127.0.0.1/::1 allowed for tests): {base_url}",
+                ALLOWED_INTERCOM_HOSTS
             ),
         )
     }
 }
+
+/// br-gs71m: allow-listed Intercom API hosts. Intercom regions per
+/// https://developers.intercom.com/docs/build-an-integration/learn-more/rest-apis/api-base-urls/
+const ALLOWED_INTERCOM_HOSTS: &[&str] = &[
+    "api.intercom.io",      // US (default)
+    "api.eu.intercom.io",   // EU region
+    "api.au.intercom.io",   // AU region
+];
 
 fn is_local_test_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
@@ -889,13 +925,21 @@ mod tests {
     }
 
     #[test]
-    fn config_custom_base_url() {
+    fn config_custom_base_url_within_policy() {
+        // br-gs71m: from_params accepts policy-conforming Intercom
+        // hosts (api.intercom.io / api.eu.intercom.io / api.au.intercom.io
+        // over https) when the caller overrides base_url. The pre-fix
+        // test asserted `https://intercom.example.com` was accepted —
+        // that was the bug; `intercom.example.com` is NOT an Intercom
+        // host and would have routed the bearer token to the
+        // attacker. Now uses the EU regional host to lock in the
+        // policy-conforming override path.
         let config = IntercomConfig::from_params(&json!({
             "access_token": "tok",
-            "base_url": "https://intercom.example.com",
+            "base_url": "https://api.eu.intercom.io",
         }))
-        .unwrap();
-        assert_eq!(config.base_url, "https://intercom.example.com");
+        .expect("api.eu.intercom.io must be accepted");
+        assert_eq!(config.base_url, "https://api.eu.intercom.io");
     }
 
     #[test]
@@ -1186,14 +1230,18 @@ mod tests {
 
     #[test]
     fn config_clone_preserves_base_url() {
+        // br-gs71m: pre-fix used `https://custom.io` (now policy-rejected).
+        // The test's intent is to verify clone preserves base_url —
+        // the policy allow-list is unrelated to that property. Use the
+        // AU regional host to get a non-default policy-allowed URL.
         let config = IntercomConfig::from_params(&json!({
             "access_token": "tok",
-            "base_url": "https://custom.io"
+            "base_url": "https://api.au.intercom.io"
         }))
         .unwrap();
         let cloned = config.clone();
-        assert_eq!(config.base_url, "https://custom.io");
-        assert_eq!(cloned.base_url, "https://custom.io");
+        assert_eq!(config.base_url, "https://api.au.intercom.io");
+        assert_eq!(cloned.base_url, "https://api.au.intercom.io");
     }
 
     #[test]
@@ -1535,15 +1583,99 @@ mod tests {
     }
 
     #[test]
-    fn provisioning_readiness_custom_base_url_rejected() {
-        let config = IntercomConfig::from_params(&json!({
+    fn from_params_rejects_non_intercom_host() {
+        // br-gs71m: pre-fix this test asserted that
+        // `https://evil.example.com` succeeded at from_params and that
+        // the rejection only surfaced through provisioning_readiness.
+        // That was the bug — IntercomClient was already constructed
+        // with the bearer token before any policy check fired. The
+        // post-fix invariant: non-Intercom base_url is refused at
+        // from_params; the IntercomClient is never built for it.
+        let err = IntercomConfig::from_params(&json!({
             "access_token": "tok",
             "base_url": "https://evil.example.com",
         }))
-        .unwrap();
-        let readiness = config.provisioning_readiness();
-        assert!(!readiness.network_ok);
-        assert!(readiness.network_message.contains("api.intercom.io"));
+        .expect_err("non-intercom base_url must be rejected at from_params");
+        match err {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert!(
+                    message.contains("intercom.io"),
+                    "rejection must name the policy: {message}"
+                );
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    /// br-gs71m: substring matching is INSUFFICIENT — a host like
+    /// `intercom.io.evil.example` containing `intercom.io` as a
+    /// subdomain label must be rejected. Locks in exact-host equality.
+    #[test]
+    fn from_params_rejects_substring_collision_host() {
+        let err = IntercomConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://intercom.io.evil.example",
+        }))
+        .expect_err("substring-collision host must be rejected");
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+
+        let err2 = IntercomConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://evil-intercom.io",
+        }))
+        .expect_err("prefix-trick host must be rejected");
+        assert!(matches!(err2, FcpError::InvalidRequest { .. }));
+    }
+
+    /// br-gs71m: http (non-https) on an Intercom host is also a
+    /// downgrade attempt — reject unless localhost.
+    #[test]
+    fn from_params_rejects_http_non_local_host() {
+        let err = IntercomConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "http://api.intercom.io",
+        }))
+        .expect_err("http://api.intercom.io must be rejected (https required)");
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    /// br-gs71m: every regional API host (US/EU/AU) must pass the
+    /// policy. Regression guard — if a future region addition forgets
+    /// to add its host to ALLOWED_INTERCOM_HOSTS, this fails fast.
+    #[test]
+    fn from_params_accepts_all_regional_hosts() {
+        for host in [
+            "api.intercom.io",
+            "api.eu.intercom.io",
+            "api.au.intercom.io",
+        ] {
+            let url = format!("https://{host}");
+            let config = IntercomConfig::from_params(&json!({
+                "access_token": "tok",
+                "base_url": url.clone(),
+            }))
+            .unwrap_or_else(|err| panic!("regional host {host} must be accepted: {err}"));
+            assert_eq!(config.base_url, url);
+        }
+    }
+
+    /// br-gs71m: localhost / 127.0.0.1 / ::1 stay allowed for tests.
+    #[test]
+    fn from_params_accepts_localhost_for_tests() {
+        let config = IntercomConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "http://localhost:8080",
+        }))
+        .expect("localhost must be accepted");
+        assert_eq!(config.base_url, "http://localhost:8080");
+
+        let config2 = IntercomConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "http://127.0.0.1:9090/api",
+        }))
+        .expect("127.0.0.1 must be accepted");
+        assert_eq!(config2.base_url, "http://127.0.0.1:9090/api");
     }
 
     #[test]

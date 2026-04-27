@@ -162,7 +162,8 @@ impl RateLimitHeaders {
                 .provider_info
                 .insert("limit_tokens".to_string(), limit_tokens.to_string());
         }
-        if let Some(remaining_tokens) = parse_header_u32(headers, "x-ratelimit-remaining-tokens") {
+        let remaining_tokens = parse_header_u32(headers, "x-ratelimit-remaining-tokens");
+        if let Some(remaining_tokens) = remaining_tokens {
             result
                 .provider_info
                 .insert("remaining_tokens".to_string(), remaining_tokens.to_string());
@@ -172,6 +173,22 @@ impl RateLimitHeaders {
         if let Some(reset_requests) = header_value(headers, "x-ratelimit-reset-requests") {
             if let Some(duration) = parse_duration_string(reset_requests) {
                 result.reset_seconds = Some(duration.as_secs());
+                result.provider_info.insert(
+                    "reset_requests_seconds".to_string(),
+                    duration.as_secs().to_string(),
+                );
+            }
+        }
+        if let Some(reset_tokens) = header_value(headers, "x-ratelimit-reset-tokens") {
+            if let Some(duration) = parse_duration_string(reset_tokens) {
+                let reset_seconds = duration.as_secs();
+                result.provider_info.insert(
+                    "reset_tokens_seconds".to_string(),
+                    reset_seconds.to_string(),
+                );
+                if result.reset_seconds.is_none() || remaining_tokens == Some(0) {
+                    result.reset_seconds = Some(reset_seconds);
+                }
             }
         }
 
@@ -280,7 +297,7 @@ fn parse_header_u64(headers: &HashMap<String, String>, key: &str) -> Option<u64>
     header_value(headers, key).and_then(|v| v.trim().parse().ok())
 }
 
-/// Parse duration strings like "1s", "500ms", "5m", "2h".
+/// Parse duration strings like "1s", "500ms", "5m", "2h", or "6m0s".
 fn parse_duration_string(s: &str) -> Option<Duration> {
     let s = s.trim();
 
@@ -289,32 +306,55 @@ fn parse_duration_string(s: &str) -> Option<Duration> {
         return Some(Duration::from_secs(secs));
     }
 
-    // Try with suffix
-    if s.ends_with("ms") {
-        if let Ok(ms) = s.trim_end_matches("ms").parse::<u64>() {
-            return Some(Duration::from_millis(ms));
+    parse_compound_duration(s)
+}
+
+fn parse_compound_duration(s: &str) -> Option<Duration> {
+    let bytes = s.as_bytes();
+    let mut pos = 0;
+    let mut total = Duration::ZERO;
+    let mut parsed_component = false;
+
+    while pos < bytes.len() {
+        let number_start = pos;
+        let mut saw_dot = false;
+
+        while pos < bytes.len() && (bytes[pos].is_ascii_digit() || (!saw_dot && bytes[pos] == b'.'))
+        {
+            saw_dot |= bytes[pos] == b'.';
+            pos += 1;
         }
-    }
-    if s.ends_with('s') && !s.ends_with("ms") {
-        if let Ok(secs) = s.trim_end_matches('s').parse::<f64>() {
-            if secs >= 0.0 && secs.is_finite() {
-                return Duration::try_from_secs_f64(secs).ok();
-            }
+
+        if number_start == pos {
             return None;
         }
-    }
-    if s.ends_with('m') {
-        if let Ok(mins) = s.trim_end_matches('m').parse::<u64>() {
-            return mins.checked_mul(60).map(Duration::from_secs);
-        }
-    }
-    if s.ends_with('h') {
-        if let Ok(hours) = s.trim_end_matches('h').parse::<u64>() {
-            return hours.checked_mul(3600).map(Duration::from_secs);
-        }
+
+        let number = &s[number_start..pos];
+        let component = if s[pos..].starts_with("ms") {
+            pos += 2;
+            Duration::from_millis(number.parse::<u64>().ok()?)
+        } else if s[pos..].starts_with('s') {
+            pos += 1;
+            let secs = number.parse::<f64>().ok()?;
+            if secs < 0.0 || !secs.is_finite() {
+                return None;
+            }
+            Duration::try_from_secs_f64(secs).ok()?
+        } else if s[pos..].starts_with('m') {
+            pos += 1;
+            Duration::from_secs(number.parse::<u64>().ok()?.checked_mul(60)?)
+        } else if s[pos..].starts_with('h') {
+            pos += 1;
+            Duration::from_secs(number.parse::<u64>().ok()?.checked_mul(3600)?)
+        } else {
+            return None;
+        };
+
+        total = total.checked_add(component)?;
+        parsed_component = true;
     }
 
-    None
+    parsed_component.then_some(total)
 }
 
 /// Provider type for automatic header parsing.
@@ -652,6 +692,45 @@ mod tests {
     }
 
     #[test]
+    fn parse_openai_compound_reset_token_duration() {
+        let mut headers = HashMap::new();
+        headers.insert("x-ratelimit-remaining-tokens".to_string(), "0".to_string());
+        headers.insert("x-ratelimit-reset-tokens".to_string(), "6m0s".to_string());
+
+        let parsed = RateLimitHeaders::parse_openai(&headers);
+
+        assert_eq!(parsed.reset_seconds, Some(360));
+        assert_eq!(
+            parsed.provider_info.get("reset_tokens_seconds"),
+            Some(&"360".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_openai_keeps_request_reset_unless_tokens_exhausted() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "x-ratelimit-remaining-requests".to_string(),
+            "1".to_string(),
+        );
+        headers.insert("x-ratelimit-remaining-tokens".to_string(), "12".to_string());
+        headers.insert("x-ratelimit-reset-requests".to_string(), "1s".to_string());
+        headers.insert("x-ratelimit-reset-tokens".to_string(), "6m0s".to_string());
+
+        let parsed = RateLimitHeaders::parse_openai(&headers);
+
+        assert_eq!(parsed.reset_seconds, Some(1));
+        assert_eq!(
+            parsed.provider_info.get("reset_requests_seconds"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            parsed.provider_info.get("reset_tokens_seconds"),
+            Some(&"360".to_string())
+        );
+    }
+
+    #[test]
     fn parse_openai_all_token_info() {
         let mut headers = HashMap::new();
         headers.insert("x-ratelimit-limit-tokens".to_string(), "200000".to_string());
@@ -784,6 +863,10 @@ mod tests {
         );
         assert_eq!(parse_duration_string("5m"), Some(Duration::from_secs(300)));
         assert_eq!(parse_duration_string("2h"), Some(Duration::from_secs(7200)));
+        assert_eq!(
+            parse_duration_string("6m0s"),
+            Some(Duration::from_secs(360))
+        );
     }
 
     #[test]

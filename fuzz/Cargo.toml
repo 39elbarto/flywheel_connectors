@@ -34,6 +34,7 @@ fcp-host = { path = "../crates/fcp-host" }
 fcp-oauth = { path = "../crates/fcp-oauth" }
 fcp-protocol = { path = "../crates/fcp-protocol" }
 fcp-raptorq = { path = "../crates/fcp-raptorq" }
+fcp-ratelimit = { path = "../crates/fcp-ratelimit" }
 fcp-store = { path = "../crates/fcp-store" }
 fcp-streaming = { path = "../crates/fcp-streaming" }
 fcp-tailscale = { path = "../crates/fcp-tailscale" }
@@ -322,6 +323,13 @@ bench = false
 [[bin]]
 name = "fuzz_sse_event_stream"
 path = "fuzz_targets/sse_event_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_ratelimit_headers"
+path = "fuzz_targets/ratelimit_headers.rs"
 test = false
 doc = false
 bench = false

@@ -350,6 +350,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_host_invoke_dispatch"
+path = "fuzz_targets/host_invoke_dispatch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "graphql_ws_message"
 path = "fuzz_targets/graphql_ws_message.rs"
 test = false

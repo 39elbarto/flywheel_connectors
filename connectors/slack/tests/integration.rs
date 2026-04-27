@@ -37,6 +37,7 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::thread;
 use std::time::Duration as StdDuration;
+use url::form_urlencoded;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
@@ -528,7 +529,17 @@ async fn list_channels_happy_path() {
     let _ctx = AsyncTestContext::for_scenario("slack.list_channels.happy_path");
     let fake_server = StructuredFakeHttpServer::spawn(1, |_idx, request| {
         assert_eq!(request.method, "GET");
-        assert_eq!(request.path, "/conversations.list?types=public_channel");
+        let (path, query) = request
+            .path
+            .split_once('?')
+            .expect("list_channels should include query params");
+        assert_eq!(path, "/conversations.list");
+        let query_params: HashMap<String, String> =
+            form_urlencoded::parse(query.as_bytes()).into_owned().collect();
+        assert_eq!(
+            query_params.get("types").map(String::as_str),
+            Some("public_channel")
+        );
         assert_eq!(
             request.headers.get("authorization").map(String::as_str),
             Some("Bearer xoxb-test-token-xyz")

@@ -32,14 +32,14 @@ const SLACK_API_HOST: &str = "slack.com";
 const SOCKET_EVENT_BUFFER_CAPACITY: usize = 200;
 
 fn is_local_test_host(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
+    (cfg!(test) || cfg!(debug_assertions)) && matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// Validate a Slack `base_url` override.
 ///
-/// Direct-token mode pins the host to `slack.com` (localhost permitted
-/// for tests). Empty/whitespace overrides fall through to the client
-/// default upstream. Custom vault-proxy hosts are not supported here —
+/// Direct-token mode pins the host to `slack.com`.
+/// Empty/whitespace overrides fall through to the client default upstream.
+/// Custom vault-proxy hosts are not supported here -
 /// Slack's connector does not yet have a credential_id auth mode.
 fn validate_slack_base_url(raw: &str) -> FcpResult<String> {
     let trimmed = raw.trim();
@@ -64,7 +64,7 @@ fn validate_slack_base_url(raw: &str) -> FcpResult<String> {
         return Err(FcpError::InvalidRequest {
             code: 1003,
             message: format!(
-                "base_url must use https and {SLACK_API_HOST} (localhost/127.0.0.1/::1 allowed for tests): {trimmed}"
+                "base_url must use https and {SLACK_API_HOST} (localhost/127.0.0.1/::1 allowed only in test/debug builds): {trimmed}"
             ),
         });
     }
@@ -1633,7 +1633,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_slack_base_url_allows_localhost_http() {
+    fn validate_slack_base_url_allows_localhost_http_for_tests() {
         validate_slack_base_url("http://localhost:8080").expect("localhost permitted for tests");
         validate_slack_base_url("http://127.0.0.1/api").expect("127.0.0.1 permitted for tests");
     }
@@ -1687,7 +1687,10 @@ mod tests {
         let now = Utc::now();
         // C3.4: tokens MUST include constraints (default-deny)
         let constraints = CapabilityConstraints {
-            resource_allow: resource_allow.iter().map(|value| (*value).to_string()).collect(),
+            resource_allow: resource_allow
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
             ..Default::default()
         };
         let mut cbor = Vec::new();
@@ -2839,13 +2842,12 @@ mod tests {
             .await;
 
         let mut connector = SlackConnector::new();
-        connector
-            .handle_configure(json!({
-                "token": "xoxb-test",
-                "base_url": mock_server.uri()
-            }))
-            .await
-            .unwrap();
+        connector.client = Some(
+            SlackClient::new("xoxb-test")
+                .unwrap()
+                .with_base_url(mock_server.uri()),
+        );
+        connector.base.set_configured(true);
 
         let value = connector.handle_self_check().await.unwrap();
         assert_eq!(value["status"], "ok");

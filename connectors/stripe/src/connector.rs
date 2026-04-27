@@ -205,7 +205,7 @@ fn api_url_policy(api_url: &str) -> (bool, String) {
         );
     }
 
-    let local = is_local_test_host(host);
+    let local = is_local_test_host(host) && (cfg!(test) || cfg!(debug_assertions));
     let allowed_host = host.eq_ignore_ascii_case(STRIPE_API_HOST) || local;
     let secure_or_local = parsed.scheme() == "https" || local;
 
@@ -218,7 +218,7 @@ fn api_url_policy(api_url: &str) -> (bool, String) {
         (
             false,
             format!(
-                "api_url must use https and {STRIPE_API_HOST} (localhost/127.0.0.1/::1 allowed for tests): {api_url}"
+                "api_url must use https and {STRIPE_API_HOST} (localhost/127.0.0.1/::1 allowed only in test/debug builds): {api_url}"
             ),
         )
     }
@@ -2187,8 +2187,7 @@ mod tests {
         let mut connector = StripeConnector::new();
         connector
             .handle_configure(json!({
-                "secret_key": "sk_test",
-                "api_url": "http://localhost:9999/v1"
+                "secret_key": "sk_test"
             }))
             .await
             .unwrap();
@@ -2938,13 +2937,18 @@ mod tests {
     async fn test_self_check_unreachable_api() {
         use fcp_core::SelfCheckStatus;
         let mut connector = StripeConnector::new();
-        connector
-            .handle_configure(json!({
-                "secret_key": "sk_test",
-                "api_url": "http://127.0.0.1:1/v1"
-            }))
-            .await
-            .unwrap();
+        connector.config = Some(StripeConfig {
+            auth: StripeAuth::SecretKey("sk_test".into()),
+            api_url: "http://127.0.0.1:1/v1".into(),
+            webhook_signing_secret: None,
+            webhook_tolerance_seconds: DEFAULT_WEBHOOK_TOLERANCE_SECONDS,
+        });
+        connector.client = Some(
+            StripeClient::new("sk_test")
+                .unwrap()
+                .with_api_url("http://127.0.0.1:1/v1"),
+        );
+        connector.base.set_configured(true);
 
         let result = connector.handle_self_check().await.unwrap();
         let report: SelfCheckReport = serde_json::from_value(result).unwrap();
@@ -3001,6 +3005,18 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert_invalid_request_contains(result.unwrap_err(), STRIPE_API_HOST);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_secret_key_allows_localhost_api_origin_for_tests() {
+        let mut connector = StripeConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "secret_key": "sk_test",
+                "api_url": "http://localhost:9999/v1"
+            }))
+            .await;
+        assert!(result.is_ok());
     }
 
     #[fcp_async_core::runtime::test]
@@ -3568,6 +3584,16 @@ mod tests {
         let result = StripeConfig::from_params(&params);
         assert!(result.is_err());
         assert_invalid_request_contains(result.unwrap_err(), STRIPE_API_HOST);
+    }
+
+    #[test]
+    fn config_allows_secret_key_localhost_api_origin_for_tests() {
+        let params = json!({
+            "secret_key": "sk_test",
+            "api_url": "http://localhost:9999/v1"
+        });
+        let config = StripeConfig::from_params(&params).unwrap();
+        assert_eq!(config.api_url, "http://localhost:9999/v1");
     }
 
     #[test]

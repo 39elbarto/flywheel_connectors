@@ -136,7 +136,7 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
         return (false, "base_url must include a host".into());
     };
 
-    let local = is_local_test_host(host);
+    let local = is_local_test_host(host) && (cfg!(test) || cfg!(debug_assertions));
     let allowed_host = host.eq_ignore_ascii_case(GITHUB_API_HOST) || local;
     let secure_or_local = parsed.scheme() == "https" || local;
 
@@ -149,7 +149,7 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
         (
             false,
             format!(
-                "Endpoint must use https and {GITHUB_API_HOST} (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+                "Endpoint must use https and {GITHUB_API_HOST} (localhost/127.0.0.1/::1 allowed only in test/debug builds): {base_url}"
             ),
         )
     }
@@ -1932,8 +1932,7 @@ mod tests {
         let mut connector = GitHubConnector::new();
         connector
             .handle_configure(json!({
-                "token": "fake_key",
-                "base_url": "http://localhost:9999"
+                "token": "fake_key"
             }))
             .await
             .unwrap();
@@ -2023,8 +2022,7 @@ mod tests {
         let mut connector = GitHubConnector::new();
         connector
             .handle_configure(json!({
-                "token": "fake_key",
-                "base_url": "http://localhost:9999"
+                "token": "fake_key"
             }))
             .await
             .unwrap();
@@ -2546,6 +2544,18 @@ mod tests {
             }))
             .await;
         assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_with_token_allows_localhost_base_url_for_tests() {
+        let mut connector = GitHubConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "token": "ghp_test",
+                "base_url": "http://localhost:9999"
+            }))
+            .await;
+        assert!(result.is_ok());
     }
 
     #[fcp_async_core::runtime::test]

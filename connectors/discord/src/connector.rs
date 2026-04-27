@@ -1117,6 +1117,10 @@ impl DiscordConnector {
     /// This is an optimization to avoid wasting resources on capability verification
     /// for requests that will fail validation anyway.
     fn validate_input_early(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+        if matches!(operation, "discord.send_message" | "discord.edit_message") {
+            parse_embeds(input)?;
+        }
+
         if let Some(schema) = Self::input_schema_for(operation) {
             validate_input_with_limits(&schema, input, &Limits::default())?;
         }

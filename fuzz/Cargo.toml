@@ -801,5 +801,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_fcpc_header_layout"
+path = "fuzz_targets/fcpc_header_layout.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

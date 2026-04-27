@@ -94,8 +94,75 @@ impl DatadogConfig {
             DEFAULT_BASE_URL.to_string()
         };
 
+        // br-ieiby: enforce endpoint policy at the configure boundary.
+        // Mirrors the zapier (63493e6e) and teams (9a2aabd2) fixes.
+        // Without this gate, DatadogClient was constructed with the
+        // api_key+app_key bearer pair pointing at any caller-supplied
+        // host — provisioning_readiness only ran a substring diagnostic
+        // (`base_url.contains("datadoghq.com")`) AFTER the client was
+        // already wired, so a malicious config like
+        // `base_url: https://datadoghq.com.evil.example/api/v1` would
+        // pass the substring check, build the client with full creds,
+        // and route every API request to the attacker host. Strict
+        // host-allowlist enforcement at construction closes that
+        // vector. localhost / 127.0.0.1 stay allowed for tests.
+        validate_base_url(&base_url)?;
+
         Ok(Self { auth, base_url })
     }
+}
+
+/// br-ieiby: allow-listed Datadog API hosts. Mirrors the
+/// `DatadogRegion::api_base_url` set in `client.rs`. Substring matching
+/// (e.g. `contains("datadoghq.com")`) is INSUFFICIENT — it accepts
+/// `datadoghq.com.evil.example`, `evil-datadoghq.com.example`, etc.
+/// We do exact host equality.
+const ALLOWED_DATADOG_HOSTS: &[&str] = &[
+    // US1 (default).
+    "api.datadoghq.com",
+    // US3 / US5 / AP1 — also under datadoghq.com but different subdomains.
+    "api.us3.datadoghq.com",
+    "api.us5.datadoghq.com",
+    "api.ap1.datadoghq.com",
+    // EU1 — distinct TLD.
+    "api.datadoghq.eu",
+];
+
+fn validate_base_url(base_url: &str) -> FcpResult<()> {
+    // Reuse reqwest's re-export of the url crate for parsing — already
+    // a transitive dep via `reqwest`, no new direct dependency.
+    let parsed = reqwest::Url::parse(base_url).map_err(|err| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("base_url could not be parsed: {err}"),
+    })?;
+
+    let Some(host) = parsed.host_str() else {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("base_url must include a host: {base_url}"),
+        });
+    };
+
+    let local = matches!(host, "localhost" | "127.0.0.1");
+
+    let allowed_host = local
+        || ALLOWED_DATADOG_HOSTS
+            .iter()
+            .any(|allowed| host.eq_ignore_ascii_case(allowed));
+
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if !allowed_host || !secure_or_local {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "Endpoint must use https and one of {:?} (localhost/127.0.0.1 allowed for tests): {base_url}",
+                ALLOWED_DATADOG_HOSTS
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 /// Doctor check result.
@@ -959,14 +1026,114 @@ mod tests {
     }
 
     #[test]
-    fn config_base_url_overrides_region() {
+    fn config_base_url_overrides_region_within_policy() {
+        // br-ieiby: from_params accepts policy-conforming hosts when
+        // the caller overrides base_url. The pre-fix test asserted
+        // `https://custom.example.com/api/v1` was accepted — that was
+        // the bug; `custom.example.com` is NOT a Datadog host and
+        // would have routed api_key+app_key creds to the attacker.
+        // Now uses `https://api.us3.datadoghq.com/api/v1` to lock in
+        // the policy-conforming override path.
         let config = DatadogConfig::from_params(&json!({
             "api_key": "k", "app_key": "a",
             "region": "eu1",
+            "base_url": "https://api.us3.datadoghq.com/api/v1",
+        }))
+        .expect("api.us3.datadoghq.com must be accepted");
+        assert_eq!(config.base_url, "https://api.us3.datadoghq.com/api/v1");
+    }
+
+    /// br-ieiby: configure-time refuse for non-Datadog hosts. Closes
+    /// the auth-routing-to-attacker vector where api_key + app_key
+    /// would be sent to whatever host the caller named.
+    #[test]
+    fn config_rejects_non_datadog_host() {
+        let err = DatadogConfig::from_params(&json!({
+            "api_key": "k", "app_key": "a",
             "base_url": "https://custom.example.com/api/v1",
         }))
-        .unwrap();
-        assert_eq!(config.base_url, "https://custom.example.com/api/v1");
+        .expect_err("non-datadog base_url must be rejected at from_params");
+        match err {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert!(
+                    message.contains("datadoghq"),
+                    "rejection must name the policy: {message}"
+                );
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    /// br-ieiby: substring matching is INSUFFICIENT — `*.evil.example`
+    /// containing `datadoghq.com` as a subdomain label must be
+    /// rejected. Locks in exact-host-equality vs the legacy
+    /// `base_url.contains("datadoghq.com")` substring check.
+    #[test]
+    fn config_rejects_substring_collision_host() {
+        let err = DatadogConfig::from_params(&json!({
+            "api_key": "k", "app_key": "a",
+            "base_url": "https://datadoghq.com.evil.example/api/v1",
+        }))
+        .expect_err("substring-collision host must be rejected");
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+        let err2 = DatadogConfig::from_params(&json!({
+            "api_key": "k", "app_key": "a",
+            "base_url": "https://evil-datadoghq.com/api/v1",
+        }))
+        .expect_err("prefix-trick host must be rejected");
+        assert!(matches!(err2, FcpError::InvalidRequest { .. }));
+    }
+
+    /// br-ieiby: http (non-https) on a Datadog host is also a
+    /// downgrade attempt — reject unless localhost.
+    #[test]
+    fn config_rejects_http_non_local_host() {
+        let err = DatadogConfig::from_params(&json!({
+            "api_key": "k", "app_key": "a",
+            "base_url": "http://api.datadoghq.com/api/v1",
+        }))
+        .expect_err("http://api.datadoghq.com must be rejected (https required)");
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    /// br-ieiby: localhost / 127.0.0.1 stay allowed for tests so the
+    /// fix doesn't break test fixtures.
+    #[test]
+    fn config_accepts_localhost_for_tests() {
+        let config = DatadogConfig::from_params(&json!({
+            "api_key": "k", "app_key": "a",
+            "base_url": "http://localhost:8080",
+        }))
+        .expect("localhost must be accepted");
+        assert_eq!(config.base_url, "http://localhost:8080");
+
+        let config2 = DatadogConfig::from_params(&json!({
+            "api_key": "k", "app_key": "a",
+            "base_url": "http://127.0.0.1:9090/api",
+        }))
+        .expect("127.0.0.1 must be accepted");
+        assert_eq!(config2.base_url, "http://127.0.0.1:9090/api");
+    }
+
+    /// br-ieiby: every region's api_base_url must pass the policy.
+    /// Regression guard — if a future region addition forgets to add
+    /// its host to ALLOWED_DATADOG_HOSTS, this fails fast.
+    #[test]
+    fn config_accepts_every_region_default_url() {
+        for region_str in ["us1", "us3", "us5", "eu1", "ap1"] {
+            let config = DatadogConfig::from_params(&json!({
+                "api_key": "k", "app_key": "a",
+                "region": region_str,
+            }))
+            .unwrap_or_else(|err| {
+                panic!("region {region_str} default base_url must be accepted: {err}")
+            });
+            assert!(
+                config.base_url.starts_with("https://"),
+                "region {region_str} default base_url must be https"
+            );
+        }
     }
 
     #[test]

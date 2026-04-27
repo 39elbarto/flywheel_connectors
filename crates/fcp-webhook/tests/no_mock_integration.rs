@@ -1006,14 +1006,15 @@ fn known_hmac_sha1_vectors() {
 // ─── claim_event vs record_event semantics ────────────────────────────
 
 #[test]
-fn record_event_does_not_check_replay() {
+fn record_event_rejects_active_replay() {
     let handler = WebhookHandler::new(HmacSha256Verifier::new("s"), "test");
 
-    // record_event records, never errors for fresh + duplicate inserts
     handler.record_event("evt_r1").unwrap();
-    handler.record_event("evt_r1").unwrap(); // no error on duplicate
+    assert!(matches!(
+        handler.record_event("evt_r1"),
+        Err(WebhookError::ReplayDetected { event_id }) if event_id == "evt_r1"
+    ));
 
-    // But check_replay now detects it
     assert!(matches!(
         handler.check_replay("evt_r1"),
         Err(WebhookError::ReplayDetected { .. })

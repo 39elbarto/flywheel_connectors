@@ -229,12 +229,15 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
     /// Record an event as seen.
     ///
     /// # Errors
-    /// Returns [`WebhookError::ReplayCacheFull`] when the cache has reached its maximum size.
+    /// Returns [`WebhookError::ReplayDetected`] when the event was already
+    /// recorded within the idempotency TTL. Returns
+    /// [`WebhookError::ReplayCacheFull`] when the cache has reached its maximum size.
     ///
     /// # Deprecated
     /// The write half of the racy [`check_replay`] + `record_event` pair.
-    /// Use [`claim_event`] instead — it performs the duplicate check and
-    /// the insert atomically under a single write lock (br-v3wrz).
+    /// Use [`claim_event`] instead. `record_event` now fails closed on an
+    /// already-recorded active ID, but it still cannot protect callers that
+    /// process the event between a prior [`check_replay`] call and this write.
     ///
     /// [`check_replay`]: Self::check_replay
     /// [`claim_event`]: Self::claim_event
@@ -244,8 +247,20 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
     )]
     pub fn record_event(&self, event_id: &str) -> WebhookResult<()> {
         if self.config.idempotency_enabled {
+            self.cleanup_seen_events();
+
             let mut state = self.seen_events.write();
             let now = Utc::now();
+            if let Some(&time) = state.events.get(event_id) {
+                let ttl = chrono::Duration::from_std(self.config.idempotency_ttl)
+                    .unwrap_or(chrono::TimeDelta::MAX);
+                if now - time < ttl {
+                    return Err(WebhookError::ReplayDetected {
+                        event_id: event_id.to_string(),
+                    });
+                }
+            }
+
             if state.events.len() >= MAX_SEEN_EVENTS && !state.events.contains_key(event_id) {
                 self.prune_expired_events_locked(&mut state, now);
                 if state.events.len() >= MAX_SEEN_EVENTS {
@@ -674,6 +689,18 @@ mod tests {
         assert!(matches!(
             handler.claim_event("evt_1"),
             Err(WebhookError::ReplayDetected { .. })
+        ));
+    }
+
+    #[test]
+    fn record_event_rejects_active_duplicate_id() {
+        let verifier = HmacSha256Verifier::new("secret");
+        let handler = WebhookHandler::new(verifier, "test");
+
+        assert!(handler.record_event("evt_1").is_ok());
+        assert!(matches!(
+            handler.record_event("evt_1"),
+            Err(WebhookError::ReplayDetected { event_id }) if event_id == "evt_1"
         ));
     }
 

@@ -28,6 +28,7 @@ fcp-bootstrap = { path = "../crates/fcp-bootstrap" }
 fcp-cbor = { path = "../crates/fcp-cbor" }
 fcp-core = { path = "../crates/fcp-core" }
 fcp-crypto = { path = "../crates/fcp-crypto" }
+fcp-graphql = { path = "../crates/fcp-graphql" }
 fcp-mesh = { path = "../crates/fcp-mesh" }
 fcp-manifest = { path = "../crates/fcp-manifest" }
 fcp-host = { path = "../crates/fcp-host" }
@@ -195,6 +196,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_webhook_provider_headers"
+path = "fuzz_targets/webhook_provider_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_registry_manifest_verify"
 path = "fuzz_targets/registry_manifest_verify.rs"
 test = false
@@ -337,6 +345,13 @@ bench = false
 [[bin]]
 name = "fuzz_websocket_frame_parser"
 path = "fuzz_targets/websocket_frame_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "graphql_ws_message"
+path = "fuzz_targets/graphql_ws_message.rs"
 test = false
 doc = false
 bench = false

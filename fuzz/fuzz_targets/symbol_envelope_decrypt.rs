@@ -28,10 +28,10 @@
 
 #![no_main]
 
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Arbitrary;
 use fcp_core::{ObjectId, TailscaleNodeId, ZoneIdHash, ZoneKeyId};
 use fcp_crypto::AeadKey;
-use fcp_protocol::symbol_envelope::{
+use fcp_protocol::{
     AUTH_TAG_SIZE, SymbolContext, SymbolEnvelopeError, ZoneKeyAlgorithm, decrypt_symbol,
     derive_sender_subkey, encrypt_symbol,
 };

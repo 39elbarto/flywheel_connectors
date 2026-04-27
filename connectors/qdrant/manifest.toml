@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:a0d87d49fd595446563a5a7af3c03f23fa5dd3fe8f63b1a1a8bea272aba14c71"
+interface_hash = "blake3-256:fcp.interface.v2:df181d4ef45c2fd52fae00ea7e9e85e23861d90173330b50b7913ed6866063b5"
 
 [connector]
 id = "fcp.qdrant"

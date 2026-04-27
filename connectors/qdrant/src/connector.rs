@@ -99,6 +99,24 @@ impl QdrantConfig {
                 message: "cluster_url must include a host".into(),
             });
         }
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "cluster_url must not include userinfo".into(),
+            });
+        }
+        if parsed.path() != "/" {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "cluster_url must not include a path".into(),
+            });
+        }
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "cluster_url must not include query or fragment components".into(),
+            });
+        }
 
         Ok(Self {
             cluster_url: cluster_url.trim_end_matches('/').to_string(),
@@ -1747,6 +1765,48 @@ mod tests {
                 assert!(message.contains("exactly one of api_key or credential_id"));
             }
             other => panic!("expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_cluster_url_userinfo() {
+        let mut connector = QdrantConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "api_key": "test-key",
+                "cluster_url": "https://user:secret@example.qdrant.io"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("userinfo"));
+            }
+            other => panic!("expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_cluster_url_path_query_and_fragment() {
+        for cluster_url in [
+            "https://example.qdrant.io/proxy",
+            "https://example.qdrant.io?trace=1",
+            "https://example.qdrant.io#fragment",
+            "http://localhost:6333/proxy",
+        ] {
+            let mut connector = QdrantConnector::new();
+            let result = connector
+                .handle_configure(json!({
+                    "api_key": "test-key",
+                    "cluster_url": cluster_url
+                }))
+                .await;
+
+            assert!(
+                matches!(result, Err(FcpError::InvalidRequest { .. })),
+                "cluster_url should be rejected: {cluster_url}"
+            );
         }
     }
 

@@ -351,12 +351,9 @@ impl QdrantClient {
                                 .and_then(|v| v.to_str().ok())
                                 .and_then(|v| v.parse::<u64>().ok())
                                 .map_or(60_000, |s| s * 1000);
-                            return AttemptOutcome::Retryable {
-                                error: QdrantError::RateLimit {
-                                    retry_after_ms: retry_after,
-                                },
-                                retry_after: Some(Duration::from_millis(retry_after)),
-                            };
+                            return AttemptOutcome::Terminal(QdrantError::RateLimit {
+                                retry_after_ms: retry_after,
+                            });
                         }
 
                         if status.is_server_error() {

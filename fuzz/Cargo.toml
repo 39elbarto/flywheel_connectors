@@ -119,6 +119,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_zone_id_parse"
+path = "fuzz_targets/zone_id_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_store_repair_planner"
 path = "fuzz_targets/store_repair_planner.rs"
 test = false

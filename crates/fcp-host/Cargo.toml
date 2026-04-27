@@ -65,3 +65,7 @@ criterion.workspace = true
 [[bench]]
 name = "cold_start"
 harness = false
+
+[[bench]]
+name = "local_invoke"
+harness = false

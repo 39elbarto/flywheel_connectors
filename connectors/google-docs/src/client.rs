@@ -283,6 +283,7 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> DocsResult<&'a str>
         || lower.contains("%5c")
         || lower.contains("%3f")
         || lower.contains("%23")
+        || lower.contains("%25")
     {
         return Err(DocsError::Api {
             status_code: 400,
@@ -441,6 +442,22 @@ mod tests {
         assert!(sanitize_path_segment("doc%23frag", "document_id").is_err());
         assert!(sanitize_path_segment("", "document_id").is_err());
         assert!(sanitize_path_segment("  ", "document_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_double_percent_encoding() {
+        // br-rjok0: a server that decodes the request path twice (some
+        // proxies / sidecars do) would unwrap `%252F` → `%2F` → `/`,
+        // which is the very traversal the lowercase-`%2f` check is
+        // meant to block. Refuse any segment carrying a literal-`%`
+        // encoding so the second decode pass cannot resurrect a slash.
+        assert!(sanitize_path_segment("foo%252Fbar", "document_id").is_err());
+        assert!(sanitize_path_segment("foo%252fbar", "document_id").is_err());
+        assert!(sanitize_path_segment("doc%2523frag", "document_id").is_err());
+        assert!(sanitize_path_segment("doc%2523FRAG", "document_id").is_err());
+        // A lone `%25` (literal `%` encoded) is also rejected — it has no
+        // legitimate use in a Drive document/file id.
+        assert!(sanitize_path_segment("foo%25", "document_id").is_err());
     }
 
     #[test]

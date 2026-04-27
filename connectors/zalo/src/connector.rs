@@ -8,13 +8,14 @@ const CONNECTOR_VERSION: &str = "0.1.0";
 const BOUNDARY: &str = "This first slice covers bot identity, message send, photo send, long-poll updates, webhook setup, and webhook token verification.";
 const NOT_HANDSHAKEN_REASON_CODE: &str = "not_handshaken";
 const NOT_HANDSHAKEN_MESSAGE: &str = "Connector configured, but handshake has not completed yet.";
-const UNIMPLEMENTED_REASON_CODE: &str = "invoke_surface_unimplemented";
 const UNIMPLEMENTED_MESSAGE: &str = "This connector scaffold only declares planned operations. Live invoke support is not implemented yet.";
+const PARTIAL_SURFACE_REASON_CODE: &str = "partial_invoke_surface";
 
 pub struct ZaloConnector {
     base: Arc<BaseConnector>,
     configured: bool,
     handshaken: bool,
+    webhook_verify_challenge: Option<String>,
 }
 
 // Zalo's planned FCP handlers share async signatures before live invoke support lands.
@@ -26,13 +27,24 @@ impl ZaloConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static(CONNECTOR_ID))),
             configured: false,
             handshaken: false,
+            webhook_verify_challenge: None,
         }
     }
 
-    pub async fn handle_configure(&mut self, _params: Value) -> FcpResult<Value> {
+    pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
+        self.webhook_verify_challenge =
+            if let Some(token) = optional_trimmed_string(&params, "webhook_verify_challenge")? {
+                Some(token)
+            } else {
+                optional_trimmed_string(&params, "webhook_token")?
+            };
         self.configured = true;
         self.base.set_configured(true);
-        Ok(json!({"connector_id": CONNECTOR_ID, "configured": true}))
+        Ok(json!({
+            "connector_id": CONNECTOR_ID,
+            "configured": true,
+            "webhook_verify_configured": self.webhook_verify_challenge.is_some()
+        }))
     }
 
     pub async fn handle_handshake(&mut self, _params: Value) -> FcpResult<Value> {
@@ -67,6 +79,7 @@ impl ZaloConnector {
             "checks": [
                 { "name": "configuration", "passed": self.configured, "critical": true },
                 { "name": "handshake", "passed": self.handshaken, "critical": false },
+                { "name": "webhook_verify", "passed": self.webhook_verify_challenge.is_some(), "critical": false, "message": "Local webhook token verification is implemented when webhook_verify_challenge is configured." },
                 { "name": "invoke_surface", "passed": false, "critical": false, "message": UNIMPLEMENTED_MESSAGE },
                 { "name": "surface_boundary", "passed": true, "critical": false, "message": BOUNDARY }
             ]
@@ -84,9 +97,11 @@ impl ZaloConnector {
             )
         } else {
             (
-                "unsupported",
-                json!(UNIMPLEMENTED_REASON_CODE),
-                json!(UNIMPLEMENTED_MESSAGE),
+                "degraded",
+                json!(PARTIAL_SURFACE_REASON_CODE),
+                json!(
+                    "Only local webhook token verification is implemented in this connector slice; upstream Zalo invoke operations remain planned."
+                ),
             )
         };
         Ok(json!({
@@ -108,7 +123,7 @@ impl ZaloConnector {
                 { "id": "zalo.webhook.set", "summary": "Set the Zalo webhook URL", "capability": "zalo.webhook", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort", "implemented": false },
                 { "id": "zalo.webhook.delete", "summary": "Delete the Zalo webhook", "capability": "zalo.webhook", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort", "implemented": false },
                 { "id": "zalo.webhook.info", "summary": "Get Zalo webhook info", "capability": "zalo.webhook", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": false },
-                { "id": "zalo.webhook.verify", "summary": "Verify a webhook secret token against local config", "capability": "zalo.webhook", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": false }
+                { "id": "zalo.webhook.verify", "summary": "Verify a webhook secret token against local config", "capability": "zalo.webhook", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": true }
             ],
             "surface_status": "incubating",
             "surface_status_rationale": "Runtime path is incomplete or lacks production evidence",
@@ -127,6 +142,10 @@ impl ZaloConnector {
                 code: 1003,
                 message: "Missing operation_id".into(),
             })?;
+
+        if operation == "zalo.webhook.verify" {
+            return self.invoke_webhook_verify(params.get("input").unwrap_or(&params));
+        }
 
         Err(FcpError::InvalidRequest {
             code: 1002,
@@ -157,6 +176,31 @@ impl ZaloConnector {
             .and_then(Value::as_str)
             .unwrap_or("");
 
+        if operation == "zalo.webhook.verify" {
+            let input = params.get("input").unwrap_or(&params);
+            let token_present = input
+                .get("token")
+                .and_then(Value::as_str)
+                .is_some_and(|token| !token.trim().is_empty());
+            let configured =
+                self.configured && self.handshaken && self.webhook_verify_challenge.is_some();
+            return Ok(json!({
+                "allowed": configured && token_present,
+                "simulate_capability": "local_validation",
+                "reason": if configured && token_present {
+                    "Webhook verification can be evaluated locally."
+                } else if !self.configured {
+                    "Connector is not configured."
+                } else if !self.handshaken {
+                    NOT_HANDSHAKEN_MESSAGE
+                } else if self.webhook_verify_challenge.is_none() {
+                    "webhook_verify_challenge is not configured."
+                } else {
+                    "Missing token."
+                }
+            }));
+        }
+
         Ok(json!({
             "allowed": false,
             "simulate_capability": "unsupported",
@@ -181,10 +225,65 @@ impl ZaloConnector {
     pub async fn handle_shutdown(&mut self, _params: Value) -> FcpResult<Value> {
         self.configured = false;
         self.handshaken = false;
+        self.webhook_verify_challenge = None;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
         Ok(json!({}))
     }
+
+    fn invoke_webhook_verify(&self, input: &Value) -> FcpResult<Value> {
+        let expected_challenge =
+            self.webhook_verify_challenge
+                .as_deref()
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1004,
+                    message: "webhook_verify_challenge is not configured".into(),
+                })?;
+        let supplied_challenge = input
+            .get("token")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing token".into(),
+            })?;
+
+        Ok(json!({
+            "verified": constant_time_eq(expected_challenge.as_bytes(), supplied_challenge.as_bytes())
+        }))
+    }
+}
+
+fn optional_trimmed_string(params: &Value, key: &str) -> FcpResult<Option<String>> {
+    let Some(value) = params.get(key) else {
+        return Ok(None);
+    };
+    let Some(raw) = value.as_str() else {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{key} must be a string"),
+        });
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{key} must not be empty"),
+        });
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut diff = left.len() ^ right.len();
+    let max_len = left.len().max(right.len());
+    for index in 0..max_len {
+        let a = left.get(index).copied().unwrap_or(0);
+        let b = right.get(index).copied().unwrap_or(0);
+        diff |= usize::from(a ^ b);
+    }
+    diff == 0
 }
 
 impl Default for ZaloConnector {
@@ -234,17 +333,16 @@ mod tests {
                 .as_array()
                 .expect("operations should be an array")
                 .iter()
-                .all(|operation| {
-                    operation.get("implemented").and_then(Value::as_bool) == Some(false)
-                })
+                .any(|operation| operation["id"] == "zalo.webhook.verify"
+                    && operation.get("implemented").and_then(Value::as_bool) == Some(true))
         );
 
         let self_check = connector
             .handle_self_check()
             .await
             .expect("self_check should succeed");
-        assert_eq!(self_check["status"], "unsupported");
-        assert_eq!(self_check["reason_code"], UNIMPLEMENTED_REASON_CODE);
+        assert_eq!(self_check["status"], "degraded");
+        assert_eq!(self_check["reason_code"], PARTIAL_SURFACE_REASON_CODE);
     }
 
     #[fcp_async_core::runtime::test]
@@ -271,6 +369,56 @@ mod tests {
             .expect("simulate should succeed");
         assert_eq!(simulate["allowed"], false);
         assert_eq!(simulate["simulate_capability"], "unsupported");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn webhook_verify_uses_configured_challenge_without_upstream_stub() {
+        let mut connector = ZaloConnector::new();
+        let configure = connector
+            .handle_configure(json!({"webhook_verify_challenge": "expected-challenge"}))
+            .await
+            .expect("configure should succeed");
+        assert_eq!(configure["webhook_verify_configured"], true);
+        connector
+            .handle_handshake(json!({}))
+            .await
+            .expect("handshake should succeed");
+
+        let good = connector
+            .handle_invoke(json!({
+                "operation_id": "zalo.webhook.verify",
+                "input": { "token": "expected-challenge" }
+            }))
+            .await
+            .expect("matching token should verify");
+        assert_eq!(good["verified"], true);
+
+        let bad = connector
+            .handle_invoke(json!({
+                "operation_id": "zalo.webhook.verify",
+                "input": { "token": "wrong-challenge" }
+            }))
+            .await
+            .expect("mismatched token should return a negative verification result");
+        assert_eq!(bad["verified"], false);
+
+        let simulate = connector
+            .handle_simulate(json!({
+                "operation_id": "zalo.webhook.verify",
+                "input": { "token": "expected-challenge" }
+            }))
+            .await
+            .expect("simulate should succeed");
+        assert_eq!(simulate["allowed"], true);
+        assert_eq!(simulate["simulate_capability"], "local_validation");
+    }
+
+    #[test]
+    fn constant_time_eq_matches_equal_byte_strings_only() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"Secret"));
+        assert!(!constant_time_eq(b"secret", b"secret2"));
+        assert!(!constant_time_eq(b"secret", b""));
     }
 
     #[fcp_async_core::runtime::test]

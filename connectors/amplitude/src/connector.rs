@@ -37,6 +37,17 @@ const VERIFY_COMMANDS: [&str; 10] = [
     "rch exec -- env RUSTUP_TOOLCHAIN=nightly-2026-02-19 cargo clippy -p fcp-amplitude --all-targets -- -D warnings",
 ];
 
+const ALLOWED_AMPLITUDE_HOSTS: &[&str] = &[
+    "amplitude.com",
+    "analytics.amplitude.com",
+    "analytics.eu.amplitude.com",
+    "api.amplitude.com",
+    "api.eu.amplitude.com",
+    "api2.amplitude.com",
+    "data.amplitude.com",
+    "data.eu.amplitude.com",
+];
+
 /// Parsed and validated `Amplitude` connector configuration.
 #[derive(Debug, Clone)]
 struct AmplitudeConfig {
@@ -68,11 +79,12 @@ impl AmplitudeConfig {
             })?
             .to_string();
 
-        let base_url = params
-            .get("base_url")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(DEFAULT_BASE_URL)
-            .to_string();
+        let base_url = validate_base_url(
+            params
+                .get("base_url")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(DEFAULT_BASE_URL),
+        )?;
 
         Ok(Self {
             auth: AmplitudeAuth {
@@ -97,7 +109,7 @@ impl AmplitudeConfig {
             cohorts_surface: true,
             events_export_surface: true,
             write_surface: false,
-            host_policy_guidance: "Production verification must target https://analytics.amplitude.com or https://amplitude.com over HTTPS. Localhost overrides are allowed only for deterministic test fixtures.",
+            host_policy_guidance: "Production verification must target one of the official Amplitude API hosts over HTTPS. Localhost overrides are allowed only for deterministic test fixtures.",
         }
     }
 }
@@ -224,7 +236,7 @@ fn operator_guidance() -> OperatorGuidance {
             RemediationHint {
                 code: "network_constraints_invalid",
                 symptom: "health or self_check reports that the configured base_url violates Amplitude host policy",
-                action: "Use https://analytics.amplitude.com, https://amplitude.com, or a localhost test override that mirrors the Amplitude API surface.",
+                action: "Use an official Amplitude API host over HTTPS, or a localhost test override that mirrors the Amplitude API surface.",
             },
             RemediationHint {
                 code: "auth_invalid",
@@ -895,9 +907,7 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
     };
 
     let local = is_local_test_host(host);
-    let allowed_host = host.eq_ignore_ascii_case("analytics.amplitude.com")
-        || host.eq_ignore_ascii_case("amplitude.com")
-        || local;
+    let allowed_host = is_allowed_amplitude_host(host) || local;
     let secure_or_local = parsed.scheme() == "https" || local;
 
     if allowed_host && secure_or_local {
@@ -909,10 +919,56 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
         (
             false,
             format!(
-                "Endpoint must use https and analytics.amplitude.com or amplitude.com (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
+                "Endpoint must use https and one of {ALLOWED_AMPLITUDE_HOSTS:?} (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
             ),
         )
     }
+}
+
+fn validate_base_url(raw_base_url: &str) -> FcpResult<String> {
+    let trimmed = raw_base_url.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not be empty".into(),
+        });
+    }
+
+    let parsed = Url::parse(trimmed).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("base_url could not be parsed: {error}"),
+    })?;
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include embedded credentials".into(),
+        });
+    }
+
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
+
+    let canonical = parsed.to_string().trim_end_matches('/').to_string();
+    let (allowed, message) = base_url_policy(&canonical);
+    if !allowed {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message,
+        });
+    }
+
+    Ok(canonical)
+}
+
+fn is_allowed_amplitude_host(host: &str) -> bool {
+    ALLOWED_AMPLITUDE_HOSTS
+        .iter()
+        .any(|allowed| host.eq_ignore_ascii_case(allowed))
 }
 
 fn is_local_test_host(host: &str) -> bool {
@@ -940,10 +996,21 @@ mod tests {
         let config = AmplitudeConfig::from_params(&json!({
             "api_key": "KEY",
             "secret_key": "SECRET",
-            "base_url": "https://test.amplitude.com/api/2",
+            "base_url": "https://api.amplitude.com/api/2",
         }))
         .unwrap();
-        assert_eq!(config.base_url, "https://test.amplitude.com/api/2");
+        assert_eq!(config.base_url, "https://api.amplitude.com/api/2");
+    }
+
+    #[test]
+    fn config_accepts_eu_base_url() {
+        let config = AmplitudeConfig::from_params(&json!({
+            "api_key": "KEY",
+            "secret_key": "SECRET",
+            "base_url": "https://api.eu.amplitude.com/api/2",
+        }))
+        .unwrap();
+        assert_eq!(config.base_url, "https://api.eu.amplitude.com/api/2");
     }
 
     #[test]
@@ -1085,6 +1152,40 @@ mod tests {
             "secret_key": {"nested": true},
         }));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_off_policy_base_url() {
+        let result = AmplitudeConfig::from_params(&json!({
+            "api_key": "key",
+            "secret_key": "secret",
+            "base_url": "https://evil.example.com",
+        }));
+        let err = result.expect_err("off-policy base_url must be rejected");
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+        assert!(err.to_string().contains("api.amplitude.com"));
+    }
+
+    #[test]
+    fn config_rejects_base_url_query_string() {
+        let result = AmplitudeConfig::from_params(&json!({
+            "api_key": "key",
+            "secret_key": "secret",
+            "base_url": "https://api.amplitude.com/api/2?leak=1",
+        }));
+        let err = result.expect_err("query-bearing base_url must be rejected");
+        assert!(err.to_string().contains("query string or fragment"));
+    }
+
+    #[test]
+    fn config_rejects_base_url_with_userinfo() {
+        let result = AmplitudeConfig::from_params(&json!({
+            "api_key": "key",
+            "secret_key": "secret",
+            "base_url": "https://attacker:pw@api.amplitude.com/api/2",
+        }));
+        let err = result.expect_err("userinfo-bearing base_url must be rejected");
+        assert!(err.to_string().contains("embedded credentials"));
     }
 
     #[test]
@@ -1666,6 +1767,20 @@ mod tests {
     #[test]
     fn base_url_policy_accepts_analytics_amplitude_https() {
         let (ok, message) = base_url_policy("https://analytics.amplitude.com");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_api_amplitude_https() {
+        let (ok, message) = base_url_policy("https://api.amplitude.com/api/2");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn base_url_policy_accepts_api_eu_amplitude_https() {
+        let (ok, message) = base_url_policy("https://api.eu.amplitude.com/api/2");
         assert!(ok);
         assert!(message.contains("accepted"));
     }

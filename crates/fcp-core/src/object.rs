@@ -307,12 +307,28 @@ mod tests {
 
         let object_id = ObjectId::new(b"hello", &zone, &schema, &key);
 
-        // Golden vector: keyed BLAKE3 with domain separation
-        // Input: key=[0;32], zone="z:work", schema="fcp.core/CapabilityObject@1.0.0", content=b"hello"
-        // Hash: blake3_keyed(key, "FCP2-OBJECT-V2" || zone_bytes || schema_hash || content)
+        // Golden vector: keyed BLAKE3 with domain separation.
+        //
+        // Input: key=[0;32], zone="z:work",
+        //        schema=SchemaId::new("fcp.core", "CapabilityObject", 1.0.0),
+        //        content=b"hello"
+        // Hash:  blake3_keyed(key, "FCP2-OBJECT-V2" || zone_bytes ||
+        //                          schema.hash().as_bytes() || content)
+        //
+        // Updated for br-wyq8x: the previous golden
+        // `5fc04a5e6c6b549580a78b9dd99d7f92208022873def22441f58b8df8dd84f7e`
+        // matched the pre-mzi9x SchemaId::hash() which concatenated
+        // `namespace || ':' || name || '@' || version` raw, allowing
+        // distinct (namespace, name) tuples to collide on the same hash
+        // (separator-collision). Commit 72a0975f fixed that by
+        // length-prefixing each component before feeding the hasher; the
+        // schema_hash bytes therefore changed, which propagates through
+        // the keyed-BLAKE3 derivation here. The new value below is the
+        // post-fix derivation and SHOULD remain stable until the wire
+        // format itself bumps via a new domain separator.
         assert_eq!(
             object_id.to_string(),
-            "5fc04a5e6c6b549580a78b9dd99d7f92208022873def22441f58b8df8dd84f7e"
+            "6d766e3dd7615531c490254cf35644c0c21bb734cbaf26938a8edcf2da6ca36a"
         );
     }
 

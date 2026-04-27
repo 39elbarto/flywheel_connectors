@@ -708,5 +708,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_derive_sender_subkey"
+path = "fuzz_targets/derive_sender_subkey.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

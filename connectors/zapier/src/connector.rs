@@ -209,6 +209,18 @@ impl ZapierConnector {
         let client = ZapierClient::new(config.auth.clone(), Some(&config.base_url))
             .map_err(|e| e.to_fcp_error())?;
 
+        // br-2ot4f cross-crate lifecycle finding: a re-configure (with
+        // a previous handshake still active) must invalidate the old
+        // session_id and clear the handshaken flag. Otherwise the
+        // connector keeps reporting `handshaken = true` against a
+        // session_id that was negotiated under the OLD auth/base_url
+        // — the host may have already invalidated it, and any
+        // subsequent invoke routes through the NEW client with stale
+        // session metadata. Same fail-closed discipline the generator
+        // template (br-2ot4f comment 39) was tightened to.
+        self.session_id = None;
+        self.base.set_handshaken(false);
+
         self.client = Some(Arc::new(client));
         self.config = Some(config);
         self.base.set_configured(true);

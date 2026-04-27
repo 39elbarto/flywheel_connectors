@@ -69,6 +69,43 @@ async fn lifecycle_handshake_before_configure_fails() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn lifecycle_reconfigure_invalidates_handshake() {
+    // br-2ot4f cross-crate lifecycle finding: a re-configure must
+    // clear the handshaken flag and drop the prior session_id, so
+    // a subsequent invoke cannot reuse a session that was
+    // negotiated under the OLD auth/base_url.
+    let server = MockServer::start().await;
+    let mut c = setup_connector(&server.uri()).await;
+    // Baseline: full lifecycle established.
+    assert_eq!(c.handle_health().await.unwrap()["handshaken"], true);
+
+    // Re-configure with a fresh api_key (simulating a credential
+    // rotation OR a hostile re-config). Localhost is allowed by
+    // base_url policy so the call itself succeeds.
+    c.handle_configure(json!({
+        "api_key": "new-token",
+        "base_url": server.uri(),
+    }))
+    .await
+    .expect("re-configure should succeed");
+
+    // After re-configure the connector must REPORT not-handshaken
+    // until a fresh handshake is performed. Without the fix, the
+    // old `set_handshaken(true)` flag persisted and `handshaken`
+    // remained true with a stale session_id.
+    let h = c.handle_health().await.unwrap();
+    assert_eq!(h["configured"], true);
+    assert_eq!(
+        h["handshaken"], false,
+        "re-configure must invalidate prior handshake state"
+    );
+    assert_eq!(
+        h["status"], "degraded",
+        "post-reconfigure status must reflect un-handshaken state"
+    );
+}
+
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;

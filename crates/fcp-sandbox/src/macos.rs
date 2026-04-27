@@ -219,6 +219,8 @@ impl MacOsSandbox {
             rlim_cur: policy.memory_limit_bytes,
             rlim_max: policy.memory_limit_bytes,
         };
+        // SAFETY: `memory_limit` is a fully initialized `libc::rlimit`, and
+        // `setrlimit` only reads that struct for the current process.
         unsafe {
             if libc::setrlimit(libc::RLIMIT_DATA, &memory_limit) != 0 {
                 warn!(
@@ -240,6 +242,8 @@ impl MacOsSandbox {
             rlim_cur: cpu_seconds,
             rlim_max: cpu_seconds + 5,
         };
+        // SAFETY: `cpu_limit` is a valid `libc::rlimit`, and `setrlimit`
+        // updates only the current process resource limits.
         unsafe {
             if libc::setrlimit(libc::RLIMIT_CPU, &cpu_limit) != 0 {
                 warn!(
@@ -254,6 +258,8 @@ impl MacOsSandbox {
             rlim_cur: 1024,
             rlim_max: 4096,
         };
+        // SAFETY: `fd_limit` is initialized locally and passed by shared
+        // reference for the kernel to read while updating this process limit.
         unsafe {
             if libc::setrlimit(libc::RLIMIT_NOFILE, &fd_limit) != 0 {
                 warn!(
@@ -268,6 +274,8 @@ impl MacOsSandbox {
             rlim_cur: 0,
             rlim_max: 0,
         };
+        // SAFETY: `core_limit` is a valid `libc::rlimit`, and `setrlimit`
+        // reads it synchronously to disable core dumps for this process.
         unsafe {
             if libc::setrlimit(libc::RLIMIT_CORE, &core_limit) != 0 {
                 warn!(
@@ -312,6 +320,9 @@ impl Sandbox for MacOsSandbox {
         // Apply sandbox using sandbox_init
         let mut errorbuf: *mut i8 = std::ptr::null_mut();
 
+        // SAFETY: `c_profile` is a live NUL-terminated CString for the duration
+        // of the call, `flags` selects inline-profile parsing, and `errorbuf`
+        // points to writable storage for the returned error pointer.
         let result = unsafe {
             sandbox_init(
                 c_profile.as_ptr(),
@@ -324,8 +335,12 @@ impl Sandbox for MacOsSandbox {
             let error_msg = if errorbuf.is_null() {
                 "unknown error".to_string()
             } else {
+                // SAFETY: `sandbox_init` returned a non-null error buffer on
+                // failure, and Apple documents it as a valid C string.
                 let err = unsafe { std::ffi::CStr::from_ptr(errorbuf) };
                 let msg = err.to_string_lossy().to_string();
+                // SAFETY: `errorbuf` came from `sandbox_init` and must be
+                // released exactly once with `sandbox_free_error`.
                 unsafe {
                     sandbox_free_error(errorbuf);
                 }
@@ -358,6 +373,9 @@ impl Sandbox for MacOsSandbox {
         let memory_limit_bytes = policy.memory_limit_bytes;
         let cpu_seconds = policy.wall_clock_timeout.as_secs();
 
+        // SAFETY: `pre_exec` is only installed before spawning the child. The
+        // closure captures owned values, uses async-signal-safe libc calls plus
+        // `sandbox_init`, and returns only `std::io::Error` on failure.
         unsafe {
             cmd.pre_exec(move || {
                 // Enforce both heap/data growth and total address-space growth. RLIMIT_DATA

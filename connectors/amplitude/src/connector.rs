@@ -510,10 +510,7 @@ impl AmplitudeConnector {
                 ),
             (Some(config), Some(client), Some(_)) => match client.list_cohorts().await {
                 Ok(response) => {
-                    let cohorts_count = response
-                        .get("cohorts")
-                        .and_then(serde_json::Value::as_array)
-                        .map_or(0, std::vec::Vec::len);
+                    let cohorts_count = response.cohorts.len();
                     let live_probe = json!({
                         "probe": "amplitude.cohorts.list",
                         "base_url": config.base_url.clone(),
@@ -789,14 +786,16 @@ impl AmplitudeConnector {
         input: &serde_json::Value,
     ) -> Result<serde_json::Value, AmplitudeError> {
         let chart_id = require_str(input, "chart_id")?;
-        client.query_chart(chart_id).await
+        let response = client.query_chart(chart_id).await?;
+        serde_json::to_value(response).map_err(AmplitudeError::Json)
     }
 
     async fn invoke_cohorts_list(
         &self,
         client: &AmplitudeClient,
     ) -> Result<serde_json::Value, AmplitudeError> {
-        client.list_cohorts().await
+        let response = client.list_cohorts().await?;
+        serde_json::to_value(response).map_err(AmplitudeError::Json)
     }
 
     async fn invoke_events_export(
@@ -806,7 +805,8 @@ impl AmplitudeConnector {
     ) -> Result<serde_json::Value, AmplitudeError> {
         let start = require_str(input, "start")?;
         let end = require_str(input, "end")?;
-        client.export_events(start, end).await
+        let response = client.export_events(start, end).await?;
+        serde_json::to_value(response).map_err(AmplitudeError::Json)
     }
 }
 

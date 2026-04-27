@@ -8,11 +8,12 @@ use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };
 use reqwest::{Client, Response, StatusCode};
+use serde::de::DeserializeOwned;
 use tracing::{debug, instrument};
 
 use crate::{
     error::{AmplitudeError, AmplitudeResult},
-    types::ApiErrorResponse,
+    types::{ApiErrorResponse, ChartQueryResponse, CohortsListResponse, EventsExportResponse},
 };
 
 /// Default `Amplitude` API base URL.
@@ -107,12 +108,24 @@ impl AmplitudeClient {
         req.header("Authorization", self.auth.basic_auth_header())
     }
 
-    async fn handle_response(&self, resp: Response) -> AmplitudeResult<serde_json::Value> {
+    /// Parse a successful JSON response into the caller-supplied typed shape.
+    ///
+    /// br-csgvd: previously the client returned `serde_json::Value` for every
+    /// endpoint, which let an upstream that altered its response shape slip
+    /// through the connector boundary unnoticed. Each caller now declares the
+    /// exact type it expects, so a shape regression surfaces as a `Decode`
+    /// error at the boundary instead of as silently wrong output downstream.
+    /// Empty bodies use the type's `Default` so endpoints that legitimately
+    /// return an empty 200 (e.g. some health-check shapes) continue to work.
+    async fn handle_response<T>(&self, resp: Response) -> AmplitudeResult<T>
+    where
+        T: DeserializeOwned + Default,
+    {
         let status = resp.status();
         if status.is_success() {
             let body = resp.text().await?;
             if body.is_empty() {
-                return Ok(serde_json::json!({}));
+                return Ok(T::default());
             }
             Ok(serde_json::from_str(&body)?)
         } else {
@@ -120,11 +133,7 @@ impl AmplitudeClient {
         }
     }
 
-    async fn handle_error(
-        &self,
-        status: StatusCode,
-        resp: Response,
-    ) -> AmplitudeResult<serde_json::Value> {
+    async fn handle_error<T>(&self, status: StatusCode, resp: Response) -> AmplitudeResult<T> {
         let retry_after = resp
             .headers()
             .get("retry-after")
@@ -151,12 +160,15 @@ impl AmplitudeClient {
         }
     }
 
-    async fn request_with_retry(
+    async fn request_with_retry<T>(
         &self,
         http_method: &'static str,
         url: &str,
         body: Option<&serde_json::Value>,
-    ) -> AmplitudeResult<serde_json::Value> {
+    ) -> AmplitudeResult<T>
+    where
+        T: DeserializeOwned + Default,
+    {
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
@@ -197,7 +209,10 @@ impl AmplitudeClient {
     }
 
     #[instrument(skip(self), fields(url))]
-    async fn get(&self, path: &str) -> AmplitudeResult<serde_json::Value> {
+    async fn get<T>(&self, path: &str) -> AmplitudeResult<T>
+    where
+        T: DeserializeOwned + Default,
+    {
         let url = format!("{}{path}", self.base_url);
         self.request_with_retry("GET", &url, None).await
     }
@@ -205,7 +220,7 @@ impl AmplitudeClient {
     // -- Charts --
 
     /// Query a chart by ID.
-    pub async fn query_chart(&self, chart_id: &str) -> AmplitudeResult<serde_json::Value> {
+    pub async fn query_chart(&self, chart_id: &str) -> AmplitudeResult<ChartQueryResponse> {
         let safe_id = sanitize_path_segment(chart_id, "chart_id")?;
         self.get(&format!("/charts/{safe_id}/query")).await
     }
@@ -213,7 +228,7 @@ impl AmplitudeClient {
     // -- Cohorts --
 
     /// List all cohorts.
-    pub async fn list_cohorts(&self) -> AmplitudeResult<serde_json::Value> {
+    pub async fn list_cohorts(&self) -> AmplitudeResult<CohortsListResponse> {
         self.get("/cohorts").await
     }
 
@@ -224,7 +239,7 @@ impl AmplitudeClient {
         &self,
         start: &str,
         end: &str,
-    ) -> AmplitudeResult<serde_json::Value> {
+    ) -> AmplitudeResult<EventsExportResponse> {
         let safe_start = encode_query_value(start, "start")?;
         let safe_end = encode_query_value(end, "end")?;
         self.get(&format!("/export?start={safe_start}&end={safe_end}"))

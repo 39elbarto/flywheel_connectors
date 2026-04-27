@@ -3,8 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 /// Chart query response from `Amplitude`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChartQueryResponse {
+    #[serde(default)]
     pub data: serde_json::Value,
     #[serde(rename = "xValues")]
     pub x_values: Option<Vec<String>>,
@@ -37,8 +38,9 @@ pub struct Cohort {
 }
 
 /// Cohorts list response from `Amplitude`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CohortsListResponse {
+    #[serde(default)]
     pub cohorts: Vec<serde_json::Value>,
 }
 
@@ -63,8 +65,9 @@ pub struct ExportedEvent {
 }
 
 /// Events export response from `Amplitude`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EventsExportResponse {
+    #[serde(default)]
     pub data: Vec<serde_json::Value>,
 }
 

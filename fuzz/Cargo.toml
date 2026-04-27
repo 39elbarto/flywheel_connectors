@@ -475,5 +475,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_tailscale_attestation_binding"
+path = "fuzz_targets/tailscale_attestation_binding.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

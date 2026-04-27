@@ -3989,6 +3989,54 @@ fn save_context_config(path: &PathBuf, config: &ContextConfigFile) -> Result<()>
     })
 }
 
+fn normalize_host_endpoint(endpoint: &str) -> Result<String> {
+    let endpoint = endpoint.trim();
+    if endpoint.is_empty() {
+        bail!("host endpoint cannot be empty");
+    }
+    if endpoint.contains("://")
+        && !(endpoint.starts_with("http://")
+            || endpoint.starts_with("https://")
+            || endpoint.starts_with("tcp://")
+            || endpoint.starts_with("unix://"))
+    {
+        bail!("host endpoint must use http, https, tcp, unix, or an absolute Unix socket path");
+    }
+
+    #[cfg(unix)]
+    if endpoint.starts_with("unix://") || endpoint.starts_with('/') {
+        let socket_path = endpoint.strip_prefix("unix://").unwrap_or(endpoint);
+        if socket_path.trim().is_empty() {
+            bail!("Unix host endpoint must include a socket path");
+        }
+        return Ok(endpoint.to_owned());
+    }
+
+    let normalized = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint.to_owned()
+    } else {
+        let stripped = endpoint.strip_prefix("tcp://").unwrap_or(endpoint);
+        format!("http://{stripped}")
+    };
+
+    let url =
+        Url::parse(&normalized).with_context(|| format!("invalid host endpoint `{endpoint}`"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("host endpoint must use http, https, tcp, unix, or an absolute Unix socket path");
+    }
+    if url.host_str().is_none() {
+        bail!("host endpoint must include a host");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("host endpoint must not include username or password components");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        bail!("host endpoint must not include query or fragment components");
+    }
+
+    Ok(normalized.trim_end_matches('/').to_owned())
+}
+
 #[cfg(test)]
 struct ContextConfigPathOverrideGuard;
 
@@ -4038,15 +4086,12 @@ struct HostConnectorCatalog {
 
 impl HostAdminClient {
     fn new(endpoint: &str) -> Result<Self> {
-        let endpoint = endpoint.trim();
-        if endpoint.is_empty() {
-            bail!("`--host` cannot be empty");
-        }
+        let endpoint = normalize_host_endpoint(endpoint)?;
 
         #[cfg(unix)]
         {
             if endpoint.starts_with("unix://") || endpoint.starts_with('/') {
-                let socket_path = endpoint.strip_prefix("unix://").unwrap_or(endpoint);
+                let socket_path = endpoint.strip_prefix("unix://").unwrap_or(&endpoint);
                 let client = BlockingClientBuilder::new()
                     .unix_socket(socket_path)
                     .build()
@@ -4062,20 +4107,12 @@ impl HostAdminClient {
             }
         }
 
-        let normalized_endpoint =
-            if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
-                endpoint.to_owned()
-            } else {
-                let stripped = endpoint.strip_prefix("tcp://").unwrap_or(endpoint);
-                format!("http://{stripped}")
-            };
-
         let client = BlockingClientBuilder::new()
             .build()
             .context("failed to build HTTP host client")?;
         Ok(Self {
             client,
-            base_url: normalized_endpoint.trim_end_matches('/').to_owned(),
+            base_url: endpoint,
         })
     }
 
@@ -8589,6 +8626,29 @@ fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
         }
         ContextCommand::Create(args) => {
             let (path, mut config) = load_context_config()?;
+            let endpoint = match normalize_host_endpoint(&args.endpoint) {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    return Ok(DispatchOutcome {
+                        payload: json!({
+                            "status": "error",
+                            "command": "context",
+                            "subcommand": "create",
+                            "error": {
+                                "type": "invalid-host-endpoint",
+                                "message": error.to_string(),
+                                "recoverable": true,
+                            },
+                            "next_actions": [
+                                "Use an origin-style endpoint such as http://127.0.0.1:8787.".to_owned(),
+                                "Do not include credentials, query strings, or fragments in saved host contexts.".to_owned(),
+                                "Use unix:///path/to/socket on Unix hosts when targeting a local socket.".to_owned(),
+                            ],
+                        }),
+                        exit_code: CliExitCode::Validation,
+                    });
+                }
+            };
             if config.contexts.contains_key(&args.name) {
                 return Ok(DispatchOutcome {
                     payload: json!({
@@ -8611,7 +8671,7 @@ fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
             config.contexts.insert(
                 args.name.clone(),
                 MeshContextFile {
-                    endpoint: args.endpoint.clone(),
+                    endpoint: endpoint.clone(),
                     default_zone: args.zone.clone(),
                     node_identity: args.identity.clone(),
                     mesh_targets: MeshTargetState::default(),
@@ -8631,7 +8691,7 @@ fn context_dispatch(args: &ContextArgs) -> Result<DispatchOutcome> {
                 "config_path": path.display().to_string(),
                 "context": {
                     "name": &args.name,
-                    "endpoint": &args.endpoint,
+                    "endpoint": endpoint,
                     "default_zone": &args.zone,
                     "node_identity": args.identity.as_ref().map(|path| path.display().to_string()),
                     "set_current": args.set_current,
@@ -25747,6 +25807,63 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.to_string_lossy().contains(".tmp."));
         assert!(second.to_string_lossy().contains(".tmp."));
+    }
+
+    #[test]
+    fn normalize_host_endpoint_rejects_secret_or_smuggling_components() {
+        for endpoint in [
+            "http://user:pass@127.0.0.1:8787",
+            "http://127.0.0.1:8787/api?redirect=http://evil.example",
+            "https://host.example/#fragment",
+            "file:///tmp/fcp.sock",
+        ] {
+            let err = super::normalize_host_endpoint(endpoint)
+                .expect_err("unsafe host endpoint should be rejected");
+            let message = err.to_string();
+            assert!(
+                message.contains("endpoint") || message.contains("username"),
+                "error should describe invalid endpoint shape, got: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_host_endpoint_accepts_and_normalizes_supported_forms() {
+        assert_eq!(
+            super::normalize_host_endpoint("127.0.0.1:8787/").unwrap(),
+            "http://127.0.0.1:8787"
+        );
+        assert_eq!(
+            super::normalize_host_endpoint("tcp://127.0.0.1:8787").unwrap(),
+            "http://127.0.0.1:8787"
+        );
+        assert_eq!(
+            super::normalize_host_endpoint("https://host.example").unwrap(),
+            "https://host.example"
+        );
+    }
+
+    #[test]
+    fn context_create_rejects_endpoint_with_userinfo() {
+        let (_tempdir, _path, _guard) = temp_context_config();
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "context",
+            "create",
+            "unsafe",
+            "--endpoint",
+            "http://user:pass@127.0.0.1:8787",
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "invalid-host-endpoint");
+        assert!(
+            payload["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("username") || message.contains("password"))
+        );
     }
 
     fn assert_discovery_provenance(payload: &Value, source: &str, authoritative: bool, mode: &str) {

@@ -1306,15 +1306,14 @@ Your mesh can install/update connectors fully offline from mirrored objects.
 
 Before execution, FCP verifies:
 
-1. Manifest signature (registry or trusted publisher quorum)
-2. Binary checksum matches manifest
-3. Binary signature matches trusted key
-4. Platform/arch match
-5. Requested capabilities ⊆ zone ceilings
-6. **If policy requires**: Transparency log entry present
-7. **If policy requires**: in-toto/SLSA attestations valid
-8. **If policy requires**: SLSA provenance meets minimum level
-9. **If policy requires**: Attestation from trusted builder
+1. Manifest signature (registry or trusted publisher quorum) over the manifest signing view and binary hash
+2. Binary checksum matches the signed binary hash
+3. Platform/arch match
+4. Requested capabilities ⊆ zone ceilings
+5. **If policy requires**: Transparency log entry present
+6. **If policy requires**: in-toto/SLSA attestations valid
+7. **If policy requires**: SLSA provenance meets minimum level
+8. **If policy requires**: Attestation from trusted builder
 
 Owner policy can enforce:
 - `require_transparency_log = true`

@@ -673,6 +673,10 @@ async fn handshake_returns_capabilities() {
     assert!(caps.iter().any(|c| c == "datadog.events.write"));
     assert!(caps.iter().any(|c| c == "datadog.metrics.read"));
     assert!(caps.iter().any(|c| c == "datadog.monitors.write"));
+    // br-m7s4q: monitor.delete is now its own capability —
+    // handshake must advertise it separately so callers can
+    // request the destructive scope explicitly.
+    assert!(caps.iter().any(|c| c == "datadog.monitors.delete"));
     assert!(caps.iter().any(|c| c == "datadog.logs.read"));
 }
 

@@ -286,6 +286,13 @@ impl DatadogConnector {
                 "datadog.metrics.write",
                 "datadog.monitors.read",
                 "datadog.monitors.write",
+                // br-m7s4q: monitor deletion is irreversible
+                // (RiskLevel::High / SafetyTier::Dangerous) and is gated
+                // by a dedicated capability so a token issued for
+                // creating/updating monitor definitions cannot also
+                // destroy them. Holders that legitimately need delete
+                // semantics must request both.
+                "datadog.monitors.delete",
                 "datadog.logs.read"
             ]
         }))
@@ -928,7 +935,15 @@ fn operations_info() -> Vec<OperationInfo> {
                 }
             }),
             json!({ "type": "object" }),
-            "datadog.monitors.write",
+            // br-m7s4q: split destructive monitor.delete behind its own
+            // capability id. Pre-fix used the generic
+            // `datadog.monitors.write` (the same id as monitors.create
+            // and monitors.update), so a token issued to a workflow
+            // that needed to define/update monitors could ALSO delete
+            // them — RiskLevel::High + SafetyTier::Dangerous +
+            // irreversible action. Holders that legitimately need to
+            // delete monitors must now request the dedicated capability.
+            "datadog.monitors.delete",
             RiskLevel::High,
             SafetyTier::Dangerous,
             IdempotencyClass::Strict,
@@ -1472,6 +1487,46 @@ mod tests {
         assert!(ids.contains(&"datadog.monitors.create"));
         assert!(ids.contains(&"datadog.monitors.delete"));
         assert!(ids.contains(&"datadog.monitors.list"));
+    }
+
+    /// br-m7s4q: monitor.delete must require a DEDICATED capability,
+    /// not the generic monitors.write shared with create/update.
+    /// Lock in the split so a future regression that re-conflates
+    /// them is caught at test time.
+    #[test]
+    fn operations_monitor_delete_has_dedicated_capability() {
+        let ops = ops_json();
+        let arr = ops.as_array().unwrap();
+
+        let delete = arr
+            .iter()
+            .find(|op| op["id"] == "datadog.monitors.delete")
+            .expect("monitor.delete operation must be present");
+        assert_eq!(
+            delete["capability"].as_str().unwrap(),
+            "datadog.monitors.delete",
+            "delete must require its own capability id, not the generic write",
+        );
+        // Sanity: risk + safety tier remain dangerous.
+        assert_eq!(delete["risk_level"], "high");
+        assert_eq!(delete["safety_tier"], "dangerous");
+
+        // create/update style operation should NOT route through
+        // the new delete capability.
+        let create = arr
+            .iter()
+            .find(|op| op["id"] == "datadog.monitors.create")
+            .expect("monitor.create operation must be present");
+        assert_eq!(
+            create["capability"].as_str().unwrap(),
+            "datadog.monitors.write",
+            "create still uses the generic write capability",
+        );
+        assert_ne!(
+            create["capability"].as_str().unwrap(),
+            delete["capability"].as_str().unwrap(),
+            "create and delete must require different capabilities",
+        );
     }
 
     #[test]

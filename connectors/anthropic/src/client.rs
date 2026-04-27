@@ -590,6 +590,14 @@ fn next_sse_event_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
 }
 
 fn parse_sse_event_bytes(event_bytes: &[u8]) -> Option<AnthropicResult<StreamEvent>> {
+    if event_bytes.len() > MAX_SSE_BUFFER_BYTES {
+        return Some(Err(AnthropicError::Api {
+            error_type: "sse_event_too_large".into(),
+            message: format!("Anthropic SSE event exceeded {MAX_SSE_BUFFER_BYTES} bytes"),
+            status_code: None,
+        }));
+    }
+
     let event_str = match std::str::from_utf8(event_bytes) {
         Ok(event_str) => event_str,
         Err(error) => {
@@ -1010,6 +1018,28 @@ mod tests {
                 assert_eq!(error.message, "café");
             }
             other => assert!(matches!(other, StreamEvent::Error { .. }), "expected Error"),
+        }
+    }
+
+    #[test]
+    fn parse_sse_event_bytes_rejects_oversized_complete_event() {
+        let event_bytes = vec![b'x'; MAX_SSE_BUFFER_BYTES + 1];
+        let event = parse_sse_event_bytes(&event_bytes).expect("expected oversized event error");
+
+        match event {
+            Err(AnthropicError::Api {
+                error_type,
+                message,
+                status_code,
+            }) => {
+                assert_eq!(error_type, "sse_event_too_large");
+                assert!(message.contains("SSE event exceeded"));
+                assert_eq!(status_code, None);
+            }
+            other => assert!(
+                matches!(other, Err(AnthropicError::Api { .. })),
+                "expected oversized event API error"
+            ),
         }
     }
 

@@ -52,7 +52,7 @@ impl ArxivConfig {
             .unwrap_or(crate::client::DEFAULT_SCHOLAR_BASE_URL)
             .to_string();
 
-        let scholar_api_key = params
+        let scholar_auth = params
             .get("scholar_api_key")
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
@@ -67,7 +67,7 @@ impl ArxivConfig {
         Self {
             arxiv_base_url,
             scholar_base_url,
-            scholar_api_key,
+            scholar_api_key: scholar_auth,
             rate_limit_rps,
         }
     }
@@ -897,19 +897,34 @@ impl ArxivConnector {
 
     /// Handle the `simulate` method.
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let operation = params
+        let Some(operation) = params
             .get("operation_id")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
+        else {
+            return Ok(simulate_denied("Missing operation_id", "FCP-1003"));
+        };
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        if !operation_supported(operation) {
+            return Ok(simulate_denied(
+                format!("Unknown operation: {operation}"),
+                "FCP-1002",
+            ));
+        }
+
+        if let Err(error) = self.base.check_ready() {
+            return Ok(simulate_denied(error.to_string(), error.error_code()));
+        }
+
+        let empty_input = json!({});
+        let input = params.get("input").unwrap_or(&empty_input);
+        if let Err(error) = validate_simulate_input(operation, input) {
+            let fcp_error = error.to_fcp_error();
+            return Ok(simulate_denied(error.to_string(), fcp_error.error_code()));
+        }
 
         Ok(json!({
-            "allowed": allowed,
-            "reason": if allowed { "Operation supported" } else { "Unknown operation" },
+            "allowed": true,
+            "reason": "Operation supported",
         }))
     }
 
@@ -1100,6 +1115,86 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         .ok_or_else(|| ArxivError::InvalidInput {
             message: format!("Missing required field: {field}"),
         })
+}
+
+fn require_string_array(input: &serde_json::Value, field: &str) -> Result<(), ArxivError> {
+    let values = input
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| ArxivError::InvalidInput {
+            message: format!("Missing required field: {field}"),
+        })?;
+
+    if values.iter().any(serde_json::Value::is_string) {
+        return Ok(());
+    }
+
+    Err(ArxivError::InvalidInput {
+        message: format!("Field {field} must include at least one string"),
+    })
+}
+
+fn operation_supported(operation: &str) -> bool {
+    matches!(
+        operation,
+        "arxiv.search_papers"
+            | "arxiv.search_semantic"
+            | "arxiv.get_paper"
+            | "arxiv.get_full_text"
+            | "arxiv.download_pdf"
+            | "arxiv.get_citations"
+            | "arxiv.get_references"
+            | "arxiv.extract_references"
+            | "arxiv.get_author"
+            | "arxiv.list_categories"
+            | "arxiv.get_new_papers"
+            | "arxiv.monitor_category"
+            | "arxiv.monitor_query"
+    )
+}
+
+fn validate_simulate_input(operation: &str, input: &serde_json::Value) -> Result<(), ArxivError> {
+    match operation {
+        "arxiv.search_papers" | "arxiv.search_semantic" | "arxiv.monitor_query" => {
+            require_str(input, "query")?;
+        }
+        "arxiv.get_paper"
+        | "arxiv.get_full_text"
+        | "arxiv.download_pdf"
+        | "arxiv.get_citations"
+        | "arxiv.get_references"
+        | "arxiv.extract_references" => {
+            require_str(input, "arxiv_id")?;
+        }
+        "arxiv.get_author" => {
+            require_str(input, "author_name")?;
+        }
+        "arxiv.list_categories" => {}
+        "arxiv.get_new_papers" => {
+            require_str(input, "category")?;
+        }
+        "arxiv.monitor_category" => {
+            require_string_array(input, "categories")?;
+        }
+        _ => {
+            return Err(ArxivError::InvalidInput {
+                message: format!("Unknown operation: {operation}"),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn simulate_denied(
+    reason: impl Into<String>,
+    denial_code: impl Into<String>,
+) -> serde_json::Value {
+    json!({
+        "allowed": false,
+        "reason": reason.into(),
+        "denial_code": denial_code.into(),
+    })
 }
 
 /// Build the provisioning recipe for the arXiv connector.
@@ -1396,6 +1491,69 @@ mod tests {
     fn require_str_null_value() {
         let input = json!({"query": null});
         assert!(require_str(&input, "query").is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_denies_unconfigured_supported_operation() {
+        let connector = ArxivConnector::new();
+        let result = connector
+            .handle_simulate(json!({
+                "operation_id": "arxiv.search_papers",
+                "input": {"query": "capability tokens"},
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["allowed"].as_bool(), Some(false));
+        assert_eq!(result["denial_code"].as_str(), Some("FCP-5002"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_denies_missing_required_input_when_ready() {
+        let mut connector = ArxivConnector::new();
+        connector.handle_configure(json!({})).await.unwrap();
+        connector
+            .handle_handshake(json!({"session_id": "test-session"}))
+            .await
+            .unwrap();
+
+        let result = connector
+            .handle_simulate(json!({
+                "operation_id": "arxiv.search_papers",
+                "input": {},
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["allowed"].as_bool(), Some(false));
+        assert_eq!(result["denial_code"].as_str(), Some("FCP-1003"));
+        assert!(
+            result["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("Missing required field: query"))
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_allows_ready_valid_input() {
+        let mut connector = ArxivConnector::new();
+        connector.handle_configure(json!({})).await.unwrap();
+        connector
+            .handle_handshake(json!({"session_id": "test-session"}))
+            .await
+            .unwrap();
+
+        let result = connector
+            .handle_simulate(json!({
+                "operation_id": "arxiv.search_papers",
+                "input": {"query": "capability tokens"},
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["allowed"].as_bool(), Some(true));
+        assert_eq!(result["reason"].as_str(), Some("Operation supported"));
+        assert!(result.get("denial_code").is_none());
     }
 
     #[test]

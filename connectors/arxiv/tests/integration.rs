@@ -865,11 +865,14 @@ async fn simulate_known() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri(), &server.uri()).await;
     assert!(
-        c.handle_simulate(json!({"operation_id": "arxiv.search_papers"}))
-            .await
-            .unwrap()["allowed"]
-            .as_bool()
-            .unwrap()
+        c.handle_simulate(json!({
+            "operation_id": "arxiv.search_papers",
+            "input": {"query": "attention"},
+        }))
+        .await
+        .unwrap()["allowed"]
+        .as_bool()
+        .unwrap()
     );
 }
 
@@ -891,23 +894,26 @@ async fn simulate_all_operations() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri(), &server.uri()).await;
     let ops = [
-        "arxiv.search_papers",
-        "arxiv.search_semantic",
-        "arxiv.get_paper",
-        "arxiv.get_full_text",
-        "arxiv.download_pdf",
-        "arxiv.get_citations",
-        "arxiv.get_references",
-        "arxiv.extract_references",
-        "arxiv.get_author",
-        "arxiv.list_categories",
-        "arxiv.get_new_papers",
-        "arxiv.monitor_category",
-        "arxiv.monitor_query",
+        ("arxiv.search_papers", json!({"query": "attention"})),
+        ("arxiv.search_semantic", json!({"query": "attention"})),
+        ("arxiv.get_paper", json!({"arxiv_id": "1706.03762"})),
+        ("arxiv.get_full_text", json!({"arxiv_id": "1706.03762"})),
+        ("arxiv.download_pdf", json!({"arxiv_id": "1706.03762"})),
+        ("arxiv.get_citations", json!({"arxiv_id": "1706.03762"})),
+        ("arxiv.get_references", json!({"arxiv_id": "1706.03762"})),
+        ("arxiv.extract_references", json!({"arxiv_id": "1706.03762"})),
+        ("arxiv.get_author", json!({"author_name": "Alice"})),
+        ("arxiv.list_categories", json!({})),
+        ("arxiv.get_new_papers", json!({"category": "cs.AI"})),
+        ("arxiv.monitor_category", json!({"categories": ["cs.AI"]})),
+        ("arxiv.monitor_query", json!({"query": "attention"})),
     ];
-    for op in &ops {
+    for (op, input) in &ops {
         let result = c
-            .handle_simulate(json!({"operation_id": op}))
+            .handle_simulate(json!({
+                "operation_id": op,
+                "input": input,
+            }))
             .await
             .unwrap();
         assert!(result["allowed"].as_bool().unwrap(), "op {op} not allowed");

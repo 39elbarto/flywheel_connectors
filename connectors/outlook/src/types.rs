@@ -101,6 +101,12 @@ fn validate_graph_host(raw: &str) -> FcpResult<()> {
             message: "graph_host must not include a fragment".into(),
         });
     }
+    if url.path() != "/" {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "graph_host must not include a path".into(),
+        });
+    }
 
     let host = url.host_str().ok_or_else(|| FcpError::InvalidRequest {
         code: 1003,
@@ -199,11 +205,12 @@ mod tests {
     }
 
     #[test]
-    fn config_rejects_graph_host_with_userinfo_query_or_fragment() {
+    fn config_rejects_graph_host_with_userinfo_query_fragment_or_path() {
         for graph_host in [
             "https://user:pass@graph.microsoft.com",
             "https://graph.microsoft.com?trace=1",
             "https://graph.microsoft.com#fragment",
+            "https://graph.microsoft.com/v1.0",
         ] {
             let result = OutlookConfig::from_value(serde_json::json!({
                 "access_token": "tok",

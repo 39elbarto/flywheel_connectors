@@ -482,5 +482,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_cbor_array_canonical"
+path = "fuzz_targets/cbor_array_canonical.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:fba40e8129b2695742e8ca3813f6ac1d656a1ce0181f702a5c9b61cf82caa9d8"
+interface_hash = "blake3-256:fcp.interface.v2:26062a6a9f4757a0f0f72b96e17e13cf7449c9cae936211ba7f882d2fe9910e6"
 
 [connector]
 id = "fcp.hubspot"
@@ -52,6 +52,7 @@ optional = [
     "hubspot.contacts.read",
     "hubspot.associations.read",
     "hubspot.contacts.write",
+    "hubspot.contacts.delete",
     "hubspot.deals.write",
     "hubspot.deals.read",
     "hubspot.associations.write",
@@ -786,7 +787,7 @@ related = [
 
 [provides.operations."hubspot.contacts.delete"]
 description = "Delete a contact from HubSpot"
-capability = "hubspot.contacts.write"
+capability = "hubspot.contacts.delete"
 risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
@@ -1607,6 +1608,13 @@ burst = 15
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "hubspot.contacts.delete"
+requests = 100
+window_ms = 60000
+burst = 15
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "hubspot.deals.read"
 requests = 500
 window_ms = 60000
@@ -1671,7 +1679,7 @@ scope = "instance"
 
 [rate_limits.operation_pools]
 "hubspot.contacts.get" = ["hubspot.contacts.read"]
-"hubspot.contacts.delete" = ["hubspot.contacts.write"]
+"hubspot.contacts.delete" = ["hubspot.contacts.delete"]
 "hubspot.events.stream" = ["hubspot.events.read"]
 "hubspot.analytics.report" = ["hubspot.analytics.read"]
 "hubspot.contacts.list" = ["hubspot.contacts.read"]

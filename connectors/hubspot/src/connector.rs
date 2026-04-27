@@ -9,6 +9,8 @@ use fcp_core::{
     ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport,
     StepId, WebhookRecipe, WebhookVerification,
 };
+#[cfg(test)]
+use fcp_manifest::ConnectorManifest;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -283,6 +285,7 @@ impl HubSpotConnector {
             "capabilities": [
                 "hubspot.contacts.read",
                 "hubspot.contacts.write",
+                "hubspot.contacts.delete",
                 "hubspot.companies.read",
                 "hubspot.companies.write",
                 "hubspot.deals.read",
@@ -563,7 +566,7 @@ impl HubSpotConnector {
                         "properties": { "contact_id": { "type": "string" } }
                     }),
                     output_schema: json!({ "type": "object" }),
-                    capability: CapabilityId::from_static("hubspot.contacts.write"),
+                    capability: CapabilityId::from_static("hubspot.contacts.delete"),
                     risk_level: RiskLevel::High,
                     description: None,
                     rate_limit: None,
@@ -2035,7 +2038,7 @@ fn operations_info() -> serde_json::Value {
         {
             "id": "hubspot.contacts.delete",
             "summary": "Delete a contact from HubSpot",
-            "capability": "hubspot.contacts.write",
+            "capability": "hubspot.contacts.delete",
             "risk_level": "high",
             "safety_tier": "dangerous",
             "idempotency": "strict",
@@ -2760,6 +2763,118 @@ mod tests {
             .unwrap();
         assert_eq!(op["safety_tier"], "dangerous");
         assert_eq!(op["risk_level"], "high");
+    }
+
+    #[test]
+    fn operations_contacts_delete_requires_dedicated_capability() {
+        let ops = operations_info();
+        let delete = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "hubspot.contacts.delete")
+            .unwrap();
+        let create = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "hubspot.contacts.create")
+            .unwrap();
+        let update = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"] == "hubspot.contacts.update")
+            .unwrap();
+
+        assert_eq!(delete["capability"].as_str().unwrap(), "hubspot.contacts.delete");
+        assert_eq!(create["capability"].as_str().unwrap(), "hubspot.contacts.write");
+        assert_eq!(update["capability"].as_str().unwrap(), "hubspot.contacts.write");
+        assert_ne!(
+            delete["capability"].as_str().unwrap(),
+            create["capability"].as_str().unwrap()
+        );
+    }
+
+    #[test]
+    fn manifest_contacts_delete_requires_dedicated_capability() {
+        let manifest = ConnectorManifest::parse_str(include_str!("../manifest.toml"))
+            .expect("manifest should validate");
+
+        let delete_op = manifest
+            .provides
+            .operations
+            .get("hubspot.contacts.delete")
+            .expect("delete operation should exist");
+        let create_op = manifest
+            .provides
+            .operations
+            .get("hubspot.contacts.create")
+            .expect("create operation should exist");
+        let update_op = manifest
+            .provides
+            .operations
+            .get("hubspot.contacts.update")
+            .expect("update operation should exist");
+
+        assert_eq!(delete_op.capability.as_str(), "hubspot.contacts.delete");
+        assert_eq!(create_op.capability.as_str(), "hubspot.contacts.write");
+        assert_eq!(update_op.capability.as_str(), "hubspot.contacts.write");
+
+        assert!(manifest
+            .capabilities
+            .optional
+            .iter()
+            .any(|cap| cap.as_str() == "hubspot.contacts.delete"));
+
+        let rate_limits = manifest
+            .rate_limits
+            .as_ref()
+            .expect("manifest should declare rate limits");
+        assert_eq!(
+            rate_limits
+                .operation_pools
+                .get("hubspot.contacts.delete")
+                .expect("delete op should have a pool mapping"),
+            &vec!["hubspot.contacts.delete".to_string()]
+        );
+        assert_eq!(
+            rate_limits
+                .operation_pools
+                .get("hubspot.contacts.create")
+                .expect("create op should have a pool mapping"),
+            &vec!["hubspot.contacts.write".to_string()]
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_advertises_dedicated_contacts_delete_capability() {
+        let mut connector = HubSpotConnector::new();
+        connector
+            .handle_configure(json!({
+                "access_token": "pat-na1-test",
+            }))
+            .await
+            .unwrap();
+
+        let handshake = connector
+            .handle_handshake(json!({"session_id": "test-session"}))
+            .await
+            .unwrap();
+        let capabilities = handshake["capabilities"]
+            .as_array()
+            .expect("handshake capabilities should be an array");
+
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("hubspot.contacts.write"))
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("hubspot.contacts.delete"))
+        );
     }
 
     #[test]

@@ -844,6 +844,30 @@ async fn missing_required_field_returns_invalid_request() {
     );
 }
 
+/// Malformed optional label arrays are rejected before Gmail API calls.
+#[fcp_async_core::runtime::test]
+async fn invoke_modify_message_rejects_malformed_label_arrays() {
+    let mock_server = MockServer::start().await;
+
+    let mut connector = GmailConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["gmail.modify_message"]).await;
+    let token = generate_valid_token(&signing_key, "gmail.modify_message");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "gmail.modify_message",
+            "input": {
+                "message_id": "msg1",
+                "add_label_ids": "STARRED"
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+}
+
 /// Doctor reports credential injection requirement for `credential_id` mode.
 #[fcp_async_core::runtime::test]
 async fn doctor_reports_pending_materialization_for_credential_mode() {

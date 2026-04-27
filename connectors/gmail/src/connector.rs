@@ -1168,14 +1168,8 @@ impl GmailConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let message_id = require_str(&input, "message_id")?;
 
-        let add_labels: Vec<String> = input
-            .get("add_label_ids")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let remove_labels: Vec<String> = input
-            .get("remove_label_ids")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
+        let add_labels = parse_optional_string_array_field(&input, "add_label_ids")?;
+        let remove_labels = parse_optional_string_array_field(&input, "remove_label_ids")?;
 
         let message = client
             .modify_message(message_id, &add_labels, &remove_labels)
@@ -1638,8 +1632,8 @@ fn validate_gmail_input(operation: &str, input: &serde_json::Value) -> FcpResult
         }
         "gmail.modify_message" => {
             require_str(input, "message_id")?;
-            validate_optional_string_array_field(input, "add_label_ids")?;
-            validate_optional_string_array_field(input, "remove_label_ids")
+            parse_optional_string_array_field(input, "add_label_ids")?;
+            parse_optional_string_array_field(input, "remove_label_ids").map(|_| ())
         }
         "gmail.get_thread" => require_str(input, "thread_id").map(|_| ()),
         "gmail.list_labels" => Ok(()),
@@ -1702,9 +1696,12 @@ fn validate_optional_u32_field(input: &serde_json::Value, field: &str) -> FcpRes
     Ok(())
 }
 
-fn validate_optional_string_array_field(input: &serde_json::Value, field: &str) -> FcpResult<()> {
+fn parse_optional_string_array_field(
+    input: &serde_json::Value,
+    field: &str,
+) -> FcpResult<Vec<String>> {
     let Some(value) = input.get(field) else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let values: Vec<String> =
         serde_json::from_value(value.clone()).map_err(|_| FcpError::InvalidRequest {
@@ -1717,7 +1714,7 @@ fn validate_optional_string_array_field(input: &serde_json::Value, field: &str) 
             message: format!("{field} entries must not be empty"),
         });
     }
-    Ok(())
+    Ok(values)
 }
 
 fn granted_scopes_are_authoritative(config: &GmailConfig) -> bool {
@@ -2454,6 +2451,37 @@ mod tests {
     fn parse_optional_string_field_trims() {
         let result = parse_optional_string_field(&json!({"field": "  hello  "}), "field").unwrap();
         assert_eq!(result.as_deref(), Some("hello"));
+    }
+
+    // ── parse_optional_string_array_field ──────────────────────────
+
+    #[test]
+    fn parse_optional_string_array_field_present() {
+        let result = parse_optional_string_array_field(
+            &json!({"labels": [" STARRED ", "UNREAD"]}),
+            "labels",
+        )
+        .unwrap();
+        assert_eq!(result, vec!["STARRED".to_string(), "UNREAD".to_string()]);
+    }
+
+    #[test]
+    fn parse_optional_string_array_field_missing() {
+        let result = parse_optional_string_array_field(&json!({}), "labels").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_optional_string_array_field_rejects_non_array() {
+        let result = parse_optional_string_array_field(&json!({"labels": "STARRED"}), "labels");
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[test]
+    fn parse_optional_string_array_field_rejects_empty_entry() {
+        let result =
+            parse_optional_string_array_field(&json!({"labels": ["STARRED", " "]}), "labels");
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
     }
 
     // ── parse_optional_u64_field ───────────────────────────────────

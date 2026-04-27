@@ -490,6 +490,36 @@ fn decode_ws_message(message: WsMessage) -> Result<GraphqlWsMessage, GraphqlClie
     }
 }
 
+/// Fuzz-only entry points for the GraphQL-over-WebSocket frame decoder.
+///
+/// Exposed for the `graphql_ws_message` libfuzzer target so it can drive the
+/// private `decode_ws_message` entry point with adversarial `WsMessage` values
+/// while keeping the production parser and its internal message type private.
+///
+/// Bead flywheel_connectors-ren6p.
+#[doc(hidden)]
+pub mod __fuzz {
+    use super::{GraphqlClientError, WsMessage, decode_ws_message};
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct DecodedGraphqlWsMessage {
+        pub message_type: String,
+        pub id: Option<String>,
+        pub payload: Option<serde_json::Value>,
+    }
+
+    pub fn decode_message(
+        message: WsMessage,
+    ) -> Result<DecodedGraphqlWsMessage, GraphqlClientError> {
+        let decoded = decode_ws_message(message)?;
+        Ok(DecodedGraphqlWsMessage {
+            message_type: decoded.message_type,
+            id: decoded.id,
+            payload: decoded.payload,
+        })
+    }
+}
+
 impl From<StreamError> for GraphqlClientError {
     fn from(err: StreamError) -> Self {
         Self::Protocol {

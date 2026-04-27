@@ -40,3 +40,6 @@ pub use retry::{RetryDecision, RetryPolicy, RetryStrategy};
 pub use subscription::{
     GraphqlSubscriptionClient, GraphqlSubscriptionConfig, GraphqlSubscriptionStream,
 };
+
+#[doc(hidden)]
+pub use subscription::__fuzz;

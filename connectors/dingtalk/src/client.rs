@@ -363,7 +363,9 @@ pub fn normalize_conversation_type(raw: Option<&str>) -> String {
 /// Returns an error if `raw_json` cannot be deserialized as a callback event.
 pub fn normalize_callback_event(raw_json: &Value) -> DingTalkResult<NormalizedDingTalkEvent> {
     let event: DingTalkCallbackEvent =
-        serde_json::from_value(raw_json.clone()).map_err(DingTalkError::Json)?;
+        serde_json::from_value(raw_json.clone()).map_err(|error| {
+            DingTalkError::InvalidInput(format!("invalid callback event payload: {error}"))
+        })?;
 
     let conversation_type = normalize_conversation_type(event.conversation_type.as_deref());
 
@@ -830,6 +832,26 @@ mod tests {
         });
         let normalized = normalize_callback_event(&raw).unwrap();
         assert_eq!(normalized.raw["customField"], "extra-data");
+    }
+
+    #[test]
+    fn normalize_callback_rejects_non_object_payload() {
+        let err = normalize_callback_event(&json!("not an event")).unwrap_err();
+        assert!(matches!(err, DingTalkError::InvalidInput(_)));
+        assert!(err.to_string().contains("invalid callback event payload"));
+    }
+
+    #[test]
+    fn normalize_callback_rejects_malformed_field_shapes() {
+        for raw in [
+            json!({ "text": "plain string is not a text object" }),
+            json!({ "atUsers": "not an array" }),
+            json!({ "createAt": "not an integer timestamp" }),
+        ] {
+            let err = normalize_callback_event(&raw).unwrap_err();
+            assert!(matches!(err, DingTalkError::InvalidInput(_)));
+            assert!(err.to_string().contains("invalid callback event payload"));
+        }
     }
 
     // ── detect_at_bot tests ──────────────────────────────────────

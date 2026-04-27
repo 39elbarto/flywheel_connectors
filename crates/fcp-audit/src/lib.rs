@@ -1354,6 +1354,7 @@ impl VerifyIssue {
             "audit.fork_detected"
                 | "audit.object_id_mismatch"
                 | "audit.object_id_unverifiable"
+                | "audit.chain.empty"
                 | "audit.prev_mismatch"
                 | "audit.seq_gap"
                 | "audit.genesis_invalid"
@@ -1509,7 +1510,7 @@ pub fn verify_chain_with_precomputed_ids(
                 "head provided but chain is empty",
             ));
             report.issues = issues;
-            report.status = VerifyStatus::Warn;
+            report.status = VerifyStatus::Fail;
         }
         return report;
     }
@@ -3850,6 +3851,7 @@ mod tests {
             "audit.fork_detected",
             "audit.object_id_mismatch",
             "audit.object_id_unverifiable",
+            "audit.chain.empty",
             "audit.prev_mismatch",
             "audit.seq_gap",
             "audit.genesis_invalid",
@@ -3864,7 +3866,7 @@ mod tests {
 
     #[test]
     fn verify_issue_is_critical_false() {
-        let non_critical = ["audit.zone_mismatch", "audit.chain.empty", "custom.issue"];
+        let non_critical = ["audit.zone_mismatch", "custom.issue"];
         for code in non_critical {
             let issue = VerifyIssue::new(code, "msg");
             assert!(!issue.is_critical(), "{code} should not be critical");
@@ -3976,8 +3978,10 @@ mod tests {
     fn verify_chain_empty_with_head() {
         let head = sample_head("entry-0", 0);
         let report = verify_chain(&[], Some(&head), None);
-        assert_eq!(report.status, VerifyStatus::Warn);
+        assert_eq!(report.status, VerifyStatus::Fail);
         assert!(!report.is_clean());
+        assert_eq!(report.critical_count(), 1);
+        assert_eq!(report.issues[0].code, "audit.chain.empty");
     }
 
     #[test]
@@ -5274,9 +5278,6 @@ mod tests {
         report
             .issues
             .push(VerifyIssue::new("audit.zone_mismatch", "m"));
-        report
-            .issues
-            .push(VerifyIssue::new("audit.chain.empty", "e"));
         assert_eq!(report.critical_count(), 0);
     }
 

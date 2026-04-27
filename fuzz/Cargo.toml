@@ -649,5 +649,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_keyid_derive"
+path = "fuzz_targets/keyid_derive.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

@@ -944,7 +944,16 @@ impl FcpConnector for AwsConnector {
             return Ok(self.attach_self_check_details(
                 SelfCheckReport::degraded(
                     "self_check_unsupported_on_default_sts",
-                    "Self-check is not safe against the default AWS STS endpoint because SigV4 signing is not implemented; set sts_base_url to a verification endpoint or signing proxy",
+                    // br-3hrw3-style message correction: SigV4 signing IS implemented in
+                    // this connector (see fcp_sdk::sigv4::SigV4Signer + sign_request in
+                    // client.rs). The pre-fix wording falsely claimed otherwise. The real
+                    // reason self_check abstains here is operational: sts_get_caller_identity
+                    // against the DEFAULT STS endpoint (https://sts.amazonaws.com/) would
+                    // hit *production* AWS with the operator's real credentials, which is
+                    // unsafe as a routine connector self-check. Setting `sts_base_url` to a
+                    // staging STS, LocalStack endpoint, or signing proxy lets self_check run
+                    // against a deterministic verification target without touching production.
+                    "self_check abstains against the default AWS STS endpoint to avoid hitting production with the operator's real credentials; set sts_base_url to a staging STS endpoint, LocalStack, or signing proxy for deterministic verification",
                 ),
                 Some(provisioning),
             ));
@@ -1933,6 +1942,43 @@ mod tests {
         assert_eq!(
             report.details.as_ref().unwrap()["provisioning"]["sts_self_check_supported"],
             json!(false)
+        );
+    }
+
+    /// br-3hrw3-style message regression: the pre-fix self_check
+    /// abstention message claimed "SigV4 signing is not implemented",
+    /// but SigV4 IS implemented in this connector (fcp_sdk::sigv4 +
+    /// client.rs::sign_request) and the integration test
+    /// `assert_sigv4_headers` confirms the headers are emitted on
+    /// every request. The real reason for abstention is operational:
+    /// the default STS endpoint is production AWS, and self_check
+    /// must not hit production with the operator's real credentials.
+    /// Pin both halves of that contract here so neither half drifts
+    /// back without a test failure.
+    #[test]
+    fn self_check_message_does_not_falsely_claim_sigv4_unimplemented() {
+        let report = fcp_async_core::runtime::block_on_sync(async {
+            let mut c = AwsConnector::new();
+            c.configure(tc()).await.unwrap();
+            c.self_check().await
+        })
+        .unwrap()
+        .unwrap();
+        let message = report
+            .message
+            .as_deref()
+            .expect("self_check abstention must carry an operator-facing message");
+        assert!(
+            !message.contains("SigV4 signing is not implemented"),
+            "br-xirgb: stale 'SigV4 signing is not implemented' wording reintroduced in: {message}"
+        );
+        assert!(
+            message.contains("production"),
+            "br-xirgb: abstention message must explain the production-credentials safety reason: {message}"
+        );
+        assert!(
+            message.contains("sts_base_url"),
+            "br-xirgb: abstention message must point operators at the sts_base_url remedy: {message}"
         );
     }
 

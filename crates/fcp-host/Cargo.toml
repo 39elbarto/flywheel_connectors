@@ -67,6 +67,10 @@ name = "cold_start"
 harness = false
 
 [[bench]]
+name = "memory_overhead"
+harness = false
+
+[[bench]]
 name = "local_invoke"
 harness = false
 

@@ -189,6 +189,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_raptorq_roundtrip"
+path = "fuzz_targets/raptorq_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_webhook_signature"
 path = "fuzz_targets/webhook_signature.rs"
 test = false

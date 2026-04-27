@@ -126,6 +126,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_schema_id_hash"
+path = "fuzz_targets/schema_id_hash.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_version_negotiation_handshake"
 path = "fuzz_targets/version_negotiation_handshake.rs"
 test = false

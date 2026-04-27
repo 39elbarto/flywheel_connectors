@@ -158,6 +158,8 @@ impl GrafanaConnector {
         let client = GrafanaClient::new(config.auth.clone(), Some(&config.base_url))
             .map_err(|e| e.to_fcp_error())?;
 
+        self.session_id = None;
+        self.base.set_handshaken(false);
         self.client = Some(Arc::new(client));
         self.config = Some(config);
         self.base.set_configured(true);

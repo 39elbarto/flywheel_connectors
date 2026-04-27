@@ -69,6 +69,22 @@ async fn lifecycle_handshake_before_configure_fails() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn lifecycle_reconfigure_invalidates_handshake() {
+    let server = MockServer::start().await;
+    let mut c = setup_connector(&server.uri()).await;
+    c.handle_configure(json!({
+        "api_key": "new_api_key",
+        "secret_key": "new_secret_key",
+        "base_url": server.uri()
+    }))
+    .await
+    .unwrap();
+    let h = c.handle_health().await.unwrap();
+    assert_eq!(h["configured"], true);
+    assert_eq!(h["handshaken"], false);
+}
+
+#[fcp_async_core::runtime::test]
 async fn lifecycle_shutdown() {
     let server = MockServer::start().await;
     let mut c = setup_connector(&server.uri()).await;

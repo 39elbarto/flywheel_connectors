@@ -174,6 +174,8 @@ impl AlgoliaConnector {
         let client = AlgoliaClient::new(config.auth.clone(), config.base_url.as_deref())
             .map_err(|e| e.to_fcp_error())?;
 
+        self.session_id = None;
+        self.base.set_handshaken(false);
         self.client = Some(Arc::new(client));
         self.config = Some(config);
         self.base.set_configured(true);
@@ -1480,7 +1482,10 @@ mod tests {
             "base_url": "https://app-dsn.algolia.net",
         }))
         .unwrap();
-        assert_eq!(config.base_url.as_deref(), Some("https://app-dsn.algolia.net"));
+        assert_eq!(
+            config.base_url.as_deref(),
+            Some("https://app-dsn.algolia.net")
+        );
     }
 
     #[test]

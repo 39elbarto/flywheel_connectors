@@ -18,6 +18,9 @@ use crate::{
     error::AsanaError,
 };
 
+#[cfg(test)]
+use fcp_manifest::ConnectorManifest;
+
 /// Parsed and validated Asana connector configuration.
 #[derive(Debug, Clone)]
 struct AsanaConfig {
@@ -142,7 +145,9 @@ fn validate_base_url_for_auth(base_url: &str, auth: &AsanaAuth) -> FcpResult<Str
             if !secure_or_local {
                 return Err(FcpError::InvalidRequest {
                     code: 1003,
-                    message: "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests".into(),
+                    message:
+                        "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
+                            .into(),
                 });
             }
         }
@@ -245,6 +250,8 @@ impl AsanaConnector {
         let client = AsanaClient::new(config.auth.clone(), Some(&config.base_url))
             .map_err(|e| e.to_fcp_error())?;
 
+        self.session_id = None;
+        self.base.set_handshaken(false);
         self.client = Some(Arc::new(client));
         self.config = Some(config);
         self.base.set_configured(true);
@@ -280,6 +287,7 @@ impl AsanaConnector {
                 "asana.projects.read",
                 "asana.tasks.read",
                 "asana.tasks.write",
+                "asana.tasks.delete",
                 "asana.sections.read"
             ]
         }))
@@ -851,7 +859,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             "Delete a task",
             json!({"type": "object", "required": ["task_gid"], "properties": {"task_gid": {"type": "string", "description": "Task GID"}}}),
             json!({"type": "object"}),
-            "asana.tasks.write",
+            "asana.tasks.delete",
             RiskLevel::High,
             SafetyTier::Dangerous,
             IdempotencyClass::None,
@@ -962,7 +970,7 @@ fn operations_info() -> serde_json::Value {
         {
             "id": "asana.tasks.delete",
             "summary": "Delete a task",
-            "capability": "asana.tasks.write",
+            "capability": "asana.tasks.delete",
             "risk_level": "high",
             "safety_tier": "dangerous",
             "idempotency": "none",
@@ -1419,6 +1427,94 @@ mod tests {
     }
 
     #[test]
+    fn operations_tasks_delete_requires_dedicated_capability() {
+        let ops = operations_info();
+        let delete_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"].as_str() == Some("asana.tasks.delete"))
+            .unwrap();
+        let create_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"].as_str() == Some("asana.tasks.create"))
+            .unwrap();
+        let update_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"].as_str() == Some("asana.tasks.update"))
+            .unwrap();
+
+        assert_eq!(delete_op["capability"].as_str().unwrap(), "asana.tasks.delete");
+        assert_eq!(create_op["capability"].as_str().unwrap(), "asana.tasks.write");
+        assert_eq!(update_op["capability"].as_str().unwrap(), "asana.tasks.write");
+    }
+
+    #[test]
+    fn manifest_tasks_delete_requires_dedicated_capability() {
+        let manifest = ConnectorManifest::parse_str(include_str!("../manifest.toml"))
+            .expect("manifest should validate");
+
+        let delete_op = manifest
+            .provides
+            .operations
+            .get("asana.tasks.delete")
+            .expect("delete operation should exist");
+        let create_op = manifest
+            .provides
+            .operations
+            .get("asana.tasks.create")
+            .expect("create operation should exist");
+        let update_op = manifest
+            .provides
+            .operations
+            .get("asana.tasks.update")
+            .expect("update operation should exist");
+
+        assert_eq!(delete_op.capability.as_str(), "asana.tasks.delete");
+        assert_eq!(create_op.capability.as_str(), "asana.tasks.write");
+        assert_eq!(update_op.capability.as_str(), "asana.tasks.write");
+        assert!(manifest
+            .capabilities
+            .optional
+            .iter()
+            .any(|cap| cap.as_str() == "asana.tasks.delete"));
+        assert_eq!(
+            manifest
+                .rate_limits
+                .operation_pools
+                .get("asana.tasks.delete")
+                .map(|pools| pools.iter().map(|pool| pool.as_str()).collect::<Vec<_>>()),
+            Some(vec!["asana.tasks.delete"])
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_advertises_dedicated_tasks_delete_capability() {
+        let mut connector = AsanaConnector::new();
+        connector
+            .handle_configure(json!({
+                "access_token": "tok"
+            }))
+            .await
+            .unwrap();
+
+        let response = connector
+            .handle_handshake(json!({
+                "session_id": "test-session"
+            }))
+            .await
+            .unwrap();
+        let capabilities = response["capabilities"].as_array().unwrap();
+
+        assert!(capabilities.iter().any(|cap| cap.as_str() == Some("asana.tasks.write")));
+        assert!(capabilities.iter().any(|cap| cap.as_str() == Some("asana.tasks.delete")));
+    }
+
+    #[test]
     fn operations_create_is_medium_risk() {
         let ops = operations_info();
         let create_op = ops
@@ -1660,8 +1756,8 @@ mod tests {
     #[test]
     fn validate_base_url_for_auth_rejects_query_string_with_pat() {
         let auth = AsanaAuth::PersonalAccessToken("pat_test".into());
-        let err = validate_base_url_for_auth("https://app.asana.com/api/1.0?leak=x", &auth)
-            .unwrap_err();
+        let err =
+            validate_base_url_for_auth("https://app.asana.com/api/1.0?leak=x", &auth).unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("query"), "got: {message}");
@@ -1673,19 +1769,16 @@ mod tests {
     #[test]
     fn validate_base_url_for_auth_rejects_fragment_with_pat() {
         let auth = AsanaAuth::PersonalAccessToken("pat_test".into());
-        let err = validate_base_url_for_auth("https://app.asana.com/api/1.0#frag", &auth)
-            .unwrap_err();
+        let err =
+            validate_base_url_for_auth("https://app.asana.com/api/1.0#frag", &auth).unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 
     #[test]
     fn validate_base_url_for_auth_rejects_userinfo_with_pat() {
         let auth = AsanaAuth::PersonalAccessToken("pat_test".into());
-        let err = validate_base_url_for_auth(
-            "https://attacker:pw@app.asana.com/api/1.0",
-            &auth,
-        )
-        .unwrap_err();
+        let err = validate_base_url_for_auth("https://attacker:pw@app.asana.com/api/1.0", &auth)
+            .unwrap_err();
         match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("userinfo"), "got: {message}");
@@ -1698,11 +1791,8 @@ mod tests {
     fn validate_base_url_for_auth_rejects_query_string_with_credential_id() {
         let cid = fcp_core::CredentialId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let auth = AsanaAuth::CredentialId(cid);
-        let err = validate_base_url_for_auth(
-            "https://any-vault-proxy.example/api/?leak=x",
-            &auth,
-        )
-        .unwrap_err();
+        let err = validate_base_url_for_auth("https://any-vault-proxy.example/api/?leak=x", &auth)
+            .unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
     }
 

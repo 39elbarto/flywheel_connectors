@@ -67,6 +67,22 @@ async fn handshake_after_configure_succeeds() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn lifecycle_reconfigure_invalidates_handshake() {
+    let server = MockServer::start().await;
+    let mut connector = configured_connector(&server.uri()).await;
+    connector
+        .handle_configure(json!({
+            "auth_token": "new-token",
+            "base_url": server.uri(),
+        }))
+        .await
+        .unwrap();
+    let h = connector.handle_health().await.unwrap();
+    assert_eq!(h["configured"], true);
+    assert_eq!(h["handshaken"], false);
+}
+
+#[fcp_async_core::runtime::test]
 async fn health_unconfigured() {
     let connector = GrafanaConnector::new();
     let result = connector.handle_health().await.unwrap();

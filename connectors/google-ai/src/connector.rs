@@ -9,6 +9,7 @@ use fcp_core::{
     OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, SimulateRequest,
     SimulateResponse,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -19,6 +20,63 @@ use crate::types::{
     CancelTuningOperationRequest, CreateTunedModelRequest, GetTunedModelRequest,
     GetTuningOperationRequest, ListTunedModelsRequest,
 };
+
+const GOOGLE_AI_ALLOWED_HOST: &str = "generativelanguage.googleapis.com";
+
+fn invalid_base_url(message: impl Into<String>) -> FcpError {
+    FcpError::InvalidRequest {
+        code: 1003,
+        message: message.into(),
+    }
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+fn validate_google_ai_base_url(raw: &str) -> FcpResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(invalid_base_url("base_url must not be empty"));
+    }
+
+    let parsed =
+        Url::parse(trimmed).map_err(|_| invalid_base_url("base_url must be an absolute URL"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(invalid_base_url("base_url must use http or https"));
+    }
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(invalid_base_url("base_url must not contain userinfo"));
+    }
+
+    if parsed.query().is_some() {
+        return Err(invalid_base_url("base_url must not contain a query string"));
+    }
+
+    if parsed.fragment().is_some() {
+        return Err(invalid_base_url("base_url must not contain a fragment"));
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| invalid_base_url("base_url must include a host"))?;
+    let is_local = is_local_test_host(host);
+
+    if parsed.scheme() == "http" && !is_local {
+        return Err(invalid_base_url(
+            "base_url must use https unless targeting localhost",
+        ));
+    }
+
+    if !is_local && !host.eq_ignore_ascii_case(GOOGLE_AI_ALLOWED_HOST) {
+        return Err(invalid_base_url(format!(
+            "base_url host must be {GOOGLE_AI_ALLOWED_HOST} or localhost"
+        )));
+    }
+
+    Ok(parsed.to_string().trim_end_matches('/').to_string())
+}
 
 /// Parsed and validated Google AI connector configuration.
 #[derive(Debug, Clone)]
@@ -69,11 +127,14 @@ impl GoogleAiConfig {
             }
         };
 
-        let base_url = params
-            .get("base_url")
-            .and_then(|v| v.as_str())
-            .unwrap_or(DEFAULT_BASE_URL)
-            .to_string();
+        let base_url = match params.get("base_url") {
+            Some(value) => validate_google_ai_base_url(
+                value
+                    .as_str()
+                    .ok_or_else(|| invalid_base_url("base_url must be a string"))?,
+            )?,
+            None => DEFAULT_BASE_URL.to_string(),
+        };
 
         Ok(Self { auth, base_url })
     }
@@ -304,10 +365,12 @@ impl GoogleAiConnector {
         });
 
         // Check 5: Network constraints
-        let allowed_hosts = ["generativelanguage.googleapis.com"];
-        let host_ok = config.base_url.starts_with("http://localhost")
-            || config.base_url.starts_with("http://127.0.0.1")
-            || allowed_hosts.iter().any(|h| config.base_url.contains(h));
+        let host_ok = Url::parse(&config.base_url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .is_some_and(|host| {
+                is_local_test_host(&host) || host.eq_ignore_ascii_case(GOOGLE_AI_ALLOWED_HOST)
+            });
         checks.push(DoctorCheck {
             name: "network_constraints".into(),
             passed: host_ok,
@@ -316,7 +379,8 @@ impl GoogleAiConnector {
             } else {
                 format!(
                     "Base URL {} does not match allowed hosts: {:?}",
-                    config.base_url, allowed_hosts
+                    config.base_url,
+                    [GOOGLE_AI_ALLOWED_HOST]
                 )
             }),
             critical: true,
@@ -1456,6 +1520,13 @@ mod tests {
         CapabilityToken::from_raw(cose)
     }
 
+    fn invalid_request_message(err: FcpError) -> String {
+        match err {
+            FcpError::InvalidRequest { message, .. } => message,
+            other => format!("unexpected error variant: {other:?}"),
+        }
+    }
+
     #[fcp_async_core::runtime::test]
     async fn test_handshake() {
         let mut connector = GoogleAiConnector::new();
@@ -1581,6 +1652,78 @@ mod tests {
         }
     }
 
+    #[test]
+    fn validate_base_url_accepts_google_ai_and_local_test_hosts() {
+        assert_eq!(
+            validate_google_ai_base_url("https://generativelanguage.googleapis.com/v1beta/")
+                .unwrap(),
+            "https://generativelanguage.googleapis.com/v1beta"
+        );
+        assert_eq!(
+            validate_google_ai_base_url("http://localhost:9999/v1beta").unwrap(),
+            "http://localhost:9999/v1beta"
+        );
+        assert_eq!(
+            validate_google_ai_base_url("http://127.0.0.1:9999/v1beta").unwrap(),
+            "http://127.0.0.1:9999/v1beta"
+        );
+        assert_eq!(
+            validate_google_ai_base_url("http://[::1]:9999/v1beta").unwrap(),
+            "http://[::1]:9999/v1beta"
+        );
+    }
+
+    #[test]
+    fn validate_base_url_rejects_unsafe_components() {
+        for (raw, expected) in [
+            (
+                "https://evil.example.com/v1beta",
+                "generativelanguage.googleapis.com",
+            ),
+            (
+                "https://evil.example.com/generativelanguage.googleapis.com/v1beta",
+                "generativelanguage.googleapis.com",
+            ),
+            (
+                "http://generativelanguage.googleapis.com/v1beta",
+                "https unless targeting localhost",
+            ),
+            (
+                "https://attacker:pw@generativelanguage.googleapis.com/v1beta",
+                "userinfo",
+            ),
+            (
+                "https://generativelanguage.googleapis.com/v1beta?key=leak",
+                "query string",
+            ),
+            (
+                "https://generativelanguage.googleapis.com/v1beta#fragment",
+                "fragment",
+            ),
+            ("", "empty"),
+            ("not a url", "absolute URL"),
+        ] {
+            let err = validate_google_ai_base_url(raw).unwrap_err();
+            let message = invalid_request_message(err);
+            assert!(
+                message.contains(expected),
+                "expected {raw:?} error {message:?} to contain {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn configure_params_rejects_non_string_base_url() {
+        let err = GoogleAiConfig::from_params(&json!({
+            "api_key": "test-key",
+            "base_url": 123
+        }))
+        .unwrap_err();
+
+        let message = invalid_request_message(err);
+        assert!(message.contains("base_url must be a string"));
+    }
+
     // ── Doctor checks ──────────────────────────────────────────────
 
     #[fcp_async_core::runtime::test]
@@ -1658,25 +1801,17 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_doctor_bad_host() {
+    async fn test_configure_rejects_bad_host() {
         let mut connector = GoogleAiConnector::new();
-        connector
+        let result = connector
             .handle_configure(json!({
                 "api_key": "test-key",
                 "base_url": "https://evil.example.com/v1"
             }))
-            .await
-            .unwrap();
-
-        let result = connector.handle_doctor().await.unwrap();
-        assert_eq!(result["status"], "unhealthy");
-
-        let checks = result["checks"].as_array().unwrap();
-        let net_check = checks
-            .iter()
-            .find(|c| c["name"] == "network_constraints")
-            .unwrap();
-        assert_eq!(net_check["passed"], false);
+            .await;
+        assert!(result.is_err());
+        let message = invalid_request_message(result.unwrap_err());
+        assert!(message.contains("generativelanguage.googleapis.com"));
     }
 
     // ── Self-check ─────────────────────────────────────────────────

@@ -334,5 +334,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_websocket_frame_parser"
+path = "fuzz_targets/websocket_frame_parser.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

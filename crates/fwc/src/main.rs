@@ -17166,6 +17166,8 @@ enum InvokePathSegment {
     Index(usize),
 }
 
+const MAX_INVOKE_BINDING_ARRAY_INDEX: usize = 1024;
+
 #[derive(Debug)]
 struct PreparedInvokeInput {
     payload: Value,
@@ -18751,6 +18753,25 @@ fn parse_invoke_path(
                 ],
                 details: Some(json!({ "path": raw_path, "index": index_str })),
             })?;
+            if index > MAX_INVOKE_BINDING_ARRAY_INDEX {
+                return Err(InvokeInputError {
+                    error_type: "invalid-input-binding-path",
+                    message: format!(
+                        "`{raw_path}` uses array index [{index}], which exceeds the maximum supported --set index [{MAX_INVOKE_BINDING_ARRAY_INDEX}]."
+                    ),
+                    next_actions: vec![
+                        "Use `--input` or `--file` when building large arrays.".to_owned(),
+                        format!(
+                            "Keep --set array indices at or below {MAX_INVOKE_BINDING_ARRAY_INDEX}."
+                        ),
+                    ],
+                    details: Some(json!({
+                        "path": raw_path,
+                        "index": index,
+                        "max_index": MAX_INVOKE_BINDING_ARRAY_INDEX,
+                    })),
+                });
+            }
             segments.push(InvokePathSegment::Index(index));
             remaining = &after_open[close_index + 1..];
         }
@@ -35845,6 +35866,27 @@ depends_on = ["missing"]
 
         assert_eq!(payload["input_authoring"]["payload"]["owner"], "octocat");
         assert_eq!(payload["input_authoring"]["payload"]["title"], "My issue");
+    }
+
+    #[test]
+    fn invoke_set_rejects_oversized_array_index() {
+        let oversized_binding = format!("items[{}]=x", super::MAX_INVOKE_BINDING_ARRAY_INDEX + 1);
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "invoke",
+            "github",
+            "issues.create",
+            "--set",
+            &oversized_binding,
+        ]);
+
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["error"]["type"], "invalid-input-binding-path");
+        assert_eq!(
+            payload["error"]["details"]["max_index"].as_u64(),
+            Some(super::MAX_INVOKE_BINDING_ARRAY_INDEX as u64)
+        );
     }
 
     #[test]

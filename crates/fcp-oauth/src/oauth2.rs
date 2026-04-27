@@ -898,15 +898,6 @@ impl AuthorizationCallback {
             ));
         }
 
-        // Check for errors first
-        if let Some(error) = &self.error {
-            return Err(OAuthError::AuthorizationError {
-                error: error.clone(),
-                description: self.error_description.clone().unwrap_or_default(),
-                error_uri: self.error_uri.clone(),
-            });
-        }
-
         if expected_state.is_empty() {
             return Err(OAuthError::InvalidState(
                 "expected state must not be empty".into(),
@@ -941,7 +932,16 @@ impl AuthorizationCallback {
             });
         }
 
-        // Extract code
+        // Provider error callbacks still have to prove they belong to the
+        // authorization session before their provider-controlled fields matter.
+        if let Some(error) = &self.error {
+            return Err(OAuthError::AuthorizationError {
+                error: error.clone(),
+                description: self.error_description.clone().unwrap_or_default(),
+                error_uri: self.error_uri.clone(),
+            });
+        }
+
         self.code
             .clone()
             .ok_or_else(|| OAuthError::InvalidTokenResponse("Missing authorization code".into()))
@@ -1062,6 +1062,40 @@ mod tests {
 
         let result = callback.validate("state");
         assert!(matches!(result, Err(OAuthError::AuthorizationError { .. })));
+    }
+
+    #[test]
+    fn test_callback_error_requires_matching_state() {
+        let callback = AuthorizationCallback {
+            code: None,
+            state: Some("attacker_state".to_string()),
+            error: Some("access_denied".to_string()),
+            error_description: Some("User denied access".to_string()),
+            error_uri: None,
+        };
+
+        let result = callback.validate("expected_state");
+        assert!(
+            matches!(result, Err(OAuthError::StateMismatch { .. })),
+            "provider errors must not bypass callback state validation: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_callback_error_requires_present_state() {
+        let callback = AuthorizationCallback {
+            code: None,
+            state: None,
+            error: Some("access_denied".to_string()),
+            error_description: Some("User denied access".to_string()),
+            error_uri: None,
+        };
+
+        let result = callback.validate("expected_state");
+        assert!(
+            matches!(result, Err(OAuthError::InvalidTokenResponse(ref msg)) if msg.contains("Missing state")),
+            "provider errors must not bypass missing state validation: {result:?}"
+        );
     }
 
     #[test]

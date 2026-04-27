@@ -6,7 +6,7 @@
 use bip39::{Language, Mnemonic};
 use fcp_crypto::{Ed25519SigningKey, Ed25519VerifyingKey};
 use thiserror::Error;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Errors related to recovery phrases.
 #[derive(Debug, Error)]
@@ -114,7 +114,7 @@ impl RecoveryPhrase {
             return Err(RecoveryPhraseError::WrongWordCount(words.len()));
         }
 
-        let phrase = words.join(" ");
+        let phrase = Zeroizing::new(words.join(" "));
         Self::from_mnemonic(&phrase)
     }
 

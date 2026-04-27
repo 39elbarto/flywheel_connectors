@@ -468,5 +468,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_store_validate_structure"
+path = "fuzz_targets/store_validate_structure.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

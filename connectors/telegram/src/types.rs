@@ -400,6 +400,24 @@ impl TelegramConfig {
                 message: "base_url must include a host".into(),
             });
         }
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "base_url must not include userinfo".into(),
+            });
+        }
+        if parsed.path() != "/" {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "base_url must not include a path".into(),
+            });
+        }
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "base_url must not include query or fragment components".into(),
+            });
+        }
         let host = parsed.host_str().unwrap_or_default();
         let is_local_test_host = host.eq_ignore_ascii_case("localhost")
             || host.ends_with(".localhost")
@@ -1520,6 +1538,34 @@ mod tests {
         assert_eq!(updates.len(), 3);
         assert_eq!(updates[0], "message");
         assert_eq!(updates[2], "channel_post");
+    }
+
+    #[test]
+    fn telegram_config_rejects_base_url_userinfo() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "base_url": "https://bot:secret@api.telegram.org"
+        }))
+        .unwrap();
+        let err = config.normalize_base_url().unwrap_err();
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn telegram_config_rejects_base_url_path_query_and_fragment() {
+        for base_url in [
+            "https://api.telegram.org/proxy",
+            "https://api.telegram.org?proxy=1",
+            "https://api.telegram.org#fragment",
+            "http://localhost:8080/api",
+        ] {
+            let config: TelegramConfig =
+                serde_json::from_value(json!({ "base_url": base_url })).unwrap();
+            let err = config.normalize_base_url().unwrap_err();
+            assert!(
+                matches!(err, FcpError::InvalidRequest { .. }),
+                "base_url should be rejected: {base_url}"
+            );
+        }
     }
 
     // ---- UpdateKind additional ----

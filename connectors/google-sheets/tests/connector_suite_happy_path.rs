@@ -194,6 +194,29 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
     CapabilityToken::from_raw(raw)
 }
 
+fn get_values_invoke(signing_key: &Ed25519SigningKey, id: &'static str) -> InvokeRequest {
+    InvokeRequest {
+        r#type: "invoke".to_string(),
+        id: RequestId::new(id),
+        connector_id: ConnectorId::from_static(CONNECTOR_ID),
+        operation: OperationId::from_static(OP_GET_VALUES),
+        zone_id: ZoneId::work(),
+        input: json!({
+            "spreadsheet_id": SPREADSHEET_ID,
+            "range": RANGE
+        }),
+        capability_token: build_token(signing_key),
+        holder_proof: None,
+        context: None,
+        idempotency_key: None,
+        lease_seq: None,
+        deadline_ms: None,
+        correlation_id: None,
+        provenance: None,
+        approval_tokens: Vec::new(),
+    }
+}
+
 #[fcp_async_core::runtime::test]
 async fn connector_suite_happy_path_reads_values() {
     let server = MockServer::start().await;
@@ -213,26 +236,7 @@ async fn connector_suite_happy_path_reads_values() {
         .await;
 
     let signing_key = Ed25519SigningKey::generate();
-    let invoke = InvokeRequest {
-        r#type: "invoke".to_string(),
-        id: RequestId::new("google-sheets-connector-suite"),
-        connector_id: ConnectorId::from_static(CONNECTOR_ID),
-        operation: OperationId::from_static(OP_GET_VALUES),
-        zone_id: ZoneId::work(),
-        input: json!({
-            "spreadsheet_id": SPREADSHEET_ID,
-            "range": RANGE
-        }),
-        capability_token: build_token(&signing_key),
-        holder_proof: None,
-        context: None,
-        idempotency_key: None,
-        lease_seq: None,
-        deadline_ms: None,
-        correlation_id: None,
-        provenance: None,
-        approval_tokens: Vec::new(),
-    };
+    let invoke = get_values_invoke(&signing_key, "google-sheets-connector-suite");
 
     let suite = ConnectorSuite {
         test_name: "google_sheets_get_values_happy_path".to_string(),
@@ -261,4 +265,92 @@ async fn connector_suite_happy_path_reads_values() {
 
     assert!(report.passed, "connector suite should pass");
     assert!(!report.logs.is_empty(), "structured logs should be present");
+}
+
+#[fcp_async_core::runtime::test]
+async fn connector_suite_error_path_reports_unauthorized_get_values() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/v4/spreadsheets/{SPREADSHEET_ID}/values/{ENCODED_RANGE}"
+        )))
+        .and(header("authorization", "Bearer ya29_test_sheets"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": {
+                "code": 401,
+                "message": "Request had invalid authentication credentials.",
+                "status": "UNAUTHENTICATED",
+                "errors": [
+                    {
+                        "domain": "global",
+                        "reason": "authError",
+                        "message": "Invalid Credentials"
+                    }
+                ]
+            }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let signing_key = Ed25519SigningKey::generate();
+    let invoke = get_values_invoke(&signing_key, "google-sheets-connector-suite-unauthorized");
+
+    let suite = ConnectorSuite {
+        test_name: "google_sheets_get_values_unauthorized".to_string(),
+        config: json!({
+            "access_token": "ya29_test_sheets",
+            "base_url": format!("{}/v4", server.uri()),
+        }),
+        handshake: handshake_request(signing_key.verifying_key().to_bytes()),
+        invoke: Some(invoke),
+        invoke_expectations: InvokeExpectations {
+            expect_error: true,
+            expected_reason_code: Some("FCP-2001".to_string()),
+            ..InvokeExpectations::default()
+        },
+    };
+
+    let mut connector = GoogleSheetsAdapter::new();
+    let mut runner = E2eRunner::new("fcp-google-sheets");
+    let report = runner
+        .run_connector_suite(&mut connector, suite)
+        .await
+        .expect("connector suite run");
+
+    for entry in &report.logs {
+        println!(
+            "{}",
+            serde_json::to_string(entry).expect("serialize report log")
+        );
+    }
+
+    assert!(report.passed, "connector suite should pass");
+    let execute = report
+        .logs
+        .iter()
+        .map(|entry| serde_json::to_value(entry).expect("serialize report log"))
+        .find(|entry| {
+            matches!(
+                entry.get("phase").and_then(serde_json::Value::as_str),
+                Some("execute")
+            )
+        })
+        .expect("execute log entry");
+    assert_eq!(
+        execute["context"]["expected_error"],
+        json!(true),
+        "suite must assert the expected error path"
+    );
+    assert_eq!(
+        execute["context"]["reason_code"],
+        json!("FCP-2001"),
+        "Sheets 401 should map to the FCP unauthorized code"
+    );
+    assert_eq!(
+        execute["context"]["retryable"],
+        json!(false),
+        "auth failures should be reported as terminal"
+    );
 }

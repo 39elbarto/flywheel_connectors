@@ -7,6 +7,7 @@ use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
     IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -23,9 +24,64 @@ struct PostgresConfig {
     base_url: String,
 }
 
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+fn validate_postgres_base_url(raw: &str) -> FcpResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not be empty".into(),
+        });
+    }
+
+    let parsed = Url::parse(trimmed).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("base_url could not be parsed: {error}"),
+    })?;
+
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must use http or https".into(),
+        });
+    }
+
+    let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "base_url must include a host".into(),
+    })?;
+    let local = is_local_test_host(host);
+    if parsed.scheme() == "http" && !local {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
+                .into(),
+        });
+    }
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
+
+    Ok(parsed.to_string().trim_end_matches('/').to_string())
+}
+
 impl PostgresConfig {
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
-        let api_key = params
+        let rest_key = params
             .get("api_key")
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
@@ -48,7 +104,7 @@ impl PostgresConfig {
             None => None,
         };
 
-        let auth = match (api_key, credential_id) {
+        let auth = match (rest_key, credential_id) {
             (Some(key), None) => PostgresAuth::ApiKey(key),
             (None, Some(cred_id)) => PostgresAuth::CredentialId(cred_id),
             (Some(_), Some(_)) => {
@@ -65,11 +121,15 @@ impl PostgresConfig {
             }
         };
 
-        let base_url = params
-            .get("base_url")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(DEFAULT_BASE_URL)
-            .to_string();
+        let base_url = match params.get("base_url") {
+            Some(value) => validate_postgres_base_url(value.as_str().ok_or_else(|| {
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "base_url must be a string".into(),
+                }
+            })?)?,
+            None => DEFAULT_BASE_URL.to_string(),
+        };
 
         Ok(Self { auth, base_url })
     }
@@ -788,4 +848,82 @@ fn typed_operations_info() -> Vec<OperationInfo> {
 /// Build the operations info for introspection (JSON format for simulate).
 fn operations_info() -> serde_json::Value {
     serde_json::to_value(typed_operations_info()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn configure_with_base_url(base_url: &str) -> FcpResult<PostgresConfig> {
+        PostgresConfig::from_params(&json!({
+            "api_key": "test-key",
+            "base_url": base_url
+        }))
+    }
+
+    fn require_invalid_base_url(base_url: &str, expected: &str) -> Result<(), String> {
+        match configure_with_base_url(base_url) {
+            Err(FcpError::InvalidRequest { message, .. }) if message.contains(expected) => Ok(()),
+            Err(FcpError::InvalidRequest { message, .. }) => Err(format!(
+                "expected error containing {expected:?}, got {message:?}"
+            )),
+            Err(other) => Err(format!("expected InvalidRequest, got {other:?}")),
+            Ok(config) => Err(format!(
+                "base_url should be rejected, got {:?}",
+                config.base_url
+            )),
+        }
+    }
+
+    #[test]
+    fn configure_accepts_https_postgrest_base_url() -> Result<(), String> {
+        let config = configure_with_base_url(" https://project.supabase.co/rest/v1/ ")
+            .map_err(|error| format!("{error:?}"))?;
+
+        if config.base_url != "https://project.supabase.co/rest/v1" {
+            return Err(format!("unexpected base_url {:?}", config.base_url));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn configure_accepts_local_http_test_base_url() -> Result<(), String> {
+        let config = configure_with_base_url("http://127.0.0.1:54321/rest/v1/")
+            .map_err(|error| format!("{error:?}"))?;
+
+        if config.base_url != "http://127.0.0.1:54321/rest/v1" {
+            return Err(format!("unexpected base_url {:?}", config.base_url));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn configure_rejects_base_url_userinfo() -> Result<(), String> {
+        require_invalid_base_url("https://user:pass@project.supabase.co/rest/v1", "userinfo")
+    }
+
+    #[test]
+    fn configure_rejects_base_url_query_and_fragment() -> Result<(), String> {
+        require_invalid_base_url(
+            "https://project.supabase.co/rest/v1?select=value",
+            "query string or fragment",
+        )?;
+        require_invalid_base_url(
+            "https://project.supabase.co/rest/v1#section",
+            "query string or fragment",
+        )
+    }
+
+    #[test]
+    fn configure_rejects_non_local_http_base_url() -> Result<(), String> {
+        require_invalid_base_url(
+            "http://project.supabase.co/rest/v1",
+            "https unless targeting localhost",
+        )
+    }
+
+    #[test]
+    fn configure_rejects_invalid_base_url_scheme() -> Result<(), String> {
+        require_invalid_base_url("ftp://project.supabase.co/rest/v1", "http or https")
+    }
 }

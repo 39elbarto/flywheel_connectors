@@ -96,6 +96,16 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
         return (false, "base_url must include a host".into());
     };
 
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return (false, "base_url must not include userinfo".into());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return (
+            false,
+            "base_url must not include a query string or fragment".into(),
+        );
+    }
+
     if is_local_test_host(host) {
         return (
             true,
@@ -702,6 +712,28 @@ mod tests {
     }
 
     #[test]
+    fn configure_rejects_ambiguous_base_url_components() {
+        for base_url in [
+            "https://user:pass@api.firecrawl.dev/v1",
+            "https://api.firecrawl.dev/v1?trace=1",
+            "https://api.firecrawl.dev/v1#frag",
+            "http://localhost:8080/v1?trace=1",
+        ] {
+            let result = fcp_async_core::runtime::block_on_sync(async {
+                let mut connector = FirecrawlConnector::new();
+                connector
+                    .handle_configure(json!({
+                        "api_key": "fc-key",
+                        "base_url": base_url
+                    }))
+                    .await
+            })
+            .unwrap();
+            assert!(result.is_err(), "{base_url} should be rejected");
+        }
+    }
+
+    #[test]
     fn configure_accepts_localhost() {
         let result = fcp_async_core::runtime::block_on_sync(async {
             let mut connector = FirecrawlConnector::new();
@@ -759,6 +791,25 @@ mod tests {
     fn base_url_policy_rejects_unknown_host() {
         let (ok, _) = base_url_policy("https://not-firecrawl.example.com/v1");
         assert!(!ok);
+    }
+
+    #[test]
+    fn base_url_policy_rejects_ambiguous_components() {
+        for base_url in [
+            "https://user:pass@api.firecrawl.dev/v1",
+            "https://api.firecrawl.dev/v1?trace=1",
+            "https://api.firecrawl.dev/v1#frag",
+            "http://localhost:9999/v1?trace=1",
+        ] {
+            let (ok, message) = base_url_policy(base_url);
+            assert!(!ok, "{base_url} should be rejected");
+            assert!(
+                message.contains("userinfo")
+                    || message.contains("query string")
+                    || message.contains("fragment"),
+                "unexpected rejection message for {base_url}: {message}"
+            );
+        }
     }
 
     #[test]

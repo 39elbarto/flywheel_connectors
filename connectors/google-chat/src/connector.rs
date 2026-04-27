@@ -8,6 +8,7 @@ use fcp_core::{
     Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
 };
 use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
+use reqwest::Url;
 use serde_json::json;
 use tracing::info;
 
@@ -65,9 +66,21 @@ impl ChatConnector {
             GoogleMaterializedAuth::BearerToken { .. } => "configured",
         };
 
-        let client = ChatClient::new_with_auth(materialized).map_err(|e| FcpError::Internal {
-            message: format!("Failed to create Chat client: {e}"),
-        })?;
+        let base_url = match params.get("base_url") {
+            Some(value) => {
+                validate_chat_base_url(value.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "base_url must be a string".into(),
+                })?)?
+            }
+            None => "https://chat.googleapis.com/v1".to_string(),
+        };
+
+        let client = ChatClient::new_with_auth(materialized)
+            .map_err(|e| FcpError::Internal {
+                message: format!("Failed to create Chat client: {e}"),
+            })?
+            .with_base_url(base_url.clone());
 
         let auth_label = client.auth_redacted_label();
         self.client = Some(client);
@@ -76,7 +89,12 @@ impl ChatConnector {
             .store(true, std::sync::atomic::Ordering::Relaxed);
         info!(auth = %auth_label, status, "Google Chat connector configured");
 
-        Ok(json!({ "status": status }))
+        Ok(json!({
+            "status": status,
+            "details": {
+                "base_url": base_url
+            }
+        }))
     }
 
     pub async fn handle_handshake(
@@ -476,6 +494,72 @@ impl Default for ChatConnector {
     }
 }
 
+fn is_local_test_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host == "127.0.0.1"
+        || host == "::1"
+        || host == "[::1]"
+}
+
+fn host_is_chat_googleapis(host: &str) -> bool {
+    host.eq_ignore_ascii_case("chat.googleapis.com")
+}
+
+fn validate_chat_base_url(raw: &str) -> FcpResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not be empty".into(),
+        });
+    }
+
+    let parsed = Url::parse(trimmed).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("base_url could not be parsed: {error}"),
+    })?;
+    if !matches!(parsed.scheme(), "https" | "http") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must use http or https".into(),
+        });
+    }
+    let host = parsed.host_str().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "base_url must include a host".into(),
+    })?;
+    let local = is_local_test_host(host);
+    if parsed.scheme() == "http" && !local {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
+                .into(),
+        });
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
+    if !local && !host_is_chat_googleapis(host) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "base_url must target chat.googleapis.com (localhost/127.0.0.1/::1 allowed for tests): {host}"
+            ),
+        });
+    }
+
+    Ok(trimmed.trim_end_matches('/').to_string())
+}
+
 fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
     input
         .get(field)
@@ -517,7 +601,7 @@ fn op_info(
 mod tests {
     use super::*;
     use std::future::Future;
-    use wiremock::matchers::{method, path_regex};
+    use wiremock::matchers::{header, method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn run_async_test<F>(future: F) -> F::Output
@@ -565,6 +649,43 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(result["status"], "configured");
+            assert_eq!(
+                result["details"]["base_url"],
+                "https://chat.googleapis.com/v1"
+            );
+        });
+    }
+
+    #[test]
+    fn configure_accepts_local_base_url_override() {
+        run_async_test(async {
+            let mut connector = ChatConnector::new();
+            let result = connector
+                .handle_configure(json!({
+                    "access_token": "test-token",
+                    "base_url": "http://127.0.0.1:8080/v1/"
+                }))
+                .await
+                .unwrap();
+            assert_eq!(result["details"]["base_url"], "http://127.0.0.1:8080/v1");
+        });
+    }
+
+    #[test]
+    fn configure_rejects_unsafe_base_url_override() {
+        run_async_test(async {
+            let mut connector = ChatConnector::new();
+            let error = connector
+                .handle_configure(json!({
+                    "access_token": "test-token",
+                    "base_url": "https://evil.example/v1"
+                }))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&error, FcpError::InvalidRequest { message, .. } if message.contains("chat.googleapis.com")),
+                "expected chat.googleapis.com validation error, got {error:?}"
+            );
         });
     }
 
@@ -784,6 +905,7 @@ mod tests {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
                 .and(path_regex(r"/v1/spaces$"))
+                .and(header("Authorization", "Bearer test-token"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                     "spaces": [
                         { "name": "spaces/AAAA", "displayName": "General", "spaceType": "ROOM", "threaded": false }
@@ -792,10 +914,23 @@ mod tests {
                 .mount(&server)
                 .await;
 
-            // Verify introspect works as a smoke test (can't easily override base_url)
-            let connector = ChatConnector::new();
-            let introspect = connector.handle_introspect().await.unwrap();
-            assert!(introspect["operations"].as_array().unwrap().len() >= 6);
+            let mut connector = ChatConnector::new();
+            connector
+                .handle_configure(json!({
+                    "access_token": "test-token",
+                    "base_url": format!("{}/v1", server.uri())
+                }))
+                .await
+                .unwrap();
+            let result = connector
+                .handle_invoke(json!({
+                    "operation": "chat.list_spaces",
+                    "input": {}
+                }))
+                .await
+                .unwrap();
+            assert_eq!(result["spaces"][0]["name"], "spaces/AAAA");
+            assert_eq!(result["spaces"][0]["displayName"], "General");
         });
     }
 
@@ -805,6 +940,7 @@ mod tests {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path_regex(r"/v1/spaces/.+/messages"))
+                .and(header("Authorization", "Bearer test-token"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                     "name": "spaces/AAAA/messages/msg1",
                     "text": "Hello!",
@@ -813,12 +949,26 @@ mod tests {
                 .mount(&server)
                 .await;
 
-            // Verify connector operations exist
-            let connector = ChatConnector::new();
-            let introspect = connector.handle_introspect().await.unwrap();
-            let ops = introspect["operations"].as_array().unwrap();
-            let send_op = ops.iter().find(|o| o["id"] == "chat.send_message");
-            assert!(send_op.is_some());
+            let mut connector = ChatConnector::new();
+            connector
+                .handle_configure(json!({
+                    "access_token": "test-token",
+                    "base_url": format!("{}/v1", server.uri())
+                }))
+                .await
+                .unwrap();
+            let result = connector
+                .handle_invoke(json!({
+                    "operation": "chat.send_message",
+                    "input": {
+                        "space_name": "spaces/AAAA",
+                        "text": "Hello!"
+                    }
+                }))
+                .await
+                .unwrap();
+            assert_eq!(result["message"]["name"], "spaces/AAAA/messages/msg1");
+            assert_eq!(result["message"]["text"], "Hello!");
         });
     }
 }

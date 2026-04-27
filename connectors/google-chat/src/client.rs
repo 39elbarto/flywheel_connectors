@@ -88,9 +88,8 @@ impl ChatClient {
         &self.auth
     }
 
-    #[cfg(test)]
     #[must_use]
-    fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+    pub(crate) fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into().trim_end_matches('/').to_string();
         self
     }

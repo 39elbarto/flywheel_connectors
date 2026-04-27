@@ -244,6 +244,72 @@ pub struct ConnectorRuntime {
 
 const MANIFEST_REQUEST_TIMEOUT_ENV_VAR: &str = "FCP_REQUEST_TIMEOUT_MS";
 
+/// Operator opt-in that lets `FCP_REQUEST_TIMEOUT_MS` actually take effect.
+///
+/// Bead flywheel_connectors-3a3r6: previously the request-timeout env var
+/// silently overrode the manifest's pinned `[timeouts]` section, which
+/// inverts the trust hierarchy — the manifest is operator-pinned (and
+/// will be signed in a future regime), the env is ambient and writable
+/// by anything in the connector's process tree. Defense-in-depth pattern
+/// shared with br-n4429 (registry trust roots): require an explicit `=1`
+/// opt-in env before honoring the ambient override. Anything else (unset,
+/// `0`, `false`, blank, mixed case) means the manifest wins.
+const ALLOW_AMBIENT_TIMEOUT_OVERRIDE_ENV_VAR: &str = "FCP_ALLOW_AMBIENT_TIMEOUT_OVERRIDE";
+
+/// Pure: classify a raw env value (or its absence) as an opt-in or not.
+///
+/// Exact-match against `1` / `true` / `yes`. Mixed case (`True`, `YES`)
+/// and falsey values (`0`, `false`, `no`, blank) all read as not-opt-in
+/// so a typo can't accidentally enable the override.
+fn opt_in_value_allows_override(value: Option<&str>) -> bool {
+    matches!(value, Some("1" | "true" | "yes"))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only override for the opt-in env read. The crate forbids
+    /// `unsafe_code`, so tests cannot use `std::env::set_var` (which
+    /// became `unsafe` in Rust 2024). Each test sets this thread-local to
+    /// its desired raw value and the reader below honors it. Outer
+    /// `Option` is "is the override set?" (None == fall through to real
+    /// env read); inner `Option` is "what raw value should be reported?"
+    /// (None == env-unset).
+    static AMBIENT_OPT_IN_TEST_VALUE:
+        std::cell::RefCell<Option<Option<String>>> =
+            const { std::cell::RefCell::new(None) };
+
+    /// Test-only override for the request-timeout env read. Same shape
+    /// and rationale as `AMBIENT_OPT_IN_TEST_VALUE`.
+    static REQUEST_TIMEOUT_TEST_VALUE:
+        std::cell::RefCell<Option<Option<String>>> =
+            const { std::cell::RefCell::new(None) };
+}
+
+fn ambient_timeout_override_allowed() -> bool {
+    #[cfg(test)]
+    {
+        let test_override = AMBIENT_OPT_IN_TEST_VALUE.with(|cell| cell.borrow().clone());
+        if let Some(value) = test_override {
+            return opt_in_value_allows_override(value.as_deref());
+        }
+    }
+    let real = std::env::var_os(ALLOW_AMBIENT_TIMEOUT_OVERRIDE_ENV_VAR);
+    let owned = real.map(|value| value.to_string_lossy().into_owned());
+    opt_in_value_allows_override(owned.as_deref())
+}
+
+fn ambient_request_timeout_env_value() -> Option<String> {
+    #[cfg(test)]
+    {
+        let test_override = REQUEST_TIMEOUT_TEST_VALUE.with(|cell| cell.borrow().clone());
+        if let Some(value) = test_override {
+            return value;
+        }
+    }
+    std::env::var_os(MANIFEST_REQUEST_TIMEOUT_ENV_VAR)
+        .map(|value| value.to_string_lossy().into_owned())
+}
+
 /// Errors produced while loading runtime settings from an embedded manifest.
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectorRuntimeConfigError {
@@ -309,15 +375,26 @@ impl ConnectorRuntimeConfig {
     /// Build runtime settings from a parsed connector manifest.
     ///
     /// If the manifest omits `[timeouts]`, scaffold defaults are used. An
-    /// optional `FCP_REQUEST_TIMEOUT_MS` env var overrides the request timeout.
+    /// `FCP_REQUEST_TIMEOUT_MS` env var overrides the request timeout
+    /// ONLY when the operator has explicitly opted in via
+    /// `FCP_ALLOW_AMBIENT_TIMEOUT_OVERRIDE=1` (br-3a3r6). Without the
+    /// opt-in the manifest's pinned timeout always wins, even if the env
+    /// var is set — the manifest is operator-pinned, the env is ambient
+    /// and writable by anything in the connector's process tree.
     ///
     /// # Errors
-    /// Returns an error when `FCP_REQUEST_TIMEOUT_MS` is present but invalid.
+    /// Returns an error when the opt-in is set AND `FCP_REQUEST_TIMEOUT_MS`
+    /// is present but invalid. When the opt-in is missing the env value is
+    /// not consulted, so a malformed value cannot be used as a denial-of-
+    /// service vector.
     pub fn from_manifest(
         manifest: &ConnectorManifest,
     ) -> Result<Self, ConnectorRuntimeConfigError> {
-        let request_timeout_override = std::env::var_os(MANIFEST_REQUEST_TIMEOUT_ENV_VAR)
-            .map(|value| value.to_string_lossy().into_owned());
+        let request_timeout_override = if ambient_timeout_override_allowed() {
+            ambient_request_timeout_env_value()
+        } else {
+            None
+        };
         Self::from_manifest_with_request_timeout_override(
             manifest,
             request_timeout_override.as_deref(),
@@ -828,6 +905,41 @@ pub fn map_async_to_fcp_error(error: &AsyncError) -> FcpError {
 mod tests {
     use super::*;
 
+    /// br-3a3r6: scope-bound test override of the opt-in env value.
+    /// Crate forbids `unsafe_code` so tests can't `std::env::set_var`;
+    /// instead this RAII guard sets the per-thread override and clears
+    /// it on drop. Tests run in parallel on different threads, so the
+    /// thread-local keeps each scenario isolated.
+    struct OptInOverrideGuard;
+    impl OptInOverrideGuard {
+        fn set(value: Option<&str>) -> Self {
+            AMBIENT_OPT_IN_TEST_VALUE.with(|cell| {
+                *cell.borrow_mut() = Some(value.map(str::to_owned));
+            });
+            Self
+        }
+    }
+    impl Drop for OptInOverrideGuard {
+        fn drop(&mut self) {
+            AMBIENT_OPT_IN_TEST_VALUE.with(|cell| *cell.borrow_mut() = None);
+        }
+    }
+
+    struct RequestTimeoutOverrideGuard;
+    impl RequestTimeoutOverrideGuard {
+        fn set(value: Option<&str>) -> Self {
+            REQUEST_TIMEOUT_TEST_VALUE.with(|cell| {
+                *cell.borrow_mut() = Some(value.map(str::to_owned));
+            });
+            Self
+        }
+    }
+    impl Drop for RequestTimeoutOverrideGuard {
+        fn drop(&mut self) {
+            REQUEST_TIMEOUT_TEST_VALUE.with(|cell| *cell.borrow_mut() = None);
+        }
+    }
+
     fn manifest_toml_with_optional_timeouts(timeouts: Option<&str>) -> String {
         let placeholder = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
         let timeouts_block = timeouts.unwrap_or_default();
@@ -1255,21 +1367,116 @@ deny_ptrace = true
 
     #[test]
     fn config_from_manifest_str_parses_embedded_manifest() {
-        let request_timeout_override = std::env::var_os(MANIFEST_REQUEST_TIMEOUT_ENV_VAR)
-            .map(|value| value.to_string_lossy().into_owned());
-        let expected_request_timeout =
-            parse_request_timeout_override(request_timeout_override.as_deref())
-                .expect("ambient override should be valid if present")
-                .unwrap_or(Duration::from_secs(52));
+        // br-3a3r6: from_manifest_str now ignores the ambient
+        // FCP_REQUEST_TIMEOUT_MS unless FCP_ALLOW_AMBIENT_TIMEOUT_OVERRIDE
+        // is also set. The manifest value (52s) is the expected outcome.
+        let _opt_in = OptInOverrideGuard::set(None);
         let config = ConnectorRuntimeConfig::from_manifest_str(
             &manifest_toml_with_optional_timeouts(Some(
                 "[timeouts]\nrequest_timeout_ms = 52000\nconnect_timeout_ms = 6000\nwall_clock_timeout_ms = 88000\n\n",
             )),
         )
         .expect("embedded manifest should parse");
-        assert_eq!(config.request_timeout, expected_request_timeout);
+        assert_eq!(config.request_timeout, Duration::from_secs(52));
         assert_eq!(config.connect_timeout, Duration::from_secs(6));
         assert_eq!(config.wall_clock_timeout, Duration::from_secs(88));
+    }
+
+    #[test]
+    fn from_manifest_ignores_ambient_timeout_env_without_opt_in() {
+        // br-3a3r6: ambient FCP_REQUEST_TIMEOUT_MS must NOT override the
+        // manifest's pinned [timeouts] section unless the operator has
+        // explicitly opted in.
+        let _opt_in = OptInOverrideGuard::set(None);
+        let _timeout = RequestTimeoutOverrideGuard::set(Some("99000"));
+        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(Some(
+            "[timeouts]\nrequest_timeout_ms = 48000\nconnect_timeout_ms = 8000\nwall_clock_timeout_ms = 95000\n\n",
+        )))
+        .expect("manifest should parse");
+        let config = ConnectorRuntimeConfig::from_manifest(&manifest)
+            .expect("manifest precedence path should succeed");
+        assert_eq!(
+            config.request_timeout,
+            Duration::from_secs(48),
+            "manifest must win without explicit opt-in"
+        );
+    }
+
+    #[test]
+    fn from_manifest_honors_ambient_timeout_env_with_opt_in() {
+        // br-3a3r6: when the operator explicitly sets
+        // FCP_ALLOW_AMBIENT_TIMEOUT_OVERRIDE=1, the env override is
+        // honored and replaces the manifest request_timeout.
+        let _opt_in = OptInOverrideGuard::set(Some("1"));
+        let _timeout = RequestTimeoutOverrideGuard::set(Some("99000"));
+        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(Some(
+            "[timeouts]\nrequest_timeout_ms = 48000\nconnect_timeout_ms = 8000\nwall_clock_timeout_ms = 95000\n\n",
+        )))
+        .expect("manifest should parse");
+        let config = ConnectorRuntimeConfig::from_manifest(&manifest)
+            .expect("opt-in path should succeed");
+        assert_eq!(
+            config.request_timeout,
+            Duration::from_secs(99),
+            "explicit opt-in must let env override the manifest request timeout"
+        );
+        // connect/wall-clock are NOT overridable by env — manifest stays.
+        assert_eq!(config.connect_timeout, Duration::from_secs(8));
+        assert_eq!(config.wall_clock_timeout, Duration::from_secs(95));
+    }
+
+    #[test]
+    fn from_manifest_invalid_env_with_opt_in_returns_error() {
+        // br-3a3r6: when opt-in is on, an unparseable
+        // FCP_REQUEST_TIMEOUT_MS surfaces as an error (was the existing
+        // contract before the gate). Without opt-in the env is never
+        // consulted, so a malformed value is silently irrelevant — that
+        // behavior is documented on `from_manifest`.
+        let _opt_in = OptInOverrideGuard::set(Some("1"));
+        let _timeout = RequestTimeoutOverrideGuard::set(Some("not-a-number"));
+        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(None))
+            .expect("manifest should parse");
+        let err = ConnectorRuntimeConfig::from_manifest(&manifest).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("FCP_REQUEST_TIMEOUT_MS must be a positive integer")
+        );
+    }
+
+    #[test]
+    fn from_manifest_invalid_env_without_opt_in_is_ignored() {
+        // br-3a3r6: malformed FCP_REQUEST_TIMEOUT_MS in the absence of
+        // opt-in must NOT cause a startup error — the value is never
+        // consulted, so the manifest path completes cleanly.
+        let _opt_in = OptInOverrideGuard::set(None);
+        let _timeout = RequestTimeoutOverrideGuard::set(Some("garbage"));
+        let manifest = ConnectorManifest::parse_str(&manifest_toml_with_optional_timeouts(Some(
+            "[timeouts]\nrequest_timeout_ms = 48000\nconnect_timeout_ms = 8000\nwall_clock_timeout_ms = 95000\n\n",
+        )))
+        .expect("manifest should parse");
+        let config = ConnectorRuntimeConfig::from_manifest(&manifest)
+            .expect("malformed env must be ignored without opt-in");
+        assert_eq!(config.request_timeout, Duration::from_secs(48));
+    }
+
+    #[test]
+    fn opt_in_value_allows_override_recognises_truthy_values() {
+        for value in ["1", "true", "yes"] {
+            assert!(
+                opt_in_value_allows_override(Some(value)),
+                "{value:?} should be treated as opt-in"
+            );
+        }
+        for value in ["0", "false", "no", "", "True", "YES", "TRUE", " 1", "1 "] {
+            assert!(
+                !opt_in_value_allows_override(Some(value)),
+                "{value:?} should NOT be treated as opt-in (case-sensitive exact match required)"
+            );
+        }
+        assert!(
+            !opt_in_value_allows_override(None),
+            "unset env must default to opt-in disabled"
+        );
     }
 
     #[test]

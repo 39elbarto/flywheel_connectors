@@ -121,6 +121,8 @@ impl DingTalkConnector {
         DoctorResult::from_checks(checks)
     }
 
+    // 14 OperationInfo entries built inline; splitting is churn-only — each
+    // arm carries its own input_schema literal and reads top-to-bottom.
     #[allow(clippy::too_many_lines)]
     fn operations() -> Vec<OperationInfo> {
         vec![
@@ -231,6 +233,9 @@ impl DingTalkConnector {
         ]
     }
 
+    // Single match dispatch over every operation_id; extracting per-op
+    // helpers would scatter the verify_bound + client-call shape that the
+    // capability boundary review depends on staying in one place.
     #[allow(clippy::too_many_lines)]
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         self.base.check_ready()?;
@@ -647,6 +652,9 @@ fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
         .collect()
 }
 
+// Internal builder for OperationInfo: the 8 args mirror OperationInfo's
+// own field count by design — packaging them into a struct would just
+// force every call site to spell out the same fields with extra syntax.
 #[allow(clippy::too_many_arguments)]
 fn operation(
     id: &'static str,

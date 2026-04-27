@@ -172,6 +172,9 @@ pub struct ParsedTarget<'a> {
 }
 
 impl<'a> ParsedTarget<'a> {
+    // Two-prefix dispatch: `if let` cascade keeps the `chat:` / `user:`
+    // tags visually adjacent. The map_or_else rewrite forces the
+    // is_group/id pair to be plumbed through closures and reads worse.
     #[allow(clippy::option_if_let_else)]
     #[must_use]
     pub fn parse(raw: &'a str) -> Self {

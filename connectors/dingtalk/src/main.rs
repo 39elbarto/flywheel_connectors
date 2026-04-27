@@ -59,6 +59,9 @@ fn encode<T: serde::Serialize>(value: &T) -> FcpResult<serde_json::Value> {
     })
 }
 
+// JSON-RPC dispatcher: linear method-name match keeps the request
+// shape, error mapping, and encode() call adjacent for each method —
+// extracting helpers would obscure the wire format at the boundary.
 #[allow(clippy::too_many_lines)]
 async fn handle_message(connector: &mut DingTalkConnector, message: &str) -> serde_json::Value {
     let request: serde_json::Value = match serde_json::from_str(message) {

@@ -124,6 +124,17 @@ pub enum DiscoveryError {
         alternate: String,
     },
 
+    /// Discovery document identity did not match the requested service.
+    #[error("discovery document identity mismatch for `{service}`: {field} was `{actual}`")]
+    SnapshotIdentityMismatch {
+        /// Requested service identity.
+        service: String,
+        /// Mismatched Discovery identity field.
+        field: &'static str,
+        /// Field value from the Discovery document.
+        actual: String,
+    },
+
     /// Discovery schema tree exceeded the supported recursion depth.
     #[error("schema depth exceeds limit {max_depth}")]
     SchemaDepthExceeded {
@@ -683,6 +694,7 @@ pub fn normalize_snapshot_bytes(
             url: source_url.to_string(),
             source,
         })?;
+    validate_snapshot_identity(service, &parsed)?;
 
     let mut methods = normalize_methods(&parsed.methods, service, &[]);
     let resources = normalize_resources(&parsed.resources, service, &[]);
@@ -714,6 +726,32 @@ pub fn normalize_snapshot_bytes(
         source_url: source_url.to_string(),
         source_digest,
     })
+}
+
+fn validate_snapshot_identity(
+    service: &DiscoveryServiceId,
+    document: &RawDiscoveryDocument,
+) -> Result<(), DiscoveryError> {
+    let service_identity = service.identity();
+    if let Some(name) = normalize_optional(document.name.clone())
+        && name != service.api_name
+    {
+        return Err(DiscoveryError::SnapshotIdentityMismatch {
+            service: service_identity,
+            field: "name",
+            actual: name,
+        });
+    }
+    if let Some(version) = normalize_optional(document.version.clone())
+        && version != service.api_version
+    {
+        return Err(DiscoveryError::SnapshotIdentityMismatch {
+            service: service_identity,
+            field: "version",
+            actual: version,
+        });
+    }
+    Ok(())
 }
 
 fn normalize_schema_map(
@@ -978,6 +1016,8 @@ fn trim_trailing_slash(value: &str) -> String {
 struct RawDiscoveryDocument {
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
@@ -2970,6 +3010,59 @@ mod tests {
         assert_eq!(snap.revision.as_deref(), Some("valid"));
     }
 
+    #[test]
+    fn normalize_rejects_mismatched_document_name() {
+        let doc = r#"{
+            "name": "drive",
+            "version": "v1",
+            "title": "Drive API"
+        }"#;
+        let service = DiscoveryServiceId::new("gmail", "v1").expect("valid");
+        let err = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect_err("mismatched discovery name should fail");
+
+        assert!(
+            matches!(
+                err,
+                DiscoveryError::SnapshotIdentityMismatch { field: "name", .. }
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn normalize_rejects_mismatched_document_version() {
+        let doc = r#"{
+            "name": "gmail",
+            "version": "v2",
+            "title": "Gmail API"
+        }"#;
+        let service = DiscoveryServiceId::new("gmail", "v1").expect("valid");
+        let err = normalize_snapshot_bytes(
+            &service,
+            doc.as_bytes(),
+            DiscoveryEndpointKind::Standard,
+            "https://example.test",
+        )
+        .expect_err("mismatched discovery version should fail");
+
+        assert!(
+            matches!(
+                err,
+                DiscoveryError::SnapshotIdentityMismatch {
+                    field: "version",
+                    ..
+                }
+            ),
+            "unexpected error: {err}"
+        );
+    }
+
     // ── Top-level methods alongside resources ───────────────────────────
 
     #[test]
@@ -3336,7 +3429,7 @@ mod tests {
 
     #[test]
     fn fetched_snapshot_serde_roundtrip() {
-        let service = DiscoveryServiceId::new("test", "v1").expect("valid");
+        let service = DiscoveryServiceId::new("gmail", "v1").expect("valid");
         let fetched = normalize_snapshot_bytes(
             &service,
             GMAIL_FIXTURE.as_bytes(),

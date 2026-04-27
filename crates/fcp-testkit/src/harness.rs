@@ -100,15 +100,16 @@ impl<C: FcpConnector> ConnectorTestHarness<C> {
     /// Returns an error if configuration fails.
     pub async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
         let start = Instant::now();
-        info!("Configuring connector with: {:?}", config);
+        let recorded_config = redact_sensitive_config(&config);
+        info!(config = ?recorded_config, "Configuring connector");
 
-        let result = self.connector.configure(config.clone()).await;
+        let result = self.connector.configure(config).await;
 
         let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         self.operations.push(RecordedOperation {
             operation: "configure".to_string(),
-            input: Some(config),
+            input: Some(recorded_config),
             result: result
                 .as_ref()
                 .map(|()| serde_json::json!({}))
@@ -297,6 +298,38 @@ impl<C: FcpConnector> ConnectorTestHarness<C> {
             max_duration_ms,
         }
     }
+}
+
+fn redact_sensitive_config(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    let value = if is_sensitive_config_key(key) {
+                        serde_json::Value::String("redacted".to_string())
+                    } else {
+                        redact_sensitive_config(value)
+                    };
+                    (key.clone(), value)
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(redact_sensitive_config).collect())
+        }
+        _ => value.clone(),
+    }
+}
+
+fn is_sensitive_config_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    lower.contains("token")
+        || lower.contains("secret")
+        || lower.contains("password")
+        || lower.contains("authorization")
+        || lower.contains("credential")
+        || lower.contains("api_key")
+        || lower.contains("apikey")
 }
 
 /// Statistics about harness operations.
@@ -730,6 +763,36 @@ mod tests {
         harness.configure(config.clone()).await.unwrap();
         let last = harness.last_operation().unwrap();
         assert_eq!(last.input, Some(config));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn harness_redacts_sensitive_config_input() {
+        let mut harness = ConnectorTestHarness::new(StubConnector::ok());
+        let config = serde_json::json!({
+            "api_key": "sk-live-secret",
+            "client_secret": "client-secret",
+            "oauth": {
+                "refresh_token": "refresh-token",
+                "scopes": ["gmail.readonly"]
+            },
+            "nested": [
+                {
+                    "password": "db-password",
+                    "port": 5432
+                }
+            ],
+            "port": 8080
+        });
+        harness.configure(config).await.unwrap();
+
+        let input = harness.last_operation().unwrap().input.as_ref().unwrap();
+        assert_eq!(input["api_key"], "redacted");
+        assert_eq!(input["client_secret"], "redacted");
+        assert_eq!(input["oauth"]["refresh_token"], "redacted");
+        assert_eq!(input["oauth"]["scopes"][0], "gmail.readonly");
+        assert_eq!(input["nested"][0]["password"], "redacted");
+        assert_eq!(input["nested"][0]["port"], 5432);
+        assert_eq!(input["port"], 8080);
     }
 
     // ---- Additional RecordedOperation tests ----

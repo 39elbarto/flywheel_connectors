@@ -447,5 +447,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_object_id_construction"
+path = "fuzz_targets/object_id_construction.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

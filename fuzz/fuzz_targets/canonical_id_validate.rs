@@ -39,8 +39,8 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use fcp_core::{
-    validate_canonical_id, CapabilityId, ConnectorId, InstanceId, OperationId, PrincipalId,
-    TailscaleNodeId,
+    CapabilityId, ConnectorId, InstanceId, OperationId, PrincipalId, TailscaleNodeId,
+    validate_canonical_id,
 };
 use libfuzzer_sys::fuzz_target;
 use std::sync::Once;

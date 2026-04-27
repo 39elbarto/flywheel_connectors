@@ -28,7 +28,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use fcp_core::TailscaleNodeId;
 use fcp_crypto::X25519SecretKey;
-use fcp_protocol::{derive_session_keys, MeshSessionId, SessionNonce};
+use fcp_protocol::{MeshSessionId, SessionNonce, derive_session_keys};
 use libfuzzer_sys::fuzz_target;
 
 const KEY_SIZE: usize = 32;

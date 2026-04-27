@@ -35,7 +35,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use ciborium::value::Value;
-use fcp_cbor::{to_canonical_cbor, SerializationError};
+use fcp_cbor::{SerializationError, to_canonical_cbor};
 use libfuzzer_sys::fuzz_target;
 use std::sync::Once;
 

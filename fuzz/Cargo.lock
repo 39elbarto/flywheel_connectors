@@ -1492,6 +1492,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-dingtalk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-sdk",
+ "hex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.17",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "fcp-evidence"
 version = "0.1.0"
 dependencies = [
@@ -1515,6 +1536,7 @@ dependencies = [
  "fcp-cbor",
  "fcp-core",
  "fcp-crypto",
+ "fcp-dingtalk",
  "fcp-github",
  "fcp-gmail",
  "fcp-graphql",

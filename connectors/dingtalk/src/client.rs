@@ -400,12 +400,19 @@ pub fn detect_at_bot(event: &DingTalkCallbackEvent) -> bool {
     if at_users.is_empty() {
         return false;
     }
-    let Some(bot_id) = event.chatbot_user_id.as_deref() else {
+    let Some(bot_id) = event
+        .chatbot_user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
         return false;
     };
-    at_users
-        .iter()
-        .any(|u| u.dingtalk_id.as_deref() == Some(bot_id))
+    at_users.iter().any(|u| {
+        u.dingtalk_id
+            .as_deref()
+            .is_some_and(|id| id.trim() == bot_id)
+    })
 }
 
 /// Extract a [`ConversationIdentity`] from a callback event.
@@ -896,6 +903,29 @@ mod tests {
                 staff_id: None,
             }]),
             chatbot_user_id: Some("bot-1".into()),
+            create_at: None,
+            msg_id: None,
+        };
+        assert!(!detect_at_bot(&event));
+    }
+
+    #[test]
+    fn detect_at_bot_rejects_empty_chatbot_id_match() {
+        use crate::types::{AtUser, DingTalkCallbackEvent};
+        let event = DingTalkCallbackEvent {
+            msg_type: None,
+            text: None,
+            sender_id: None,
+            sender_nick: None,
+            sender_staff_id: None,
+            conversation_id: None,
+            conversation_type: None,
+            conversation_title: None,
+            at_users: Some(vec![AtUser {
+                dingtalk_id: Some(String::new()),
+                staff_id: None,
+            }]),
+            chatbot_user_id: Some("   ".into()),
             create_at: None,
             msg_id: None,
         };

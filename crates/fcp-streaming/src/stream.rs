@@ -71,6 +71,7 @@ impl<S: Stream> Stream for TimeoutStream<S> {
         // Check timeout
         if let Some(deadline) = this.deadline.as_mut().as_pin_mut() {
             if deadline.poll(cx).is_ready() {
+                this.deadline.set(None);
                 return Poll::Ready(Some(Err(StreamError::Timeout(*this.timeout))));
             }
         }
@@ -625,6 +626,27 @@ mod tests {
         assert!(result.is_some());
         let err = result.unwrap();
         assert!(err.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn timeout_stream_recovers_after_timeout() {
+        let stream = stream::once(async {
+            sleep(Duration::from_millis(25)).await;
+            42
+        });
+        let ts = TimeoutStream::new(stream, Duration::from_millis(5));
+        pin_mut!(ts);
+
+        let first = ts.next().await.unwrap();
+        assert!(matches!(
+            first,
+            Err(StreamError::Timeout(timeout)) if timeout == Duration::from_millis(5)
+        ));
+
+        sleep(Duration::from_millis(30)).await;
+
+        assert_eq!(ts.next().await.unwrap().unwrap(), 42);
+        assert!(ts.next().await.is_none());
     }
 
     // ── BatchStream additional tests ──

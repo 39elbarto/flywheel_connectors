@@ -845,7 +845,63 @@ impl QdrantConnector {
                 message: format!("Invalid simulate request: {e}"),
             })?;
 
-        let response = SimulateResponse::allowed(req.id);
+        let capability = match qdrant_capability_for_operation(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                let response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize response: {e}"),
+                });
+            }
+        };
+
+        if let Err(error) = validate_simulate_input(req.operation.as_str(), &req.input) {
+            let response = SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
+        if self.config.is_none() || self.client.is_none() {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
+        let Some(verifier) = &self.verifier else {
+            let response = SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            );
+            return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        };
+
+        let response =
+            match verifier.verify_bound(req.capability_token, &capability, &req.operation, &[]) {
+                Ok(_) => SimulateResponse::allowed(req.id),
+                Err(error) => {
+                    let is_grant_mismatch = matches!(
+                        error,
+                        FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+                    );
+                    let mut response =
+                        SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                    if is_grant_mismatch {
+                        response = response
+                            .with_missing_capabilities(vec![capability.as_str().to_string()]);
+                    }
+                    response
+                }
+            };
         serde_json::to_value(response).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize response: {e}"),
         })
@@ -1379,6 +1435,95 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
         })
 }
 
+fn require_field<'a>(
+    input: &'a serde_json::Value,
+    field: &str,
+) -> FcpResult<&'a serde_json::Value> {
+    input.get(field).ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Missing required field: {field}"),
+    })
+}
+
+fn require_array<'a>(
+    input: &'a serde_json::Value,
+    field: &str,
+) -> FcpResult<&'a Vec<serde_json::Value>> {
+    input
+        .get(field)
+        .and_then(|value| value.as_array())
+        .ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Missing required field: {field}"),
+        })
+}
+
+fn qdrant_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
+    let capability = match operation {
+        "qdrant.list_collections" | "qdrant.collection_info" => "qdrant.collections.read",
+        "qdrant.create_collection" | "qdrant.delete_collection" => "qdrant.collections.write",
+        "qdrant.search"
+        | "qdrant.query_points"
+        | "qdrant.batch_query_points"
+        | "qdrant.get_points"
+        | "qdrant.scroll"
+        | "qdrant.count" => "qdrant.points.read",
+        "qdrant.upsert_points" | "qdrant.delete_points" => "qdrant.points.write",
+        _ => {
+            return Err(FcpError::OperationNotGranted {
+                operation: operation.into(),
+            });
+        }
+    };
+    Ok(CapabilityId::from_static(capability))
+}
+
+fn validate_simulate_input(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+    match operation {
+        "qdrant.list_collections" => {}
+        "qdrant.collection_info"
+        | "qdrant.delete_collection"
+        | "qdrant.scroll"
+        | "qdrant.count" => {
+            require_str(input, "collection_name")?;
+        }
+        "qdrant.create_collection" => {
+            require_str(input, "collection_name")?;
+            require_field(input, "vectors")?;
+        }
+        "qdrant.search" => {
+            require_str(input, "collection_name")?;
+            require_array(input, "vector")?;
+            require_field(input, "limit")?;
+        }
+        "qdrant.query_points" => {
+            require_str(input, "collection_name")?;
+            require_field(input, "query")?;
+        }
+        "qdrant.batch_query_points" => {
+            require_str(input, "collection_name")?;
+            require_array(input, "queries")?;
+        }
+        "qdrant.get_points" => {
+            require_str(input, "collection_name")?;
+            require_array(input, "ids")?;
+        }
+        "qdrant.upsert_points" => {
+            require_str(input, "collection_name")?;
+            require_array(input, "points")?;
+        }
+        "qdrant.delete_points" => {
+            require_str(input, "collection_name")?;
+        }
+        _ => {
+            return Err(FcpError::OperationNotGranted {
+                operation: operation.into(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn operation_receipt(operation: &str, effect: &str, resource: String) -> OperationReceipt {
     OperationReceipt {
         operation: operation.to_string(),
@@ -1424,6 +1569,7 @@ fn op_info(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+    use fcp_core::{CapabilityConstraints, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
@@ -1432,6 +1578,28 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
+
+    fn generate_token(signing_key: &Ed25519SigningKey, cap: &str, op: &str) -> CapabilityToken {
+        let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+        let cose = CapabilityTokenBuilder::new()
+            .capability_id(cap)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&[op])
+            .issuer("node:test")
+            .validity(now, now + Duration::hours(1))
+            .try_constraints_cbor(&cbor)
+            .expect("constraints cbor")
+            .sign(signing_key)
+            .unwrap();
+        CapabilityToken::from_raw(cose)
+    }
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
         let cap = match op {
@@ -1446,17 +1614,50 @@ mod tests {
             "qdrant.upsert_points" | "qdrant.delete_points" => "qdrant.points.write",
             _ => "qdrant.collections.read",
         };
-        let now = Utc::now();
-        let cose = CapabilityTokenBuilder::new()
-            .capability_id(cap)
-            .zone_id("z:work")
-            .principal("user:test")
-            .operations(&[op])
-            .issuer("node:test")
-            .validity(now, now + Duration::hours(1))
-            .sign(signing_key)
+        generate_token(signing_key, cap, op)
+    }
+
+    fn simulate_request(
+        signing_key: &Ed25519SigningKey,
+        cap: &str,
+        operation: &'static str,
+        token_operation: &str,
+        input: serde_json::Value,
+    ) -> serde_json::Value {
+        serde_json::to_value(SimulateRequest::new(
+            ConnectorId::from_static("qdrant"),
+            OperationId::from_static(operation),
+            ZoneId::work(),
+            input,
+            generate_token(signing_key, cap, token_operation),
+        ))
+        .expect("serialize simulate request")
+    }
+
+    fn parse_simulate_response(value: serde_json::Value) -> SimulateResponse {
+        serde_json::from_value(value).expect("simulate response")
+    }
+
+    async fn ready_connector(signing_key: &Ed25519SigningKey) -> QdrantConnector {
+        let mut connector = QdrantConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "test-key",
+                "cluster_url": "http://localhost:9999"
+            }))
+            .await
             .unwrap();
-        CapabilityToken::from_raw(cose)
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["qdrant.collections.read", "qdrant.points.write"]
+            }))
+            .await
+            .unwrap();
+        connector
     }
 
     #[fcp_async_core::runtime::test]
@@ -1637,6 +1838,110 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), FcpError::NotConfigured));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_before_configure_denied() {
+        let connector = QdrantConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    &signing_key,
+                    "qdrant.collections.read",
+                    "qdrant.list_collections",
+                    "qdrant.list_collections",
+                    json!({}),
+                ))
+                .await
+                .unwrap(),
+        );
+
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code.as_deref(),
+            Some(FcpError::NotConfigured.error_code().as_str())
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_missing_required_input_denied() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = ready_connector(&signing_key).await;
+
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    &signing_key,
+                    "qdrant.collections.read",
+                    "qdrant.collection_info",
+                    "qdrant.collection_info",
+                    json!({}),
+                ))
+                .await
+                .unwrap(),
+        );
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-1003"));
+        assert!(
+            response
+                .failure_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("collection_name")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_wrong_capability_denied() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = ready_connector(&signing_key).await;
+
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    &signing_key,
+                    "qdrant.collections.read",
+                    "qdrant.upsert_points",
+                    "qdrant.upsert_points",
+                    json!({
+                        "collection_name": "docs",
+                        "points": [{"id": 1, "vector": [0.1, 0.2, 0.3]}]
+                    }),
+                ))
+                .await
+                .unwrap(),
+        );
+
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.missing_capabilities,
+            vec!["qdrant.points.write".to_string()]
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_valid_request_allowed() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = ready_connector(&signing_key).await;
+
+        let response = parse_simulate_response(
+            connector
+                .handle_simulate(simulate_request(
+                    &signing_key,
+                    "qdrant.collections.read",
+                    "qdrant.collection_info",
+                    "qdrant.collection_info",
+                    json!({ "collection_name": "docs" }),
+                ))
+                .await
+                .unwrap(),
+        );
+
+        assert!(response.would_succeed, "{response:?}");
+        assert!(response.failure_reason.is_none());
     }
 
     #[fcp_async_core::runtime::test]

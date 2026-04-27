@@ -218,6 +218,26 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
     CapabilityToken::from_raw(raw)
 }
 
+fn boards_list_invoke(signing_key: &Ed25519SigningKey, id: &'static str) -> InvokeRequest {
+    InvokeRequest {
+        r#type: "invoke".to_string(),
+        id: RequestId::new(id),
+        connector_id: ConnectorId::from_static(CONNECTOR_ID),
+        operation: OperationId::from_static(OP_LIST_BOARDS),
+        zone_id: ZoneId::work(),
+        input: json!({ "limit": 2 }),
+        capability_token: build_token(signing_key),
+        holder_proof: None,
+        context: None,
+        idempotency_key: None,
+        lease_seq: None,
+        deadline_ms: None,
+        correlation_id: None,
+        provenance: None,
+        approval_tokens: Vec::new(),
+    }
+}
+
 #[fcp_async_core::runtime::test]
 async fn connector_suite_happy_path_lists_boards() {
     let server = MockServer::start().await;
@@ -248,23 +268,7 @@ async fn connector_suite_happy_path_lists_boards() {
         .await;
 
     let signing_key = Ed25519SigningKey::generate();
-    let invoke = InvokeRequest {
-        r#type: "invoke".to_string(),
-        id: RequestId::new("monday-connector-suite"),
-        connector_id: ConnectorId::from_static(CONNECTOR_ID),
-        operation: OperationId::from_static(OP_LIST_BOARDS),
-        zone_id: ZoneId::work(),
-        input: json!({ "limit": 2 }),
-        capability_token: build_token(&signing_key),
-        holder_proof: None,
-        context: None,
-        idempotency_key: None,
-        lease_seq: None,
-        deadline_ms: None,
-        correlation_id: None,
-        provenance: None,
-        approval_tokens: Vec::new(),
-    };
+    let invoke = boards_list_invoke(&signing_key, "monday-connector-suite");
 
     let suite = ConnectorSuite {
         test_name: "monday_list_boards_happy_path".to_string(),
@@ -293,4 +297,79 @@ async fn connector_suite_happy_path_lists_boards() {
 
     assert!(report.passed, "connector suite should pass");
     assert!(!report.logs.is_empty(), "structured logs should be present");
+}
+
+#[fcp_async_core::runtime::test]
+async fn connector_suite_error_path_reports_unauthorized_boards_list() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(header("Authorization", "monday_test_token"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error_message": "Invalid API token"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let signing_key = Ed25519SigningKey::generate();
+    let invoke = boards_list_invoke(&signing_key, "monday-connector-suite-unauthorized");
+
+    let suite = ConnectorSuite {
+        test_name: "monday_list_boards_unauthorized".to_string(),
+        config: json!({
+            "api_token": "monday_test_token",
+            "base_url": server.uri(),
+        }),
+        handshake: handshake_request(signing_key.verifying_key().to_bytes()),
+        invoke: Some(invoke),
+        invoke_expectations: InvokeExpectations {
+            expect_error: true,
+            expected_reason_code: Some("FCP-2001".to_string()),
+            ..InvokeExpectations::default()
+        },
+    };
+
+    let mut connector = MondayAdapter::new();
+    let mut runner = E2eRunner::new("fcp-monday");
+    let report = runner
+        .run_connector_suite(&mut connector, suite)
+        .await
+        .expect("connector suite run");
+
+    for entry in &report.logs {
+        println!(
+            "{}",
+            serde_json::to_string(entry).expect("serialize report log")
+        );
+    }
+
+    assert!(report.passed, "connector suite should pass");
+    let execute = report
+        .logs
+        .iter()
+        .map(|entry| serde_json::to_value(entry).expect("serialize report log"))
+        .find(|entry| {
+            matches!(
+                entry.get("phase").and_then(serde_json::Value::as_str),
+                Some("execute")
+            )
+        })
+        .expect("execute log entry");
+    assert_eq!(
+        execute["context"]["expected_error"],
+        json!(true),
+        "suite must assert the expected error path"
+    );
+    assert_eq!(
+        execute["context"]["reason_code"],
+        json!("FCP-2001"),
+        "Monday 401 should map to the FCP unauthorized code"
+    );
+    assert_eq!(
+        execute["context"]["retryable"],
+        json!(false),
+        "auth failures should be reported as terminal"
+    );
 }

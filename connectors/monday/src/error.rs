@@ -105,12 +105,9 @@ impl MondayError {
                 retryable: true,
                 retry_after: self.retry_after(),
             },
-            Self::Unauthorized => FcpError::External {
-                service: "monday".into(),
-                message: "Authentication failed".into(),
-                status_code: Some(401),
-                retryable: false,
-                retry_after: None,
+            Self::Unauthorized => FcpError::Unauthorized {
+                code: 2001,
+                message: "Invalid or expired Monday API token".into(),
             },
             Self::Forbidden => FcpError::External {
                 service: "monday".into(),
@@ -308,17 +305,14 @@ mod tests {
     #[test]
     fn unauthorized_to_fcp_error() {
         match MondayError::Unauthorized.to_fcp_error() {
-            FcpError::External {
-                service,
-                status_code,
-                retryable,
-                ..
-            } => {
-                assert_eq!(service, "monday");
-                assert_eq!(status_code, Some(401));
-                assert!(!retryable);
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(message.contains("Monday API token"));
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::Unauthorized { .. }),
+                "expected Unauthorized, got {other:?}"
+            ),
         }
     }
 
@@ -335,7 +329,10 @@ mod tests {
                 assert_eq!(status_code, Some(403));
                 assert!(!retryable);
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::External { .. }),
+                "expected External, got {other:?}"
+            ),
         }
     }
 
@@ -356,7 +353,10 @@ mod tests {
                 assert!(message.contains("board_abc"));
                 assert!(!retryable);
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::External { .. }),
+                "expected External, got {other:?}"
+            ),
         }
     }
 
@@ -377,7 +377,10 @@ mod tests {
                 assert!(retryable);
                 assert_eq!(retry_after, Some(Duration::from_secs(60)));
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::External { .. }),
+                "expected External, got {other:?}"
+            ),
         }
     }
 
@@ -401,7 +404,10 @@ mod tests {
                 assert!(retryable);
                 assert_eq!(message, "unavailable");
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::External { .. }),
+                "expected External, got {other:?}"
+            ),
         }
     }
 
@@ -424,7 +430,10 @@ mod tests {
                 assert!(!retryable);
                 assert_eq!(message, "column not found");
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::External { .. }),
+                "expected External, got {other:?}"
+            ),
         }
     }
 
@@ -433,7 +442,10 @@ mod tests {
         let bad: Result<serde_json::Value, _> = serde_json::from_str("{invalid");
         match MondayError::Json(bad.unwrap_err()).to_fcp_error() {
             FcpError::Internal { message } => assert!(message.starts_with("JSON error:")),
-            other => panic!("expected Internal, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::Internal { .. }),
+                "expected Internal, got {other:?}"
+            ),
         }
     }
 
@@ -453,7 +465,10 @@ mod tests {
                 assert_eq!(status_code, Some(400));
                 assert!(!retryable);
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::External { .. }),
+                "expected External, got {other:?}"
+            ),
         }
     }
 
@@ -666,7 +681,10 @@ mod tests {
                 assert_eq!(service, "monday");
                 assert!(retryable);
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::External { .. }),
+                "expected External, got {other:?}"
+            ),
         }
     }
 
@@ -680,7 +698,10 @@ mod tests {
             FcpError::External { message, .. } => {
                 assert!(message.contains("5000"), "message: {message}");
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::External { .. }),
+                "expected External, got {other:?}"
+            ),
         }
     }
 
@@ -694,17 +715,24 @@ mod tests {
             FcpError::External { retry_after, .. } => {
                 assert_eq!(retry_after, None);
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::External { .. }),
+                "expected External, got {other:?}"
+            ),
         }
     }
 
     #[test]
-    fn unauthorized_to_fcp_error_retry_after_is_none() {
+    fn unauthorized_to_fcp_error_has_reason_code() {
         match MondayError::Unauthorized.to_fcp_error() {
-            FcpError::External { retry_after, .. } => {
-                assert_eq!(retry_after, None);
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(message.contains("Monday API token"));
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::Unauthorized { .. }),
+                "expected Unauthorized, got {other:?}"
+            ),
         }
     }
 
@@ -714,7 +742,10 @@ mod tests {
             FcpError::External { message, .. } => {
                 assert_eq!(message, "Insufficient permissions");
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::External { .. }),
+                "expected External, got {other:?}"
+            ),
         }
     }
 
@@ -728,7 +759,10 @@ mod tests {
             FcpError::External { retry_after, .. } => {
                 assert_eq!(retry_after, None);
             }
-            other => panic!("expected External, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::External { .. }),
+                "expected External, got {other:?}"
+            ),
         }
     }
 }

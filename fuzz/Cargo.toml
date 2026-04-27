@@ -511,5 +511,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_canonical_serializer_schema_binding"
+path = "fuzz_targets/canonical_serializer_schema_binding.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

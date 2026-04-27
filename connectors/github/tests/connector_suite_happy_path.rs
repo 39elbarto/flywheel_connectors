@@ -186,6 +186,29 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
     CapabilityToken::from_raw(raw)
 }
 
+fn get_repo_invoke(signing_key: &Ed25519SigningKey, id: &'static str) -> InvokeRequest {
+    InvokeRequest {
+        r#type: "invoke".to_string(),
+        id: RequestId::new(id),
+        connector_id: ConnectorId::from_static(CONNECTOR_ID),
+        operation: OperationId::from_static(OP_GET_REPO),
+        zone_id: ZoneId::work(),
+        input: json!({
+            "owner": OWNER,
+            "repo": REPO
+        }),
+        capability_token: build_token(signing_key),
+        holder_proof: None,
+        context: None,
+        idempotency_key: None,
+        lease_seq: None,
+        deadline_ms: None,
+        correlation_id: None,
+        provenance: None,
+        approval_tokens: Vec::new(),
+    }
+}
+
 #[fcp_async_core::runtime::test]
 async fn connector_suite_happy_path_gets_repo() {
     let server = MockServer::start().await;
@@ -220,26 +243,7 @@ async fn connector_suite_happy_path_gets_repo() {
         .await;
 
     let signing_key = Ed25519SigningKey::generate();
-    let invoke = InvokeRequest {
-        r#type: "invoke".to_string(),
-        id: RequestId::new("github-connector-suite"),
-        connector_id: ConnectorId::from_static(CONNECTOR_ID),
-        operation: OperationId::from_static(OP_GET_REPO),
-        zone_id: ZoneId::work(),
-        input: json!({
-            "owner": OWNER,
-            "repo": REPO
-        }),
-        capability_token: build_token(&signing_key),
-        holder_proof: None,
-        context: None,
-        idempotency_key: None,
-        lease_seq: None,
-        deadline_ms: None,
-        correlation_id: None,
-        provenance: None,
-        approval_tokens: Vec::new(),
-    };
+    let invoke = get_repo_invoke(&signing_key, "github-connector-suite");
 
     let suite = ConnectorSuite {
         test_name: "github_get_repo_happy_path".to_string(),
@@ -268,4 +272,80 @@ async fn connector_suite_happy_path_gets_repo() {
 
     assert!(report.passed, "connector suite should pass");
     assert!(!report.logs.is_empty(), "structured logs should be present");
+}
+
+#[fcp_async_core::runtime::test]
+async fn connector_suite_error_path_reports_not_found_repo() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/repos/{OWNER}/{REPO}")))
+        .and(header("authorization", "Bearer ghp_test_github"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "message": "Not Found",
+            "documentation_url": "https://docs.github.com/rest/repos/repos#get-a-repository"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let signing_key = Ed25519SigningKey::generate();
+    let invoke = get_repo_invoke(&signing_key, "github-connector-suite-not-found");
+
+    let suite = ConnectorSuite {
+        test_name: "github_get_repo_not_found".to_string(),
+        config: json!({
+            "token": "ghp_test_github",
+            "base_url": server.uri(),
+        }),
+        handshake: handshake_request(signing_key.verifying_key().to_bytes()),
+        invoke: Some(invoke),
+        invoke_expectations: InvokeExpectations {
+            expect_error: true,
+            expected_reason_code: Some("FCP-6001".to_string()),
+            ..InvokeExpectations::default()
+        },
+    };
+
+    let mut connector = GitHubAdapter::new();
+    let mut runner = E2eRunner::new("fcp-github");
+    let report = runner
+        .run_connector_suite(&mut connector, suite)
+        .await
+        .expect("connector suite run");
+
+    for entry in &report.logs {
+        println!(
+            "{}",
+            serde_json::to_string(entry).expect("serialize report log")
+        );
+    }
+
+    assert!(report.passed, "connector suite should pass");
+    let execute = report
+        .logs
+        .iter()
+        .map(|entry| serde_json::to_value(entry).expect("serialize report log"))
+        .find(|entry| {
+            matches!(
+                entry.get("phase").and_then(serde_json::Value::as_str),
+                Some("execute")
+            )
+        })
+        .expect("execute log entry");
+    assert_eq!(
+        execute["context"]["expected_error"],
+        json!(true),
+        "suite must assert the expected error path"
+    );
+    assert_eq!(
+        execute["context"]["reason_code"],
+        json!("FCP-6001"),
+        "GitHub 404 should map to the FCP not-found code"
+    );
+    assert_eq!(
+        execute["context"]["retryable"],
+        json!(false),
+        "not-found responses should be reported as terminal"
+    );
 }

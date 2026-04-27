@@ -22,6 +22,21 @@ mod discovery;
 mod doctor;
 mod enforcement;
 mod error;
+// Retained-but-unwired: composite host-health framework
+// (`HealthAggregator`, `CompositeHealthStatus`, tri-state `HealthState`,
+// merge/rollup logic across connector / mesh / resource / named-component
+// inputs). Production `/rpc/health` at `crates/fcp-host/src/bin/fcp-host.rs`
+// `health_handler` instead builds a flat `HostHealthResponse` directly from
+// `state.registry.list()` and `ConnectorHealth` (from fcp-kernel); the
+// composite shape here was the prototype that did not get adopted when the
+// host binary landed. Module is intentionally retained — its 77 unit tests
+// pin the target shape for a future composite-health redesign and the
+// types are the natural starting point if `/rpc/health` ever needs to
+// surface mesh or resource subsystems alongside connectors. Same pattern
+// as `enforcement::EnforcementPipeline` (br-ike8x diagnosis). Visibility
+// stays private (no `pub use health::*`) so the module cannot accidentally
+// be picked up by external callers expecting it to drive production
+// health responses.
 #[allow(dead_code)]
 mod health;
 mod output_capture;

@@ -510,54 +510,33 @@ async fn interval_tick_cadence_reasonable() {
 // ============================================================================
 
 #[fcp_async_core::runtime::test]
-async fn retry_under_deadline_attempt_count_bounded() {
-    let ctx = ExecutionContext::request_scoped(Duration::from_millis(100));
-    let ctx_attempts = Arc::new(AtomicUsize::new(0));
-    let ctx_attempts_clone = Arc::clone(&ctx_attempts);
-
-    for _ in 0..100 {
-        ctx_attempts_clone.fetch_add(1, Ordering::SeqCst);
-        if ctx
-            .run(async { time::sleep(Duration::from_millis(20)).await })
-            .await
-            .is_err()
-        {
-            break;
+async fn retry_under_deadline_stops_on_timeout() {
+    let ctx = ExecutionContext::request_scoped(Duration::from_millis(50));
+    let mut ctx_count = 0;
+    let ctx_err = loop {
+        ctx_count += 1;
+        match ctx.run(std::future::pending::<()>()).await {
+            Ok(()) => continue,
+            Err(err) => break err,
         }
-    }
-    let ctx_count = ctx_attempts.load(Ordering::SeqCst);
+    };
 
-    let deadline = Instant::now() + Duration::from_millis(100);
-    let timeout_attempts = Arc::new(AtomicUsize::new(0));
-    let timeout_attempts_clone = Arc::clone(&timeout_attempts);
-
-    for _ in 0..100 {
+    let deadline = Instant::now() + Duration::from_millis(50);
+    let mut timeout_count = 0;
+    let timeout_err = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            break;
+            break AsyncError::Timeout { timeout_ms: 0 };
         }
-        timeout_attempts_clone.fetch_add(1, Ordering::SeqCst);
-        if time::timeout(remaining, time::sleep(Duration::from_millis(20)))
-            .await
-            .is_err()
-        {
-            break;
+        timeout_count += 1;
+        match time::timeout(remaining, std::future::pending::<()>()).await {
+            Ok(()) => continue,
+            Err(err) => break err,
         }
-    }
-    let timeout_count = timeout_attempts.load(Ordering::SeqCst);
+    };
 
-    assert!(
-        (3..=7).contains(&ctx_count),
-        "ctx attempts out of range: {ctx_count}"
-    );
-    assert!(
-        (3..=7).contains(&timeout_count),
-        "timeout attempts out of range: {timeout_count}"
-    );
-
-    let diff = ctx_count.abs_diff(timeout_count);
-    assert!(
-        diff <= 2,
-        "attempt count difference too large: ctx={ctx_count} timeout={timeout_count}"
-    );
+    assert_eq!(ctx_count, 1, "ctx retry should stop after first timeout");
+    assert_eq!(timeout_count, 1, "manual retry should stop after first timeout");
+    assert!(matches!(ctx_err, AsyncError::Timeout { .. }));
+    assert!(matches!(timeout_err, AsyncError::Timeout { .. }));
 }

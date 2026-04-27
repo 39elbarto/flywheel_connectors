@@ -213,6 +213,9 @@ impl GitHubWebhook {
         // Get signature header
         let signature = header_value_case_insensitive(headers, "x-hub-signature-256")?
             .ok_or_else(|| WebhookError::MissingSignature("X-Hub-Signature-256".into()))?;
+        if !signature.starts_with("sha256=") {
+            return Err(WebhookError::InvalidSignature);
+        }
 
         // Verify signature
         self.verifier.verify(body, signature)?;
@@ -843,6 +846,41 @@ mod tests {
                 .contains(TaintFlag::WebhookInjected)
         );
         assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
+    }
+
+    #[test]
+    fn github_rejects_non_sha256_signature_prefix() {
+        let handler = GitHubWebhook::new("shared-secret");
+        let body = br#"{"zen":"Keep it logically awesome."}"#;
+        let raw_signature = handler.verifier.compute(body);
+
+        for prefix in ["v0=", "v1=", ""] {
+            let mut headers = HashMap::new();
+            headers.insert(
+                "x-hub-signature-256".to_string(),
+                format!("{prefix}{raw_signature}"),
+            );
+            headers.insert("x-github-event".to_string(), "ping".to_string());
+            headers.insert("x-github-delivery".to_string(), "delivery-1".to_string());
+
+            let result = handler.verify_and_parse(&headers, body);
+            assert!(
+                matches!(result, Err(WebhookError::InvalidSignature)),
+                "GitHub signature prefix {prefix:?} must fail closed; got {result:?}"
+            );
+        }
+
+        let mut valid_headers = HashMap::new();
+        valid_headers.insert(
+            "x-hub-signature-256".to_string(),
+            format!("sha256={raw_signature}"),
+        );
+        valid_headers.insert("x-github-event".to_string(), "ping".to_string());
+        valid_headers.insert("x-github-delivery".to_string(), "delivery-1".to_string());
+
+        handler
+            .verify_and_parse(&valid_headers, body)
+            .expect("provider-correct sha256= signature must still verify");
     }
 
     #[test]

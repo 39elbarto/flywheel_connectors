@@ -66,7 +66,10 @@ impl std::fmt::Debug for WhatsAppConfig {
                 "app_secret",
                 &self.app_secret.as_ref().map(|_| "[REDACTED]"),
             )
-            .field("webhook_verify_token", &self.webhook_verify_token)
+            .field(
+                "webhook_verify_token",
+                &self.webhook_verify_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
@@ -748,14 +751,14 @@ impl WhatsAppConnector {
                         message: "Missing 'hub_mode' field".into(),
                     },
                 )?;
-                let token = req
-                    .input
-                    .get("hub_verify_token")
-                    .and_then(|v| v.as_str())
-                    .ok_or(FcpError::InvalidRequest {
+                let Some(verify_challenge) =
+                    req.input.get("hub_verify_token").and_then(|v| v.as_str())
+                else {
+                    return Err(FcpError::InvalidRequest {
                         code: 1005,
                         message: "Missing 'hub_verify_token' field".into(),
-                    })?;
+                    });
+                };
                 let challenge = req
                     .input
                     .get("hub_challenge")
@@ -766,7 +769,7 @@ impl WhatsAppConnector {
                     })?;
 
                 let result = webhook
-                    .verify_challenge(mode, token, challenge)
+                    .verify_challenge(mode, verify_challenge, challenge)
                     .map_err(|_| FcpError::Unauthorized {
                         code: 2002,
                         message: "Webhook challenge verification failed".into(),
@@ -1293,8 +1296,8 @@ mod tests {
             .unwrap();
 
         let mut req = base_invoke(connector.id(), OP_WEBHOOK_RECEIVE);
-        req.capability_token =
-            signed_capability_token(&signing_key, CAP_WEBHOOK, OP_WEBHOOK_RECEIVE);
+        let signed_grant = signed_capability_token(&signing_key, CAP_WEBHOOK, OP_WEBHOOK_RECEIVE);
+        req.capability_token.clone_from(&signed_grant);
         req.input = json!({
             "headers": {
                 "x-hub-signature-256": "sha256=deadbeef"
@@ -1303,13 +1306,11 @@ mod tests {
         });
 
         let err = connector.invoke(req).await.unwrap_err();
-        match err {
-            FcpError::Unauthorized { code, message } => {
-                assert_eq!(code, 2002);
-                assert!(message.contains("Webhook signature verification failed"));
-            }
-            other => panic!("expected Unauthorized, got {other:?}"),
-        }
+        assert!(matches!(
+            err,
+            FcpError::Unauthorized { code: 2002, ref message }
+                if message.contains("Webhook signature verification failed")
+        ));
     }
 
     #[test]
@@ -1337,7 +1338,7 @@ mod tests {
             retry: HttpRetryConfig::default(),
             request_timeout_ms: default_request_timeout_ms(),
             app_secret: Some("super_secret_app_key".into()),
-            webhook_verify_token: Some("verify_tok".into()),
+            webhook_verify_token: Some("super_secret_webhook_key".into()),
         };
         let debug_output = format!("{config:?}");
         assert!(
@@ -1349,12 +1350,15 @@ mod tests {
             "Debug output must not contain the raw app_secret"
         );
         assert!(
+            !debug_output.contains("super_secret_webhook_key"),
+            "Debug output must not contain the raw webhook_verify_token"
+        );
+        assert!(
             debug_output.contains("[REDACTED]"),
             "Debug output should show [REDACTED] for sensitive fields"
         );
         // Non-secret fields should still appear
         assert!(debug_output.contains("123"));
-        assert!(debug_output.contains("verify_tok"));
     }
 
     #[test]

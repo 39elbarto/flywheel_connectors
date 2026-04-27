@@ -91,6 +91,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_derive_session_keys"
+path = "fuzz_targets/derive_session_keys.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_fcps_frame"
 path = "fuzz_targets/fcps_frame.rs"
 test = false

@@ -634,5 +634,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_chunk_manifest"
+path = "fuzz_targets/chunk_manifest.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

@@ -85,6 +85,24 @@ fn max_buffer_bytes_for_budget(
     Ok((max_symbols, max_buffer_bytes))
 }
 
+fn checked_budget_multiply(lhs: usize, rhs: usize, limit: usize) -> Result<usize, DecodeError> {
+    lhs.checked_mul(rhs)
+        .ok_or(DecodeError::MemoryLimitExceeded {
+            used: usize::MAX,
+            limit,
+        })
+}
+
+fn checked_budget_add(total: &mut usize, amount: usize, limit: usize) -> Result<(), DecodeError> {
+    *total = total
+        .checked_add(amount)
+        .ok_or(DecodeError::MemoryLimitExceeded {
+            used: usize::MAX,
+            limit,
+        })?;
+    Ok(())
+}
+
 impl RaptorQDecoder {
     /// Create a decoder with the given transmission info.
     #[must_use]
@@ -380,6 +398,8 @@ impl RaptorQDecoder {
                 needed: self.needed(),
             });
         }
+
+        self.validate_dense_fallback_budget(total_rows, l, symbol_size, transfer_len)?;
 
         // Build the overdetermined matrix (total_rows x L).
         let mut matrix = ConstraintMatrix::zeros(total_rows, l);
@@ -717,6 +737,80 @@ impl RaptorQDecoder {
 
         Ok(())
     }
+
+    fn validate_dense_fallback_budget(
+        &self,
+        total_rows: usize,
+        l: usize,
+        symbol_size: usize,
+        transfer_len: usize,
+    ) -> Result<(), DecodeError> {
+        let limit = max_buffer_bytes_for_budget(
+            transfer_len,
+            symbol_size,
+            self.config.repair_ratio_bps,
+            self.config.max_object_size as usize,
+        )?
+        .1;
+
+        let gf256_bytes = std::mem::size_of::<crate::codec::gf256::Gf256>();
+        let usize_bytes = std::mem::size_of::<usize>();
+        let bool_bytes = std::mem::size_of::<bool>();
+
+        let dense_matrix_bytes = checked_budget_multiply(
+            checked_budget_multiply(total_rows, l, limit)?,
+            gf256_bytes,
+            limit,
+        )?;
+        let constraint_matrix_bytes =
+            checked_budget_multiply(checked_budget_multiply(l, l, limit)?, gf256_bytes, limit)?;
+        let rhs_bytes = checked_budget_multiply(total_rows, symbol_size, limit)?;
+        let intermediate_bytes = checked_budget_multiply(l, symbol_size, limit)?;
+        let pivot_bytes = checked_budget_multiply(total_rows, usize_bytes, limit)?;
+        let bool_state_bytes =
+            checked_budget_additive_bool_bytes(total_rows, l, bool_bytes, limit)?;
+
+        let mut required = 0usize;
+        // `try_reconstruct_dense` materializes two matrices (`matrix`,
+        // `constraints`), and `ConstraintMatrix::solve` clones both the
+        // matrix data and the RHS before Gaussian elimination. Keep the
+        // dense path inside the same hostile-decode budget as buffered
+        // symbol ingress instead of letting an O(L^2) fallback allocate
+        // well past the per-block cap.
+        checked_budget_add(&mut required, dense_matrix_bytes, limit)?;
+        checked_budget_add(&mut required, dense_matrix_bytes, limit)?;
+        checked_budget_add(&mut required, constraint_matrix_bytes, limit)?;
+        checked_budget_add(&mut required, rhs_bytes, limit)?;
+        checked_budget_add(&mut required, rhs_bytes, limit)?;
+        checked_budget_add(&mut required, intermediate_bytes, limit)?;
+        checked_budget_add(&mut required, pivot_bytes, limit)?;
+        checked_budget_add(&mut required, bool_state_bytes, limit)?;
+        checked_budget_add(&mut required, transfer_len, limit)?;
+        checked_budget_add(&mut required, symbol_size, limit)?;
+
+        if required > limit {
+            return Err(DecodeError::MemoryLimitExceeded {
+                used: required,
+                limit,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+fn checked_budget_additive_bool_bytes(
+    total_rows: usize,
+    l: usize,
+    bool_bytes: usize,
+    limit: usize,
+) -> Result<usize, DecodeError> {
+    let used_col_bytes = checked_budget_multiply(l, bool_bytes, limit)?;
+    let used_row_bytes = checked_budget_multiply(total_rows, bool_bytes, limit)?;
+    let mut total = 0usize;
+    checked_budget_add(&mut total, used_col_bytes, limit)?;
+    checked_budget_add(&mut total, used_row_bytes, limit)?;
+    Ok(total)
 }
 
 /// Decode admission controller (NORMATIVE).
@@ -2601,6 +2695,45 @@ mod tests {
             .add_symbol(source[0].0, source[0].1.clone())
             .unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn decoder_rejects_dense_fallback_that_exceeds_hostile_decode_budget() {
+        let config = RaptorQConfig {
+            symbol_size: 1,
+            repair_ratio_bps: 0,
+            max_object_size: 1001,
+            ..test_config()
+        };
+        let payload: Vec<u8> = (0..1001_u32)
+            .map(|i| u8::try_from(i % 251).expect("payload byte fits u8"))
+            .collect();
+        let encoder = RaptorQEncoder::new(&payload, &config).unwrap();
+        let source = encoder.encode_source();
+        let oti = encoder.transmission_info().with_payload_hash([0xCD; 32]);
+
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        let mut dense_budget_err = None;
+        for (esi, data) in source {
+            match decoder.add_symbol(esi, data) {
+                Err(err @ DecodeError::MemoryLimitExceeded { .. }) => {
+                    dense_budget_err = Some(err);
+                    break;
+                }
+                Ok(None) => {}
+                Ok(Some(_)) => panic!("wrong payload hash must not decode successfully"),
+                Err(other) => panic!("expected dense-budget guard, got {other:?}"),
+            }
+        }
+
+        let err = dense_budget_err.expect("dense fallback should be rejected by the budget guard");
+        match err {
+            DecodeError::MemoryLimitExceeded { used, limit } => {
+                assert_eq!(limit, 2001);
+                assert!(used > limit);
+            }
+            other => panic!("expected MemoryLimitExceeded, got {other:?}"),
+        }
     }
 
     #[test]

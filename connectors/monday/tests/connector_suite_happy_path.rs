@@ -148,27 +148,13 @@ impl FcpConnector for MondayAdapter {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> fcp_core::FcpResult<SimulateResponse> {
-        let value = self
-            .connector
-            .handle_simulate(json!({ "operation_id": req.operation.as_str() }))
-            .await?;
-        if value
-            .get("allowed")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-        {
-            Ok(SimulateResponse::allowed(req.id))
-        } else {
-            Ok(SimulateResponse::denied(
-                req.id,
-                value
-                    .get("reason")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("Operation denied")
-                    .to_string(),
-                "MONDAY-SIMULATE-DENIED".to_string(),
-            ))
-        }
+        let value = serde_json::to_value(req).map_err(|err| FcpError::Internal {
+            message: format!("failed to serialize simulate request: {err}"),
+        })?;
+        let value = self.connector.handle_simulate(value).await?;
+        serde_json::from_value(value).map_err(|err| FcpError::Internal {
+            message: format!("failed to deserialize simulate response: {err}"),
+        })
     }
 
     async fn subscribe(&self, _req: SubscribeRequest) -> fcp_core::FcpResult<SubscribeResponse> {

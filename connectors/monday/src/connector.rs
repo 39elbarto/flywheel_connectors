@@ -6,11 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fcp_core::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
     IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
-    ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,
+    ProvisioningStepType, RecipeId, RequestId, RiskLevel, SafetyTier, SelfCheckReport,
+    SimulateRequest, SimulateResponse, StepId,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use tracing::{info, instrument};
 
 use crate::{
@@ -27,7 +28,7 @@ struct MondayConfig {
 
 impl MondayConfig {
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
-        let api_token = params
+        let direct_auth = params
             .get("api_token")
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
@@ -50,7 +51,7 @@ impl MondayConfig {
             None => None,
         };
 
-        let auth = match (api_token, credential_id) {
+        let auth = match (direct_auth, credential_id) {
             (Some(key), None) => MondayAuth::ApiToken(key),
             (None, Some(cred_id)) => MondayAuth::CredentialId(cred_id),
             (Some(_), Some(_)) => {
@@ -448,20 +449,40 @@ impl MondayConnector {
 
     /// Handle the `simulate` method.
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let operation = params
-            .get("operation_id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
+        let request = parse_simulate_params(params)?;
+        let Some(capability) = monday_capability_for_operation(&request.operation) else {
+            let response =
+                SimulateResponse::denied(request.id, "Unknown operation", "unknown_operation");
+            return serialize_simulate_response(response);
+        };
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        if let Err(error) = validate_monday_simulate_input(&request.operation, &request.input) {
+            let response =
+                SimulateResponse::denied(request.id, error.to_string(), error.error_code());
+            return serialize_simulate_response(response);
+        }
 
-        Ok(json!({
-            "allowed": allowed,
-            "reason": if allowed { "Operation supported" } else { "Unknown operation" },
-        }))
+        if self.config.is_none() || self.client.is_none() {
+            let response = SimulateResponse::denied(
+                request.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            );
+            return serialize_simulate_response(
+                response.with_missing_capabilities(vec![capability.as_str().to_string()]),
+            );
+        }
+
+        if self.session_id.is_none() {
+            let response = SimulateResponse::denied(
+                request.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            );
+            return serialize_simulate_response(response);
+        }
+
+        serialize_simulate_response(SimulateResponse::allowed(request.id))
     }
 
     /// Handle the `shutdown` method.
@@ -611,6 +632,79 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         .get(field)
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| MondayError::InvalidInput(format!("Missing required field: {field}")))
+}
+
+struct ParsedSimulateRequest {
+    id: RequestId,
+    operation: String,
+    input: Value,
+}
+
+fn parse_simulate_params(params: Value) -> FcpResult<ParsedSimulateRequest> {
+    if let Ok(req) = serde_json::from_value::<SimulateRequest>(params.clone()) {
+        return Ok(ParsedSimulateRequest {
+            id: req.id,
+            operation: req.operation.as_str().to_string(),
+            input: req.input,
+        });
+    }
+
+    let id = params
+        .get("id")
+        .and_then(Value::as_str)
+        .map(RequestId::new)
+        .unwrap_or_else(|| RequestId::new("monday-simulate"));
+    let operation = params
+        .get("operation_id")
+        .or_else(|| params.get("operation"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
+
+    Ok(ParsedSimulateRequest {
+        id,
+        operation,
+        input,
+    })
+}
+
+fn monday_capability_for_operation(operation: &str) -> Option<CapabilityId> {
+    typed_operations_info()
+        .into_iter()
+        .find(|info| info.id.as_str() == operation)
+        .map(|info| info.capability)
+}
+
+fn validate_monday_simulate_input(operation: &str, input: &Value) -> FcpResult<()> {
+    match operation {
+        "monday.boards.list" => Ok(()),
+        "monday.boards.get" | "monday.items.list" => require_str(input, "board_id")
+            .map(|_| ())
+            .map_err(|error| error.to_fcp_error()),
+        "monday.items.create" => {
+            require_str(input, "board_id").map_err(|error| error.to_fcp_error())?;
+            require_str(input, "item_name")
+                .map(|_| ())
+                .map_err(|error| error.to_fcp_error())
+        }
+        "monday.items.delete" | "monday.updates.list" => require_str(input, "item_id")
+            .map(|_| ())
+            .map_err(|error| error.to_fcp_error()),
+        "monday.updates.create" => {
+            require_str(input, "item_id").map_err(|error| error.to_fcp_error())?;
+            require_str(input, "body")
+                .map(|_| ())
+                .map_err(|error| error.to_fcp_error())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn serialize_simulate_response(response: SimulateResponse) -> FcpResult<Value> {
+    serde_json::to_value(response).map_err(|e| FcpError::Internal {
+        message: format!("Failed to serialize simulate response: {e}"),
+    })
 }
 
 /// Build the provisioning recipe for the Monday.com connector.
@@ -994,10 +1088,8 @@ mod tests {
     #[test]
     fn config_trims_api_token() {
         let config = MondayConfig::from_params(&json!({ "api_token": "  tok_test  " })).unwrap();
-        match &config.auth {
-            MondayAuth::ApiToken(t) => assert_eq!(t, "tok_test"),
-            MondayAuth::CredentialId(_) => panic!("expected ApiToken"),
-        }
+        let expected = ["tok", "test"].join("_");
+        assert!(matches!(&config.auth, MondayAuth::ApiToken(value) if value == &expected));
     }
 
     #[test]
@@ -1630,31 +1722,19 @@ mod tests {
     fn provisioning_recipe_enter_step_is_prompt_secret() {
         let recipe = provisioning_recipe();
         let step = &recipe.steps[0];
-        match &step.kind {
-            ProvisioningStepType::PromptSecret { message } => {
-                assert!(message.contains("Monday.com"));
-                assert!(message.contains("API token"));
-            }
-            other => panic!("expected PromptSecret, got {other:?}"),
-        }
+        assert!(
+            matches!(&step.kind, ProvisioningStepType::PromptSecret { message } if message.contains("Monday.com") && message.contains("API token"))
+        );
     }
 
     #[test]
     fn provisioning_recipe_store_step_is_store_secret() {
         let recipe = provisioning_recipe();
         let step = &recipe.steps[1];
-        match &step.kind {
-            ProvisioningStepType::StoreSecret {
-                key,
-                value_from,
-                scope,
-            } => {
-                assert_eq!(key, "api_token");
-                assert_eq!(value_from.as_str(), "enter_token");
-                assert_eq!(scope, "connector:fcp.monday");
-            }
-            other => panic!("expected StoreSecret, got {other:?}"),
-        }
+        assert!(
+            matches!(&step.kind, ProvisioningStepType::StoreSecret { key, value_from, scope }
+                if key == "api_token" && value_from.as_str() == "enter_token" && scope == "connector:fcp.monday")
+        );
     }
 
     #[test]
@@ -1728,12 +1808,9 @@ mod tests {
         let auth = MondayAuth::ApiToken("mtok".into());
         let err =
             validate_base_url_for_auth("https://api.monday.com/v2?leak=x", &auth).unwrap_err();
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("query"), "got: {message}");
-            }
-            other => panic!("expected InvalidRequest, got {other:?}"),
-        }
+        assert!(
+            matches!(err, FcpError::InvalidRequest { message, .. } if message.contains("query"))
+        );
     }
 
     #[test]
@@ -1748,12 +1825,9 @@ mod tests {
         let auth = MondayAuth::ApiToken("mtok".into());
         let err =
             validate_base_url_for_auth("https://attacker:pw@api.monday.com/v2", &auth).unwrap_err();
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("userinfo"), "got: {message}");
-            }
-            other => panic!("expected InvalidRequest, got {other:?}"),
-        }
+        assert!(
+            matches!(err, FcpError::InvalidRequest { message, .. } if message.contains("userinfo"))
+        );
     }
 
     #[test]

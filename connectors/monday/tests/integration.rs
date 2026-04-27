@@ -16,6 +16,7 @@ use serde_json::json;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use fcp_core::SimulateResponse;
 use fcp_monday::connector::MondayConnector;
 
 /// Helper: GraphQL response wrapper for Monday.com API.
@@ -706,26 +707,41 @@ async fn unknown_operation() {
 async fn simulate_known() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(
+    let response: SimulateResponse = serde_json::from_value(
         c.handle_simulate(json!({"operation_id": "monday.boards.list"}))
             .await
-            .unwrap()["allowed"]
-            .as_bool()
-            .unwrap()
-    );
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(response.would_succeed);
 }
 
 #[fcp_async_core::runtime::test]
 async fn simulate_unknown() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
-    assert!(
-        !c.handle_simulate(json!({"operation_id": "monday.nope"}))
+    let response: SimulateResponse = serde_json::from_value(
+        c.handle_simulate(json!({"operation_id": "monday.nope"}))
             .await
-            .unwrap()["allowed"]
-            .as_bool()
-            .unwrap()
-    );
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!response.would_succeed);
+    assert_eq!(response.denial_code.as_deref(), Some("unknown_operation"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_missing_required_input() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let response: SimulateResponse = serde_json::from_value(
+        c.handle_simulate(json!({"operation_id": "monday.items.create"}))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!response.would_succeed);
+    assert_eq!(response.denial_code.as_deref(), Some("FCP-4000"));
 }
 
 // -- Counters --

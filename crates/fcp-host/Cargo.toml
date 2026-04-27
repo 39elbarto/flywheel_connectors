@@ -60,3 +60,8 @@ fcp-testkit = { path = "../fcp-testkit" }
 reqwest.workspace = true
 tempfile = "3"
 insta.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "cold_start"
+harness = false

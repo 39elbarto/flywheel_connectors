@@ -3905,6 +3905,7 @@ dependencies = [
  "blake3",
  "chrono",
  "ciborium",
+ "criterion",
  "fcp-async-core",
  "fcp-cbor",
  "fcp-core",

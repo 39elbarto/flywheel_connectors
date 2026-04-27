@@ -525,13 +525,16 @@ async fn error_401() {
         .await;
 
     let c = setup_connector(&server.uri()).await;
-    assert!(
-        c.handle_invoke(json!({
+    let err = c
+        .handle_invoke(json!({
             "operation_id": "amplitude.cohorts.list",
             "input": {}
         }))
         .await
-        .is_err()
+        .expect_err("401 should map to Unauthorized");
+    assert!(
+        matches!(err, fcp_core::FcpError::Unauthorized { .. }),
+        "expected Unauthorized, got {err:?}"
     );
 }
 

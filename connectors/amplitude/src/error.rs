@@ -94,12 +94,9 @@ impl AmplitudeError {
                 retryable: true,
                 retry_after: self.retry_after(),
             },
-            Self::Unauthorized => FcpError::External {
-                service: "amplitude".into(),
-                message: "Authentication failed".into(),
-                status_code: Some(401),
-                retryable: false,
-                retry_after: None,
+            Self::Unauthorized => FcpError::Unauthorized {
+                code: 2001,
+                message: "Invalid Amplitude API key or secret key".into(),
             },
             Self::Forbidden => FcpError::External {
                 service: "amplitude".into(),
@@ -287,17 +284,11 @@ mod tests {
     #[test]
     fn unauthorized_to_fcp_error() {
         match AmplitudeError::Unauthorized.to_fcp_error() {
-            FcpError::External {
-                service,
-                status_code,
-                retryable,
-                ..
-            } => {
-                assert_eq!(service, "amplitude");
-                assert_eq!(status_code, Some(401));
-                assert!(!retryable);
+            FcpError::Unauthorized { code, message } => {
+                assert_eq!(code, 2001);
+                assert!(message.contains("Amplitude"));
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected Unauthorized, got {other:?}"),
         }
     }
 
@@ -628,10 +619,10 @@ mod tests {
     #[test]
     fn unauthorized_to_fcp_error_message() {
         match AmplitudeError::Unauthorized.to_fcp_error() {
-            FcpError::External { message, .. } => {
-                assert!(message.contains("Authentication"));
+            FcpError::Unauthorized { message, .. } => {
+                assert!(message.contains("Invalid Amplitude"));
             }
-            other => panic!("expected External, got {other:?}"),
+            other => panic!("expected Unauthorized, got {other:?}"),
         }
     }
 

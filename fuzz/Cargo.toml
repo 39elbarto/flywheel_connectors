@@ -49,6 +49,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_canonical_id_validate"
+path = "fuzz_targets/canonical_id_validate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_cose_roundtrip"
 path = "fuzz_targets/cose_roundtrip.rs"
 test = false

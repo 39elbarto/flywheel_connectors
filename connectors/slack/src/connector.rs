@@ -598,7 +598,88 @@ impl SlackConnector {
                 message: format!("Invalid simulate request: {e}"),
             })?;
 
-        let response = SimulateResponse::allowed(req.id);
+        let operation = req.operation.as_str();
+        if !is_supported_operation(operation) {
+            let error = FcpError::OperationNotGranted {
+                operation: operation.into(),
+            };
+            return Self::serialize_simulate_response(SimulateResponse::denied(
+                req.id,
+                error.to_string(),
+                error.error_code(),
+            ));
+        }
+
+        let cap_id: CapabilityId = required_capability_for_operation(operation)
+            .parse()
+            .map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "Invalid capability ID format".into(),
+            })?;
+
+        if let Err(error) = validate_simulate_input(operation, &req.input) {
+            return Self::serialize_simulate_response(SimulateResponse::denied(
+                req.id,
+                error.to_string(),
+                error.error_code(),
+            ));
+        }
+
+        let resource_uris = match resource_uris_for_operation(operation, &req.input) {
+            Ok(resource_uris) => resource_uris,
+            Err(error) => {
+                return Self::serialize_simulate_response(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ));
+            }
+        };
+
+        if self.client.is_none() {
+            let error = FcpError::NotConfigured;
+            return Self::serialize_simulate_response(SimulateResponse::denied(
+                req.id,
+                error.to_string(),
+                error.error_code(),
+            ));
+        }
+
+        let Some(verifier) = &self.verifier else {
+            let error = FcpError::NotHandshaken;
+            return Self::serialize_simulate_response(SimulateResponse::denied(
+                req.id,
+                error.to_string(),
+                error.error_code(),
+            ));
+        };
+
+        let response = match verifier.verify_bound(
+            req.capability_token,
+            &cap_id,
+            &req.operation,
+            &resource_uris,
+        ) {
+            Ok(_) => SimulateResponse::allowed(req.id),
+            Err(error) => {
+                let is_grant_mismatch = matches!(
+                    error,
+                    FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+                );
+                let mut response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                if is_grant_mismatch {
+                    response =
+                        response.with_missing_capabilities(vec![cap_id.as_str().to_string()]);
+                }
+                response
+            }
+        };
+
+        Self::serialize_simulate_response(response)
+    }
+
+    fn serialize_simulate_response(response: SimulateResponse) -> FcpResult<serde_json::Value> {
         serde_json::to_value(response).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize response: {e}"),
         })
@@ -1506,6 +1587,68 @@ fn required_capability_for_operation(operation: &str) -> &str {
     }
 }
 
+fn is_supported_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "slack.post_message"
+            | "slack.reply_thread"
+            | "slack.get_channel_history"
+            | "slack.search_messages"
+            | "slack.list_channels"
+            | "slack.get_user_info"
+            | "slack.upload_file"
+            | "slack.download_file"
+            | "slack.add_reaction"
+            | "slack.set_channel_topic"
+    )
+}
+
+fn validate_simulate_input(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+    match operation {
+        "slack.post_message" => {
+            require_str(input, "channel")?;
+            require_str(input, "text")?;
+        }
+        "slack.reply_thread" => {
+            require_str(input, "channel")?;
+            require_str(input, "text")?;
+            require_str(input, "thread_ts")?;
+        }
+        "slack.get_channel_history" | "slack.set_channel_topic" => {
+            require_str(input, "channel")?;
+            if operation == "slack.set_channel_topic" {
+                require_str(input, "topic")?;
+            }
+        }
+        "slack.search_messages" => {
+            require_str(input, "query")?;
+        }
+        "slack.get_user_info" => {
+            require_str(input, "user")?;
+        }
+        "slack.upload_file" => {
+            require_str(input, "channels")?;
+            require_object_id_str(input, "content_object_id")?;
+            require_str(input, "resolved_content")?;
+        }
+        "slack.download_file" => {
+            require_str(input, "file_id")?;
+        }
+        "slack.add_reaction" => {
+            require_str(input, "channel")?;
+            require_str(input, "timestamp")?;
+            require_str(input, "name")?;
+        }
+        "slack.list_channels" => {}
+        _ => {
+            return Err(FcpError::OperationNotGranted {
+                operation: operation.into(),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn resource_uris_for_operation(
     operation: &str,
     input: &serde_json::Value,
@@ -1741,6 +1884,23 @@ mod tests {
         CapabilityToken::from_raw(cose)
     }
 
+    fn simulate_request(
+        signing_key: &Ed25519SigningKey,
+        cap: &str,
+        operation: &'static str,
+        input: serde_json::Value,
+        resource_allow: &[&str],
+    ) -> serde_json::Value {
+        let req = SimulateRequest::new(
+            ConnectorId::from_static("slack"),
+            OperationId::from_static(operation),
+            ZoneId::work(),
+            input,
+            generate_token_with_resources(signing_key, cap, resource_allow),
+        );
+        serde_json::to_value(req).expect("serialize simulate request")
+    }
+
     #[test]
     fn test_resource_uris_for_operation_bind_slack_targets() {
         let uris = resource_uris_for_operation(
@@ -1792,6 +1952,189 @@ mod tests {
             .unwrap();
 
         assert_eq!(result["status"], "accepted");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_without_config_denied() {
+        let connector = SlackConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let response: SimulateResponse = serde_json::from_value(
+            connector
+                .handle_simulate(simulate_request(
+                    &signing_key,
+                    "slack.post_message",
+                    "slack.post_message",
+                    json!({"channel": "C123", "text": "hello"}),
+                    &["*"],
+                ))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-5002"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_before_handshake_denied() {
+        let mut connector = SlackConnector::new();
+        connector.client = Some(
+            SlackClient::new("fake_key")
+                .unwrap()
+                .with_base_url("http://localhost:9999"),
+        );
+        connector.base.set_configured(true);
+
+        let signing_key = Ed25519SigningKey::generate();
+        let response: SimulateResponse = serde_json::from_value(
+            connector
+                .handle_simulate(simulate_request(
+                    &signing_key,
+                    "slack.post_message",
+                    "slack.post_message",
+                    json!({"channel": "C123", "text": "hello"}),
+                    &["*"],
+                ))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-5003"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_missing_required_input_denied() {
+        let connector = SlackConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let response: SimulateResponse = serde_json::from_value(
+            connector
+                .handle_simulate(simulate_request(
+                    &signing_key,
+                    "slack.post_message",
+                    "slack.post_message",
+                    json!({"channel": "C123"}),
+                    &["*"],
+                ))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-1003"));
+        assert!(
+            response
+                .failure_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("text")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_unknown_operation_denied() {
+        let connector = SlackConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let response: SimulateResponse = serde_json::from_value(
+            connector
+                .handle_simulate(simulate_request(
+                    &signing_key,
+                    "slack.noop",
+                    "slack.noop",
+                    json!({}),
+                    &["*"],
+                ))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-3003"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_known_operation_allowed() {
+        let mut connector = SlackConnector::new();
+        connector.client = Some(
+            SlackClient::new("fake_key")
+                .unwrap()
+                .with_base_url("http://localhost:9999"),
+        );
+        connector.base.set_configured(true);
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["slack.post_message"]
+            }))
+            .await
+            .unwrap();
+
+        let response: SimulateResponse = serde_json::from_value(
+            connector
+                .handle_simulate(simulate_request(
+                    &signing_key,
+                    "slack.post_message",
+                    "slack.post_message",
+                    json!({"channel": "C123", "text": "hello"}),
+                    &["*"],
+                ))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert!(response.would_succeed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_rejects_channel_outside_resource_allow() {
+        let mut connector = SlackConnector::new();
+        connector.client = Some(
+            SlackClient::new("fake_key")
+                .unwrap()
+                .with_base_url("http://localhost:9999"),
+        );
+        connector.base.set_configured(true);
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["slack.post_message"]
+            }))
+            .await
+            .unwrap();
+
+        let response: SimulateResponse = serde_json::from_value(
+            connector
+                .handle_simulate(simulate_request(
+                    &signing_key,
+                    "slack.post_message",
+                    "slack.post_message",
+                    json!({"channel": "C-denied", "text": "hello"}),
+                    &["slack:channel:C-allowed"],
+                ))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-3004"));
     }
 
     #[fcp_async_core::runtime::test]

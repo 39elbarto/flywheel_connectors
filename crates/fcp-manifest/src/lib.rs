@@ -162,6 +162,21 @@ impl ConnectorManifest {
             policy.validate()?;
         }
 
+        if self
+            .policy
+            .as_ref()
+            .is_some_and(|policy| policy.require_transparency_log)
+            && !self
+                .signatures
+                .as_ref()
+                .is_some_and(|signatures| signatures.transparency_log_entry.is_some())
+        {
+            return Err(ManifestError::Invalid {
+                field: "signatures.transparency_log_entry",
+                message: "required when policy.require_transparency_log is true".into(),
+            });
+        }
+
         if self.zones.forbidden.iter().any(|z| z == &self.zones.home) {
             return Err(ManifestError::Invalid {
                 field: "zones.forbidden",

@@ -1144,6 +1144,7 @@ test_op = ["global"]
 
 [signatures]
 publisher_threshold = "1-of-1"
+transparency_log_entry = "objectid:{oid1}"
 [[signatures.publisher_signatures]]
 kid = "pub1"
 sig = "base64:AQIDBA=="
@@ -1171,4 +1172,33 @@ trusted_builders = ["github-actions"]
     assert!(manifest.supply_chain.is_some());
     assert!(manifest.policy.is_some());
     assert!(!manifest.provides.events.is_empty());
+}
+
+#[test]
+fn policy_requires_transparency_log_entry() {
+    let oid = "aa".repeat(32);
+    let toml = base_manifest()
+        + &format!(
+            r#"
+[signatures]
+publisher_threshold = "1-of-1"
+[[signatures.publisher_signatures]]
+kid = "pub1"
+sig = "base64:AQIDBA=="
+
+[[supply_chain.attestations]]
+type = "in-toto"
+object_id = "objectid:{oid}"
+
+[policy]
+require_transparency_log = true
+require_attestation_types = ["in-toto"]
+"#
+        );
+
+    let err = parse_err(&toml);
+    assert!(
+        err.contains("signatures.transparency_log_entry"),
+        "policy.require_transparency_log must require transparency-log evidence, got {err}"
+    );
 }

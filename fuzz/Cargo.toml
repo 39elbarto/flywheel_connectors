@@ -28,6 +28,7 @@ fcp-bootstrap = { path = "../crates/fcp-bootstrap" }
 fcp-cbor = { path = "../crates/fcp-cbor" }
 fcp-core = { path = "../crates/fcp-core" }
 fcp-crypto = { path = "../crates/fcp-crypto" }
+fcp-arxiv = { path = "../connectors/arxiv" }
 fcp-dingtalk = { path = "../connectors/dingtalk" }
 fcp-gmail = { path = "../connectors/gmail" }
 fcp-graphql = { path = "../crates/fcp-graphql" }
@@ -264,6 +265,13 @@ bench = false
 [[bin]]
 name = "fuzz_github_webhook_payload"
 path = "fuzz_targets/github_webhook_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_arxiv_atom_parser"
+path = "fuzz_targets/arxiv_atom_parser.rs"
 test = false
 doc = false
 bench = false
@@ -600,6 +608,13 @@ bench = false
 [[bin]]
 name = "fuzz_symbol_envelope_layout"
 path = "fuzz_targets/symbol_envelope_layout.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_fcpc_seal_open"
+path = "fuzz_targets/fcpc_seal_open.rs"
 test = false
 doc = false
 bench = false

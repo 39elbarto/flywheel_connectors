@@ -654,7 +654,7 @@ pub mod channel {
     use std::pin::Pin;
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
 
     use super::{AsyncError, Instrumentation, NoopInstrumentation};
@@ -766,8 +766,11 @@ pub mod channel {
     pub mod mpsc {
         use std::sync::Arc;
 
-        use super::{AtomicBool, AtomicUsize, Ordering, StdMutex, VecDeque, decrement_depth};
+        use super::{AtomicUsize, Ordering, StdMutex, VecDeque, decrement_depth};
         use crate::compatibility_cx;
+
+        #[cfg(test)]
+        type UnboundedSendHook = Arc<dyn Fn() + Send + Sync + 'static>;
 
         /// Bounded mpsc send error.
         #[derive(Debug, PartialEq, Eq)]
@@ -850,32 +853,12 @@ pub mod channel {
             closed: bool,
         }
 
-        #[cfg(test)]
-        static UNBOUNDED_SEND_HOOK: std::sync::OnceLock<
-            StdMutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>,
-        > = std::sync::OnceLock::new();
-
-        #[cfg(test)]
-        pub(crate) fn unbounded_send_hook_cell()
-        -> &'static StdMutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>> {
-            UNBOUNDED_SEND_HOOK.get_or_init(|| StdMutex::new(None))
-        }
-
-        #[cfg(test)]
-        fn run_unbounded_send_hook() {
-            let hook = unbounded_send_hook_cell()
-                .lock()
-                .expect("unbounded send hook poisoned")
-                .clone();
-            if let Some(hook) = hook {
-                hook();
-            }
-        }
-
         struct UnboundedShared<T> {
             state: StdMutex<UnboundedState<T>>,
             sender_count: AtomicUsize,
             notify: asupersync::sync::Notify,
+            #[cfg(test)]
+            send_hook: StdMutex<Option<UnboundedSendHook>>,
         }
 
         impl<T> std::fmt::Debug for UnboundedShared<T> {
@@ -895,7 +878,7 @@ pub mod channel {
                     return Err(SendError(value));
                 }
                 #[cfg(test)]
-                run_unbounded_send_hook();
+                self.run_send_hook();
                 state.queue.push_back(value);
                 drop(state);
                 self.notify.notify_one();
@@ -916,6 +899,18 @@ pub mod channel {
             fn close(&self) {
                 self.state.lock().expect("unbounded queue poisoned").closed = true;
                 self.notify.notify_waiters();
+            }
+
+            #[cfg(test)]
+            fn run_send_hook(&self) {
+                let hook = self
+                    .send_hook
+                    .lock()
+                    .expect("unbounded send hook poisoned")
+                    .clone();
+                if let Some(hook) = hook {
+                    hook();
+                }
             }
         }
 
@@ -1101,6 +1096,18 @@ pub mod channel {
             }
         }
 
+        #[cfg(test)]
+        pub(crate) fn set_unbounded_send_hook<T>(
+            sender: &UnboundedSender<T>,
+            hook: Option<UnboundedSendHook>,
+        ) {
+            *sender
+                .shared
+                .send_hook
+                .lock()
+                .expect("unbounded send hook poisoned") = hook;
+        }
+
         /// Create a bounded mpsc channel.
         #[must_use]
         pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
@@ -1130,6 +1137,8 @@ pub mod channel {
                 }),
                 sender_count: AtomicUsize::new(1),
                 notify: asupersync::sync::Notify::new(),
+                #[cfg(test)]
+                send_hook: StdMutex::new(None),
             });
             (
                 UnboundedSender {
@@ -1908,6 +1917,7 @@ pub mod task {
     use std::pin::Pin;
     use std::task::{Context, Poll};
 
+    use crate::AsyncError;
     use futures_util::future::{AbortHandle, Abortable, FutureExt};
 
     /// Join error returned by spawned tasks.
@@ -2045,6 +2055,9 @@ pub mod task {
         }
     }
 
+    const SPAWN_OUTSIDE_RUNTIME_MESSAGE: &str =
+        "fcp_async_core::task::spawn called outside an active runtime";
+
     /// Spawn an asynchronous task.
     ///
     /// The spawned task inherits the Tokio compatibility context from the
@@ -2059,8 +2072,33 @@ pub mod task {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        let runtime_context = crate::runtime::current_runtime_context()
-            .expect("fcp_async_core::task::spawn called outside an active runtime");
+        match try_spawn(future) {
+            Ok(handle) => handle,
+            Err(AsyncError::Runtime { message }) => panic!("{message}"),
+            Err(error) => panic!("fcp_async_core::task::spawn failed: {error}"),
+        }
+    }
+
+    /// Try to spawn an asynchronous task.
+    ///
+    /// The spawned task inherits the Tokio compatibility context from the
+    /// calling thread so that crates depending on `tokio` (e.g., `reqwest`,
+    /// `wiremock`) work correctly even when the task runs on an asupersync
+    /// worker thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AsyncError::Runtime`] when called outside an active
+    /// `fcp_async_core` runtime.
+    pub fn try_spawn<F>(future: F) -> Result<JoinHandle<F::Output>, AsyncError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let runtime_context =
+            crate::runtime::current_runtime_context().ok_or_else(|| AsyncError::Runtime {
+                message: SPAWN_OUTSIDE_RUNTIME_MESSAGE.to_string(),
+            })?;
         let runtime = runtime_context.handle.clone();
 
         // Capture the Tokio compat handle from the calling thread so the
@@ -2090,11 +2128,11 @@ pub mod task {
             let _ = result_tx.send(result);
         }));
 
-        JoinHandle {
+        Ok(JoinHandle {
             receiver: result_rx,
             abort_handle,
             detached: false,
-        }
+        })
     }
 
     /// Spawn a task that is allowed to outlive the returned handle.
@@ -4001,17 +4039,17 @@ mod tests {
 
         {
             let release_rx = Arc::clone(&release_rx);
-            let mut hook = channel::mpsc::unbounded_send_hook_cell()
-                .lock()
-                .expect("unbounded send hook poisoned");
-            *hook = Some(Arc::new(move || {
-                entered_tx.send(()).expect("entered signal");
-                release_rx
-                    .lock()
-                    .expect("release receiver mutex poisoned")
-                    .recv()
-                    .expect("release signal");
-            }));
+            channel::mpsc::set_unbounded_send_hook(
+                &tx,
+                Some(Arc::new(move || {
+                    entered_tx.send(()).expect("entered signal");
+                    release_rx
+                        .lock()
+                        .expect("release receiver mutex poisoned")
+                        .recv()
+                        .expect("release signal");
+                })),
+            );
         }
 
         thread::scope(|scope| {
@@ -4037,12 +4075,7 @@ mod tests {
             closer.join().expect("closer thread join");
         });
 
-        {
-            let mut hook = channel::mpsc::unbounded_send_hook_cell()
-                .lock()
-                .expect("unbounded send hook poisoned");
-            *hook = None;
-        }
+        channel::mpsc::set_unbounded_send_hook(&tx, None);
 
         let rx = Arc::into_inner(rx)
             .expect("receiver arc should be unique")
@@ -4384,6 +4417,25 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────
     // Task module: spawn, JoinHandle
     // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn try_spawn_outside_runtime_returns_runtime_error() {
+        let err = task::try_spawn(async { 1_u32 })
+            .expect_err("runtime mismatch should be returned without panicking");
+        assert_eq!(
+            err,
+            AsyncError::Runtime {
+                message: "fcp_async_core::task::spawn called outside an active runtime".to_string(),
+            }
+        );
+    }
+
+    #[runtime::test]
+    async fn try_spawn_and_join() {
+        let handle = task::try_spawn(async { 42_u32 }).expect("spawn should succeed in runtime");
+        let result = handle.await.expect("should join");
+        assert_eq!(result, 42);
+    }
 
     #[runtime::test]
     async fn spawn_and_join() {

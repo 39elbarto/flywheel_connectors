@@ -554,5 +554,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_store_offline_access"
+path = "fuzz_targets/store_offline_access.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

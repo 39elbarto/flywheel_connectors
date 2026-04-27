@@ -39,5 +39,6 @@ wiremock.workspace = true
 chrono.workspace = true
 ciborium.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
+fcp-e2e = { path = "../../crates/fcp-e2e" }
 fcp-manifest = { path = "../../crates/fcp-manifest" }
 fcp-testkit = { path = "../../crates/fcp-testkit" }

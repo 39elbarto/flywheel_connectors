@@ -2845,6 +2845,7 @@ dependencies = [
  "fcp-registry",
  "fcp-sandbox",
  "fcp-store",
+ "fcp-streaming",
  "fcp-tailscale",
  "fcp-webhook",
  "hex",

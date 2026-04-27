@@ -202,7 +202,7 @@ mod tests {
     fn config_rejects_graph_host_with_userinfo_query_or_fragment() {
         for graph_host in [
             "https://user:pass@graph.microsoft.com",
-            "https://graph.microsoft.com?token=leak",
+            "https://graph.microsoft.com?trace=1",
             "https://graph.microsoft.com#fragment",
         ] {
             let result = OutlookConfig::from_value(serde_json::json!({
@@ -218,9 +218,11 @@ mod tests {
         let config = OutlookConfig::from_value(serde_json::json!({
             "access_token": "tok",
             "graph_host": "http://localhost:8080"
-        }))
-        .unwrap();
-        assert_eq!(config.base_url(), "http://localhost:8080");
+        }));
+        assert!(
+            matches!(config.as_ref().map(OutlookConfig::base_url), Ok(base_url) if base_url == "http://localhost:8080"),
+            "localhost test override should be accepted, got {config:?}"
+        );
     }
 
     #[test]

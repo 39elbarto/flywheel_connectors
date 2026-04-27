@@ -272,6 +272,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_github_api_error_response"
+path = "fuzz_targets/github_api_error_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_arxiv_atom_parser"
 path = "fuzz_targets/arxiv_atom_parser.rs"
 test = false

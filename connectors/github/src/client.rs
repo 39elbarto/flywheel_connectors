@@ -665,6 +665,32 @@ fn parse_error_response(
     }
 }
 
+/// Fuzz-only entry points for GitHub client response parsers.
+///
+/// Exposed for `fuzz_github_api_error_response` so the fuzz crate can drive the
+/// private REST error body parser across status-code and retry-after variants.
+///
+/// Bead flywheel_connectors-65lt5.
+#[doc(hidden)]
+pub mod __fuzz {
+    use bytes::Bytes;
+    use reqwest::StatusCode;
+
+    use crate::error::GitHubError;
+
+    use super::parse_error_response;
+
+    /// Parse a raw GitHub API error body with a caller-supplied HTTP status.
+    pub fn parse_api_error_response(
+        status_code: u16,
+        body: &[u8],
+        retry_after_secs: Option<u64>,
+    ) -> GitHubError {
+        let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        parse_error_response(status, &Bytes::copy_from_slice(body), retry_after_secs)
+    }
+}
+
 /// URL-encode a query string.
 mod urlencoding {
     use std::fmt::Write;

@@ -3,6 +3,9 @@
 use fcp_core::{FcpError, FcpResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use url::Url;
+
+const ALLOWED_GRAPH_HOSTS: &[&str] = &["graph.microsoft.com", "graph.microsoft.us"];
 
 /// Outlook connector configuration.
 #[derive(Clone, Serialize, Deserialize)]
@@ -59,6 +62,7 @@ impl OutlookConfig {
                 message: "graph_host must not be empty".into(),
             });
         }
+        validate_graph_host(&self.graph_host)?;
         if self.request_timeout_ms == 0 {
             return Err(FcpError::InvalidRequest {
                 code: 1003,
@@ -71,6 +75,53 @@ impl OutlookConfig {
     pub fn base_url(&self) -> String {
         self.graph_host.trim().trim_end_matches('/').to_string()
     }
+}
+
+fn validate_graph_host(raw: &str) -> FcpResult<()> {
+    let url = Url::parse(raw.trim()).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("graph_host must be a valid absolute URL: {error}"),
+    })?;
+
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "graph_host must not include userinfo".into(),
+        });
+    }
+    if url.query().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "graph_host must not include a query string".into(),
+        });
+    }
+    if url.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "graph_host must not include a fragment".into(),
+        });
+    }
+
+    let host = url.host_str().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "graph_host must include a host".into(),
+    })?;
+    let is_local_test_host =
+        (cfg!(test) || cfg!(debug_assertions)) && matches!(host, "localhost" | "127.0.0.1");
+    if !is_local_test_host && url.scheme() != "https" {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "graph_host must use https for non-local hosts".into(),
+        });
+    }
+    if !is_local_test_host && !ALLOWED_GRAPH_HOSTS.contains(&host) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("graph_host `{host}` is not an allowed Microsoft Graph host"),
+        });
+    }
+
+    Ok(())
 }
 
 impl std::fmt::Display for OutlookConfig {
@@ -127,6 +178,49 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(config.graph_host, "https://graph.microsoft.us");
+    }
+
+    #[test]
+    fn config_rejects_non_graph_remote_host() {
+        let result = OutlookConfig::from_value(serde_json::json!({
+            "access_token": "tok",
+            "graph_host": "https://evil.example.com"
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_remote_http_graph_host() {
+        let result = OutlookConfig::from_value(serde_json::json!({
+            "access_token": "tok",
+            "graph_host": "http://graph.microsoft.com"
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_rejects_graph_host_with_userinfo_query_or_fragment() {
+        for graph_host in [
+            "https://user:pass@graph.microsoft.com",
+            "https://graph.microsoft.com?token=leak",
+            "https://graph.microsoft.com#fragment",
+        ] {
+            let result = OutlookConfig::from_value(serde_json::json!({
+                "access_token": "tok",
+                "graph_host": graph_host
+            }));
+            assert!(result.is_err(), "{graph_host} must be rejected");
+        }
+    }
+
+    #[test]
+    fn config_accepts_localhost_graph_host_for_tests() {
+        let config = OutlookConfig::from_value(serde_json::json!({
+            "access_token": "tok",
+            "graph_host": "http://localhost:8080"
+        }))
+        .unwrap();
+        assert_eq!(config.base_url(), "http://localhost:8080");
     }
 
     #[test]

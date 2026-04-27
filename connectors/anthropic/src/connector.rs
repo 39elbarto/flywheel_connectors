@@ -875,6 +875,8 @@ impl AnthropicConnector {
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
 
+        self.base.check_ready()?;
+
         // Extract and verify capability token
         let token_value = params
             .get("capability_token")
@@ -1495,13 +1497,19 @@ impl AnthropicConnector {
     ///
     /// Returns an error if shutdown serialization fails (should not happen).
     pub async fn handle_shutdown(
-        &self,
+        &mut self,
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         info!("Anthropic connector shutting down");
         if let Some(client) = &self.client {
             client.shutdown();
         }
+        self.client = None;
+        self.config = None;
+        self.verifier = None;
+        self.session_id = None;
+        self.base.set_configured(false);
+        self.base.set_handshaken(false);
         Ok(json!({ "status": "shutdown" }))
     }
 }

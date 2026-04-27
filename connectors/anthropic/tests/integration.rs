@@ -13,7 +13,7 @@
 #![allow(clippy::doc_markdown)]
 
 use chrono::{Duration, Utc};
-use fcp_core::CapabilityConstraints;
+use fcp_core::{CapabilityConstraints, FcpError};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_testkit::{AsyncTestContext, MockApiServer};
@@ -1217,7 +1217,7 @@ async fn lifecycle_handshake_grants_capabilities() {
 /// Shutdown returns clean status.
 #[fcp_async_core::test]
 async fn lifecycle_shutdown_clean() {
-    let connector = AnthropicConnector::new();
+    let mut connector = AnthropicConnector::new();
     let result = connector
         .handle_shutdown(json!({}))
         .await
@@ -2373,16 +2373,10 @@ async fn self_check_failing_api_returns_failed() {
     assert_eq!(result["status"], "failed");
 }
 
-/// Shutdown then re-invoke works (connector is stateless after shutdown).
+/// Shutdown clears state and prevents further invocation until reconfigured.
 #[fcp_async_core::test]
-async fn lifecycle_shutdown_then_reinvoke() {
+async fn lifecycle_shutdown_then_invoke_fails_closed() {
     let mock = MockApiServer::start().await;
-
-    mock.expect_post(
-        "/v1/messages",
-        anthropic_success_response("msg_reinvoke", "After shutdown", 5, 3),
-    )
-    .await;
 
     let mut connector = AnthropicConnector::new();
     setup_configure(&mut connector, &mock.base_url()).await;
@@ -2391,8 +2385,11 @@ async fn lifecycle_shutdown_then_reinvoke() {
     // Shutdown
     let shutdown_result = connector.handle_shutdown(json!({})).await.unwrap();
     assert_eq!(shutdown_result["status"], "shutdown");
+    assert_eq!(
+        connector.handle_health().await.unwrap()["status"],
+        "not_configured"
+    );
 
-    // Re-invoke (client and config are still present since shutdown is soft)
     let token: TestCapability = generate_valid_token(&signing_key, "anthropic.chat");
     let result = connector
         .handle_invoke(json!({
@@ -2400,10 +2397,9 @@ async fn lifecycle_shutdown_then_reinvoke() {
             "input": { "message": "Post-shutdown test" },
             "capability_token": token
         }))
-        .await
-        .expect("invoke after shutdown should still work (soft shutdown)");
+        .await;
 
-    assert_eq!(result["response"], "After shutdown");
+    assert!(matches!(result, Err(FcpError::NotConfigured)));
 }
 
 /// Health metrics show correct counts after multiple operations.

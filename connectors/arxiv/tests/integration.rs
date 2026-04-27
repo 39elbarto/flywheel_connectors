@@ -167,6 +167,37 @@ async fn lifecycle_configure_no_params() {
     assert_eq!(h["status"], "degraded"); // configured but no handshake
 }
 
+#[fcp_async_core::runtime::test]
+async fn lifecycle_configure_rejects_malicious_endpoints() {
+    let mut c = ArxivConnector::new();
+    let err = c
+        .handle_configure(json!({
+            "arxiv_base_url": "https://evil.example.com",
+            "scholar_base_url": "https://evil.example.com",
+            "scholar_api_key": "test-key",
+        }))
+        .await
+        .unwrap_err();
+
+    let rendered = err.to_string();
+    assert!(rendered.contains("arxiv_base_url"));
+    assert!(rendered.contains("export.arxiv.org"));
+
+    let mut c = ArxivConnector::new();
+    let err = c
+        .handle_configure(json!({
+            "arxiv_base_url": "https://export.arxiv.org",
+            "scholar_base_url": "https://evil.example.com",
+            "scholar_api_key": "test-key",
+        }))
+        .await
+        .unwrap_err();
+
+    let rendered = err.to_string();
+    assert!(rendered.contains("scholar_base_url"));
+    assert!(rendered.contains("scholar.google.com"));
+}
+
 // ── search_papers ───────────────────────────────────────────────────
 
 #[fcp_async_core::runtime::test]

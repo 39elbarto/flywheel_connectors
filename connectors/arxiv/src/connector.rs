@@ -85,6 +85,19 @@ impl ArxivConfig {
             has_scholar_key: self.scholar_api_key.is_some(),
         }
     }
+
+    fn validate_endpoint_policies(&self) -> FcpResult<()> {
+        enforce_base_url_policy(
+            "arxiv_base_url",
+            &self.arxiv_base_url,
+            &["export.arxiv.org"],
+        )?;
+        enforce_base_url_policy(
+            "scholar_base_url",
+            &self.scholar_base_url,
+            &["api.semanticscholar.org", "scholar.google.com"],
+        )
+    }
 }
 
 /// Provisioning readiness assessment for the arXiv connector.
@@ -181,6 +194,7 @@ impl ArxivConnector {
             has_scholar_key = config.scholar_api_key.is_some(),
             "Configuring arXiv connector"
         );
+        config.validate_endpoint_policies()?;
 
         let client = ArxivClient::new(
             Some(&config.arxiv_base_url),
@@ -1116,21 +1130,57 @@ pub fn provisioning_recipe() -> ProvisioningRecipe {
     )
 }
 
+fn enforce_base_url_policy(field: &str, base_url: &str, allowed_hosts: &[&str]) -> FcpResult<()> {
+    let (ok, message) = base_url_policy_for(field, base_url, allowed_hosts);
+    if ok {
+        Ok(())
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message,
+        })
+    }
+}
+
 fn base_url_policy(base_url: &str) -> (bool, String) {
+    base_url_policy_for("arxiv_base_url", base_url, &["export.arxiv.org"])
+}
+
+#[cfg(test)]
+fn scholar_base_url_policy(base_url: &str) -> (bool, String) {
+    base_url_policy_for(
+        "scholar_base_url",
+        base_url,
+        &["api.semanticscholar.org", "scholar.google.com"],
+    )
+}
+
+fn base_url_policy_for(field: &str, base_url: &str, allowed_hosts: &[&str]) -> (bool, String) {
     let parsed = match Url::parse(base_url) {
         Ok(parsed) => parsed,
         Err(error) => {
-            return (false, format!("base_url could not be parsed: {error}"));
+            return (false, format!("{field} could not be parsed: {error}"));
         }
     };
 
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return (false, format!("{field} must not include userinfo"));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return (
+            false,
+            format!("{field} must not include a query string or fragment"),
+        );
+    }
+
     let Some(host) = parsed.host_str() else {
-        return (false, "base_url must include a host".into());
+        return (false, format!("{field} must include a host"));
     };
 
     let local = is_local_test_host(host);
-    let allowed_host = host.eq_ignore_ascii_case("export.arxiv.org")
-        || host.eq_ignore_ascii_case("arxiv.org")
+    let allowed_host = allowed_hosts
+        .iter()
+        .any(|allowed_host| host.eq_ignore_ascii_case(allowed_host))
         || local;
     let secure_or_local = parsed.scheme() == "https" || local;
 
@@ -1140,10 +1190,11 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
             format!("Endpoint accepted by policy checks: {base_url}"),
         )
     } else {
+        let allowed = allowed_hosts.join(" or ");
         (
             false,
             format!(
-                "Endpoint must use https and export.arxiv.org or arxiv.org \
+                "{field} must use https and {allowed} \
                  (localhost/127.0.0.1/::1 allowed for tests): {base_url}"
             ),
         )
@@ -1660,10 +1711,10 @@ mod tests {
     }
 
     #[test]
-    fn base_url_policy_accepts_arxiv_org() {
+    fn base_url_policy_rejects_arxiv_org() {
         let (ok, message) = base_url_policy("https://arxiv.org");
-        assert!(ok);
-        assert!(message.contains("accepted"));
+        assert!(!ok);
+        assert!(message.contains("export.arxiv.org"));
     }
 
     #[test]
@@ -1693,6 +1744,21 @@ mod tests {
     }
 
     #[test]
+    fn base_url_policy_rejects_userinfo_query_and_fragment() {
+        let (ok, message) = base_url_policy("https://user@export.arxiv.org");
+        assert!(!ok);
+        assert!(message.contains("userinfo"));
+
+        let (ok, message) = base_url_policy("https://export.arxiv.org?leak=1");
+        assert!(!ok);
+        assert!(message.contains("query string or fragment"));
+
+        let (ok, message) = base_url_policy("https://export.arxiv.org#frag");
+        assert!(!ok);
+        assert!(message.contains("query string or fragment"));
+    }
+
+    #[test]
     fn base_url_policy_rejects_invalid_url() {
         let (ok, message) = base_url_policy("not a url");
         assert!(!ok);
@@ -1703,5 +1769,24 @@ mod tests {
     fn base_url_policy_accepts_ipv6_loopback() {
         let (ok, _) = base_url_policy("http://[::1]:8080");
         assert!(ok);
+    }
+
+    #[test]
+    fn scholar_base_url_policy_accepts_allowed_hosts() {
+        let (ok, message) = scholar_base_url_policy("https://api.semanticscholar.org/graph/v1");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+
+        let (ok, message) = scholar_base_url_policy("https://scholar.google.com");
+        assert!(ok);
+        assert!(message.contains("accepted"));
+    }
+
+    #[test]
+    fn scholar_base_url_policy_rejects_unknown_host() {
+        let (ok, message) = scholar_base_url_policy("https://evil.example.com");
+        assert!(!ok);
+        assert!(message.contains("scholar_base_url"));
+        assert!(message.contains("scholar.google.com"));
     }
 }

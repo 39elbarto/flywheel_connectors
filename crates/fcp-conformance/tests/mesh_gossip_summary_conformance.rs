@@ -192,3 +192,104 @@ fn msh_gs_5_differs_from_ignores_timestamp_drift() {
         "MSH-GS-5: timestamp drift alone must not flag a difference"
     );
 }
+
+#[test]
+fn msh_gs_5_differs_from_flags_object_removal() {
+    // The existing MSH-GS-5 test only exercises addition. A malformed
+    // digest implementation that handled added objects but ignored
+    // removed ones would silently fail to reconcile shrinking zones —
+    // peers that dropped an object would never resync the residue. Pin
+    // both directions of the asymmetric difference here.
+    let zone = ZoneId::work();
+    let larger = build_gossip_with_objects("peer-large", &zone, &["x", "y", "z"]);
+    let smaller = build_gossip_with_objects("peer-small", &zone, &["x", "y"]);
+
+    let s_large = fresh_summary(&larger, &zone, "epoch-rm");
+    let s_small = fresh_summary(&smaller, &zone, "epoch-rm");
+    assert!(
+        s_large.differs_from(&s_small),
+        "MSH-GS-5: removal of an object MUST flip the digest (large vs small)"
+    );
+    assert!(
+        s_small.differs_from(&s_large),
+        "MSH-GS-5: removal must be symmetric — small vs large MUST also differ"
+    );
+}
+
+// ── MSH-GS-6: is_stale freshness window (past-TTL + future-skew) ──────
+
+#[test]
+fn msh_gs_6_is_stale_false_for_summary_within_ttl() {
+    // A summary stamped one second in the past with a 60-second TTL
+    // MUST be considered fresh.
+    let zone = ZoneId::work();
+    let gossip = build_gossip_with_objects("peer-fresh", &zone, &["a"]);
+    let mut summary = fresh_summary(&gossip, &zone, "epoch-fresh");
+    let now = 1_000_000_u64;
+    summary.timestamp = now - 1;
+    assert!(
+        !summary.is_stale(now, 60, 60),
+        "MSH-GS-6: summary 1s old with 60s TTL must NOT be stale"
+    );
+}
+
+#[test]
+fn msh_gs_6_is_stale_true_for_summary_past_ttl() {
+    let zone = ZoneId::work();
+    let gossip = build_gossip_with_objects("peer-old", &zone, &["a"]);
+    let mut summary = fresh_summary(&gossip, &zone, "epoch-old");
+    let now = 1_000_000_u64;
+    summary.timestamp = now - 61;
+    assert!(
+        summary.is_stale(now, 60, 60),
+        "MSH-GS-6: summary 61s old with 60s TTL MUST be stale"
+    );
+}
+
+#[test]
+fn msh_gs_6_is_stale_false_for_summary_within_future_skew() {
+    // Slightly future timestamps inside `max_future_skew_secs` are
+    // legitimate clock drift and MUST NOT be flagged as stale.
+    let zone = ZoneId::work();
+    let gossip = build_gossip_with_objects("peer-skew", &zone, &["a"]);
+    let mut summary = fresh_summary(&gossip, &zone, "epoch-skew");
+    let now = 1_000_000_u64;
+    summary.timestamp = now + 30;
+    assert!(
+        !summary.is_stale(now, 60, 60),
+        "MSH-GS-6: summary 30s in the future with 60s skew window MUST NOT be stale"
+    );
+}
+
+#[test]
+fn msh_gs_6_is_stale_true_for_summary_beyond_future_skew() {
+    // The regression this guards against is documented on
+    // `GossipSummary::is_stale`: future-dated summaries used to slip
+    // past the `age > ttl_secs` check because `saturating_sub` on a
+    // future timestamp returns `0`. The future-skew bound MUST reject
+    // arbitrarily future-dated summaries.
+    let zone = ZoneId::work();
+    let gossip = build_gossip_with_objects("peer-far-future", &zone, &["a"]);
+    let mut summary = fresh_summary(&gossip, &zone, "epoch-far-future");
+    let now = 1_000_000_u64;
+    summary.timestamp = now + 61;
+    assert!(
+        summary.is_stale(now, 60, 60),
+        "MSH-GS-6: summary 61s in the future with 60s skew window MUST be stale \
+         (regression guard: saturating_sub-zero on future timestamps used to bypass TTL)"
+    );
+}
+
+#[test]
+fn msh_gs_6_is_stale_true_for_summary_far_in_past_zero_skew() {
+    // Zero-skew configuration must still reject very-old summaries.
+    let zone = ZoneId::work();
+    let gossip = build_gossip_with_objects("peer-zero-skew", &zone, &["a"]);
+    let mut summary = fresh_summary(&gossip, &zone, "epoch-zero-skew");
+    let now = 1_000_000_u64;
+    summary.timestamp = now.saturating_sub(3_600);
+    assert!(
+        summary.is_stale(now, 60, 0),
+        "MSH-GS-6: summary 1h old with 60s TTL MUST be stale even with zero future-skew"
+    );
+}

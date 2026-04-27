@@ -178,25 +178,36 @@ impl ZaloConnector {
 
         if operation == "zalo.webhook.verify" {
             let input = params.get("input").unwrap_or(&params);
-            let token_present = input
+            let supplied_challenge = input
                 .get("token")
                 .and_then(Value::as_str)
-                .is_some_and(|token| !token.trim().is_empty());
+                .map(str::trim)
+                .filter(|token| !token.is_empty());
             let configured =
                 self.configured && self.handshaken && self.webhook_verify_challenge.is_some();
+            let token_matches = configured
+                && supplied_challenge.is_some_and(|token| {
+                    self.webhook_verify_challenge
+                        .as_deref()
+                        .is_some_and(|expected| {
+                            constant_time_eq(expected.as_bytes(), token.as_bytes())
+                        })
+                });
             return Ok(json!({
-                "allowed": configured && token_present,
+                "allowed": token_matches,
                 "simulate_capability": "local_validation",
-                "reason": if configured && token_present {
-                    "Webhook verification can be evaluated locally."
+                "reason": if token_matches {
+                    "Webhook verification token matches configured challenge."
                 } else if !self.configured {
                     "Connector is not configured."
                 } else if !self.handshaken {
                     NOT_HANDSHAKEN_MESSAGE
                 } else if self.webhook_verify_challenge.is_none() {
                     "webhook_verify_challenge is not configured."
-                } else {
+                } else if supplied_challenge.is_none() {
                     "Missing token."
+                } else {
+                    "Webhook verification token would not match configured challenge."
                 }
             }));
         }
@@ -411,6 +422,20 @@ mod tests {
             .expect("simulate should succeed");
         assert_eq!(simulate["allowed"], true);
         assert_eq!(simulate["simulate_capability"], "local_validation");
+
+        let bad_simulate = connector
+            .handle_simulate(json!({
+                "operation_id": "zalo.webhook.verify",
+                "input": { "token": "wrong-challenge" }
+            }))
+            .await
+            .expect("simulate should succeed for mismatched token");
+        assert_eq!(bad_simulate["allowed"], false);
+        assert!(
+            bad_simulate["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("would not match"))
+        );
     }
 
     #[test]

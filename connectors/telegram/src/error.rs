@@ -13,7 +13,7 @@ pub type TelegramResult<T> = Result<T, TelegramError>;
 /// Telegram API errors.
 #[derive(Debug, Error)]
 pub enum TelegramError {
-    #[error("HTTP error: {0}")]
+    #[error("HTTP error: {}", redacted_http_error(.0))]
     Http(#[from] reqwest::Error),
 
     #[error("Telegram API error ({code}): {description}")]
@@ -53,7 +53,7 @@ impl TelegramError {
         match self {
             Self::Http(error) => FcpError::External {
                 service: "telegram".into(),
-                message: error.to_string(),
+                message: redacted_http_error(error),
                 status_code: error.status().map(|status| status.as_u16()),
                 retryable: self.is_retryable(),
                 retry_after: self.retry_after(),
@@ -96,6 +96,32 @@ impl TelegramError {
     }
 }
 
+fn redacted_http_error(error: &reqwest::Error) -> String {
+    redact_telegram_bot_token_segments(&error.to_string())
+}
+
+fn redact_telegram_bot_token_segments(message: &str) -> String {
+    let mut redacted = String::with_capacity(message.len());
+    let mut cursor = 0;
+
+    while let Some(relative_start) = message[cursor..].find("/bot") {
+        let segment_start = cursor + relative_start;
+        let credential_start = segment_start + "/bot".len();
+        redacted.push_str(&message[cursor..credential_start]);
+        redacted.push_str("[REDACTED]");
+
+        let credential_end = message[credential_start..]
+            .find(|ch: char| matches!(ch, '/' | '?' | '#' | '&' | ')' | ' ' | '\t' | '\r' | '\n'))
+            .map_or(message.len(), |relative_end| {
+                credential_start + relative_end
+            });
+        cursor = credential_end;
+    }
+
+    redacted.push_str(&message[cursor..]);
+    redacted
+}
+
 impl ConnectorErrorMapping for TelegramError {
     fn from_async_error(error: AsyncError) -> Self {
         match error {
@@ -124,5 +150,53 @@ impl ConnectorErrorMapping for TelegramError {
 
     fn retry_after(&self) -> Option<Duration> {
         Self::retry_after(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BOT_TOKEN: &str = "123456:SECRET_secret-SECRET_secret";
+
+    #[test]
+    fn redacts_bot_token_url_segments() {
+        let message = format!(
+            "error sending request for url (https://api.telegram.org/bot{BOT_TOKEN}/sendMessage)"
+        );
+
+        let redacted = redact_telegram_bot_token_segments(&message);
+
+        assert!(!redacted.contains(BOT_TOKEN));
+        assert!(redacted.contains("/bot[REDACTED]/sendMessage"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn http_error_to_fcp_error_redacts_bot_token_url() {
+        let url = format!("http://127.0.0.1:1/bot{BOT_TOKEN}/getMe");
+        let error = reqwest::Client::builder()
+            .timeout(Duration::from_millis(10))
+            .build()
+            .expect("client should build")
+            .get(url)
+            .send()
+            .await
+            .expect_err("closed local port should fail");
+
+        let telegram_error = TelegramError::Http(error);
+        let display = telegram_error.to_string();
+        assert!(!display.contains(BOT_TOKEN));
+
+        let fcp_error = telegram_error.to_fcp_error();
+        match fcp_error {
+            FcpError::External { message, .. } => {
+                assert!(!message.contains(BOT_TOKEN));
+                assert!(message.contains("/bot[REDACTED]/getMe") || !message.contains("/bot"));
+            }
+            other => assert!(
+                matches!(other, FcpError::External { .. }),
+                "expected External error, got {other:?}"
+            ),
+        }
     }
 }

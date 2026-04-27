@@ -1224,25 +1224,47 @@ pub fn check_access(args: &AccessCheckArgs) -> Result<AccessCheckResult, String>
         return Err(errors.join("; "));
     }
 
-    // In a full implementation this would query the policy engine.
-    // For now, produce a result based on local checks.
     let mut blockers = Vec::new();
+    let mut grant_diff = None;
 
-    // Zone check — if a zone is specified, verify it is valid.
+    let zone = args.zone.as_deref().unwrap_or("z:unknown");
     if let Some(zone) = &args.zone {
-        if zone.starts_with("restricted-") {
+        if !zone.starts_with("z:") {
             blockers.push(
                 AccessBlocker::new(
-                    "restricted_zone",
-                    format!("zone '{zone}' is restricted"),
+                    "invalid_zone",
+                    format!("'{zone}' is not a recognized FCP zone identifier"),
                     BlockerSeverity::Error,
                 )
-                .with_remediation("Contact zone administrator for access"),
+                .with_remediation("Use a zone identifier starting with 'z:' (for example, z:work)"),
             );
         }
     }
 
-    // Context check — look for known problematic contexts.
+    let required_capabilities = parse_capability_context(args.context.get("required_capabilities"));
+    if !required_capabilities.is_empty() {
+        let existing_capabilities = parse_capability_context(
+            args.context
+                .get("granted_capabilities")
+                .or_else(|| args.context.get("existing_capabilities")),
+        );
+        let ceiling_capabilities = parse_capability_context(args.context.get("capability_ceiling"));
+        let ceiling = (!ceiling_capabilities.is_empty()).then_some(ceiling_capabilities.as_slice());
+        let analysis = analyze_capability_gap(
+            &args.connector,
+            &args.operation,
+            zone,
+            &existing_capabilities,
+            &required_capabilities,
+            ceiling,
+        );
+
+        blockers.extend(analysis.blockers.iter().map(access_blocker_from_typed));
+        if analysis.grant_diff.change_count() > 0 || analysis.grant_diff.has_alternatives() {
+            grant_diff = serde_json::to_value(analysis.grant_diff).ok();
+        }
+    }
+
     if let Some(env) = args.context.get("environment") {
         if env == "production" {
             blockers.push(
@@ -1261,11 +1283,35 @@ pub fn check_access(args: &AccessCheckArgs) -> Result<AccessCheckResult, String>
     Ok(AccessCheckResult {
         allowed,
         blockers,
-        grant_diff: None,
+        grant_diff,
         connector: args.connector.clone(),
         operation: args.operation.clone(),
         checked_at: Utc::now(),
     })
+}
+
+fn parse_capability_context(value: Option<&String>) -> Vec<String> {
+    value
+        .map(|raw| {
+            raw.split(|ch: char| ch == ',' || ch.is_ascii_whitespace())
+                .map(str::trim)
+                .filter(|cap| !cap.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn access_blocker_from_typed(blocker: &TypedBlocker) -> AccessBlocker {
+    let mut access_blocker = AccessBlocker::new(
+        blocker.blocker_type.label(),
+        blocker.message.clone(),
+        blocker.severity,
+    );
+    if let Some(remediation) = blocker.remediation.first() {
+        access_blocker = access_blocker.with_remediation(remediation.clone());
+    }
+    access_blocker
 }
 
 /// Create a read-only access plan.
@@ -3163,7 +3209,7 @@ mod tests {
         let result = check_access(&args).unwrap();
         assert!(!result.allowed);
         assert_eq!(result.blocking_count(), 1);
-        assert_eq!(result.blockers[0].code, "restricted_zone");
+        assert_eq!(result.blockers[0].code, "invalid_zone");
     }
 
     #[test]
@@ -3185,9 +3231,34 @@ mod tests {
 
     #[test]
     fn check_access_normal_zone_ok() {
-        let args = AccessCheckArgs::new("github", "list_repos").with_zone("us-west-2");
+        let args = AccessCheckArgs::new("github", "list_repos").with_zone("z:work");
         let result = check_access(&args).unwrap();
         assert!(result.allowed);
+    }
+
+    #[test]
+    fn check_access_missing_required_capability_blocked() {
+        let args = AccessCheckArgs::new("github", "create_issue")
+            .with_zone("z:work")
+            .with_context("required_capabilities", "github.issues.write")
+            .with_context("granted_capabilities", "github.issues.read");
+        let result = check_access(&args).unwrap();
+        assert!(!result.allowed);
+        assert_eq!(result.blocking_count(), 1);
+        assert_eq!(result.blockers[0].code, "FCP_ERR_MISSING_CAPABILITY");
+        assert!(result.grant_diff.is_some());
+    }
+
+    #[test]
+    fn check_access_required_capability_allowed_when_granted() {
+        let args = AccessCheckArgs::new("github", "list_repos")
+            .with_zone("z:work")
+            .with_context("required_capabilities", "github.repos.read")
+            .with_context("granted_capabilities", "github.repos.read");
+        let result = check_access(&args).unwrap();
+        assert!(result.allowed);
+        assert_eq!(result.blocking_count(), 0);
+        assert!(result.grant_diff.is_none());
     }
 
     #[test]

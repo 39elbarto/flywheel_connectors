@@ -77,6 +77,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_session_metamorphic"
+path = "fuzz_targets/session_metamorphic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_fcps_frame"
 path = "fuzz_targets/fcps_frame.rs"
 test = false
@@ -380,6 +387,13 @@ bench = false
 [[bin]]
 name = "graphql_ws_message"
 path = "fuzz_targets/graphql_ws_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_symbol_request_validate"
+path = "fuzz_targets/symbol_request_validate.rs"
 test = false
 doc = false
 bench = false

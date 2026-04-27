@@ -34,4 +34,8 @@ tracing-subscriber.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+chrono.workspace = true
+ciborium.workspace = true
+fcp-crypto.workspace = true
+fcp-e2e = { path = "../../crates/fcp-e2e" }
 wiremock.workspace = true

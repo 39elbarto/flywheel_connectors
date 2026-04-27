@@ -45,21 +45,15 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-    routing::post,
-    Router,
-};
+use axum::{Router, extract::State, http::StatusCode, response::Json, routing::post};
+use fcp_async_core::sync::Mutex;
 use fcp_postgresql::client::{PostgresAuth, PostgresClient};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use testcontainers::{
+    GenericImage, ImageExt,
     core::{IntoContainerPort, WaitFor},
     runners::AsyncRunner,
-    GenericImage, ImageExt,
 };
-use tokio::sync::Mutex;
 use tokio_postgres::{Client as PgClient, NoTls};
 
 struct ShimState {
@@ -80,7 +74,11 @@ async fn connect(conn_str: &str) -> PgClient {
     let (client, connection) = tokio_postgres::connect(conn_str, NoTls)
         .await
         .expect("connect to testcontainer postgres");
-    tokio::spawn(async move {
+    // br-zm14c: spawn via fcp_async_core::task::spawn so the driver task
+    // inherits the calling thread's tokio compat handle (tokio_postgres
+    // requires a tokio runtime context for its connection driver). The
+    // fcp_async_core runtime sets up that compat handle automatically.
+    fcp_async_core::task::spawn(async move {
         if let Err(err) = connection.await {
             eprintln!("tokio-postgres driver task error: {err}");
         }
@@ -116,24 +114,15 @@ async fn handle_transaction(
             let txn_id = format!("txn-{}", *next);
             drop(next);
 
-            state
-                .active
-                .lock()
-                .await
-                .insert(txn_id.clone(), client);
+            state.active.lock().await.insert(txn_id.clone(), client);
             Ok(Json(json!({"txn_id": txn_id})))
         }
         "commit" => {
             let txn_id = require_str(&body, "txn_id")?;
-            let client = state
-                .active
-                .lock()
-                .await
-                .remove(&txn_id)
-                .ok_or((
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": format!("unknown txn_id {txn_id}")})),
-                ))?;
+            let client = state.active.lock().await.remove(&txn_id).ok_or((
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("unknown txn_id {txn_id}")})),
+            ))?;
             client
                 .batch_execute("COMMIT")
                 .await
@@ -144,15 +133,10 @@ async fn handle_transaction(
         }
         "rollback" => {
             let txn_id = require_str(&body, "txn_id")?;
-            let client = state
-                .active
-                .lock()
-                .await
-                .remove(&txn_id)
-                .ok_or((
-                    StatusCode::NOT_FOUND,
-                    Json(json!({"error": format!("unknown txn_id {txn_id}")})),
-                ))?;
+            let client = state.active.lock().await.remove(&txn_id).ok_or((
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": format!("unknown txn_id {txn_id}")})),
+            ))?;
             client
                 .batch_execute("ROLLBACK")
                 .await
@@ -178,11 +162,18 @@ fn require_str(body: &Value, field: &str) -> Result<String, (StatusCode, Json<Va
 }
 
 fn internal(msg: String) -> (StatusCode, Json<Value>) {
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": msg})))
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({"error": msg})),
+    )
 }
 
 /// Full test-harness bring-up: boot Postgres, start shim, wait for ready.
-async fn bring_up() -> (String, testcontainers::ContainerAsync<GenericImage>, Arc<ShimState>) {
+async fn bring_up() -> (
+    String,
+    testcontainers::ContainerAsync<GenericImage>,
+    Arc<ShimState>,
+) {
     let pg_container = GenericImage::new("postgres", "15-alpine")
         .with_exposed_port(5432.tcp())
         .with_wait_for(WaitFor::message_on_stderr(
@@ -225,7 +216,11 @@ async fn bring_up() -> (String, testcontainers::ContainerAsync<GenericImage>, Ar
         .await
         .expect("bind shim");
     let shim_addr: SocketAddr = listener.local_addr().expect("local addr");
-    tokio::spawn(async move {
+    // br-zm14c: axum::serve expects a tokio TcpListener directly; we keep
+    // the bind on the tokio side so the type matches axum's API but spawn
+    // the serve task via fcp_async_core::task::spawn so it runs under the
+    // crate's runtime hygiene policy.
+    fcp_async_core::task::spawn(async move {
         if let Err(err) = axum::serve(listener, app.into_make_service()).await {
             eprintln!("axum shim error: {err}");
         }
@@ -234,7 +229,7 @@ async fn bring_up() -> (String, testcontainers::ContainerAsync<GenericImage>, Ar
     let base_url = format!("http://{shim_addr}");
 
     // Sanity: let the shim settle before the first client request.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    fcp_async_core::time::sleep(std::time::Duration::from_millis(50)).await;
 
     (base_url, pg_container, state)
 }
@@ -244,7 +239,7 @@ fn make_client(base_url: &str) -> PostgresClient {
         .expect("construct PostgresClient")
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn transaction_commit_makes_writes_visible_and_releases_session() {
     let (base_url, _pg, shim_state) = bring_up().await;
     let client = make_client(&base_url);
@@ -255,7 +250,10 @@ async fn transaction_commit_makes_writes_visible_and_releases_session() {
         .transaction_begin(Some("READ COMMITTED"))
         .await
         .expect("begin");
-    let txn_id = begin["txn_id"].as_str().expect("txn_id present").to_string();
+    let txn_id = begin["txn_id"]
+        .as_str()
+        .expect("txn_id present")
+        .to_string();
 
     // The shim is holding the pinned PG client; use it via its
     // registered connection to run an INSERT inside the transaction.
@@ -267,10 +265,7 @@ async fn transaction_commit_makes_writes_visible_and_releases_session() {
             .expect("insert inside txn");
     }
 
-    client
-        .transaction_commit(&txn_id)
-        .await
-        .expect("commit");
+    client.transaction_commit(&txn_id).await.expect("commit");
 
     // After commit, the pinned session must be released.
     assert!(
@@ -281,21 +276,21 @@ async fn transaction_commit_makes_writes_visible_and_releases_session() {
     // Row must be visible on a fresh connection (proves real commit).
     let fresh = connect(&shim_state.conn_str).await;
     let rows = fresh
-        .query("SELECT note FROM fcp_x6qrn_ledger WHERE note = $1", &[&"commit-test"])
+        .query(
+            "SELECT note FROM fcp_x6qrn_ledger WHERE note = $1",
+            &[&"commit-test"],
+        )
         .await
         .expect("verify query");
     assert_eq!(rows.len(), 1, "committed row must be visible");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn transaction_rollback_discards_writes_and_releases_session() {
     let (base_url, _pg, shim_state) = bring_up().await;
     let client = make_client(&base_url);
 
-    let begin = client
-        .transaction_begin(None)
-        .await
-        .expect("begin");
+    let begin = client.transaction_begin(None).await.expect("begin");
     let txn_id = begin["txn_id"].as_str().unwrap().to_string();
 
     {
@@ -333,7 +328,7 @@ async fn transaction_rollback_discards_writes_and_releases_session() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn concurrent_begins_produce_distinct_pinned_sessions() {
     // Proves the invariant from the bead: "one connector session
     // cannot fan out multiple open transactions or leak pinned
@@ -368,7 +363,10 @@ async fn concurrent_begins_produce_distinct_pinned_sessions() {
 
     // Commit A, rollback B.
     client.transaction_commit(&a_id).await.expect("commit A");
-    client.transaction_rollback(&b_id).await.expect("rollback B");
+    client
+        .transaction_rollback(&b_id)
+        .await
+        .expect("rollback B");
 
     assert!(shim_state.active.lock().await.is_empty());
 
@@ -376,18 +374,24 @@ async fn concurrent_begins_produce_distinct_pinned_sessions() {
     // were independent — no cross-talk, no leaked pinning.
     let fresh = connect(&shim_state.conn_str).await;
     let a_rows = fresh
-        .query("SELECT note FROM fcp_x6qrn_ledger WHERE note = $1", &[&"A-row"])
+        .query(
+            "SELECT note FROM fcp_x6qrn_ledger WHERE note = $1",
+            &[&"A-row"],
+        )
         .await
         .expect("query A");
     let b_rows = fresh
-        .query("SELECT note FROM fcp_x6qrn_ledger WHERE note = $1", &[&"B-row"])
+        .query(
+            "SELECT note FROM fcp_x6qrn_ledger WHERE note = $1",
+            &[&"B-row"],
+        )
         .await
         .expect("query B");
     assert_eq!(a_rows.len(), 1, "committed A-row must be visible");
     assert_eq!(b_rows.len(), 0, "rolled-back B-row must not be visible");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
 async fn commit_with_unknown_txn_id_does_not_leak_sessions() {
     // Error path: the client sends commit for a txn_id the server
     // never issued. The shim returns 404 and MUST NOT accidentally

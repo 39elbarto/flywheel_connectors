@@ -15,6 +15,7 @@ use fcp_google_discovery::{
     policy::{GooglePolicyCatalog, PolicyApprovalMode, PolicyRiskLevel, PolicySafetyTier},
     provisioning::load_default_google_provisioning_bundle,
 };
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{info, instrument};
@@ -30,6 +31,64 @@ const DEFAULT_CONTACT_FIELDS: &[&str] =
     &["names", "emailAddresses", "phoneNumbers", "organizations"];
 const DEFAULT_DIRECTORY_FIELDS: &[&str] = &["names", "emailAddresses", "organizations"];
 const DEFAULT_GROUP_FIELDS: &[&str] = &["name", "formattedName", "groupType", "memberCount"];
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+fn validate_people_base_url(raw: &str) -> FcpResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not be empty".into(),
+        });
+    }
+    let parsed = Url::parse(trimmed).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("base_url could not be parsed: {error}"),
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must use http or https".into(),
+        });
+    }
+    let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "base_url must include a host".into(),
+    })?;
+    let local = is_local_test_host(host);
+    if parsed.scheme() == "http" && !local {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must use https unless targeting localhost/127.0.0.1/::1 for tests"
+                .into(),
+        });
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include userinfo".into(),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "base_url must not include a query string or fragment".into(),
+        });
+    }
+    if !local && !host.eq_ignore_ascii_case("people.googleapis.com") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "base_url must target people.googleapis.com (localhost/127.0.0.1/::1 allowed for tests): {host}"
+            ),
+        });
+    }
+
+    Ok(parsed.to_string().trim_end_matches('/').to_string())
+}
 
 /// Validated configuration for the Google People connector.
 struct GooglePeopleConfig {
@@ -86,11 +145,15 @@ impl GooglePeopleConfig {
                 message: format!("Failed to materialize Google auth source: {error}"),
             })?;
 
-        let base_url = params
-            .get("base_url")
-            .and_then(Value::as_str)
-            .unwrap_or(DEFAULT_BASE_URL)
-            .to_string();
+        let base_url = match params.get("base_url") {
+            Some(value) => {
+                validate_people_base_url(value.as_str().ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "base_url must be a string".into(),
+                })?)?
+            }
+            None => DEFAULT_BASE_URL.to_string(),
+        };
 
         Ok(Self {
             auth,
@@ -1536,6 +1599,104 @@ mod tests {
         assert!(
             matches!(&error, FcpError::InvalidRequest { message, .. } if message.contains("service_selector")),
             "expected invalid request, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn validate_people_base_url_accepts_googleapis() {
+        let out = validate_people_base_url("https://people.googleapis.com/v1/").unwrap();
+        assert_eq!(out, "https://people.googleapis.com/v1");
+    }
+
+    #[test]
+    fn validate_people_base_url_allows_localhost_http() {
+        validate_people_base_url("http://localhost:9999/v1").unwrap();
+        validate_people_base_url("http://127.0.0.1/people").unwrap();
+        validate_people_base_url("http://[::1]:9999/v1").unwrap();
+    }
+
+    #[test]
+    fn validate_people_base_url_rejects_foreign_host() {
+        let error = validate_people_base_url("https://evil.example.com/v1").unwrap_err();
+        assert!(
+            matches!(&error, FcpError::InvalidRequest { message, .. } if message.contains("people.googleapis.com")),
+            "expected people.googleapis.com validation error, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn validate_people_base_url_rejects_substring_smuggle() {
+        let error =
+            validate_people_base_url("https://evil.com/people.googleapis.com/v1").unwrap_err();
+        assert!(
+            matches!(&error, FcpError::InvalidRequest { message, .. } if message.contains("people.googleapis.com")),
+            "expected host validation error, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn validate_people_base_url_rejects_query_fragment_userinfo() {
+        assert!(
+            validate_people_base_url("https://people.googleapis.com/v1?leak=x")
+                .unwrap_err()
+                .to_string()
+                .contains("query string")
+        );
+        assert!(
+            validate_people_base_url("https://people.googleapis.com/v1#frag")
+                .unwrap_err()
+                .to_string()
+                .contains("fragment")
+        );
+        let error =
+            validate_people_base_url("https://attacker:pw@people.googleapis.com/v1").unwrap_err();
+        assert!(
+            matches!(&error, FcpError::InvalidRequest { message, .. } if message.contains("userinfo")),
+            "expected userinfo validation error, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn validate_people_base_url_rejects_plain_http_on_public_host() {
+        let error = validate_people_base_url("http://people.googleapis.com/v1").unwrap_err();
+        assert!(
+            matches!(&error, FcpError::InvalidRequest { message, .. } if message.contains("https")),
+            "expected https validation error, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn validate_people_base_url_rejects_empty_and_malformed() {
+        assert!(
+            matches!(validate_people_base_url("   ").unwrap_err(), FcpError::InvalidRequest { message, .. } if message.contains("empty"))
+        );
+        assert!(
+            matches!(validate_people_base_url("not a url").unwrap_err(), FcpError::InvalidRequest { message, .. } if message.contains("parsed"))
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_invalid_base_url_override() {
+        let mut connector = GooglePeopleConnector::new();
+        let error = connector
+            .handle_configure(config_with_test_bearer(&[(
+                "base_url",
+                json!("https://evil.example.com/v1"),
+            )]))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, FcpError::InvalidRequest { message, .. } if message.contains("people.googleapis.com")),
+            "expected base_url validation error, got {error:?}"
+        );
+
+        let error = connector
+            .handle_configure(config_with_test_bearer(&[("base_url", json!(123))]))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, FcpError::InvalidRequest { message, .. } if message.contains("base_url")),
+            "expected base_url type error, got {error:?}"
         );
     }
 

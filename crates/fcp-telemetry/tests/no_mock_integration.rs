@@ -410,6 +410,23 @@ fn trace_capture_redacted_snapshot_applies_policy() {
 }
 
 #[test]
+fn trace_capture_default_redaction_redacts_session_id() {
+    let config = TraceCaptureConfig::new().enabled();
+    let mut capture = TraceCapture::new("cap-default-redact", config);
+    capture
+        .record(make_session(1, "t1", "secret-session-123"))
+        .unwrap();
+
+    let redacted = capture.redacted_snapshot();
+    assert!(redacted.redacted);
+    if let TraceEvent::Session(s) = &redacted.events[0] {
+        assert_eq!(s.session_id, "[REDACTED]");
+    } else {
+        panic!("expected session event");
+    }
+}
+
+#[test]
 fn trace_capture_finish_sets_ended_at() {
     let config = TraceCaptureConfig::new().enabled();
     let mut capture = TraceCapture::new("cap-finish", config);

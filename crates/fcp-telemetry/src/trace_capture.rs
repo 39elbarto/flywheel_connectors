@@ -73,6 +73,7 @@ impl Default for RedactionPolicy {
                 "authorization",
                 "credential",
                 "private_key",
+                "session_id",
                 "session_key",
                 "bearer",
             ]
@@ -1266,6 +1267,7 @@ mod tests {
             "authorization",
             "credential",
             "private_key",
+            "session_id",
             "session_key",
             "bearer",
         ];
@@ -2111,6 +2113,7 @@ mod tests {
             "authorization",
             "credential",
             "private_key",
+            "session_id",
             "session_key",
             "bearer",
         ];

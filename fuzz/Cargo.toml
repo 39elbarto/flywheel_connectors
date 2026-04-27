@@ -313,6 +313,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_symbol_envelope_decrypt"
+path = "fuzz_targets/symbol_envelope_decrypt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_sse_event_stream"
 path = "fuzz_targets/sse_event_stream.rs"
 test = false

@@ -1512,9 +1512,22 @@ fn parse_history_cursor_path(params: &serde_json::Value) -> FcpResult<PathBuf> {
         return Ok(PathBuf::from(trimmed));
     }
 
-    let default_dir =
-        std::env::var_os("FCP_CONNECTOR_STATE_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
-    Ok(default_dir.join(DEFAULT_HISTORY_CURSOR_FILE))
+    if let Some(state_dir) = params.get("state_dir") {
+        let raw = state_dir.as_str().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "state_dir must be a string".into(),
+        })?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "state_dir must not be empty".into(),
+            });
+        }
+        return Ok(PathBuf::from(trimmed).join(DEFAULT_HISTORY_CURSOR_FILE));
+    }
+
+    Ok(PathBuf::from(DEFAULT_HISTORY_CURSOR_FILE))
 }
 
 fn parse_optional_string_field(
@@ -2373,11 +2386,7 @@ mod tests {
     #[test]
     fn parse_history_cursor_path_default() {
         let result = parse_history_cursor_path(&json!({})).unwrap();
-        assert!(
-            result
-                .to_string_lossy()
-                .contains("fcp-gmail-history-cursor")
-        );
+        assert_eq!(result, PathBuf::from(DEFAULT_HISTORY_CURSOR_FILE));
     }
 
     #[test]
@@ -2386,6 +2395,15 @@ mod tests {
             parse_history_cursor_path(&json!({"history_cursor_path": "/tmp/custom-cursor.json"}))
                 .unwrap();
         assert_eq!(result.to_str().unwrap(), "/tmp/custom-cursor.json");
+    }
+
+    #[test]
+    fn parse_history_cursor_path_uses_configured_state_dir() {
+        let result = parse_history_cursor_path(&json!({"state_dir": "/tmp/gmail-state"})).unwrap();
+        assert_eq!(
+            result,
+            PathBuf::from("/tmp/gmail-state").join(DEFAULT_HISTORY_CURSOR_FILE)
+        );
     }
 
     #[test]
@@ -2398,6 +2416,12 @@ mod tests {
     fn parse_history_cursor_path_rejects_non_string() {
         let result = parse_history_cursor_path(&json!({"history_cursor_path": 42}));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_history_cursor_path_rejects_bad_state_dir() {
+        assert!(parse_history_cursor_path(&json!({"state_dir": ""})).is_err());
+        assert!(parse_history_cursor_path(&json!({"state_dir": 42})).is_err());
     }
 
     // ── parse_optional_string_field ────────────────────────────────

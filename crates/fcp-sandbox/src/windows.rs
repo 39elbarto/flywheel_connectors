@@ -116,15 +116,33 @@ impl WindowsSandbox {
         let appcontainer_available = check_appcontainer_available();
 
         if appcontainer_available {
-            info!("AppContainer available for process isolation");
+            info!(
+                env = FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV,
+                "AppContainer opt-in enabled — caller must ensure CreateProcessAsUser path is wired"
+            );
         } else {
-            warn!("AppContainer not available, using job objects only");
+            warn!(
+                env = FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV,
+                "AppContainer not active (br-3hrw3 fail-closed default); enforcement is job-objects + integrity-level + firewall only. \
+                 Set the env var to 1 to opt into the AppContainer code path once it is wired."
+            );
         }
 
         Self {
             job_handle: None,
             appcontainer_available,
         }
+    }
+
+    /// Whether AppContainer is *actually active* for this process.
+    ///
+    /// Pre-br-3hrw3 the sandbox unconditionally claimed AppContainer
+    /// availability even though no `CreateProcessAsUser`-based wiring
+    /// existed; this getter exposes the post-fix truth so conformance
+    /// tests and observability surfaces can assert against it.
+    #[must_use]
+    pub const fn appcontainer_active(&self) -> bool {
+        self.appcontainer_available
     }
 
     /// Create and configure a job object.
@@ -579,11 +597,45 @@ unsafe extern "system" {
 // Helper Functions
 // ============================================================================
 
-/// Check if AppContainer is available (Windows 8+).
+/// Environment variable that opts the process into the future
+/// AppContainer code path.
+///
+/// AppContainer requires spawning a new process via `CreateProcessAsUser`
+/// with an AppContainer token (see the inline note inside
+/// [`WindowsSandbox::apply`] at line 351). That code path is **not yet
+/// wired** in this crate — only job-object + integrity-level + firewall
+/// enforcement is active. Until the real implementation lands, the
+/// availability flag must be honest with downstream observers (logs,
+/// metrics, conformance harness) and report `false` so that callers do
+/// not assume AppContainer is protecting the process when it is not.
+///
+/// Operators who land the real CreateProcessAsUser-based implementation
+/// can flip this env var to `1` (or `true`) without re-rolling the
+/// stub function. This keeps the opt-in gate in user-controlled
+/// configuration rather than a code change once the implementation
+/// exists.
+pub const FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV: &str = "FCP_SANDBOX_WINDOWS_APPCONTAINER";
+
+/// Check if AppContainer is *actually wired* and active for this
+/// process (NOT just available on the kernel).
+///
+/// Pre-fix this returned `true` unconditionally on the assumption that
+/// AppContainer was present on Windows 8+. That was a stub: the
+/// downstream `apply()` path never invokes the AppContainer code (no
+/// `CreateProcessAsUser`, no AppContainer token), so reporting `true`
+/// gave the rest of the system a false sense of process isolation —
+/// br-flywheel_connectors-3hrw3.
+///
+/// Until the real AppContainer integration lands, we fail closed and
+/// require explicit operator opt-in via
+/// [`FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV`].
 fn check_appcontainer_available() -> bool {
-    // AppContainer requires Windows 8 or later
-    // For simplicity, we assume it's available on modern Windows
-    true
+    matches!(
+        std::env::var(FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV)
+            .ok()
+            .as_deref(),
+        Some("1") | Some("true") | Some("TRUE")
+    )
 }
 
 /// Get last Windows error as string.
@@ -633,6 +685,61 @@ mod tests {
         let sandbox = WindowsSandbox::new();
         assert!(sandbox.is_available());
         assert_eq!(sandbox.platform_name(), "windows");
+    }
+
+    /// br-3hrw3 regression: AppContainer must NOT report itself as
+    /// active by default, because no `CreateProcessAsUser`-based wiring
+    /// exists yet. Pre-fix, `check_appcontainer_available()` returned
+    /// `true` unconditionally and the constructor logged "AppContainer
+    /// available for process isolation" — giving downstream observers a
+    /// false sense of process isolation that the rest of `apply()`
+    /// never delivered. Post-fix, the default is fail-closed.
+    #[test]
+    fn appcontainer_inactive_by_default() {
+        // Make sure no leftover env value from a parallel test poisons
+        // the assertion. Tests in this module are not annotated with
+        // `#[serial]`, but each `WindowsSandbox::new()` call captures
+        // the env at that instant, so we read the current value first.
+        let prev = std::env::var(FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV).ok();
+        unsafe {
+            std::env::remove_var(FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV);
+        }
+        let sandbox = WindowsSandbox::new();
+        assert!(
+            !sandbox.appcontainer_active(),
+            "br-3hrw3: AppContainer must default to INACTIVE until the \
+             CreateProcessAsUser code path is wired"
+        );
+        // Restore the prior value to keep the test environment clean
+        // for any sibling test that may run after us in the same process.
+        if let Some(v) = prev {
+            unsafe {
+                std::env::set_var(FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV, v);
+            }
+        }
+    }
+
+    /// br-3hrw3 companion: an explicit operator opt-in via the env var
+    /// flips `appcontainer_active()` to true so the eventual real
+    /// implementation can be enabled without re-rolling the stub.
+    #[test]
+    fn appcontainer_active_when_env_opt_in_set() {
+        let prev = std::env::var(FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV).ok();
+        unsafe {
+            std::env::set_var(FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV, "1");
+        }
+        let sandbox = WindowsSandbox::new();
+        assert!(
+            sandbox.appcontainer_active(),
+            "explicit opt-in via {} must flip AppContainer to active",
+            FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV
+        );
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV, v),
+                None => std::env::remove_var(FCP_SANDBOX_WINDOWS_APPCONTAINER_ENV),
+            }
+        }
     }
 
     #[test]

@@ -1445,16 +1445,23 @@ fn close_pkcs11_session(
 }
 
 fn acquire_provider_context(provider: &Path) -> Result<Pkcs11, TokenError> {
+    acquire_provider_context_with_stage(provider).map_err(|(_, err)| err)
+}
+
+fn acquire_provider_context_with_stage(
+    provider: &Path,
+) -> Result<Pkcs11, (DetectionStage, TokenError)> {
     let mut sessions = provider_session_registry()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    let pkcs11 = Pkcs11::new(provider).map_err(map_pkcs11_error)?;
+    let pkcs11 = Pkcs11::new(provider)
+        .map_err(|err| (DetectionStage::LoadProvider, map_pkcs11_error(err)))?;
     let initialized_here =
         match pkcs11.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)) {
             Ok(()) => true,
             Err(Pkcs11Error::Pkcs11(RvError::CryptokiAlreadyInitialized, _)) => false,
-            Err(err) => return Err(map_pkcs11_error(err)),
+            Err(err) => return Err((DetectionStage::InitializeProvider, map_pkcs11_error(err))),
         };
 
     note_provider_session_open(&mut sessions, provider, initialized_here);
@@ -1727,18 +1734,13 @@ fn detect_tokens_for_provider(provider: &Path) -> ProviderDetectionResult {
 
     tracing::debug!(provider = %provider.display(), "Probing PKCS#11 provider");
 
-    let pkcs11 = match Pkcs11::new(provider) {
+    let pkcs11 = match acquire_provider_context_with_stage(provider) {
         Ok(pkcs11) => pkcs11,
-        Err(err) => {
-            result.push_issue(DetectionStage::LoadProvider, None, err.to_string());
+        Err((stage, err)) => {
+            result.push_issue(stage, None, err.to_string());
             return result;
         }
     };
-
-    if let Err(err) = pkcs11.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)) {
-        result.push_issue(DetectionStage::InitializeProvider, None, err.to_string());
-        return result;
-    }
 
     match pkcs11.get_slots_with_token() {
         Ok(slots) => {
@@ -1749,7 +1751,7 @@ fn detect_tokens_for_provider(provider: &Path) -> ProviderDetectionResult {
         Err(err) => result.push_issue(DetectionStage::EnumerateSlots, None, err.to_string()),
     }
 
-    if let Err(err) = pkcs11.finalize() {
+    if let Err(err) = finalize_pkcs11_context(provider, pkcs11) {
         result.push_issue(DetectionStage::FinalizeProvider, None, err.to_string());
     }
 
@@ -2843,6 +2845,31 @@ mod tests {
         assert!(!note_provider_session_close(&mut sessions, provider));
         assert!(!note_provider_session_close(&mut sessions, provider));
         assert!(!sessions.contains_key(provider));
+    }
+
+    #[test]
+    fn provider_detection_close_does_not_finalize_live_bootstrap_session() {
+        let provider = Path::new("/test/provider.so");
+        let mut sessions = HashMap::new();
+
+        note_provider_session_open(&mut sessions, provider, true);
+        note_provider_session_open(&mut sessions, provider, false);
+
+        assert!(
+            !note_provider_session_close(&mut sessions, provider),
+            "a discovery pass that observed an already-initialized provider must not finalize it"
+        );
+        assert_eq!(
+            sessions.get(provider),
+            Some(&ProviderSessionState {
+                active_sessions: 1,
+                finalize_required: true,
+            })
+        );
+        assert!(
+            note_provider_session_close(&mut sessions, provider),
+            "the bootstrap session that initialized the provider remains responsible for finalize"
+        );
     }
 
     // ---- DetectionStage serde roundtrip ----

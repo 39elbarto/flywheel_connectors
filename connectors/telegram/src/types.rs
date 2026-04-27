@@ -43,12 +43,74 @@ pub struct TelegramResponse<T> {
 }
 
 /// Telegram Update object.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Update {
     pub update_id: i64,
-    #[serde(flatten)]
     pub kind: UpdateKind,
 }
+
+impl<'de> Deserialize<'de> for Update {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| de::Error::custom("Telegram update must be a JSON object"))?;
+
+        let update_id = object
+            .remove("update_id")
+            .ok_or_else(|| de::Error::missing_field("update_id"))
+            .and_then(|value| i64::deserialize(value).map_err(de::Error::custom))?;
+
+        let known_kind_count = TELEGRAM_UPDATE_KIND_FIELDS
+            .iter()
+            .filter(|field| object.get(**field).is_some_and(|value| !value.is_null()))
+            .count();
+        if known_kind_count > 1 {
+            return Err(de::Error::custom(
+                "Telegram update includes multiple known update kinds",
+            ));
+        }
+
+        let kind = if let Some(value) = object.remove("message").filter(|value| !value.is_null()) {
+            UpdateKind::Message(serde_json::from_value(value).map_err(de::Error::custom)?)
+        } else if let Some(value) = object
+            .remove("edited_message")
+            .filter(|value| !value.is_null())
+        {
+            UpdateKind::EditedMessage(serde_json::from_value(value).map_err(de::Error::custom)?)
+        } else if let Some(value) = object
+            .remove("channel_post")
+            .filter(|value| !value.is_null())
+        {
+            UpdateKind::ChannelPost(serde_json::from_value(value).map_err(de::Error::custom)?)
+        } else if let Some(value) = object
+            .remove("edited_channel_post")
+            .filter(|value| !value.is_null())
+        {
+            UpdateKind::EditedChannelPost(serde_json::from_value(value).map_err(de::Error::custom)?)
+        } else if let Some(value) = object
+            .remove("callback_query")
+            .filter(|value| !value.is_null())
+        {
+            UpdateKind::CallbackQuery(serde_json::from_value(value).map_err(de::Error::custom)?)
+        } else {
+            UpdateKind::Unknown
+        };
+
+        Ok(Self { update_id, kind })
+    }
+}
+
+const TELEGRAM_UPDATE_KIND_FIELDS: &[&str] = &[
+    "message",
+    "edited_message",
+    "channel_post",
+    "edited_channel_post",
+    "callback_query",
+];
 
 /// Different kinds of updates.
 #[derive(Debug, Clone, Deserialize)]
@@ -1533,6 +1595,57 @@ mod tests {
             }
             other => panic!("expected CallbackQuery, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn update_rejects_multiple_known_kinds() {
+        let json = json!({
+            "update_id": 203,
+            "message": {
+                "message_id": 1,
+                "chat": {"id": 100, "type": "private"},
+                "date": 1_700_000_000,
+                "text": "primary"
+            },
+            "callback_query": {
+                "id": "cq_update",
+                "from": {"id": 42, "is_bot": false, "first_name": "Frank"},
+                "chat_instance": "ci_val",
+                "data": "btn_press"
+            }
+        });
+        let result = serde_json::from_value::<Update>(json);
+
+        assert!(result.is_err(), "ambiguous update must be rejected");
+        let error_message = result.err().map_or_else(String::new, |err| err.to_string());
+        assert!(
+            error_message.contains("multiple known update kinds"),
+            "unexpected error: {error_message}"
+        );
+    }
+
+    #[test]
+    fn update_with_only_unsupported_kind_is_unknown() {
+        let json = json!({
+            "update_id": 203,
+            "poll": {
+                "id": "poll1",
+                "question": "ready?",
+                "options": []
+            }
+        });
+        let result = serde_json::from_value::<Update>(json);
+
+        assert!(
+            matches!(
+                result,
+                Ok(Update {
+                    update_id: 203,
+                    kind: UpdateKind::Unknown
+                })
+            ),
+            "unsupported-only update must parse as Unknown: {result:?}"
+        );
     }
 
     #[test]

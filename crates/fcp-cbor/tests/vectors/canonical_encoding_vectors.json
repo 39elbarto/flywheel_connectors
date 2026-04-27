@@ -41,6 +41,87 @@
     }
   ],
 
+  "negative_integer_minimal_encoding": [
+    {
+      "value": -1,
+      "canonical_hex": "20",
+      "description": "Major type 1, minor 0: encodes -1 - 0 = -1 (RFC 8949 §3.1)"
+    },
+    {
+      "value": -10,
+      "canonical_hex": "29",
+      "description": "Minor 9 in major type 1: -1 - 9 = -10"
+    },
+    {
+      "value": -24,
+      "canonical_hex": "37",
+      "description": "Max value with no extra bytes (minor 23 = -24)"
+    },
+    {
+      "value": -25,
+      "canonical_hex": "3818",
+      "description": "First value requiring 1-byte argument (minor 24, arg 0x18 = 24, encodes -25)"
+    },
+    {
+      "value": -100,
+      "canonical_hex": "3863",
+      "description": "Negative byte-range value (-1 - 99 = -100)"
+    },
+    {
+      "value": -256,
+      "canonical_hex": "38ff",
+      "description": "Max 1-byte negative (-1 - 255 = -256)"
+    },
+    {
+      "value": -257,
+      "canonical_hex": "390100",
+      "description": "First value requiring 2-byte argument"
+    },
+    {
+      "value": -65536,
+      "canonical_hex": "39ffff",
+      "description": "Max 2-byte negative (-1 - 65535 = -65536)"
+    },
+    {
+      "value": -65537,
+      "canonical_hex": "3a00010000",
+      "description": "First value requiring 4-byte argument"
+    },
+    {
+      "value": -4294967296,
+      "canonical_hex": "3affffffff",
+      "description": "Max 4-byte negative (-1 - 2^32-1 = -2^32)"
+    },
+    {
+      "value": -4294967297,
+      "canonical_hex": "3b0000000100000000",
+      "description": "First value requiring 8-byte argument"
+    },
+    {
+      "value": -9223372036854775808,
+      "canonical_hex": "3b7fffffffffffffff",
+      "description": "i64::MIN: -1 - i64::MAX = i64::MIN, fits in 8-byte argument"
+    }
+  ],
+
+  "simple_value_encoding": [
+    {
+      "value_name": "false",
+      "canonical_hex": "f4",
+      "description": "Major type 7, minor 20 (RFC 8949 §3.3)"
+    },
+    {
+      "value_name": "true",
+      "canonical_hex": "f5",
+      "description": "Major type 7, minor 21"
+    },
+    {
+      "value_name": "null",
+      "canonical_hex": "f6",
+      "description": "Major type 7, minor 22 (encodes serde Option::None)"
+    }
+  ],
+
   "non_canonical_integers": [
     {
       "non_canonical_hex": "1800",

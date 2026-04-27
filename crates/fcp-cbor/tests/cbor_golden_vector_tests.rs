@@ -5,7 +5,7 @@
 
 #![allow(dead_code)]
 
-use fcp_cbor::{CanonicalSerializer, SchemaId, to_canonical_cbor};
+use fcp_cbor::{to_canonical_cbor, CanonicalSerializer, SchemaId};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -18,10 +18,26 @@ use std::fs;
 #[derive(Debug, Deserialize)]
 struct CanonicalEncodingVectors {
     integer_minimal_encoding: Vec<IntegerVector>,
+    negative_integer_minimal_encoding: Vec<NegativeIntegerVector>,
+    simple_value_encoding: Vec<SimpleValueVector>,
     non_canonical_integers: Vec<NonCanonicalIntegerVector>,
     map_key_ordering: MapKeyOrderingVectors,
     string_encoding: Vec<StringVector>,
     array_encoding: Vec<ArrayVector>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NegativeIntegerVector {
+    value: i64,
+    canonical_hex: String,
+    description: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SimpleValueVector {
+    value_name: String,
+    canonical_hex: String,
+    description: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +148,76 @@ fn test_integer_minimal_encoding_from_vectors() {
             expected,
             "Value {} ({}) encoding mismatch: got {} expected {}",
             vector.value,
+            vector.description,
+            bytes_to_hex(&encoded),
+            vector.canonical_hex
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Negative Integer Encoding Tests (RFC 8949 §3.1, major type 1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_negative_integer_minimal_encoding_from_vectors() {
+    let vectors = load_canonical_vectors();
+
+    for vector in vectors.negative_integer_minimal_encoding {
+        let expected = hex_to_bytes(&vector.canonical_hex);
+
+        // Choose the smallest signed type that can hold the value, mirroring
+        // how the positive-integer test selects an unsigned type. Encoding
+        // must be type-width-independent (RFC 8949 §3.1: minor 0..27 alone
+        // dictates byte count), so this also exercises the canonicalizer's
+        // narrow-width handling.
+        let encoded = if let Ok(value) = i8::try_from(vector.value) {
+            to_canonical_cbor(&value).unwrap()
+        } else if let Ok(value) = i16::try_from(vector.value) {
+            to_canonical_cbor(&value).unwrap()
+        } else if let Ok(value) = i32::try_from(vector.value) {
+            to_canonical_cbor(&value).unwrap()
+        } else {
+            to_canonical_cbor(&vector.value).unwrap()
+        };
+
+        assert_eq!(
+            encoded,
+            expected,
+            "Negative value {} ({}) encoding mismatch: got {} expected {}",
+            vector.value,
+            vector.description,
+            bytes_to_hex(&encoded),
+            vector.canonical_hex
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Simple Value Encoding Tests (RFC 8949 §3.3, major type 7)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_simple_value_encoding_from_vectors() {
+    let vectors = load_canonical_vectors();
+
+    for vector in vectors.simple_value_encoding {
+        let expected = hex_to_bytes(&vector.canonical_hex);
+
+        let encoded = match vector.value_name.as_str() {
+            "false" => to_canonical_cbor(&false).unwrap(),
+            "true" => to_canonical_cbor(&true).unwrap(),
+            // serde represents `null` as `Option::None`; ciborium emits
+            // major type 7 / minor 22 (0xf6) for it.
+            "null" => to_canonical_cbor(&Option::<u8>::None).unwrap(),
+            other => panic!("unknown simple value '{other}' in golden vectors"),
+        };
+
+        assert_eq!(
+            encoded,
+            expected,
+            "Simple value '{}' ({}) encoding mismatch: got {} expected {}",
+            vector.value_name,
             vector.description,
             bytes_to_hex(&encoded),
             vector.canonical_hex

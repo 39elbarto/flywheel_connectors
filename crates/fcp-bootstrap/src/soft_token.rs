@@ -115,7 +115,7 @@ impl SoftTokenIdentitySpec {
 }
 
 /// Configuration for a soft-token driver instance.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct SoftTokenConfig {
     /// The PIN required for authentication.
     pub pin: String,
@@ -131,6 +131,20 @@ struct SoftTokenConfig {
     pub identities: Vec<SoftTokenIdentitySpec>,
     /// Advertised mechanisms (defaults to Ed25519 + ECDH).
     pub mechanisms: Vec<String>,
+}
+
+impl std::fmt::Debug for SoftTokenConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SoftTokenConfig")
+            .field("pin", &"<redacted>")
+            .field("token_label", &self.token_label)
+            .field("manufacturer", &self.manufacturer)
+            .field("serial", &self.serial)
+            .field("slot", &self.slot)
+            .field("identities", &self.identities)
+            .field("mechanisms", &self.mechanisms)
+            .finish()
+    }
 }
 
 impl Default for SoftTokenConfig {
@@ -681,6 +695,20 @@ mod tests {
     }
 
     // ── PIN validation tests ───────────────────────────────────────────
+
+    #[test]
+    fn soft_token_config_debug_redacts_pin() {
+        let config = SoftTokenConfig {
+            pin: "987654".into(),
+            ..SoftTokenConfig::default()
+        };
+
+        let debug = format!("{config:?}");
+
+        assert!(debug.contains("SoftTokenConfig"));
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("987654"));
+    }
 
     #[test]
     fn correct_pin_opens_session() {

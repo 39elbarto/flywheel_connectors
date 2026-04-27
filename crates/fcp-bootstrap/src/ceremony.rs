@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 use thiserror::Error;
+use zeroize::Zeroize;
 
 /// Unique identifier for a ceremony.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -273,6 +274,18 @@ pub struct ThresholdCeremony {
 struct ThresholdKeyMaterial {
     public_key_package: frost::keys::PublicKeyPackage,
     key_packages: HashMap<u32, frost::keys::KeyPackage>,
+}
+
+impl Drop for ThresholdKeyMaterial {
+    fn drop(&mut self) {
+        zeroize_key_packages(&mut self.key_packages);
+    }
+}
+
+fn zeroize_key_packages(key_packages: &mut HashMap<u32, frost::keys::KeyPackage>) {
+    for key_package in key_packages.values_mut() {
+        key_package.zeroize();
+    }
 }
 
 /// Result of a threshold signing session.
@@ -1393,6 +1406,33 @@ mod tests {
         ceremony
             .verify_signature_artifact(&artifact, b"FCP2-THRESHOLD-OWNER", b"bootstrap-owner")
             .expect("artifact verification");
+    }
+
+    #[test]
+    fn completed_threshold_key_material_zeroizes_key_packages() {
+        let mut ceremony = ThresholdCeremony::new(2, 3);
+        ceremony.add_participant(test_participant(1)).unwrap();
+        ceremony.add_participant(test_participant(2)).unwrap();
+        ceremony.add_participant(test_participant(3)).unwrap();
+        ceremony.add_commitment(test_commitment(1)).unwrap();
+        ceremony.add_commitment(test_commitment(2)).unwrap();
+        ceremony.add_commitment(test_commitment(3)).unwrap();
+        ceremony.add_shares(1, test_shares(1, 2)).unwrap();
+        ceremony.add_shares(2, test_shares(2, 1)).unwrap();
+        ceremony.add_shares(3, test_shares(3, 1)).unwrap();
+
+        let key_material = ceremony
+            .key_material
+            .as_mut()
+            .expect("completed ceremony should retain threshold key material");
+        let original_key_packages = key_material.key_packages.clone();
+
+        zeroize_key_packages(&mut key_material.key_packages);
+
+        assert_ne!(
+            key_material.key_packages, original_key_packages,
+            "zeroization must overwrite completed ceremony signing shares before drop"
+        );
     }
 
     #[test]

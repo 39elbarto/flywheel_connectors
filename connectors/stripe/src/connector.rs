@@ -1643,10 +1643,11 @@ impl StripeConnector {
         }
 
         let signature_header = require_str(&input, "stripe_signature")?;
+        let verified_at = Utc::now().timestamp();
         let received_at = input
             .get("received_at")
             .and_then(|v| v.as_i64())
-            .unwrap_or_else(|| Utc::now().timestamp());
+            .unwrap_or(verified_at);
 
         let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
         let webhook_signature_material =
@@ -1662,7 +1663,7 @@ impl StripeConnector {
             webhook_signature_material,
             payload,
             signature_header,
-            received_at,
+            verified_at,
             config.webhook_tolerance_seconds,
         )?;
 
@@ -1676,7 +1677,7 @@ impl StripeConnector {
             .map_or_else(|| event.id.clone(), str::to_owned);
 
         // Only event.id is covered by Stripe's signature; host delivery metadata is not.
-        self.register_webhook_delivery(&event.id, received_at, config.webhook_tolerance_seconds)?;
+        self.register_webhook_delivery(&event.id, verified_at, config.webhook_tolerance_seconds)?;
 
         let object_type = event
             .data
@@ -2704,8 +2705,9 @@ mod tests {
             .await
             .unwrap();
 
+        let signature_timestamp = Utc::now().timestamp();
         let payload = r#"{"id":"evt_123","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
-        let header = build_test_webhook_signature("whsec_test", payload, 1_700_000_000);
+        let header = build_test_webhook_signature("whsec_test", payload, signature_timestamp);
         let capability = generate_valid_token(
             &signing_key,
             "stripe.webhook",
@@ -2717,8 +2719,7 @@ mod tests {
                 "operation": "stripe.ingest_webhook_event",
                 "input": {
                     "payload": payload,
-                    "stripe_signature": header,
-                    "received_at": 1_700_000_005
+                    "stripe_signature": header
                 },
                 "capability_token": capability
             }))
@@ -2756,8 +2757,9 @@ mod tests {
             .await
             .unwrap();
 
+        let signature_timestamp = Utc::now().timestamp();
         let payload = r#"{"id":"evt_replay","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
-        let header = build_test_webhook_signature("whsec_test", payload, 1_700_000_000);
+        let header = build_test_webhook_signature("whsec_test", payload, signature_timestamp);
         let capability = generate_valid_token(
             &signing_key,
             "stripe.webhook",
@@ -2767,8 +2769,7 @@ mod tests {
             "operation": "stripe.ingest_webhook_event",
             "input": {
                 "payload": payload,
-                "stripe_signature": header,
-                "received_at": 1_700_000_005
+                "stripe_signature": header
             },
             "capability_token": capability
         });
@@ -2803,8 +2804,9 @@ mod tests {
             .await
             .unwrap();
 
+        let signature_timestamp = Utc::now().timestamp();
         let payload = r#"{"id":"evt_replay_delivery_substitution","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
-        let header = build_test_webhook_signature("whsec_test", payload, 1_700_000_000);
+        let header = build_test_webhook_signature("whsec_test", payload, signature_timestamp);
         let capability = generate_valid_token(
             &signing_key,
             "stripe.webhook",
@@ -2817,8 +2819,7 @@ mod tests {
                 "input": {
                     "payload": payload,
                     "stripe_signature": header,
-                    "delivery_id": "delivery-first",
-                    "received_at": 1_700_000_005
+                    "delivery_id": "delivery-first"
                 },
                 "capability_token": capability
             }))
@@ -2836,8 +2837,7 @@ mod tests {
                 "input": {
                     "payload": payload,
                     "stripe_signature": header,
-                    "delivery_id": "delivery-second",
-                    "received_at": 1_700_000_006
+                    "delivery_id": "delivery-second"
                 },
                 "capability_token": replay_capability
             }))
@@ -2848,6 +2848,58 @@ mod tests {
             matches!(err, FcpError::Conflict { .. }),
             "expected replay Conflict for same signed event id with substituted delivery_id, got {err:?}"
         );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_rejects_backdated_received_at() {
+        let mut connector = StripeConnector::new();
+        connector
+            .handle_configure(json!({
+                "secret_key": "sk_test",
+                "webhook_signing_secret": "whsec_test",
+            }))
+            .await
+            .unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["stripe.ingest_webhook_event"]
+            }))
+            .await
+            .unwrap();
+
+        let stale_timestamp = Utc::now()
+            .timestamp()
+            .saturating_sub(DEFAULT_WEBHOOK_TOLERANCE_SECONDS + 60);
+        let payload = r#"{"id":"evt_backdated_received_at","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
+        let header = build_test_webhook_signature("whsec_test", payload, stale_timestamp);
+        let capability = generate_valid_token(
+            &signing_key,
+            "stripe.webhook",
+            &["stripe.ingest_webhook_event"],
+        );
+
+        let err = connector
+            .handle_invoke(json!({
+                "operation": "stripe.ingest_webhook_event",
+                "input": {
+                    "payload": payload,
+                    "stripe_signature": header,
+                    "received_at": stale_timestamp
+                },
+                "capability_token": capability
+            }))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, FcpError::Unauthorized { .. }));
     }
 
     #[fcp_async_core::runtime::test]

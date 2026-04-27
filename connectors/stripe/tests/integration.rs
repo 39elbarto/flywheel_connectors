@@ -1380,16 +1380,16 @@ async fn invoke_ingest_webhook_event_success() {
     let signing_key = setup_handshake(&mut connector, &["stripe.ingest_webhook_event"]).await;
     let capability = generate_valid_token(&signing_key, "stripe.ingest_webhook_event");
 
+    let signature_timestamp = Utc::now().timestamp();
     let payload = r#"{"id":"evt_integration","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
-    let signature = build_webhook_signature("whsec_integration", payload, 1_700_000_000);
+    let signature = build_webhook_signature("whsec_integration", payload, signature_timestamp);
 
     let result = connector
         .handle_invoke(json!({
             "operation": "stripe.ingest_webhook_event",
             "input": {
                 "payload": payload,
-                "stripe_signature": signature,
-                "received_at": 1_700_000_010
+                "stripe_signature": signature
             },
             "capability_token": capability
         }))
@@ -1418,14 +1418,14 @@ async fn invoke_ingest_webhook_event_replay_rejected() {
     let signing_key = setup_handshake(&mut connector, &["stripe.ingest_webhook_event"]).await;
     let capability = generate_valid_token(&signing_key, "stripe.ingest_webhook_event");
 
+    let signature_timestamp = Utc::now().timestamp();
     let payload = r#"{"id":"evt_replay_test","object":"event","type":"invoice.paid","created":1700000000,"data":{"object":{"id":"in_123","object":"invoice"}}}"#;
-    let signature = build_webhook_signature("whsec_replay", payload, 1_700_000_000);
+    let signature = build_webhook_signature("whsec_replay", payload, signature_timestamp);
     let invoke = json!({
         "operation": "stripe.ingest_webhook_event",
         "input": {
             "payload": payload,
-            "stripe_signature": signature,
-            "received_at": 1_700_000_005
+            "stripe_signature": signature
         },
         "capability_token": capability
     });

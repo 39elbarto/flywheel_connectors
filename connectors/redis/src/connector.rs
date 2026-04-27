@@ -602,6 +602,7 @@ fn require_str_array(input: &serde_json::Value, field: &str) -> Result<Vec<Strin
 }
 
 /// Build the typed operations info for introspection.
+// The exported Redis operation catalog is intentionally kept in one auditable table.
 #[allow(clippy::too_many_lines)]
 fn typed_operations_info() -> Vec<OperationInfo> {
     vec![

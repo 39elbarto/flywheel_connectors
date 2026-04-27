@@ -1055,7 +1055,7 @@ impl NotionConnector {
         })?;
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
+            verifier.verify_bound(token, &cap_id, &op_id, &[])?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -1473,6 +1473,7 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
         })
 }
 
+// Explicit metadata parameters keep each operation declaration complete at its call site.
 #[allow(clippy::fn_params_excessive_bools)]
 fn op_info(
     id: &'static str,
@@ -1532,7 +1533,8 @@ mod tests {
             .operations(operations)
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&constraints_cbor)
+            .try_constraints_cbor(&constraints_cbor)
+            .unwrap()
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)

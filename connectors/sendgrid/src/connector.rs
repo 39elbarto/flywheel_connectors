@@ -97,6 +97,7 @@ impl SendGridConfig {
 }
 
 #[derive(Debug, Clone, Serialize)]
+// Readiness output exposes independent operator-facing booleans in doctor responses.
 #[allow(clippy::struct_excessive_bools)]
 struct ProvisioningReadiness {
     auth_mode: &'static str,

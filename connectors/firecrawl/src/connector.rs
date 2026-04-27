@@ -1,7 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use fcp_core::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_core::{
+    BaseConnector, ConnectorId, FcpError, FcpResult, RequestId, SimulateRequest, SimulateResponse,
+};
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use serde_json::{Value, json};
 use tracing::info;
@@ -35,6 +37,10 @@ fn default_base_url() -> String {
 
 const fn default_timeout_ms() -> u64 {
     30_000
+}
+
+fn trim_config_string(value: &mut String) {
+    *value = value.trim().to_owned();
 }
 
 impl std::fmt::Debug for FirecrawlConfig {
@@ -72,8 +78,8 @@ impl FirecrawlConfig {
                 code: 1001,
                 message: format!("Invalid configuration: {e}"),
             })?;
-        config.base_url = config.base_url.trim().to_string();
-        config.api_key = config.api_key.trim().to_string();
+        trim_config_string(&mut config.base_url);
+        trim_config_string(&mut config.api_key);
         config.validate().map_err(|e| FcpError::InvalidRequest {
             code: 1001,
             message: e,
@@ -414,22 +420,36 @@ impl FirecrawlConnector {
     }
 
     pub async fn handle_simulate(&self, params: Value) -> FcpResult<Value> {
-        let operation = params
-            .get("operation_id")
-            .or_else(|| params.get("operation"))
-            .and_then(Value::as_str)
+        let parsed = serde_json::from_value::<SimulateRequest>(params.clone()).ok();
+        let id = parsed
+            .as_ref()
+            .map(|req| req.id.clone())
+            .or_else(|| params.get("id").and_then(Value::as_str).map(RequestId::new))
+            .unwrap_or_else(|| RequestId::new("firecrawl-simulate"));
+        let operation = parsed
+            .as_ref()
+            .map(|req| req.operation.as_str())
+            .or_else(|| {
+                params
+                    .get("operation_id")
+                    .or_else(|| params.get("operation"))
+                    .and_then(Value::as_str)
+            })
             .unwrap_or("");
 
         let known = matches!(operation, OP_SCRAPE | OP_CRAWL_START | OP_CRAWL_STATUS);
-        Ok(json!({
-            "allowed": false,
-            "simulate_capability": if known { "dry_run_not_supported" } else { "unknown_operation" },
-            "reason": if known {
-                "Firecrawl API does not support dry-run mode."
-            } else {
-                "Unknown operation."
-            }
-        }))
+        let response = if known {
+            SimulateResponse::denied(
+                id,
+                "Firecrawl API does not support dry-run mode.",
+                "dry_run_not_supported",
+            )
+        } else {
+            SimulateResponse::denied(id, "Unknown operation.", "unknown_operation")
+        };
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize simulate response: {e}"),
+        })
     }
 
     pub async fn handle_shutdown(&mut self, _params: Value) -> FcpResult<Value> {
@@ -629,8 +649,12 @@ mod tests {
             .handle_simulate(json!({"operation_id": "firecrawl.scrape"}))
             .await
             .unwrap();
-        assert_eq!(sim["allowed"], false);
-        assert_eq!(sim["simulate_capability"], "dry_run_not_supported");
+        let response: SimulateResponse = serde_json::from_value(sim).unwrap();
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code.as_deref(),
+            Some("dry_run_not_supported")
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -640,8 +664,9 @@ mod tests {
             .handle_simulate(json!({"operation_id": "firecrawl.nope"}))
             .await
             .unwrap();
-        assert_eq!(sim["allowed"], false);
-        assert_eq!(sim["simulate_capability"], "unknown_operation");
+        let response: SimulateResponse = serde_json::from_value(sim).unwrap();
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("unknown_operation"));
     }
 
     #[fcp_async_core::runtime::test]

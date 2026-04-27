@@ -141,30 +141,13 @@ impl FcpConnector for FirecrawlSuiteAdapter {
     }
 
     async fn simulate(&self, req: SimulateRequest) -> fcp_core::FcpResult<SimulateResponse> {
-        let request_id = req.id.clone();
         let value = serde_json::to_value(req).map_err(|err| FcpError::Internal {
             message: format!("failed to serialize simulate request: {err}"),
         })?;
         let response = self.connector.handle_simulate(value).await?;
-        let allowed = response
-            .get("allowed")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        if allowed {
-            Ok(SimulateResponse::allowed(request_id))
-        } else {
-            Ok(SimulateResponse::denied(
-                request_id,
-                response
-                    .get("reason")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("simulation denied"),
-                response
-                    .get("simulate_capability")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("firecrawl_simulation_denied"),
-            ))
-        }
+        serde_json::from_value(response).map_err(|err| FcpError::Internal {
+            message: format!("failed to deserialize simulate response: {err}"),
+        })
     }
 
     async fn subscribe(&self, _req: SubscribeRequest) -> fcp_core::FcpResult<SubscribeResponse> {

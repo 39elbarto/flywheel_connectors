@@ -34,6 +34,7 @@ fcp-arxiv = { path = "../connectors/arxiv" }
 fcp-dingtalk = { path = "../connectors/dingtalk" }
 fcp-discord = { path = "../connectors/discord" }
 fcp-gmail = { path = "../connectors/gmail" }
+fcp-google-docs = { path = "../connectors/google-docs" }
 fcp-google-drive = { path = "../connectors/google-drive" }
 fcp-graphql = { path = "../crates/fcp-graphql" }
 fcp-github = { path = "../connectors/github" }
@@ -334,6 +335,13 @@ bench = false
 [[bin]]
 name = "fuzz_google_drive_path_segment"
 path = "fuzz_targets/google_drive_path_segment.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_google_docs_path_segment"
+path = "fuzz_targets/google_docs_path_segment.rs"
 test = false
 doc = false
 bench = false
@@ -740,6 +748,13 @@ bench = false
 [[bin]]
 name = "fuzz_symbol_record_layout"
 path = "fuzz_targets/symbol_record_layout.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_cbor_int_canonical_length"
+path = "fuzz_targets/cbor_int_canonical_length.rs"
 test = false
 doc = false
 bench = false

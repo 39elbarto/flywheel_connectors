@@ -563,6 +563,13 @@ impl FcpConnector for DingTalkConnector {
             }
             return Ok(response);
         }
+        if let Err(error) = validate_operation_input(req.operation.as_str(), &req.input) {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                error.to_string(),
+                error.error_code(),
+            ));
+        }
         Ok(SimulateResponse::allowed(req.id))
     }
 
@@ -618,6 +625,55 @@ fn required_string<'a>(value: &'a Value, field: &str) -> FcpResult<&'a str> {
             code: 1005,
             message: format!("{field} is required"),
         })
+}
+
+fn validate_operation_input(operation: &str, input: &Value) -> FcpResult<()> {
+    match operation {
+        OP_SEND_TEXT => {
+            required_string(input, "to")?;
+            required_string(input, "content")?;
+        }
+        OP_SEND_LINK => {
+            required_string(input, "to")?;
+            required_string(input, "title")?;
+            required_string(input, "text")?;
+            required_string(input, "message_url")?;
+            optional_string(input, "pic_url")?;
+        }
+        OP_SEND_FILE => {
+            required_string(input, "to")?;
+            required_string(input, "media_id")?;
+            required_string(input, "file_name")?;
+            required_string(input, "file_type")?;
+        }
+        OP_UPLOAD_MEDIA => {
+            let media_type = required_string(input, "media_type")?;
+            if !matches!(media_type, "image" | "voice" | "video" | "file") {
+                return Err(FcpError::InvalidRequest {
+                    code: 1005,
+                    message: "media_type must be one of image, voice, video, or file".into(),
+                });
+            }
+            required_string(input, "file_name")?;
+            optional_string(input, "mime_type")?;
+            required_string(input, "content_base64")?;
+        }
+        OP_NORMALIZE_EVENT => {
+            input.get("event").ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: "event is required".into(),
+            })?;
+        }
+        OP_HEALTH => {}
+        _ => {
+            return Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: format!("unknown operation: {operation}"),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
@@ -693,6 +749,9 @@ fn operation(
 mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+    use chrono::{Duration, Utc};
+    use fcp_core::{CapabilityConstraints, CapabilityToken, InstanceId, RequestId, ZoneId};
+    use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{body_partial_json, method, path, query_param},
@@ -710,6 +769,75 @@ mod tests {
             .await
             .expect("configure should succeed");
         connector
+    }
+
+    fn signed_token(
+        signing_key: &Ed25519SigningKey,
+        capability: &'static str,
+        operation: &'static str,
+    ) -> CapabilityToken {
+        let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut constraints_cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut constraints_cbor).expect("serialize constraints");
+        let raw = CapabilityTokenBuilder::new()
+            .capability_id(capability)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&[operation])
+            .issuer("node:test")
+            .validity(now, now + Duration::hours(1))
+            .try_constraints_cbor(&constraints_cbor)
+            .expect("valid constraints cbor")
+            .sign(signing_key)
+            .expect("capability token");
+        CapabilityToken::from_raw(raw)
+    }
+
+    async fn configured_handshaken_connector(
+        server: &MockServer,
+        capabilities: Vec<CapabilityId>,
+    ) -> (DingTalkConnector, Ed25519SigningKey) {
+        let mut connector = configured_connector(server).await;
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(HandshakeRequest {
+                protocol_version: "2.0.0".into(),
+                zone: ZoneId::work(),
+                zone_dir: None,
+                host_public_key: signing_key.verifying_key().to_bytes(),
+                nonce: [7u8; 32],
+                capabilities_requested: capabilities,
+                host: None,
+                transport_caps: None,
+                requested_instance_id: Some(InstanceId::new()),
+            })
+            .await
+            .expect("handshake should succeed");
+        (connector, signing_key)
+    }
+
+    fn simulate_request(
+        operation: &'static str,
+        input: Value,
+        capability_token: CapabilityToken,
+    ) -> SimulateRequest {
+        SimulateRequest {
+            r#type: "simulate".into(),
+            id: RequestId::new("simulate-test"),
+            connector_id: ConnectorId::from_static("fcp.dingtalk"),
+            operation: OperationId::from_static(operation),
+            zone_id: ZoneId::work(),
+            input,
+            capability_token,
+            estimate_cost: false,
+            check_availability: false,
+            context: None,
+            correlation_id: None,
+        }
     }
 
     #[fcp_async_core::runtime::test]
@@ -867,6 +995,64 @@ mod tests {
             CAP_MESSAGES_READ
         );
         assert!(required_capability("unknown.op").is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_denies_missing_send_text_content() {
+        let server = MockServer::start().await;
+        let (connector, signing_key) = configured_handshaken_connector(
+            &server,
+            vec![CapabilityId::from_static(CAP_MESSAGES_WRITE)],
+        )
+        .await;
+        let response = connector
+            .simulate(simulate_request(
+                OP_SEND_TEXT,
+                json!({"to": "user:user-1"}),
+                signed_token(&signing_key, CAP_MESSAGES_WRITE, OP_SEND_TEXT),
+            ))
+            .await
+            .expect("simulate should return denial response");
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-1005"));
+        assert!(
+            response
+                .failure_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("content is required"))
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_denies_invalid_upload_media_type() {
+        let server = MockServer::start().await;
+        let (connector, signing_key) = configured_handshaken_connector(
+            &server,
+            vec![CapabilityId::from_static(CAP_MEDIA_WRITE)],
+        )
+        .await;
+        let response = connector
+            .simulate(simulate_request(
+                OP_UPLOAD_MEDIA,
+                json!({
+                    "media_type": "archive",
+                    "file_name": "payload.bin",
+                    "content_base64": BASE64.encode(b"payload"),
+                }),
+                signed_token(&signing_key, CAP_MEDIA_WRITE, OP_UPLOAD_MEDIA),
+            ))
+            .await
+            .expect("simulate should return denial response");
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-1005"));
+        assert!(
+            response
+                .failure_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("media_type must be one of"))
+        );
     }
 
     #[test]

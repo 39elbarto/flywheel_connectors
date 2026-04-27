@@ -489,5 +489,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_cbor_float_encoding_edges"
+path = "fuzz_targets/cbor_float_encoding_edges.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

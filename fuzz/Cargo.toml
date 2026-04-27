@@ -29,6 +29,7 @@ fcp-cbor = { path = "../crates/fcp-cbor" }
 fcp-core = { path = "../crates/fcp-core" }
 fcp-crypto = { path = "../crates/fcp-crypto" }
 fcp-graphql = { path = "../crates/fcp-graphql" }
+fcp-github = { path = "../connectors/github" }
 fcp-mesh = { path = "../crates/fcp-mesh" }
 fcp-manifest = { path = "../crates/fcp-manifest" }
 fcp-host = { path = "../crates/fcp-host" }
@@ -254,6 +255,13 @@ bench = false
 [[bin]]
 name = "fuzz_webhook_provider_headers"
 path = "fuzz_targets/webhook_provider_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_github_webhook_payload"
+path = "fuzz_targets/github_webhook_payload.rs"
 test = false
 doc = false
 bench = false
@@ -492,6 +500,13 @@ bench = false
 [[bin]]
 name = "fuzz_cbor_float_encoding_edges"
 path = "fuzz_targets/cbor_float_encoding_edges.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_tailscale_acl_rule_shape"
+path = "fuzz_targets/tailscale_acl_rule_shape.rs"
 test = false
 doc = false
 bench = false

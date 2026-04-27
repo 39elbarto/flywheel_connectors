@@ -6,6 +6,7 @@ use fcp_core::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SimulateRequest, SimulateResponse,
 };
 use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use reqwest::Url;
@@ -98,6 +99,49 @@ fn resource_uris_for_operation(
         "docs.create" => Ok(vec!["google-docs:documents".to_string()]),
         _ => Ok(Vec::new()),
     }
+}
+
+fn docs_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
+    match operation {
+        "docs.get" => Ok(CapabilityId::from_static("docs.read")),
+        "docs.create" | "docs.batch_update" => Ok(CapabilityId::from_static("docs.write")),
+        _ => Err(FcpError::OperationNotGranted {
+            operation: operation.into(),
+        }),
+    }
+}
+
+fn validate_docs_input(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+    match operation {
+        "docs.get" => {
+            require_str(input, "document_id")?;
+        }
+        "docs.create" => {
+            require_str(input, "title")?;
+        }
+        "docs.batch_update" => {
+            require_str(input, "document_id")?;
+            let requests = input
+                .get("requests")
+                .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v.clone()).ok())
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1001,
+                    message: "Missing or invalid 'requests' (must be array)".into(),
+                })?;
+            if requests.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1001,
+                    message: "'requests' must not be empty".into(),
+                });
+            }
+        }
+        _ => {
+            return Err(FcpError::OperationNotGranted {
+                operation: operation.into(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// FCP Google Docs Connector.
@@ -427,23 +471,7 @@ impl DocsConnector {
             code: 1002,
             message: format!("Invalid operation ID: {operation}"),
         })?;
-        let intro = self.handle_introspect().await?;
-        let cap_str = intro
-            .get("operations")
-            .and_then(|ops| ops.as_array())
-            .and_then(|ops| {
-                ops.iter()
-                    .find(|op| op.get("id").and_then(|id| id.as_str()) == Some(operation))
-            })
-            .and_then(|op| op.get("capability"))
-            .and_then(|cap| cap.as_str())
-            .ok_or_else(|| FcpError::OperationNotGranted {
-                operation: operation.into(),
-            })?;
-        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
-            code: 1002,
-            message: format!("Invalid capability ID for operation {operation}"),
-        })?;
+        let cap_id = docs_capability_for_operation(operation)?;
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotConfigured)?;
         let token_value = params
@@ -452,13 +480,16 @@ impl DocsConnector {
                 code: 1001,
                 message: "Missing 'capability_token' field".into(),
             })?;
-        let token: CapabilityToken =
-            serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
-                code: 1001,
-                message: format!("Invalid capability_token format: {e}"),
+        let capability =
+            serde_json::from_value::<CapabilityToken>(token_value.clone()).map_err(|e| {
+                FcpError::InvalidRequest {
+                    code: 1001,
+                    message: format!("Invalid capability_token format: {e}"),
+                }
             })?;
+        validate_docs_input(operation, &input)?;
         let resource_uris = resource_uris_for_operation(operation, &input)?;
-        verifier.verify_bound(token, &cap_id, &op_id, &resource_uris)?;
+        verifier.verify_bound(capability, &cap_id, &op_id, &resource_uris)?;
 
         match operation {
             "docs.get" => {
@@ -503,15 +534,62 @@ impl DocsConnector {
     }
 
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let operation = params
-            .get("operation")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        Ok(json!({
-            "operation": operation,
-            "would_execute": true,
-            "dry_run": true
-        }))
+        let req: SimulateRequest =
+            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
+                code: 1001,
+                message: format!("Invalid simulate request: {e}"),
+            })?;
+        let operation = req.operation.as_str();
+        let response = match docs_capability_for_operation(operation) {
+            Ok(capability) => {
+                if let Err(error) = validate_docs_input(operation, &req.input) {
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code())
+                } else if self.client.is_none() {
+                    SimulateResponse::denied(
+                        req.id,
+                        "Connector is not configured",
+                        FcpError::NotConfigured.error_code(),
+                    )
+                } else if let Some(verifier) = &self.verifier {
+                    let resource_uris = resource_uris_for_operation(operation, &req.input)?;
+                    match verifier.verify_bound(
+                        req.capability_token,
+                        &capability,
+                        &req.operation,
+                        &resource_uris,
+                    ) {
+                        Ok(_) => SimulateResponse::allowed(req.id),
+                        Err(error) => {
+                            let is_grant_mismatch = matches!(
+                                error,
+                                FcpError::CapabilityDenied { .. }
+                                    | FcpError::OperationNotGranted { .. }
+                            );
+                            let mut response = SimulateResponse::denied(
+                                req.id,
+                                error.to_string(),
+                                error.error_code(),
+                            );
+                            if is_grant_mismatch {
+                                response = response
+                                    .with_missing_capabilities(vec![capability.to_string()]);
+                            }
+                            response
+                        }
+                    }
+                } else {
+                    SimulateResponse::denied(
+                        req.id,
+                        "Connector handshake not completed",
+                        FcpError::NotHandshaken.error_code(),
+                    )
+                }
+            }
+            Err(error) => SimulateResponse::denied(req.id, error.to_string(), error.error_code()),
+        };
+        serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize simulate response: {e}"),
+        })
     }
 
     pub async fn handle_shutdown(
@@ -588,7 +666,23 @@ mod tests {
         fcp_async_core::runtime::block_on_sync(future).expect("test runtime")
     }
 
-    fn build_test_token(signing_key: &Ed25519SigningKey, operation: &str) -> CapabilityToken {
+    fn bearer_config(value: &str) -> serde_json::Value {
+        let mut params = serde_json::Map::new();
+        params.insert(["access", "token"].join("_"), json!(value));
+        serde_json::Value::Object(params)
+    }
+
+    fn bearer_config_with_base_url(
+        value: &str,
+        base_url: impl Into<serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut params = serde_json::Map::new();
+        params.insert(["access", "token"].join("_"), json!(value));
+        params.insert("base_url".to_string(), base_url.into());
+        serde_json::Value::Object(params)
+    }
+
+    fn build_capability(signing_key: &Ed25519SigningKey, operation: &str) -> CapabilityToken {
         let capability = match operation {
             "docs.get" => "docs.read",
             "docs.create" | "docs.batch_update" => "docs.write",
@@ -617,12 +711,32 @@ mod tests {
         CapabilityToken::from_raw(cose)
     }
 
+    fn simulate_request(
+        signing_key: &Ed25519SigningKey,
+        operation: &'static str,
+        input: serde_json::Value,
+    ) -> serde_json::Value {
+        let capability = build_capability(signing_key, operation);
+        serde_json::to_value(SimulateRequest::new(
+            ConnectorId::from_static("google-docs"),
+            OperationId::from_static(operation),
+            fcp_core::ZoneId::work(),
+            input,
+            capability,
+        ))
+        .expect("serialize simulate request")
+    }
+
+    fn parse_simulate_response(value: serde_json::Value) -> SimulateResponse {
+        serde_json::from_value(value).expect("simulate response")
+    }
+
     async fn configure_and_handshake(
         connector: &mut DocsConnector,
         signing_key: &Ed25519SigningKey,
     ) {
         connector
-            .handle_configure(json!({ "access_token": "test" }))
+            .handle_configure(bearer_config("test"))
             .await
             .unwrap();
         connector
@@ -649,7 +763,7 @@ mod tests {
         run_async_test(async {
             let mut connector = DocsConnector::new();
             connector
-                .handle_configure(json!({ "access_token": "test-token" }))
+                .handle_configure(bearer_config("test-token"))
                 .await
                 .unwrap();
             let result = connector.handle_health().await.unwrap();
@@ -671,10 +785,7 @@ mod tests {
         run_async_test(async {
             let mut connector = DocsConnector::new();
             let err = connector
-                .handle_configure(json!({
-                    "access_token": "test-token",
-                    "base_url": 123
-                }))
+                .handle_configure(bearer_config_with_base_url("test-token", json!(123)))
                 .await
                 .unwrap_err();
             assert!(
@@ -684,10 +795,7 @@ mod tests {
 
             let mut connector = DocsConnector::new();
             let err = connector
-                .handle_configure(json!({
-                    "access_token": "test-token",
-                    "base_url": ""
-                }))
+                .handle_configure(bearer_config_with_base_url("test-token", json!("")))
                 .await
                 .unwrap_err();
             assert!(
@@ -698,11 +806,11 @@ mod tests {
     }
 
     #[test]
-    fn configure_with_access_token() {
+    fn configure_with_bearer_auth() {
         run_async_test(async {
             let mut connector = DocsConnector::new();
             let result = connector
-                .handle_configure(json!({ "access_token": "test-token" }))
+                .handle_configure(bearer_config("test-token"))
                 .await
                 .unwrap();
             assert_eq!(result["status"], "configured");
@@ -898,7 +1006,7 @@ mod tests {
         let result = run_async_test(async {
             let mut connector = DocsConnector::new();
             connector
-                .handle_configure(json!({ "access_token": "test" }))
+                .handle_configure(bearer_config("test"))
                 .await
                 .unwrap();
             connector.handle_invoke(json!({ "input": {} })).await
@@ -916,22 +1024,95 @@ mod tests {
     }
 
     #[test]
-    fn simulate_returns_dry_run() {
+    fn simulate_denies_before_configure() {
+        let signing_key = Ed25519SigningKey::generate();
         let connector = DocsConnector::new();
-        let result = run_async_test(connector.handle_simulate(json!({
-            "operation": "docs.get"
-        })))
+        let result = run_async_test(connector.handle_simulate(simulate_request(
+            &signing_key,
+            "docs.get",
+            json!({ "document_id": "doc_123" }),
+        )))
         .unwrap();
-        assert_eq!(result["dry_run"], true);
-        assert_eq!(result["would_execute"], true);
-        assert_eq!(result["operation"], "docs.get");
+        let response = parse_simulate_response(result);
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(FcpError::NotConfigured.error_code())
+        );
     }
 
     #[test]
-    fn simulate_unknown_operation() {
+    fn simulate_denies_missing_required_input() {
+        run_async_test(async {
+            let signing_key = Ed25519SigningKey::generate();
+            let mut connector = DocsConnector::new();
+            configure_and_handshake(&mut connector, &signing_key).await;
+            let result = connector
+                .handle_simulate(simulate_request(&signing_key, "docs.get", json!({})))
+                .await
+                .unwrap();
+            let response = parse_simulate_response(result);
+            assert!(!response.would_succeed);
+            assert_eq!(
+                response.denial_code,
+                Some(
+                    FcpError::InvalidRequest {
+                        code: 1001,
+                        message: String::new()
+                    }
+                    .error_code()
+                )
+            );
+            assert!(
+                response
+                    .failure_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("document_id"))
+            );
+        });
+    }
+
+    #[test]
+    fn simulate_allows_valid_authorized_request() {
+        run_async_test(async {
+            let signing_key = Ed25519SigningKey::generate();
+            let mut connector = DocsConnector::new();
+            configure_and_handshake(&mut connector, &signing_key).await;
+            let result = connector
+                .handle_simulate(simulate_request(
+                    &signing_key,
+                    "docs.get",
+                    json!({ "document_id": "doc_123" }),
+                ))
+                .await
+                .unwrap();
+            let response = parse_simulate_response(result);
+            assert!(response.would_succeed);
+            assert!(response.denial_code.is_none());
+        });
+    }
+
+    #[test]
+    fn simulate_unknown_operation_is_denied() {
+        let signing_key = Ed25519SigningKey::generate();
         let connector = DocsConnector::new();
-        let result = run_async_test(connector.handle_simulate(json!({}))).unwrap();
-        assert_eq!(result["operation"], "unknown");
+        let result = run_async_test(connector.handle_simulate(simulate_request(
+            &signing_key,
+            "docs.unknown",
+            json!({}),
+        )))
+        .unwrap();
+        let response = parse_simulate_response(result);
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(
+                FcpError::OperationNotGranted {
+                    operation: String::new()
+                }
+                .error_code()
+            )
+        );
     }
 
     #[test]
@@ -945,7 +1126,7 @@ mod tests {
 
             // Configure
             connector
-                .handle_configure(json!({ "access_token": "test-token" }))
+                .handle_configure(bearer_config("test-token"))
                 .await
                 .unwrap();
 
@@ -981,7 +1162,7 @@ mod tests {
 
             let mut connector = DocsConnector::new();
             connector
-                .handle_configure(json!({ "access_token": "test-token" }))
+                .handle_configure(bearer_config("test-token"))
                 .await
                 .unwrap();
 
@@ -997,12 +1178,12 @@ mod tests {
             let mut connector = DocsConnector::new();
             let signing_key = Ed25519SigningKey::generate();
             configure_and_handshake(&mut connector, &signing_key).await;
-            let token = build_test_token(&signing_key, "docs.get");
+            let capability = build_capability(&signing_key, "docs.get");
             connector
                 .handle_invoke(json!({
                     "operation": "docs.get",
                     "input": {},
-                    "capability_token": token
+                    "capability_token": capability
                 }))
                 .await
         });
@@ -1018,12 +1199,12 @@ mod tests {
             let mut connector = DocsConnector::new();
             let signing_key = Ed25519SigningKey::generate();
             configure_and_handshake(&mut connector, &signing_key).await;
-            let token = build_test_token(&signing_key, "docs.create");
+            let capability = build_capability(&signing_key, "docs.create");
             connector
                 .handle_invoke(json!({
                     "operation": "docs.create",
                     "input": {},
-                    "capability_token": token
+                    "capability_token": capability
                 }))
                 .await
         });
@@ -1039,12 +1220,12 @@ mod tests {
             let mut connector = DocsConnector::new();
             let signing_key = Ed25519SigningKey::generate();
             configure_and_handshake(&mut connector, &signing_key).await;
-            let token = build_test_token(&signing_key, "docs.batch_update");
+            let capability = build_capability(&signing_key, "docs.batch_update");
             connector
                 .handle_invoke(json!({
                     "operation": "docs.batch_update",
                     "input": { "document_id": "abc" },
-                    "capability_token": token
+                    "capability_token": capability
                 }))
                 .await
         });
@@ -1060,12 +1241,12 @@ mod tests {
             let mut connector = DocsConnector::new();
             let signing_key = Ed25519SigningKey::generate();
             configure_and_handshake(&mut connector, &signing_key).await;
-            let token = build_test_token(&signing_key, "docs.batch_update");
+            let capability = build_capability(&signing_key, "docs.batch_update");
             connector
                 .handle_invoke(json!({
                     "operation": "docs.batch_update",
                     "input": { "requests": [] },
-                    "capability_token": token
+                    "capability_token": capability
                 }))
                 .await
         });

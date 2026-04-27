@@ -656,5 +656,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_taint_flags"
+path = "fuzz_targets/taint_flags.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

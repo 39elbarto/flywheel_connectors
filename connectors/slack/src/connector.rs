@@ -30,6 +30,9 @@ use crate::{
 
 const SLACK_API_HOST: &str = "slack.com";
 const SOCKET_EVENT_BUFFER_CAPACITY: usize = 200;
+const SOCKET_TOPIC_COMPONENT_MAX_CHARS: usize = 64;
+const SOCKET_SUBSCRIBE_TOPIC_MAX_CHARS: usize = 128;
+const SOCKET_SUBSCRIBE_TOPIC_MAX_COUNT: usize = 64;
 
 fn is_local_test_host(host: &str) -> bool {
     (cfg!(test) || cfg!(debug_assertions)) && matches!(host, "localhost" | "127.0.0.1" | "::1")
@@ -1396,6 +1399,8 @@ fn parse_subscribe_topics(params: &serde_json::Value) -> Vec<String> {
                 .filter_map(|item| item.as_str())
                 .map(str::trim)
                 .filter(|topic| !topic.is_empty())
+                .filter(|topic| is_valid_subscribe_topic_pattern(topic))
+                .take(SOCKET_SUBSCRIBE_TOPIC_MAX_COUNT)
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
         })
@@ -1413,6 +1418,21 @@ fn parse_subscribe_topics(params: &serde_json::Value) -> Vec<String> {
         .into_iter()
         .filter(|topic| dedup.insert(topic.clone()))
         .collect()
+}
+
+fn is_valid_subscribe_topic_pattern(topic: &str) -> bool {
+    if topic.len() > SOCKET_SUBSCRIBE_TOPIC_MAX_CHARS {
+        return false;
+    }
+    if topic == "*" {
+        return true;
+    }
+
+    let component = topic.strip_suffix('*').unwrap_or(topic);
+    !component.is_empty()
+        && component
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 fn topic_allowed(topic: &str, patterns: &[String]) -> bool {
@@ -1438,7 +1458,10 @@ fn socket_frame_topic(frame_type: &str, payload: &Value) -> String {
             "slash_commands" => "slack.command".to_string(),
             "disconnect" => "slack.disconnect".to_string(),
             "hello" => "slack.hello".to_string(),
-            _ => format!("slack.socket.{frame_type}"),
+            _ => format!(
+                "slack.socket.{}",
+                safe_socket_topic_component(frame_type).unwrap_or("unknown")
+            ),
         };
     }
 
@@ -1462,8 +1485,20 @@ fn socket_frame_topic(frame_type: &str, payload: &Value) -> String {
         }
         "reaction_added" => "slack.reaction.added".to_string(),
         "reaction_removed" => "slack.reaction.removed".to_string(),
-        _ => format!("slack.event.{event_type}"),
+        _ => format!(
+            "slack.event.{}",
+            safe_socket_topic_component(event_type).unwrap_or("unknown")
+        ),
     }
+}
+
+fn safe_socket_topic_component(raw: &str) -> Option<&str> {
+    if raw.is_empty() || raw.len() > SOCKET_TOPIC_COMPONENT_MAX_CHARS {
+        return None;
+    }
+    raw.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .then_some(raw)
 }
 
 fn socket_frame_to_event(
@@ -3016,6 +3051,48 @@ mod tests {
         assert_eq!(topics.len(), 1);
     }
 
+    #[test]
+    fn test_parse_subscribe_topics_rejects_oversized_and_malformed_patterns() {
+        let oversized = format!("slack.{}", "a".repeat(SOCKET_SUBSCRIBE_TOPIC_MAX_CHARS));
+        let params = json!({
+            "topics": [
+                oversized,
+                "slack.message.new",
+                "slack.message.*",
+                "slack.message.*.extra",
+                "slack.message.* ",
+                "slack.message./etc/passwd",
+                "*"
+            ]
+        });
+        let topics = parse_subscribe_topics(&params);
+
+        assert_eq!(
+            topics,
+            vec![
+                "slack.message.new".to_string(),
+                "slack.message.*".to_string(),
+                "*".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_subscribe_topics_caps_count() {
+        let input_topics: Vec<String> = (0..(SOCKET_SUBSCRIBE_TOPIC_MAX_COUNT + 8))
+            .map(|idx| format!("slack.event.{idx}"))
+            .collect();
+        let params = json!({ "topics": input_topics });
+        let topics = parse_subscribe_topics(&params);
+
+        assert_eq!(topics.len(), SOCKET_SUBSCRIBE_TOPIC_MAX_COUNT);
+        assert_eq!(topics[0], "slack.event.0");
+        assert_eq!(
+            topics[SOCKET_SUBSCRIBE_TOPIC_MAX_COUNT - 1],
+            format!("slack.event.{}", SOCKET_SUBSCRIBE_TOPIC_MAX_COUNT - 1)
+        );
+    }
+
     // ── Socket frame topic mapping tests ─────────────────────────
 
     #[test]
@@ -3073,6 +3150,22 @@ mod tests {
     }
 
     #[test]
+    fn test_socket_frame_topic_sanitizes_unknown_event_type() {
+        let oversized = "a".repeat(SOCKET_TOPIC_COMPONENT_MAX_CHARS + 1);
+        let payload = json!({ "event": { "type": oversized } });
+        assert_eq!(
+            socket_frame_topic("events_api", &payload),
+            "slack.event.unknown"
+        );
+
+        let payload = json!({ "event": { "type": "bad/event" } });
+        assert_eq!(
+            socket_frame_topic("events_api", &payload),
+            "slack.event.unknown"
+        );
+    }
+
+    #[test]
     fn test_socket_frame_topic_non_events_api() {
         assert_eq!(
             socket_frame_topic("interactive", &json!({})),
@@ -3090,6 +3183,17 @@ mod tests {
         assert_eq!(
             socket_frame_topic("custom_type", &json!({})),
             "slack.socket.custom_type"
+        );
+        assert_eq!(
+            socket_frame_topic("bad/type", &json!({})),
+            "slack.socket.unknown"
+        );
+        assert_eq!(
+            socket_frame_topic(
+                &"a".repeat(SOCKET_TOPIC_COMPONENT_MAX_CHARS + 1),
+                &json!({})
+            ),
+            "slack.socket.unknown"
         );
     }
 

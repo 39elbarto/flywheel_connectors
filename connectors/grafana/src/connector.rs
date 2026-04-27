@@ -72,8 +72,100 @@ impl GrafanaConfig {
             .unwrap_or(DEFAULT_BASE_URL)
             .to_string();
 
+        // br-1ju3i: enforce endpoint policy at the configure
+        // boundary. Mirrors the zapier (63493e6e) / datadog
+        // (c2339e04) / intercom (4871a96b) fixes. The pre-fix code
+        // accepted ANY base_url verbatim — no parse, no scheme
+        // check, no userinfo/query/fragment rejection. A config with
+        // `base_url: https://attacker:pw@grafana.evil.example/api`
+        // would parse, configure, and route the auth_token bearer
+        // to grafana.evil.example with attacker:pw in the userinfo
+        // (most servers log Authorization headers).
+        validate_base_url(&base_url)?;
+
         Ok(Self { auth, base_url })
     }
+}
+
+/// br-1ju3i: allow-listed Grafana Cloud / Labs hostnames. Grafana
+/// is self-hosted by design (every operator picks their own host),
+/// so the allow-list cannot fully replace operator vetting — a
+/// self-hosted host that does not match the allow-list AND is not
+/// localhost is rejected, forcing operators to add their host to
+/// this list explicitly when they migrate the connector to a new
+/// deployment. That conscious-step is the security property: the
+/// auth_token cannot be silently routed to an attacker host via a
+/// config-file typo or supply-chain manipulation.
+const ALLOWED_GRAFANA_HOSTS: &[&str] = &[
+    // Grafana Labs — registry, docs, and the default
+    // DEFAULT_BASE_URL = https://grafana.com/api.
+    "grafana.com",
+];
+
+/// Suffix-allowed Grafana Cloud subdomains. Each Grafana Cloud
+/// organization is provisioned as `<org>.grafana.net`.
+const ALLOWED_GRAFANA_HOST_SUFFIXES: &[&str] = &[".grafana.net"];
+
+fn validate_base_url(base_url: &str) -> FcpResult<()> {
+    let parsed = reqwest::Url::parse(base_url).map_err(|err| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("base_url could not be parsed: {err}"),
+    })?;
+
+    // Reject userinfo (username:password@host). The pre-fix code's
+    // missing check is the named bead repro path: `attacker:pw@host`
+    // would have been logged by every downstream HTTP server even
+    // though the auth_token ended up at the host portion.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "base_url must not contain userinfo (username/password): {base_url}"
+            ),
+        });
+    }
+
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "base_url must not contain query or fragment components: {base_url}"
+            ),
+        });
+    }
+
+    let Some(host) = parsed.host_str() else {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("base_url must include a host: {base_url}"),
+        });
+    };
+
+    let host_lower = host.to_ascii_lowercase();
+    let local = matches!(host_lower.as_str(), "localhost" | "127.0.0.1");
+
+    let allowed_host = local
+        || ALLOWED_GRAFANA_HOSTS
+            .iter()
+            .any(|allowed| host_lower == *allowed)
+        || ALLOWED_GRAFANA_HOST_SUFFIXES
+            .iter()
+            .any(|suffix| host_lower.ends_with(suffix) && host_lower.len() > suffix.len());
+
+    let secure_or_local = parsed.scheme() == "https" || local;
+
+    if !allowed_host || !secure_or_local {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "Endpoint must use https and one of {:?} (or *.grafana.net subdomains; \
+                 localhost/127.0.0.1 allowed for tests): {base_url}",
+                ALLOWED_GRAFANA_HOSTS
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 /// Doctor check result.
@@ -1519,14 +1611,20 @@ mod tests {
 
     #[test]
     fn config_clone_preserves_base_url() {
+        // br-1ju3i: pre-fix used `https://custom.grafana.io/api`
+        // which is NOT a Grafana Cloud subdomain (.grafana.io vs
+        // .grafana.net) and would have been silently accepted —
+        // exactly the auth-routing-to-attacker bug. The test's
+        // intent is to verify clone preserves base_url; switched
+        // to a policy-conforming Grafana Cloud subdomain.
         let config = GrafanaConfig::from_params(&json!({
             "auth_token": "tok",
-            "base_url": "https://custom.grafana.io/api"
+            "base_url": "https://my-org.grafana.net/api"
         }))
         .unwrap();
         let cloned = config.clone();
-        assert_eq!(config.base_url, "https://custom.grafana.io/api");
-        assert_eq!(cloned.base_url, "https://custom.grafana.io/api");
+        assert_eq!(config.base_url, "https://my-org.grafana.net/api");
+        assert_eq!(cloned.base_url, "https://my-org.grafana.net/api");
     }
 
     #[test]
@@ -1860,5 +1958,175 @@ mod tests {
         assert!(readiness.get("credential_id_configured").is_some());
         assert!(readiness.get("network_ok").is_some());
         assert!(readiness.get("base_url").is_some());
+    }
+
+    // ── br-1ju3i: base_url policy enforcement ───────────────────────
+
+    /// Default URL (https://grafana.com/api) must be policy-conforming.
+    /// Regression guard — if DEFAULT_BASE_URL ever drifts to a host
+    /// outside the allow-list, this fails fast.
+    #[test]
+    fn from_params_accepts_default_url() {
+        let config = GrafanaConfig::from_params(&json!({"auth_token": "tok"}))
+            .expect("default base_url must be accepted");
+        assert!(config.base_url.starts_with("https://grafana.com"));
+    }
+
+    /// Grafana Cloud per-org subdomains must be accepted.
+    #[test]
+    fn from_params_accepts_grafana_cloud_subdomains() {
+        for host in ["my-org.grafana.net", "alpha.grafana.net", "a.grafana.net"] {
+            let url = format!("https://{host}/api");
+            let config = GrafanaConfig::from_params(&json!({
+                "auth_token": "tok",
+                "base_url": url.clone(),
+            }))
+            .unwrap_or_else(|err| panic!("{host} must be accepted: {err}"));
+            assert_eq!(config.base_url, url);
+        }
+    }
+
+    /// br-1ju3i (the bead's named exploit): userinfo must be rejected
+    /// — the pre-fix code would have routed Authorization: Bearer
+    /// <auth_token> to `grafana.evil.example` AND logged
+    /// `attacker:pw` in every downstream HTTP server access log.
+    #[test]
+    fn from_params_rejects_userinfo() {
+        let err = GrafanaConfig::from_params(&json!({
+            "auth_token": "tok",
+            "base_url": "https://attacker:pw@grafana.evil.example/api",
+        }))
+        .expect_err("base_url with userinfo must be rejected");
+        match err {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert!(
+                    message.contains("userinfo"),
+                    "rejection must name the userinfo gate: {message}"
+                );
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    /// br-1ju3i: an entirely off-policy host (e.g. grafana lookalike
+    /// like grafana.io / grafana.evil.example) must be rejected
+    /// even with https + clean shape, because the auth_token is
+    /// only safe to send to known Grafana Cloud / Labs hosts (or
+    /// localhost test hosts).
+    #[test]
+    fn from_params_rejects_off_policy_host() {
+        for url in [
+            "https://grafana.io/api",
+            "https://grafana.evil.example/api",
+            "https://my-org.grafana.cloud/api",
+            "https://evil-grafana.net/api",
+        ] {
+            let err = GrafanaConfig::from_params(&json!({
+                "auth_token": "tok",
+                "base_url": url,
+            }))
+            .expect_err(&format!("{url} must be rejected"));
+            assert!(
+                matches!(err, FcpError::InvalidRequest { .. }),
+                "expected InvalidRequest for {url}, got {err:?}"
+            );
+        }
+    }
+
+    /// br-1ju3i: substring-collision protection. A host containing
+    /// `.grafana.net` as a non-suffix label must NOT slip through
+    /// the suffix-allow list. `grafana.net.evil.example` and
+    /// `evil.grafana.net.attacker.com` are both rejected because
+    /// they don't END with `.grafana.net`.
+    #[test]
+    fn from_params_rejects_substring_collision() {
+        for url in [
+            "https://grafana.net.evil.example/api",
+            "https://evil.grafana.net.attacker.com/api",
+            // The bare suffix without a leading subdomain should
+            // also be rejected — `grafana.net` itself isn't a
+            // valid Grafana Cloud org URL.
+            "https://grafana.net/api",
+        ] {
+            let err = GrafanaConfig::from_params(&json!({
+                "auth_token": "tok",
+                "base_url": url,
+            }))
+            .expect_err(&format!("substring collision {url} must be rejected"));
+            assert!(matches!(err, FcpError::InvalidRequest { .. }));
+        }
+    }
+
+    /// br-1ju3i: query/fragment must be rejected even for an
+    /// allow-listed host — the auth_token would otherwise be sent
+    /// with attacker-controlled query parameters or fragments.
+    #[test]
+    fn from_params_rejects_query_and_fragment() {
+        let urls = [
+            "https://grafana.com/api?leak=token",
+            "https://grafana.com/api#frag",
+            "https://my-org.grafana.net/api?inject=1",
+        ];
+        for url in urls {
+            let err = GrafanaConfig::from_params(&json!({
+                "auth_token": "tok",
+                "base_url": url,
+            }))
+            .expect_err(&format!("{url} must be rejected"));
+            assert!(matches!(err, FcpError::InvalidRequest { .. }));
+        }
+    }
+
+    /// br-1ju3i: http (non-https) on an allow-listed host is also
+    /// a downgrade attempt — auth_token should never travel in
+    /// cleartext. Only localhost gets the http allowance.
+    #[test]
+    fn from_params_rejects_http_non_local() {
+        let err = GrafanaConfig::from_params(&json!({
+            "auth_token": "tok",
+            "base_url": "http://grafana.com/api",
+        }))
+        .expect_err("http://grafana.com must be rejected (https required)");
+        assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    /// br-1ju3i: localhost / 127.0.0.1 stay allowed for tests.
+    /// Existing test fixtures (and the pre-existing
+    /// config_local_base_url test at line ~1099) rely on this.
+    #[test]
+    fn from_params_accepts_localhost_for_tests() {
+        for url in [
+            "http://localhost:3000/api",
+            "http://127.0.0.1:3000/api",
+            "https://localhost/api",
+        ] {
+            let config = GrafanaConfig::from_params(&json!({
+                "auth_token": "tok",
+                "base_url": url,
+            }))
+            .unwrap_or_else(|err| panic!("{url} must be accepted: {err}"));
+            assert_eq!(config.base_url, url);
+        }
+    }
+
+    /// br-1ju3i: unparseable URL surfaces a clear error.
+    #[test]
+    fn from_params_rejects_unparseable_url() {
+        let err = GrafanaConfig::from_params(&json!({
+            "auth_token": "tok",
+            "base_url": "not a url",
+        }))
+        .expect_err("garbage base_url must be rejected");
+        match err {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert!(
+                    message.contains("could not be parsed") || message.contains("base_url"),
+                    "rejection should name parsing failure: {message}"
+                );
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
     }
 }

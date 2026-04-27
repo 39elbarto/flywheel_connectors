@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:fe9e06580867ea275c356ff383c75dd8183c80dc3eae7a71dc0b17b8117f216f"
+interface_hash = "blake3-256:fcp.interface.v2:09ce98d5942ab8eede6aee19dfead6b707a3e070299deb0055e3cd65c3006593"
 
 [connector]
 id = "fcp.asana"
@@ -46,6 +46,7 @@ required = [
 optional = [
     "asana.projects.read",
     "asana.tasks.write",
+    "asana.tasks.delete",
     "asana.tasks.read",
     "asana.workspaces.read",
 ]
@@ -166,7 +167,7 @@ related = [
 
 [provides.operations."asana.tasks.delete"]
 description = "Delete a task"
-capability = "asana.tasks.write"
+capability = "asana.tasks.delete"
 risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
@@ -341,9 +342,16 @@ window_ms = 60000
 burst = 10
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "asana.tasks.delete"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
 [rate_limits.operation_pools]
-"asana.projects.list" = ["asana.projects.read"]
-"asana.tasks.create" = ["asana.tasks.write"]
 "asana.tasks.list" = ["asana.tasks.read"]
 "asana.workspaces.list" = ["asana.workspaces.read"]
-"asana.tasks.delete" = ["asana.tasks.write"]
+"asana.tasks.create" = ["asana.tasks.write"]
+"asana.tasks.delete" = ["asana.tasks.delete"]
+"asana.projects.list" = ["asana.projects.read"]

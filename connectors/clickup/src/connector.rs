@@ -18,6 +18,9 @@ use crate::{
     error::ClickUpError,
 };
 
+#[cfg(test)]
+use fcp_manifest::ConnectorManifest;
+
 /// Parsed and validated `ClickUp` connector configuration.
 #[derive(Debug, Clone)]
 struct ClickUpConfig {
@@ -282,7 +285,8 @@ impl ClickUpConnector {
                 "clickup.spaces.read",
                 "clickup.lists.read",
                 "clickup.tasks.read",
-                "clickup.tasks.write"
+                "clickup.tasks.write",
+                "clickup.tasks.delete"
             ]
         }))
     }
@@ -743,7 +747,7 @@ fn typed_operations_info() -> Vec<OperationInfo> {
             "Delete a task",
             json!({"type": "object", "required": ["task_id"], "properties": {"task_id": {"type": "string", "description": "ClickUp task identifier to delete"}}}),
             json!({"type": "object"}),
-            "clickup.tasks.write",
+            "clickup.tasks.delete",
             RiskLevel::High,
             SafetyTier::Dangerous,
             IdempotencyClass::None,
@@ -798,7 +802,7 @@ fn operations_info() -> serde_json::Value {
         {
             "id": "clickup.tasks.delete",
             "summary": "Delete a task",
-            "capability": "clickup.tasks.write",
+            "capability": "clickup.tasks.delete",
             "risk_level": "high",
             "safety_tier": "dangerous",
             "idempotency": "none",
@@ -1223,10 +1227,85 @@ mod tests {
         for op in operations_info().as_array().unwrap() {
             let id = op["id"].as_str().unwrap();
             let cap = op["capability"].as_str().unwrap();
-            if id.contains("create") || id.contains("delete") {
+            if id.contains("create") {
                 assert!(cap.ends_with(".write"), "write op {id} has cap {cap}");
             }
         }
+    }
+
+    #[test]
+    fn operations_tasks_delete_requires_dedicated_capability() {
+        let ops = operations_info();
+        let delete_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"].as_str() == Some("clickup.tasks.delete"))
+            .unwrap();
+        let create_op = ops
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["id"].as_str() == Some("clickup.tasks.create"))
+            .unwrap();
+
+        assert_eq!(delete_op["capability"].as_str().unwrap(), "clickup.tasks.delete");
+        assert_eq!(create_op["capability"].as_str().unwrap(), "clickup.tasks.write");
+    }
+
+    #[test]
+    fn manifest_tasks_delete_requires_dedicated_capability() {
+        let manifest = ConnectorManifest::parse_str(include_str!("../manifest.toml"))
+            .expect("manifest should validate");
+
+        let delete_op = manifest
+            .provides
+            .operations
+            .get("clickup.tasks.delete")
+            .expect("delete operation should exist");
+        let create_op = manifest
+            .provides
+            .operations
+            .get("clickup.tasks.create")
+            .expect("create operation should exist");
+
+        assert_eq!(delete_op.capability.as_str(), "clickup.tasks.delete");
+        assert_eq!(create_op.capability.as_str(), "clickup.tasks.write");
+        assert!(manifest
+            .capabilities
+            .optional
+            .iter()
+            .any(|cap| cap.as_str() == "clickup.tasks.delete"));
+        assert_eq!(
+            manifest
+                .rate_limits
+                .operation_pools
+                .get("clickup.tasks.delete")
+                .map(|pools| pools.iter().map(|pool| pool.as_str()).collect::<Vec<_>>()),
+            Some(vec!["clickup.tasks.delete"])
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_advertises_dedicated_tasks_delete_capability() {
+        let mut connector = ClickUpConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_token": "tok"
+            }))
+            .await
+            .unwrap();
+
+        let response = connector
+            .handle_handshake(json!({
+                "session_id": "test-session"
+            }))
+            .await
+            .unwrap();
+        let capabilities = response["capabilities"].as_array().unwrap();
+
+        assert!(capabilities.iter().any(|cap| cap.as_str() == Some("clickup.tasks.write")));
+        assert!(capabilities.iter().any(|cap| cap.as_str() == Some("clickup.tasks.delete")));
     }
 
     // ── require_str edge cases ────────────────────────────────────

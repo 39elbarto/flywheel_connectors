@@ -34,4 +34,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+fcp-manifest = { path = "../../crates/fcp-manifest" }
 wiremock.workspace = true

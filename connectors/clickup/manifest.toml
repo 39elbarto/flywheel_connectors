@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:ead666d257eb3973012a094b983470688454351b80c43a3a447ce6975db5e356"
+interface_hash = "blake3-256:fcp.interface.v2:56cc9684ebdf41290ba4f22cbf94641bce39120983d280f1187a983768a8ca8c"
 
 [connector]
 id = "fcp.clickup"
@@ -47,6 +47,7 @@ optional = [
     "clickup.lists.read",
     "clickup.spaces.read",
     "clickup.tasks.write",
+    "clickup.tasks.delete",
     "clickup.tasks.read",
 ]
 forbidden = [
@@ -215,7 +216,7 @@ related = [
 
 [provides.operations."clickup.tasks.delete"]
 description = "Delete a task from ClickUp"
-capability = "clickup.tasks.write"
+capability = "clickup.tasks.delete"
 risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
@@ -351,9 +352,16 @@ window_ms = 60000
 burst = 10
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "clickup.tasks.delete"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
 [rate_limits.operation_pools]
 "clickup.tasks.create" = ["clickup.tasks.write"]
-"clickup.spaces.list" = ["clickup.spaces.read"]
-"clickup.tasks.delete" = ["clickup.tasks.write"]
 "clickup.tasks.list" = ["clickup.tasks.read"]
+"clickup.tasks.delete" = ["clickup.tasks.delete"]
 "clickup.lists.list" = ["clickup.lists.read"]
+"clickup.spaces.list" = ["clickup.spaces.read"]

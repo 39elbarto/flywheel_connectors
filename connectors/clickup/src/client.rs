@@ -21,7 +21,13 @@ fn sanitize_path_segment(segment: &str) -> ClickUpResult<&str> {
     if segment.trim().is_empty()
         || segment.contains('/')
         || segment.contains('\\')
+        || segment.contains('?')
+        || segment.contains('#')
+        || segment.contains('&')
+        || segment.contains('=')
+        || segment.contains('%')
         || segment.contains('\0')
+        || segment.chars().any(char::is_control)
         || segment == "."
         || segment == ".."
     {
@@ -443,6 +449,15 @@ mod tests {
         assert!(sanitize_path_segment("").is_err());
         assert!(sanitize_path_segment("foo\0bar").is_err());
         assert!(sanitize_path_segment("foo\\bar").is_err());
+    }
+
+    #[test]
+    fn sanitize_rejects_url_active_characters() {
+        assert!(sanitize_path_segment("abc?123").is_err());
+        assert!(sanitize_path_segment("abc#123").is_err());
+        assert!(sanitize_path_segment("abc&123").is_err());
+        assert!(sanitize_path_segment("abc=123").is_err());
+        assert!(sanitize_path_segment("abc%23123").is_err());
     }
 
     #[test]

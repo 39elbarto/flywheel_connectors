@@ -23,7 +23,13 @@ fn sanitize_path_segment(segment: &str) -> AsanaResult<&str> {
         || segment.contains('/')
         || segment.contains('\\')
         || segment.contains("..")
+        || segment.contains('?')
+        || segment.contains('#')
+        || segment.contains('&')
+        || segment.contains('=')
+        || segment.contains('%')
         || segment.contains('\0')
+        || segment.chars().any(char::is_control)
         || lower.contains("%2f")
         || lower.contains("%5c")
     {
@@ -488,6 +494,15 @@ mod tests {
         let client = AsanaClient::new(AsanaAuth::CredentialId(CredentialId::new()), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains("CredentialId"));
+    }
+
+    #[test]
+    fn sanitize_rejects_url_active_characters() {
+        assert!(sanitize_path_segment("123?456").is_err());
+        assert!(sanitize_path_segment("123#456").is_err());
+        assert!(sanitize_path_segment("123&456").is_err());
+        assert!(sanitize_path_segment("123=456").is_err());
+        assert!(sanitize_path_segment("123%23456").is_err());
     }
 
     #[test]

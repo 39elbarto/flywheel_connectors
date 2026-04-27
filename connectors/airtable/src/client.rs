@@ -181,6 +181,12 @@ impl AirtableClient {
         if value.contains('/')
             || value.contains('\\')
             || value.contains("..")
+            || value.contains('?')
+            || value.contains('#')
+            || value.contains('&')
+            || value.contains('=')
+            || value.contains('%')
+            || value.chars().any(char::is_control)
             || lower.contains("%2f")
             || lower.contains("%5c")
         {
@@ -1715,6 +1721,15 @@ mod tests {
         assert!(AirtableClient::sanitize_path_segment("foo%5Cbar", "base_id").is_err());
         assert!(AirtableClient::sanitize_path_segment("", "base_id").is_err());
         assert!(AirtableClient::sanitize_path_segment("  ", "base_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_url_active_characters() {
+        assert!(AirtableClient::sanitize_path_segment("app?123", "base_id").is_err());
+        assert!(AirtableClient::sanitize_path_segment("app#123", "base_id").is_err());
+        assert!(AirtableClient::sanitize_path_segment("app&123", "base_id").is_err());
+        assert!(AirtableClient::sanitize_path_segment("app=123", "base_id").is_err());
+        assert!(AirtableClient::sanitize_path_segment("app%23123", "base_id").is_err());
     }
 
     #[test]

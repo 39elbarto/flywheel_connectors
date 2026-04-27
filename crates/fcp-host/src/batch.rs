@@ -84,6 +84,8 @@ impl Default for BatchOptions {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Overall batch status.
+#[must_use]
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BatchStatus {
@@ -98,6 +100,8 @@ pub enum BatchStatus {
 }
 
 /// Status of an individual operation result.
+#[must_use]
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationResultStatus {
@@ -110,6 +114,7 @@ pub enum OperationResultStatus {
 }
 
 /// Result of a single operation within a batch.
+#[must_use]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationResult {
     /// Operation ID.

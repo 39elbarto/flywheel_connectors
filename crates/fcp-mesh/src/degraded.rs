@@ -951,6 +951,7 @@ fn symbol_context(
 }
 
 /// Status information for a pending decode.
+#[must_use]
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeStatusInfo {
     /// Unique symbols received.

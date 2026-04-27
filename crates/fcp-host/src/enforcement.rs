@@ -480,6 +480,7 @@ impl EnforcementContextBuilder {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Outcome of a single enforcement check.
+#[must_use]
 #[derive(Debug, Clone)]
 pub enum CheckOutcome {
     /// The check passed.
@@ -530,6 +531,7 @@ pub struct CheckRecord {
 }
 
 /// Overall outcome of the enforcement pipeline.
+#[must_use]
 #[derive(Debug, Clone)]
 pub enum PipelineOutcome {
     /// All checks passed (or were skipped).

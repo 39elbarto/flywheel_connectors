@@ -353,6 +353,7 @@ pub struct VerifiedRevocationPush {
 }
 
 /// Structured result of dispatching an inbound gossip message.
+#[must_use]
 #[derive(Debug, Clone, Default)]
 pub struct GossipDispatchOutcome {
     /// Verified revocation push ready for registry application.
@@ -3282,7 +3283,8 @@ mod tests {
             ..template
         };
 
-        node.handle_gossip_message(GossipMessage::Summary(summary), 1_000)
+        let _ = node
+            .handle_gossip_message(GossipMessage::Summary(summary), 1_000)
             .expect("summary should verify");
         assert_eq!(node.metrics().gossip_updates, 1);
     }
@@ -3621,12 +3623,14 @@ mod tests {
         };
 
         let newer_summary = signed_summary(2_000, &["newer-a", "newer-b"]);
-        node.handle_gossip_message(GossipMessage::Summary(newer_summary), 2_000)
+        let _ = node
+            .handle_gossip_message(GossipMessage::Summary(newer_summary), 2_000)
             .expect("newer summary should verify");
         assert_eq!(node.metrics().gossip_updates, 1);
 
         let older_summary = signed_summary(1_500, &["older-only"]);
-        node.handle_gossip_message(GossipMessage::Summary(older_summary), 2_000)
+        let _ = node
+            .handle_gossip_message(GossipMessage::Summary(older_summary), 2_000)
             .expect("older-but-signed summary should be ignored, not fail verification");
 
         let accepted = node

@@ -6040,7 +6040,7 @@ mod real_component_integration {
         let summary_a = sign_summary(&signing_key_a, &gossip_a_id, summary_a);
 
         // B processes A's summary to learn about A's objects
-        node_b
+        let _ = node_b
             .handle_gossip_message(GossipMessage::Summary(summary_a), 2000)
             .expect("node B should accept node A's signed summary");
 
@@ -6061,7 +6061,7 @@ mod real_component_integration {
         let summary_b = sign_summary(&signing_key_b, &gossip_b_id, summary_b);
 
         // A processes B's summary to learn about B's objects
-        node_a
+        let _ = node_a
             .handle_gossip_message(GossipMessage::Summary(summary_b), 2002)
             .expect("node A should accept node B's signed summary");
 
@@ -6612,7 +6612,7 @@ mod real_component_integration {
         let summary_a = sign_summary(&signing_key_a, &checkpoint_a_id, summary_a);
 
         // B processes A's summary, then requests A's objects it doesn't have
-        node_b
+        let _ = node_b
             .handle_gossip_message(GossipMessage::Summary(summary_a), 2000)
             .expect("B should accept A's signed summary");
         // B wants a_objects[1..5] (it already has a_objects[0])
@@ -6628,7 +6628,7 @@ mod real_component_integration {
             .create_summary(&zone_id, epoch)
             .expect("B should produce summary");
         let summary_b = sign_summary(&signing_key_b, &checkpoint_b_id, summary_b);
-        node_a
+        let _ = node_a
             .handle_gossip_message(GossipMessage::Summary(summary_b), 2002)
             .expect("A should accept B's signed summary");
 

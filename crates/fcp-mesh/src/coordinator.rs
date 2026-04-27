@@ -84,6 +84,8 @@ impl Default for LeaseCoordinatorConfig {
 // ── Lease Coordinator ───────────────────────────────────────────────────
 
 /// Outcome of a lease acquisition attempt.
+#[must_use]
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum AcquireOutcome {
@@ -107,6 +109,8 @@ pub enum AcquireOutcome {
 }
 
 /// Outcome of a lease renewal attempt.
+#[must_use]
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum RenewOutcome {
@@ -117,6 +121,8 @@ pub enum RenewOutcome {
 }
 
 /// Outcome of a lease release.
+#[must_use]
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum ReleaseOutcome {

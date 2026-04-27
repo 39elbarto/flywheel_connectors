@@ -85,6 +85,7 @@ pub enum IbltError {
 }
 
 /// Result of decoding an IBLT difference sketch.
+#[must_use]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IbltDecodeResult {
     /// Objects present only in the left-hand sketch.

@@ -21,7 +21,9 @@ use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
 use fcp_kernel::CapabilityId;
 use serde::{Deserialize, Serialize};
-use std::process::Command;
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -271,6 +273,34 @@ where
     let percentiles = calculate_percentiles(&durations_ns);
 
     (percentiles, outlier_count)
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn run_fallible_benchmark_with_result<F, R>(
+    warmup: u32,
+    iterations: u32,
+    mut f: F,
+) -> anyhow::Result<(Percentiles, u32)>
+where
+    F: FnMut() -> anyhow::Result<R>,
+{
+    for _ in 0..warmup {
+        std::hint::black_box(f()?);
+    }
+
+    let mut durations_ns: Vec<u64> = Vec::with_capacity(iterations as usize);
+    for _ in 0..iterations {
+        let start = Instant::now();
+        let result = f()?;
+        let elapsed = start.elapsed();
+        std::hint::black_box(result);
+        durations_ns.push(elapsed.as_nanos() as u64);
+    }
+
+    durations_ns.sort_unstable();
+    let outlier_count = count_outliers(&durations_ns);
+    let percentiles = calculate_percentiles(&durations_ns);
+    Ok((percentiles, outlier_count))
 }
 
 #[allow(
@@ -897,8 +927,11 @@ pub(crate) fn run(args: &BenchArgs) -> anyhow::Result<()> {
 
     let results = match &args.command {
         BenchCommand::ConnectorActivate { connector } => {
-            let name = connector.as_deref().unwrap_or("default");
-            vec![bench_connector_activate(name, args.iterations, args.warmup)]
+            vec![bench_connector_activate(
+                connector.as_deref(),
+                args.iterations,
+                args.warmup,
+            )?]
         }
         BenchCommand::InvokeLocal => {
             vec![bench_invoke_local(args.iterations, args.warmup)]
@@ -973,12 +1006,13 @@ pub(crate) fn run(args: &BenchArgs) -> anyhow::Result<()> {
                 args.warmup,
             )?);
 
-            // Real benchmarks for connector, invoke, mesh, and secrets.
+            // Mixed local benchmarks: connector activation uses the explicit
+            // default fixture unless the operator supplies a binary path.
             all_results.push(bench_connector_activate(
-                "default",
+                None,
                 args.iterations,
                 args.warmup,
-            ));
+            )?);
             all_results.push(bench_invoke_local(args.iterations, args.warmup));
             all_results.push(bench_invoke_mesh(
                 &MeshPath::Direct,
@@ -1705,29 +1739,131 @@ fn bench_pipeline_setup(step_count: u32, iterations: u32, warmup: u32) -> Benchm
 
 // ─── Connector Activate Benchmark ──────────────────────────────────────────
 
-fn bench_connector_activate(connector_name: &str, iterations: u32, warmup: u32) -> BenchmarkResult {
+fn connector_health_probe(connector_path: &Path) -> anyhow::Result<usize> {
+    let mut child = Command::new(connector_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            anyhow!(
+                "failed to start connector binary '{}': {error}",
+                connector_path.display()
+            )
+        })?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("failed to open connector stdin"))?;
+    stdin.write_all(
+        br#"{"jsonrpc":"2.0","id":"bench-health","method":"health","params":{}}
+"#,
+    )?;
+    drop(stdin);
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("failed to open connector stdout"))?;
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    let bytes = reader.read_line(&mut line)?;
+    if bytes == 0 {
+        let status = child.wait()?;
+        bail!(
+            "connector binary '{}' exited without a health response: {status}",
+            connector_path.display()
+        );
+    }
+
+    let response: serde_json::Value = serde_json::from_str(line.trim_end()).map_err(|error| {
+        anyhow!(
+            "connector binary '{}' returned invalid JSON-RPC health response: {error}",
+            connector_path.display()
+        )
+    })?;
+    if response.get("result").is_none() {
+        bail!(
+            "connector binary '{}' health probe returned no result: {response}",
+            connector_path.display()
+        );
+    }
+
+    let status = child.wait()?;
+    if !status.success() {
+        bail!(
+            "connector binary '{}' exited unsuccessfully after health probe: {status}",
+            connector_path.display()
+        );
+    }
+
+    Ok(bytes)
+}
+
+fn bench_connector_activate(
+    connector_path: Option<&str>,
+    iterations: u32,
+    warmup: u32,
+) -> anyhow::Result<BenchmarkResult> {
     use fcp_kernel::{ConnectorId, SessionId, ZoneId};
 
-    // Benchmark the connector configuration parsing + validation path.
-    // This measures the "cold start" cost of parsing a config, constructing
-    // typed state, and validating all fields — the real work of activation.
+    if let Some(path) = connector_path {
+        let path = Path::new(path);
+        if !path.is_file() {
+            bail!("connector binary '{}' does not exist", path.display());
+        }
+
+        let (percentiles, outliers) =
+            run_fallible_benchmark_with_result(warmup, iterations, || {
+                connector_health_probe(path)
+            })?;
+
+        let mut result = BenchmarkResult::new(
+            format!(
+                "connector-activate-{}",
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("custom")
+            ),
+            format!(
+                "Connector cold start for '{}' through JSON-RPC health probe",
+                path.display()
+            ),
+            iterations,
+            warmup,
+            percentiles,
+        )
+        .with_parameters(serde_json::json!({
+            "connector_path": path.display().to_string(),
+            "probe": "jsonrpc.health",
+        }))
+        .with_targets(Targets {
+            p50_target_ms: 100.0,
+            p99_target_ms: 500.0,
+        });
+        result.outliers_detected = outliers;
+        return Ok(result);
+    }
+
+    // The default `fwc bench all` path has no connector binary to execute, so
+    // keep the benchmark explicit: this is a local activation fixture, not a
+    // measured external connector process.
     let config_str = serde_json::json!({
-        "mode": "access_token",
-        "access_token": "ya29.bench-token",
+        "mode": "credential_ref",
+        "credential_id": "00000000-0000-0000-0000-000000000000",
         "project_id": "bench-project",
         "retry": { "max_retries": 3 },
         "request_timeout_ms": 30_000,
-        "connector_name": connector_name,
+        "connector_name": "default",
     })
     .to_string();
 
     let (percentiles, outliers) = run_benchmark_with_result(warmup, iterations, || {
-        // Simulate config parse + validation (the real cost of activation)
         let parsed: serde_json::Value = serde_json::from_str(&config_str).unwrap();
         let _project = parsed["project_id"].as_str().unwrap();
-        let _token = parsed["access_token"].as_str().unwrap();
+        let _credential_id = parsed["credential_id"].as_str().unwrap();
         let _timeout = parsed["request_timeout_ms"].as_u64().unwrap();
-        // Simulate base connector + session init
         let _session = SessionId::new();
         let _connector_id = ConnectorId::from_static("fcp.bench");
         let _zone = ZoneId::work();
@@ -1735,14 +1871,15 @@ fn bench_connector_activate(connector_name: &str, iterations: u32, warmup: u32) 
     });
 
     let mut result = BenchmarkResult::new(
-        format!("connector-activate-{connector_name}"),
-        format!("Connector activation (config parse + validation) for {connector_name}"),
+        "connector-activate-default-fixture",
+        "Synthetic activation fixture: config parse + validation without a connector binary",
         iterations,
         warmup,
         percentiles,
     )
     .with_parameters(serde_json::json!({
-        "connector": connector_name,
+        "connector": "default",
+        "mode": "synthetic-fixture",
         "config_bytes": config_str.len(),
     }))
     .with_targets(Targets {
@@ -1750,7 +1887,7 @@ fn bench_connector_activate(connector_name: &str, iterations: u32, warmup: u32) 
         p99_target_ms: 500.0,
     });
     result.outliers_detected = outliers;
-    result
+    Ok(result)
 }
 
 // ─── Invoke Local Benchmark ───────────────────────────────────────────────
@@ -1891,15 +2028,15 @@ fn bench_secrets(k: u32, n: u32, iterations: u32, warmup: u32) -> BenchmarkResul
     let k_u8 = u8::try_from(k).unwrap_or(3);
     let n_u8 = u8::try_from(n).unwrap_or(5);
 
-    // Generate a 32-byte secret (typical for API keys / encryption keys)
-    let secret = [0xAB_u8; 32];
+    // Deterministic 32-byte fixture material for Shamir split/reconstruct timing.
+    let fixture_material = [0xAB_u8; 32];
 
     // Pre-split the shares for the reconstruction benchmark
-    let shares = split_secret(&secret, k_u8, n_u8).expect("Shamir split should succeed");
+    let shares = split_secret(&fixture_material, k_u8, n_u8).expect("Shamir split should succeed");
 
     let (percentiles, outliers) = run_benchmark_with_result(warmup, iterations, || {
         // Benchmark the full split + reconstruct cycle
-        let new_shares = split_secret(&secret, k_u8, n_u8).expect("split");
+        let new_shares = split_secret(&fixture_material, k_u8, n_u8).expect("split");
         let k_shares: Vec<_> = new_shares.into_iter().take(k_u8 as usize).collect();
         let reconstructed = reconstruct_secret(&k_shares).expect("reconstruct");
         std::hint::black_box(reconstructed)
@@ -1915,7 +2052,7 @@ fn bench_secrets(k: u32, n: u32, iterations: u32, warmup: u32) -> BenchmarkResul
     .with_parameters(serde_json::json!({
         "k": k,
         "n": n,
-        "secret_bytes": secret.len(),
+        "material_bytes": fixture_material.len(),
     }))
     .with_targets(Targets {
         p50_target_ms: 150.0,
@@ -2812,6 +2949,22 @@ mod tests {
     #[test]
     fn parse_size_bytes_raw_number() {
         assert_eq!(parse_size_bytes("1024").unwrap(), 1024);
+    }
+
+    #[test]
+    fn connector_activate_default_is_explicit_synthetic_fixture() {
+        let result = bench_connector_activate(None, 2, 1).expect("default fixture benchmark");
+        assert_eq!(result.name, "connector-activate-default-fixture");
+        assert_eq!(result.parameters["mode"], "synthetic-fixture");
+        assert!(result.description.contains("Synthetic activation fixture"));
+        assert!(result.percentiles.is_some());
+    }
+
+    #[test]
+    fn connector_activate_missing_binary_errors_instead_of_faking_measurement() {
+        let missing = "/definitely/not/a/fcp/connector/binary";
+        let error = bench_connector_activate(Some(missing), 1, 0).unwrap_err();
+        assert!(error.to_string().contains("does not exist"));
     }
 
     #[test]

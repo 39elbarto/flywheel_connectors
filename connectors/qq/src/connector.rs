@@ -456,6 +456,13 @@ impl FcpConnector for QqConnector {
                 ));
             }
         };
+        if let Err(error) = validate_simulate_input(req.operation.as_str(), &req.input) {
+            return Ok(SimulateResponse::denied(
+                req.id,
+                error.to_string(),
+                error.error_code(),
+            ));
+        }
         if self.client.is_none() {
             return Ok(SimulateResponse::denied(
                 req.id,
@@ -507,6 +514,49 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
         }
     };
     Ok(CapabilityId::from_static(capability))
+}
+
+fn validate_simulate_input(operation: &str, input: &Value) -> FcpResult<()> {
+    match operation {
+        OP_SEND_CHANNEL => {
+            let channel_id = required_string(input, "channel_id")?;
+            let _path = message_path("/channels/", channel_id, "channel_id")?;
+            required_string(input, "content")?;
+            optional_string(input, "msg_id")?;
+        }
+        OP_SEND_GROUP => {
+            let group_openid = required_string(input, "group_openid")?;
+            let _path = message_path("/v2/groups/", group_openid, "group_openid")?;
+            required_string(input, "content")?;
+            optional_string(input, "msg_id")?;
+        }
+        OP_SEND_C2C => {
+            let openid = required_string(input, "openid")?;
+            let _path = message_path("/v2/users/", openid, "openid")?;
+            required_string(input, "content")?;
+            optional_string(input, "msg_id")?;
+        }
+        OP_GET_GATEWAY | OP_HEALTH => {}
+        OP_EVENTS_NORMALIZE => {
+            let event_value = input.get("event").ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: "event is required".into(),
+            })?;
+            let gateway_event: QqGatewayEvent = serde_json::from_value(event_value.clone())
+                .map_err(|e| FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("invalid gateway event: {e}"),
+                })?;
+            normalize_message_event(&gateway_event).map_err(|e| e.to_fcp_error())?;
+        }
+        _ => {
+            return Err(FcpError::InvalidRequest {
+                code: 1004,
+                message: format!("unknown operation: {operation}"),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
@@ -598,6 +648,75 @@ fn operation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, Utc};
+    use fcp_core::{CapabilityConstraints, CapabilityToken, ZoneId};
+    use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+
+    fn build_token(signing_key: &Ed25519SigningKey, cap: &str, operation: &str) -> CapabilityToken {
+        let now = Utc::now();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
+
+        let raw = CapabilityTokenBuilder::new()
+            .capability_id(cap)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&[operation])
+            .issuer("node:test")
+            .validity(now, now + Duration::hours(1))
+            .try_constraints_cbor(&cbor)
+            .expect("valid constraints cbor")
+            .sign(signing_key)
+            .expect("capability token");
+        CapabilityToken::from_raw(raw)
+    }
+
+    fn simulate_request(
+        signing_key: &Ed25519SigningKey,
+        cap: &str,
+        operation: &'static str,
+        input: Value,
+    ) -> SimulateRequest {
+        SimulateRequest::new(
+            ConnectorId::from_static("fcp.qq"),
+            OperationId::from_static(operation),
+            ZoneId::work(),
+            input,
+            build_token(signing_key, cap, operation),
+        )
+    }
+
+    async fn ready_connector(signing_key: &Ed25519SigningKey) -> QqConnector {
+        let mut connector = QqConnector::new();
+        connector
+            .configure(json!({
+                "app_id": "test-app",
+                "client_secret": "test-secret",
+                "base_url": "http://localhost:9999",
+                "token_base_url": "http://localhost:9999"
+            }))
+            .await
+            .unwrap();
+        connector
+            .handshake(HandshakeRequest {
+                protocol_version: "2.0.0".into(),
+                zone: ZoneId::work(),
+                zone_dir: None,
+                host_public_key: signing_key.verifying_key().to_bytes(),
+                nonce: [7u8; 32],
+                capabilities_requested: vec![CapabilityId::from_static(CAP_MESSAGES_WRITE)],
+                host: None,
+                transport_caps: None,
+                requested_instance_id: None,
+            })
+            .await
+            .unwrap();
+        connector
+    }
 
     #[test]
     fn connector_default_creates_instance() {
@@ -799,6 +918,84 @@ mod tests {
     fn required_capability_unknown_op() {
         let err = required_capability("qq.unknown").unwrap_err();
         assert!(matches!(err, FcpError::InvalidRequest { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_send_channel_missing_content_denied() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = ready_connector(&signing_key).await;
+        let response = connector
+            .simulate(simulate_request(
+                &signing_key,
+                CAP_MESSAGES_WRITE,
+                OP_SEND_CHANNEL,
+                json!({"channel_id": "channel-1"}),
+            ))
+            .await
+            .unwrap();
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-1005"));
+        assert!(
+            response
+                .failure_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("content")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_send_group_rejects_path_traversal_target() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = ready_connector(&signing_key).await;
+        let response = connector
+            .simulate(simulate_request(
+                &signing_key,
+                CAP_MESSAGES_WRITE,
+                OP_SEND_GROUP,
+                json!({"group_openid": "../admin", "content": "hello"}),
+            ))
+            .await
+            .unwrap();
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-1005"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_send_channel_valid_input_allowed() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = ready_connector(&signing_key).await;
+        let response = connector
+            .simulate(simulate_request(
+                &signing_key,
+                CAP_MESSAGES_WRITE,
+                OP_SEND_CHANNEL,
+                json!({"channel_id": "channel-1", "content": "hello"}),
+            ))
+            .await
+            .unwrap();
+
+        assert!(response.would_succeed);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_events_normalize_missing_event_denied() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = ready_connector(&signing_key).await;
+        let response = connector
+            .simulate(simulate_request(
+                &signing_key,
+                CAP_EVENTS_READ,
+                OP_EVENTS_NORMALIZE,
+                json!({}),
+            ))
+            .await
+            .unwrap();
+
+        assert!(!response.would_succeed);
+        assert_eq!(response.denial_code.as_deref(), Some("FCP-1005"));
     }
 
     #[test]

@@ -1562,6 +1562,7 @@ dependencies = [
  "fcp-host",
  "fcp-manifest",
  "fcp-mesh",
+ "fcp-monday",
  "fcp-oauth",
  "fcp-protocol",
  "fcp-raptorq",
@@ -1748,6 +1749,23 @@ dependencies = [
  "tracing",
  "xorf",
  "zeroize",
+]
+
+[[package]]
+name = "fcp-monday"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-sdk",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

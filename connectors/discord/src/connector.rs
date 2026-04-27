@@ -888,6 +888,33 @@ impl DiscordConnector {
         }
     }
 
+    fn capability_for_operation(operation: &str) -> Option<CapabilityId> {
+        match operation {
+            "discord.send_message" | "discord.trigger_typing" => {
+                Some(CapabilityId::from_static("discord.send"))
+            }
+            "discord.edit_message" => Some(CapabilityId::from_static("discord.edit")),
+            "discord.delete_message" => Some(CapabilityId::from_static("discord.delete")),
+            "discord.get_channel" | "discord.get_guild" | "discord.list_channels" => {
+                Some(CapabilityId::from_static("discord.read"))
+            }
+            "discord.add_reaction" => Some(CapabilityId::from_static("discord.react")),
+            "discord.create_thread" => Some(CapabilityId::from_static("discord.threads")),
+            _ => None,
+        }
+    }
+
+    fn resource_uris_for_input(input: &serde_json::Value) -> Vec<String> {
+        let mut resource_uris = Vec::new();
+        if let Some(channel_id) = input.get("channel_id").and_then(|v| v.as_str()) {
+            resource_uris.push(format!("discord:channel:{channel_id}"));
+        }
+        if let Some(guild_id) = input.get("guild_id").and_then(|v| v.as_str()) {
+            resource_uris.push(format!("discord:guild:{guild_id}"));
+        }
+        resource_uris
+    }
+
     /// Handle introspection.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         let introspection = Introspection {
@@ -1107,7 +1134,75 @@ impl DiscordConnector {
                 message: format!("Invalid simulate request: {e}"),
             })?;
 
-        let response = SimulateResponse::allowed(req.id);
+        let operation = req.operation.as_str();
+        let Some(capability) = Self::capability_for_operation(operation) else {
+            let error = FcpError::OperationNotGranted {
+                operation: operation.into(),
+            };
+            return serde_json::to_value(SimulateResponse::denied(
+                req.id,
+                error.to_string(),
+                error.error_code(),
+            ))
+            .map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        };
+
+        if let Err(error) = Self::validate_input_early(operation, &req.input) {
+            return serde_json::to_value(SimulateResponse::denied(
+                req.id,
+                error.to_string(),
+                error.error_code(),
+            ))
+            .map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
+        if let Err(error) = self.base.check_ready() {
+            return serde_json::to_value(SimulateResponse::denied(
+                req.id,
+                error.to_string(),
+                error.error_code(),
+            ))
+            .map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        }
+
+        let Some(verifier) = &self.verifier else {
+            let error = FcpError::Internal {
+                message: "connector ready state missing capability verifier".into(),
+            };
+            return serde_json::to_value(SimulateResponse::denied(
+                req.id,
+                error.to_string(),
+                error.error_code(),
+            ))
+            .map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize response: {e}"),
+            });
+        };
+
+        let resource_uris = Self::resource_uris_for_input(&req.input);
+        let response = match verifier.verify_bound(
+            req.capability_token,
+            &capability,
+            &req.operation,
+            &resource_uris,
+        ) {
+            Ok(_) => SimulateResponse::allowed(req.id),
+            Err(error) => {
+                let mut response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                if error.error_code() == "FCP-3001" {
+                    response =
+                        response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+                }
+                response
+            }
+        };
         serde_json::to_value(response).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize response: {e}"),
         })
@@ -1297,13 +1392,7 @@ impl DiscordConnector {
             message: "Invalid capability ID format".into(),
         })?;
 
-        let mut resource_uris = Vec::new();
-        if let Some(channel_id) = input.get("channel_id").and_then(|v| v.as_str()) {
-            resource_uris.push(format!("discord:channel:{channel_id}"));
-        }
-        if let Some(guild_id) = input.get("guild_id").and_then(|v| v.as_str()) {
-            resource_uris.push(format!("discord:guild:{guild_id}"));
-        }
+        let resource_uris = Self::resource_uris_for_input(&input);
 
         let Some(verifier) = &self.verifier else {
             self.base.check_ready()?;
@@ -1311,7 +1400,7 @@ impl DiscordConnector {
                 message: "connector ready state missing capability verifier".into(),
             });
         };
-        verifier.verify(token, &cap_id, &op_id, &resource_uris)?;
+        verifier.verify_bound(token, &cap_id, &op_id, &resource_uris)?;
 
         match operation {
             "discord.send_message" => self.invoke_send_message(input).await,
@@ -2435,6 +2524,21 @@ mod tests {
         CapabilityArtifact::from_raw(cose)
     }
 
+    fn simulate_send_message_payload(capability: CapabilityArtifact) -> serde_json::Value {
+        json!({
+            "type": "simulate",
+            "id": "simulate-discord-send-message",
+            "connector_id": "fcp.discord",
+            "operation": "discord.send_message",
+            "zone_id": "z:work",
+            "input": {
+                "channel_id": "123456789",
+                "content": "Hello"
+            },
+            "capability_token": capability
+        })
+    }
+
     async fn mock_current_user_ok(mock_server: &MockServer, token: &str) {
         Mock::given(method("GET"))
             .and(path("/users/@me"))
@@ -3353,6 +3457,55 @@ mod tests {
         assert!(
             matches!(err, FcpError::OperationNotGranted { .. }),
             "Mismatched capability should yield OperationNotGranted, got: {err:?}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_unconfigured_denies() {
+        let connector = DiscordConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let capability =
+            generate_capability(&signing_key, "discord.send", &["discord.send_message"]);
+
+        let result = connector
+            .handle_simulate(simulate_send_message_payload(capability))
+            .await
+            .expect("simulate should return a denial response");
+
+        assert_eq!(result["would_succeed"], false);
+        assert_eq!(result["denial_code"], "FCP-5002");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_simulate_capability_not_granted_denies() {
+        let mut connector = DiscordConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector.base.set_configured(true);
+        connector.base.set_handshaken(true);
+        connector.verifier = Some(CapabilityVerifier::new(
+            verifying_key.to_bytes(),
+            ZoneId::work(),
+            connector.base.instance_id.clone(),
+        ));
+
+        let capability = generate_capability(
+            &signing_key,
+            "discord.get_channel",
+            &["discord.get_channel"],
+        );
+
+        let result = connector
+            .handle_simulate(simulate_send_message_payload(capability))
+            .await
+            .expect("simulate should return a denial response");
+
+        assert_eq!(result["would_succeed"], false);
+        assert!(
+            result["denial_code"]
+                .as_str()
+                .is_some_and(|code| code.starts_with("FCP-3")),
+            "capability denial should use an FCP-3xxx code, got {result}"
         );
     }
 

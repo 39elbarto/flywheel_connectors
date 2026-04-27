@@ -525,5 +525,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_cbor_decode_recursion_limit"
+path = "fuzz_targets/cbor_decode_recursion_limit.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

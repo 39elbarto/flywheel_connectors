@@ -561,5 +561,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_store_quarantine"
+path = "fuzz_targets/store_quarantine.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

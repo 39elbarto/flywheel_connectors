@@ -243,6 +243,7 @@ impl DropboxConnector {
             "capabilities": [
                 "dropbox.files.read",
                 "dropbox.files.write",
+                "dropbox.files.delete",
                 "dropbox.account.read"
             ]
         }))
@@ -839,7 +840,7 @@ fn operations_info() -> Vec<OperationInfo> {
                 }
             }),
             json!({ "type": "object" }),
-            "dropbox.files.write",
+            "dropbox.files.delete",
             RiskLevel::High,
             SafetyTier::Dangerous,
             IdempotencyClass::None,
@@ -1295,7 +1296,48 @@ mod tests {
             .iter()
             .find(|o| o.id.as_ref() == "dropbox.files.delete")
             .unwrap();
-        assert_eq!(del_op.capability.as_ref(), "dropbox.files.write");
+        assert_eq!(del_op.capability.as_ref(), "dropbox.files.delete");
+    }
+
+    #[test]
+    fn manifest_delete_requires_dedicated_capability() {
+        let manifest = include_str!("../manifest.toml");
+
+        assert!(manifest.contains("capability = \"dropbox.files.delete\""));
+        assert!(manifest.contains("\"dropbox.files.delete\","));
+        assert!(manifest.contains("id = \"dropbox.files.delete\""));
+        assert!(manifest.contains("id = \"dropbox.files.write\""));
+        assert!(manifest.contains("\"dropbox.files.delete\" = [\"dropbox.files.delete\"]"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_advertises_dedicated_files_delete_capability() {
+        let mut connector = DropboxConnector::new();
+        connector
+            .handle_configure(json!({
+                "access_token": "tok"
+            }))
+            .await
+            .unwrap();
+
+        let response = connector
+            .handle_handshake(json!({
+                "session_id": "test-session"
+            }))
+            .await
+            .unwrap();
+        let capabilities = response["capabilities"].as_array().unwrap();
+
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("dropbox.files.write"))
+        );
+        assert!(
+            capabilities
+                .iter()
+                .any(|cap| cap.as_str() == Some("dropbox.files.delete"))
+        );
     }
 
     #[test]

@@ -168,7 +168,13 @@ async fn lifecycle_handshake_response_fields() {
         .unwrap();
     assert_eq!(hs["connector_id"], "fcp.dropbox");
     assert_eq!(hs["protocol_version"], "2.0");
-    assert!(hs["capabilities"].as_array().unwrap().len() >= 3);
+    let capabilities = hs["capabilities"].as_array().unwrap();
+    assert!(capabilities.len() >= 4);
+    assert!(
+        capabilities
+            .iter()
+            .any(|cap| cap.as_str() == Some("dropbox.files.delete"))
+    );
 }
 
 #[fcp_async_core::runtime::test]

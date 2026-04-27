@@ -46,6 +46,7 @@ required = [
 optional = [
     "media.download",
     "dropbox.files.write",
+    "dropbox.files.delete",
     "dropbox.files.read",
     "dropbox.sharing.read",
 ]
@@ -57,7 +58,7 @@ forbidden = [
 
 [provides.operations."dropbox.files.delete"]
 description = "Delete a file or folder"
-capability = "dropbox.files.write"
+capability = "dropbox.files.delete"
 risk_level = "high"
 safety_tier = "dangerous"
 requires_approval = "interactive"
@@ -282,6 +283,13 @@ burst = 10
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "dropbox.files.delete"
+requests = 50
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "dropbox.sharing.read"
 requests = 100
 window_ms = 60000
@@ -292,4 +300,4 @@ scope = "instance"
 "dropbox.files.get_metadata" = ["dropbox.files.read"]
 "dropbox.files.list" = ["dropbox.files.read"]
 "dropbox.sharing.list" = ["dropbox.sharing.read"]
-"dropbox.files.delete" = ["dropbox.files.write"]
+"dropbox.files.delete" = ["dropbox.files.delete"]

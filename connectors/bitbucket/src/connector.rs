@@ -117,6 +117,24 @@ impl BitbucketConfig {
             .to_string();
         reject_base_url_qfu(&base_url)?;
 
+        // br-3a2ce: enforce endpoint policy at the configure boundary.
+        // Previously `from_params` accepted any base_url and the connector
+        // constructed a `BitbucketClient` (carrying access-token /
+        // app-password credentials) BEFORE any policy check fired —
+        // `provisioning_readiness` reported the rejection but did not fail
+        // configuration, so a malicious config could route the credentials
+        // to an attacker-controlled host such as `https://bitbucket.example.com/2.0`.
+        // The policy gate must be a hard refuse, not a status indicator.
+        // localhost / 127.0.0.1 / ::1 stay allowed for tests via
+        // `is_local_test_host` inside `base_url_policy`.
+        let (network_ok, network_message) = base_url_policy(&base_url);
+        if !network_ok {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: network_message,
+            });
+        }
+
         Ok(Self { auth, base_url })
     }
 
@@ -1376,13 +1394,79 @@ mod tests {
     }
 
     #[test]
-    fn config_custom_base_url() {
+    fn config_custom_base_url_within_policy() {
+        // Was previously asserting that `https://bitbucket.example.com/2.0`
+        // (a non-bitbucket.org host) was accepted — that was the bug fixed
+        // by br-3a2ce. Now uses the policy-conforming default host so the
+        // test locks in that a custom-but-allowlisted base_url verifies.
         let config = BitbucketConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "https://api.bitbucket.org/2.0",
+        }))
+        .unwrap();
+        assert_eq!(config.base_url, "https://api.bitbucket.org/2.0");
+    }
+
+    #[test]
+    fn config_rejects_off_policy_https_host() {
+        // br-3a2ce: an attacker-controlled HTTPS host outside the
+        // bitbucket allowlist must be refused at construction so that no
+        // BitbucketClient (carrying access-token / app-password creds) is
+        // ever built for it.
+        let err = BitbucketConfig::from_params(&json!({
             "access_token": "tok",
             "base_url": "https://bitbucket.example.com/2.0",
         }))
-        .unwrap();
-        assert_eq!(config.base_url, "https://bitbucket.example.com/2.0");
+        .expect_err("non-bitbucket.org host must be rejected");
+        match err {
+            FcpError::InvalidRequest { code, message } => {
+                assert_eq!(code, 1003);
+                assert!(
+                    message.contains("api.bitbucket.org") || message.contains("bitbucket.org"),
+                    "rejection should name the policy host: {message}"
+                );
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_rejects_http_non_local_host() {
+        // br-3a2ce: even the policy-allowlisted host must be refused over
+        // plain http — only localhost / 127.0.0.1 / ::1 may downgrade.
+        let err = BitbucketConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "http://api.bitbucket.org/2.0",
+        }))
+        .expect_err("http to api.bitbucket.org must be rejected (downgrade)");
+        assert!(matches!(
+            err,
+            FcpError::InvalidRequest { code: 1003, .. }
+        ));
+    }
+
+    #[test]
+    fn config_accepts_localhost_for_tests() {
+        // Locks in the local-test-host allowance so the policy fix never
+        // breaks `tests/integration.rs` wiremock fixtures.
+        let config = BitbucketConfig::from_params(&json!({
+            "access_token": "tok",
+            "base_url": "http://localhost:8080",
+        }))
+        .expect("localhost must remain allowed for tests");
+        assert_eq!(config.base_url, "http://localhost:8080");
+    }
+
+    #[test]
+    fn config_default_base_url_is_within_policy() {
+        // Regression guard: if DEFAULT_BASE_URL ever drifts off-policy,
+        // this test fails fast rather than silently breaking every fresh
+        // configure() call.
+        let config = BitbucketConfig::from_params(&json!({
+            "access_token": "tok",
+        }))
+        .expect("DEFAULT_BASE_URL must satisfy base_url_policy");
+        assert_eq!(config.base_url, DEFAULT_BASE_URL);
     }
 
     #[test]
@@ -1895,14 +1979,12 @@ mod tests {
 
     #[test]
     fn provisioning_readiness_custom_base_url_rejected() {
-        let config = BitbucketConfig::from_params(&json!({
+        let err = BitbucketConfig::from_params(&json!({
             "access_token": "tok",
             "base_url": "https://evil.example.com",
         }))
-        .unwrap();
-        let readiness = config.provisioning_readiness();
-        assert!(!readiness.network_ok);
-        assert!(readiness.network_message.contains("api.bitbucket.org"));
+        .expect_err("off-policy base_url must be rejected before readiness");
+        assert!(format!("{err:?}").contains("api.bitbucket.org"));
     }
 
     #[test]

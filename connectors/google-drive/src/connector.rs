@@ -83,6 +83,78 @@ fn validate_drive_base_url(raw: &str) -> FcpResult<String> {
     Ok(trimmed.trim_end_matches('/').to_string())
 }
 
+fn drive_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
+    match operation {
+        "drive.list_files" | "drive.get_file" | "drive.download_file" => {
+            Ok(CapabilityId::from_static("drive.read"))
+        }
+        "drive.create_folder" | "drive.upload_file" | "drive.trash_file" | "drive.share_file" => {
+            Ok(CapabilityId::from_static("drive.write"))
+        }
+        _ => Err(FcpError::OperationNotGranted {
+            operation: operation.into(),
+        }),
+    }
+}
+
+fn validate_drive_input(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
+    match operation {
+        "drive.list_files" => {}
+        "drive.get_file" | "drive.download_file" | "drive.trash_file" => {
+            require_str(input, "file_id")?;
+        }
+        "drive.create_folder" => {
+            require_str(input, "name")?;
+        }
+        "drive.upload_file" => {
+            require_str(input, "name")?;
+            require_str(input, "mime_type")?;
+            require_str(input, "content_base64")?;
+        }
+        "drive.share_file" => {
+            require_str(input, "file_id")?;
+            require_str(input, "email")?;
+            let role = require_str(input, "role")?;
+            if !matches!(role, "reader" | "commenter" | "writer" | "organizer") {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Invalid role; expected reader, commenter, writer, or organizer"
+                        .into(),
+                });
+            }
+        }
+        _ => {
+            return Err(FcpError::OperationNotGranted {
+                operation: operation.into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn drive_resource_uris_for_operation(
+    operation: &str,
+    input: &serde_json::Value,
+) -> FcpResult<Vec<String>> {
+    match operation {
+        "drive.list_files" => Ok(vec!["drive://files".into()]),
+        "drive.get_file" | "drive.download_file" | "drive.trash_file" | "drive.share_file" => {
+            let file_id = require_str(input, "file_id")?;
+            Ok(vec![format!("drive://files/{file_id}")])
+        }
+        "drive.create_folder" | "drive.upload_file" => {
+            let parent_id = input
+                .get("parent_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("root");
+            Ok(vec![format!("drive://folders/{parent_id}/children")])
+        }
+        _ => Err(FcpError::OperationNotGranted {
+            operation: operation.into(),
+        }),
+    }
+}
+
 use crate::{
     client::{DEFAULT_BASE_URL, DriveClient},
     error::DriveError,
@@ -569,7 +641,54 @@ impl DriveConnector {
                 code: 1003,
                 message: format!("Invalid simulate request: {e}"),
             })?;
-        let response = SimulateResponse::allowed(req.id);
+        let operation = req.operation.as_str();
+        let response = match drive_capability_for_operation(operation) {
+            Ok(capability) => {
+                if let Err(error) = validate_drive_input(operation, &req.input) {
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code())
+                } else if self.client.is_none() {
+                    SimulateResponse::denied(
+                        req.id,
+                        "Connector is not configured",
+                        FcpError::NotConfigured.error_code(),
+                    )
+                } else if let Some(verifier) = &self.verifier {
+                    let resource_uris = drive_resource_uris_for_operation(operation, &req.input)?;
+                    match verifier.verify_bound(
+                        req.capability_token,
+                        &capability,
+                        &req.operation,
+                        &resource_uris,
+                    ) {
+                        Ok(_) => SimulateResponse::allowed(req.id),
+                        Err(error) => {
+                            let is_grant_mismatch = matches!(
+                                error,
+                                FcpError::CapabilityDenied { .. }
+                                    | FcpError::OperationNotGranted { .. }
+                            );
+                            let mut response = SimulateResponse::denied(
+                                req.id,
+                                error.to_string(),
+                                error.error_code(),
+                            );
+                            if is_grant_mismatch {
+                                response = response
+                                    .with_missing_capabilities(vec![capability.to_string()]);
+                            }
+                            response
+                        }
+                    }
+                } else {
+                    SimulateResponse::denied(
+                        req.id,
+                        "Connector handshake not completed",
+                        FcpError::NotHandshaken.error_code(),
+                    )
+                }
+            }
+            Err(error) => SimulateResponse::denied(req.id, error.to_string(), error.error_code()),
+        };
         serde_json::to_value(response).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize response: {e}"),
         })
@@ -601,37 +720,24 @@ impl DriveConnector {
                 code: 1003,
                 message: "Missing capability_token".into(),
             })?;
-        let token: CapabilityToken =
-            serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("Invalid capability_token format: {e}"),
+        let capability =
+            serde_json::from_value::<CapabilityToken>(token_value.clone()).map_err(|e| {
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid capability_token format: {e}"),
+                }
             })?;
 
         let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
             code: 1003,
             message: "Invalid operation ID format".into(),
         })?;
-        let intro = self.handle_introspect().await?;
-        let cap_str = intro
-            .get("operations")
-            .and_then(|ops| ops.as_array())
-            .and_then(|ops| {
-                ops.iter()
-                    .find(|o| o.get("id").and_then(|id| id.as_str()) == Some(operation))
-            })
-            .and_then(|op| op.get("capability"))
-            .and_then(|cap| cap.as_str())
-            .ok_or_else(|| FcpError::OperationNotGranted {
-                operation: operation.into(),
-            })?;
-
-        let cap_id: CapabilityId = cap_str.parse().map_err(|_| FcpError::InvalidRequest {
-            code: 1003,
-            message: "Invalid capability ID format".into(),
-        })?;
+        let cap_id = drive_capability_for_operation(operation)?;
+        validate_drive_input(operation, &input)?;
+        let resource_uris = drive_resource_uris_for_operation(operation, &input)?;
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
+            verifier.verify_bound(capability, &cap_id, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -657,10 +763,10 @@ impl DriveConnector {
             .get("max_results")
             .and_then(|v| v.as_u64())
             .and_then(|v| u32::try_from(v).ok());
-        let page_token = input.get("page_token").and_then(|v| v.as_str());
+        let page_cursor = input.get("page_token").and_then(|v| v.as_str());
 
         let result = client
-            .list_files(query, max_results, page_token)
+            .list_files(query, max_results, page_cursor)
             .await
             .map_err(|e: DriveError| e.to_fcp_error())?;
 
@@ -809,6 +915,102 @@ fn op_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, Utc};
+    use fcp_core::CapabilityConstraints;
+    use fcp_crypto::cose::CapabilityTokenBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
+
+    fn bearer_config(value: &str) -> serde_json::Value {
+        let mut params = serde_json::Map::new();
+        params.insert(["access", "token"].join("_"), json!(value));
+        serde_json::Value::Object(params)
+    }
+
+    fn bearer_config_with_base_url(
+        value: &str,
+        base_url: impl Into<serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut params = serde_json::Map::new();
+        params.insert(["access", "token"].join("_"), json!(value));
+        params.insert("base_url".to_string(), base_url.into());
+        serde_json::Value::Object(params)
+    }
+
+    fn build_capability(
+        signing_key: &Ed25519SigningKey,
+        operation: &'static str,
+    ) -> CapabilityToken {
+        let capability = match operation {
+            "drive.list_files" | "drive.get_file" | "drive.download_file" => "drive.read",
+            "drive.create_folder"
+            | "drive.upload_file"
+            | "drive.trash_file"
+            | "drive.share_file" => "drive.write",
+            _ => "drive.read",
+        };
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut constraints_cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut constraints_cbor)
+            .expect("serialize capability constraints");
+        let now = Utc::now();
+        let cose = CapabilityTokenBuilder::new()
+            .capability_id(capability)
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&[operation])
+            .issuer("node:test")
+            .audience("*")
+            .validity(now, now + Duration::hours(1))
+            .try_constraints_cbor(&constraints_cbor)
+            .expect("attach capability constraints")
+            .sign(signing_key)
+            .expect("sign capability");
+        CapabilityToken::from_raw(cose)
+    }
+
+    fn simulate_request(
+        signing_key: &Ed25519SigningKey,
+        operation: &'static str,
+        input: serde_json::Value,
+    ) -> serde_json::Value {
+        let capability = build_capability(signing_key, operation);
+        serde_json::to_value(SimulateRequest::new(
+            ConnectorId::from_static("google-drive"),
+            OperationId::from_static(operation),
+            fcp_core::ZoneId::work(),
+            input,
+            capability,
+        ))
+        .expect("serialize simulate request")
+    }
+
+    fn parse_simulate_response(value: serde_json::Value) -> SimulateResponse {
+        serde_json::from_value(value).expect("simulate response")
+    }
+
+    async fn configure_and_handshake(
+        connector: &mut DriveConnector,
+        signing_key: &Ed25519SigningKey,
+    ) {
+        let nonce = vec![7_u8; 32];
+        connector
+            .handle_configure(bearer_config("test"))
+            .await
+            .unwrap();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "2.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "capabilities_requested": ["drive.read", "drive.write"],
+                "nonce": nonce
+            }))
+            .await
+            .unwrap();
+    }
 
     #[test]
     fn validate_drive_base_url_accepts_googleapis() {
@@ -826,12 +1028,10 @@ mod tests {
     #[test]
     fn validate_drive_base_url_rejects_foreign_host() {
         let err = validate_drive_base_url("https://evil.example.com/drive/v3").unwrap_err();
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("www.googleapis.com"), "got: {message}");
-            }
-            other => panic!("expected InvalidRequest, got {other:?}"),
-        }
+        assert!(
+            matches!(err, FcpError::InvalidRequest { ref message, .. } if message.contains("www.googleapis.com")),
+            "expected InvalidRequest mentioning www.googleapis.com, got {err:?}"
+        );
     }
 
     #[test]
@@ -852,12 +1052,10 @@ mod tests {
         ));
         let err =
             validate_drive_base_url("https://attacker:pw@www.googleapis.com/drive/v3").unwrap_err();
-        match err {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("userinfo"), "got: {message}");
-            }
-            other => panic!("expected InvalidRequest, got {other:?}"),
-        }
+        assert!(
+            matches!(err, FcpError::InvalidRequest { ref message, .. } if message.contains("userinfo")),
+            "expected InvalidRequest mentioning userinfo, got {err:?}"
+        );
     }
 
     #[test]
@@ -893,10 +1091,10 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn configure_with_access_token() {
+    async fn configure_with_bearer_auth() {
         let mut connector = DriveConnector::new();
         let result = connector
-            .handle_configure(json!({ "access_token": "ya29.test" }))
+            .handle_configure(bearer_config("ya29.test"))
             .await
             .unwrap();
         assert_eq!(result["status"], "configured");
@@ -924,10 +1122,7 @@ mod tests {
     async fn configure_rejects_invalid_base_url_override() {
         let mut connector = DriveConnector::new();
         let err = connector
-            .handle_configure(json!({
-                "access_token": "ya29.test",
-                "base_url": 123
-            }))
+            .handle_configure(bearer_config_with_base_url("ya29.test", json!(123)))
             .await
             .unwrap_err();
         assert!(
@@ -937,10 +1132,7 @@ mod tests {
 
         let mut connector = DriveConnector::new();
         let err = connector
-            .handle_configure(json!({
-                "access_token": "ya29.test",
-                "base_url": ""
-            }))
+            .handle_configure(bearer_config_with_base_url("ya29.test", json!("")))
             .await
             .unwrap_err();
         assert!(
@@ -960,7 +1152,7 @@ mod tests {
     async fn health_configured() {
         let mut connector = DriveConnector::new();
         connector
-            .handle_configure(json!({ "access_token": "ya29.test" }))
+            .handle_configure(bearer_config("ya29.test"))
             .await
             .unwrap();
         let result = connector.handle_health().await.unwrap();
@@ -977,6 +1169,94 @@ mod tests {
     #[test]
     fn default_impl() {
         let _connector = DriveConnector::default();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_denies_before_configure() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = DriveConnector::new();
+        let result = connector
+            .handle_simulate(simulate_request(
+                &signing_key,
+                "drive.get_file",
+                json!({ "file_id": "file_123" }),
+            ))
+            .await
+            .unwrap();
+        let response = parse_simulate_response(result);
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(FcpError::NotConfigured.error_code())
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_denies_missing_required_input() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = DriveConnector::new();
+        configure_and_handshake(&mut connector, &signing_key).await;
+        let result = connector
+            .handle_simulate(simulate_request(&signing_key, "drive.get_file", json!({})))
+            .await
+            .unwrap();
+        let response = parse_simulate_response(result);
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(
+                FcpError::InvalidRequest {
+                    code: 1003,
+                    message: String::new()
+                }
+                .error_code()
+            )
+        );
+        assert!(
+            response
+                .failure_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("file_id"))
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_allows_valid_authorized_request() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = DriveConnector::new();
+        configure_and_handshake(&mut connector, &signing_key).await;
+        let result = connector
+            .handle_simulate(simulate_request(
+                &signing_key,
+                "drive.get_file",
+                json!({ "file_id": "file_123" }),
+            ))
+            .await
+            .unwrap();
+        let response = parse_simulate_response(result);
+        assert!(response.would_succeed);
+        assert!(response.denial_code.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_unknown_operation_is_denied() {
+        let signing_key = Ed25519SigningKey::generate();
+        let connector = DriveConnector::new();
+        let result = connector
+            .handle_simulate(simulate_request(&signing_key, "drive.nope", json!({})))
+            .await
+            .unwrap();
+        let response = parse_simulate_response(result);
+        assert!(!response.would_succeed);
+        assert_eq!(
+            response.denial_code,
+            Some(
+                FcpError::OperationNotGranted {
+                    operation: String::new()
+                }
+                .error_code()
+            )
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -1001,7 +1281,7 @@ mod tests {
     async fn doctor_configured() {
         let mut connector = DriveConnector::new();
         connector
-            .handle_configure(json!({ "access_token": "ya29.test" }))
+            .handle_configure(bearer_config("ya29.test"))
             .await
             .unwrap();
         let value = connector.handle_doctor().await.unwrap();

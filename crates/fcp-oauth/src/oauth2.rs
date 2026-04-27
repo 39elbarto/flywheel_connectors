@@ -2,7 +2,7 @@
 //!
 //! Supports authorization code flow (with PKCE) and client credentials flow.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -868,6 +868,7 @@ impl AuthorizationCallback {
     /// # Errors
     /// Returns an error when the query string cannot be deserialized into callback fields.
     pub fn from_query(query: &str) -> OAuthResult<Self> {
+        reject_duplicate_callback_params(query)?;
         serde_urlencoded::from_str(query)
             .map_err(|e| OAuthError::InvalidTokenResponse(e.to_string()))
     }
@@ -946,6 +947,24 @@ impl AuthorizationCallback {
             .clone()
             .ok_or_else(|| OAuthError::InvalidTokenResponse("Missing authorization code".into()))
     }
+}
+
+fn reject_duplicate_callback_params(query: &str) -> OAuthResult<()> {
+    let mut seen = HashSet::new();
+    for (key, _) in url::form_urlencoded::parse(query.as_bytes()) {
+        if matches!(
+            key.as_ref(),
+            "code" | "state" | "error" | "error_description" | "error_uri"
+        ) {
+            let key = key.into_owned();
+            if !seen.insert(key.clone()) {
+                return Err(OAuthError::InvalidTokenResponse(format!(
+                    "duplicate OAuth callback parameter `{key}`"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Generate a cryptographically random state parameter.
@@ -1164,6 +1183,32 @@ mod tests {
     #[test]
     fn test_callback_from_query() {
         let callback = AuthorizationCallback::from_query("code=abc&state=xyz").unwrap();
+        assert_eq!(callback.code, Some("abc".to_string()));
+        assert_eq!(callback.state, Some("xyz".to_string()));
+    }
+
+    #[test]
+    fn test_callback_from_query_rejects_duplicate_state() {
+        let err = AuthorizationCallback::from_query("code=abc&state=good&state=evil")
+            .expect_err("duplicate state is parser-smuggling ambiguity");
+        assert!(
+            matches!(err, OAuthError::InvalidTokenResponse(ref msg) if msg.contains("duplicate OAuth callback parameter `state`"))
+        );
+    }
+
+    #[test]
+    fn test_callback_from_query_rejects_duplicate_code() {
+        let err = AuthorizationCallback::from_query("code=first&code=second&state=xyz")
+            .expect_err("duplicate code is parser-smuggling ambiguity");
+        assert!(
+            matches!(err, OAuthError::InvalidTokenResponse(ref msg) if msg.contains("duplicate OAuth callback parameter `code`"))
+        );
+    }
+
+    #[test]
+    fn test_callback_from_query_allows_duplicate_unknown_params() {
+        let callback =
+            AuthorizationCallback::from_query("code=abc&state=xyz&extra=one&extra=two").unwrap();
         assert_eq!(callback.code, Some("abc".to_string()));
         assert_eq!(callback.state, Some("xyz".to_string()));
     }

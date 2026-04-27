@@ -59,6 +59,7 @@ fn encode<T: serde::Serialize>(value: &T) -> FcpResult<serde_json::Value> {
     })
 }
 
+// Keep the stdio JSON-RPC dispatch table centralized with its response mapping.
 #[allow(clippy::too_many_lines)]
 async fn handle_message(connector: &mut QqConnector, message: &str) -> serde_json::Value {
     let request: serde_json::Value = match serde_json::from_str(message) {

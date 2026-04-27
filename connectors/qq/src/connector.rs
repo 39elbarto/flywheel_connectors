@@ -116,6 +116,7 @@ impl QqConnector {
         DoctorResult::from_checks(checks)
     }
 
+    // Keep the QQ operation catalog contiguous so introspection metadata stays auditable.
     #[allow(clippy::too_many_lines)]
     fn operations() -> Vec<OperationInfo> {
         vec![
@@ -558,6 +559,7 @@ fn message_path(prefix: &str, target_id: &str, field: &str) -> FcpResult<String>
     Ok(format!("{prefix}{safe_id}/messages"))
 }
 
+// This factory mirrors the OperationInfo fields to keep each catalog entry explicit.
 #[allow(clippy::too_many_arguments)]
 fn operation(
     id: &'static str,

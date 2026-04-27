@@ -17,6 +17,7 @@ pub struct ZaloConnector {
     handshaken: bool,
 }
 
+// Zalo's planned FCP handlers share async signatures before live invoke support lands.
 #[allow(clippy::missing_errors_doc, clippy::unused_async)]
 impl ZaloConnector {
     #[must_use]

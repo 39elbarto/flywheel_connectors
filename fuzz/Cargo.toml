@@ -759,5 +759,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_cbor_string_canonical_length"
+path = "fuzz_targets/cbor_string_canonical_length.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

@@ -446,17 +446,26 @@ impl AnthropicClient {
 }
 
 /// Extract the `retry-after` header as milliseconds.
+const MAX_RETRY_AFTER_MS: u64 = 60 * 60 * 1000;
+
 fn extract_retry_after(response: &Response) -> Option<u64> {
     response
         .headers()
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(|secs| secs * 1000)
+        .and_then(parse_retry_after_header_value)
+}
+
+pub(crate) fn parse_retry_after_header_value(value: &str) -> Option<u64> {
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|secs| secs.saturating_mul(1000).min(MAX_RETRY_AFTER_MS))
 }
 
 /// Parse an error response.
-fn parse_error_response(
+pub(crate) fn parse_error_response(
     status: StatusCode,
     bytes: &Bytes,
     retry_after_ms: Option<u64>,
@@ -1333,6 +1342,38 @@ mod tests {
             err,
             AnthropicError::RateLimited {
                 retry_after_ms: 5_000
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_retry_after_header_clamps_large_value() {
+        assert_eq!(
+            parse_retry_after_header_value(&u64::MAX.to_string()),
+            Some(MAX_RETRY_AFTER_MS)
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_header_rejects_invalid_values() {
+        assert_eq!(parse_retry_after_header_value("-1"), None);
+        assert_eq!(parse_retry_after_header_value("not-a-number"), None);
+        assert_eq!(parse_retry_after_header_value("1.5"), None);
+    }
+
+    #[test]
+    fn parse_error_response_529_clamps_retry_after() {
+        let bytes =
+            bytes::Bytes::from(r#"{"error":{"type":"overloaded_error","message":"Overloaded"}}"#);
+        let err = parse_error_response(
+            StatusCode::from_u16(529).unwrap(),
+            &bytes,
+            parse_retry_after_header_value(&u64::MAX.to_string()),
+        );
+        assert!(matches!(
+            err,
+            AnthropicError::Overloaded {
+                retry_after_ms: MAX_RETRY_AFTER_MS
             }
         ));
     }

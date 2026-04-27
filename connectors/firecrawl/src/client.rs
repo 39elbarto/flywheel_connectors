@@ -30,6 +30,7 @@ impl std::fmt::Debug for FirecrawlClient {
     }
 }
 
+// Public async constructors mirror the connector lifecycle even when setup is local.
 #[allow(clippy::missing_errors_doc, clippy::unused_async)]
 impl FirecrawlClient {
     pub async fn new(

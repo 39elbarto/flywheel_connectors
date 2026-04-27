@@ -129,6 +129,7 @@ pub struct FirecrawlConnector {
     handshaken: bool,
 }
 
+// Public async methods mirror the connector runtime contract even for local state transitions.
 #[allow(clippy::missing_errors_doc, clippy::unused_async)]
 impl FirecrawlConnector {
     #[must_use]
@@ -253,6 +254,7 @@ impl FirecrawlConnector {
         }))
     }
 
+    // Keep dispatch validation and operation execution together so capability checks stay local.
     #[allow(clippy::too_many_lines)]
     pub async fn handle_invoke(&self, params: Value) -> FcpResult<Value> {
         self.base.check_ready()?;

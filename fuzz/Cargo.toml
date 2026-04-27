@@ -34,6 +34,7 @@ fcp-arxiv = { path = "../connectors/arxiv" }
 fcp-dingtalk = { path = "../connectors/dingtalk" }
 fcp-discord = { path = "../connectors/discord" }
 fcp-gmail = { path = "../connectors/gmail" }
+fcp-google-drive = { path = "../connectors/google-drive" }
 fcp-graphql = { path = "../crates/fcp-graphql" }
 fcp-github = { path = "../connectors/github" }
 fcp-monday = { path = "../connectors/monday" }
@@ -317,8 +318,22 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_discord_rest_error_response"
+path = "fuzz_targets/discord_rest_error_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_gmail_path_segment"
 path = "fuzz_targets/gmail_path_segment.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_google_drive_path_segment"
+path = "fuzz_targets/google_drive_path_segment.rs"
 test = false
 doc = false
 bench = false
@@ -718,6 +733,13 @@ bench = false
 [[bin]]
 name = "fuzz_decode_hello_ack_canonical"
 path = "fuzz_targets/decode_hello_ack_canonical.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_symbol_record_layout"
+path = "fuzz_targets/symbol_record_layout.rs"
 test = false
 doc = false
 bench = false

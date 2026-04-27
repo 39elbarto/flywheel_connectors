@@ -146,6 +146,7 @@ impl DriveClient {
 
     /// Get a file's metadata by ID.
     pub async fn get_file(&self, file_id: &str) -> DriveResult<DriveFile> {
+        let file_id = sanitize_path_segment(file_id, "file_id")?;
         let url = format!(
             "{}/files/{}?fields=id,name,mimeType,size,description,createdTime,modifiedTime,parents,webViewLink,webContentLink,thumbnailLink,trashed,shared,owners,permissions",
             self.base_url,
@@ -199,6 +200,7 @@ impl DriveClient {
 
     /// Download a file's content as bytes (returned as base64).
     pub async fn download_file(&self, file_id: &str) -> DriveResult<String> {
+        let file_id = sanitize_path_segment(file_id, "file_id")?;
         let url = format!(
             "{}/files/{}?alt=media",
             self.base_url,
@@ -216,6 +218,7 @@ impl DriveClient {
 
     /// Trash a file (move to trash).
     pub async fn trash_file(&self, file_id: &str) -> DriveResult<DriveFile> {
+        let file_id = sanitize_path_segment(file_id, "file_id")?;
         let url = format!(
             "{}/files/{}?fields=id,name,trashed",
             self.base_url,
@@ -232,6 +235,7 @@ impl DriveClient {
         email: &str,
         role: &str,
     ) -> DriveResult<DrivePermission> {
+        let file_id = sanitize_path_segment(file_id, "file_id")?;
         let url = format!(
             "{}/files/{}/permissions",
             self.base_url,
@@ -438,6 +442,55 @@ fn map_google_api_error(error: GoogleApiError) -> DriveError {
     }
 }
 
+/// Validate that a user-supplied ID is safe to interpolate into a URL path segment.
+///
+/// Rejects empty strings, path/query separators, traversal sequences (`..`),
+/// and percent-encoded variants that could reappear after double decoding.
+fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> DriveResult<&'a str> {
+    if value.trim().is_empty() {
+        return Err(DriveError::Api {
+            status_code: 400,
+            message: format!("{field} must not be empty"),
+        });
+    }
+
+    let lower = value.to_ascii_lowercase();
+    if value.contains('/')
+        || value.contains('\\')
+        || value.contains("..")
+        || value.contains('?')
+        || value.contains('#')
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+        || lower.contains("%3f")
+        || lower.contains("%23")
+        || lower.contains("%25")
+    {
+        return Err(DriveError::Api {
+            status_code: 400,
+            message: format!("{field} contains path traversal characters"),
+        });
+    }
+
+    Ok(value)
+}
+
+/// Fuzz-only entry points for Drive client parsers.
+///
+/// Exposed for the Drive path-segment fuzz target so the fuzz crate can
+/// exercise the private guard before Drive file IDs enter REST URL paths.
+///
+/// Bead flywheel_connectors-grb4c.
+#[doc(hidden)]
+pub mod __fuzz {
+    use super::sanitize_path_segment;
+
+    /// Validate an arbitrary Drive URL path segment candidate.
+    pub fn sanitize_path_segment_candidate(value: &str) -> bool {
+        sanitize_path_segment(value, "file_id").is_ok()
+    }
+}
+
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
@@ -468,6 +521,47 @@ fn base64_encode(data: &[u8]) -> String {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_path_segment;
+
+    #[test]
+    fn sanitize_path_segment_rejects_traversal() {
+        assert!(sanitize_path_segment("../admin", "file_id").is_err());
+        assert!(sanitize_path_segment("foo/bar", "file_id").is_err());
+        assert!(sanitize_path_segment("foo\\bar", "file_id").is_err());
+        assert!(sanitize_path_segment("foo%2fbar", "file_id").is_err());
+        assert!(sanitize_path_segment("foo%5Cbar", "file_id").is_err());
+        assert!(sanitize_path_segment("file?alt=media", "file_id").is_err());
+        assert!(sanitize_path_segment("file#frag", "file_id").is_err());
+        assert!(sanitize_path_segment("file%3Falt=media", "file_id").is_err());
+        assert!(sanitize_path_segment("file%23frag", "file_id").is_err());
+        assert!(sanitize_path_segment("", "file_id").is_err());
+        assert!(sanitize_path_segment("  ", "file_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_rejects_double_percent_encoding() {
+        assert!(sanitize_path_segment("foo%252Fbar", "file_id").is_err());
+        assert!(sanitize_path_segment("foo%252fbar", "file_id").is_err());
+        assert!(sanitize_path_segment("file%2523frag", "file_id").is_err());
+        assert!(sanitize_path_segment("file%2523FRAG", "file_id").is_err());
+        assert!(sanitize_path_segment("foo%25", "file_id").is_err());
+    }
+
+    #[test]
+    fn sanitize_path_segment_accepts_valid() {
+        assert!(matches!(
+            sanitize_path_segment("1AbC_def-123", "file_id"),
+            Ok("1AbC_def-123")
+        ));
+        assert!(matches!(
+            sanitize_path_segment("drive.file.id", "file_id"),
+            Ok("drive.file.id")
+        ));
+    }
 }
 
 /// Simple URL encoding helper.

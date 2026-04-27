@@ -60,6 +60,7 @@ fcp-raptorq = { path = "../fcp-raptorq" }
 fcp-host = { path = "../fcp-host" }
 fcp-oauth = { path = "../fcp-oauth" }
 fcp-sandbox = { path = "../fcp-sandbox" }
+fcp-streaming = { path = "../fcp-streaming" }
 url.workspace = true
 criterion.workspace = true
 wasmtime.workspace = true

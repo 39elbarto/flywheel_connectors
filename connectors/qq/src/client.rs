@@ -14,6 +14,12 @@ use crate::types::{
     TOKEN_REFRESH_SAFETY_MARGIN_SECS,
 };
 
+const QQ_GATEWAY_EVENT_TYPE_MAX_CHARS: usize = 64;
+const QQ_GATEWAY_ID_MAX_CHARS: usize = 256;
+const QQ_GATEWAY_TEXT_MAX_CHARS: usize = 8_192;
+const QQ_GATEWAY_ATTACHMENT_FIELD_MAX_CHARS: usize = 1_024;
+const QQ_GATEWAY_ATTACHMENTS_MAX_COUNT: usize = 32;
+
 #[derive(Clone)]
 struct CachedAccessToken {
     token: String,
@@ -325,6 +331,7 @@ pub fn normalize_message_event(event: &QqGatewayEvent) -> QqResult<NormalizedQqE
         .t
         .as_deref()
         .ok_or_else(|| QqError::InvalidInput("gateway event missing event type (t)".into()))?;
+    validate_event_type_component(event_type)?;
 
     let routing = QqRouting::from_event_type(event_type).ok_or_else(|| {
         QqError::InvalidInput(format!(
@@ -343,6 +350,7 @@ pub fn normalize_message_event(event: &QqGatewayEvent) -> QqResult<NormalizedQqE
 
     let msg: QqMessageEvent = serde_json::from_value(effective_data)
         .map_err(|e| QqError::InvalidInput(format!("failed to parse message event data: {e}")))?;
+    validate_message_event_bounds(&msg)?;
 
     let reply_to = msg
         .message_reference
@@ -385,6 +393,98 @@ pub fn normalize_message_event(event: &QqGatewayEvent) -> QqResult<NormalizedQqE
         routing,
         raw: raw_data,
     })
+}
+
+fn validate_event_type_component(event_type: &str) -> QqResult<()> {
+    if event_type.chars().count() > QQ_GATEWAY_EVENT_TYPE_MAX_CHARS
+        || !event_type
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Err(QqError::InvalidInput(
+            "gateway event type exceeds parser bounds".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_message_event_bounds(msg: &QqMessageEvent) -> QqResult<()> {
+    validate_optional_chars("message id", msg.id.as_deref(), QQ_GATEWAY_ID_MAX_CHARS)?;
+    validate_optional_chars(
+        "channel id",
+        msg.channel_id.as_deref(),
+        QQ_GATEWAY_ID_MAX_CHARS,
+    )?;
+    validate_optional_chars("guild id", msg.guild_id.as_deref(), QQ_GATEWAY_ID_MAX_CHARS)?;
+    validate_optional_chars("content", msg.content.as_deref(), QQ_GATEWAY_TEXT_MAX_CHARS)?;
+    validate_optional_chars(
+        "timestamp",
+        msg.timestamp.as_deref(),
+        QQ_GATEWAY_ID_MAX_CHARS,
+    )?;
+    validate_optional_chars(
+        "group openid",
+        msg.group_openid.as_deref(),
+        QQ_GATEWAY_ID_MAX_CHARS,
+    )?;
+    validate_optional_chars(
+        "group member openid",
+        msg.group_member_openid.as_deref(),
+        QQ_GATEWAY_ID_MAX_CHARS,
+    )?;
+
+    if let Some(author) = &msg.author {
+        validate_optional_chars("author id", author.id.as_deref(), QQ_GATEWAY_ID_MAX_CHARS)?;
+        validate_optional_chars(
+            "author username",
+            author.username.as_deref(),
+            QQ_GATEWAY_ID_MAX_CHARS,
+        )?;
+    }
+
+    if let Some(reference) = &msg.message_reference {
+        validate_optional_chars(
+            "reply message id",
+            reference.message_id.as_deref(),
+            QQ_GATEWAY_ID_MAX_CHARS,
+        )?;
+    }
+
+    if let Some(attachments) = &msg.attachments {
+        if attachments.len() > QQ_GATEWAY_ATTACHMENTS_MAX_COUNT {
+            return Err(QqError::InvalidInput(
+                "attachment count exceeds parser bounds".into(),
+            ));
+        }
+        for attachment in attachments {
+            validate_optional_chars(
+                "attachment url",
+                attachment.url.as_deref(),
+                QQ_GATEWAY_ATTACHMENT_FIELD_MAX_CHARS,
+            )?;
+            validate_optional_chars(
+                "attachment filename",
+                attachment.filename.as_deref(),
+                QQ_GATEWAY_ATTACHMENT_FIELD_MAX_CHARS,
+            )?;
+            validate_optional_chars(
+                "attachment content_type",
+                attachment.content_type.as_deref(),
+                QQ_GATEWAY_ATTACHMENT_FIELD_MAX_CHARS,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_optional_chars(label: &str, value: Option<&str>, limit: usize) -> QqResult<()> {
+    if value.is_some_and(|value| value.chars().count() > limit) {
+        return Err(QqError::InvalidInput(format!(
+            "{label} exceeds parser bounds"
+        )));
+    }
+    Ok(())
 }
 
 fn http_status_error(status: u16, headers: &HeaderMap, body: String) -> QqError {
@@ -967,6 +1067,73 @@ mod tests {
         };
         let normalized = normalize_message_event(&event).unwrap();
         assert!(!normalized.has_attachments);
+    }
+
+    #[test]
+    fn normalize_rejects_oversized_event_type_without_echoing_it() {
+        let oversized_type = "A".repeat(QQ_GATEWAY_EVENT_TYPE_MAX_CHARS + 1);
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(7),
+            t: Some(oversized_type.clone()),
+            d: Some(json!({"content": "hello"})),
+            id: None,
+        };
+        let result = normalize_message_event(&event);
+
+        match result {
+            Err(QqError::InvalidInput(message)) => {
+                assert!(message.contains("gateway event type exceeds parser bounds"));
+                assert!(!message.contains(&oversized_type));
+            }
+            other => assert!(
+                matches!(other, Err(QqError::InvalidInput(_))),
+                "expected InvalidInput, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn normalize_rejects_oversized_content() {
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(8),
+            t: Some("MESSAGE_CREATE".into()),
+            d: Some(json!({
+                "id": "msg-8",
+                "content": "x".repeat(QQ_GATEWAY_TEXT_MAX_CHARS + 1)
+            })),
+            id: None,
+        };
+        let result = normalize_message_event(&event);
+
+        assert!(
+            matches!(result, Err(QqError::InvalidInput(ref message)) if message.contains("content exceeds parser bounds")),
+            "expected content bounds rejection, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn normalize_rejects_too_many_attachments() {
+        let attachments = (0..=QQ_GATEWAY_ATTACHMENTS_MAX_COUNT)
+            .map(|idx| json!({"filename": format!("file-{idx}.txt")}))
+            .collect::<Vec<_>>();
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(9),
+            t: Some("AT_MESSAGE_CREATE".into()),
+            d: Some(json!({
+                "id": "msg-9",
+                "attachments": attachments
+            })),
+            id: None,
+        };
+        let result = normalize_message_event(&event);
+
+        assert!(
+            matches!(result, Err(QqError::InvalidInput(ref message)) if message.contains("attachment count exceeds parser bounds")),
+            "expected attachment bounds rejection, got {result:?}"
+        );
     }
 
     #[test]

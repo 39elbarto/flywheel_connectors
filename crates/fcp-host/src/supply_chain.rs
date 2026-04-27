@@ -499,6 +499,44 @@ mod tests {
         }
     }
 
+    fn assert_permissive_invalid_digest_denied(digest: &str) -> GateOutcome {
+        let config = SupplyChainGateConfig {
+            policy: permissive_policy(),
+            ..SupplyChainGateConfig::default()
+        };
+        let gate = SupplyChainGate::with_config(config);
+
+        let outcome = gate
+            .verify_at(
+                &test_connector_id(),
+                "1.0.0",
+                digest,
+                None,
+                None,
+                test_time(),
+            )
+            .unwrap();
+
+        assert!(!outcome.allowed);
+        assert_eq!(
+            outcome.evidence.reason_code,
+            VerificationReasonCode::ArtifactDigestInvalid
+        );
+        assert_eq!(
+            outcome.audit_event.reason_code,
+            VerificationReasonCode::ArtifactDigestInvalid
+        );
+        assert!(
+            outcome
+                .evidence
+                .steps
+                .iter()
+                .any(|step| step.step == "artifact_digest_validation" && !step.passed)
+        );
+
+        outcome
+    }
+
     // ── Default Construction ─────────────────────────────────────
 
     #[test]
@@ -1468,13 +1506,8 @@ mod tests {
 
     #[test]
     fn empty_digest_string() {
-        let gate = SupplyChainGate::new();
-        let outcome = gate
-            .verify_at(&test_connector_id(), "1.0.0", "", None, None, test_time())
-            .unwrap();
+        let outcome = assert_permissive_invalid_digest_denied("");
 
-        // Should still produce a valid outcome (deny due to missing attestation).
-        assert!(!outcome.allowed);
         assert_eq!(outcome.evidence.artifact_digest, "");
     }
 
@@ -2252,25 +2285,10 @@ mod tests {
 
     #[test]
     fn very_long_digest_string() {
-        let config = SupplyChainGateConfig {
-            policy: permissive_policy(),
-            ..SupplyChainGateConfig::default()
-        };
-        let gate = SupplyChainGate::with_config(config);
         let long_digest = "x".repeat(10000);
 
-        let outcome = gate
-            .verify_at(
-                &test_connector_id(),
-                "1.0.0",
-                &long_digest,
-                None,
-                None,
-                test_time(),
-            )
-            .unwrap();
+        let outcome = assert_permissive_invalid_digest_denied(&long_digest);
 
-        assert!(outcome.allowed);
         assert_eq!(outcome.audit_event.artifact_digest, long_digest);
     }
 
@@ -4176,69 +4194,23 @@ mod tests {
 
     #[test]
     fn whitespace_only_digest() {
-        let config = SupplyChainGateConfig {
-            policy: permissive_policy(),
-            ..SupplyChainGateConfig::default()
-        };
-        let gate = SupplyChainGate::with_config(config);
+        let outcome = assert_permissive_invalid_digest_denied("   ");
 
-        let outcome = gate
-            .verify_at(
-                &test_connector_id(),
-                "1.0.0",
-                "   ",
-                None,
-                None,
-                test_time(),
-            )
-            .unwrap();
-
-        assert!(outcome.allowed);
         assert_eq!(outcome.audit_event.artifact_digest, "   ");
     }
 
     #[test]
     fn special_characters_in_digest() {
-        let config = SupplyChainGateConfig {
-            policy: permissive_policy(),
-            ..SupplyChainGateConfig::default()
-        };
-        let gate = SupplyChainGate::with_config(config);
-
         let digest = "sha256:abc!@#$%^&*()";
-        let outcome = gate
-            .verify_at(
-                &test_connector_id(),
-                "1.0.0",
-                digest,
-                None,
-                None,
-                test_time(),
-            )
-            .unwrap();
+        let outcome = assert_permissive_invalid_digest_denied(digest);
 
         assert_eq!(outcome.audit_event.artifact_digest, digest);
     }
 
     #[test]
     fn unicode_digest_string() {
-        let config = SupplyChainGateConfig {
-            policy: permissive_policy(),
-            ..SupplyChainGateConfig::default()
-        };
-        let gate = SupplyChainGate::with_config(config);
-
         let digest = "blake3-256:\u{1F600}\u{1F601}\u{1F602}";
-        let outcome = gate
-            .verify_at(
-                &test_connector_id(),
-                "1.0.0",
-                digest,
-                None,
-                None,
-                test_time(),
-            )
-            .unwrap();
+        let outcome = assert_permissive_invalid_digest_denied(digest);
 
         assert_eq!(outcome.evidence.artifact_digest, digest);
     }

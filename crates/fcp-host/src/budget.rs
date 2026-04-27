@@ -442,6 +442,8 @@ mod tests {
     };
     use fcp_policy::ZoneId;
 
+    static LOG_CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn budget_tracker_warns_on_exceeded() {
         let zone = ZoneId::work();
@@ -786,8 +788,12 @@ mod tests {
     fn budget_deny_emits_structured_log_with_zone_id() {
         use fcp_testkit::LogCapture;
 
+        let _log_capture_guard = LOG_CAPTURE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let capture = LogCapture::new();
         let _guard = capture.install_json_with_filter("warn");
+        tracing::callsite::rebuild_interest_cache();
 
         let zone = ZoneId::work();
         let policy = UsageBudgetPolicy {
@@ -822,8 +828,12 @@ mod tests {
     fn budget_warn_emits_structured_log_with_zone_id() {
         use fcp_testkit::LogCapture;
 
+        let _log_capture_guard = LOG_CAPTURE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let capture = LogCapture::new();
         let _guard = capture.install_json_with_filter("warn");
+        tracing::callsite::rebuild_interest_cache();
 
         let zone = ZoneId::work();
         let policy = UsageBudgetPolicy {

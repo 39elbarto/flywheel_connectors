@@ -22,9 +22,10 @@ use fcp_async_core::sync::Mutex;
 use fcp_async_core::task::JoinHandle as AsyncJoinHandle;
 use fcp_core::{
     AttestationMaterial, AttestationMetadata, AttestationPredicateType, CapabilityConstraints,
-    CapabilityToken, CorrelationId, RollbackRules, RolloutPolicy, SBOM_SIGNED_FIELDS,
-    SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent, SbomDependency, SuccessThresholds,
-    TransitionReason, ZoneId,
+    CapabilityToken, CorrelationId, DecisionReceiptPolicy, ObjectHeader, Provenance,
+    RollbackRules, RolloutPolicy, SBOM_SIGNED_FIELDS, SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS,
+    SbomComponent, SbomDependency, SuccessThresholds, TransitionReason, ZoneId,
+    ZonePolicyObject, ZoneTransportPolicy,
 };
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
@@ -115,6 +116,52 @@ const TEST_CAPABILITY_ID: &str = "cap.test.echo";
 const TEST_ADMIN_BEARER_TOKEN: &str = "host-test-admin-bearer";
 const TRUSTED_CAPABILITY_SIGNING_KEY_HEX: &str =
     "1111111111111111111111111111111111111111111111111111111111111111";
+
+fn test_zone_policy(zone_id: ZoneId) -> ZonePolicyObject {
+    ZonePolicyObject {
+        header: ObjectHeader {
+            schema: fcp_cbor::SchemaId::new(
+                "fcp.core",
+                "ZonePolicyObject",
+                semver::Version::new(1, 0, 0),
+            ),
+            zone_id: zone_id.clone(),
+            created_at: u64::try_from(Utc::now().timestamp()).unwrap_or(0),
+            provenance: Provenance::new(zone_id.clone()),
+            refs: Vec::new(),
+            foreign_refs: Vec::new(),
+            ttl_secs: None,
+            placement: None,
+        },
+        zone_id,
+        principal_allow: Vec::new(),
+        principal_deny: Vec::new(),
+        connector_allow: Vec::new(),
+        connector_deny: Vec::new(),
+        capability_allow: Vec::new(),
+        capability_deny: Vec::new(),
+        capability_ceiling: Vec::new(),
+        transport_policy: ZoneTransportPolicy {
+            allow_lan: true,
+            allow_derp: true,
+            allow_funnel: true,
+        },
+        decision_receipts: DecisionReceiptPolicy::default(),
+        usage_budget: None,
+        requires_posture: None,
+    }
+}
+
+fn write_test_zone_policies_file(
+    dir: &tempfile::TempDir,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let policy = test_zone_policy(ZoneId::work());
+    let mut policies = HashMap::new();
+    policies.insert(policy.zone_id.as_str().to_string(), policy);
+    let path = dir.path().join("zone-policies.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&policies)?)?;
+    Ok(path)
+}
 
 struct ConnectorProcessRunner {
     child: AsyncChild,
@@ -575,6 +622,7 @@ fn build_live_capability_token(
         .principal(principal)
         .operations(&[operation])
         .issuer("node:test")
+        .audience("*")
         .validity(now, now + chrono::Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("test constraints CBOR should be valid")
@@ -599,6 +647,7 @@ fn build_live_capability_token_with_validity(
         .principal(principal)
         .operations(&[operation])
         .issuer("node:test")
+        .audience("*")
         .validity(not_before, expires)
         .try_constraints_cbor(&cbor)
         .expect("test constraints CBOR should be valid")
@@ -822,6 +871,8 @@ fn protected_route_request(method: &reqwest::Method, path: &str) -> bool {
     path.starts_with("/rpc/admin/")
         || path.starts_with("/rpc/rollout/")
         || path.starts_with("/rpc/lifecycle/")
+        || path == "/rpc/cancel"
+        || path == "/rpc/operations/cancel"
         || (*method == reqwest::Method::POST && path.starts_with("/rpc/connectors/apply"))
         || connector_admin_path
         || (*method == reqwest::Method::POST && path.starts_with("/rpc/supply-chain/verify"))
@@ -835,6 +886,15 @@ fn admin_auth_headers() -> HeaderMap {
             .expect("test admin bearer token should be a valid header"),
     );
     headers.insert("x-fcp-zone", HeaderValue::from_static("z:owner"));
+    headers
+}
+
+fn cancel_admin_headers(principal: &str) -> HeaderMap {
+    let mut headers = admin_auth_headers();
+    headers.insert(
+        "x-principal",
+        HeaderValue::from_str(principal).expect("test principal should be a valid header"),
+    );
     headers
 }
 
@@ -1155,6 +1215,7 @@ impl HttpHostProcess {
         let base_url = format!("http://{bind_addr}");
         let lifecycle_state_dir = tempfile::tempdir()?;
         let lifecycle_state_path = lifecycle_state_dir.path().join("lifecycle-state.json");
+        let zone_policies_path = write_test_zone_policies_file(&lifecycle_state_dir)?;
         let mut command = Command::new(env!("CARGO_BIN_EXE_fcp-host"));
         command
             .env("FCP_HOST_BIND", bind_addr.to_string())
@@ -1164,6 +1225,7 @@ impl HttpHostProcess {
             )
             .env("FCP_HOST_ADMIN_BEARER_TOKEN", TEST_ADMIN_BEARER_TOKEN)
             .env("FCP_HOST_LIFECYCLE_STATE_FILE", &lifecycle_state_path)
+            .env("FCP_HOST_ZONE_POLICIES_FILE", &zone_policies_path)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         for (name, value) in extra_env {
@@ -1197,6 +1259,7 @@ impl HttpHostProcess {
         let lifecycle_state_dir = tempfile::tempdir()?;
         let lifecycle_state_path = lifecycle_state_dir.path().join("lifecycle-state.json");
         let connectors_file_path = lifecycle_state_dir.path().join("connectors.json");
+        let zone_policies_path = write_test_zone_policies_file(&lifecycle_state_dir)?;
         std::fs::write(
             &connectors_file_path,
             serde_json::to_vec_pretty(&connector_configs)?,
@@ -1208,6 +1271,7 @@ impl HttpHostProcess {
             .env("FCP_HOST_CONNECTORS_FILE", &connectors_file_path)
             .env("FCP_HOST_ADMIN_BEARER_TOKEN", TEST_ADMIN_BEARER_TOKEN)
             .env("FCP_HOST_LIFECYCLE_STATE_FILE", &lifecycle_state_path)
+            .env("FCP_HOST_ZONE_POLICIES_FILE", &zone_policies_path)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         for (name, value) in extra_env {
@@ -1269,6 +1333,7 @@ impl UnixHostProcess {
         let base_url = "http://localhost".to_string();
         let lifecycle_state_dir = tempfile::tempdir()?;
         let lifecycle_state_path = lifecycle_state_dir.path().join("lifecycle-state.json");
+        let zone_policies_path = write_test_zone_policies_file(&lifecycle_state_dir)?;
         let mut command = Command::new(env!("CARGO_BIN_EXE_fcp-host"));
         command
             .env("FCP_HOST_BIND", format!("unix://{}", socket_path.display()))
@@ -1278,6 +1343,7 @@ impl UnixHostProcess {
             )
             .env("FCP_HOST_ADMIN_BEARER_TOKEN", TEST_ADMIN_BEARER_TOKEN)
             .env("FCP_HOST_LIFECYCLE_STATE_FILE", &lifecycle_state_path)
+            .env("FCP_HOST_ZONE_POLICIES_FILE", &zone_policies_path)
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         for (name, value) in extra_env {
@@ -2620,6 +2686,7 @@ async fn fcp_host_binary_config_routes_are_live_revision_aware()
     let stale_response = host
         .client
         .post(apply_url)
+        .headers(admin_auth_headers())
         .json(&ConnectorConfigApplyRequest {
             payload: config_v2,
             expected_active_revision_id: Some(revision_v2),
@@ -3350,7 +3417,7 @@ async fn fcp_host_binary_cancel_route_cancels_in_flight_invoke()
 
     fcp_async_core::time::sleep(Duration::from_millis(50)).await;
 
-    let cancel_response: CancellationResponse = http_post_json(
+    let cancel_response: CancellationResponse = http_post_json_response(
         host.client.clone(),
         url("/rpc/operations/cancel"),
         CancellationRequest {
@@ -3360,8 +3427,10 @@ async fn fcp_host_binary_cancel_route_cancels_in_flight_invoke()
             return_partial: true,
             capability_token: None,
         },
+        Some(cancel_admin_headers(TEST_PRINCIPAL)),
     )
-    .await?;
+    .await?
+    .body;
 
     assert_eq!(cancel_response.operation_id, operation_id);
     assert_eq!(cancel_response.outcome, CancellationOutcome::Cancelled);
@@ -3449,7 +3518,7 @@ async fn fcp_host_binary_cancel_route_allows_follow_up_invoke_after_cleanup()
 
     fcp_async_core::time::sleep(Duration::from_millis(50)).await;
 
-    let cancel_response: CancellationResponse = http_post_json(
+    let cancel_response: CancellationResponse = http_post_json_response(
         host.client.clone(),
         url("/rpc/operations/cancel"),
         CancellationRequest {
@@ -3459,8 +3528,10 @@ async fn fcp_host_binary_cancel_route_allows_follow_up_invoke_after_cleanup()
             return_partial: true,
             capability_token: None,
         },
+        Some(cancel_admin_headers(TEST_PRINCIPAL)),
     )
-    .await?;
+    .await?
+    .body;
 
     assert_eq!(cancel_response.operation_id, cancelled_operation_id);
     assert_eq!(cancel_response.outcome, CancellationOutcome::Cancelled);
@@ -3545,7 +3616,7 @@ async fn fcp_host_binary_cancel_route_returns_too_late_for_completed_invoke()
         http_post_json(host.client.clone(), url("/rpc/invoke"), invoke_request).await?;
     assert_eq!(invoke_response.status, InvokeStatus::Ok);
 
-    let cancel_response: CancellationResponse = http_post_json(
+    let cancel_response: CancellationResponse = http_post_json_response(
         host.client.clone(),
         url("/rpc/cancel"),
         CancellationRequest {
@@ -3555,8 +3626,10 @@ async fn fcp_host_binary_cancel_route_returns_too_late_for_completed_invoke()
             return_partial: false,
             capability_token: None,
         },
+        Some(cancel_admin_headers(TEST_PRINCIPAL)),
     )
-    .await?;
+    .await?
+    .body;
 
     assert_eq!(cancel_response.operation_id, operation_id);
     assert_eq!(cancel_response.outcome, CancellationOutcome::TooLate);
@@ -4482,6 +4555,20 @@ async fn fcp_host_binary_protected_routes_require_admin_bearer()
     assert!(public_health.status().is_success());
 
     let policy = test_rollout_policy();
+    let rollout_seed: RolloutOutcome = http_post_json(
+        host.client.clone(),
+        url("/rpc/rollout/schedule"),
+        json!({
+            "connector_id": connector_id.as_str(),
+            "version": "1.0.1",
+            "previous_version": "1.0.0",
+            "policy": policy.clone(),
+            "observed_at": chrono::Utc::now(),
+        }),
+    )
+    .await?;
+    assert_eq!(rollout_seed.decision, RolloutDecision::Scheduled);
+
     let protected_cases: Vec<(&str, reqwest::Method, String, Option<Value>)> = vec![
         (
             "config snapshot",

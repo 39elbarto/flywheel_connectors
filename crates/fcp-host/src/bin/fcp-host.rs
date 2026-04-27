@@ -2493,6 +2493,47 @@ fn load_connector_configs() -> HostResult<LoadedConnectorConfigs> {
     })
 }
 
+fn resolve_zone_policies_file_path() -> HostResult<Option<PathBuf>> {
+    Ok(read_optional_trimmed_env_string("FCP_HOST_ZONE_POLICIES_FILE")?.map(PathBuf::from))
+}
+
+fn load_zone_policies() -> HostResult<HashMap<ZoneId, ZonePolicyObject>> {
+    let Some(path) = resolve_zone_policies_file_path()? else {
+        return Ok(HashMap::new());
+    };
+    let raw = std::fs::read_to_string(&path).map_err(|err| {
+        HostError::Internal(format!(
+            "failed to read zone policies file '{}': {err}",
+            path.display()
+        ))
+    })?;
+    parse_zone_policies_json(&raw)
+}
+
+fn parse_zone_policies_json(raw: &str) -> HostResult<HashMap<ZoneId, ZonePolicyObject>> {
+    if raw.trim().is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let parsed: HashMap<String, ZonePolicyObject> = serde_json::from_str(raw)
+        .map_err(|err| HostError::InvalidFilter(format!("invalid zone policies json: {err}")))?;
+    let mut policies = HashMap::new();
+    for (raw_zone, policy) in parsed {
+        let zone_id: ZoneId = raw_zone.parse().map_err(|err| {
+            HostError::InvalidFilter(format!("invalid zone policy key '{raw_zone}': {err}"))
+        })?;
+        if policy.zone_id != zone_id {
+            return Err(HostError::InvalidFilter(format!(
+                "zone policy key '{}' does not match policy zone_id '{}'",
+                zone_id.as_str(),
+                policy.zone_id.as_str()
+            )));
+        }
+        policies.insert(zone_id, policy);
+    }
+    Ok(policies)
+}
+
 fn resolve_self_check_timeout() -> HostResult<Option<Duration>> {
     let Some(raw) = read_optional_trimmed_env_string("FCP_HOST_SELF_CHECK_TIMEOUT_MS")? else {
         return Ok(None);
@@ -2722,6 +2763,7 @@ async fn async_main() -> HostResult<()> {
     if loaded_configs.configs.is_empty() {
         tracing::warn!("no connectors configured; doctor self-checks will fail");
     }
+    let zone_policies = load_zone_policies()?;
 
     let registry = Arc::new(
         SubprocessRegistry::from_configs(
@@ -2769,7 +2811,7 @@ async fn async_main() -> HostResult<()> {
         approval_verifying_key,
         admin_bearer_token: resolve_admin_bearer_token()?,
         connectors_file: loaded_configs.connectors_file,
-        zone_policies: Arc::new(RwLock::new(HashMap::new())),
+        zone_policies: Arc::new(RwLock::new(zone_policies)),
         started_at: Instant::now(),
     });
 
@@ -8250,6 +8292,35 @@ done"#;
         )
         .expect("blank env should decode");
         assert_eq!(value, None);
+    }
+
+    #[test]
+    fn parse_zone_policies_json_accepts_zone_keyed_map() {
+        let policy = host_runtime_policy(ZoneId::work());
+        let raw = serde_json::to_string(&HashMap::from([(
+            ZoneId::work().as_str().to_string(),
+            policy,
+        )]))
+        .expect("serialize zone policy map");
+
+        let parsed = parse_zone_policies_json(&raw).expect("zone policy map should parse");
+
+        assert!(parsed.contains_key(&ZoneId::work()));
+    }
+
+    #[test]
+    fn parse_zone_policies_json_rejects_mismatched_policy_zone() {
+        let policy = host_runtime_policy(ZoneId::private());
+        let raw = serde_json::to_string(&HashMap::from([(
+            ZoneId::work().as_str().to_string(),
+            policy,
+        )]))
+        .expect("serialize zone policy map");
+
+        let err = parse_zone_policies_json(&raw).expect_err("zone mismatch must fail closed");
+
+        assert!(matches!(err, HostError::InvalidFilter(_)));
+        assert!(err.to_string().contains("does not match policy zone_id"));
     }
 
     #[test]

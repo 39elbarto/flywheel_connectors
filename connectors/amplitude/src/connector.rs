@@ -733,19 +733,34 @@ impl AmplitudeConnector {
 
     /// Handle the `simulate` method.
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let operation = params
+        let Some(operation) = params
             .get("operation_id")
             .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
+        else {
+            return Ok(simulate_denied("Missing operation_id", "FCP-1003"));
+        };
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        if !operation_supported(operation) {
+            return Ok(simulate_denied(
+                format!("Unknown operation: {operation}"),
+                "FCP-1002",
+            ));
+        }
+
+        if let Err(error) = self.base.check_ready() {
+            return Ok(simulate_denied(error.to_string(), error.error_code()));
+        }
+
+        let empty_input = json!({});
+        let input = params.get("input").unwrap_or(&empty_input);
+        if let Err(error) = validate_simulate_input(operation, input) {
+            let fcp_error = error.to_fcp_error();
+            return Ok(simulate_denied(error.to_string(), fcp_error.error_code()));
+        }
 
         Ok(json!({
-            "allowed": allowed,
-            "reason": if allowed { "Operation supported" } else { "Unknown operation" },
+            "allowed": true,
+            "reason": "Operation supported",
         }))
     }
 
@@ -816,6 +831,43 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
         .get(field)
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| AmplitudeError::InvalidInput(format!("Missing required field: {field}")))
+}
+
+fn operation_supported(operation: &str) -> bool {
+    matches!(
+        operation,
+        "amplitude.charts.query" | "amplitude.cohorts.list" | "amplitude.events.export"
+    )
+}
+
+fn validate_simulate_input(
+    operation: &str,
+    input: &serde_json::Value,
+) -> Result<(), AmplitudeError> {
+    match operation {
+        "amplitude.charts.query" => {
+            require_str(input, "chart_id")?;
+        }
+        "amplitude.cohorts.list" => {}
+        "amplitude.events.export" => {
+            require_str(input, "start")?;
+            require_str(input, "end")?;
+        }
+        _ => {
+            return Err(AmplitudeError::InvalidInput(format!(
+                "Unknown operation: {operation}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn simulate_denied(reason: impl Into<String>, denial_code: impl Into<String>) -> serde_json::Value {
+    json!({
+        "allowed": false,
+        "reason": reason.into(),
+        "denial_code": denial_code.into(),
+    })
 }
 
 /// Build the operations info for introspection.

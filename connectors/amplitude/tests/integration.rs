@@ -660,9 +660,12 @@ async fn simulate_known_charts() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert!(
-        c.handle_simulate(json!({"operation_id": "amplitude.charts.query"}))
-            .await
-            .unwrap()["allowed"]
+        c.handle_simulate(json!({
+            "operation_id": "amplitude.charts.query",
+            "input": {"chart_id": "chart_123"}
+        }))
+        .await
+        .unwrap()["allowed"]
             .as_bool()
             .unwrap()
     );
@@ -686,9 +689,12 @@ async fn simulate_known_events() {
     let server = MockServer::start().await;
     let c = setup_connector(&server.uri()).await;
     assert!(
-        c.handle_simulate(json!({"operation_id": "amplitude.events.export"}))
-            .await
-            .unwrap()["allowed"]
+        c.handle_simulate(json!({
+            "operation_id": "amplitude.events.export",
+            "input": {"start": "20250101T00", "end": "20250102T00"}
+        }))
+        .await
+        .unwrap()["allowed"]
             .as_bool()
             .unwrap()
     );
@@ -704,6 +710,42 @@ async fn simulate_unknown() {
             .unwrap()["allowed"]
             .as_bool()
             .unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_denies_unconfigured_supported_operation() {
+    let c = AmplitudeConnector::new();
+    let result = c
+        .handle_simulate(json!({
+            "operation_id": "amplitude.charts.query",
+            "input": {"chart_id": "chart_123"}
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["allowed"].as_bool(), Some(false));
+    assert_eq!(result["denial_code"].as_str(), Some("FCP-5002"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulate_denies_missing_required_input_when_ready() {
+    let server = MockServer::start().await;
+    let c = setup_connector(&server.uri()).await;
+    let result = c
+        .handle_simulate(json!({
+            "operation_id": "amplitude.events.export",
+            "input": {"start": "20250101T00"}
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["allowed"].as_bool(), Some(false));
+    assert_eq!(result["denial_code"].as_str(), Some("FCP-1005"));
+    assert!(
+        result["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("Missing required field: end"))
     );
 }
 

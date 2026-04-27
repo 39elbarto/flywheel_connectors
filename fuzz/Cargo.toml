@@ -787,5 +787,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_session_mac_cross_suite"
+path = "fuzz_targets/session_mac_cross_suite.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

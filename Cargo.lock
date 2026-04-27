@@ -3621,6 +3621,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
+ "fcp-e2e",
  "fcp-google-discovery",
  "fcp-manifest",
  "fcp-sdk",

@@ -889,8 +889,15 @@ impl AuthorizationCallback {
     /// Validate the callback and extract the code.
     ///
     /// # Errors
-    /// Returns an error for provider error callbacks, state mismatches, or missing `code`.
+    /// Returns an error for ambiguous callbacks, provider error callbacks, state mismatches,
+    /// or missing `code`.
     pub fn validate(&self, expected_state: &str) -> OAuthResult<String> {
+        if self.code.is_some() && self.error.is_some() {
+            return Err(OAuthError::InvalidTokenResponse(
+                "callback must not include both code and error".into(),
+            ));
+        }
+
         // Check for errors first
         if let Some(error) = &self.error {
             return Err(OAuthError::AuthorizationError {
@@ -2307,8 +2314,7 @@ mod tests {
     }
 
     #[test]
-    fn test_callback_error_takes_precedence_over_code() {
-        // If both error and code are present, error should be returned first
+    fn test_callback_rejects_mixed_success_and_error() {
         let callback = AuthorizationCallback {
             code: Some("code".into()),
             state: Some("state".into()),
@@ -2316,8 +2322,13 @@ mod tests {
             error_description: None,
             error_uri: None,
         };
-        let result = callback.validate("state");
-        assert!(matches!(result, Err(OAuthError::AuthorizationError { .. })));
+        let err = callback
+            .validate("state")
+            .expect_err("mixed success/error callbacks must fail closed");
+        assert!(
+            matches!(err, OAuthError::InvalidTokenResponse(ref msg) if msg.contains("both code and error")),
+            "expected mixed callback rejection, got {err:?}"
+        );
     }
 
     #[test]

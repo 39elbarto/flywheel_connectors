@@ -63,6 +63,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_ed25519_verify"
+path = "fuzz_targets/ed25519_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_session"
 path = "fuzz_targets/session.rs"
 test = false

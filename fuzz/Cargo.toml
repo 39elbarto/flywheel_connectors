@@ -454,5 +454,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_cbor_map_canonical_relations"
+path = "fuzz_targets/cbor_map_canonical_relations.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

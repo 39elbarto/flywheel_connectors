@@ -244,6 +244,11 @@ impl IntercomConnector {
             "capabilities": [
                 "intercom.contacts.read",
                 "intercom.contacts.write",
+                // br-5g8rj: contact deletion is irreversible
+                // (RiskLevel::High / SafetyTier::Dangerous) and is
+                // gated by a dedicated capability. A token issued
+                // for the create/update workflow cannot also delete.
+                "intercom.contacts.delete",
                 "intercom.conversations.read",
                 "intercom.conversations.write",
                 "intercom.tags.read"
@@ -438,7 +443,16 @@ impl IntercomConnector {
                         "properties": {"contact_id": {"type": "string"}}
                     }),
                     output_schema: json!({"type": "object"}),
-                    capability: CapabilityId::from_static("intercom.contacts.write"),
+                    // br-5g8rj: split destructive contacts.delete behind
+                    // its own capability id. Pre-fix used the generic
+                    // intercom.contacts.write (same id as
+                    // contacts.create), so a token issued to a
+                    // create/update workflow could ALSO delete contacts —
+                    // RiskLevel::High + SafetyTier::Dangerous +
+                    // irreversible. Holders that legitimately need
+                    // delete semantics must request the dedicated
+                    // capability explicitly.
+                    capability: CapabilityId::from_static("intercom.contacts.delete"),
                     risk_level: RiskLevel::High,
                     description: None,
                     rate_limit: None,
@@ -869,7 +883,9 @@ fn operations_info() -> serde_json::Value {
         {
             "id": "intercom.contacts.delete",
             "summary": "Delete a contact",
-            "capability": "intercom.contacts.write",
+            // br-5g8rj: dedicated capability for irreversible delete —
+            // mirrors the introspect-side OperationInfo at line ~441.
+            "capability": "intercom.contacts.delete",
             "risk_level": "high",
             "safety_tier": "dangerous",
             "idempotency": "strict",
@@ -1395,6 +1411,49 @@ mod tests {
             .unwrap();
         assert_eq!(op["safety_tier"], "dangerous");
         assert_eq!(op["risk_level"], "high");
+    }
+
+    /// br-5g8rj: contacts.delete must require a DEDICATED capability,
+    /// not the generic contacts.write shared with create/update.
+    /// Locks in the split across BOTH the introspection-side
+    /// OperationInfo and the operations_info() JSON metadata
+    /// builder so a future regression that re-conflates them is
+    /// caught at test time.
+    #[test]
+    fn operations_contacts_delete_has_dedicated_capability() {
+        let ops = operations_info();
+        let arr = ops.as_array().unwrap();
+
+        let delete = arr
+            .iter()
+            .find(|op| op["id"] == "intercom.contacts.delete")
+            .expect("contacts.delete operation must be present");
+        assert_eq!(
+            delete["capability"].as_str().unwrap(),
+            "intercom.contacts.delete",
+            "delete must require its own capability id, not the generic write",
+        );
+        // Sanity: still high-risk + dangerous.
+        assert_eq!(delete["risk_level"], "high");
+        assert_eq!(delete["safety_tier"], "dangerous");
+
+        // create still routes through generic write — only delete
+        // is split out.
+        let create = arr
+            .iter()
+            .find(|op| op["id"] == "intercom.contacts.create")
+            .expect("contacts.create operation must be present");
+        assert_eq!(
+            create["capability"].as_str().unwrap(),
+            "intercom.contacts.write",
+            "create still uses the generic write capability",
+        );
+        assert_ne!(
+            create["capability"].as_str().unwrap(),
+            delete["capability"].as_str().unwrap(),
+            "create and delete must require different capabilities",
+        );
+
     }
 
     #[test]

@@ -518,5 +518,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_store_oti_roundtrip"
+path = "fuzz_targets/store_oti_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

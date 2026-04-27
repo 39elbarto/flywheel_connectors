@@ -630,22 +630,47 @@ fn parse_sse_event(event_str: &str) -> Option<AnthropicResult<StreamEvent>> {
 
     let data = data_lines.join("\n");
 
+    let expected_event_type = event_type?;
+
     // Parse based on event type
-    match event_type {
-        Some(
-            "message_start"
-            | "content_block_start"
-            | "content_block_delta"
-            | "content_block_stop"
-            | "message_delta"
-            | "message_stop"
-            | "ping"
-            | "error",
-        ) => match serde_json::from_str::<StreamEvent>(&data) {
-            Ok(event) => Some(Ok(event)),
+    match expected_event_type {
+        "message_start"
+        | "content_block_start"
+        | "content_block_delta"
+        | "content_block_stop"
+        | "message_delta"
+        | "message_stop"
+        | "ping"
+        | "error" => match serde_json::from_str::<StreamEvent>(&data) {
+            Ok(event) => {
+                let payload_event_type = stream_event_type(&event);
+                if payload_event_type != expected_event_type {
+                    return Some(Err(AnthropicError::Api {
+                        error_type: "sse_event_type_mismatch".into(),
+                        message: format!(
+                            "Anthropic SSE event type mismatch: envelope {expected_event_type}, payload {payload_event_type}"
+                        ),
+                        status_code: None,
+                    }));
+                }
+                Some(Ok(event))
+            }
             Err(e) => Some(Err(AnthropicError::Json(e))),
         },
         _ => None,
+    }
+}
+
+fn stream_event_type(event: &StreamEvent) -> &'static str {
+    match event {
+        StreamEvent::MessageStart { .. } => "message_start",
+        StreamEvent::ContentBlockStart { .. } => "content_block_start",
+        StreamEvent::ContentBlockDelta { .. } => "content_block_delta",
+        StreamEvent::ContentBlockStop { .. } => "content_block_stop",
+        StreamEvent::MessageDelta { .. } => "message_delta",
+        StreamEvent::MessageStop => "message_stop",
+        StreamEvent::Ping => "ping",
+        StreamEvent::Error { .. } => "error",
     }
 }
 
@@ -905,6 +930,29 @@ mod tests {
             .expect("expected ok event");
 
         assert!(matches!(event, StreamEvent::Ping));
+    }
+
+    #[test]
+    fn test_parse_sse_event_rejects_event_payload_type_mismatch() {
+        let event = parse_sse_event("event: error\ndata: {\"type\":\"message_stop\"}\n");
+        let event = event.expect("expected mismatch error");
+
+        match event {
+            Err(AnthropicError::Api {
+                error_type,
+                message,
+                status_code,
+            }) => {
+                assert_eq!(error_type, "sse_event_type_mismatch");
+                assert!(message.contains("envelope error"));
+                assert!(message.contains("payload message_stop"));
+                assert_eq!(status_code, None);
+            }
+            other => assert!(
+                matches!(other, Err(AnthropicError::Api { .. })),
+                "expected SSE type mismatch error"
+            ),
+        }
     }
 
     #[test]

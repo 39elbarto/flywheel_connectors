@@ -259,6 +259,52 @@ impl SseParser {
     }
 }
 
+/// Fuzz-only entry points for the SSE parser.
+///
+/// Exposed for the `fuzz_sse_event_stream` libfuzzer target so it can drive
+/// the private `SseParser` on adversarial byte streams (oversized fields,
+/// missing terminators, embedded nulls, malformed retry/id fields). The
+/// outer module remains `mod sse;` (private); only this `__fuzz` namespace
+/// is public, and it is `#[doc(hidden)]` so it does not appear in rustdoc.
+///
+/// Bead flywheel_connectors-2qsbc.
+#[doc(hidden)]
+pub mod __fuzz {
+    use super::{Bytes, SseEvent, SseParser};
+
+    /// Drive the SSE parser by feeding `chunks` sequentially, returning
+    /// every event the parser dispatched across the whole stream.
+    ///
+    /// `max_data_bytes` caps the retained `data:` payload for an in-progress
+    /// event (matches the production `SseConfig::max_buffer_size` cap path).
+    pub fn parse_chunks(chunks: &[&[u8]], max_data_bytes: usize) -> Vec<SseEvent> {
+        let mut parser = SseParser::with_max_data_bytes(max_data_bytes);
+        let mut events = Vec::new();
+        for chunk in chunks {
+            let bytes = Bytes::copy_from_slice(chunk);
+            events.extend(parser.parse(&bytes));
+        }
+        events
+    }
+
+    /// Number of bytes the parser is currently retaining (in-progress buffer
+    /// plus accumulated `data:` payload). The fuzz target asserts this stays
+    /// bounded by a multiple of `max_data_bytes` so a regression that
+    /// loosens the retention cap surfaces immediately.
+    pub fn parse_chunks_with_retained(
+        chunks: &[&[u8]],
+        max_data_bytes: usize,
+    ) -> (Vec<SseEvent>, usize) {
+        let mut parser = SseParser::with_max_data_bytes(max_data_bytes);
+        let mut events = Vec::new();
+        for chunk in chunks {
+            let bytes = Bytes::copy_from_slice(chunk);
+            events.extend(parser.parse(&bytes));
+        }
+        (events, parser.retained_bytes())
+    }
+}
+
 /// SSE client configuration.
 #[derive(Clone)]
 pub struct SseConfig {

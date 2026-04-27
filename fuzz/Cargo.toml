@@ -35,6 +35,7 @@ fcp-oauth = { path = "../crates/fcp-oauth" }
 fcp-protocol = { path = "../crates/fcp-protocol" }
 fcp-raptorq = { path = "../crates/fcp-raptorq" }
 fcp-store = { path = "../crates/fcp-store" }
+fcp-streaming = { path = "../crates/fcp-streaming" }
 fcp-tailscale = { path = "../crates/fcp-tailscale" }
 fcp-webhook = { path = "../crates/fcp-webhook" }
 
@@ -307,6 +308,13 @@ bench = false
 [[bin]]
 name = "fuzz_raptorq_envelope_decrypt"
 path = "fuzz_targets/raptorq_envelope_decrypt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_sse_event_stream"
+path = "fuzz_targets/sse_event_stream.rs"
 test = false
 doc = false
 bench = false

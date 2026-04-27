@@ -515,6 +515,23 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> GmailResult<&'a str
     Ok(value)
 }
 
+/// Fuzz-only entry points for Gmail client parsers.
+///
+/// Exposed for `fuzz_gmail_path_segment` so the fuzz crate can exercise the
+/// private path-segment guard used before message, thread, and draft IDs are
+/// interpolated into Gmail REST URLs.
+///
+/// Bead flywheel_connectors-ue7tc.
+#[doc(hidden)]
+pub mod __fuzz {
+    use super::sanitize_path_segment;
+
+    /// Validate an arbitrary Gmail URL path segment candidate.
+    pub fn sanitize_path_segment_candidate(value: &str) -> bool {
+        sanitize_path_segment(value, "id").is_ok()
+    }
+}
+
 fn redact_url(url: &str) -> String {
     let Ok(mut parsed) = Url::parse(url) else {
         return url.to_string();

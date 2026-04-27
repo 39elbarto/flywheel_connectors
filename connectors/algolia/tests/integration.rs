@@ -17,6 +17,16 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use fcp_algolia::connector::AlgoliaConnector;
 
+/// br-uh9e9: shared auth-header matcher values.
+///
+/// Every Mock::given chain that hits a `setup_connector(...)` route MUST
+/// assert both `X-Algolia-Application-Id: TESTAPP` and
+/// `X-Algolia-API-Key: test-api-key`. Without these matchers a regression
+/// that dropped the auth headers in `connectors/algolia/src/client.rs`
+/// would still pass every integration test.
+const ALGOLIA_APP_ID: &str = "TESTAPP";
+const ALGOLIA_API_KEY: &str = "test-api-key";
+
 async fn setup_connector(mock_url: &str) -> AlgoliaConnector {
     let mut c = AlgoliaConnector::new();
     c.handle_configure(json!({
@@ -144,6 +154,8 @@ async fn search_basic() {
         .and(path("/indexes/products/query"))
         .and(header("X-Algolia-Application-Id", "TESTAPP"))
         .and(header("X-Algolia-API-Key", "test-api-key"))
+        .and(header("X-Algolia-Application-Id", ALGOLIA_APP_ID))
+        .and(header("X-Algolia-API-Key", ALGOLIA_API_KEY))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "hits": [
                 {"objectID": "h1", "name": "Laptop", "_highlightResult": {}},
@@ -175,6 +187,8 @@ async fn search_with_hits_per_page() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/indexes/products/query"))
+        .and(header("X-Algolia-Application-Id", ALGOLIA_APP_ID))
+        .and(header("X-Algolia-API-Key", ALGOLIA_API_KEY))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "hits": [{"objectID": "h1"}],
             "nbHits": 1,
@@ -199,6 +213,8 @@ async fn search_empty_results() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/indexes/products/query"))
+        .and(header("X-Algolia-Application-Id", ALGOLIA_APP_ID))
+        .and(header("X-Algolia-API-Key", ALGOLIA_API_KEY))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "hits": [],
             "nbHits": 0,
@@ -254,6 +270,8 @@ async fn indices_list() {
     Mock::given(method("GET"))
         .and(path("/indexes"))
         .and(header("X-Algolia-Application-Id", "TESTAPP"))
+        .and(header("X-Algolia-Application-Id", ALGOLIA_APP_ID))
+        .and(header("X-Algolia-API-Key", ALGOLIA_API_KEY))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "items": [
                 {"name": "products", "entries": 5000, "dataSize": 1048576},
@@ -280,6 +298,8 @@ async fn indices_list_empty() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/indexes"))
+        .and(header("X-Algolia-Application-Id", ALGOLIA_APP_ID))
+        .and(header("X-Algolia-API-Key", ALGOLIA_API_KEY))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "items": []
         })))
@@ -304,6 +324,8 @@ async fn records_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/indexes/products/abc123"))
+        .and(header("X-Algolia-Application-Id", ALGOLIA_APP_ID))
+        .and(header("X-Algolia-API-Key", ALGOLIA_API_KEY))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "objectID": "abc123",
             "name": "Laptop Pro",
@@ -359,6 +381,8 @@ async fn records_delete() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
         .and(path("/indexes/products/abc123"))
+        .and(header("X-Algolia-Application-Id", ALGOLIA_APP_ID))
+        .and(header("X-Algolia-API-Key", ALGOLIA_API_KEY))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "deletedAt": "2025-06-15T12:00:00Z",
             "taskID": 12345
@@ -412,6 +436,8 @@ async fn error_401() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/indexes"))
+        .and(header("X-Algolia-Application-Id", ALGOLIA_APP_ID))
+        .and(header("X-Algolia-API-Key", ALGOLIA_API_KEY))
         .respond_with(
             ResponseTemplate::new(401).set_body_json(
                 json!({"message": "Invalid Application-Id or API key", "status": 401}),
@@ -436,6 +462,8 @@ async fn error_403() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/indexes"))
+        .and(header("X-Algolia-Application-Id", ALGOLIA_APP_ID))
+        .and(header("X-Algolia-API-Key", ALGOLIA_API_KEY))
         .respond_with(
             ResponseTemplate::new(403)
                 .set_body_json(json!({"message": "Forbidden", "status": 403})),
@@ -459,6 +487,8 @@ async fn error_404() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex("/indexes/.*"))
+        .and(header("X-Algolia-Application-Id", ALGOLIA_APP_ID))
+        .and(header("X-Algolia-API-Key", ALGOLIA_API_KEY))
         .respond_with(
             ResponseTemplate::new(404)
                 .set_body_json(json!({"message": "Index not found", "status": 404})),
@@ -482,6 +512,8 @@ async fn error_429() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/indexes"))
+        .and(header("X-Algolia-Application-Id", ALGOLIA_APP_ID))
+        .and(header("X-Algolia-API-Key", ALGOLIA_API_KEY))
         .respond_with(
             ResponseTemplate::new(429)
                 .set_body_json(json!({"message": "Too many requests", "status": 429}))
@@ -506,6 +538,8 @@ async fn error_500() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/indexes"))
+        .and(header("X-Algolia-Application-Id", ALGOLIA_APP_ID))
+        .and(header("X-Algolia-API-Key", ALGOLIA_API_KEY))
         .respond_with(
             ResponseTemplate::new(500)
                 .set_body_json(json!({"message": "Internal server error", "status": 500})),
@@ -612,6 +646,8 @@ async fn counters_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/indexes"))
+        .and(header("X-Algolia-Application-Id", ALGOLIA_APP_ID))
+        .and(header("X-Algolia-API-Key", ALGOLIA_API_KEY))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "items": [],
         })))
@@ -635,6 +671,8 @@ async fn counters_error_increment() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/indexes"))
+        .and(header("X-Algolia-Application-Id", ALGOLIA_APP_ID))
+        .and(header("X-Algolia-API-Key", ALGOLIA_API_KEY))
         .respond_with(
             ResponseTemplate::new(500)
                 .set_body_json(json!({"message": "Internal error", "status": 500})),
@@ -659,6 +697,8 @@ async fn counters_multiple_requests() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/indexes"))
+        .and(header("X-Algolia-Application-Id", ALGOLIA_APP_ID))
+        .and(header("X-Algolia-API-Key", ALGOLIA_API_KEY))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "items": [],
         })))
@@ -715,5 +755,72 @@ async fn invoke_before_configure_fails() {
         }))
         .await
         .is_err()
+    );
+}
+
+// -- br-uh9e9: auth-header regression --
+
+#[fcp_async_core::runtime::test]
+async fn auth_headers_actually_sent_or_request_is_unmatched() {
+    // br-uh9e9: pin that the connector emits BOTH X-Algolia-Application-Id
+    // and X-Algolia-API-Key on every authenticated route. The Mock requires
+    // both header matchers; if the connector ever dropped either one, the
+    // request would not match and `handle_invoke` would error instead of
+    // getting the canned 200.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/indexes"))
+        .and(header("X-Algolia-Application-Id", ALGOLIA_APP_ID))
+        .and(header("X-Algolia-API-Key", ALGOLIA_API_KEY))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+        .mount(&server)
+        .await;
+
+    let c = setup_connector(&server.uri()).await;
+    let ok = c
+        .handle_invoke(json!({
+            "operation_id": "algolia.indices.list",
+            "input": {}
+        }))
+        .await;
+    assert!(
+        ok.is_ok(),
+        "configured connector must satisfy X-Algolia-Application-Id + X-Algolia-API-Key matchers: {ok:?}"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn auth_header_mismatch_is_caught_by_matcher() {
+    // Negative-control: prove the matcher fails when the configured key
+    // differs from the expected value. If wiremock silently accepted any
+    // value (the earlier defect class), this assertion would falsely pass.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/indexes"))
+        .and(header("X-Algolia-API-Key", "WRONG-KEY"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"items": []})))
+        .mount(&server)
+        .await;
+
+    let mut c = AlgoliaConnector::new();
+    c.handle_configure(json!({
+        "application_id": ALGOLIA_APP_ID,
+        "api_key": ALGOLIA_API_KEY,
+        "base_url": server.uri(),
+    }))
+    .await
+    .unwrap();
+    c.handle_handshake(json!({"session_id": "test"}))
+        .await
+        .unwrap();
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "algolia.indices.list",
+            "input": {}
+        }))
+        .await;
+    assert!(
+        result.is_err(),
+        "request with mismatched X-Algolia-API-Key must NOT match the mock: {result:?}"
     );
 }

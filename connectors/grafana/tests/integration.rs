@@ -2,8 +2,16 @@
 
 use fcp_grafana::connector::GrafanaConnector;
 use serde_json::json;
-use wiremock::matchers::{method, path, path_regex};
+use wiremock::matchers::{header, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// br-uh9e9: bearer-token auth-header value used by the test fixture.
+///
+/// Every Mock::given chain that hits a `configured_connector(...)` route MUST
+/// assert this Authorization header. Otherwise a regression that dropped the
+/// `bearer_auth(token)` call in `connectors/grafana/src/client.rs` would still
+/// pass every integration test.
+const GRAFANA_AUTH_HEADER: &str = "Bearer test-token";
 
 // -- Helper --
 
@@ -177,6 +185,7 @@ async fn invoke_dashboards_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex("/search.*"))
+        .and(header("Authorization", GRAFANA_AUTH_HEADER))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             {"id": 1, "uid": "abc", "title": "Dashboard 1"},
             {"id": 2, "uid": "def", "title": "Dashboard 2"},
@@ -201,6 +210,7 @@ async fn invoke_dashboards_get() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/dashboards/uid/abc123"))
+        .and(header("Authorization", GRAFANA_AUTH_HEADER))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "dashboard": {"title": "My Dashboard", "panels": []},
             "meta": {"slug": "my-dash", "version": 3}
@@ -238,6 +248,7 @@ async fn invoke_dashboards_create() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/dashboards/db"))
+        .and(header("Authorization", GRAFANA_AUTH_HEADER))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": 1, "uid": "new-uid", "url": "/d/new-uid/", "status": "success"
         })))
@@ -301,6 +312,7 @@ async fn invoke_datasources_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/datasources"))
+        .and(header("Authorization", GRAFANA_AUTH_HEADER))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             {"id": 1, "uid": "prometheus", "name": "Prometheus", "type": "prometheus"},
             {"id": 2, "uid": "loki", "name": "Loki", "type": "loki"},
@@ -325,6 +337,7 @@ async fn invoke_datasources_query() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/ds/query"))
+        .and(header("Authorization", GRAFANA_AUTH_HEADER))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "results": {"A": {"frames": [{"data": {"values": [[1.0, 2.0]]}}]}}
         })))
@@ -367,6 +380,7 @@ async fn invoke_alerts_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex("/ruler/grafana/api/v1/rules.*"))
+        .and(header("Authorization", GRAFANA_AUTH_HEADER))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "default": [{"name": "High CPU", "rules": []}]
         })))
@@ -389,6 +403,7 @@ async fn invoke_alerts_create() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/ruler/grafana/api/v1/rules"))
+        .and(header("Authorization", GRAFANA_AUTH_HEADER))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "uid": "alert-new", "title": "High Error Rate"
         })))
@@ -428,6 +443,7 @@ async fn invoke_annotations_create() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/annotations"))
+        .and(header("Authorization", GRAFANA_AUTH_HEADER))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": 42, "message": "Annotation added"
         })))
@@ -469,6 +485,7 @@ async fn invoke_unauthorized_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/datasources"))
+        .and(header("Authorization", GRAFANA_AUTH_HEADER))
         .respond_with(ResponseTemplate::new(401).set_body_json(json!({"message": "Unauthorized"})))
         .mount(&server)
         .await;
@@ -563,6 +580,7 @@ async fn error_counter_increments() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/datasources"))
+        .and(header("Authorization", GRAFANA_AUTH_HEADER))
         .respond_with(ResponseTemplate::new(500).set_body_json(json!({"message": "Server Error"})))
         .mount(&server)
         .await;
@@ -585,6 +603,7 @@ async fn request_counter_increments_on_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex("/search.*"))
+        .and(header("Authorization", GRAFANA_AUTH_HEADER))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
         .mount(&server)
         .await;
@@ -691,6 +710,7 @@ async fn invoke_api_403_forbidden() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/datasources"))
+        .and(header("Authorization", GRAFANA_AUTH_HEADER))
         .respond_with(ResponseTemplate::new(403).set_body_json(json!({"message": "Forbidden"})))
         .mount(&server)
         .await;
@@ -757,4 +777,73 @@ async fn doctor_configured_not_handshaken_is_degraded() {
     if let Some(hc) = handshake_check {
         assert_eq!(hc["passed"], false);
     }
+}
+
+// -- br-uh9e9: auth-header regression --
+
+#[fcp_async_core::runtime::test]
+async fn auth_header_actually_sent_or_request_is_unmatched() {
+    // br-uh9e9: pin that the connector emits Authorization: Bearer
+    // <token> on every authenticated route. The Mock requires the
+    // exact header; if the connector ever dropped bearer_auth() (or
+    // sent the wrong scheme), the request would not match and
+    // `handle_invoke` would error out instead of getting the canned 200.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/dashboards/uid/abc"))
+        .and(header("Authorization", GRAFANA_AUTH_HEADER))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "dashboard": {"uid": "abc", "title": "Probe"},
+            "meta": {}
+        })))
+        .mount(&server)
+        .await;
+
+    let connector = configured_connector(&server.uri()).await;
+    let ok = connector
+        .handle_invoke(json!({
+            "operation_id": "grafana.dashboards.get",
+            "input": {"uid": "abc"}
+        }))
+        .await;
+    assert!(
+        ok.is_ok(),
+        "configured connector must satisfy Authorization matcher: {ok:?}"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn auth_header_mismatch_is_caught_by_matcher() {
+    // Negative-control companion: prove the matcher actually fails
+    // when the configured token differs from the expected value.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/dashboards/uid/abc"))
+        .and(header("Authorization", "Bearer WRONG-TOKEN"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+
+    let mut connector = GrafanaConnector::new();
+    connector
+        .handle_configure(json!({
+            "auth_token": "test-token",
+            "base_url": server.uri(),
+        }))
+        .await
+        .unwrap();
+    connector
+        .handle_handshake(json!({"session_id": "test"}))
+        .await
+        .unwrap();
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "grafana.dashboards.get",
+            "input": {"uid": "abc"}
+        }))
+        .await;
+    assert!(
+        result.is_err(),
+        "request with mismatched bearer token must NOT match the mock: {result:?}"
+    );
 }

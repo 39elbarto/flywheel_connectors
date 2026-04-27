@@ -2,8 +2,18 @@
 
 use fcp_datadog::connector::DatadogConnector;
 use serde_json::json;
-use wiremock::matchers::{method, path, path_regex};
+use wiremock::matchers::{header, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// br-uh9e9: shared auth-header matcher pair.
+///
+/// Datadog routes that hit the connector via `configured_connector` MUST
+/// emit both `DD-API-KEY: test-api-key` and `DD-APPLICATION-KEY: test-app-key`.
+/// Without these matchers on every Mock::given chain, a regression that
+/// dropped the headers in `connectors/datadog/src/client.rs` would still
+/// pass every integration test.
+const DD_API_KEY: &str = "test-api-key";
+const DD_APP_KEY: &str = "test-app-key";
 
 // -- Helper --
 
@@ -217,6 +227,8 @@ async fn invoke_events_create() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/api/v1/events"))
+        .and(header("DD-API-KEY", DD_API_KEY))
+        .and(header("DD-APPLICATION-KEY", DD_APP_KEY))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "event": {"id": 1, "title": "Deploy v2.0"},
             "status": "ok"
@@ -240,6 +252,8 @@ async fn invoke_events_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex("/api/v1/events.*"))
+        .and(header("DD-API-KEY", DD_API_KEY))
+        .and(header("DD-APPLICATION-KEY", DD_APP_KEY))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "events": [
                 {"id": 1, "title": "Event 1"},
@@ -281,6 +295,8 @@ async fn invoke_metrics_query() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex("/api/v1/query.*"))
+        .and(header("DD-API-KEY", DD_API_KEY))
+        .and(header("DD-APPLICATION-KEY", DD_APP_KEY))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "status": "ok",
             "series": [
@@ -311,6 +327,8 @@ async fn invoke_metrics_submit() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/api/v1/series"))
+        .and(header("DD-API-KEY", DD_API_KEY))
+        .and(header("DD-APPLICATION-KEY", DD_APP_KEY))
         .respond_with(ResponseTemplate::new(202).set_body_json(json!({"status": "ok"})))
         .mount(&server)
         .await;
@@ -348,6 +366,8 @@ async fn invoke_monitors_list() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex("/api/v1/monitor.*"))
+        .and(header("DD-API-KEY", DD_API_KEY))
+        .and(header("DD-APPLICATION-KEY", DD_APP_KEY))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             {"id": 1, "name": "Monitor 1"},
             {"id": 2, "name": "Monitor 2"},
@@ -372,6 +392,8 @@ async fn invoke_monitors_create() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/api/v1/monitor"))
+        .and(header("DD-API-KEY", DD_API_KEY))
+        .and(header("DD-APPLICATION-KEY", DD_APP_KEY))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "id": 12345,
             "name": "High CPU",
@@ -400,6 +422,8 @@ async fn invoke_monitors_delete() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
         .and(path("/api/v1/monitor/12345"))
+        .and(header("DD-API-KEY", DD_API_KEY))
+        .and(header("DD-APPLICATION-KEY", DD_APP_KEY))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
         .mount(&server)
         .await;
@@ -422,6 +446,8 @@ async fn invoke_logs_search() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/api/v1/logs-queries/list"))
+        .and(header("DD-API-KEY", DD_API_KEY))
+        .and(header("DD-APPLICATION-KEY", DD_APP_KEY))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "logs": [
                 {"id": "log1", "content": {"message": "Error", "service": "api"}},
@@ -450,6 +476,8 @@ async fn invoke_unauthorized_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex("/api/v1/monitor.*"))
+        .and(header("DD-API-KEY", DD_API_KEY))
+        .and(header("DD-APPLICATION-KEY", DD_APP_KEY))
         .respond_with(ResponseTemplate::new(401).set_body_json(json!({"errors": ["Unauthorized"]})))
         .mount(&server)
         .await;
@@ -469,6 +497,8 @@ async fn invoke_forbidden_error() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex("/api/v1/monitor.*"))
+        .and(header("DD-API-KEY", DD_API_KEY))
+        .and(header("DD-APPLICATION-KEY", DD_APP_KEY))
         .respond_with(ResponseTemplate::new(403).set_body_json(json!({"errors": ["Forbidden"]})))
         .mount(&server)
         .await;
@@ -586,6 +616,8 @@ async fn error_counter_increments() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex("/api/v1/monitor.*"))
+        .and(header("DD-API-KEY", DD_API_KEY))
+        .and(header("DD-APPLICATION-KEY", DD_APP_KEY))
         .respond_with(ResponseTemplate::new(500).set_body_json(json!({"errors": ["Server Error"]})))
         .mount(&server)
         .await;
@@ -717,6 +749,8 @@ async fn request_counter_increments_on_success() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex("/api/v1/monitor.*"))
+        .and(header("DD-API-KEY", DD_API_KEY))
+        .and(header("DD-APPLICATION-KEY", DD_APP_KEY))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
         .mount(&server)
         .await;
@@ -748,4 +782,76 @@ async fn invoke_monitors_delete_missing_id_fails() {
         }))
         .await;
     assert!(result.is_err());
+}
+
+// -- br-uh9e9: auth-header regression --
+
+#[fcp_async_core::runtime::test]
+async fn auth_headers_actually_sent_or_request_is_unmatched() {
+    // br-uh9e9: this test pins that the connector emits BOTH
+    // DD-API-KEY and DD-APPLICATION-KEY on every authenticated route.
+    // The Mock requires both header matchers; if the connector ever
+    // dropped either header (or sent wrong values), the request would
+    // not match and `handle_invoke` would error out instead of getting
+    // the canned 200. Without the matchers, this test would
+    // (incorrectly) pass even with all auth wiring removed.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("/api/v1/monitor.*"))
+        .and(header("DD-API-KEY", DD_API_KEY))
+        .and(header("DD-APPLICATION-KEY", DD_APP_KEY))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&server)
+        .await;
+
+    let connector = configured_connector(&format!("{}/api/v1", server.uri())).await;
+    let ok = connector
+        .handle_invoke(json!({
+            "operation_id": "datadog.monitors.list",
+            "input": {}
+        }))
+        .await;
+    assert!(
+        ok.is_ok(),
+        "configured connector must satisfy DD-API-KEY + DD-APPLICATION-KEY matchers: {ok:?}"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn auth_header_mismatch_is_caught_by_matcher() {
+    // Negative-control companion to the above: prove that the matcher
+    // actually fails when the configured key differs from the matcher's
+    // expected value. If wiremock silently accepted any value (the
+    // earlier defect class), this assertion would falsely pass.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("/api/v1/monitor.*"))
+        .and(header("DD-API-KEY", "WRONG-KEY"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&server)
+        .await;
+
+    let mut connector = DatadogConnector::new();
+    connector
+        .handle_configure(json!({
+            "api_key": DD_API_KEY,
+            "app_key": DD_APP_KEY,
+            "base_url": format!("{}/api/v1", server.uri()),
+        }))
+        .await
+        .unwrap();
+    connector
+        .handle_handshake(json!({"session_id": "test"}))
+        .await
+        .unwrap();
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "datadog.monitors.list",
+            "input": {}
+        }))
+        .await;
+    assert!(
+        result.is_err(),
+        "request with mismatched DD-API-KEY must NOT match the mock: {result:?}"
+    );
 }

@@ -189,8 +189,7 @@ fn check_outcome_pascalcase_tag_rejected() {
     assert!(bad.is_err(), "PascalCase outcome value MUST be rejected");
 
     // Wrong tag key.
-    let bad_key =
-        serde_json::from_str::<CheckOutcome>(r#"{"type":"allow"}"#);
+    let bad_key = serde_json::from_str::<CheckOutcome>(r#"{"type":"allow"}"#);
     assert!(bad_key.is_err(), "tag key MUST be `outcome`, not `type`");
 
     // Unknown variant.
@@ -255,7 +254,10 @@ fn decision_pascalcase_tag_rejected() {
     let bad_deny = serde_json::from_str::<Decision>("\"Deny\"");
     assert!(bad_deny.is_err());
     let bad_skip = serde_json::from_str::<Decision>("\"skip\"");
-    assert!(bad_skip.is_err(), "Decision has no `skip` variant — MUST reject");
+    assert!(
+        bad_skip.is_err(),
+        "Decision has no `skip` variant — MUST reject"
+    );
 }
 
 #[test]
@@ -265,12 +267,16 @@ fn decision_distinct_from_check_outcome_on_wire() {
     // object (`{"outcome":"allow"}`). Pin that they don't accidentally
     // accept each other's serialized form.
     let decision_json = serde_json::to_string(&Decision::Allow).unwrap();
-    assert!(serde_json::from_str::<CheckOutcome>(&decision_json).is_err(),
-        "CheckOutcome MUST NOT accept Decision's bare-string JSON");
+    assert!(
+        serde_json::from_str::<CheckOutcome>(&decision_json).is_err(),
+        "CheckOutcome MUST NOT accept Decision's bare-string JSON"
+    );
 
     let outcome_json = serde_json::to_string(&CheckOutcome::Allow).unwrap();
-    assert!(serde_json::from_str::<Decision>(&outcome_json).is_err(),
-        "Decision MUST NOT accept CheckOutcome's tagged-object JSON");
+    assert!(
+        serde_json::from_str::<Decision>(&outcome_json).is_err(),
+        "Decision MUST NOT accept CheckOutcome's tagged-object JSON"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -289,8 +295,7 @@ fn check_outcome_json_and_cbor_decode_to_same_value() {
 
     let mut cbor = Vec::new();
     ciborium::into_writer(&original, &mut cbor).expect("cbor");
-    let from_cbor: CheckOutcome =
-        ciborium::from_reader(&cbor[..]).expect("cbor deser");
+    let from_cbor: CheckOutcome = ciborium::from_reader(&cbor[..]).expect("cbor deser");
 
     assert_eq!(from_json, from_cbor);
     assert_eq!(from_json, original);

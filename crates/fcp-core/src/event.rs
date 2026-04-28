@@ -26,6 +26,22 @@ pub enum OrderingPolicy {
     Unordered,
 }
 
+/// Normalized event severity ordered from least to most severe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventSeverity {
+    /// Informational event.
+    Info,
+    /// Noteworthy event that is not yet a warning.
+    Notice,
+    /// Warning condition.
+    Warning,
+    /// Error condition.
+    Error,
+    /// Critical condition requiring immediate attention.
+    Critical,
+}
+
 /// Event envelope wrapper for streaming events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {

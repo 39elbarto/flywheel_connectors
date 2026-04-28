@@ -830,8 +830,22 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_secret_id_parse"
+path = "fuzz_targets/secret_id_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_provenance_construction"
 path = "fuzz_targets/provenance_construction.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_tailscale_tag_fcp_predicates"
+path = "fuzz_targets/tailscale_tag_fcp_predicates.rs"
 test = false
 doc = false
 bench = false

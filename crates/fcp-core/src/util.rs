@@ -5,6 +5,7 @@ use std::{error::Error, fmt, str::FromStr, time::Duration};
 pub mod base64_url;
 pub mod hex_or_bytes;
 pub mod hex_or_bytes_vec;
+pub mod hostname;
 pub mod objectid_prefixed;
 pub mod uri;
 

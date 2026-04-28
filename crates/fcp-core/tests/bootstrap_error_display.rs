@@ -9,6 +9,8 @@ struct BootstrapErrorDisplayCase {
     remediation_hint: &'static str,
 }
 
+const BOOTSTRAP_ERROR_VARIANT_COUNT: usize = 27;
+
 fn display_cases() -> Vec<BootstrapErrorDisplayCase> {
     vec![
         BootstrapErrorDisplayCase {
@@ -209,7 +211,10 @@ fn display_cases() -> Vec<BootstrapErrorDisplayCase> {
 
 #[test]
 fn bootstrap_error_display_is_pinned_for_each_variant_with_remediation() {
-    for case in display_cases() {
+    let cases = display_cases();
+    assert_eq!(cases.len(), BOOTSTRAP_ERROR_VARIANT_COUNT);
+
+    for case in cases {
         let rendered = case.error.to_string();
 
         assert_eq!(rendered, case.expected, "{}", case.variant);

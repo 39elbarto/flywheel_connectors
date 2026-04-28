@@ -1085,6 +1085,189 @@ impl UsageMetricKind {
     }
 }
 
+/// Maximum metric-label length in bytes.
+pub const MAX_METRIC_LABEL_LEN: usize = 128;
+
+/// Canonical metric label validation error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum MetricLabelValidationError {
+    /// Label is empty.
+    #[error("metric label must not be empty")]
+    Empty,
+
+    /// Label exceeds the maximum byte length.
+    #[error("metric label too long ({len} bytes > {max} bytes)")]
+    TooLong {
+        /// Observed byte length.
+        len: usize,
+        /// Maximum accepted byte length.
+        max: usize,
+    },
+
+    /// Label is not ASCII.
+    #[error("metric label must be ASCII")]
+    NonAscii,
+
+    /// Label contains uppercase ASCII.
+    #[error("metric label must be lowercase")]
+    UppercaseNotAllowed,
+
+    /// Label does not contain a namespace separator.
+    #[error("metric label must use a dotted namespace")]
+    MissingNamespaceSeparator,
+
+    /// Label contains an empty namespace segment.
+    #[error("metric label contains an empty namespace segment at byte {index}")]
+    EmptySegment {
+        /// Byte index of the empty segment boundary.
+        index: usize,
+    },
+
+    /// Namespace segment starts with a disallowed character.
+    #[error("metric label segment has invalid start character '{ch}' at byte {index}")]
+    InvalidSegmentStart {
+        /// Invalid character.
+        ch: char,
+        /// Byte index of the invalid character.
+        index: usize,
+    },
+
+    /// Label contains a disallowed character.
+    #[error("metric label has invalid character '{ch}' at byte {index}")]
+    InvalidChar {
+        /// Invalid character.
+        ch: char,
+        /// Byte index of the invalid character.
+        index: usize,
+    },
+}
+
+/// Lowercase dotted namespace for connector and host metrics.
+///
+/// The canonical format is ASCII, at most [`MAX_METRIC_LABEL_LEN`] bytes, and
+/// made of lowercase namespace segments separated by dots. Each segment starts
+/// with `a-z`; the rest of a segment may contain `a-z`, `0-9`, or `_`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct MetricLabel(std::sync::Arc<str>);
+
+impl MetricLabel {
+    /// Create a canonical metric label.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `label` is not lowercase, dotted, ASCII, within
+    /// the length cap, or limited to the allowed character set.
+    pub fn new(label: impl Into<String>) -> Result<Self, MetricLabelValidationError> {
+        Self::try_from(label.into())
+    }
+
+    /// Create a metric label from a static string literal.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the literal is not a canonical metric label.
+    #[must_use]
+    pub fn from_static(label: &'static str) -> Self {
+        Self::new(label).expect("static metric label must be canonical")
+    }
+
+    /// Return the canonical label string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for MetricLabel {
+    type Error = MetricLabelValidationError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        validate_metric_label(&value)?;
+        Ok(Self(value.into()))
+    }
+}
+
+impl From<MetricLabel> for String {
+    fn from(value: MetricLabel) -> Self {
+        value.0.to_string()
+    }
+}
+
+impl std::str::FromStr for MetricLabel {
+    type Err = MetricLabelValidationError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_from(s.to_owned())
+    }
+}
+
+impl std::fmt::Display for MetricLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl AsRef<str> for MetricLabel {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+fn validate_metric_label(label: &str) -> Result<(), MetricLabelValidationError> {
+    if label.is_empty() {
+        return Err(MetricLabelValidationError::Empty);
+    }
+
+    if label.len() > MAX_METRIC_LABEL_LEN {
+        return Err(MetricLabelValidationError::TooLong {
+            len: label.len(),
+            max: MAX_METRIC_LABEL_LEN,
+        });
+    }
+
+    if !label.is_ascii() {
+        return Err(MetricLabelValidationError::NonAscii);
+    }
+
+    if label.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return Err(MetricLabelValidationError::UppercaseNotAllowed);
+    }
+
+    if !label.contains('.') {
+        return Err(MetricLabelValidationError::MissingNamespaceSeparator);
+    }
+
+    let mut segment_start = true;
+    for (index, ch) in label.char_indices() {
+        if ch == '.' {
+            if segment_start {
+                return Err(MetricLabelValidationError::EmptySegment { index });
+            }
+            segment_start = true;
+            continue;
+        }
+
+        if segment_start {
+            if !ch.is_ascii_lowercase() {
+                return Err(MetricLabelValidationError::InvalidSegmentStart { ch, index });
+            }
+            segment_start = false;
+            continue;
+        }
+
+        if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_') {
+            return Err(MetricLabelValidationError::InvalidChar { ch, index });
+        }
+    }
+
+    if segment_start {
+        return Err(MetricLabelValidationError::EmptySegment { index: label.len() });
+    }
+
+    Ok(())
+}
+
 /// Usage metric for actual execution (NORMATIVE when present).
 ///
 /// Connectors SHOULD emit usage metrics when they can measure actual usage.

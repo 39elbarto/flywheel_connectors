@@ -328,6 +328,23 @@ impl OperationReceipt {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Operation Status (public operation lifecycle)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Public operation lifecycle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OperationStatus {
+    /// Operation has been accepted but has not started.
+    Pending,
+    /// Operation is currently running.
+    Running,
+    /// Operation completed successfully.
+    Completed,
+    /// Operation failed.
+    Failed,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Intent Status (for crash recovery)
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -29,6 +29,7 @@ mod health;
 mod lease;
 mod lifecycle;
 mod operation;
+pub mod pem;
 mod protocol;
 mod provisioning;
 mod quorum;

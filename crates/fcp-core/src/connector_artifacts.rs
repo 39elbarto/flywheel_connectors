@@ -18,6 +18,9 @@ use crate::{FcpError, FcpResult, ObjectId};
 #[serde(transparent)]
 pub struct ManifestVersion(Version);
 
+/// Semantic version for connector artifact ordering and compatibility checks.
+pub type ConnectorVersion = ManifestVersion;
+
 impl ManifestVersion {
     /// Parse a manifest version from its semantic-version string form.
     ///

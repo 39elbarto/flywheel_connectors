@@ -435,6 +435,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_doctor_wire_format"
+path = "fuzz_targets/doctor_wire_format.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_tailscale_acl"
 path = "fuzz_targets/tailscale_acl.rs"
 test = false
@@ -1116,6 +1123,20 @@ bench = false
 [[bin]]
 name = "fuzz_audit_event_follows"
 path = "fuzz_targets/audit_event_follows.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_secret_format_serde"
+path = "fuzz_targets/secret_format_serde.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_revocation_registry"
+path = "fuzz_targets/revocation_registry.rs"
 test = false
 doc = false
 bench = false

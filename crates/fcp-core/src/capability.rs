@@ -2313,6 +2313,154 @@ impl Default for RetryConfig {
     }
 }
 
+/// Exponential backoff delay policy expressed in retry attempts.
+///
+/// `max_retries` counts the delays after the initial operation attempt. A policy
+/// with zero retries yields no delays, while a policy with `N` retries yields
+/// exactly `N` delay values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BackoffPolicy {
+    /// Maximum number of retries after the initial operation attempt.
+    pub max_retries: u32,
+
+    /// Initial delay before the first retry.
+    pub initial_delay: Duration,
+
+    /// Maximum delay for any retry.
+    pub max_delay: Duration,
+
+    /// Multiplier for exponential backoff.
+    pub multiplier: f64,
+}
+
+impl BackoffPolicy {
+    /// Create a new backoff policy.
+    #[must_use]
+    pub const fn new(
+        max_retries: u32,
+        initial_delay: Duration,
+        max_delay: Duration,
+        multiplier: f64,
+    ) -> Self {
+        Self {
+            max_retries,
+            initial_delay,
+            max_delay,
+            multiplier,
+        }
+    }
+
+    /// Return the configured maximum number of retries.
+    #[must_use]
+    pub const fn max_retries(self) -> u32 {
+        self.max_retries
+    }
+
+    /// Return an iterator over the retry delays allowed by this policy.
+    #[must_use]
+    pub const fn retry_delays(self) -> BackoffDelays {
+        BackoffDelays {
+            policy: self,
+            next_retry: 0,
+        }
+    }
+
+    /// Return the delay for a zero-based retry index.
+    #[must_use]
+    pub fn delay_for_retry(self, retry_index: u32) -> Option<Duration> {
+        if retry_index >= self.max_retries {
+            return None;
+        }
+
+        Some(self.capped_delay_for_retry(retry_index))
+    }
+
+    fn capped_delay_for_retry(self, retry_index: u32) -> Duration {
+        let mut delay = std::cmp::min(self.initial_delay, self.max_delay);
+        for _ in 0..retry_index {
+            delay = next_backoff_delay(delay, self.max_delay, self.multiplier);
+        }
+
+        delay
+    }
+}
+
+impl Default for BackoffPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: 2,
+            initial_delay: Duration::from_millis(100),
+            max_delay: Duration::from_secs(30),
+            multiplier: 2.0,
+        }
+    }
+}
+
+impl From<&RetryConfig> for BackoffPolicy {
+    fn from(config: &RetryConfig) -> Self {
+        Self {
+            max_retries: config.max_attempts.saturating_sub(1),
+            initial_delay: config.initial_delay,
+            max_delay: config.max_delay,
+            multiplier: config.multiplier,
+        }
+    }
+}
+
+impl From<RetryConfig> for BackoffPolicy {
+    fn from(config: RetryConfig) -> Self {
+        Self::from(&config)
+    }
+}
+
+/// Iterator over the retry delays allowed by a [`BackoffPolicy`].
+#[derive(Debug, Clone)]
+pub struct BackoffDelays {
+    policy: BackoffPolicy,
+    next_retry: u32,
+}
+
+impl Iterator for BackoffDelays {
+    type Item = Duration;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let delay = self.policy.delay_for_retry(self.next_retry)?;
+        self.next_retry = self.next_retry.saturating_add(1);
+        Some(delay)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.policy.max_retries.saturating_sub(self.next_retry);
+        let remaining = usize::try_from(remaining).unwrap_or(usize::MAX);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for BackoffDelays {}
+
+impl std::iter::FusedIterator for BackoffDelays {}
+
+fn next_backoff_delay(delay: Duration, max_delay: Duration, multiplier: f64) -> Duration {
+    if delay >= max_delay {
+        return max_delay;
+    }
+
+    let multiplier = if multiplier.is_finite() && multiplier >= 1.0 {
+        multiplier
+    } else {
+        1.0
+    };
+    let scaled_secs = delay.as_secs_f64() * multiplier;
+    if !scaled_secs.is_finite() {
+        return max_delay;
+    }
+
+    match Duration::try_from_secs_f64(scaled_secs) {
+        Ok(scaled) => std::cmp::min(scaled, max_delay),
+        Err(_) => max_delay,
+    }
+}
+
 /// Retry with exponential backoff.
 ///
 /// # Errors

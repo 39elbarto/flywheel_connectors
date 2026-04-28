@@ -8,8 +8,70 @@ use fcp_crypto::{Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, KeyId
 use semver::Version;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 
 use crate::{FcpError, FcpResult, ObjectId};
+
+/// Semantic version for connector manifest compatibility checks.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ManifestVersion(Version);
+
+impl ManifestVersion {
+    /// Parse a manifest version from its semantic-version string form.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`semver::Error`] if `input` is not a valid semantic version.
+    pub fn parse(input: &str) -> Result<Self, semver::Error> {
+        Version::parse(input).map(Self)
+    }
+
+    /// Borrow the underlying semantic version.
+    #[must_use]
+    pub const fn as_semver(&self) -> &Version {
+        &self.0
+    }
+
+    /// Return whether this manifest version satisfies a required version.
+    ///
+    /// Compatibility is intentionally stricter than plain semantic-version
+    /// ordering: the major version must match exactly, and the candidate must
+    /// not be lower than the required version. This accepts same-major forward
+    /// evolution while rejecting cross-major changes and pre-release downgrades.
+    #[must_use]
+    pub fn is_compatible_with(&self, required: &Self) -> bool {
+        self.0.major == required.0.major
+            && !matches!(self.0.cmp(&required.0), std::cmp::Ordering::Less)
+    }
+}
+
+impl From<Version> for ManifestVersion {
+    fn from(version: Version) -> Self {
+        Self(version)
+    }
+}
+
+impl From<ManifestVersion> for Version {
+    fn from(version: ManifestVersion) -> Self {
+        version.0
+    }
+}
+
+impl FromStr for ManifestVersion {
+    type Err = semver::Error;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        Self::parse(input)
+    }
+}
+
+impl fmt::Display for ManifestVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// Operating system + CPU architecture pairing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

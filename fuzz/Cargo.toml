@@ -850,5 +850,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_can_drive_operation"
+path = "fuzz_targets/can_drive_operation.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

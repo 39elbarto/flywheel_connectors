@@ -44,8 +44,12 @@ pub mod __fuzz {
     use reqwest::StatusCode;
 
     use crate::{
-        client::{parse_error_response, parse_retry_after_header_value},
+        client::{
+            MAX_SSE_BUFFER_BYTES, parse_error_response, parse_retry_after_header_value,
+            parse_sse_event_bytes,
+        },
         error::AnthropicError,
+        types::StreamEvent,
     };
 
     /// Parse a raw Anthropic API error body with a caller-supplied HTTP status.
@@ -66,4 +70,24 @@ pub mod __fuzz {
     pub fn parse_retry_after_header(header_value: &str) -> Option<u64> {
         parse_retry_after_header_value(header_value)
     }
+
+    /// Parse a single SSE event byte-slice. Drives the internal
+    /// `parse_sse_event_bytes` for fuzz coverage of:
+    ///
+    /// - oversized event rejection (`> MAX_SSE_BUFFER_BYTES`)
+    /// - invalid-UTF-8 rejection
+    /// - `data:` line joining
+    /// - unknown-event-type skipping
+    /// - envelope-vs-payload type mismatch detection
+    ///
+    /// Bead `flywheel_connectors-dzveq`.
+    pub fn parse_sse_event_bytes_fuzz(
+        event_bytes: &[u8],
+    ) -> Option<Result<StreamEvent, AnthropicError>> {
+        parse_sse_event_bytes(event_bytes)
+    }
+
+    /// Expose `MAX_SSE_BUFFER_BYTES` so the fuzz target can hit the
+    /// boundary directly without hard-coding the cap.
+    pub const FUZZ_MAX_SSE_BUFFER_BYTES: usize = MAX_SSE_BUFFER_BYTES;
 }

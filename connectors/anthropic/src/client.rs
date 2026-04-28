@@ -520,7 +520,7 @@ pub(crate) fn parse_error_response(
 /// Parse SSE stream into events.
 /// Maximum SSE buffer size (16 MiB). Prevents memory exhaustion from
 /// malformed streams that never produce an event delimiter.
-const MAX_SSE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_SSE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
 
 fn parse_sse_stream(response: Response) -> impl Stream<Item = AnthropicResult<StreamEvent>> {
     parse_sse_chunks(response.bytes_stream())
@@ -598,7 +598,7 @@ fn next_sse_event_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
     }
 }
 
-fn parse_sse_event_bytes(event_bytes: &[u8]) -> Option<AnthropicResult<StreamEvent>> {
+pub(crate) fn parse_sse_event_bytes(event_bytes: &[u8]) -> Option<AnthropicResult<StreamEvent>> {
     if event_bytes.len() > MAX_SSE_BUFFER_BYTES {
         return Some(Err(AnthropicError::Api {
             error_type: "sse_event_too_large".into(),

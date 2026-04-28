@@ -1211,5 +1211,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_anthropic_sse_envelope"
+path = "fuzz_targets/anthropic_sse_envelope.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

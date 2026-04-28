@@ -217,6 +217,173 @@ impl fmt::Display for CanonicalDurationParseError {
 
 impl Error for CanonicalDurationParseError {}
 
+/// Second-granular relative time using compact `s`, `m`, `h`, `d`, or `w` units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RelativeTime(Duration);
+
+impl RelativeTime {
+    /// Construct relative time when it can be represented with whole seconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `duration` carries sub-second precision.
+    pub fn new(duration: Duration) -> Result<Self, RelativeTimeParseError> {
+        if duration.subsec_nanos() != 0 {
+            return Err(RelativeTimeParseError::SubsecondPrecision);
+        }
+
+        Ok(Self(duration))
+    }
+
+    /// Return the wrapped [`Duration`].
+    #[must_use]
+    pub const fn as_duration(self) -> Duration {
+        self.0
+    }
+}
+
+impl TryFrom<Duration> for RelativeTime {
+    type Error = RelativeTimeParseError;
+
+    fn try_from(value: Duration) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<RelativeTime> for Duration {
+    fn from(value: RelativeTime) -> Self {
+        value.0
+    }
+}
+
+impl FromStr for RelativeTime {
+    type Err = RelativeTimeParseError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let input = input.trim();
+        if input.is_empty() {
+            return Err(RelativeTimeParseError::Empty);
+        }
+
+        let (number, seconds_per_unit) =
+            RelativeTimeUnit::parse(input).ok_or(RelativeTimeParseError::MissingUnit)?;
+        if number.is_empty() || !number.chars().all(|ch| ch.is_ascii_digit()) {
+            return Err(RelativeTimeParseError::InvalidNumber);
+        }
+
+        let value = number
+            .parse::<u64>()
+            .map_err(|_| RelativeTimeParseError::InvalidNumber)?;
+        let seconds = value
+            .checked_mul(seconds_per_unit)
+            .ok_or(RelativeTimeParseError::Overflow)?;
+
+        Ok(Self(Duration::from_secs(seconds)))
+    }
+}
+
+impl fmt::Display for RelativeTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let seconds = self.0.as_secs();
+        for unit in RelativeTimeUnit::DISPLAY_ORDER {
+            if seconds != 0 && seconds % unit.seconds == 0 {
+                return write!(f, "{}{}", seconds / unit.seconds, unit.suffix);
+            }
+        }
+
+        write!(f, "{seconds}s")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RelativeTimeUnit {
+    suffix: &'static str,
+    seconds: u64,
+}
+
+impl RelativeTimeUnit {
+    const DISPLAY_ORDER: [Self; 5] = [
+        Self::WEEKS,
+        Self::DAYS,
+        Self::HOURS,
+        Self::MINUTES,
+        Self::SECONDS,
+    ];
+
+    const SECONDS: Self = Self {
+        suffix: "s",
+        seconds: 1,
+    };
+    const MINUTES: Self = Self {
+        suffix: "m",
+        seconds: 60,
+    };
+    const HOURS: Self = Self {
+        suffix: "h",
+        seconds: 60 * 60,
+    };
+    const DAYS: Self = Self {
+        suffix: "d",
+        seconds: 24 * 60 * 60,
+    };
+    const WEEKS: Self = Self {
+        suffix: "w",
+        seconds: 7 * 24 * 60 * 60,
+    };
+
+    fn parse(input: &str) -> Option<(&str, u64)> {
+        for unit in [
+            Self::SECONDS,
+            Self::MINUTES,
+            Self::HOURS,
+            Self::DAYS,
+            Self::WEEKS,
+        ] {
+            if let Some(number) = input.strip_suffix(unit.suffix) {
+                return Some((number, unit.seconds));
+            }
+        }
+
+        None
+    }
+}
+
+/// Error returned when parsing or constructing [`RelativeTime`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelativeTimeParseError {
+    /// Input is empty after trimming.
+    Empty,
+    /// Input has no supported relative-time unit suffix.
+    MissingUnit,
+    /// Input has an empty or non-decimal numeric component.
+    InvalidNumber,
+    /// Parsed relative time overflowed `u64` seconds.
+    Overflow,
+    /// Duration cannot be represented in whole seconds.
+    SubsecondPrecision,
+}
+
+impl fmt::Display for RelativeTimeParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => write!(f, "relative time is empty"),
+            Self::MissingUnit => {
+                write!(
+                    f,
+                    "relative time must use an 's', 'm', 'h', 'd', or 'w' suffix"
+                )
+            }
+            Self::InvalidNumber => {
+                write!(f, "relative time value must be an unsigned decimal integer")
+            }
+            Self::Overflow => write!(f, "relative time exceeds u64::MAX seconds"),
+            Self::SubsecondPrecision => write!(f, "relative time must use whole seconds"),
+        }
+    }
+}
+
+impl Error for RelativeTimeParseError {}
+
 /// Byte count with deterministic binary-unit text representation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ByteSize(u64);

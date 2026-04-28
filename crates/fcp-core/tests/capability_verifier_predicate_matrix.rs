@@ -1,7 +1,7 @@
 use chrono::{Duration, Utc};
 use fcp_core::{
-    CapabilityConstraints, CapabilityId, CapabilityToken, CapabilityVerifier, FcpError, InstanceId,
-    OperationId, ZoneId, CAPABILITY_TOKEN_CLOCK_SKEW_SECS,
+    CAPABILITY_TOKEN_CLOCK_SKEW_SECS, CapabilityConstraints, CapabilityId, CapabilityToken,
+    CapabilityVerifier, FcpError, InstanceId, OperationId, ZoneId,
 };
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
@@ -321,15 +321,20 @@ fn capability_verifier_rejects_documented_predicate_matrix() {
     ];
 
     for case in cases {
-        let err = case
-            .verifier
-            .verify_bound(
-                case.token,
-                &case.capability,
-                &case.operation,
-                &case.resources,
-            )
-            .unwrap_err();
+        let err = match case.verifier.verify_bound(
+            case.token,
+            &case.capability,
+            &case.operation,
+            &case.resources,
+        ) {
+            Err(err) => err,
+            Ok(token) => {
+                panic!(
+                    "{}: expected verifier predicate to reject, got accepted token {token:?}",
+                    case.name
+                )
+            }
+        };
         assert!(
             case.expected.matches(&err),
             "{}: expected verifier predicate to reject with documented error, got {err:?}",

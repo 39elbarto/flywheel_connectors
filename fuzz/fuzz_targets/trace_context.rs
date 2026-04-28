@@ -26,14 +26,16 @@ fn assert_context_invariants(ctx: &TraceContext) {
     assert_ne!(ctx.span_id, [0u8; 8]);
     assert_eq!(ctx.trace_id_hex().len(), 32);
     assert_eq!(ctx.span_id_hex().len(), 16);
-    assert!(ctx
-        .trace_id_hex()
-        .bytes()
-        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
-    assert!(ctx
-        .span_id_hex()
-        .bytes()
-        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+    assert!(
+        ctx.trace_id_hex()
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    );
+    assert!(
+        ctx.span_id_hex()
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    );
 
     let traceparent = ctx.to_traceparent();
     let parsed = TraceContext::from_traceparent(&traceparent)

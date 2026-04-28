@@ -871,8 +871,8 @@ async fn simulate_known() {
         }))
         .await
         .unwrap()["allowed"]
-        .as_bool()
-        .unwrap()
+            .as_bool()
+            .unwrap()
     );
 }
 
@@ -901,7 +901,10 @@ async fn simulate_all_operations() {
         ("arxiv.download_pdf", json!({"arxiv_id": "1706.03762"})),
         ("arxiv.get_citations", json!({"arxiv_id": "1706.03762"})),
         ("arxiv.get_references", json!({"arxiv_id": "1706.03762"})),
-        ("arxiv.extract_references", json!({"arxiv_id": "1706.03762"})),
+        (
+            "arxiv.extract_references",
+            json!({"arxiv_id": "1706.03762"}),
+        ),
         ("arxiv.get_author", json!({"author_name": "Alice"})),
         ("arxiv.list_categories", json!({})),
         ("arxiv.get_new_papers", json!({"category": "cs.AI"})),

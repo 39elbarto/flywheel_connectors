@@ -1186,10 +1186,7 @@ fn validate_simulate_input(operation: &str, input: &serde_json::Value) -> Result
     Ok(())
 }
 
-fn simulate_denied(
-    reason: impl Into<String>,
-    denial_code: impl Into<String>,
-) -> serde_json::Value {
+fn simulate_denied(reason: impl Into<String>, denial_code: impl Into<String>) -> serde_json::Value {
     json!({
         "allowed": false,
         "reason": reason.into(),

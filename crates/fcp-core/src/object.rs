@@ -98,6 +98,14 @@ impl fmt::Display for ObjectId {
     }
 }
 
+impl std::str::FromStr for ObjectId {
+    type Err = ObjectIdParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse_prefixed(value)
+    }
+}
+
 impl AsRef<[u8]> for ObjectId {
     fn as_ref(&self) -> &[u8] {
         &self.0

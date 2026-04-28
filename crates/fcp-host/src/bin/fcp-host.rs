@@ -27,7 +27,7 @@ use base64::Engine;
 use chrono::{DateTime, Utc};
 use fcp_async_core::channel::{mpsc, oneshot};
 use fcp_async_core::hyper_bridge::{HyperExecutor, HyperIo};
-use fcp_async_core::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use fcp_async_core::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use fcp_async_core::net::TcpListener;
 #[cfg(unix)]
 use fcp_async_core::net::UnixListener;
@@ -759,6 +759,7 @@ enum ResponseIdDisposition {
 const CONNECTOR_RPC_QUEUE_CAPACITY: usize = 64;
 const CONNECTOR_RPC_IO_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECTOR_RPC_MAX_STDOUT_LINE_BYTES: usize = 64 * 1024;
+const CONNECTOR_RPC_MAX_STDERR_LINE_BYTES: usize = 64 * 1024;
 
 fn connector_io_timeout_error(phase: &'static str, timeout: Duration) -> std::io::Error {
     std::io::Error::new(
@@ -779,6 +780,18 @@ fn connector_transport_poisoned_error() -> std::io::Error {
         std::io::ErrorKind::BrokenPipe,
         "connector transport is desynchronized after a previous failed RPC; restart connector before issuing another RPC",
     )
+}
+
+fn log_connector_stderr_line(line: &[u8], truncated: bool) {
+    let trimmed = String::from_utf8_lossy(line);
+    let trimmed = trimmed.trim_end();
+    if !trimmed.is_empty() || truncated {
+        tracing::warn!(
+            connector_stderr = %trimmed,
+            connector_stderr_truncated = truncated,
+            "connector log"
+        );
+    }
 }
 
 impl ConnectorProcessRunner {
@@ -811,17 +824,28 @@ impl ConnectorProcessRunner {
 
         let stderr_task = task::spawn(async move {
             let mut reader = BufReader::new(stderr);
-            let mut line = String::new();
+            let mut line = Vec::with_capacity(1024);
+            let mut truncated = false;
             loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {
-                        let trimmed = line.trim_end();
-                        if !trimmed.is_empty() {
-                            tracing::warn!(connector_stderr = %trimmed, "connector log");
+                match reader.read_u8().await {
+                    Ok(byte) => {
+                        if byte == b'\n' {
+                            log_connector_stderr_line(&line, truncated);
+                            line.clear();
+                            truncated = false;
+                        } else if line.len() < CONNECTOR_RPC_MAX_STDERR_LINE_BYTES {
+                            line.push(byte);
+                        } else {
+                            truncated = true;
                         }
                     }
+                    Err(err)
+                        if err.kind() == std::io::ErrorKind::UnexpectedEof && !line.is_empty() =>
+                    {
+                        log_connector_stderr_line(&line, truncated);
+                        break;
+                    }
+                    Err(_) => break,
                 }
             }
         });

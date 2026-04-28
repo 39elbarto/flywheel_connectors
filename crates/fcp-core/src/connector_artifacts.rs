@@ -221,6 +221,17 @@ pub fn connector_manifest_signing_view_schema() -> SchemaId {
 /// Signature domain separator for canonical signed manifests.
 pub const SIGNED_MANIFEST_SIGNATURE_CONTEXT: &[u8] = b"FCP2-SIGNED-MANIFEST-V1";
 
+/// Manifest signature algorithm tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ManifestSignature {
+    /// Ed25519 manifest signature.
+    Ed25519,
+    /// RSA-PSS manifest signature.
+    RsaPss,
+    /// ECDSA P-256 manifest signature.
+    EcdsaP256,
+}
+
 /// Canonical signed manifest envelope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedManifest<T> {

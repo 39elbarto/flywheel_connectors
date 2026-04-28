@@ -1106,5 +1106,19 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_tool_schema_format"
+path = "fuzz_targets/tool_schema_format.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_audit_event_follows"
+path = "fuzz_targets/audit_event_follows.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

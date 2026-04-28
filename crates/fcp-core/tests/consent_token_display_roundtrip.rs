@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, hash_map::DefaultHasher},
+    error::Error,
     hash::{Hash, Hasher},
 };
 
@@ -13,57 +14,53 @@ const CONSENT_TOKENS: &[&str] = &[
 ];
 
 #[test]
-fn consent_token_display_from_str_roundtrips() {
+fn consent_token_display_from_str_roundtrips() -> Result<(), Box<dyn Error>> {
     for canonical in CONSENT_TOKENS {
-        let token = canonical
-            .parse::<ConsentToken>()
-            .unwrap_or_else(|err| panic!("parse({canonical:?}): {err}"));
+        let consent = canonical.parse::<ConsentToken>()?;
 
-        assert_eq!(token.as_str(), *canonical);
-        assert_eq!(token.to_string(), *canonical);
-        assert_eq!(format!("{token}"), *canonical);
+        assert_eq!(consent.as_str(), *canonical);
+        assert_eq!(consent.to_string(), *canonical);
+        assert_eq!(format!("{consent}"), *canonical);
 
-        let displayed = token.to_string();
-        let reparsed = displayed
-            .parse::<ConsentToken>()
-            .expect("displayed ConsentToken parses");
+        let displayed = consent.to_string();
+        let reparsed = displayed.parse::<ConsentToken>()?;
 
-        assert_eq!(reparsed, token);
+        assert_eq!(reparsed, consent);
     }
+
+    Ok(())
 }
 
 #[test]
-fn consent_token_hash_is_deterministic_across_display_roundtrips() {
+fn consent_token_hash_is_deterministic_across_display_roundtrips() -> Result<(), Box<dyn Error>> {
     for canonical in CONSENT_TOKENS {
-        let token = ConsentToken::new(*canonical).expect("canonical ConsentToken");
-        let display_roundtrip = token
-            .to_string()
-            .parse::<ConsentToken>()
-            .expect("displayed ConsentToken parses");
-        let cloned = token.clone();
+        let consent = ConsentToken::new(*canonical)?;
+        let display_roundtrip = consent.to_string().parse::<ConsentToken>()?;
+        let cloned = consent.clone();
 
-        let expected_hash = hash_value(&token);
+        let expected_hash = hash_value(&consent);
 
         assert_eq!(hash_value(&display_roundtrip), expected_hash);
         assert_eq!(hash_value(&cloned), expected_hash);
-        assert_eq!(display_roundtrip, token);
+        assert_eq!(display_roundtrip, consent);
     }
+
+    Ok(())
 }
 
 #[test]
-fn consent_token_hashmap_lookup_survives_display_roundtrip() {
-    let token = "consent:github.repo".parse::<ConsentToken>().unwrap();
-    let display_roundtrip = token
-        .to_string()
-        .parse::<ConsentToken>()
-        .expect("displayed ConsentToken parses");
-    let via_new = ConsentToken::new("consent:github.repo").expect("new ConsentToken");
+fn consent_token_hashmap_lookup_survives_display_roundtrip() -> Result<(), Box<dyn Error>> {
+    let consent = "consent:github.repo".parse::<ConsentToken>()?;
+    let display_roundtrip = consent.to_string().parse::<ConsentToken>()?;
+    let via_new = ConsentToken::new("consent:github.repo")?;
     let mut decisions = HashMap::new();
 
-    decisions.insert(token, "approved");
+    decisions.insert(consent, "approved");
 
     assert_eq!(decisions.get(&display_roundtrip), Some(&"approved"));
     assert_eq!(decisions.get(&via_new), Some(&"approved"));
+
+    Ok(())
 }
 
 #[test]

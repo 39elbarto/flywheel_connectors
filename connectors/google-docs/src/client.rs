@@ -293,6 +293,22 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> DocsResult<&'a str>
     Ok(value)
 }
 
+/// Fuzz-only entry points for Docs client parsers.
+///
+/// Exposed for the Docs path-segment fuzz target so the fuzz crate can
+/// exercise the private guard before document IDs enter REST URL paths.
+///
+/// Bead flywheel_connectors-qle2j.
+#[doc(hidden)]
+pub mod __fuzz {
+    use super::sanitize_path_segment;
+
+    /// Validate an arbitrary Docs URL path segment candidate.
+    pub fn sanitize_path_segment_candidate(value: &str) -> bool {
+        sanitize_path_segment(value, "document_id").is_ok()
+    }
+}
+
 fn decode_json_response<T: DeserializeOwned>(response: GoogleExecuteResponse) -> DocsResult<T> {
     match response.body {
         GoogleResponseBody::Json(value) => serde_json::from_value(value).map_err(DocsError::Json),

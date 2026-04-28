@@ -1745,6 +1745,7 @@ dependencies = [
  "fcp-discord",
  "fcp-github",
  "fcp-gmail",
+ "fcp-google-docs",
  "fcp-google-drive",
  "fcp-graphql",
  "fcp-host",
@@ -1830,6 +1831,24 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.17",
+]
+
+[[package]]
+name = "fcp-google-docs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-google-discovery",
+ "fcp-sdk",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -140,11 +140,38 @@ fn assert_positive_integer_shortest_form(value: u64, expected_hex: &str) {
     );
 }
 
+fn assert_negative_integer_shortest_form(value: i64, expected_hex: &str) {
+    let encoded = to_canonical_cbor(&value).unwrap();
+    let expected = hex_to_bytes(expected_hex);
+
+    assert_eq!(
+        encoded,
+        expected,
+        "negative integer {value} did not use the expected shortest-form CBOR bytes: got {} expected {expected_hex}",
+        bytes_to_hex(&encoded)
+    );
+
+    let decoded: i64 = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+    assert_eq!(
+        decoded, value,
+        "negative integer {value} did not roundtrip from shortest-form CBOR"
+    );
+}
+
 macro_rules! positive_integer_shortest_form_boundary {
     ($test_name:ident, $value:expr, $expected_hex:literal) => {
         #[test]
         fn $test_name() {
             assert_positive_integer_shortest_form($value, $expected_hex);
+        }
+    };
+}
+
+macro_rules! negative_integer_shortest_form_boundary {
+    ($test_name:ident, $value:expr, $expected_hex:literal) => {
+        #[test]
+        fn $test_name() {
+            assert_negative_integer_shortest_form($value, $expected_hex);
         }
     };
 }
@@ -178,6 +205,22 @@ positive_integer_shortest_form_boundary!(
     positive_integer_shortest_form_u64_max,
     u64::MAX,
     "1bffffffffffffffff"
+);
+
+negative_integer_shortest_form_boundary!(negative_integer_shortest_form_minus_1, -1, "20");
+negative_integer_shortest_form_boundary!(negative_integer_shortest_form_minus_24, -24, "37");
+negative_integer_shortest_form_boundary!(negative_integer_shortest_form_minus_25, -25, "3818");
+negative_integer_shortest_form_boundary!(negative_integer_shortest_form_minus_256, -256, "38ff");
+negative_integer_shortest_form_boundary!(negative_integer_shortest_form_minus_257, -257, "390100");
+negative_integer_shortest_form_boundary!(
+    negative_integer_shortest_form_minus_65536,
+    -65_536,
+    "39ffff"
+);
+negative_integer_shortest_form_boundary!(
+    negative_integer_shortest_form_i64_min,
+    i64::MIN,
+    "3b7fffffffffffffff"
 );
 
 #[test]

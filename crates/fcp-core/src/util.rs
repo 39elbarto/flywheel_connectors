@@ -5,6 +5,62 @@ use std::{error::Error, fmt, str::FromStr, time::Duration};
 pub mod hex_or_bytes;
 pub mod hex_or_bytes_vec;
 pub mod objectid_prefixed;
+pub mod uri;
+
+pub use uri::SafeUri;
+
+/// Convert an ASCII label to kebab-case.
+#[must_use]
+pub fn to_kebab_case(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut previous_kind = None;
+    let mut pending_separator = false;
+    let mut chars = input.trim().chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch.is_ascii_alphanumeric() {
+            let kind = KebabCharKind::from_ascii_alphanumeric(ch);
+            let next_is_lowercase = chars.peek().is_some_and(|next| next.is_ascii_lowercase());
+            let camel_boundary = matches!(
+                (previous_kind, kind),
+                (Some(KebabCharKind::Lower | KebabCharKind::Digit), KebabCharKind::Upper)
+                    | (Some(KebabCharKind::Upper), KebabCharKind::Upper) if next_is_lowercase
+            );
+
+            if (pending_separator || camel_boundary) && !output.is_empty() {
+                output.push('-');
+            }
+
+            output.push(ch.to_ascii_lowercase());
+            previous_kind = Some(kind);
+            pending_separator = false;
+        } else {
+            pending_separator = true;
+            previous_kind = None;
+        }
+    }
+
+    output
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KebabCharKind {
+    Lower,
+    Upper,
+    Digit,
+}
+
+impl KebabCharKind {
+    fn from_ascii_alphanumeric(ch: char) -> Self {
+        if ch.is_ascii_digit() {
+            Self::Digit
+        } else if ch.is_ascii_uppercase() {
+            Self::Upper
+        } else {
+            Self::Lower
+        }
+    }
+}
 
 /// Maximum accepted canonical duration.
 pub const MAX_CANONICAL_DURATION: Duration = Duration::from_secs(86_400);

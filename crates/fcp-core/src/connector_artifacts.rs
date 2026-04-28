@@ -3,11 +3,13 @@
 //! These types give registry/store layers a shared `fcp-core` schema surface for
 //! mirrored connector manifests, binaries, and repair descriptors.
 
-use fcp_cbor::SchemaId;
+use fcp_cbor::{CanonicalSerializer, SchemaId, SerializationError};
+use fcp_crypto::{Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, KeyId};
 use semver::Version;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::ObjectId;
+use crate::{FcpError, FcpResult, ObjectId};
 
 /// Operating system + CPU architecture pairing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,6 +151,113 @@ pub fn connector_manifest_signing_view_schema() -> SchemaId {
         "ConnectorManifestSigningView",
         Version::new(1, 0, 0),
     )
+}
+
+/// Signature domain separator for canonical signed manifests.
+pub const SIGNED_MANIFEST_SIGNATURE_CONTEXT: &[u8] = b"FCP2-SIGNED-MANIFEST-V1";
+
+/// Canonical signed manifest envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedManifest<T> {
+    /// Schema used to produce the canonical payload bytes.
+    pub payload_schema: SchemaId,
+    /// Manifest payload.
+    pub payload: T,
+    /// Key identifier for the signing key.
+    pub signer_kid: KeyId,
+    /// Ed25519 signature over the canonical payload bytes.
+    pub signature: Ed25519Signature,
+}
+
+impl<T> SignedManifest<T> {
+    /// Canonical schema identifier for signed manifest envelopes.
+    #[must_use]
+    pub fn schema() -> SchemaId {
+        SchemaId::new("fcp.core", "SignedManifest", Version::new(1, 0, 0))
+    }
+}
+
+impl<T: Serialize> SignedManifest<T> {
+    /// Canonical bytes for the manifest payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serialization error if the payload cannot be encoded as
+    /// deterministic CBOR with the declared schema.
+    pub fn canonical_payload_bytes(&self) -> Result<Vec<u8>, SerializationError> {
+        CanonicalSerializer::serialize(&self.payload, &self.payload_schema)
+    }
+
+    /// Sign a manifest payload using deterministic canonical payload bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serialization error if the payload cannot be encoded as
+    /// deterministic CBOR with the declared schema.
+    pub fn sign(
+        payload_schema: SchemaId,
+        payload: T,
+        signing_key: &Ed25519SigningKey,
+    ) -> Result<Self, SerializationError> {
+        let payload_bytes = CanonicalSerializer::serialize(&payload, &payload_schema)?;
+        let signature =
+            signing_key.sign_with_context(SIGNED_MANIFEST_SIGNATURE_CONTEXT, &payload_bytes);
+
+        Ok(Self {
+            payload_schema,
+            payload,
+            signer_kid: signing_key.key_id(),
+            signature,
+        })
+    }
+
+    /// Verify the manifest signature against the supplied public key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FcpError::InvalidSignature`] if the signer key id or signature
+    /// does not match. Returns [`FcpError::Internal`] if the payload cannot be
+    /// re-encoded for verification.
+    pub fn verify(&self, verifying_key: &Ed25519VerifyingKey) -> FcpResult<()> {
+        if self.signer_kid != verifying_key.key_id() {
+            return Err(FcpError::InvalidSignature);
+        }
+
+        let payload_bytes = self
+            .canonical_payload_bytes()
+            .map_err(|err| FcpError::Internal {
+                message: format!("failed to encode signed manifest payload: {err}"),
+            })?;
+
+        verifying_key
+            .verify_with_context(
+                SIGNED_MANIFEST_SIGNATURE_CONTEXT,
+                &payload_bytes,
+                &self.signature,
+            )
+            .map_err(|_| FcpError::InvalidSignature)
+    }
+}
+
+impl<T: Serialize + DeserializeOwned> SignedManifest<T> {
+    /// Serialize the signed manifest envelope using its canonical schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serialization error if the envelope cannot be encoded.
+    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, SerializationError> {
+        CanonicalSerializer::serialize(self, &Self::schema())
+    }
+
+    /// Deserialize a signed manifest envelope using its canonical schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serialization error if the envelope is malformed, has the
+    /// wrong schema hash, or is not canonically encoded.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, SerializationError> {
+        CanonicalSerializer::deserialize(bytes, &Self::schema())
+    }
 }
 
 #[cfg(test)]

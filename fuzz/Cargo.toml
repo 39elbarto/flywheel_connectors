@@ -278,6 +278,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_webhook_delivery_status_parse"
+path = "fuzz_targets/webhook_delivery_status_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_github_webhook_payload"
 path = "fuzz_targets/github_webhook_payload.rs"
 test = false
@@ -966,6 +973,13 @@ bench = false
 [[bin]]
 name = "fuzz_webhook_event_json"
 path = "fuzz_targets/webhook_event_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_aead_chacha20"
+path = "fuzz_targets/aead_chacha20.rs"
 test = false
 doc = false
 bench = false

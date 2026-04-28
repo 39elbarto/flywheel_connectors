@@ -2848,6 +2848,7 @@ dependencies = [
  "fcp-streaming",
  "fcp-tailscale",
  "fcp-webhook",
+ "futures-util",
  "hex",
  "jsonschema",
  "pretty_assertions",

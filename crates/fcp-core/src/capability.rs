@@ -2280,6 +2280,116 @@ pub struct RetryConfig {
     pub multiplier: f64,
 }
 
+/// Retry directive returned by classification layers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RetryDirective {
+    /// Retry without waiting.
+    Immediate,
+    /// Retry using the caller's configured backoff policy.
+    Backoff,
+    /// Retry after a concrete delay.
+    RetryAfter(Duration),
+    /// Do not retry.
+    Terminal,
+}
+
+impl RetryDirective {
+    /// Parse a `Retry-After` duration value expressed as decimal seconds.
+    ///
+    /// This intentionally covers the deterministic delta-seconds form of the
+    /// HTTP `Retry-After` header. Date-based parsing depends on wall-clock
+    /// time and belongs at transport adapters that can supply a clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RetryDirectiveParseError`] when the input is empty,
+    /// non-numeric, or overflows a [`Duration`].
+    pub fn parse_retry_after(value: &str) -> Result<Self, RetryDirectiveParseError> {
+        parse_retry_after_duration(value).map(Self::RetryAfter)
+    }
+
+    /// Return the explicit retry-after delay, if this directive carries one.
+    #[must_use]
+    pub const fn retry_after(self) -> Option<Duration> {
+        match self {
+            Self::RetryAfter(delay) => Some(delay),
+            Self::Immediate | Self::Backoff | Self::Terminal => None,
+        }
+    }
+}
+
+impl fmt::Display for RetryDirective {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Immediate => f.write_str("immediate"),
+            Self::Backoff => f.write_str("backoff"),
+            Self::RetryAfter(delay) => write!(f, "retry-after={}ms", delay.as_millis()),
+            Self::Terminal => f.write_str("terminal"),
+        }
+    }
+}
+
+impl std::str::FromStr for RetryDirective {
+    type Err = RetryDirectiveParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "immediate" => Ok(Self::Immediate),
+            "backoff" => Ok(Self::Backoff),
+            "terminal" => Ok(Self::Terminal),
+            _ => {
+                let millis = s
+                    .strip_prefix("retry-after=")
+                    .and_then(|rest| rest.strip_suffix("ms"))
+                    .ok_or(RetryDirectiveParseError::InvalidFormat)?;
+                parse_millis_duration(millis).map(Self::RetryAfter)
+            }
+        }
+    }
+}
+
+/// Error returned when parsing a [`RetryDirective`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RetryDirectiveParseError {
+    /// Input did not match the stable directive grammar.
+    #[error("retry directive must be immediate, backoff, terminal, or retry-after=<millis>ms")]
+    InvalidFormat,
+
+    /// Retry-after duration was not a decimal integer.
+    #[error("retry-after duration must be a decimal integer")]
+    InvalidDuration,
+
+    /// Retry-after duration overflowed [`Duration`].
+    #[error("retry-after duration is too large")]
+    DurationOverflow,
+}
+
+fn parse_millis_duration(value: &str) -> Result<Duration, RetryDirectiveParseError> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(RetryDirectiveParseError::InvalidDuration);
+    }
+
+    let millis = value
+        .parse::<u128>()
+        .map_err(|_| RetryDirectiveParseError::DurationOverflow)?;
+    let secs =
+        u64::try_from(millis / 1_000).map_err(|_| RetryDirectiveParseError::DurationOverflow)?;
+    let nanos = u32::try_from((millis % 1_000) * 1_000_000)
+        .map_err(|_| RetryDirectiveParseError::DurationOverflow)?;
+    Ok(Duration::new(secs, nanos))
+}
+
+fn parse_retry_after_duration(value: &str) -> Result<Duration, RetryDirectiveParseError> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(RetryDirectiveParseError::InvalidDuration);
+    }
+
+    let seconds = value
+        .parse::<u64>()
+        .map_err(|_| RetryDirectiveParseError::DurationOverflow)?;
+    Ok(Duration::from_secs(seconds))
+}
+
 mod duration_millis {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use std::time::Duration;

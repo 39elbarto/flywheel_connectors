@@ -7,7 +7,11 @@
 //! both JSON (for debugging) and CBOR (for production).
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    convert::Infallible,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use crate::{
     ApprovalToken, CapabilityGrant, CapabilityId, CapabilityToken, ConnectorId, CorrelationId,
@@ -19,6 +23,8 @@ use crate::{
 // ─────────────────────────────────────────────────────────────────────────────
 // Request ID (Wire Format)
 // ─────────────────────────────────────────────────────────────────────────────
+
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Request identifier for correlation.
 ///
@@ -34,10 +40,11 @@ impl RequestId {
         Self(id.into())
     }
 
-    /// Generate a new random request ID using UUID.
+    /// Generate a new monotonic request ID.
     #[must_use]
     pub fn random() -> Self {
-        Self(format!("req_{}", uuid::Uuid::new_v4()))
+        let sequence = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+        Self(format!("req_{sequence:020}"))
     }
 }
 
@@ -50,6 +57,14 @@ impl std::fmt::Display for RequestId {
 impl<S: Into<String>> From<S> for RequestId {
     fn from(s: S) -> Self {
         Self(s.into())
+    }
+}
+
+impl std::str::FromStr for RequestId {
+    type Err = Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::new(s))
     }
 }
 

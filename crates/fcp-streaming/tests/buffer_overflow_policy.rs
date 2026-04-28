@@ -149,7 +149,10 @@ async fn stream_with_tiny_buffer_emits_buffer_overflow_error_when_chunk_exceeds_
     let client = SseClient::with_config(format!("{}/events", mock_server.uri()), config);
     let mut stream = client.connect().await.expect("connect");
 
-    let first = stream.next().await.expect("stream MUST yield at least one item");
+    let first = stream
+        .next()
+        .await
+        .expect("stream MUST yield at least one item");
     let err = first.expect_err(
         "documented policy is ERROR RETURNED — first poll on an oversized chunk MUST yield Err",
     );

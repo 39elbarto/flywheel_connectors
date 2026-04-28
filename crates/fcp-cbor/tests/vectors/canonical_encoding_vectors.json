@@ -38,6 +38,21 @@
       "value": 65536,
       "canonical_hex": "1a00010000",
       "description": "65536 requires 4-byte additional info"
+    },
+    {
+      "value": 4294967295,
+      "canonical_hex": "1affffffff",
+      "description": "Max 4-byte value"
+    },
+    {
+      "value": 4294967296,
+      "canonical_hex": "1b0000000100000000",
+      "description": "First value requiring 8-byte additional info"
+    },
+    {
+      "value": 18446744073709551615,
+      "canonical_hex": "1bffffffffffffffff",
+      "description": "u64::MAX uses 8-byte additional info"
     }
   ],
 
@@ -153,18 +168,21 @@
         "name": "length_first",
         "keys": ["bb", "aaa", "a"],
         "sorted_keys": ["a", "bb", "aaa"],
+        "canonical_hex": "a3616102626262006361616101",
         "description": "Shorter keys come first regardless of lexicographic order"
       },
       {
         "name": "lexicographic_same_length",
         "keys": ["z", "a", "m"],
         "sorted_keys": ["a", "m", "z"],
+        "canonical_hex": "a3616101616d02617a00",
         "description": "Same-length keys sorted lexicographically"
       },
       {
         "name": "mixed",
         "keys": ["zz", "aa", "b", "aaa"],
         "sorted_keys": ["b", "aa", "zz", "aaa"],
+        "canonical_hex": "a461620262616101627a7a006361616103",
         "description": "Length first, then lexicographic"
       }
     ]

@@ -66,6 +66,7 @@ struct MapKeyOrderingCase {
     name: String,
     keys: Vec<String>,
     sorted_keys: Vec<String>,
+    canonical_hex: String,
     description: String,
 }
 
@@ -198,7 +199,7 @@ fn test_negative_integer_minimal_encoding_from_vectors() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn test_simple_value_encoding_from_vectors() {
+fn test_simple_value_encoding_from_vectors() -> Result<(), String> {
     let vectors = load_canonical_vectors();
 
     for vector in vectors.simple_value_encoding {
@@ -210,7 +211,7 @@ fn test_simple_value_encoding_from_vectors() {
             // serde represents `null` as `Option::None`; ciborium emits
             // major type 7 / minor 22 (0xf6) for it.
             "null" => to_canonical_cbor(&Option::<u8>::None).unwrap(),
-            other => panic!("unknown simple value '{other}' in golden vectors"),
+            other => return Err(format!("unknown simple value '{other}' in golden vectors")),
         };
 
         assert_eq!(
@@ -223,6 +224,8 @@ fn test_simple_value_encoding_from_vectors() {
             vector.canonical_hex
         );
     }
+
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -232,7 +235,6 @@ fn test_simple_value_encoding_from_vectors() {
 #[test]
 fn test_map_key_ordering_from_vectors() {
     let vectors = load_canonical_vectors();
-    let schema = SchemaId::new("fcp.test", "Map", Version::new(0, 1, 0));
 
     for case in vectors.map_key_ordering.test_cases {
         // Create a map with the specified keys
@@ -241,27 +243,60 @@ fn test_map_key_ordering_from_vectors() {
             map.insert(key.clone(), i as u64);
         }
 
-        // Serialize
-        let bytes = CanonicalSerializer::serialize(&map, &schema).unwrap();
-
-        // Deserialize to verify round-trip
-        let decoded: HashMap<String, u64> =
-            CanonicalSerializer::deserialize(&bytes, &schema).unwrap();
+        let bytes = to_canonical_cbor(&map).unwrap();
+        let expected = hex_to_bytes(&case.canonical_hex);
 
         assert_eq!(
-            decoded.len(),
-            map.len(),
-            "Case '{}' ({}) should preserve all keys",
+            bytes,
+            expected,
+            "Case '{}' ({}) canonical map encoding mismatch for sorted key order {:?}: got {} expected {}",
             case.name,
-            case.description
+            case.description,
+            case.sorted_keys,
+            bytes_to_hex(&bytes),
+            case.canonical_hex
         );
+    }
+}
 
-        // Verify determinism - serialize again and check same bytes
-        let bytes2 = CanonicalSerializer::serialize(&map, &schema).unwrap();
+#[test]
+fn test_integer_shortest_encoding_is_type_width_independent() {
+    let cases = [
+        ("24_u8", to_canonical_cbor(&24_u8).unwrap(), "1818"),
+        ("24_u16", to_canonical_cbor(&24_u16).unwrap(), "1818"),
+        ("24_u32", to_canonical_cbor(&24_u32).unwrap(), "1818"),
+        ("24_u64", to_canonical_cbor(&24_u64).unwrap(), "1818"),
+        (
+            "2^32_u64",
+            to_canonical_cbor(&4_294_967_296_u64).unwrap(),
+            "1b0000000100000000",
+        ),
+        (
+            "u64::MAX",
+            to_canonical_cbor(&u64::MAX).unwrap(),
+            "1bffffffffffffffff",
+        ),
+        ("-25_i8", to_canonical_cbor(&(-25_i8)).unwrap(), "3818"),
+        ("-25_i16", to_canonical_cbor(&(-25_i16)).unwrap(), "3818"),
+        ("-25_i32", to_canonical_cbor(&(-25_i32)).unwrap(), "3818"),
+        ("-25_i64", to_canonical_cbor(&(-25_i64)).unwrap(), "3818"),
+        (
+            "-(2^32 + 1)_i64",
+            to_canonical_cbor(&(-4_294_967_297_i64)).unwrap(),
+            "3b0000000100000000",
+        ),
+        (
+            "i64::MIN",
+            to_canonical_cbor(&i64::MIN).unwrap(),
+            "3b7fffffffffffffff",
+        ),
+    ];
+
+    for (name, encoded, expected_hex) in cases {
         assert_eq!(
-            bytes, bytes2,
-            "Case '{}' ({}) must be deterministic",
-            case.name, case.description
+            encoded,
+            hex_to_bytes(expected_hex),
+            "{name} did not use the shortest canonical CBOR form"
         );
     }
 }

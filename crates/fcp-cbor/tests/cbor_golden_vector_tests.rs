@@ -122,9 +122,63 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
     hex::encode(bytes)
 }
 
+fn assert_positive_integer_shortest_form(value: u64, expected_hex: &str) {
+    let encoded = to_canonical_cbor(&value).unwrap();
+    let expected = hex_to_bytes(expected_hex);
+
+    assert_eq!(
+        encoded,
+        expected,
+        "positive integer {value} did not use the expected shortest-form CBOR bytes: got {} expected {expected_hex}",
+        bytes_to_hex(&encoded)
+    );
+
+    let decoded: u64 = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+    assert_eq!(
+        decoded, value,
+        "positive integer {value} did not roundtrip from shortest-form CBOR"
+    );
+}
+
+macro_rules! positive_integer_shortest_form_boundary {
+    ($test_name:ident, $value:expr, $expected_hex:literal) => {
+        #[test]
+        fn $test_name() {
+            assert_positive_integer_shortest_form($value, $expected_hex);
+        }
+    };
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Integer Encoding Tests
 // ─────────────────────────────────────────────────────────────────────────────
+
+positive_integer_shortest_form_boundary!(positive_integer_shortest_form_0, 0, "00");
+positive_integer_shortest_form_boundary!(positive_integer_shortest_form_23, 23, "17");
+positive_integer_shortest_form_boundary!(positive_integer_shortest_form_24, 24, "1818");
+positive_integer_shortest_form_boundary!(positive_integer_shortest_form_255, 255, "18ff");
+positive_integer_shortest_form_boundary!(positive_integer_shortest_form_256, 256, "190100");
+positive_integer_shortest_form_boundary!(positive_integer_shortest_form_65535, 65_535, "19ffff");
+positive_integer_shortest_form_boundary!(
+    positive_integer_shortest_form_65536,
+    65_536,
+    "1a00010000"
+);
+positive_integer_shortest_form_boundary!(
+    positive_integer_shortest_form_u32_max,
+    4_294_967_295,
+    "1affffffff"
+);
+positive_integer_shortest_form_boundary!(
+    positive_integer_shortest_form_u32_max_plus_one,
+    4_294_967_296,
+    "1b0000000100000000"
+);
+positive_integer_shortest_form_boundary!(
+    positive_integer_shortest_form_u64_max,
+    u64::MAX,
+    "1bffffffffffffffff"
+);
 
 #[test]
 fn test_integer_minimal_encoding_from_vectors() {

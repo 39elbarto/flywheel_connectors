@@ -321,12 +321,21 @@ fn http_status_error(status: u16, headers: &HeaderMap, body: String) -> DingTalk
     }
 }
 
+const MAX_RETRY_AFTER_MS: u64 = 60 * 60 * 1000;
+
 fn retry_after_ms(headers: &HeaderMap) -> Option<u64> {
     headers
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(|seconds| seconds.saturating_mul(1_000))
+        .and_then(parse_retry_after_header_value)
+}
+
+fn parse_retry_after_header_value(value: &str) -> Option<u64> {
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|seconds| seconds.saturating_mul(1_000).min(MAX_RETRY_AFTER_MS))
 }
 
 #[must_use]
@@ -717,6 +726,21 @@ mod tests {
                 retry_after_ms: 2_000
             }
         ));
+    }
+
+    #[test]
+    fn retry_after_header_parser_clamps_large_value() {
+        assert_eq!(
+            parse_retry_after_header_value(&u64::MAX.to_string()),
+            Some(MAX_RETRY_AFTER_MS)
+        );
+    }
+
+    #[test]
+    fn retry_after_header_parser_rejects_invalid_values() {
+        assert_eq!(parse_retry_after_header_value("-1"), None);
+        assert_eq!(parse_retry_after_header_value("1.5"), None);
+        assert_eq!(parse_retry_after_header_value("not-a-number"), None);
     }
 
     #[test]

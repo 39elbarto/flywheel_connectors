@@ -21,9 +21,10 @@
 //! | Clause | Level | Test fn |
 //! |---|---|---|
 //! | Responder-picks semantics | MUST | `negotiate_suite_responder_first_preference_wins` |
+//! | Responder picks first preference among initiator-offered suites | MUST | `negotiate_suite_picks_responder_first_initiator_offered_suite_and_requires_floor_overlap` |
 //! | Initiator order is not consulted | MUST | `negotiate_suite_ignores_initiator_order_preference` |
 //! | Malicious initiator cannot downgrade | MUST | `negotiate_suite_malicious_initiator_cannot_downgrade` |
-//! | MINIMUM_SUITE floor is enforced | MUST | `negotiate_suite_floor_refuses_below_minimum` |
+//! | MINIMUM_SUITE floor is enforced | MUST | `negotiate_suite_accepts_at_or_above_floor` |
 //! | MINIMUM_SUITE equals current weakest | MUST | `minimum_suite_equals_current_weakest` |
 //! | No intersection → None | MUST | `negotiate_suite_no_overlap_returns_none` |
 //! | Empty input → None | MUST | `negotiate_suite_empty_inputs_return_none` |
@@ -47,6 +48,32 @@ fn negotiate_suite_responder_first_preference_wins() {
         selected,
         Some(SessionCryptoSuite::Suite1),
         "responder-picks violated: expected responder's first choice (Suite1), got {selected:?}"
+    );
+}
+
+/// Spec: the responder picks its first preference that the initiator offered,
+/// and returns `None` when no offered responder suite is at or above the floor.
+#[test]
+fn negotiate_suite_picks_responder_first_initiator_offered_suite_and_requires_floor_overlap() {
+    let initiator = [SessionCryptoSuite::Suite1];
+    let responder = [SessionCryptoSuite::Suite2, SessionCryptoSuite::Suite1];
+
+    let selected = negotiate_suite(&initiator, &responder);
+
+    assert_eq!(
+        selected,
+        Some(SessionCryptoSuite::Suite1),
+        "responder must skip unoffered preferences and choose its first initiator-offered suite"
+    );
+
+    let initiator = [SessionCryptoSuite::Suite2];
+    let responder = [MINIMUM_SUITE];
+
+    let selected = negotiate_suite(&initiator, &responder);
+
+    assert_eq!(
+        selected, None,
+        "no-overlap case at MINIMUM_SUITE must refuse negotiation, got {selected:?}"
     );
 }
 

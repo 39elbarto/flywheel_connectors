@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use fcp_crypto::canonicalize::{canonical_signing_bytes, to_deterministic_cbor};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use sha2::{Digest as _, Sha256};
+use sha2::{Digest as _, Sha256, Sha384, Sha512};
 
 /// Format identifier for supply-chain attestations.
 pub const SUPPLY_CHAIN_ATTESTATION_FORMAT: &str = "fcp-supply-chain-attestation";
@@ -80,6 +80,10 @@ pub enum HashAlgorithm {
     Blake3_256,
     /// SHA-256 digest (`sha256:<hex>`).
     Sha256,
+    /// SHA-384 digest (`sha384:<hex>`).
+    Sha384,
+    /// SHA-512 digest (`sha512:<hex>`).
+    Sha512,
 }
 
 impl HashAlgorithm {
@@ -88,6 +92,8 @@ impl HashAlgorithm {
         match self {
             Self::Blake3_256 => "blake3-256",
             Self::Sha256 => "sha256",
+            Self::Sha384 => "sha384",
+            Self::Sha512 => "sha512",
         }
     }
 }
@@ -523,7 +529,7 @@ impl SbomComponent {
             if !digest_is_supported(hash) {
                 return Err(SupplyChainError::InvalidSbom {
                     reason: format!(
-                        "components.hashes value `{hash}` must use blake3-256 or sha256 with 64 lowercase hex chars"
+                        "components.hashes value `{hash}` must use a supported digest algorithm with matching lowercase hex length"
                     ),
                 });
             }
@@ -753,13 +759,14 @@ fn validate_digest_with_algo(
 ) -> Result<(), String> {
     let Some((prefix, hex)) = digest.split_once(':') else {
         return Err(format!(
-            "{field_name} must use `<algorithm>:<64-lowercase-hex>` format"
+            "{field_name} must use `<algorithm>:<lowercase-hex>` format"
         ));
     };
-    if prefix != algorithm.as_str() || !is_lower_hex_64(hex) {
+    let expected_len = digest_hex_len(algorithm);
+    if prefix != algorithm.as_str() || !is_lower_hex_len(hex, expected_len) {
         return Err(format!(
-            "{field_name} must use `{}` with 64 lowercase hex chars",
-            algorithm.as_str()
+            "{field_name} must use `{}` with {expected_len} lowercase hex chars",
+            algorithm.as_str(),
         ));
     }
     Ok(())
@@ -767,12 +774,30 @@ fn validate_digest_with_algo(
 
 fn digest_is_supported(digest: &str) -> bool {
     digest.split_once(':').is_some_and(|(prefix, hex)| {
-        matches!(prefix, "blake3-256" | "sha256") && is_lower_hex_64(hex)
+        digest_hex_len_for_prefix(prefix)
+            .is_some_and(|expected_len| is_lower_hex_len(hex, expected_len))
     })
 }
 
-fn is_lower_hex_64(value: &str) -> bool {
-    value.len() == 64
+const fn digest_hex_len(algorithm: HashAlgorithm) -> usize {
+    match algorithm {
+        HashAlgorithm::Blake3_256 | HashAlgorithm::Sha256 => 64,
+        HashAlgorithm::Sha384 => 96,
+        HashAlgorithm::Sha512 => 128,
+    }
+}
+
+const fn digest_hex_len_for_prefix(prefix: &str) -> Option<usize> {
+    match prefix.as_bytes() {
+        b"blake3-256" | b"sha256" => Some(64),
+        b"sha384" => Some(96),
+        b"sha512" => Some(128),
+        _ => None,
+    }
+}
+
+fn is_lower_hex_len(value: &str, expected_len: usize) -> bool {
+    value.len() == expected_len
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -837,6 +862,16 @@ fn hash_bytes(bytes: &[u8], algorithm: HashAlgorithm) -> String {
         }
         HashAlgorithm::Sha256 => {
             let mut hasher = Sha256::new();
+            hasher.update(bytes);
+            format!("{}:{}", algorithm.as_str(), hex::encode(hasher.finalize()))
+        }
+        HashAlgorithm::Sha384 => {
+            let mut hasher = Sha384::new();
+            hasher.update(bytes);
+            format!("{}:{}", algorithm.as_str(), hex::encode(hasher.finalize()))
+        }
+        HashAlgorithm::Sha512 => {
+            let mut hasher = Sha512::new();
             hasher.update(bytes);
             format!("{}:{}", algorithm.as_str(), hex::encode(hasher.finalize()))
         }
@@ -1043,7 +1078,7 @@ impl VerificationPipeline {
             detail: if passed {
                 "artifact_digest is a supported canonical digest".to_string()
             } else {
-                "artifact_digest must use blake3-256 or sha256 with 64 lowercase hex chars"
+                "artifact_digest must use a supported digest algorithm with matching lowercase hex length"
                     .to_string()
             },
         });
@@ -2083,33 +2118,33 @@ mod tests {
 
     #[test]
     fn is_lower_hex_64_rejects_empty() {
-        assert!(!is_lower_hex_64(""));
+        assert!(!is_lower_hex_len("", 64));
     }
 
     #[test]
     fn is_lower_hex_64_rejects_short() {
-        assert!(!is_lower_hex_64(&"a".repeat(63)));
+        assert!(!is_lower_hex_len(&"a".repeat(63), 64));
     }
 
     #[test]
     fn is_lower_hex_64_rejects_long() {
-        assert!(!is_lower_hex_64(&"a".repeat(65)));
+        assert!(!is_lower_hex_len(&"a".repeat(65), 64));
     }
 
     #[test]
     fn is_lower_hex_64_rejects_uppercase() {
-        assert!(!is_lower_hex_64(&"A".repeat(64)));
+        assert!(!is_lower_hex_len(&"A".repeat(64), 64));
     }
 
     #[test]
     fn is_lower_hex_64_rejects_non_hex() {
-        assert!(!is_lower_hex_64(&"g".repeat(64)));
+        assert!(!is_lower_hex_len(&"g".repeat(64), 64));
     }
 
     #[test]
     fn is_lower_hex_64_accepts_valid() {
-        assert!(is_lower_hex_64(&"a".repeat(64)));
-        assert!(is_lower_hex_64(&"0123456789abcdef".repeat(4)));
+        assert!(is_lower_hex_len(&"a".repeat(64), 64));
+        assert!(is_lower_hex_len(&"0123456789abcdef".repeat(4), 64));
     }
 
     #[test]
@@ -2147,6 +2182,8 @@ mod tests {
     fn hash_algorithm_as_str_values() {
         assert_eq!(HashAlgorithm::Blake3_256.as_str(), "blake3-256");
         assert_eq!(HashAlgorithm::Sha256.as_str(), "sha256");
+        assert_eq!(HashAlgorithm::Sha384.as_str(), "sha384");
+        assert_eq!(HashAlgorithm::Sha512.as_str(), "sha512");
     }
 
     #[test]

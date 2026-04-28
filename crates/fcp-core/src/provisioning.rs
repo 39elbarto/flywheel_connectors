@@ -5,7 +5,7 @@
 //! interface for automated setup (OAuth, webhooks, secret capture) with
 //! minimal human prompts and deterministic, idempotent steps.
 
-use std::fmt;
+use std::{error::Error, fmt};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -242,6 +242,50 @@ pub enum OAuthRecipe {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         scopes: Vec<String>,
     },
+}
+
+/// Port number validation failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortNumberValidationError {
+    /// The numeric port is outside the inclusive TCP/UDP port range.
+    OutOfRange {
+        /// The provided port value.
+        value: i64,
+        /// The minimum accepted port number.
+        min: u16,
+        /// The maximum accepted port number.
+        max: u16,
+    },
+}
+
+impl fmt::Display for PortNumberValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OutOfRange { value, min, max } => {
+                write!(f, "port number {value} is outside range {min}..={max}")
+            }
+        }
+    }
+}
+
+impl Error for PortNumberValidationError {}
+
+/// Validate a numeric TCP/UDP port and return the canonical `u16` value.
+///
+/// Port `0` is accepted because callers may use it to request OS-assigned
+/// ephemeral ports. Privileged ports are accepted; authorization policy belongs
+/// at the call site.
+///
+/// # Errors
+///
+/// Returns [`PortNumberValidationError::OutOfRange`] when `port` is negative or
+/// greater than `u16::MAX`.
+pub fn validate_port_number(port: i64) -> Result<u16, PortNumberValidationError> {
+    u16::try_from(port).map_err(|_| PortNumberValidationError::OutOfRange {
+        value: port,
+        min: 0,
+        max: u16::MAX,
+    })
 }
 
 /// Webhook registration definition (NORMATIVE when used).

@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+use ciborium::value::Value;
 use fcp_cbor::{to_canonical_cbor, CanonicalSerializer, SchemaId};
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -177,6 +178,26 @@ fn assert_array_length_prefix_shortest_form(len: usize, expected_prefix_hex: &st
     );
 }
 
+fn assert_byte_string_length_prefix_shortest_form(len: usize, expected_prefix_hex: &str) {
+    let value = vec![0_u8; len];
+    let encoded = to_canonical_cbor(&Value::Bytes(value.clone())).unwrap();
+    let expected_prefix = hex_to_bytes(expected_prefix_hex);
+
+    assert_eq!(
+        &encoded[..expected_prefix.len()],
+        expected_prefix.as_slice(),
+        "byte string length {len} did not use the expected shortest-form length prefix: got {} expected {expected_prefix_hex}",
+        bytes_to_hex(&encoded[..expected_prefix.len()])
+    );
+
+    let decoded: Value = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+    assert_eq!(
+        decoded,
+        Value::Bytes(value),
+        "byte string length {len} did not roundtrip from shortest-form CBOR"
+    );
+}
+
 macro_rules! positive_integer_shortest_form_boundary {
     ($test_name:ident, $value:expr, $expected_hex:literal) => {
         #[test]
@@ -200,6 +221,15 @@ macro_rules! array_length_prefix_boundary {
         #[test]
         fn $test_name() {
             assert_array_length_prefix_shortest_form($len, $expected_prefix_hex);
+        }
+    };
+}
+
+macro_rules! byte_string_length_prefix_boundary {
+    ($test_name:ident, $len:expr, $expected_prefix_hex:literal) => {
+        #[test]
+        fn $test_name() {
+            assert_byte_string_length_prefix_shortest_form($len, $expected_prefix_hex);
         }
     };
 }
@@ -449,6 +479,22 @@ fn test_string_encoding_from_vectors() {
         );
     }
 }
+
+byte_string_length_prefix_boundary!(byte_string_length_prefix_shortest_form_0, 0, "40");
+byte_string_length_prefix_boundary!(byte_string_length_prefix_shortest_form_23, 23, "57");
+byte_string_length_prefix_boundary!(byte_string_length_prefix_shortest_form_24, 24, "5818");
+byte_string_length_prefix_boundary!(byte_string_length_prefix_shortest_form_255, 255, "58ff");
+byte_string_length_prefix_boundary!(byte_string_length_prefix_shortest_form_256, 256, "590100");
+byte_string_length_prefix_boundary!(
+    byte_string_length_prefix_shortest_form_65535,
+    65_535,
+    "59ffff"
+);
+byte_string_length_prefix_boundary!(
+    byte_string_length_prefix_shortest_form_65536,
+    65_536,
+    "5a00010000"
+);
 
 array_length_prefix_boundary!(array_length_prefix_shortest_form_0, 0, "80");
 array_length_prefix_boundary!(array_length_prefix_shortest_form_23, 23, "97");

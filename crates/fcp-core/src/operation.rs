@@ -30,8 +30,40 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    IdempotencyClass, NodeSignature, ObjectHeader, ObjectId, TailscaleNodeId, UsageMetric, ZoneId,
+    CapabilityId, IdempotencyClass, InstanceId, NodeSignature, ObjectHeader, ObjectId, PrincipalId,
+    RequestId, TailscaleNodeId, UsageMetric, ZoneId,
 };
+
+/// Tracing span name for canonical operation execution.
+pub const CANONICAL_OPERATION_SPAN_NAME: &str = "fcp_operation";
+
+/// Stable tracing attribute names emitted by canonical operation spans.
+pub const CANONICAL_OPERATION_SPAN_ATTRIBUTE_NAMES: [&str; 5] = [
+    "zone_id",
+    "capability_id",
+    "principal_id",
+    "instance_id",
+    "request_id",
+];
+
+/// Create the canonical tracing span for an FCP operation.
+#[must_use]
+pub fn canonical_operation_span(
+    zone_id: &ZoneId,
+    capability_id: &CapabilityId,
+    principal_id: &PrincipalId,
+    instance_id: &InstanceId,
+    request_id: &RequestId,
+) -> tracing::Span {
+    tracing::info_span!(
+        CANONICAL_OPERATION_SPAN_NAME,
+        zone_id = %zone_id,
+        capability_id = %capability_id,
+        principal_id = %principal_id,
+        instance_id = %instance_id,
+        request_id = %request_id,
+    )
+}
 
 fn append_len_prefixed_bytes(bytes: &mut Vec<u8>, value: &[u8]) {
     let value_len = u32::try_from(value.len()).unwrap_or(u32::MAX);
@@ -1894,10 +1926,13 @@ mod tests {
     fn validate_binding_success() {
         let intent = create_test_intent();
         let receipt = create_test_receipt();
-        assert!(
-            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent)
-                .is_ok()
-        );
+        assert!(validate_receipt_intent_binding(
+            test_receipt_id(),
+            &receipt,
+            test_intent_id(),
+            &intent
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2246,10 +2281,13 @@ mod tests {
         let mut receipt = create_test_receipt();
         receipt.idempotency_key = None;
         // Should succeed: both None means keys match
-        assert!(
-            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent)
-                .is_ok()
-        );
+        assert!(validate_receipt_intent_binding(
+            test_receipt_id(),
+            &receipt,
+            test_intent_id(),
+            &intent
+        )
+        .is_ok());
     }
 
     #[test]

@@ -52,6 +52,7 @@ fcp-registry = { path = "../crates/fcp-registry" }
 fcp-store = { path = "../crates/fcp-store" }
 fcp-streaming = { path = "../crates/fcp-streaming" }
 fcp-tailscale = { path = "../crates/fcp-tailscale" }
+fcp-telemetry = { path = "../crates/fcp-telemetry" }
 fcp-webhook = { path = "../crates/fcp-webhook" }
 
 [[bin]]
@@ -414,6 +415,13 @@ bench = false
 [[bin]]
 name = "fuzz_qq_path_segment"
 path = "fuzz_targets/qq_path_segment.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_qq_access_token_response"
+path = "fuzz_targets/qq_access_token_response.rs"
 test = false
 doc = false
 bench = false
@@ -1009,6 +1017,27 @@ bench = false
 [[bin]]
 name = "fuzz_hrw_checkpoint_coordinator"
 path = "fuzz_targets/hrw_checkpoint_coordinator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_provisioning_recipe_roundtrip"
+path = "fuzz_targets/provisioning_recipe_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_trace_context"
+path = "fuzz_targets/trace_context.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_verify_epoch_zone_key"
+path = "fuzz_targets/verify_epoch_zone_key.rs"
 test = false
 doc = false
 bench = false

@@ -1762,6 +1762,7 @@ dependencies = [
  "fcp-store",
  "fcp-streaming",
  "fcp-tailscale",
+ "fcp-telemetry",
  "fcp-webhook",
  "hex",
  "libfuzzer-sys",

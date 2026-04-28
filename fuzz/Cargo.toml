@@ -596,6 +596,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_liveness_readiness_response"
+path = "fuzz_targets/liveness_readiness_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "graphql_ws_message"
 path = "fuzz_targets/graphql_ws_message.rs"
 test = false
@@ -1137,6 +1144,20 @@ bench = false
 [[bin]]
 name = "fuzz_revocation_registry"
 path = "fuzz_targets/revocation_registry.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_sbom_format_serde"
+path = "fuzz_targets/sbom_format_serde.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_validate_frame_lengths"
+path = "fuzz_targets/validate_frame_lengths.rs"
 test = false
 doc = false
 bench = false

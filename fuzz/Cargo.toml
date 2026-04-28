@@ -1049,5 +1049,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_to_deterministic_cbor"
+path = "fuzz_targets/to_deterministic_cbor.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

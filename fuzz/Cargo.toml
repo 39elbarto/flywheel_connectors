@@ -822,5 +822,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_schema_id_try_new_error"
+path = "fuzz_targets/schema_id_try_new_error.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

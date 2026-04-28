@@ -70,7 +70,8 @@ fn token_from_spec(spec: TokenSpec<'_>) -> CapabilityToken {
         .operations(&[spec.operation])
         .issuer("node:verifier-matrix")
         .validity(spec.not_before, spec.expires)
-        .constraints_cbor(&constraints);
+        .try_constraints_cbor(&constraints)
+        .expect("test constraints must be valid CBOR");
 
     if let Some(audience) = spec.audience {
         builder = builder.audience(audience);

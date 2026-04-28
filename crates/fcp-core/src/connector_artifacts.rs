@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
-use crate::{FcpError, FcpResult, ObjectId};
+use crate::{ConnectorId, FcpError, FcpResult, ObjectId};
 
 /// Semantic version for connector manifest compatibility checks.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -77,7 +77,7 @@ impl fmt::Display for ManifestVersion {
 }
 
 /// Operating system + CPU architecture pairing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ConnectorTarget {
     pub os: String,
     pub arch: String,
@@ -205,6 +205,46 @@ impl ConnectorBinarySymbolSet {
             "ConnectorBinarySymbolSet",
             Version::new(1, 0, 0),
         )
+    }
+}
+
+/// Canonical registry entry for a mirrored connector package.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RegistryEntry {
+    pub connector_id: ConnectorId,
+    pub version: ConnectorVersion,
+    pub target: ConnectorTarget,
+    pub manifest_object_id: ObjectId,
+    pub binary_object_id: ObjectId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_set_object_id: Option<ObjectId>,
+}
+
+impl RegistryEntry {
+    /// Construct a registry entry for a mirrored connector package.
+    #[must_use]
+    pub fn new(
+        connector_id: ConnectorId,
+        version: ConnectorVersion,
+        target: ConnectorTarget,
+        manifest_object_id: ObjectId,
+        binary_object_id: ObjectId,
+    ) -> Self {
+        Self {
+            connector_id,
+            version,
+            target,
+            manifest_object_id,
+            binary_object_id,
+            symbol_set_object_id: None,
+        }
+    }
+
+    /// Attach the optional repair-symbol descriptor object id.
+    #[must_use]
+    pub fn with_symbol_set_object_id(mut self, symbol_set_object_id: ObjectId) -> Self {
+        self.symbol_set_object_id = Some(symbol_set_object_id);
+        self
     }
 }
 

@@ -845,6 +845,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_rate_limit_config_parse"
+path = "fuzz_targets/rate_limit_config_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_secret_id_parse"
 path = "fuzz_targets/secret_id_parse.rs"
 test = false
@@ -882,6 +889,13 @@ bench = false
 [[bin]]
 name = "fuzz_hello_retry_roundtrip"
 path = "fuzz_targets/hello_retry_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_cbor_indefinite_length_reject"
+path = "fuzz_targets/cbor_indefinite_length_reject.rs"
 test = false
 doc = false
 bench = false

@@ -1748,6 +1748,7 @@ dependencies = [
  "fcp-google-docs",
  "fcp-google-drive",
  "fcp-graphql",
+ "fcp-hackernews",
  "fcp-host",
  "fcp-manifest",
  "fcp-mesh",
@@ -1884,6 +1885,25 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.17",
  "tracing",
+]
+
+[[package]]
+name = "fcp-hackernews"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-sdk",
+ "hex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.17",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

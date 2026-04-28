@@ -859,6 +859,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_credential_id_parse"
+path = "fuzz_targets/credential_id_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_provenance_construction"
 path = "fuzz_targets/provenance_construction.rs"
 test = false
@@ -896,6 +903,13 @@ bench = false
 [[bin]]
 name = "fuzz_cbor_indefinite_length_reject"
 path = "fuzz_targets/cbor_indefinite_length_reject.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_session_direction_dispatch"
+path = "fuzz_targets/session_direction_dispatch.rs"
 test = false
 doc = false
 bench = false

@@ -495,6 +495,22 @@ fn parse_access_token(body: &str) -> OAuthResult<OAuth1Tokens> {
     })
 }
 
+/// Fuzz-only entry points for the private OAuth 1.0a provider response parsers.
+#[doc(hidden)]
+pub mod __fuzz {
+    use super::{OAuth1Tokens, OAuthResult, RequestToken, parse_access_token, parse_request_token};
+
+    /// Parse an OAuth 1.0a request-token response body.
+    pub fn parse_request_token_body(body: &str) -> OAuthResult<RequestToken> {
+        parse_request_token(body)
+    }
+
+    /// Parse an OAuth 1.0a access-token response body.
+    pub fn parse_access_token_body(body: &str) -> OAuthResult<OAuth1Tokens> {
+        parse_access_token(body)
+    }
+}
+
 /// Generate a random nonce.
 fn generate_nonce() -> String {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};

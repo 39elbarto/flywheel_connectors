@@ -190,6 +190,54 @@ pub enum ConnectorLifecycleState {
     Terminated,
 }
 
+/// Canonical connector interaction route.
+///
+/// This is the closed vocabulary used to classify the primary interaction
+/// pattern a connector exposes to hosts, CLIs, and conformance fixtures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConnectorRoute {
+    /// Request/response APIs such as REST, GraphQL, or gRPC.
+    RequestResponse,
+    /// Continuous server-to-agent streams such as SSE, WebSocket, or logs.
+    Streaming,
+    /// Full-duplex real-time communication.
+    Bidirectional,
+    /// Periodic fetch or cursor/offset-based synchronization.
+    Polling,
+    /// Inbound callbacks from external services.
+    Webhook,
+    /// Queue or pub/sub integrations.
+    Queue,
+    /// File/blob storage operations.
+    File,
+    /// Database query and mutation operations.
+    Database,
+    /// CLI/process wrapper connectors.
+    Cli,
+    /// Browser automation or scraping connectors.
+    Browser,
+}
+
+impl ConnectorRoute {
+    /// Return the canonical wire/display tag.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RequestResponse => "request-response",
+            Self::Streaming => "streaming",
+            Self::Bidirectional => "bidirectional",
+            Self::Polling => "polling",
+            Self::Webhook => "webhook",
+            Self::Queue => "queue",
+            Self::File => "file",
+            Self::Database => "database",
+            Self::Cli => "cli",
+            Self::Browser => "browser",
+        }
+    }
+}
+
 impl ConnectorLifecycleState {
     /// Return the canonical wire/display string.
     #[must_use]

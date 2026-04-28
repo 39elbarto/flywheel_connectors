@@ -2762,7 +2762,9 @@ pub enum TrustLevel {
 /// Taint level for provenance tracking.
 ///
 /// Per FCP Specification Section 7.2.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
 pub enum TaintLevel {
     /// Trusted source only
     #[default]

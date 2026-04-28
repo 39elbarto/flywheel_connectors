@@ -86,6 +86,124 @@ impl From<&str> for StepId {
     }
 }
 
+/// Opaque token identifying a completed human-consent step.
+///
+/// A `ConsentToken` is an identifier, not raw OAuth credential material. It is
+/// intentionally displayable so provisioning receipts, audit references, and
+/// operator logs can point at the consent decision without exposing secrets.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ConsentToken(String);
+
+impl ConsentToken {
+    const MAX_LEN: usize = 256;
+
+    /// Create a new consent token identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConsentTokenParseError`] if the token is empty, too long, or
+    /// contains non-display-safe characters.
+    pub fn new(token: impl Into<String>) -> Result<Self, ConsentTokenParseError> {
+        Self::try_from(token.into())
+    }
+
+    /// Return the token identifier as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ConsentToken {
+    type Error = ConsentTokenParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        validate_consent_token(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl From<ConsentToken> for String {
+    fn from(value: ConsentToken) -> Self {
+        value.0
+    }
+}
+
+impl std::str::FromStr for ConsentToken {
+    type Err = ConsentTokenParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::new(s.to_owned())
+    }
+}
+
+impl fmt::Display for ConsentToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+fn validate_consent_token(value: &str) -> Result<(), ConsentTokenParseError> {
+    if value.is_empty() {
+        return Err(ConsentTokenParseError::Empty);
+    }
+
+    if value.len() > ConsentToken::MAX_LEN {
+        return Err(ConsentTokenParseError::TooLong {
+            len: value.len(),
+            max: ConsentToken::MAX_LEN,
+        });
+    }
+
+    for (index, ch) in value.char_indices() {
+        let valid = ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':');
+        if !valid {
+            return Err(ConsentTokenParseError::InvalidChar { ch, index });
+        }
+    }
+
+    Ok(())
+}
+
+/// Error returned when parsing a [`ConsentToken`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsentTokenParseError {
+    /// The token was empty.
+    Empty,
+    /// The token exceeded the maximum supported byte length.
+    TooLong {
+        /// Actual token length in bytes.
+        len: usize,
+        /// Maximum supported token length in bytes.
+        max: usize,
+    },
+    /// The token contained a character outside the display-safe grammar.
+    InvalidChar {
+        /// Invalid character.
+        ch: char,
+        /// Byte index of the invalid character.
+        index: usize,
+    },
+}
+
+impl fmt::Display for ConsentTokenParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("consent token must not be empty"),
+            Self::TooLong { len, max } => {
+                write!(f, "consent token too long ({len} bytes > {max} bytes)")
+            }
+            Self::InvalidChar { ch, index } => write!(
+                f,
+                "consent token contains invalid character '{ch}' at byte {index}"
+            ),
+        }
+    }
+}
+
+impl Error for ConsentTokenParseError {}
+
 /// Provisioning recipe definition (NORMATIVE).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProvisioningRecipe {

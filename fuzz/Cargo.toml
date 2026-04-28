@@ -38,6 +38,7 @@ fcp-google-docs = { path = "../connectors/google-docs" }
 fcp-google-drive = { path = "../connectors/google-drive" }
 fcp-graphql = { path = "../crates/fcp-graphql" }
 fcp-github = { path = "../connectors/github" }
+fcp-hackernews = { path = "../connectors/hackernews" }
 fcp-monday = { path = "../connectors/monday" }
 fcp-mesh = { path = "../crates/fcp-mesh" }
 fcp-manifest = { path = "../crates/fcp-manifest" }
@@ -349,6 +350,13 @@ bench = false
 [[bin]]
 name = "fuzz_google_docs_path_segment"
 path = "fuzz_targets/google_docs_path_segment.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hackernews_path_segment"
+path = "fuzz_targets/hackernews_path_segment.rs"
 test = false
 doc = false
 bench = false
@@ -825,6 +833,13 @@ bench = false
 [[bin]]
 name = "fuzz_schema_id_try_new_error"
 path = "fuzz_targets/schema_id_try_new_error.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_operation_rate_limit_scope"
+path = "fuzz_targets/operation_rate_limit_scope.rs"
 test = false
 doc = false
 bench = false

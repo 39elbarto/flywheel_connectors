@@ -155,7 +155,10 @@ fn diff_handles_optional_decisions_independently() {
         actual_decision: Some("allow".into()),
         detail: "unexpected replay event".into(),
     };
-    assert_ne!(missing, unexpected, "missing vs unexpected MUST be distinct");
+    assert_ne!(
+        missing, unexpected,
+        "missing vs unexpected MUST be distinct"
+    );
 }
 
 // ─── TraceReplaySummary ────────────────────────────────────────────

@@ -163,11 +163,7 @@ async fn reset_clears_bucket_level_to_zero() {
 
     limiter.reset().await;
 
-    assert_eq!(
-        limiter.remaining(),
-        3,
-        "reset must restore full capacity"
-    );
+    assert_eq!(limiter.remaining(), 3, "reset must restore full capacity");
     assert_eq!(
         limiter.wait_time().await,
         Duration::ZERO,

@@ -110,8 +110,14 @@ fn as_str_matches_snake_case_wire_form_for_each_variant() {
         (EnforcementCheckId::ZoneMembership, "zone_membership"),
         (EnforcementCheckId::CapabilityVerify, "capability_verify"),
         (EnforcementCheckId::HolderProof, "holder_proof"),
-        (EnforcementCheckId::CheckpointFreshness, "checkpoint_freshness"),
-        (EnforcementCheckId::RevocationFreshness, "revocation_freshness"),
+        (
+            EnforcementCheckId::CheckpointFreshness,
+            "checkpoint_freshness",
+        ),
+        (
+            EnforcementCheckId::RevocationFreshness,
+            "revocation_freshness",
+        ),
         (EnforcementCheckId::TaintApproval, "taint_approval"),
         (EnforcementCheckId::PolicyCeiling, "policy_ceiling"),
         (EnforcementCheckId::ConnectorManifest, "connector_manifest"),
@@ -147,8 +153,7 @@ fn json_serde_roundtrip_uses_snake_case() {
             json, expected,
             "JSON serialization MUST match snake_case wire form for {variant:?}"
         );
-        let parsed: EnforcementCheckId =
-            serde_json::from_str(&json).expect("deserialize");
+        let parsed: EnforcementCheckId = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, variant);
     }
 }
@@ -240,10 +245,7 @@ fn check_outcome_skip_is_neither_allow_nor_deny() {
         !skip.is_allow(),
         "Skip MUST NOT be classified as Allow — caller must handle Skip explicitly"
     );
-    assert!(
-        !skip.is_deny(),
-        "Skip MUST NOT be classified as Deny"
-    );
+    assert!(!skip.is_deny(), "Skip MUST NOT be classified as Deny");
 }
 
 #[test]

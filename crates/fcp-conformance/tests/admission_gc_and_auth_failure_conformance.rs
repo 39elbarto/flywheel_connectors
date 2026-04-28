@@ -19,9 +19,7 @@
 //!    lose its tracked inflight count and a future
 //!    `release_decode` would be a no-op.
 
-use fcp_mesh::admission::{
-    AdmissionController, AdmissionError, AdmissionPolicy, PeerBudget,
-};
+use fcp_mesh::admission::{AdmissionController, AdmissionError, AdmissionPolicy, PeerBudget};
 use fcp_tailscale::NodeId;
 
 fn permissive_no_auth_required() -> AdmissionPolicy {

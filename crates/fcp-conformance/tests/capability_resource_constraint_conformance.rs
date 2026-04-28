@@ -89,7 +89,12 @@ fn wildcard_allow_accepts_arbitrary_uri() {
     let verifier = build_verifier(&signing_key);
 
     verifier
-        .verify_unbound(token, &cap(), &op(), &["notion://page/anything".to_string()])
+        .verify_unbound(
+            token,
+            &cap(),
+            &op(),
+            &["notion://page/anything".to_string()],
+        )
         .expect("wildcard allow must accept any resource URI");
 }
 
@@ -127,10 +132,7 @@ fn empty_constraints_set_denies_all_per_c3_4_default_deny() {
         .verify_unbound(token, &cap(), &op(), &["arbitrary://uri".to_string()])
         .expect_err("empty constraint set MUST deny all (C3.4)");
     match err {
-        FcpError::CapabilityDenied {
-            capability,
-            reason,
-        } => {
+        FcpError::CapabilityDenied { capability, reason } => {
             assert_eq!(
                 capability, "constraints",
                 "CapabilityDenied must point at the constraints field"
@@ -183,12 +185,7 @@ fn non_wildcard_allow_accepts_matching_uri() {
     let verifier = build_verifier(&signing_key);
 
     verifier
-        .verify_unbound(
-            token,
-            &cap(),
-            &op(),
-            &["notion://page/123".to_string()],
-        )
+        .verify_unbound(token, &cap(), &op(), &["notion://page/123".to_string()])
         .expect("specific allow pattern must accept the exact matching URI");
 }
 
@@ -203,12 +200,7 @@ fn non_wildcard_allow_rejects_non_matching_uri_and_names_it() {
     let verifier = build_verifier(&signing_key);
 
     let err = verifier
-        .verify_unbound(
-            token,
-            &cap(),
-            &op(),
-            &["notion://page/999".to_string()],
-        )
+        .verify_unbound(token, &cap(), &op(), &["notion://page/999".to_string()])
         .expect_err("non-matching URI must be rejected");
     match err {
         FcpError::ResourceNotAllowed { resource } => {

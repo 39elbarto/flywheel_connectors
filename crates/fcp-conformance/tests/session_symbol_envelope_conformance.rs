@@ -53,9 +53,13 @@ const PLAINTEXT: &[u8] = b"FCPS symbol payload bytes - canonical fixture for con
 #[test]
 fn chacha_round_trip_recovers_plaintext() {
     let ctx = baseline_ctx();
-    let (ciphertext, tag) =
-        encrypt_symbol(&zone_key(), ZoneKeyAlgorithm::ChaCha20Poly1305, &ctx, PLAINTEXT)
-            .expect("encrypt");
+    let (ciphertext, tag) = encrypt_symbol(
+        &zone_key(),
+        ZoneKeyAlgorithm::ChaCha20Poly1305,
+        &ctx,
+        PLAINTEXT,
+    )
+    .expect("encrypt");
     let recovered = decrypt_symbol(
         &zone_key(),
         ZoneKeyAlgorithm::ChaCha20Poly1305,
@@ -91,9 +95,13 @@ fn xchacha_round_trip_recovers_plaintext() {
 #[test]
 fn wrong_zone_key_decrypt_fails() {
     let ctx = baseline_ctx();
-    let (ciphertext, tag) =
-        encrypt_symbol(&zone_key(), ZoneKeyAlgorithm::ChaCha20Poly1305, &ctx, PLAINTEXT)
-            .expect("encrypt");
+    let (ciphertext, tag) = encrypt_symbol(
+        &zone_key(),
+        ZoneKeyAlgorithm::ChaCha20Poly1305,
+        &ctx,
+        PLAINTEXT,
+    )
+    .expect("encrypt");
     let err = decrypt_symbol(
         &alt_zone_key(),
         ZoneKeyAlgorithm::ChaCha20Poly1305,
@@ -113,9 +121,13 @@ fn tampered_object_id_in_aad_decrypt_fails() {
     // The object_id is bound through the AAD. Re-attributing a
     // ciphertext to a different object MUST fail Poly1305 verification.
     let ctx = baseline_ctx();
-    let (ciphertext, tag) =
-        encrypt_symbol(&zone_key(), ZoneKeyAlgorithm::ChaCha20Poly1305, &ctx, PLAINTEXT)
-            .expect("encrypt");
+    let (ciphertext, tag) = encrypt_symbol(
+        &zone_key(),
+        ZoneKeyAlgorithm::ChaCha20Poly1305,
+        &ctx,
+        PLAINTEXT,
+    )
+    .expect("encrypt");
 
     let mut tampered = ctx.clone();
     tampered.object_id = ObjectId::from_unscoped_bytes(b"different-object");
@@ -138,9 +150,13 @@ fn tampered_zone_key_id_in_aad_decrypt_fails() {
     // B even if both sides somehow share keys — otherwise rotation is
     // a no-op.
     let ctx = baseline_ctx();
-    let (ciphertext, tag) =
-        encrypt_symbol(&zone_key(), ZoneKeyAlgorithm::ChaCha20Poly1305, &ctx, PLAINTEXT)
-            .expect("encrypt");
+    let (ciphertext, tag) = encrypt_symbol(
+        &zone_key(),
+        ZoneKeyAlgorithm::ChaCha20Poly1305,
+        &ctx,
+        PLAINTEXT,
+    )
+    .expect("encrypt");
 
     let mut tampered = ctx.clone();
     tampered.zone_key_id = ZoneKeyId::from_bytes([0xFF; 8]);
@@ -161,9 +177,13 @@ fn tampered_epoch_id_in_aad_decrypt_fails() {
     // epoch_id is the replay-protection slot. A captured ciphertext
     // from epoch N MUST NOT decrypt as if it were from epoch N+1.
     let ctx = baseline_ctx();
-    let (ciphertext, tag) =
-        encrypt_symbol(&zone_key(), ZoneKeyAlgorithm::ChaCha20Poly1305, &ctx, PLAINTEXT)
-            .expect("encrypt");
+    let (ciphertext, tag) = encrypt_symbol(
+        &zone_key(),
+        ZoneKeyAlgorithm::ChaCha20Poly1305,
+        &ctx,
+        PLAINTEXT,
+    )
+    .expect("encrypt");
 
     let mut tampered = ctx.clone();
     tampered.epoch_id = ctx.epoch_id.wrapping_add(1);
@@ -185,9 +205,13 @@ fn wrong_frame_seq_decrypt_fails_via_nonce_binding() {
     // under frame_seq=N MUST NOT decrypt under frame_seq=N+1 — that's
     // the per-frame replay defense, even before any AAD check.
     let ctx = baseline_ctx();
-    let (ciphertext, tag) =
-        encrypt_symbol(&zone_key(), ZoneKeyAlgorithm::ChaCha20Poly1305, &ctx, PLAINTEXT)
-            .expect("encrypt");
+    let (ciphertext, tag) = encrypt_symbol(
+        &zone_key(),
+        ZoneKeyAlgorithm::ChaCha20Poly1305,
+        &ctx,
+        PLAINTEXT,
+    )
+    .expect("encrypt");
 
     let mut tampered = ctx.clone();
     tampered.frame_seq = ctx.frame_seq.wrapping_add(1);
@@ -209,9 +233,13 @@ fn wrong_esi_decrypt_fails_via_nonce_binding() {
     // NOT decrypt as if it were ESI=N+1 — otherwise an attacker could
     // re-position symbols within a frame.
     let ctx = baseline_ctx();
-    let (ciphertext, tag) =
-        encrypt_symbol(&zone_key(), ZoneKeyAlgorithm::ChaCha20Poly1305, &ctx, PLAINTEXT)
-            .expect("encrypt");
+    let (ciphertext, tag) = encrypt_symbol(
+        &zone_key(),
+        ZoneKeyAlgorithm::ChaCha20Poly1305,
+        &ctx,
+        PLAINTEXT,
+    )
+    .expect("encrypt");
 
     let mut tampered = ctx.clone();
     tampered.esi = ctx.esi.wrapping_add(1);
@@ -233,9 +261,13 @@ fn chacha_ciphertext_does_not_decrypt_under_xchacha() {
     // A ChaCha20-Poly1305 ciphertext MUST NOT decrypt when re-presented
     // as XChaCha20-Poly1305 (and vice versa).
     let ctx = baseline_ctx();
-    let (ciphertext, tag) =
-        encrypt_symbol(&zone_key(), ZoneKeyAlgorithm::ChaCha20Poly1305, &ctx, PLAINTEXT)
-            .expect("ChaCha encrypt");
+    let (ciphertext, tag) = encrypt_symbol(
+        &zone_key(),
+        ZoneKeyAlgorithm::ChaCha20Poly1305,
+        &ctx,
+        PLAINTEXT,
+    )
+    .expect("ChaCha encrypt");
 
     let err = decrypt_symbol(
         &zone_key(),
@@ -255,9 +287,13 @@ fn flipped_auth_tag_byte_decrypt_fails() {
     // integrity on the tag itself, complementing the AAD/nonce
     // binding tests above.
     let ctx = baseline_ctx();
-    let (ciphertext, tag) =
-        encrypt_symbol(&zone_key(), ZoneKeyAlgorithm::ChaCha20Poly1305, &ctx, PLAINTEXT)
-            .expect("encrypt");
+    let (ciphertext, tag) = encrypt_symbol(
+        &zone_key(),
+        ZoneKeyAlgorithm::ChaCha20Poly1305,
+        &ctx,
+        PLAINTEXT,
+    )
+    .expect("encrypt");
 
     let mut tampered_tag = tag;
     tampered_tag[AUTH_TAG_SIZE - 1] ^= 0x01;

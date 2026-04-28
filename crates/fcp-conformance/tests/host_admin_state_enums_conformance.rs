@@ -98,13 +98,7 @@ fn lifecycle_action_serde_uses_snake_case_for_each_variant() {
 
 #[test]
 fn lifecycle_action_rejects_unknown_or_uppercase() {
-    for bogus in [
-        "\"ENABLE\"",
-        "\"Enable\"",
-        "\"\"",
-        "\"start\"",
-        "\"stop\"",
-    ] {
+    for bogus in ["\"ENABLE\"", "\"Enable\"", "\"\"", "\"start\"", "\"stop\""] {
         assert!(
             serde_json::from_str::<LifecycleAction>(bogus).is_err(),
             "LifecycleAction MUST reject {bogus}"
@@ -204,7 +198,10 @@ fn log_severity_implements_copy() {
 #[test]
 fn host_event_kind_serde_uses_snake_case_for_each_variant() {
     let cases = [
-        (HostEventKind::LifecycleTransition, "\"lifecycle_transition\""),
+        (
+            HostEventKind::LifecycleTransition,
+            "\"lifecycle_transition\"",
+        ),
         (HostEventKind::HealthCheck, "\"health_check\""),
         (HostEventKind::ConfigRevision, "\"config_revision\""),
         (HostEventKind::RolloutDecision, "\"rollout_decision\""),

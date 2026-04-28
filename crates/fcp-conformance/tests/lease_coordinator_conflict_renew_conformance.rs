@@ -55,21 +55,14 @@ fn detect_conflicts_returns_none_for_zero_active_leases() {
 fn detect_conflicts_returns_none_for_single_active_lease() {
     let coord = LeaseCoordinator::with_defaults();
     let observed = vec![observation("alice", 1, 2_000)];
-    let conflict =
-        coord.detect_conflicts(&ZoneId::work(), &obj(), &purpose(), &observed, 1_000);
-    assert!(
-        conflict.is_none(),
-        "single active lease is not a conflict"
-    );
+    let conflict = coord.detect_conflicts(&ZoneId::work(), &obj(), &purpose(), &observed, 1_000);
+    assert!(conflict.is_none(), "single active lease is not a conflict");
 }
 
 #[test]
 fn detect_conflicts_returns_some_with_all_holders_for_two_active_leases() {
     let coord = LeaseCoordinator::with_defaults();
-    let observed = vec![
-        observation("alice", 5, 2_000),
-        observation("bob", 7, 2_000),
-    ];
+    let observed = vec![observation("alice", 5, 2_000), observation("bob", 7, 2_000)];
 
     let conflict = coord
         .detect_conflicts(&ZoneId::work(), &obj(), &purpose(), &observed, 1_000)
@@ -122,8 +115,7 @@ fn detect_conflicts_excludes_expired_leases() {
         observation("bob", 7, 6_000),
     ];
 
-    let conflict =
-        coord.detect_conflicts(&ZoneId::work(), &obj(), &purpose(), &observed, 5_000);
+    let conflict = coord.detect_conflicts(&ZoneId::work(), &obj(), &purpose(), &observed, 5_000);
     assert!(
         conflict.is_none(),
         "expired leases MUST NOT count toward conflict detection — only one ACTIVE lease here"
@@ -136,10 +128,7 @@ fn detect_conflicts_severity_critical_with_escalation_enabled() {
         escalate_dangerous_conflicts: true,
         ..LeaseCoordinatorConfig::default()
     });
-    let observed = vec![
-        observation("alice", 5, 2_000),
-        observation("bob", 7, 2_000),
-    ];
+    let observed = vec![observation("alice", 5, 2_000), observation("bob", 7, 2_000)];
 
     let conflict = coord
         .detect_conflicts(&ZoneId::work(), &obj(), &purpose(), &observed, 1_000)
@@ -157,10 +146,7 @@ fn detect_conflicts_severity_warning_with_escalation_disabled() {
         escalate_dangerous_conflicts: false,
         ..LeaseCoordinatorConfig::default()
     });
-    let observed = vec![
-        observation("alice", 5, 2_000),
-        observation("bob", 7, 2_000),
-    ];
+    let observed = vec![observation("alice", 5, 2_000), observation("bob", 7, 2_000)];
 
     let conflict = coord
         .detect_conflicts(&ZoneId::work(), &obj(), &purpose(), &observed, 1_000)

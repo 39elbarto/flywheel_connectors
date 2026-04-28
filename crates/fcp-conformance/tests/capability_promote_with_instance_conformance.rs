@@ -224,8 +224,7 @@ fn verify_bound_and_unbound_then_promote_yield_equivalent_claims() {
 
     // Path A: verify_bound directly.
     let token_a = build_bound_token(&signing_key, &instance);
-    let bound_verifier =
-        CapabilityVerifier::new(pub_bytes, ZoneId::work(), instance.clone());
+    let bound_verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), instance.clone());
     let via_bound = bound_verifier
         .verify_bound(token_a, &cap(), &op(), &[])
         .expect("direct bound verify");
@@ -265,15 +264,10 @@ fn promoted_bound_token_carries_underlying_unbound_claims() {
     let unbound = verifier
         .verify_unbound(token, &cap(), &op(), &[])
         .expect("verify_unbound");
-    let unbound_capability = unbound
-        .claims()
-        .get_capability_id()
-        .map(str::to_string);
+    let unbound_capability = unbound.claims().get_capability_id().map(str::to_string);
     let unbound_zone = unbound.claims().get_zone_id().map(str::to_string);
 
-    let bound = unbound
-        .promote_with_instance(&instance)
-        .expect("promote");
+    let bound = unbound.promote_with_instance(&instance).expect("promote");
 
     assert_eq!(
         bound.claims().get_capability_id().map(str::to_string),

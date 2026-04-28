@@ -245,8 +245,7 @@ fn tool_call_response_serde_roundtrip_preserves_content_and_error_flag() {
         is_error: true,
     };
     let json_str = serde_json::to_string(&r).expect("serialize");
-    let parsed: McpToolCallResponse =
-        serde_json::from_str(&json_str).expect("deserialize");
+    let parsed: McpToolCallResponse = serde_json::from_str(&json_str).expect("deserialize");
     assert_eq!(parsed.content.len(), 2);
     assert!(parsed.is_error);
 }

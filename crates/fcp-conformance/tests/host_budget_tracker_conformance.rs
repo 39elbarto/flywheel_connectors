@@ -183,10 +183,7 @@ fn multiple_metrics_in_one_record_usage_track_independently() {
     let eval = tracker.record_usage(
         &zone,
         &policy,
-        &[
-            UsageMetric::tokens(500),
-            UsageMetric::bytes(20_000),
-        ],
+        &[UsageMetric::tokens(500), UsageMetric::bytes(20_000)],
     );
 
     assert_eq!(

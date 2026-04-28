@@ -222,7 +222,13 @@ fn require_min_value_compares_numeric() {
         attribute: PostureAttributeKey::ScreenLockTimeout,
         min_value: 60,
     };
-    for (value, expected) in [(0, false), (59, false), (60, true), (61, true), (3600, true)] {
+    for (value, expected) in [
+        (0, false),
+        (59, false),
+        (60, true),
+        (61, true),
+        (3600, true),
+    ] {
         let attestation = attestation_with(&[(
             PostureAttributeKey::ScreenLockTimeout,
             PostureAttributeValue::Number(value),
@@ -326,20 +332,17 @@ fn attestation_schema_constant_is_fcp_posture_v1() {
 fn attestation_is_valid_requires_unexpired_and_correct_schema() {
     // Both must be true.
     let mut a = empty_attestation();
-    assert!(a.is_valid(), "fresh attestation with correct schema is valid");
+    assert!(
+        a.is_valid(),
+        "fresh attestation with correct schema is valid"
+    );
 
     a.expires_at = Utc::now() - ChronoDuration::minutes(1);
-    assert!(
-        !a.is_valid(),
-        "expired attestation MUST NOT be valid"
-    );
+    assert!(!a.is_valid(), "expired attestation MUST NOT be valid");
 
     let mut b = empty_attestation();
     b.schema = "wrong-schema".into();
-    assert!(
-        !b.is_valid(),
-        "wrong schema MUST NOT be valid"
-    );
+    assert!(!b.is_valid(), "wrong schema MUST NOT be valid");
 }
 
 #[test]

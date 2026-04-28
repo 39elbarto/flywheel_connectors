@@ -10,11 +10,11 @@
 
 use chrono::{Duration, Utc};
 use fcp_core::{
-    validate_canonical_id, CapabilityConstraints, CapabilityId, CapabilityToken,
-    CapabilityVerifier, ConnectorId, FcpError, IdValidationError, InstanceId, OperationId,
-    PrincipalId, ZoneId, ZoneIdError,
+    CapabilityConstraints, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
+    FcpError, IdValidationError, InstanceId, OperationId, PrincipalId, ZoneId, ZoneIdError,
+    validate_canonical_id,
 };
-use fcp_crypto::cose::{fcp2_claims, CapabilityTokenBuilder, CoseToken, CwtClaims};
+use fcp_crypto::cose::{CapabilityTokenBuilder, CoseToken, CwtClaims, fcp2_claims};
 use fcp_crypto::ed25519::Ed25519SigningKey;
 
 // ═══════════════════════════════════════════════════════════════════════════════

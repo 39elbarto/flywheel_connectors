@@ -136,10 +136,7 @@ fn authority_reason_code_serde_uses_snake_case_for_each_variant() {
     ];
     for (variant, expected) in cases {
         let json = serde_json::to_string(&variant).expect("serialize");
-        assert_eq!(
-            json, expected,
-            "{variant:?} MUST serialize as '{expected}'"
-        );
+        assert_eq!(json, expected, "{variant:?} MUST serialize as '{expected}'");
         let parsed: AuthorityReasonCode = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, variant);
     }
@@ -391,7 +388,10 @@ fn lease_purpose_serde_uses_snake_case_for_three_variants() {
     let cases = [
         (LeasePurpose::SingletonWriter, "\"singleton_writer\""),
         (LeasePurpose::OperationExecution, "\"operation_execution\""),
-        (LeasePurpose::CoordinatorElection, "\"coordinator_election\""),
+        (
+            LeasePurpose::CoordinatorElection,
+            "\"coordinator_election\"",
+        ),
     ];
     for (variant, expected) in cases {
         let json = serde_json::to_string(&variant).expect("serialize");

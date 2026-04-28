@@ -34,7 +34,10 @@ use fcp_host::{McpMethodCategory, SessionStatus, route_mcp_method};
 
 #[test]
 fn route_initialize_method() {
-    assert_eq!(route_mcp_method("initialize"), McpMethodCategory::Initialize);
+    assert_eq!(
+        route_mcp_method("initialize"),
+        McpMethodCategory::Initialize
+    );
 }
 
 #[test]
@@ -73,7 +76,10 @@ fn route_prompts_list_method() {
 
 #[test]
 fn route_prompts_get_method() {
-    assert_eq!(route_mcp_method("prompts/get"), McpMethodCategory::PromptsGet);
+    assert_eq!(
+        route_mcp_method("prompts/get"),
+        McpMethodCategory::PromptsGet
+    );
 }
 
 #[test]

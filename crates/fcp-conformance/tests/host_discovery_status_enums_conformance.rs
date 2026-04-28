@@ -30,8 +30,7 @@
 //!    and metric-key code paths that pass by value.
 
 use fcp_host::{
-    ConnectorArchetype, HealthFilter, HostHealthStatus, LatencyHint, MeshStatus,
-    PolicyEngineStatus,
+    ConnectorArchetype, HealthFilter, HostHealthStatus, LatencyHint, MeshStatus, PolicyEngineStatus,
 };
 
 // ─── HealthFilter ───────────────────────────────────────────────────
@@ -85,10 +84,7 @@ fn connector_archetype_serde_uses_snake_case_for_each_variant() {
     ];
     for (variant, expected) in cases {
         let json = serde_json::to_string(&variant).expect("serialize");
-        assert_eq!(
-            json, expected,
-            "{variant:?} MUST serialize as '{expected}'"
-        );
+        assert_eq!(json, expected, "{variant:?} MUST serialize as '{expected}'");
         let parsed: ConnectorArchetype = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, variant);
     }
@@ -186,10 +182,7 @@ fn mesh_status_serde_uses_snake_case_for_each_variant() {
     ];
     for (variant, expected) in cases {
         let json = serde_json::to_string(&variant).expect("serialize");
-        assert_eq!(
-            json, expected,
-            "{variant:?} MUST serialize as '{expected}'"
-        );
+        assert_eq!(json, expected, "{variant:?} MUST serialize as '{expected}'");
         let parsed: MeshStatus = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, variant);
     }
@@ -215,7 +208,12 @@ fn mesh_status_is_operational_excludes_unreachable_and_not_configured() {
 
 #[test]
 fn mesh_status_rejects_unknown_or_camelcase_variants() {
-    for bogus in ["\"NOT_CONFIGURED\"", "\"notConfigured\"", "\"\"", "\"online\""] {
+    for bogus in [
+        "\"NOT_CONFIGURED\"",
+        "\"notConfigured\"",
+        "\"\"",
+        "\"online\"",
+    ] {
         assert!(
             serde_json::from_str::<MeshStatus>(bogus).is_err(),
             "MeshStatus MUST reject {bogus}"
@@ -235,10 +233,7 @@ fn policy_engine_status_serde_uses_snake_case_for_each_variant() {
     ];
     for (variant, expected) in cases {
         let json = serde_json::to_string(&variant).expect("serialize");
-        assert_eq!(
-            json, expected,
-            "{variant:?} MUST serialize as '{expected}'"
-        );
+        assert_eq!(json, expected, "{variant:?} MUST serialize as '{expected}'");
         let parsed: PolicyEngineStatus = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, variant);
     }

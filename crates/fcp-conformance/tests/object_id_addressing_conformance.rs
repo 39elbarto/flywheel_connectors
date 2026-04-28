@@ -94,8 +94,7 @@ fn parse_prefixed_accepts_uppercase_hex() {
 
 #[test]
 fn parse_prefixed_rejects_non_hex_with_invalid_hex_error() {
-    let err =
-        ObjectId::parse_prefixed("not-hex!!").expect_err("non-hex MUST be rejected");
+    let err = ObjectId::parse_prefixed("not-hex!!").expect_err("non-hex MUST be rejected");
     assert_eq!(err, ObjectIdParseError::InvalidHex);
 }
 

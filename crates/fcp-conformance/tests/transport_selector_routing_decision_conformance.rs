@@ -129,7 +129,7 @@ fn ranked_path_priority_field_encodes_documented_constants() {
 
 #[test]
 fn rank_paths_marks_lan_forbidden_paths_ineligible_with_reason() {
-let policy = ZoneTransportPolicy {
+    let policy = ZoneTransportPolicy {
         allow_lan: false,
         allow_derp: true,
         allow_funnel: true,
@@ -140,7 +140,11 @@ let policy = ZoneTransportPolicy {
     ];
     let ranked = TransportSelector::rank_paths(&paths, &policy);
     for r in &ranked {
-        assert!(!r.eligible, "{:?} MUST be ineligible under !allow_lan", r.path.kind);
+        assert!(
+            !r.eligible,
+            "{:?} MUST be ineligible under !allow_lan",
+            r.path.kind
+        );
         assert_eq!(
             r.reason,
             Some(DecisionReasonCode::TransportLanForbidden),
@@ -152,7 +156,7 @@ let policy = ZoneTransportPolicy {
 
 #[test]
 fn rank_paths_marks_derp_forbidden_path_with_reason() {
-let policy = ZoneTransportPolicy {
+    let policy = ZoneTransportPolicy {
         allow_lan: true,
         allow_derp: false,
         allow_funnel: true,
@@ -173,7 +177,7 @@ let policy = ZoneTransportPolicy {
 
 #[test]
 fn rank_paths_marks_funnel_forbidden_path_with_reason() {
-let policy = ZoneTransportPolicy {
+    let policy = ZoneTransportPolicy {
         allow_lan: true,
         allow_derp: true,
         allow_funnel: false,

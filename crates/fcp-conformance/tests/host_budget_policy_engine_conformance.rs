@@ -105,7 +105,9 @@ async fn upsert_policy_replaces_prior_policy() {
     // effect on the next record_usage. (Note: usage state persists
     // in the tracker — this test doesn't assert a state reset, only
     // that the new LIMIT applies.)
-    engine.upsert_policy(zone.clone(), token_policy(10_000)).await;
+    engine
+        .upsert_policy(zone.clone(), token_policy(10_000))
+        .await;
     let eval_relaxed = engine
         .record_usage(&zone, &[UsageMetric::tokens(50)])
         .await
@@ -180,7 +182,9 @@ async fn with_policies_constructor_seeds_initial_state() {
         "private has a 50-cap — 60 tokens MUST exceed it"
     );
 
-    let unknown = engine.record_usage(&ZoneId::owner(), &[UsageMetric::tokens(1)]).await;
+    let unknown = engine
+        .record_usage(&ZoneId::owner(), &[UsageMetric::tokens(1)])
+        .await;
     assert!(
         unknown.is_none(),
         "owner has no policy — record_usage returns None"
@@ -193,7 +197,9 @@ async fn report_returns_snapshots_sorted_by_zone_id() {
     // diffs across reports are stable.
     let engine = BudgetPolicyEngine::new();
     // Insert in deliberately scrambled order.
-    engine.upsert_policy(ZoneId::work(), token_policy(100)).await;
+    engine
+        .upsert_policy(ZoneId::work(), token_policy(100))
+        .await;
     engine
         .upsert_policy(ZoneId::owner(), token_policy(200))
         .await;
@@ -215,7 +221,9 @@ async fn report_returns_snapshots_sorted_by_zone_id() {
 #[runtime_test]
 async fn report_with_zone_filter_narrows_to_single_zone() {
     let engine = BudgetPolicyEngine::new();
-    engine.upsert_policy(ZoneId::work(), token_policy(100)).await;
+    engine
+        .upsert_policy(ZoneId::work(), token_policy(100))
+        .await;
     engine
         .upsert_policy(ZoneId::private(), token_policy(200))
         .await;
@@ -233,7 +241,9 @@ async fn report_with_zone_filter_narrows_to_single_zone() {
 #[runtime_test]
 async fn report_with_unknown_zone_filter_returns_empty() {
     let engine = BudgetPolicyEngine::new();
-    engine.upsert_policy(ZoneId::work(), token_policy(100)).await;
+    engine
+        .upsert_policy(ZoneId::work(), token_policy(100))
+        .await;
 
     let owner = ZoneId::owner();
     let report = engine.report(Some(&owner)).await;

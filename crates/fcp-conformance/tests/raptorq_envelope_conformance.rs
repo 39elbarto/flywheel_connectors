@@ -37,15 +37,15 @@ const PLAINTEXT: &[u8] = b"FCP raptorq symbol payload - canonical fixture for co
 fn baseline_envelope(algorithm: ZoneKeyAlgorithm) -> SymbolEnvelope {
     SymbolEnvelope::encrypt(
         ObjectId::from_bytes([0x11; 32]),
-        7,                              // esi
-        4,                              // k
+        7, // esi
+        4, // k
         PLAINTEXT,
         ZoneId::work(),
         ZoneKeyId::from_bytes([0x22; 8]),
-        1_000,                          // epoch_id
+        1_000, // epoch_id
         NodeId::new("node-source"),
-        0xDEAD_BEEF_CAFE_F00D,          // sender_instance_id
-        12_345,                         // frame_seq
+        0xDEAD_BEEF_CAFE_F00D, // sender_instance_id
+        12_345,                // frame_seq
         &zone_key(),
         algorithm,
     )

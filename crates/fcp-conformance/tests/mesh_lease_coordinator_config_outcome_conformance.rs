@@ -105,8 +105,7 @@ fn config_serde_roundtrip_preserves_all_six_fields() {
         escalate_dangerous_conflicts: false,
     };
     let json_str = serde_json::to_string(&cfg).expect("serialize");
-    let parsed: LeaseCoordinatorConfig =
-        serde_json::from_str(&json_str).expect("deserialize");
+    let parsed: LeaseCoordinatorConfig = serde_json::from_str(&json_str).expect("deserialize");
     assert_eq!(parsed, cfg);
 }
 
@@ -169,9 +168,7 @@ fn acquire_outcome_serde_roundtrip_for_every_variant() {
             fencing_token: 1,
             expires_at: 2,
         },
-        AcquireOutcome::Rejected {
-            reason: "x".into(),
-        },
+        AcquireOutcome::Rejected { reason: "x".into() },
         AcquireOutcome::Denied {
             current_holder: fake_node("nx"),
             current_fencing_token: 1,
@@ -261,9 +258,7 @@ fn release_outcome_not_held_serializes_with_snake_case_tag() {
 fn release_outcome_serde_roundtrip_for_each_variant() {
     let cases = vec![
         ReleaseOutcome::Released,
-        ReleaseOutcome::NotHeld {
-            reason: "x".into(),
-        },
+        ReleaseOutcome::NotHeld { reason: "x".into() },
     ];
     for original in cases {
         let json_str = serde_json::to_string(&original).expect("serialize");
@@ -359,8 +354,7 @@ fn conflicting_holder_serde_roundtrip_preserves_three_fields() {
         expires_at: 10_000,
     };
     let json_str = serde_json::to_string(&h).expect("serialize");
-    let parsed: ConflictingHolder =
-        serde_json::from_str(&json_str).expect("deserialize");
+    let parsed: ConflictingHolder = serde_json::from_str(&json_str).expect("deserialize");
     assert_eq!(parsed, h);
 }
 

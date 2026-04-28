@@ -241,8 +241,7 @@ fn doctor_enums_use_documented_heterogeneous_rename_rules() {
     assert_eq!(severity_warn, "\"warning\"");
 
     // FreshnessLevel → snake_case ('too_stale' multi-word)
-    let freshness_too_stale =
-        serde_json::to_string(&FreshnessLevel::TooStale).expect("serialize");
+    let freshness_too_stale = serde_json::to_string(&FreshnessLevel::TooStale).expect("serialize");
     assert_eq!(freshness_too_stale, "\"too_stale\"");
 }
 

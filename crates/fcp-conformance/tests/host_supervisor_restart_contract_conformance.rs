@@ -353,11 +353,7 @@ fn supervisor_config_default_restart_policy_is_on_failure() {
 
 #[test]
 fn exponential_backoff_first_call_returns_initial() {
-    let mut b = ExponentialBackoff::new(
-        Duration::from_millis(100),
-        Duration::from_secs(10),
-        2.0,
-    );
+    let mut b = ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(10), 2.0);
     assert_eq!(b.attempts(), 0);
     let first = b.next_backoff();
     assert_eq!(
@@ -370,11 +366,7 @@ fn exponential_backoff_first_call_returns_initial() {
 
 #[test]
 fn exponential_backoff_subsequent_calls_multiply_by_multiplier() {
-    let mut b = ExponentialBackoff::new(
-        Duration::from_millis(100),
-        Duration::from_secs(60),
-        2.0,
-    );
+    let mut b = ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(60), 2.0);
     let _ = b.next_backoff(); // 100
     let second = b.next_backoff(); // 200
     assert_eq!(second, Duration::from_millis(200));
@@ -384,11 +376,8 @@ fn exponential_backoff_subsequent_calls_multiply_by_multiplier() {
 
 #[test]
 fn exponential_backoff_caps_at_max() {
-    let mut b = ExponentialBackoff::new(
-        Duration::from_millis(100),
-        Duration::from_millis(500),
-        2.0,
-    );
+    let mut b =
+        ExponentialBackoff::new(Duration::from_millis(100), Duration::from_millis(500), 2.0);
     for _ in 0..20 {
         let d = b.next_backoff();
         assert!(
@@ -402,11 +391,7 @@ fn exponential_backoff_caps_at_max() {
 fn exponential_backoff_normalizes_multiplier_below_one_to_two() {
     // Documented degenerate-input guard: multiplier < 1.0 reverts
     // to 2.0 to avoid backoff that shrinks (or zero).
-    let mut b = ExponentialBackoff::new(
-        Duration::from_millis(100),
-        Duration::from_secs(60),
-        0.5,
-    );
+    let mut b = ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(60), 0.5);
     let _ = b.next_backoff(); // 100
     let second = b.next_backoff();
     assert_eq!(
@@ -418,11 +403,7 @@ fn exponential_backoff_normalizes_multiplier_below_one_to_two() {
 
 #[test]
 fn exponential_backoff_clamps_initial_above_max_down_to_max() {
-    let b = ExponentialBackoff::new(
-        Duration::from_secs(10),
-        Duration::from_millis(500),
-        2.0,
-    );
+    let b = ExponentialBackoff::new(Duration::from_secs(10), Duration::from_millis(500), 2.0);
     assert_eq!(
         b.current_delay(),
         Duration::from_millis(500),
@@ -432,11 +413,7 @@ fn exponential_backoff_clamps_initial_above_max_down_to_max() {
 
 #[test]
 fn exponential_backoff_reset_returns_attempt_to_zero() {
-    let mut b = ExponentialBackoff::new(
-        Duration::from_millis(100),
-        Duration::from_secs(60),
-        2.0,
-    );
+    let mut b = ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(60), 2.0);
     for _ in 0..5 {
         let _ = b.next_backoff();
     }
@@ -555,7 +532,10 @@ fn restart_tracker_total_restarts_persists_across_window_pruning() {
 
 #[test]
 fn restart_denied_policy_denied_display() {
-    assert_eq!(format!("{}", RestartDenied::PolicyDenied), "restart policy denied");
+    assert_eq!(
+        format!("{}", RestartDenied::PolicyDenied),
+        "restart policy denied"
+    );
 }
 
 #[test]

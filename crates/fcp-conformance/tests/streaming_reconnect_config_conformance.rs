@@ -31,9 +31,7 @@
 
 use std::time::Duration;
 
-use fcp_streaming::{
-    MIN_RECONNECT_DELAY, ReconnectConfig, ReconnectHandler,
-};
+use fcp_streaming::{MIN_RECONNECT_DELAY, ReconnectConfig, ReconnectHandler};
 
 #[test]
 fn default_config_returns_floored_delay_at_attempt_zero() {

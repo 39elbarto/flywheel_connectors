@@ -279,8 +279,7 @@ fn tool_call_request_arguments_defaults_to_null_when_absent_in_json() {
     // serde(default) on arguments: missing field MUST deserialize
     // as serde_json::Value::Null.
     let json_str = json!({"name": "ping"}).to_string();
-    let parsed: McpToolCallRequest =
-        serde_json::from_str(&json_str).expect("deserialize");
+    let parsed: McpToolCallRequest = serde_json::from_str(&json_str).expect("deserialize");
     assert_eq!(parsed.name, "ping");
     assert_eq!(
         parsed.arguments,
@@ -316,8 +315,7 @@ fn tool_call_request_serde_roundtrip_preserves_arbitrary_arguments() {
             arguments: args.clone(),
         };
         let json_str = serde_json::to_string(&req).expect("serialize");
-        let parsed: McpToolCallRequest =
-            serde_json::from_str(&json_str).expect("deserialize");
+        let parsed: McpToolCallRequest = serde_json::from_str(&json_str).expect("deserialize");
         assert_eq!(parsed.arguments, args);
     }
 }

@@ -160,7 +160,8 @@ fn supply_chain_gate_config_clone_preserves_three_fields() {
 }
 
 #[test]
-fn supply_chain_gate_config_with_explicit_overrides_preserves_documented_defaults_for_unset_fields() {
+fn supply_chain_gate_config_with_explicit_overrides_preserves_documented_defaults_for_unset_fields()
+{
     // Setting allow_dev_overrides=true while keeping other defaults.
     let cfg = SupplyChainGateConfig {
         allow_dev_overrides: true,

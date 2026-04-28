@@ -37,8 +37,8 @@
 use fcp_cbor::SchemaId;
 use fcp_core::{ObjectId, ObjectIdKey, ZoneId, ZoneKeyId};
 use fcp_mesh::{
-    ControlPlaneEnvelope, ControlPlaneHandler, DegradedTransportError,
-    InMemoryControlPlaneHandler, RetentionClass,
+    ControlPlaneEnvelope, ControlPlaneHandler, DegradedTransportError, InMemoryControlPlaneHandler,
+    RetentionClass,
 };
 use semver::Version;
 
@@ -300,8 +300,10 @@ fn handler_fetch_epoch_unknown_zone_returns_empty() {
 fn handler_count_does_not_double_count_object_id_replays() {
     // Re-handling the same object_id MUST replace, not duplicate.
     let h = InMemoryControlPlaneHandler::new();
-    let env_a = fake_envelope_in_zone_at_epoch(b"replay", ZoneId::work(), 1, RetentionClass::Required);
-    let env_b = fake_envelope_in_zone_at_epoch(b"replay", ZoneId::work(), 2, RetentionClass::Required);
+    let env_a =
+        fake_envelope_in_zone_at_epoch(b"replay", ZoneId::work(), 1, RetentionClass::Required);
+    let env_b =
+        fake_envelope_in_zone_at_epoch(b"replay", ZoneId::work(), 2, RetentionClass::Required);
     h.handle(env_a).expect("first");
     assert_eq!(h.count(), 1);
     h.handle(env_b).expect("replay with same object_id");
@@ -321,7 +323,10 @@ fn error_incomplete_display_includes_received_and_needed_counts() {
         needed: 12,
     };
     let s = format!("{e}");
-    assert!(s.contains("7/12"), "Incomplete Display MUST show received/needed; got {s}");
+    assert!(
+        s.contains("7/12"),
+        "Incomplete Display MUST show received/needed; got {s}"
+    );
     assert!(s.contains("incomplete"));
 }
 

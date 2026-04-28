@@ -102,8 +102,7 @@ fn with_stream_key_sets_optional_key() {
 
 #[test]
 fn with_ordering_sets_optional_policy() {
-    let env =
-        EventEnvelope::new("t", test_event_data()).with_ordering(OrderingPolicy::PerKey);
+    let env = EventEnvelope::new("t", test_event_data()).with_ordering(OrderingPolicy::PerKey);
     assert_eq!(env.ordering, Some(OrderingPolicy::PerKey));
 }
 
@@ -260,10 +259,9 @@ fn json_serde_roundtrip_preserves_envelope_fields() {
         .with_ordering(OrderingPolicy::Gateway)
         .requiring_ack();
     // Deterministic timestamp for the round-trip check.
-    env.timestamp =
-        chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
-            .expect("parse timestamp")
-            .with_timezone(&chrono::Utc);
+    env.timestamp = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+        .expect("parse timestamp")
+        .with_timezone(&chrono::Utc);
 
     let json = serde_json::to_string(&env).expect("serialize");
     let parsed: EventEnvelope = serde_json::from_str(&json).expect("deserialize");

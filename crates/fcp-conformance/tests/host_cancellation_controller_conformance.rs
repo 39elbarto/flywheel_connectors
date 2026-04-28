@@ -27,8 +27,7 @@
 
 use chrono::Utc;
 use fcp_host::{
-    CancelReason, CancellationController, CancellationOutcome, CancellationRequest,
-    CleanupBehavior,
+    CancelReason, CancellationController, CancellationOutcome, CancellationRequest, CleanupBehavior,
 };
 
 fn user_request(operation_id: &str) -> CancellationRequest {
@@ -117,11 +116,7 @@ fn br_jdaro_principal_mismatch_rejects_before_state_mutation() {
     let ctrl = CancellationController::new();
     ctrl.track_with_owner("op-jdaro", Some("user:alice"));
 
-    let result = ctrl.cancel(
-        &user_request("op-jdaro"),
-        Some("user:eve"),
-        Utc::now(),
-    );
+    let result = ctrl.cancel(&user_request("op-jdaro"), Some("user:eve"), Utc::now());
     assert!(
         result.is_err(),
         "cancel by mismatched principal MUST be rejected; got Ok({result:?})"
@@ -136,11 +131,7 @@ fn br_jdaro_principal_mismatch_rejects_before_state_mutation() {
 
     // Alice can still cancel.
     let r = ctrl
-        .cancel(
-            &user_request("op-jdaro"),
-            Some("user:alice"),
-            Utc::now(),
-        )
+        .cancel(&user_request("op-jdaro"), Some("user:alice"), Utc::now())
         .expect("legitimate owner cancel must succeed after rejected attempt");
     assert_eq!(
         r.outcome,
@@ -189,8 +180,10 @@ fn audit_log_records_every_successful_cancel() {
 
     let events = ctrl.audit_events();
     assert!(
-        events.iter().any(|e| e.operation_id == "op-audit"
-            && matches!(e.outcome, CancellationOutcome::Cancelled)),
+        events
+            .iter()
+            .any(|e| e.operation_id == "op-audit"
+                && matches!(e.outcome, CancellationOutcome::Cancelled)),
         "audit log MUST contain a Cancelled entry for op-audit; got {events:?}"
     );
 }
@@ -206,8 +199,10 @@ fn audit_log_records_too_late_cancel_attempts() {
 
     let events = ctrl.audit_events();
     assert!(
-        events.iter().any(|e| e.operation_id == "op-late"
-            && matches!(e.outcome, CancellationOutcome::TooLate)),
+        events
+            .iter()
+            .any(|e| e.operation_id == "op-late"
+                && matches!(e.outcome, CancellationOutcome::TooLate)),
         "audit log MUST capture TooLate cancellation attempts for forensics"
     );
 }
@@ -228,11 +223,7 @@ fn remove_after_complete_drops_tracking_entry() {
         "remove() MUST drop the tracking entry"
     );
 
-    let result = ctrl.cancel(
-        &user_request("op-remove"),
-        Some("user:alice"),
-        Utc::now(),
-    );
+    let result = ctrl.cancel(&user_request("op-remove"), Some("user:alice"), Utc::now());
     assert!(
         result.is_err(),
         "after remove(), cancel MUST treat the operation as unknown"

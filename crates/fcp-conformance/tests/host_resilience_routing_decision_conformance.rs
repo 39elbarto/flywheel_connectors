@@ -36,12 +36,12 @@
 //! 10. **`ResilienceMetricsSnapshot::default`** is all zero — fresh
 //!     layer state has no observed traffic.
 
+use fcp_core::ConnectorId;
 use fcp_host::{
     BulkheadConfig, CircuitBreakerConfig, CircuitState, FailurePredicate, HealthRouterConfig,
     LoadShedConfig, RequestPriority, ResilienceConfig, ResilienceError, ResilienceLayer,
     ResilienceMetricsSnapshot, RoutingDecision,
 };
-use fcp_core::ConnectorId;
 use std::time::Duration;
 
 // ─── CircuitBreakerConfig defaults ──────────────────────────────────
@@ -427,7 +427,8 @@ fn fresh_resilience_layer_metrics_for_new_connector_are_zero() {
     layer.ensure_connector(&cid);
     let m = layer.metrics(&cid);
     assert_eq!(
-        m, ResilienceMetricsSnapshot::default(),
+        m,
+        ResilienceMetricsSnapshot::default(),
         "freshly-ensured connector MUST have all-zero metrics"
     );
 }

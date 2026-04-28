@@ -98,8 +98,16 @@ fn connector_target_arch_translation_normalizes_to_canonical_names() {
     // that simply passes through).
     let t = ConnectorTarget::from_env();
     let canonical_or_passthrough = [
-        "amd64", "arm64", // canonical translations
-        "x86", "powerpc", "powerpc64", "mips", "mips64", "s390x", "wasm32", "riscv64",
+        "amd64",
+        "arm64", // canonical translations
+        "x86",
+        "powerpc",
+        "powerpc64",
+        "mips",
+        "mips64",
+        "s390x",
+        "wasm32",
+        "riscv64",
         "loongarch64",
     ];
     assert!(
@@ -141,8 +149,8 @@ fn binary_transmission_info_new_defaults_payload_hash_to_none() {
 
 #[test]
 fn binary_transmission_info_with_payload_hash_sets_field() {
-    let info = ConnectorBinaryTransmissionInfo::new(4096, 128, 1, 1, 8)
-        .with_payload_hash([0xAB; 32]);
+    let info =
+        ConnectorBinaryTransmissionInfo::new(4096, 128, 1, 1, 8).with_payload_hash([0xAB; 32]);
     assert_eq!(info.payload_hash, Some([0xAB; 32]));
 }
 
@@ -173,15 +181,14 @@ fn binary_transmission_info_serde_omits_field_consistent_with_pre_payload_hash_r
 
 #[test]
 fn binary_transmission_info_serde_includes_payload_hash_when_some() {
-    let info = ConnectorBinaryTransmissionInfo::new(4096, 128, 1, 1, 8)
-        .with_payload_hash([0xCC; 32]);
+    let info =
+        ConnectorBinaryTransmissionInfo::new(4096, 128, 1, 1, 8).with_payload_hash([0xCC; 32]);
     let json = serde_json::to_string(&info).expect("serialize");
     assert!(
         json.contains("payload_hash"),
         "payload_hash=Some MUST appear in serialized JSON"
     );
-    let parsed: ConnectorBinaryTransmissionInfo =
-        serde_json::from_str(&json).expect("deserialize");
+    let parsed: ConnectorBinaryTransmissionInfo = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(parsed.payload_hash, Some([0xCC; 32]));
 }
 
@@ -196,8 +203,7 @@ fn binary_symbol_set_serde_roundtrip_preserves_all_fields() {
         },
         binary_hash: "sha256:abc".into(),
         encoded_body_hash: "sha256:def".into(),
-        oti: ConnectorBinaryTransmissionInfo::new(4096, 128, 1, 1, 8)
-            .with_payload_hash([0xAB; 32]),
+        oti: ConnectorBinaryTransmissionInfo::new(4096, 128, 1, 1, 8).with_payload_hash([0xAB; 32]),
         source_symbols: 32,
         total_symbols: 48,
         mirrored_at: 1_700_000_000,

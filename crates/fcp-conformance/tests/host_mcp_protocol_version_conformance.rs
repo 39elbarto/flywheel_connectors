@@ -91,10 +91,7 @@ fn json_serde_roundtrip_preserves_wire_string() {
     // and version-negotiation comparison would disagree on the
     // literal string and the host would advertise a version no
     // client recognizes.
-    for version in [
-        McpProtocolVersion::V2025_03,
-        McpProtocolVersion::V2024_11,
-    ] {
+    for version in [McpProtocolVersion::V2025_03, McpProtocolVersion::V2024_11] {
         let json = serde_json::to_string(&version).expect("serialize");
         // The serialized JSON is a quoted string equal to as_str.
         let expected = format!("\"{}\"", version.as_str());
@@ -138,18 +135,9 @@ fn versions_compare_by_variant_equality() {
     // PartialEq + Eq are derived; pin that the same variant is
     // self-equal and different variants are unequal. Without this
     // version negotiation can't make decisions.
-    assert_eq!(
-        McpProtocolVersion::V2025_03,
-        McpProtocolVersion::V2025_03
-    );
-    assert_eq!(
-        McpProtocolVersion::V2024_11,
-        McpProtocolVersion::V2024_11
-    );
-    assert_ne!(
-        McpProtocolVersion::V2025_03,
-        McpProtocolVersion::V2024_11
-    );
+    assert_eq!(McpProtocolVersion::V2025_03, McpProtocolVersion::V2025_03);
+    assert_eq!(McpProtocolVersion::V2024_11, McpProtocolVersion::V2024_11);
+    assert_ne!(McpProtocolVersion::V2025_03, McpProtocolVersion::V2024_11);
 }
 
 #[test]

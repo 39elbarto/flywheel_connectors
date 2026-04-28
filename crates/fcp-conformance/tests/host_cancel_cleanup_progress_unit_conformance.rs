@@ -53,9 +53,7 @@ fn cancel_reason_agent_abort_carries_reason_field() {
 
 #[test]
 fn cancel_reason_timeout_approaching_carries_remaining_ms() {
-    let r = CancelReason::TimeoutApproaching {
-        remaining_ms: 500,
-    };
+    let r = CancelReason::TimeoutApproaching { remaining_ms: 500 };
     let v = serde_json::to_value(&r).expect("serialize");
     assert_eq!(v["type"], "timeout_approaching");
     assert_eq!(v["remaining_ms"], 500);
@@ -97,9 +95,7 @@ fn cancel_reason_label_matches_serde_tag_for_every_variant() {
     let cases = [
         (CancelReason::UserRequested, "user_requested"),
         (
-            CancelReason::AgentAbort {
-                reason: "x".into(),
-            },
+            CancelReason::AgentAbort { reason: "x".into() },
             "agent_abort",
         ),
         (
@@ -138,9 +134,7 @@ fn cancel_reason_serde_roundtrip_for_every_variant() {
         CancelReason::AgentAbort {
             reason: "fault".into(),
         },
-        CancelReason::TimeoutApproaching {
-            remaining_ms: 1000,
-        },
+        CancelReason::TimeoutApproaching { remaining_ms: 1000 },
         CancelReason::ResourceLimit {
             resource: "cpu".into(),
             current: 95,

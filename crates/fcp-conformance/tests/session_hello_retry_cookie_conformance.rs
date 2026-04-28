@@ -107,8 +107,8 @@ fn cookie_binds_to_hello_to() {
     let mut hello_b = hello_a.clone();
     hello_b.to = TailscaleNodeId::new("node-other-responder");
 
-    let err = verify_cookie(&COOKIE_KEY_A, &hello_b, &cookie)
-        .expect_err("cookie must bind to hello.to");
+    let err =
+        verify_cookie(&COOKIE_KEY_A, &hello_b, &cookie).expect_err("cookie must bind to hello.to");
     assert!(matches!(err, SessionError::InvalidCookie));
 }
 

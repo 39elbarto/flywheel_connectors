@@ -283,8 +283,7 @@ fn redact_json_redacts_only_at_sensitive_keys_not_in_values() {
     let policy = RedactionPolicy::default();
     let redacted = redact_json(value, &policy);
     assert_eq!(
-        redacted["note"],
-        "the user reported a password reset issue",
+        redacted["note"], "the user reported a password reset issue",
         "redact_json MUST inspect KEYS only — value bodies MUST be left alone"
     );
     assert_eq!(redacted["host"], "example.com");

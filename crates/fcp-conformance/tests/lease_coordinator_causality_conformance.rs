@@ -52,7 +52,11 @@ fn purpose() -> LeasePurpose {
     LeasePurpose::OperationExecution
 }
 
-fn observation(holder: &TailscaleNodeId, fencing_token: u64, expires_at: u64) -> ObservedLeaseAuthority {
+fn observation(
+    holder: &TailscaleNodeId,
+    fencing_token: u64,
+    expires_at: u64,
+) -> ObservedLeaseAuthority {
     ObservedLeaseAuthority::new(
         holder.clone(),
         HeldLease {
@@ -90,11 +94,7 @@ fn acquire_on_empty_state_grants_lease_with_fresh_token() {
                 fencing_token > 0,
                 "fresh fencing_token must be positive (token=0 is reserved)"
             );
-            assert_eq!(
-                expires_at,
-                now + 60,
-                "expires_at must be now_secs + ttl"
-            );
+            assert_eq!(expires_at, now + 60, "expires_at must be now_secs + ttl");
         }
         other => panic!("expected Granted on empty state, got {other:?}"),
     }
@@ -257,15 +257,7 @@ fn renew_with_wrong_fencing_token_is_denied() {
     // Alice holds token=7; she tries to renew claiming token=99.
     let observed = vec![observation(&alice(), 7, now + 60)];
 
-    let (outcome, _) = coord.renew(
-        &alice(),
-        &obj(),
-        &purpose(),
-        99,
-        &observed,
-        now,
-        Some(60),
-    );
+    let (outcome, _) = coord.renew(&alice(), &obj(), &purpose(), 99, &observed, now, Some(60));
 
     assert!(
         matches!(outcome, RenewOutcome::Denied { .. }),

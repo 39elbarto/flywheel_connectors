@@ -376,7 +376,10 @@ fn validate_canonical_id_accepts_max_complexity_string() {
     // Stress: every legal char class, max length region, all four
     // legal mid-punctuation marks. The validator MUST accept.
     let s = "a0b.c_d:e-f.g_h:i-j0k.l_m:n-o";
-    assert!(validate_canonical_id(s).is_ok(), "complex canonical MUST pass");
+    assert!(
+        validate_canonical_id(s).is_ok(),
+        "complex canonical MUST pass"
+    );
     // And it round-trips through every ID type.
     assert!(CapabilityId::new(s).is_ok());
     assert!(ConnectorId::try_from(s.to_owned()).is_ok());

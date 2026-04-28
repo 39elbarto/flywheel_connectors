@@ -53,9 +53,9 @@ fn baseline_request() -> (SymbolRequest, Ed25519SigningKey) {
         ObjectId::from_bytes([0x11; 32]),
         zone,
         ZoneKeyId::from_bytes([0x22; 8]),
-        1_000,    // epoch_id
-        100,      // max_symbols (well below MAX_SYMBOLS_HARD_CAP=2001)
-        25,       // current_symbols
+        1_000, // epoch_id
+        100,   // max_symbols (well below MAX_SYMBOLS_HARD_CAP=2001)
+        25,    // current_symbols
     )
     .with_missing_hint(vec![1, 5, 9]);
     req.sign(&signing_key);

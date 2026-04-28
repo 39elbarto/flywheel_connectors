@@ -23,7 +23,7 @@
 //! `from`/`timestamp` from `signing_bytes` (breaking forwarder
 //! attribution) fails conformance directly.
 
-use fcp_core::{NodeSignature as CoreNodeSignature, NodeId, ObjectId, TailscaleNodeId, ZoneId};
+use fcp_core::{NodeId, NodeSignature as CoreNodeSignature, ObjectId, TailscaleNodeId, ZoneId};
 use fcp_crypto::{Ed25519SigningKey, Ed25519VerifyingKey};
 use fcp_mesh::gossip::RevocationPushMessage;
 

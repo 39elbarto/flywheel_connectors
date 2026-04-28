@@ -37,7 +37,7 @@
 //! - `SessionStatus::Display` returns the snake_case string for each.
 
 use fcp_host::{
-    McpClientInfo, McpInitializeResponse, McpProtocolVersion, McpPromptCapability,
+    McpClientInfo, McpInitializeResponse, McpPromptCapability, McpProtocolVersion,
     McpResourceCapability, McpResourceEntry, McpResourceListRequest, McpResourceListResponse,
     McpServerInfo, SessionStatus,
 };
@@ -127,8 +127,14 @@ fn resource_capability_omits_optional_fields_when_none() {
         list_changed: None,
     };
     let s = serde_json::to_string(&cap).expect("serialize");
-    assert!(!s.contains("subscribe"), "subscribe=None MUST be omitted; got {s}");
-    assert!(!s.contains("listChanged"), "list_changed=None MUST be omitted; got {s}");
+    assert!(
+        !s.contains("subscribe"),
+        "subscribe=None MUST be omitted; got {s}"
+    );
+    assert!(
+        !s.contains("listChanged"),
+        "list_changed=None MUST be omitted; got {s}"
+    );
 }
 
 #[test]
@@ -147,7 +153,10 @@ fn prompt_capability_uses_camelcase_for_list_changed() {
 fn resource_list_request_omits_cursor_when_none() {
     let req = McpResourceListRequest { cursor: None };
     let s = serde_json::to_string(&req).expect("serialize");
-    assert!(!s.contains("cursor"), "cursor=None MUST be omitted; got {s}");
+    assert!(
+        !s.contains("cursor"),
+        "cursor=None MUST be omitted; got {s}"
+    );
     // Empty body when no fields set.
     assert_eq!(s, "{}");
 }
@@ -274,8 +283,7 @@ fn resource_list_response_with_resources_round_trips() {
         next_cursor: Some("token".into()),
     };
     let json_str = serde_json::to_string(&resp).expect("serialize");
-    let parsed: McpResourceListResponse =
-        serde_json::from_str(&json_str).expect("deserialize");
+    let parsed: McpResourceListResponse = serde_json::from_str(&json_str).expect("deserialize");
     assert_eq!(parsed.resources.len(), 2);
     assert_eq!(parsed.resources[0].uri, "file:///a");
     assert_eq!(parsed.resources[1].uri, "file:///b");

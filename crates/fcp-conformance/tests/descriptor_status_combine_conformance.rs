@@ -195,15 +195,13 @@ fn from_self_check_report_ok_yields_ready() {
 
 #[test]
 fn from_self_check_report_degraded_yields_degraded() {
-    let mapped: DescriptorStatus =
-        (&SelfCheckReport::degraded("rate_limit", "near cap")).into();
+    let mapped: DescriptorStatus = (&SelfCheckReport::degraded("rate_limit", "near cap")).into();
     assert_eq!(mapped, DescriptorStatus::Degraded);
 }
 
 #[test]
 fn from_self_check_report_failed_yields_failed() {
-    let mapped: DescriptorStatus =
-        (&SelfCheckReport::failed("auth_error", "token expired")).into();
+    let mapped: DescriptorStatus = (&SelfCheckReport::failed("auth_error", "token expired")).into();
     assert_eq!(
         mapped,
         DescriptorStatus::Failed,
@@ -265,8 +263,7 @@ fn json_serde_uses_snake_case_variants() {
         "DescriptorStatus JSON form MUST use snake_case rename — admin UI / CLI output \
          depends on this literal string"
     );
-    let parsed: DescriptorStatus =
-        serde_json::from_str(&serialized).expect("deserialize");
+    let parsed: DescriptorStatus = serde_json::from_str(&serialized).expect("deserialize");
     assert_eq!(parsed, DescriptorStatus::PolicyBlocked);
 }
 

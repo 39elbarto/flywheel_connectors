@@ -124,7 +124,10 @@ fn active_lease_does_contribute_to_load_penalty() {
         candidates[0].node_id.as_str(),
         "node-b",
         "node-b (no active leases) must outrank node-a (active lease load); got {:?}",
-        candidates.iter().map(|c| (c.node_id.as_str(), c.score)).collect::<Vec<_>>()
+        candidates
+            .iter()
+            .map(|c| (c.node_id.as_str(), c.score))
+            .collect::<Vec<_>>()
     );
     assert!(
         candidates[0].score > candidates[1].score,
@@ -253,15 +256,15 @@ fn rank_one_candidate_carries_selected_as_best_reason() {
     // explainability contract callers rely on to surface "why was
     // this node picked".
     let planner = ExecutionPlanner::new();
-    let nodes = vec![
-        make_node("a", 2048, vec![]),
-        make_node("b", 4096, vec![]),
-    ];
+    let nodes = vec![make_node("a", 2048, vec![]), make_node("b", 4096, vec![])];
     let input = PlannerInput::new(nodes, 1000);
     let context = PlannerContext::new(test_connector_id());
     let candidates = planner.plan(&input, &context);
 
-    assert!(!candidates.is_empty(), "fixture sanity: at least one candidate");
+    assert!(
+        !candidates.is_empty(),
+        "fixture sanity: at least one candidate"
+    );
     let has_selected_reason = candidates[0]
         .decision_reasons
         .iter()
@@ -288,10 +291,7 @@ fn empty_node_input_yields_empty_plan() {
 #[test]
 fn select_best_returns_first_of_plan() {
     let planner = ExecutionPlanner::new();
-    let nodes = vec![
-        make_node("a", 2048, vec![]),
-        make_node("b", 8192, vec![]),
-    ];
+    let nodes = vec![make_node("a", 2048, vec![]), make_node("b", 8192, vec![])];
     let input = PlannerInput::new(nodes, 1000);
     let context = PlannerContext::new(test_connector_id());
 

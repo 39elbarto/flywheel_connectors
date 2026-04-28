@@ -96,8 +96,7 @@ fn output_capture_config_serde_roundtrip() {
         .with_stdout_capacity(1024)
         .with_max_json_lines(7);
     let json_str = serde_json::to_string(&c).expect("serialize");
-    let parsed: OutputCaptureConfig =
-        serde_json::from_str(&json_str).expect("deserialize");
+    let parsed: OutputCaptureConfig = serde_json::from_str(&json_str).expect("deserialize");
     assert_eq!(parsed.stdout_capacity, c.stdout_capacity);
     assert_eq!(parsed.max_json_lines, c.max_json_lines);
 }
@@ -201,9 +200,7 @@ fn install_status_six_variants_are_distinct() {
         InstallStatus::NotInstalled,
         InstallStatus::Installing,
         InstallStatus::Installed,
-        InstallStatus::Failed {
-            error: "x".into(),
-        },
+        InstallStatus::Failed { error: "x".into() },
         InstallStatus::Updating {
             from_version: "1".into(),
             to_version: "2".into(),
@@ -263,14 +260,11 @@ fn verification_status_serde_roundtrip_for_each_variant() {
         VerificationStatus::Verified,
         VerificationStatus::Unverified,
         VerificationStatus::Skipped,
-        VerificationStatus::Failed {
-            reason: "x".into(),
-        },
+        VerificationStatus::Failed { reason: "x".into() },
     ];
     for original in cases {
         let json_str = serde_json::to_string(&original).expect("serialize");
-        let parsed: VerificationStatus =
-            serde_json::from_str(&json_str).expect("deserialize");
+        let parsed: VerificationStatus = serde_json::from_str(&json_str).expect("deserialize");
         // Re-serialize and compare semantic JSON.
         let v1 = serde_json::to_value(&parsed).expect("v1");
         let v2 = serde_json::to_value(&original).expect("v2");

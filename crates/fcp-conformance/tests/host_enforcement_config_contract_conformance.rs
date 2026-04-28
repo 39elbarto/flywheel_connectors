@@ -116,8 +116,7 @@ fn with_revocation_max_age_ms_sets_field_only() {
 
 #[test]
 fn with_critical_taint_flags_replaces_default_list() {
-    let c = EnforcementConfig::new()
-        .with_critical_taint_flags(vec!["custom-secret".into()]);
+    let c = EnforcementConfig::new().with_critical_taint_flags(vec!["custom-secret".into()]);
     assert_eq!(
         c.critical_taint_flags,
         vec!["custom-secret".to_string()],
@@ -133,7 +132,10 @@ fn builder_chain_preserves_all_fields() {
         .with_critical_taint_flags(vec!["x".into(), "y".into()]);
     assert_eq!(c.checkpoint_max_age_ms, 1_000);
     assert_eq!(c.revocation_max_age_ms, 2_000);
-    assert_eq!(c.critical_taint_flags, vec!["x".to_string(), "y".to_string()]);
+    assert_eq!(
+        c.critical_taint_flags,
+        vec!["x".to_string(), "y".to_string()]
+    );
 }
 
 // ─── add_zone_membership ──────────────────────────────────────────
@@ -144,7 +146,9 @@ fn add_zone_membership_accepts_valid_zone_string() {
     let r = c.add_zone_membership("alice", "z:work");
     assert!(r.is_ok(), "valid zone string MUST succeed; got {r:?}");
     assert_eq!(
-        c.zone_memberships.get("alice").map(std::collections::HashSet::len),
+        c.zone_memberships
+            .get("alice")
+            .map(std::collections::HashSet::len),
         Some(1),
         "alice MUST be registered for one zone"
     );
@@ -236,10 +240,7 @@ fn add_zone_operation_rejects_malformed_operation_id() {
     let err = c
         .add_zone_operation("z:work", "Bad Op")
         .expect_err("bad op MUST fail");
-    assert!(matches!(
-        err,
-        EnforcementConfigError::InvalidOperationId(_)
-    ));
+    assert!(matches!(err, EnforcementConfigError::InvalidOperationId(_)));
 }
 
 // ─── AllowedConnector / AllowedOperation matchers ─────────────────
@@ -300,9 +301,7 @@ fn allowed_operation_implements_hash_for_hashset_use() {
     use std::collections::HashSet;
     let mut set = HashSet::new();
     set.insert(AllowedOperation::Any);
-    set.insert(AllowedOperation::Operation(OperationId::from_static(
-        "x.y",
-    )));
+    set.insert(AllowedOperation::Operation(OperationId::from_static("x.y")));
     set.insert(AllowedOperation::Any);
     assert_eq!(set.len(), 2);
 }
@@ -351,6 +350,8 @@ fn enforcement_config_error_invalid_operation_id_display() {
 #[test]
 fn enforcement_config_error_is_std_error() {
     let mut c = EnforcementConfig::new();
-    let err = c.add_zone_membership("alice", "BAD").expect_err("MUST fail");
+    let err = c
+        .add_zone_membership("alice", "BAD")
+        .expect_err("MUST fail");
     let _: &dyn std::error::Error = &err;
 }

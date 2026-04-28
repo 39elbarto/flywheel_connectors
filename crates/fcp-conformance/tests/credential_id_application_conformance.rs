@@ -89,9 +89,8 @@ fn credential_id_display_round_trips_with_parse() {
 
 #[test]
 fn credential_id_debug_includes_uuid_string() {
-    let id = CredentialId::from_uuid(
-        Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap(),
-    );
+    let id =
+        CredentialId::from_uuid(Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap());
     let dbg = format!("{id:?}");
     assert!(
         dbg.contains("550e8400"),
@@ -176,8 +175,7 @@ fn credential_application_unit_variants_round_trip() {
     ];
     for app in unit_variants {
         let json = serde_json::to_string(&app).expect("serialize");
-        let parsed: CredentialApplication =
-            serde_json::from_str(&json).expect("deserialize");
+        let parsed: CredentialApplication = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, app, "round-trip failed for {app:?}");
     }
 }
@@ -214,8 +212,10 @@ fn credential_id_ordering_is_total() {
     // BTreeSets/BTreeMaps for deterministic enumeration. Pin the
     // total-order property indirectly: any pair compares
     // consistently.
-    let a = CredentialId::from_uuid(Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap());
-    let b = CredentialId::from_uuid(Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap());
+    let a =
+        CredentialId::from_uuid(Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap());
+    let b =
+        CredentialId::from_uuid(Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap());
     assert!(a < b);
     assert!(b > a);
     assert_ne!(a, b);

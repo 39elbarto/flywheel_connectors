@@ -250,9 +250,7 @@ fn mesh_node_error_is_std_error() {
 #[test]
 fn mesh_node_error_debug_is_non_empty_for_every_variant() {
     let cases = vec![
-        MeshNodeError::PeerSigningKeyMissing {
-            peer: "x".into(),
-        },
+        MeshNodeError::PeerSigningKeyMissing { peer: "x".into() },
         MeshNodeError::PeerSignatureInvalid {
             peer: "x".into(),
             message_kind: "k",

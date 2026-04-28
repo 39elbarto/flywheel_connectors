@@ -73,10 +73,7 @@ fn start_tracking_initializes_state() {
 fn record_update_on_unknown_operation_returns_false_and_does_not_allocate() {
     let ctrl = ProgressController::new();
     let emitted = ctrl.record_update("op-unknown", update_at(10, Some(100)), Utc::now());
-    assert!(
-        !emitted,
-        "record_update on un-tracked op MUST return false"
-    );
+    assert!(!emitted, "record_update on un-tracked op MUST return false");
     assert_eq!(
         ctrl.tracked_count(),
         0,
@@ -139,12 +136,7 @@ fn record_phase_transition_moves_current_into_completed() {
     let ctrl = ProgressController::new();
     ctrl.start_tracking("op-phase", 1, "uploading", &options(100));
 
-    let ok = ctrl.record_phase_transition(
-        "op-phase",
-        "verifying",
-        &["finalizing"],
-        Utc::now(),
-    );
+    let ok = ctrl.record_phase_transition("op-phase", "verifying", &["finalizing"], Utc::now());
     assert!(ok);
 
     assert_eq!(ctrl.current_phase("op-phase").as_deref(), Some("verifying"));
@@ -251,10 +243,7 @@ fn computed_percentage_returns_none_when_total_is_zero() {
 fn computed_percentage_returns_correct_fraction() {
     let u = update_at(25, Some(100));
     let pct = u.computed_percentage().expect("percentage must be Some");
-    assert!(
-        (pct - 25.0).abs() < 1e-9,
-        "25/100 -> 25.0; got {pct}"
-    );
+    assert!((pct - 25.0).abs() < 1e-9, "25/100 -> 25.0; got {pct}");
 
     let u_done = update_at(100, Some(100));
     let pct_done = u_done.computed_percentage().expect("percentage");

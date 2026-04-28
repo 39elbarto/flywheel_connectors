@@ -44,12 +44,12 @@
 //!    3× latency-class penalty (deliberate stacking — Derp is the
 //!    worst transport AND the slowest class).
 
-use fcp_core::{ConnectorId, ObjectId, ObjectIdKey, ZoneId};
 use fcp_cbor::SchemaId;
+use fcp_core::{ConnectorId, ObjectId, ObjectIdKey, ZoneId};
 use fcp_mesh::{
     AvailabilityProfile, CpuArch, DeviceProfile, DeviceProfileBuilder, FitnessContext,
-    FitnessScore, GpuProfile, GpuVendor, InstalledConnector, LatencyClass, PowerSource,
-    TpuProfile, TpuVendor,
+    FitnessScore, GpuProfile, GpuVendor, InstalledConnector, LatencyClass, PowerSource, TpuProfile,
+    TpuVendor,
 };
 use fcp_tailscale::NodeId;
 use semver::Version;
@@ -305,7 +305,10 @@ fn requires_gpu_without_gpu_yields_ineligible() {
     let p = baseline_profile(); // no GPU
     let ctx = FitnessContext::new().with_requires_gpu(true);
     let f = p.compute_fitness(&ctx);
-    assert!(!f.eligible, "requires_gpu+!has_gpu MUST short-circuit ineligible");
+    assert!(
+        !f.eligible,
+        "requires_gpu+!has_gpu MUST short-circuit ineligible"
+    );
     assert_eq!(f.score, 0.0);
 }
 
@@ -387,11 +390,7 @@ fn score_clamps_at_zero_under_stacked_penalties() {
         .build();
     let f = p.compute_fitness(&baseline_ctx());
     assert!(f.eligible, "stacked penalties alone MUST keep eligibility");
-    assert!(
-        f.score >= 0.0,
-        "score MUST clamp at 0.0; got {}",
-        f.score
-    );
+    assert!(f.score >= 0.0, "score MUST clamp at 0.0; got {}", f.score);
     assert!(
         f.score < 1.0,
         "this stack should land at or near 0.0; got {}",
@@ -465,8 +464,7 @@ fn ord_eligible_always_outranks_ineligible_regardless_of_score() {
     // An eligible score with f.score == 0.0 (clamped) MUST still
     // outrank the ineligible 0.0 — the eligibility flag is the
     // dominant key.
-    let eligible_zero = baseline_profile()
-        .compute_fitness(&baseline_ctx());
+    let eligible_zero = baseline_profile().compute_fitness(&baseline_ctx());
     // baseline score is 100.0 — easy. But test the documented total
     // order with explicit construction:
     use std::cmp::Ordering;

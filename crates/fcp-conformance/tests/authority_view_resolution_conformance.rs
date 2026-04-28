@@ -15,9 +15,7 @@
 //! regression in any branch fails conformance immediately.
 
 use fcp_core::{ObjectId, TailscaleNodeId, ZoneId};
-use fcp_mesh::{
-    AuthorityStatus, AuthorityView, HeldLease, LeasePurpose, ObservedLeaseAuthority,
-};
+use fcp_mesh::{AuthorityStatus, AuthorityView, HeldLease, LeasePurpose, ObservedLeaseAuthority};
 
 fn obj() -> ObjectId {
     ObjectId::from_unscoped_bytes(b"subject-under-authority")
@@ -76,7 +74,10 @@ fn empty_observations_yield_no_active_holder() {
 fn higher_fencing_token_wins_among_active_leases() {
     // Two active leases — alice with token=3, bob with token=7.
     // Bob must win.
-    let eligible = vec![TailscaleNodeId::new("node-a"), TailscaleNodeId::new("node-b")];
+    let eligible = vec![
+        TailscaleNodeId::new("node-a"),
+        TailscaleNodeId::new("node-b"),
+    ];
     let observed = vec![
         observation("node-a", 3, 2_000),
         observation("node-b", 7, 2_000),
@@ -96,7 +97,10 @@ fn tied_fencing_tokens_broken_by_later_expires_at() {
     // Same token (7), different expires_at — later expiry wins
     // because the tiebreaker prefers the more-recently-renewed
     // lease.
-    let eligible = vec![TailscaleNodeId::new("node-a"), TailscaleNodeId::new("node-b")];
+    let eligible = vec![
+        TailscaleNodeId::new("node-a"),
+        TailscaleNodeId::new("node-b"),
+    ];
     let observed = vec![
         observation("node-a", 7, 1_500),
         observation("node-b", 7, 3_000),
@@ -115,7 +119,10 @@ fn tied_token_and_expiry_broken_lexicographically_by_holder() {
     // Same (token, expires_at) — the lex-smaller holder wins. This
     // is the deterministic final tiebreaker that prevents
     // observation-order-dependent split-brain.
-    let eligible = vec![TailscaleNodeId::new("node-a"), TailscaleNodeId::new("node-b")];
+    let eligible = vec![
+        TailscaleNodeId::new("node-a"),
+        TailscaleNodeId::new("node-b"),
+    ];
     let observed = vec![
         observation("node-b", 7, 2_000),
         observation("node-a", 7, 2_000),
@@ -137,7 +144,10 @@ fn expired_lease_with_higher_token_does_not_take_authority() {
     // Bob must be the active holder; the expired alice must NOT
     // win even though her token is higher — the active filter is
     // applied BEFORE the token comparison.
-    let eligible = vec![TailscaleNodeId::new("node-a"), TailscaleNodeId::new("node-b")];
+    let eligible = vec![
+        TailscaleNodeId::new("node-a"),
+        TailscaleNodeId::new("node-b"),
+    ];
     let observed = vec![
         observation("node-a", 99, 4_000), // expired (past now=5_000)
         observation("node-b", 2, 6_000),  // active
@@ -155,7 +165,10 @@ fn expired_lease_with_higher_token_does_not_take_authority() {
 
 #[test]
 fn all_expired_leases_yield_no_active_holder() {
-    let eligible = vec![TailscaleNodeId::new("node-a"), TailscaleNodeId::new("node-b")];
+    let eligible = vec![
+        TailscaleNodeId::new("node-a"),
+        TailscaleNodeId::new("node-b"),
+    ];
     let observed = vec![
         observation("node-a", 5, 2_000),
         observation("node-b", 7, 3_000),
@@ -175,7 +188,10 @@ fn all_expired_leases_yield_no_active_holder() {
 fn winner_record_status_is_active_loser_is_superseded() {
     // The winning record must carry AuthorityStatus::Active; the
     // losing-but-still-not-expired records carry Superseded.
-    let eligible = vec![TailscaleNodeId::new("node-a"), TailscaleNodeId::new("node-b")];
+    let eligible = vec![
+        TailscaleNodeId::new("node-a"),
+        TailscaleNodeId::new("node-b"),
+    ];
     let observed = vec![
         observation("node-a", 3, 2_000), // loser
         observation("node-b", 7, 2_000), // winner
@@ -210,7 +226,10 @@ fn expired_record_is_tagged_expired_regardless_of_token_rank() {
     // Even a high-token lease that has expired must appear with
     // status=Expired in the record list — preserving auditability
     // of the timeline.
-    let eligible = vec![TailscaleNodeId::new("node-a"), TailscaleNodeId::new("node-b")];
+    let eligible = vec![
+        TailscaleNodeId::new("node-a"),
+        TailscaleNodeId::new("node-b"),
+    ];
     let observed = vec![
         observation("node-a", 99, 4_000), // expired (token rank irrelevant)
         observation("node-b", 2, 6_000),  // active winner

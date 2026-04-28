@@ -128,8 +128,16 @@ fn as_text_returns_none_for_non_text_variants() {
             .as_text()
             .is_none()
     );
-    assert!(WsMessage::ping(Bytes::from_static(b"x")).as_text().is_none());
-    assert!(WsMessage::pong(Bytes::from_static(b"x")).as_text().is_none());
+    assert!(
+        WsMessage::ping(Bytes::from_static(b"x"))
+            .as_text()
+            .is_none()
+    );
+    assert!(
+        WsMessage::pong(Bytes::from_static(b"x"))
+            .as_text()
+            .is_none()
+    );
     assert!(WsMessage::Close(None).as_text().is_none());
 }
 
@@ -142,7 +150,11 @@ fn as_binary_returns_none_for_non_binary_variants() {
             .is_none(),
         "Ping payload bytes MUST NOT be exposed via as_binary — Ping is a control frame"
     );
-    assert!(WsMessage::pong(Bytes::from_static(b"x")).as_binary().is_none());
+    assert!(
+        WsMessage::pong(Bytes::from_static(b"x"))
+            .as_binary()
+            .is_none()
+    );
     assert!(WsMessage::Close(None).as_binary().is_none());
 }
 
@@ -240,10 +252,7 @@ fn close_frame_eq_compares_both_fields() {
 
 #[test]
 fn ws_config_default_connect_timeout_is_thirty_seconds() {
-    assert_eq!(
-        WsConfig::default().connect_timeout,
-        Duration::from_secs(30)
-    );
+    assert_eq!(WsConfig::default().connect_timeout, Duration::from_secs(30));
 }
 
 #[test]
@@ -286,10 +295,7 @@ fn ws_config_default_max_reconnect_attempts_is_ten() {
 
 #[test]
 fn ws_config_default_reconnect_delay_is_one_second() {
-    assert_eq!(
-        WsConfig::default().reconnect_delay,
-        Duration::from_secs(1)
-    );
+    assert_eq!(WsConfig::default().reconnect_delay, Duration::from_secs(1));
 }
 
 #[test]
@@ -316,7 +322,10 @@ fn ws_config_builders_preserve_all_fields_in_chain() {
         .with_header("Authorization", "Bearer token")
         .with_auto_reconnect(false);
     assert_eq!(c.connect_timeout, Duration::from_secs(5));
-    assert!(c.ping_interval.is_none(), "with_ping_interval(None) MUST disable pings");
+    assert!(
+        c.ping_interval.is_none(),
+        "with_ping_interval(None) MUST disable pings"
+    );
     assert_eq!(c.max_message_size, 1024);
     assert_eq!(
         c.headers.get("Authorization").map(String::as_str),
@@ -330,7 +339,10 @@ fn ws_config_with_header_replaces_value_on_duplicate_key() {
     let c = WsConfig::new()
         .with_header("X-Custom", "first")
         .with_header("X-Custom", "second");
-    assert_eq!(c.headers.get("X-Custom").map(String::as_str), Some("second"));
+    assert_eq!(
+        c.headers.get("X-Custom").map(String::as_str),
+        Some("second")
+    );
     assert_eq!(c.headers.len(), 1);
 }
 
@@ -344,7 +356,10 @@ fn ws_config_debug_redacts_header_values_but_not_keys() {
         .with_header("Authorization", "Bearer SUPER-SECRET-TOKEN-VALUE")
         .with_header("X-API-Key", "ak_live_PROD_KEY");
     let dbg = format!("{c:?}");
-    assert!(dbg.contains("Authorization"), "header keys MUST appear; got {dbg}");
+    assert!(
+        dbg.contains("Authorization"),
+        "header keys MUST appear; got {dbg}"
+    );
     assert!(dbg.contains("X-API-Key"));
     assert!(
         dbg.contains("[REDACTED]"),

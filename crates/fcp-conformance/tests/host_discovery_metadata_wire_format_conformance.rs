@@ -307,7 +307,13 @@ fn tool_example_full_round_trips_all_three_fields() {
 #[test]
 fn tool_example_input_is_arbitrary_json() {
     // input is serde_json::Value — accepts any JSON shape.
-    for input in [json!(null), json!(42), json!("string"), json!([1, 2, 3]), json!({"k": "v"})] {
+    for input in [
+        json!(null),
+        json!(42),
+        json!("string"),
+        json!([1, 2, 3]),
+        json!({"k": "v"}),
+    ] {
         let ex = ToolExample {
             description: None,
             input: input.clone(),

@@ -29,11 +29,11 @@
 //! 7. **`ZoneRegistry`** — register/get_zone round-trip; absent tool
 //!    returns None.
 
+use fcp_core::ZoneId;
 use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchOperation, BatchOperationError, BatchOptions,
     BatchStatus, ExecutionPlan, ExecutionTier, OperationResultStatus, ZoneRegistry,
 };
-use fcp_core::ZoneId;
 
 fn op(id: &str, depends_on: Vec<&str>) -> BatchOperation {
     BatchOperation {

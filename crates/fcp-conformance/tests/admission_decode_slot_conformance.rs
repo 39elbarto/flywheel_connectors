@@ -25,9 +25,7 @@
 //! These tests use a deliberately-small `max_inflight_decodes` (3) so
 //! the saturation/release semantics surface in a few iterations.
 
-use fcp_mesh::admission::{
-    AdmissionController, AdmissionError, AdmissionPolicy, PeerBudget,
-};
+use fcp_mesh::admission::{AdmissionController, AdmissionError, AdmissionPolicy, PeerBudget};
 use fcp_tailscale::NodeId;
 
 fn three_slot_policy() -> AdmissionPolicy {

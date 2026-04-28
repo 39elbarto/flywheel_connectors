@@ -50,8 +50,7 @@ fn checkpoint_status_serde_roundtrip_with_each_freshness() {
     ] {
         let s = CheckpointStatus { freshness: f };
         let json_str = serde_json::to_string(&s).expect("serialize");
-        let parsed: CheckpointStatus =
-            serde_json::from_str(&json_str).expect("deserialize");
+        let parsed: CheckpointStatus = serde_json::from_str(&json_str).expect("deserialize");
         assert_eq!(parsed.freshness, f);
     }
 }
@@ -72,10 +71,7 @@ fn checkpoint_status_serializes_freshness_as_snake_case() {
 
 #[test]
 fn revocation_status_default_freshness_is_fresh() {
-    assert_eq!(
-        RevocationStatus::default().freshness,
-        FreshnessLevel::Fresh
-    );
+    assert_eq!(RevocationStatus::default().freshness, FreshnessLevel::Fresh);
 }
 
 #[test]
@@ -84,8 +80,7 @@ fn revocation_status_serde_roundtrip() {
         freshness: FreshnessLevel::Stale,
     };
     let json_str = serde_json::to_string(&s).expect("serialize");
-    let parsed: RevocationStatus =
-        serde_json::from_str(&json_str).expect("deserialize");
+    let parsed: RevocationStatus = serde_json::from_str(&json_str).expect("deserialize");
     assert_eq!(parsed.freshness, FreshnessLevel::Stale);
 }
 
@@ -127,8 +122,7 @@ fn transport_policy_status_serde_roundtrip_preserves_three_booleans() {
         allow_funnel: true,
     };
     let json_str = serde_json::to_string(&s).expect("serialize");
-    let parsed: TransportPolicyStatus =
-        serde_json::from_str(&json_str).expect("deserialize");
+    let parsed: TransportPolicyStatus = serde_json::from_str(&json_str).expect("deserialize");
     assert!(parsed.allow_lan);
     assert!(!parsed.allow_derp);
     assert!(parsed.allow_funnel);
@@ -164,8 +158,7 @@ fn store_coverage_status_serde_roundtrip() {
         store_healthy: true,
     };
     let json_str = serde_json::to_string(&s).expect("serialize");
-    let parsed: StoreCoverageStatus =
-        serde_json::from_str(&json_str).expect("deserialize");
+    let parsed: StoreCoverageStatus = serde_json::from_str(&json_str).expect("deserialize");
     assert!(parsed.store_healthy);
 }
 
@@ -174,18 +167,14 @@ fn store_coverage_status_serde_roundtrip() {
 #[test]
 fn degraded_mode_status_default_is_not_degraded() {
     let s = DegradedModeStatus::default();
-    assert!(
-        !s.is_degraded,
-        "default is_degraded MUST be false"
-    );
+    assert!(!s.is_degraded, "default is_degraded MUST be false");
 }
 
 #[test]
 fn degraded_mode_status_serde_roundtrip() {
     let s = DegradedModeStatus { is_degraded: true };
     let json_str = serde_json::to_string(&s).expect("serialize");
-    let parsed: DegradedModeStatus =
-        serde_json::from_str(&json_str).expect("deserialize");
+    let parsed: DegradedModeStatus = serde_json::from_str(&json_str).expect("deserialize");
     assert!(parsed.is_degraded);
 }
 
@@ -271,10 +260,7 @@ fn check_result_with_all_optional_fields_populated_round_trips() {
         status: CheckStatus::Fail,
         severity: CheckSeverity::Critical,
         message: "policy denied".into(),
-        repair_hints: vec![
-            "check capability grant".into(),
-            "verify zone".into(),
-        ],
+        repair_hints: vec!["check capability grant".into(), "verify zone".into()],
     };
     let json_str = serde_json::to_string(&r).expect("serialize");
     let parsed: CheckResult = serde_json::from_str(&json_str).expect("deserialize");

@@ -238,7 +238,10 @@ fn sse_config_builder_chain_preserves_all_fields() {
         .with_reconnect_delay(Duration::from_millis(500));
     assert_eq!(c.timeout, Some(Duration::from_secs(30)));
     assert_eq!(c.max_buffer_size, 2048);
-    assert_eq!(c.headers.get("Authorization").map(String::as_str), Some("Bearer token"));
+    assert_eq!(
+        c.headers.get("Authorization").map(String::as_str),
+        Some("Bearer token")
+    );
     assert!(!c.auto_reconnect);
     assert_eq!(c.max_reconnect_attempts, Some(5));
     assert_eq!(c.reconnect_delay, Duration::from_millis(500));
@@ -249,7 +252,10 @@ fn with_header_replaces_value_on_duplicate_key() {
     let c = SseConfig::new()
         .with_header("X-Custom", "first")
         .with_header("X-Custom", "second");
-    assert_eq!(c.headers.get("X-Custom").map(String::as_str), Some("second"));
+    assert_eq!(
+        c.headers.get("X-Custom").map(String::as_str),
+        Some("second")
+    );
     assert_eq!(c.headers.len(), 1);
 }
 

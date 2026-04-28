@@ -225,10 +225,10 @@ fn oversized_missing_hint_is_rejected_pre_transcript() {
     // bad signature.
     status.sign(&signing_key);
 
-    status
-        .verify(&signing_key.verifying_key())
-        .expect_err("oversized missing_hint must be rejected by validate_hint_bounds before \
-                     verify reaches the signature check (anti-amplification guard)");
+    status.verify(&signing_key.verifying_key()).expect_err(
+        "oversized missing_hint must be rejected by validate_hint_bounds before \
+                     verify reaches the signature check (anti-amplification guard)",
+    );
 }
 
 #[test]

@@ -335,7 +335,7 @@ fn violations_empty_when_within_limits() {
     let usage = ResourceUsage {
         memory_bytes: 100 * 1024 * 1024, // 100 MiB ≤ 512 MiB
         cpu_millis: 0,
-        open_fds: 100, // ≤ 1024
+        open_fds: 100,     // ≤ 1024
         process_count: 10, // ≤ 64
         file_size_bytes: 0,
     };
@@ -501,8 +501,5 @@ fn is_drained_requires_both_draining_and_zero_active() {
         "draining + active>0: not yet drained — MUST wait for active to clear"
     );
     drop(_g);
-    assert!(
-        t.is_drained(),
-        "draining + active=0: MUST be drained"
-    );
+    assert!(t.is_drained(), "draining + active=0: MUST be drained");
 }

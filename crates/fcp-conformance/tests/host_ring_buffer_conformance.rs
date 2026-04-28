@@ -100,7 +100,11 @@ fn many_small_writes_eventually_overflow_with_correct_telemetry() {
     for byte in b"abcdefghij" {
         r.write(std::slice::from_ref(byte));
     }
-    assert_eq!(r.contents(), b"ghij", "small-write FIFO must agree with one-shot oversized write");
+    assert_eq!(
+        r.contents(),
+        b"ghij",
+        "small-write FIFO must agree with one-shot oversized write"
+    );
     assert_eq!(r.total_written(), 10);
     assert!(r.has_overflow());
 }
@@ -135,11 +139,7 @@ fn total_written_is_monotonic_and_includes_evicted_bytes() {
     let after_second = r.total_written();
     assert!(after_second > after_first);
     assert_eq!(after_second, 8);
-    assert_eq!(
-        r.len(),
-        4,
-        "len always equals capacity after overflow"
-    );
+    assert_eq!(r.len(), 4, "len always equals capacity after overflow");
     assert_eq!(
         r.total_written() - u64::try_from(r.len()).unwrap(),
         4,
@@ -158,10 +158,7 @@ fn clear_empties_data_but_preserves_total_written() {
     assert!(r.has_overflow());
 
     r.clear();
-    assert!(
-        r.is_empty(),
-        "clear() MUST empty the visible buffer"
-    );
+    assert!(r.is_empty(), "clear() MUST empty the visible buffer");
     assert_eq!(r.len(), 0);
     assert_eq!(
         r.total_written(),

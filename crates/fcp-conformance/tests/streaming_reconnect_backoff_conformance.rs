@@ -392,7 +392,9 @@ fn delay_schedule_iterator_grows_until_cap_then_holds() {
         .with_max_delay(cap)
         .with_jitter(false);
 
-    let schedule: Vec<Duration> = (0..8).map(|attempt| cfg.delay_for_attempt(attempt)).collect();
+    let schedule: Vec<Duration> = (0..8)
+        .map(|attempt| cfg.delay_for_attempt(attempt))
+        .collect();
 
     assert!(
         schedule.contains(&cap),

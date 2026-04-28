@@ -35,8 +35,7 @@
 //!     serde without data loss.
 
 use fcp_host::{
-    McpErrorCode, McpJsonRpcError, McpJsonRpcErrorResponse, McpJsonRpcRequest,
-    McpJsonRpcResponse,
+    McpErrorCode, McpJsonRpcError, McpJsonRpcErrorResponse, McpJsonRpcRequest, McpJsonRpcResponse,
 };
 use serde_json::json;
 

@@ -52,10 +52,7 @@ fn adjustment_factor_custom_payload_distinguishes_two_customs() {
     let b = AdjustmentFactor::Custom("alpha".into());
     let c = AdjustmentFactor::Custom("beta".into());
     assert_eq!(a, b);
-    assert_ne!(
-        a, c,
-        "Custom payload difference MUST register on PartialEq"
-    );
+    assert_ne!(a, c, "Custom payload difference MUST register on PartialEq");
 }
 
 #[test]

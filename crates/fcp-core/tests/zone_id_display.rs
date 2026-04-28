@@ -21,8 +21,7 @@ fn zone_id_display_formats_canonical_variants() -> Result<(), ZoneIdError> {
 }
 
 #[test]
-fn zone_id_from_str_roundtrips_through_display_for_canonical_variants(
-) -> Result<(), ZoneIdError> {
+fn zone_id_from_str_roundtrips_through_display_for_canonical_variants() -> Result<(), ZoneIdError> {
     for (expected, _) in canonical_zone_cases()? {
         let parsed: ZoneId = expected.parse()?;
         let formatted = parsed.to_string();

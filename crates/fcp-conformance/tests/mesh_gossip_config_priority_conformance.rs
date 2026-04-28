@@ -32,10 +32,9 @@
 //! - `GossipStats` 3-field construction + Clone
 
 use fcp_mesh::{
-    DEFAULT_MAX_FUTURE_SKEW_SECS, DEFAULT_MAX_OBJECTS_PER_SUMMARY,
-    DEFAULT_MAX_SYMBOLS_PER_SUMMARY, DEFAULT_RECONCILIATION_BATCH_SIZE,
-    DEFAULT_SUMMARY_TTL_SECS, GossipConfig, GossipStats, IbltDecodeError,
-    MAX_OBJECT_IDS_PER_REQUEST, PriorityGossipPolicy,
+    DEFAULT_MAX_FUTURE_SKEW_SECS, DEFAULT_MAX_OBJECTS_PER_SUMMARY, DEFAULT_MAX_SYMBOLS_PER_SUMMARY,
+    DEFAULT_RECONCILIATION_BATCH_SIZE, DEFAULT_SUMMARY_TTL_SECS, GossipConfig, GossipStats,
+    IbltDecodeError, MAX_OBJECT_IDS_PER_REQUEST, PriorityGossipPolicy,
 };
 
 // ─── Documented constants ──────────────────────────────────────────
@@ -186,8 +185,7 @@ fn priority_gossip_policy_serde_roundtrip_for_each_variant() {
         PriorityGossipPolicy::Standard,
     ] {
         let json = serde_json::to_string(&variant).expect("serialize");
-        let parsed: PriorityGossipPolicy =
-            serde_json::from_str(&json).expect("deserialize");
+        let parsed: PriorityGossipPolicy = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, variant);
     }
 }
@@ -245,18 +243,9 @@ fn iblt_decode_error_three_variants_are_distinct() {
 
 #[test]
 fn iblt_decode_error_partial_eq_compares_payloads() {
-    let a = IbltDecodeError::TooLarge {
-        len: 100,
-        max: 50,
-    };
-    let b = IbltDecodeError::TooLarge {
-        len: 100,
-        max: 50,
-    };
-    let c = IbltDecodeError::TooLarge {
-        len: 200,
-        max: 50,
-    };
+    let a = IbltDecodeError::TooLarge { len: 100, max: 50 };
+    let b = IbltDecodeError::TooLarge { len: 100, max: 50 };
+    let c = IbltDecodeError::TooLarge { len: 200, max: 50 };
     assert_eq!(a, b);
     assert_ne!(a, c);
 }

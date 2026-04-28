@@ -32,9 +32,7 @@
 
 use std::time::Duration;
 
-use fcp_mesh::admission::{
-    AdmissionController, AdmissionError, AdmissionPolicy, PeerBudget,
-};
+use fcp_mesh::admission::{AdmissionController, AdmissionError, AdmissionPolicy, PeerBudget};
 use fcp_tailscale::NodeId;
 
 fn permissive_policy() -> AdmissionPolicy {
@@ -194,9 +192,7 @@ fn per_peer_isolation_one_peer_overrun_does_not_affect_another() {
     // `polite` must still be admitted at a reasonable request size.
     controller
         .check_admission(&polite, 1024, 8, true, 0)
-        .expect(
-            "per-peer isolation broken: polite peer rejected after noisy peer's overrun",
-        );
+        .expect("per-peer isolation broken: polite peer rejected after noisy peer's overrun");
 }
 
 #[test]

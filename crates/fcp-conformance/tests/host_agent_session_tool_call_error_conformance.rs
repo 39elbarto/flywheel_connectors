@@ -138,7 +138,10 @@ fn validate_rejects_zero_max_concurrent_calls() {
         rate_limit_per_minute: 30,
     };
     let errs = c.validate();
-    assert!(errs.iter().any(|e| e.contains("max_concurrent_calls must be > 0")));
+    assert!(
+        errs.iter()
+            .any(|e| e.contains("max_concurrent_calls must be > 0"))
+    );
 }
 
 #[test]

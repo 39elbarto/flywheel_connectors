@@ -18,8 +18,8 @@
 //! replay) or `reason` (turning a `BudgetExceeded` reject into a
 //! forged `Complete`).
 
-use fcp_core::{ObjectHeader, ObjectId, Provenance, TailscaleNodeId, ZoneId, ZoneKeyId};
 use fcp_cbor::SchemaId;
+use fcp_core::{ObjectHeader, ObjectId, Provenance, TailscaleNodeId, ZoneId, ZoneKeyId};
 use fcp_crypto::Ed25519SigningKey;
 use fcp_protocol::{SymbolAck, SymbolAckReason};
 use semver::Version;

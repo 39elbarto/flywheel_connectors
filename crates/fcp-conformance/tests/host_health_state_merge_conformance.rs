@@ -31,10 +31,7 @@ fn health_state_as_str_matches_snake_case_for_each_variant() {
     assert_eq!(HealthState::Starting.as_str(), "starting");
     assert_eq!(HealthState::Ready.as_str(), "ready");
     assert_eq!(
-        HealthState::Degraded {
-            reason: "x".into()
-        }
-        .as_str(),
+        HealthState::Degraded { reason: "x".into() }.as_str(),
         "degraded"
     );
     assert_eq!(
@@ -181,31 +178,27 @@ fn from_health_state_unavailable_records_a_recent_timestamp() {
 
 #[test]
 fn json_serde_health_state_uses_state_tag_with_lowercase_variant() {
-    let starting_json =
-        serde_json::to_string(&HealthState::Starting).expect("serialize Starting");
+    let starting_json = serde_json::to_string(&HealthState::Starting).expect("serialize Starting");
     assert!(
         starting_json.contains("\"state\":\"starting\""),
         "HealthState JSON MUST use {{\"state\":\"<variant>\"}} tag with lowercase rename; \
          got {starting_json}"
     );
 
-    let parsed: HealthState =
-        serde_json::from_str(&starting_json).expect("deserialize Starting");
+    let parsed: HealthState = serde_json::from_str(&starting_json).expect("deserialize Starting");
     assert!(matches!(parsed, HealthState::Starting));
 }
 
 #[test]
 fn json_serde_connector_health_uses_status_tag() {
-    let healthy_json =
-        serde_json::to_string(&ConnectorHealth::Healthy).expect("serialize Healthy");
+    let healthy_json = serde_json::to_string(&ConnectorHealth::Healthy).expect("serialize Healthy");
     assert!(
         healthy_json.contains("\"status\":\"healthy\""),
         "ConnectorHealth JSON MUST use {{\"status\":\"<variant>\"}} tag with lowercase \
          rename; got {healthy_json}"
     );
 
-    let parsed: ConnectorHealth =
-        serde_json::from_str(&healthy_json).expect("deserialize Healthy");
+    let parsed: ConnectorHealth = serde_json::from_str(&healthy_json).expect("deserialize Healthy");
     assert!(matches!(parsed, ConnectorHealth::Healthy));
 }
 
@@ -229,12 +222,8 @@ fn from_health_state_round_trips_for_all_variants_without_panic() {
     let states = [
         HealthState::Starting,
         HealthState::Ready,
-        HealthState::Degraded {
-            reason: "r".into(),
-        },
-        HealthState::Error {
-            reason: "e".into(),
-        },
+        HealthState::Degraded { reason: "r".into() },
+        HealthState::Error { reason: "e".into() },
         HealthState::Stopping,
     ];
     for state in &states {

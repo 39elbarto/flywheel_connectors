@@ -25,9 +25,7 @@
 
 use fcp_core::TailscaleNodeId;
 use fcp_crypto::{X25519SecretKey, X25519SharedSecret};
-use fcp_protocol::session::{
-    MeshSessionId, SessionKeys, SessionNonce, derive_session_keys,
-};
+use fcp_protocol::session::{MeshSessionId, SessionKeys, SessionNonce, derive_session_keys};
 
 const ALICE_SK: [u8; 32] = [0xA1; 32];
 const BOB_SK: [u8; 32] = [0xB2; 32];
@@ -246,9 +244,7 @@ fn dh_symmetry_yields_identical_keys_for_both_peers() {
     // keys. This is the property that makes the session usable at all.
     let alice = X25519SecretKey::from_bytes(ALICE_SK);
     let bob = X25519SecretKey::from_bytes(BOB_SK);
-    let shared_alice = alice
-        .diffie_hellman(&bob.public_key())
-        .expect("alice DH");
+    let shared_alice = alice.diffie_hellman(&bob.public_key()).expect("alice DH");
     let shared_bob = bob.diffie_hellman(&alice.public_key()).expect("bob DH");
     assert_eq!(
         shared_alice.as_bytes(),

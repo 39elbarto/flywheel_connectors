@@ -105,6 +105,13 @@ fn aggregate_health_state_roundtrips_documented_transition_path() {
         vec![0, 1, 2, 1, 0]
     );
     assert_eq!(
+        observed
+            .windows(2)
+            .map(|states| i16::from(states[1].severity()) - i16::from(states[0].severity()))
+            .collect::<Vec<_>>(),
+        vec![1, 1, -1, -1]
+    );
+    assert_eq!(
         observed.iter().map(ToString::to_string).collect::<Vec<_>>(),
         vec![
             "healthy",

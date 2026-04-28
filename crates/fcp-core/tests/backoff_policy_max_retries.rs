@@ -40,8 +40,11 @@ fn n_retries_iterator_yields_exactly_n_delays() {
 fn exhausted_iterator_stays_exhausted() {
     let mut delays = capped_policy(2).retry_delays();
 
+    assert_eq!(delays.size_hint(), (2, Some(2)));
     assert_eq!(delays.next(), Some(Duration::from_millis(100)));
+    assert_eq!(delays.size_hint(), (1, Some(1)));
     assert_eq!(delays.next(), Some(Duration::from_millis(200)));
+    assert_eq!(delays.size_hint(), (0, Some(0)));
     assert_eq!(delays.next(), None);
     assert_eq!(delays.next(), None);
     assert_eq!(delays.len(), 0);

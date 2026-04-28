@@ -177,7 +177,8 @@ pub enum BootstrapError {
     /// signal can match on this variant instead of substring-matching
     /// the legacy [`Self::HardwareToken`] message.
     #[error(
-        "hardware token provisioning enrollment is not implemented yet: token={token_display}, key_material={key_material}; remediation: use a supported bootstrap enrollment path before retrying"
+        "hardware token provisioning enrollment is not implemented yet for token {token_display} using {selected_material}; remediation: use a supported bootstrap enrollment path before retrying",
+        selected_material = .key_material
     )]
     HardwareTokenEnrollmentNotImplemented {
         /// Human-readable token locator selected for provisioning.
@@ -372,10 +373,10 @@ mod tests {
     fn from_io_error() {
         let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
         let err: BootstrapError = io_err.into();
-        match err {
-            BootstrapError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied),
-            other => panic!("expected Io, got {other:?}"),
-        }
+        assert!(
+            matches!(err, BootstrapError::Io(ref e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+            "expected permission-denied IO error, got {err:?}"
+        );
     }
 
     // ---- std::error::Error impl ----
@@ -487,10 +488,10 @@ mod tests {
     fn from_io_error_preserves_kind_not_found() {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
         let err: BootstrapError = io_err.into();
-        match err {
-            BootstrapError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
-            other => panic!("expected Io, got {other:?}"),
-        }
+        assert!(
+            matches!(err, BootstrapError::Io(ref e) if e.kind() == std::io::ErrorKind::NotFound),
+            "expected not-found IO error, got {err:?}"
+        );
     }
 
     // ---- Source chain ----
@@ -566,10 +567,7 @@ mod tests {
     fn bootstrap_result_with_vec() {
         let v = vec![1_u8, 2, 3];
         let r: BootstrapResult<Vec<u8>> = Ok(v);
-        match r {
-            Ok(inner) => assert_eq!(inner.len(), 3),
-            Err(e) => panic!("unexpected error: {e}"),
-        }
+        assert!(matches!(r, Ok(inner) if inner.len() == 3));
     }
 
     #[test]
@@ -586,10 +584,10 @@ mod tests {
         let io_err = std::io::Error::other("write fail");
         let cbor_err = ciborium::ser::Error::Io(io_err);
         let err: BootstrapError = cbor_err.into();
-        match err {
-            BootstrapError::Serialization(msg) => assert!(!msg.is_empty()),
-            other => panic!("expected Serialization, got {other:?}"),
-        }
+        assert!(
+            matches!(err, BootstrapError::Serialization(ref msg) if !msg.is_empty()),
+            "expected non-empty serialization error, got {err:?}"
+        );
     }
 
     #[test]
@@ -598,10 +596,10 @@ mod tests {
         let result: Result<u32, _> = ciborium::from_reader::<u32, _>(&[0xFF][..]);
         if let Err(cbor_err) = result {
             let err: BootstrapError = cbor_err.into();
-            match err {
-                BootstrapError::Serialization(msg) => assert!(!msg.is_empty()),
-                other => panic!("expected Serialization, got {other:?}"),
-            }
+            assert!(
+                matches!(err, BootstrapError::Serialization(ref msg) if !msg.is_empty()),
+                "expected non-empty serialization error, got {err:?}"
+            );
         }
     }
 
@@ -734,20 +732,20 @@ mod tests {
     fn from_io_error_preserves_kind_timed_out() {
         let io_err = std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out");
         let err: BootstrapError = io_err.into();
-        match err {
-            BootstrapError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::TimedOut),
-            other => panic!("expected Io, got {other:?}"),
-        }
+        assert!(
+            matches!(err, BootstrapError::Io(ref e) if e.kind() == std::io::ErrorKind::TimedOut),
+            "expected timed-out IO error, got {err:?}"
+        );
     }
 
     #[test]
     fn from_io_error_preserves_kind_already_exists() {
         let io_err = std::io::Error::new(std::io::ErrorKind::AlreadyExists, "exists");
         let err: BootstrapError = io_err.into();
-        match err {
-            BootstrapError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists),
-            other => panic!("expected Io, got {other:?}"),
-        }
+        assert!(
+            matches!(err, BootstrapError::Io(ref e) if e.kind() == std::io::ErrorKind::AlreadyExists),
+            "expected already-exists IO error, got {err:?}"
+        );
     }
 
     // ---- BootstrapResult with unit ----

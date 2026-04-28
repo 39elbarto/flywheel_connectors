@@ -168,7 +168,7 @@ fn display_cases() -> Vec<BootstrapErrorDisplayCase> {
                 token_display: "YubiKey 5".into(),
                 key_material: "Ed25519".into(),
             },
-            expected: "hardware token provisioning enrollment is not implemented yet: token=YubiKey 5, key_material=Ed25519; remediation: use a supported bootstrap enrollment path before retrying",
+            expected: "hardware token provisioning enrollment is not implemented yet for token YubiKey 5 using Ed25519; remediation: use a supported bootstrap enrollment path before retrying",
             remediation_hint: "use a supported bootstrap enrollment path",
         },
         BootstrapErrorDisplayCase {

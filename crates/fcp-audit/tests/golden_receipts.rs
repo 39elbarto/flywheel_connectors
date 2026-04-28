@@ -36,6 +36,109 @@ use serde_json::json;
 
 const ANCHOR_TS: u64 = 1_700_000_000;
 
+#[derive(serde::Serialize)]
+struct AuditReceiptEnvelope<T> {
+    envelope: &'static str,
+    version: u8,
+    receipt_type: &'static str,
+    receipt: T,
+}
+
+fn canonical_receipt_envelope_hex<T: serde::Serialize>(
+    receipt_type: &'static str,
+    receipt: T,
+) -> String {
+    let envelope = AuditReceiptEnvelope {
+        envelope: "fcp-audit.receipt",
+        version: 1,
+        receipt_type,
+        receipt,
+    };
+
+    hex::encode(
+        fcp_cbor::to_canonical_cbor(&envelope)
+            .expect("audit receipt envelope must encode as canonical CBOR"),
+    )
+}
+
+#[test]
+fn golden_audit_receipt_envelope_canonical_cbor() {
+    let audit_entry = AuditEntryBuilder::new()
+        .id("entry-cbor-0007")
+        .event_type("capability.invoke")
+        .severity(Severity::Info)
+        .actor("agent:canonical-cbor")
+        .zone_id("z:work")
+        .seq(7)
+        .occurred_at(ANCHOR_TS + 7)
+        .prev("entry-cbor-0006")
+        .correlation_id("req-cbor-0007")
+        .trace_context(
+            TraceContext::new("0af7651916cd43dd8448eb211c80319c", "b7ad6b7169203331")
+                .with_flags(0x01),
+        )
+        .connector_id("stripe")
+        .operation_id("charges.create")
+        .meta("amount_cents", json!(4200))
+        .meta("currency", json!("USD"))
+        .build()
+        .expect("audit entry receipt must build");
+
+    let decision_receipt = DecisionReceipt {
+        id: "rcpt_cbor_0007".to_string(),
+        request_id: "req-cbor-0007".to_string(),
+        decision: Decision::Deny,
+        reason_code: "policy.capability.missing".to_string(),
+        evidence: vec![
+            "cap:stripe.charges.create".to_string(),
+            "zone:z:work".to_string(),
+        ],
+        audit_entry_id: Some("entry-cbor-0007".to_string()),
+        explanation: Some("capability was not granted to z:work".to_string()),
+        decided_at: ANCHOR_TS + 8,
+        zone_id: "z:work".to_string(),
+        correlation_id: Some("req-cbor-0007".to_string()),
+        trace_context: Some(
+            TraceContext::new("0af7651916cd43dd8448eb211c80319c", "b7ad6b7169203331")
+                .with_flags(0x01),
+        ),
+        connector_id: Some("stripe".to_string()),
+        operation_id: Some("charges.create".to_string()),
+        issuer_kid: None,
+        signature: None,
+    };
+
+    let chain_head = ChainHead {
+        zone_id: "z:work".to_string(),
+        head_entry: "entry-cbor-0007".to_string(),
+        head_seq: 7,
+        coverage: 1.0,
+        epoch_id: "epoch-cbor-0001".to_string(),
+        signature_count: 1,
+        signatures: vec![HeadSignature {
+            issuer_kid: "kid:cbor-primary".to_string(),
+            signature: vec![0x5a; 64],
+        }],
+    };
+
+    let actual = json!({
+        "audit_entry": canonical_receipt_envelope_hex("audit_entry", audit_entry),
+        "decision_receipt": canonical_receipt_envelope_hex("decision_receipt", decision_receipt),
+        "chain_head": canonical_receipt_envelope_hex("chain_head", chain_head),
+    });
+
+    let expected = json!({
+        "audit_entry": "a46772656365697074ad6269646f656e7472792d63626f722d30303037637365710764707265766f656e7472792d63626f722d30303036656163746f72746167656e743a63616e6f6e6963616c2d63626f72677a6f6e655f6964667a3a776f726b686d65746164617461a26863757272656e6379635553446c616d6f756e745f63656e747319106868736576657269747964696e666f6a6576656e745f74797065716361706162696c6974792e696e766f6b656b6f636375727265645f61741a6553f1076c636f6e6e6563746f725f6964667374726970656c6f7065726174696f6e5f69646e636861726765732e6372656174656d74726163655f636f6e74657874a365666c61677301677370616e5f696470623761643662373136393230333333316874726163655f6964782030616637363531393136636434336464383434386562323131633830333139636e636f7272656c6174696f6e5f69646d7265712d63626f722d303030376776657273696f6e0168656e76656c6f7065716663702d61756469742e726563656970746c726563656970745f747970656b61756469745f656e747279",
+        "decision_receipt": "a46772656365697074ad6269646e726370745f63626f725f30303037677a6f6e655f6964667a3a776f726b686465636973696f6e6464656e796865766964656e63658278196361703a7374726970652e636861726765732e6372656174656b7a6f6e653a7a3a776f726b6a646563696465645f61741a6553f1086a726571756573745f69646d7265712d63626f722d303030376b6578706c616e6174696f6e78246361706162696c69747920776173206e6f74206772616e74656420746f207a3a776f726b6b726561736f6e5f636f64657819706f6c6963792e6361706162696c6974792e6d697373696e676c636f6e6e6563746f725f6964667374726970656c6f7065726174696f6e5f69646e636861726765732e6372656174656d74726163655f636f6e74657874a365666c61677301677370616e5f696470623761643662373136393230333333316874726163655f6964782030616637363531393136636434336464383434386562323131633830333139636e61756469745f656e7472795f69646f656e7472792d63626f722d303030376e636f7272656c6174696f6e5f69646d7265712d63626f722d303030376776657273696f6e0168656e76656c6f7065716663702d61756469742e726563656970746c726563656970745f74797065706465636973696f6e5f72656365697074",
+        "chain_head": "a46772656365697074a7677a6f6e655f6964667a3a776f726b68636f766572616765f93c006865706f63685f69646f65706f63682d63626f722d3030303168686561645f736571076a686561645f656e7472796f656e7472792d63626f722d303030376a7369676e61747572657381a2697369676e6174757265788035613561356135613561356135613561356135613561356135613561356135613561356135613561356135613561356135613561356135613561356135613561356135613561356135613561356135613561356135613561356135613561356135613561356135613561356135613561356135613561356135613561356135616a6973737565725f6b6964706b69643a63626f722d7072696d6172796f7369676e61747572655f636f756e74016776657273696f6e0168656e76656c6f7065716663702d61756469742e726563656970746c726563656970745f747970656a636861696e5f68656164",
+    });
+
+    assert_eq!(
+        actual, expected,
+        "canonical audit receipt envelope CBOR changed; update this golden only for an intentional wire-format change",
+    );
+}
+
 #[test]
 fn snapshot_audit_entry_minimal() {
     // Just the required fields — no trace context, no connector,

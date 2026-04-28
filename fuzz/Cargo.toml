@@ -701,6 +701,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_store_validate_source_symbols"
+path = "fuzz_targets/store_validate_source_symbols.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_cbor_decode_recursion_limit"
 path = "fuzz_targets/cbor_decode_recursion_limit.rs"
 test = false

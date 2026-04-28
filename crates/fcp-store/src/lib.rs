@@ -74,7 +74,7 @@ pub use repair::{
 };
 pub use symbol_store::{
     MemorySymbolStore, MemorySymbolStoreConfig, ObjectSymbolMeta, ObjectTransmissionInfo,
-    StoredSymbol, SymbolMeta, SymbolStore,
+    StoredSymbol, SymbolMeta, SymbolStore, validate_source_symbols,
 };
 
 pub use offline::{

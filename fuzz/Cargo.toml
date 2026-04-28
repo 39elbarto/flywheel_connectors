@@ -23,6 +23,7 @@ tempfile = "3"
 toml = "1.0"
 
 fcp-async-core = { path = "../crates/fcp-async-core" }
+fcp-auth-schema = { path = "../crates/fcp-auth-schema" }
 fcp-audit = { path = "../crates/fcp-audit" }
 fcp-bootstrap = { path = "../crates/fcp-bootstrap" }
 fcp-cbor = { path = "../crates/fcp-cbor" }
@@ -1052,6 +1053,27 @@ bench = false
 [[bin]]
 name = "fuzz_to_deterministic_cbor"
 path = "fuzz_targets/to_deterministic_cbor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_auth_claims_cbor"
+path = "fuzz_targets/auth_claims_cbor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_device_id_roundtrip"
+path = "fuzz_targets/device_id_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_credential_host_allow"
+path = "fuzz_targets/credential_host_allow.rs"
 test = false
 doc = false
 bench = false

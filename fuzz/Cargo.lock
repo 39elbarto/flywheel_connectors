@@ -1737,6 +1737,7 @@ dependencies = [
  "fcp-arxiv",
  "fcp-async-core",
  "fcp-audit",
+ "fcp-auth-schema",
  "fcp-bootstrap",
  "fcp-cbor",
  "fcp-core",

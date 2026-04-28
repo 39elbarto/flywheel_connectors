@@ -172,6 +172,12 @@ impl CheckOutcome {
     pub const fn is_deny(&self) -> bool {
         matches!(self, Self::Deny { .. })
     }
+
+    /// Whether this outcome skipped the check without allowing or denying.
+    #[must_use]
+    pub const fn is_skip(&self) -> bool {
+        matches!(self, Self::Skip { .. })
+    }
 }
 
 /// Audit record for a single check execution.

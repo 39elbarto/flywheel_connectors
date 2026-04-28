@@ -956,5 +956,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_fcp2_key_derivation"
+path = "fuzz_targets/fcp2_key_derivation.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

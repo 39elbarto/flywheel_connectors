@@ -194,13 +194,26 @@ pub struct ObjectHeader {
     pub placement: Option<ObjectPlacementPolicy>,
 }
 
-/// Retention class for garbage collection (NORMATIVE).
+/// Eviction policy for garbage collection (NORMATIVE).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RetentionClass {
+pub enum EvictionPolicy {
     Pinned,
     Lease { expires_at: u64 },
     Ephemeral,
 }
+
+impl fmt::Display for EvictionPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pinned => f.write_str("pinned"),
+            Self::Lease { expires_at } => write!(f, "lease(expires_at={expires_at})"),
+            Self::Ephemeral => f.write_str("ephemeral"),
+        }
+    }
+}
+
+/// Retention class for garbage collection (NORMATIVE).
+pub type RetentionClass = EvictionPolicy;
 
 /// Node-local storage metadata (NOT content-addressed).
 #[derive(Debug, Clone, Serialize, Deserialize)]

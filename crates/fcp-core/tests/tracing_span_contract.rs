@@ -1,19 +1,19 @@
 use std::{
     fmt,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Mutex,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
 use fcp_core::{
-    canonical_operation_span, CapabilityId, InstanceId, PrincipalId, RequestId, ZoneId,
-    CANONICAL_OPERATION_SPAN_ATTRIBUTE_NAMES, CANONICAL_OPERATION_SPAN_NAME,
+    CANONICAL_OPERATION_SPAN_ATTRIBUTE_NAMES, CANONICAL_OPERATION_SPAN_NAME, CapabilityId,
+    InstanceId, PrincipalId, RequestId, ZoneId, canonical_operation_span,
 };
 use tracing::{
+    Event, Id, Level, Metadata, Subscriber,
     field::{Field, Visit},
     span::{Attributes, Record},
-    Event, Id, Level, Metadata, Subscriber,
 };
 
 const DOCUMENTED_STABLE_CONTRACT: [&str; 5] = [

@@ -1926,13 +1926,10 @@ mod tests {
     fn validate_binding_success() {
         let intent = create_test_intent();
         let receipt = create_test_receipt();
-        assert!(validate_receipt_intent_binding(
-            test_receipt_id(),
-            &receipt,
-            test_intent_id(),
-            &intent
-        )
-        .is_ok());
+        assert!(
+            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -2281,13 +2278,10 @@ mod tests {
         let mut receipt = create_test_receipt();
         receipt.idempotency_key = None;
         // Should succeed: both None means keys match
-        assert!(validate_receipt_intent_binding(
-            test_receipt_id(),
-            &receipt,
-            test_intent_id(),
-            &intent
-        )
-        .is_ok());
+        assert!(
+            validate_receipt_intent_binding(test_receipt_id(), &receipt, test_intent_id(), &intent)
+                .is_ok()
+        );
     }
 
     #[test]

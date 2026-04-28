@@ -137,7 +137,7 @@ fn checkpoint_proposal(proposed_seq: u64) -> CheckpointProposal {
 fn gcounter_per_actor_increment_saturates_at_u64_max() {
     // Policy: per-actor counts saturate at u64::MAX. Documented at
     // crdt.rs:243 (`*entry = entry.saturating_add(delta)`).
-    let actor = CrdtActorId::Node("alice".into());
+    let actor = CrdtActorId::new("alice");
     let mut counter = GCounter::default();
     counter.increment(actor.clone(), u64::MAX);
     assert_eq!(*counter.counts.get(&actor).unwrap(), u64::MAX);
@@ -161,8 +161,8 @@ fn gcounter_aggregate_value_uses_saturating_u128_sum() {
     // Policy: GCounter::value() folds per-actor u64 counts into u128
     // via saturating_add. crdt.rs:250.
     let mut counter = GCounter::default();
-    counter.increment(CrdtActorId::Node("a".into()), u64::MAX);
-    counter.increment(CrdtActorId::Node("b".into()), 1);
+    counter.increment(CrdtActorId::new("a"), u64::MAX);
+    counter.increment(CrdtActorId::new("b"), 1);
     // Sum is u64::MAX + 1, representable in u128 — must NOT clamp at
     // u64::MAX, must NOT wrap.
     assert_eq!(
@@ -174,8 +174,8 @@ fn gcounter_aggregate_value_uses_saturating_u128_sum() {
     // Two actors at u64::MAX: 2 * u64::MAX is also representable in
     // u128.
     let mut counter2 = GCounter::default();
-    counter2.increment(CrdtActorId::Node("a".into()), u64::MAX);
-    counter2.increment(CrdtActorId::Node("b".into()), u64::MAX);
+    counter2.increment(CrdtActorId::new("a"), u64::MAX);
+    counter2.increment(CrdtActorId::new("b"), u64::MAX);
     assert_eq!(counter2.value(), 2 * u128::from(u64::MAX));
 }
 

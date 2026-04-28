@@ -42,3 +42,20 @@ fn content_address_hash_is_fixed_length() {
         assert_eq!(object_id.as_bytes().len(), OBJECT_ID_HASH_BYTES);
     }
 }
+
+#[test]
+fn content_address_hash_display_format_is_fixed_length_and_stable() {
+    let content = b"fcp-core object-id format stability vector";
+    let object_id = ObjectId::from_unscoped_bytes(content);
+    let display = object_id.to_string();
+    let prefixed = object_id.to_prefixed_string();
+
+    assert_eq!(display.len(), OBJECT_ID_HASH_BYTES * 2);
+    assert_eq!(prefixed, format!("objectid:{display}"));
+    assert_eq!(ObjectId::parse_prefixed(&display), Ok(object_id));
+    assert_eq!(ObjectId::parse_prefixed(&prefixed), Ok(object_id));
+
+    for _ in 0..16 {
+        assert_eq!(ObjectId::from_unscoped_bytes(content).to_string(), display);
+    }
+}

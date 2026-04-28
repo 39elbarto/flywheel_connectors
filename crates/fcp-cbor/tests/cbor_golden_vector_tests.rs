@@ -158,6 +158,25 @@ fn assert_negative_integer_shortest_form(value: i64, expected_hex: &str) {
     );
 }
 
+fn assert_array_length_prefix_shortest_form(len: usize, expected_prefix_hex: &str) {
+    let value = vec![0_u8; len];
+    let encoded = to_canonical_cbor(&value).unwrap();
+    let expected_prefix = hex_to_bytes(expected_prefix_hex);
+
+    assert_eq!(
+        &encoded[..expected_prefix.len()],
+        expected_prefix.as_slice(),
+        "array length {len} did not use the expected shortest-form length prefix: got {} expected {expected_prefix_hex}",
+        bytes_to_hex(&encoded[..expected_prefix.len()])
+    );
+
+    let decoded: Vec<u8> = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+    assert_eq!(
+        decoded, value,
+        "array length {len} did not roundtrip from shortest-form CBOR"
+    );
+}
+
 macro_rules! positive_integer_shortest_form_boundary {
     ($test_name:ident, $value:expr, $expected_hex:literal) => {
         #[test]
@@ -172,6 +191,15 @@ macro_rules! negative_integer_shortest_form_boundary {
         #[test]
         fn $test_name() {
             assert_negative_integer_shortest_form($value, $expected_hex);
+        }
+    };
+}
+
+macro_rules! array_length_prefix_boundary {
+    ($test_name:ident, $len:expr, $expected_prefix_hex:literal) => {
+        #[test]
+        fn $test_name() {
+            assert_array_length_prefix_shortest_form($len, $expected_prefix_hex);
         }
     };
 }
@@ -421,6 +449,18 @@ fn test_string_encoding_from_vectors() {
         );
     }
 }
+
+array_length_prefix_boundary!(array_length_prefix_shortest_form_0, 0, "80");
+array_length_prefix_boundary!(array_length_prefix_shortest_form_23, 23, "97");
+array_length_prefix_boundary!(array_length_prefix_shortest_form_24, 24, "9818");
+array_length_prefix_boundary!(array_length_prefix_shortest_form_255, 255, "98ff");
+array_length_prefix_boundary!(array_length_prefix_shortest_form_256, 256, "990100");
+array_length_prefix_boundary!(array_length_prefix_shortest_form_65535, 65_535, "99ffff");
+array_length_prefix_boundary!(
+    array_length_prefix_shortest_form_65536,
+    65_536,
+    "9a00010000"
+);
 
 #[test]
 fn test_array_encoding_from_vectors() {

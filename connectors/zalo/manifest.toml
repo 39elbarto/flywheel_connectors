@@ -5,15 +5,14 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:670ae7679635ecdf03d79cd18e4b238187a63106da1bbf2e161474d0e45af095"
+interface_hash = "blake3-256:fcp.interface.v2:f1b8abf1515f8d9b30b1603e1412954b6a7cbbd91769c8f3101fac861f88d99b"
 
 [connector]
 id = "fcp.zalo"
 name = "Zalo"
 version = "0.1.0"
-status = "incubating"
 description = "Zalo Bot API connector for bot identity, outbound send, long polling, and webhook management"
-archetypes = ["bidirectional", "polling", "webhook"]
+archetypes = ["bidirectional", "streaming", "operational"]
 format = "native"
 
 [connector.state]

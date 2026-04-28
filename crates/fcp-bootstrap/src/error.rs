@@ -20,14 +20,18 @@ pub enum BootstrapError {
     },
 
     /// Genesis already exists at this location.
-    #[error("genesis already exists: fingerprint={fingerprint}")]
+    #[error(
+        "genesis already exists: fingerprint={fingerprint}; remediation: resume the existing bootstrap or choose an empty data directory"
+    )]
     AlreadyExists {
         /// Fingerprint of the existing genesis.
         fingerprint: String,
     },
 
     /// Partial state detected from a crashed initialization.
-    #[error("partial bootstrap state detected at phase: {phase}")]
+    #[error(
+        "partial bootstrap state detected at phase: {phase}; remediation: resume bootstrap from the recorded phase or clean the partial state before restarting"
+    )]
     PartialState {
         /// Phase where the crash occurred.
         phase: String,
@@ -39,16 +43,20 @@ pub enum BootstrapError {
     /// to pick up a crashed bootstrap but nothing has started yet.
     /// Caller should use `BootstrapWorkflow::new` instead.
     #[error(
-        "no partial bootstrap state to resume: data directory is fresh — use BootstrapWorkflow::new"
+        "no partial bootstrap state to resume: data directory is fresh; remediation: use BootstrapWorkflow::new to start bootstrap"
     )]
     NotInitialized,
 
     /// Recovery phrase is invalid.
-    #[error("invalid recovery phrase: {0}")]
+    #[error(
+        "invalid recovery phrase: {0}; remediation: re-enter the recovery phrase exactly as issued"
+    )]
     InvalidRecoveryPhrase(String),
 
     /// Fingerprint mismatch during recovery.
-    #[error("genesis fingerprint mismatch: expected={expected}, actual={actual}")]
+    #[error(
+        "genesis fingerprint mismatch: expected={expected}, actual={actual}; remediation: verify the recovery phrase and target genesis fingerprint before retrying"
+    )]
     FingerprintMismatch {
         /// Expected fingerprint.
         expected: String,
@@ -57,23 +65,29 @@ pub enum BootstrapError {
     },
 
     /// Ceremony error.
-    #[error("ceremony error: {0}")]
+    #[error(
+        "ceremony error: {0}; remediation: inspect ceremony logs and retry after correcting the participant failure"
+    )]
     Ceremony(String),
 
     /// Ceremony timeout.
-    #[error("ceremony timed out at phase: {phase}")]
+    #[error(
+        "ceremony timed out at phase: {phase}; remediation: ensure all participants are online and retry the ceremony"
+    )]
     CeremonyTimeout {
         /// Phase where the timeout occurred.
         phase: String,
     },
 
     /// Hardware token error.
-    #[error("hardware token error: {0}")]
+    #[error(
+        "hardware token error: {0}; remediation: check token provider, slot, and PIN configuration"
+    )]
     HardwareToken(String),
 
     /// Requested key label was not found on the authenticated token.
     #[error(
-        "hardware token key not found: {key} — ensure the token is provisioned with the expected key label"
+        "hardware token key not found: {key} - ensure the token is provisioned with the expected key label"
     )]
     HardwareTokenKeyNotFound {
         /// The missing key label or identifier.
@@ -81,14 +95,18 @@ pub enum BootstrapError {
     },
 
     /// Token authentication succeeded, but no usable identity could be chosen.
-    #[error("hardware token certificate selection failed: {refusal}")]
+    #[error(
+        "hardware token certificate selection failed: {refusal}; remediation: provision a token certificate/key pair that matches FCP owner-signing requirements"
+    )]
     HardwareTokenCertificateSelectionFailed {
         /// Typed refusal describing why selection could not proceed.
         refusal: CertificateSelectionRefusal,
     },
 
     /// No hardware tokens found.
-    #[error("no hardware tokens detected")]
+    #[error(
+        "no hardware tokens detected; remediation: connect a supported hardware token or configure provider library paths"
+    )]
     NoHardwareTokens,
 
     /// Hardware token PIN is required for authentication.
@@ -109,7 +127,7 @@ pub enum BootstrapError {
 
     /// Requested hardware token was not found during discovery.
     #[error(
-        "hardware token not found: {locator} — verify token is connected and provider library is installed"
+        "hardware token not found: {locator} - verify token is connected and provider library is installed"
     )]
     HardwareTokenNotFound {
         /// Locator string identifying the requested token.
@@ -143,7 +161,7 @@ pub enum BootstrapError {
     HardwareTokenCancelled,
 
     /// PKCS#11 provider reported an unrecoverable error.
-    #[error("hardware token provider fault: {detail} — check provider library and token firmware")]
+    #[error("hardware token provider fault: {detail} - check provider library and token firmware")]
     HardwareTokenProviderFault {
         /// Error detail from the PKCS#11 layer.
         detail: String,
@@ -159,7 +177,7 @@ pub enum BootstrapError {
     /// signal can match on this variant instead of substring-matching
     /// the legacy [`Self::HardwareToken`] message.
     #[error(
-        "hardware token provisioning enrollment is not implemented yet: token={token_display}, key_material={key_material}"
+        "hardware token provisioning enrollment is not implemented yet: token={token_display}, key_material={key_material}; remediation: use a supported bootstrap enrollment path before retrying"
     )]
     HardwareTokenEnrollmentNotImplemented {
         /// Human-readable token locator selected for provisioning.
@@ -169,23 +187,29 @@ pub enum BootstrapError {
     },
 
     /// Cryptographic error.
-    #[error("cryptographic error: {0}")]
+    #[error(
+        "cryptographic error: {0}; remediation: verify key material and retry with a fresh bootstrap context"
+    )]
     Crypto(String),
 
     /// IO error.
-    #[error("IO error: {0}")]
+    #[error("IO error: {0}; remediation: check filesystem permissions and available disk space")]
     Io(#[from] std::io::Error),
 
     /// Serialization error.
-    #[error("serialization error: {0}")]
+    #[error(
+        "serialization error: {0}; remediation: discard corrupted bootstrap artifacts and retry from a known-good state"
+    )]
     Serialization(String),
 
     /// Configuration error.
-    #[error("configuration error: {0}")]
+    #[error(
+        "configuration error: {0}; remediation: correct bootstrap configuration before retrying"
+    )]
     Config(String),
 
     /// Internal error.
-    #[error("internal error: {0}")]
+    #[error("internal error: {0}; remediation: report this bug with bootstrap logs")]
     Internal(String),
 }
 

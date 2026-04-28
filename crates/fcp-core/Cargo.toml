@@ -38,6 +38,7 @@ zeroize = { version = "1.8", features = ["derive"] }
 [dev-dependencies]
 ciborium.workspace = true
 criterion.workspace = true
+fcp-bootstrap.workspace = true
 jsonschema.workspace = true
 semver.workspace = true
 rand = "0.9"

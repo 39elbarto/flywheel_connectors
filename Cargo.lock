@@ -2879,6 +2879,7 @@ dependencies = [
  "ed25519-dalek",
  "fcp-async-core",
  "fcp-auth-schema",
+ "fcp-bootstrap",
  "fcp-cbor",
  "fcp-crypto",
  "futures-util",

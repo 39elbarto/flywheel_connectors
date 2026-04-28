@@ -111,6 +111,12 @@ pub enum SecretType {
 pub enum SecretFormat {
     /// Raw bytes, encrypted at rest.
     Raw,
+    /// PEM-armored text bytes.
+    Pem,
+    /// DER-encoded binary bytes.
+    Der,
+    /// Base64-encoded text bytes.
+    Base64,
     /// Threshold secret share (k-of-n).
     ThresholdShare {
         /// Share index (1-based).
@@ -306,7 +312,7 @@ pub struct SecretObject {
     /// Type of secret (determines application semantics).
     pub secret_type: SecretType,
 
-    /// Storage format (raw, threshold share, wrapped).
+    /// Storage format (raw, PEM, DER, base64, threshold share, wrapped).
     pub format: SecretFormat,
 
     /// Human-readable label (MUST NOT contain secret material).

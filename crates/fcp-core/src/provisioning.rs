@@ -120,6 +120,24 @@ impl ProvisioningRecipe {
     }
 }
 
+impl fmt::Display for ProvisioningRecipe {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let step_label = if self.steps.len() == 1 {
+            "step"
+        } else {
+            "steps"
+        };
+        write!(
+            f,
+            "{}@{}: {} ({} {step_label})",
+            self.id,
+            self.version,
+            self.description,
+            self.steps.len()
+        )
+    }
+}
+
 /// A single provisioning step (NORMATIVE).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProvisioningStep {

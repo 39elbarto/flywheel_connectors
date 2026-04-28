@@ -308,6 +308,19 @@ impl HackerNewsClient {
     }
 }
 
+/// Fuzz-only entry points for Hacker News path parser guards.
+///
+/// Bead flywheel_connectors-73u29.
+#[doc(hidden)]
+pub mod __fuzz {
+    use super::HackerNewsClient;
+
+    /// Return whether a candidate item/user id is safe for URL path interpolation.
+    pub fn sanitize_path_segment_candidate(value: &str) -> bool {
+        HackerNewsClient::sanitize_path_segment(value).is_ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

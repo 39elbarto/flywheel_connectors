@@ -239,6 +239,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_lease_coordinator_wire_format"
+path = "fuzz_targets/lease_coordinator_wire_format.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_mesh_post_verify_symbol_ack"
 path = "fuzz_targets/mesh_post_verify_symbol_ack.rs"
 test = false
@@ -388,6 +395,13 @@ bench = false
 [[bin]]
 name = "fuzz_registry_manifest_verify"
 path = "fuzz_targets/registry_manifest_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_registry_signed_package_catalog"
+path = "fuzz_targets/registry_signed_package_catalog.rs"
 test = false
 doc = false
 bench = false
@@ -1158,6 +1172,20 @@ bench = false
 [[bin]]
 name = "fuzz_validate_frame_lengths"
 path = "fuzz_targets/validate_frame_lengths.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hash_algorithm_serde"
+path = "fuzz_targets/hash_algorithm_serde.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_revocation_seal"
+path = "fuzz_targets/revocation_seal.rs"
 test = false
 doc = false
 bench = false

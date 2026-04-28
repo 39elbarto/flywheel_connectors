@@ -382,3 +382,44 @@ fn delay_grows_monotonically_without_jitter_until_ceiling() {
         prev = cur;
     }
 }
+
+#[test]
+fn delay_schedule_iterator_grows_until_cap_then_holds() {
+    let cap = Duration::from_secs(5);
+    let cfg = ReconnectConfig::new()
+        .with_initial_delay(Duration::from_secs(1))
+        .with_backoff_multiplier(2.0)
+        .with_max_delay(cap)
+        .with_jitter(false);
+
+    let schedule: Vec<Duration> = (0..8).map(|attempt| cfg.delay_for_attempt(attempt)).collect();
+
+    assert!(
+        schedule.contains(&cap),
+        "schedule MUST reach the configured cap; got {schedule:?}"
+    );
+    for pair in schedule.windows(2) {
+        let [prev, cur] = pair else {
+            unreachable!("windows(2) always yields pairs")
+        };
+        assert!(
+            cur >= prev,
+            "backoff schedule MUST be monotone non-decreasing; got {schedule:?}"
+        );
+        assert!(
+            *cur <= cap,
+            "backoff schedule MUST respect cap {cap:?}; got {schedule:?}"
+        );
+        if *prev < cap {
+            assert!(
+                cur > prev,
+                "backoff schedule MUST strictly increase before cap; got {schedule:?}"
+            );
+        } else {
+            assert_eq!(
+                *cur, cap,
+                "backoff schedule MUST hold at cap after reaching it; got {schedule:?}"
+            );
+        }
+    }
+}

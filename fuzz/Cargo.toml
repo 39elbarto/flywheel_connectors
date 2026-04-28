@@ -872,5 +872,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_session_crypto_suite_serde"
+path = "fuzz_targets/session_crypto_suite_serde.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

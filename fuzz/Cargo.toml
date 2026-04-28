@@ -397,6 +397,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_oauth1_token_response"
+path = "fuzz_targets/oauth1_token_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_host_admin_api"
 path = "fuzz_targets/host_admin_api.rs"
 test = false
@@ -931,6 +938,20 @@ bench = false
 [[bin]]
 name = "fuzz_session_cookie_try_from_slice"
 path = "fuzz_targets/session_cookie_try_from_slice.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_crdt_merge_invariants"
+path = "fuzz_targets/crdt_merge_invariants.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_blake3_mac"
+path = "fuzz_targets/blake3_mac.rs"
 test = false
 doc = false
 bench = false

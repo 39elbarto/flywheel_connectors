@@ -166,6 +166,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_object_id_parse_prefixed"
+path = "fuzz_targets/object_id_parse_prefixed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_audit_verify_chain"
 path = "fuzz_targets/audit_verify_chain.rs"
 test = false
@@ -917,6 +924,13 @@ bench = false
 [[bin]]
 name = "fuzz_negotiate_suite"
 path = "fuzz_targets/negotiate_suite.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_session_cookie_try_from_slice"
+path = "fuzz_targets/session_cookie_try_from_slice.rs"
 test = false
 doc = false
 bench = false

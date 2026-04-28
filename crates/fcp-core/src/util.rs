@@ -216,3 +216,118 @@ impl fmt::Display for CanonicalDurationParseError {
 }
 
 impl Error for CanonicalDurationParseError {}
+
+/// Byte count with deterministic binary-unit text representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ByteSize(u64);
+
+impl ByteSize {
+    /// Construct a byte-size wrapper from a raw byte count.
+    #[must_use]
+    pub const fn from_bytes(bytes: u64) -> Self {
+        Self(bytes)
+    }
+
+    /// Return the wrapped byte count.
+    #[must_use]
+    pub const fn as_bytes(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<u64> for ByteSize {
+    fn from(value: u64) -> Self {
+        Self::from_bytes(value)
+    }
+}
+
+impl From<ByteSize> for u64 {
+    fn from(value: ByteSize) -> Self {
+        value.0
+    }
+}
+
+impl FromStr for ByteSize {
+    type Err = ByteSizeParseError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let input = input.trim();
+        if input.is_empty() {
+            return Err(ByteSizeParseError::Empty);
+        }
+
+        let (number, multiplier) = if let Some(number) = input.strip_suffix("GiB") {
+            (number, 1024_u64.pow(3))
+        } else if let Some(number) = input.strip_suffix("MiB") {
+            (number, 1024_u64.pow(2))
+        } else if let Some(number) = input.strip_suffix("KiB") {
+            (number, 1024_u64)
+        } else if let Some(number) = input.strip_suffix('B') {
+            (number, 1)
+        } else {
+            return Err(ByteSizeParseError::MissingUnit);
+        };
+
+        if number.is_empty() || !number.chars().all(|ch| ch.is_ascii_digit()) {
+            return Err(ByteSizeParseError::InvalidNumber);
+        }
+
+        let value = number
+            .parse::<u64>()
+            .map_err(|_| ByteSizeParseError::InvalidNumber)?;
+        let bytes = value
+            .checked_mul(multiplier)
+            .ok_or(ByteSizeParseError::Overflow)?;
+
+        Ok(Self(bytes))
+    }
+}
+
+impl fmt::Display for ByteSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const KIB: u64 = 1024;
+        const MIB: u64 = KIB * 1024;
+        const GIB: u64 = MIB * 1024;
+
+        let bytes = self.0;
+        if bytes != 0 && bytes % GIB == 0 {
+            write!(f, "{}GiB", bytes / GIB)
+        } else if bytes != 0 && bytes % MIB == 0 {
+            write!(f, "{}MiB", bytes / MIB)
+        } else if bytes != 0 && bytes % KIB == 0 {
+            write!(f, "{}KiB", bytes / KIB)
+        } else {
+            write!(f, "{bytes}B")
+        }
+    }
+}
+
+/// Error returned when parsing [`ByteSize`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ByteSizeParseError {
+    /// Input is empty after trimming.
+    Empty,
+    /// Input has no supported binary byte-size unit suffix.
+    MissingUnit,
+    /// Input has an empty or non-decimal numeric component.
+    InvalidNumber,
+    /// Parsed byte count overflowed `u64`.
+    Overflow,
+}
+
+impl fmt::Display for ByteSizeParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => write!(f, "byte size is empty"),
+            Self::MissingUnit => {
+                write!(f, "byte size must use a 'B', 'KiB', 'MiB', or 'GiB' suffix")
+            }
+            Self::InvalidNumber => {
+                write!(f, "byte size value must be an unsigned decimal integer")
+            }
+            Self::Overflow => write!(f, "byte size exceeds u64::MAX bytes"),
+        }
+    }
+}
+
+impl Error for ByteSizeParseError {}

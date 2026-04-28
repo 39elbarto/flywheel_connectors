@@ -879,5 +879,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_hello_retry_roundtrip"
+path = "fuzz_targets/hello_retry_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

@@ -11,6 +11,7 @@ use std::{
     collections::HashMap,
     convert::Infallible,
     sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
 };
 
 use crate::{
@@ -97,6 +98,42 @@ pub struct TransportCaps {
     /// Maximum frame size in bytes
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_frame_size: Option<u32>,
+}
+
+/// Documented default mesh heartbeat interval.
+pub const DEFAULT_MESH_NODE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+/// Documented default maximum mesh peers.
+pub const DEFAULT_MESH_NODE_MAX_PEERS: usize = 32;
+/// Documented default mesh lease TTL.
+pub const DEFAULT_MESH_NODE_LEASE_TTL: Duration = Duration::from_secs(300);
+
+/// Shared mesh-node runtime configuration defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeshNodeConfig {
+    /// Interval between mesh-node heartbeats.
+    pub heartbeat_interval: Duration,
+    /// Maximum directly tracked peers for default mesh operations.
+    pub max_peers: usize,
+    /// Default lease time-to-live for mesh coordination.
+    pub lease_ttl: Duration,
+}
+
+impl MeshNodeConfig {
+    /// Create a config with the documented defaults.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            heartbeat_interval: DEFAULT_MESH_NODE_HEARTBEAT_INTERVAL,
+            max_peers: DEFAULT_MESH_NODE_MAX_PEERS,
+            lease_ttl: DEFAULT_MESH_NODE_LEASE_TTL,
+        }
+    }
+}
+
+impl Default for MeshNodeConfig {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Handshake request from hub to connector.

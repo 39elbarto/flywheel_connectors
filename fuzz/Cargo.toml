@@ -815,5 +815,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_execution_context"
+path = "fuzz_targets/execution_context.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

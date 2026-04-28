@@ -1,12 +1,13 @@
 use std::{str::FromStr, time::Duration};
 
-use fcp_core::util::{CanonicalDuration, MAX_CANONICAL_DURATION};
+use fcp_core::util::{CanonicalDuration, CanonicalDurationParseError, MAX_CANONICAL_DURATION};
 
 #[test]
 fn duration_boundaries_roundtrip_through_display_and_from_str() {
     let cases = [
         ("0s", Duration::ZERO),
         ("1ms", Duration::from_millis(1)),
+        ("999ms", Duration::from_millis(999)),
         ("1s", Duration::from_secs(1)),
         ("60s", Duration::from_secs(60)),
         ("3600s", Duration::from_secs(3_600)),
@@ -23,6 +24,41 @@ fn duration_boundaries_roundtrip_through_display_and_from_str() {
         let reparsed = CanonicalDuration::from_str(&displayed).unwrap();
         assert_eq!(reparsed, parsed);
     }
+}
+
+#[test]
+fn mixed_duration_display_uses_total_milliseconds() {
+    let cases = [
+        ("1001ms", Duration::from_secs(1) + Duration::from_millis(1)),
+        (
+            "59999ms",
+            Duration::from_secs(60) - Duration::from_millis(1),
+        ),
+        (
+            "60001ms",
+            Duration::from_secs(60) + Duration::from_millis(1),
+        ),
+        (
+            "3600001ms",
+            Duration::from_secs(3_600) + Duration::from_millis(1),
+        ),
+    ];
+
+    for (expected_display, duration) in cases {
+        let canonical = CanonicalDuration::try_from(duration).unwrap();
+        assert_eq!(canonical.to_string(), expected_display);
+
+        let reparsed = CanonicalDuration::from_str(expected_display).unwrap();
+        assert_eq!(reparsed, canonical);
+    }
+}
+
+#[test]
+fn sub_millisecond_duration_has_no_display_form() {
+    assert_eq!(
+        CanonicalDuration::try_from(Duration::from_micros(999)),
+        Err(CanonicalDurationParseError::SubMillisecondPrecision)
+    );
 }
 
 #[test]

@@ -963,5 +963,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_webhook_event_json"
+path = "fuzz_targets/webhook_event_json.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

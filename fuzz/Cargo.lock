@@ -1760,6 +1760,7 @@ dependencies = [
  "fcp-raptorq",
  "fcp-ratelimit",
  "fcp-registry",
+ "fcp-slack",
  "fcp-store",
  "fcp-streaming",
  "fcp-tailscale",
@@ -2195,6 +2196,29 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.17",
  "tracing",
+]
+
+[[package]]
+name = "fcp-slack"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "asupersync",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-sdk",
+ "fcp-streaming",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
 ]
 
 [[package]]

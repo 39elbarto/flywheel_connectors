@@ -50,6 +50,7 @@ fcp-qq = { path = "../connectors/qq" }
 fcp-raptorq = { path = "../crates/fcp-raptorq" }
 fcp-ratelimit = { path = "../crates/fcp-ratelimit" }
 fcp-registry = { path = "../crates/fcp-registry" }
+fcp-slack = { path = "../connectors/slack" }
 fcp-store = { path = "../crates/fcp-store" }
 fcp-streaming = { path = "../crates/fcp-streaming" }
 fcp-tailscale = { path = "../crates/fcp-tailscale" }
@@ -353,6 +354,13 @@ bench = false
 [[bin]]
 name = "fuzz_discord_rest_error_response"
 path = "fuzz_targets/discord_rest_error_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_slack_api_response"
+path = "fuzz_targets/slack_api_response.rs"
 test = false
 doc = false
 bench = false

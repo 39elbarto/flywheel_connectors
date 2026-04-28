@@ -2,7 +2,9 @@
 //!
 //! Based on FCP Specification Section 4 (System Architecture).
 
+use std::fmt;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
@@ -170,6 +172,59 @@ pub struct ConnectorMetrics {
     pub bytes_sent: u64,
     /// Bytes received
     pub bytes_received: u64,
+}
+
+/// Runtime lifecycle state for a connector instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorLifecycleState {
+    /// Connector binary and metadata are loaded but not yet active.
+    Loaded,
+    /// Connector has completed activation and is ready to run.
+    Activated,
+    /// Connector is actively running.
+    Running,
+    /// Connector is suspended and may be resumed.
+    Suspended,
+    /// Connector has terminated and cannot resume.
+    Terminated,
+}
+
+impl ConnectorLifecycleState {
+    /// Return the canonical wire/display string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Loaded => "loaded",
+            Self::Activated => "activated",
+            Self::Running => "running",
+            Self::Suspended => "suspended",
+            Self::Terminated => "terminated",
+        }
+    }
+}
+
+impl fmt::Display for ConnectorLifecycleState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ConnectorLifecycleState {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "loaded" => Ok(Self::Loaded),
+            "activated" => Ok(Self::Activated),
+            "running" => Ok(Self::Running),
+            "suspended" => Ok(Self::Suspended),
+            "terminated" => Ok(Self::Terminated),
+            _ => Err(format!(
+                "invalid connector lifecycle state `{value}`: expected one of loaded, activated, running, suspended, terminated"
+            )),
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

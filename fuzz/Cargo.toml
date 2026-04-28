@@ -914,5 +914,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_negotiate_suite"
+path = "fuzz_targets/negotiate_suite.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

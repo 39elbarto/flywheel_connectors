@@ -74,6 +74,7 @@ pub fn verify_signature_order(node_ids: &[&[u8]]) -> CryptoResult<()> {
 /// - Map keys sorted
 /// - No indefinite-length encoding
 /// - Smallest integer encoding
+/// - CBOR tags rejected
 ///
 /// # Errors
 ///
@@ -133,7 +134,11 @@ fn canonicalize_value_in_place(v: &mut ciborium::value::Value, depth: usize) -> 
             }
         }
         ciborium::value::Value::Map(entries) => canonicalize_map(entries, depth + 1)?,
-        ciborium::value::Value::Tag(_, boxed) => canonicalize_value_in_place(boxed, depth + 1)?,
+        ciborium::value::Value::Tag(tag, _) => {
+            return Err(CryptoError::SerializationError(format!(
+                "CBOR tag {tag} not allowed in deterministic CBOR"
+            )));
+        }
         _ => {}
     }
     Ok(())
@@ -737,5 +742,14 @@ mod tests {
         let val = f64::NAN;
         let err = to_deterministic_cbor(&val).unwrap_err();
         assert!(err.to_string().contains("non-finite float"));
+    }
+
+    #[test]
+    fn deterministic_cbor_rejects_tags() {
+        use ciborium::value::Value;
+
+        let tagged = Value::Tag(42, Box::new(Value::Text("payload".into())));
+        let err = to_deterministic_cbor(&tagged).unwrap_err();
+        assert!(err.to_string().contains("CBOR tag 42"));
     }
 }

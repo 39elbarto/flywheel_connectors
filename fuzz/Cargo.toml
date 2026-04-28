@@ -45,6 +45,7 @@ fcp-manifest = { path = "../crates/fcp-manifest" }
 fcp-host = { path = "../crates/fcp-host" }
 fcp-oauth = { path = "../crates/fcp-oauth" }
 fcp-protocol = { path = "../crates/fcp-protocol" }
+fcp-qq = { path = "../connectors/qq" }
 fcp-raptorq = { path = "../crates/fcp-raptorq" }
 fcp-ratelimit = { path = "../crates/fcp-ratelimit" }
 fcp-registry = { path = "../crates/fcp-registry" }
@@ -406,6 +407,13 @@ bench = false
 [[bin]]
 name = "fuzz_oauth1_token_response"
 path = "fuzz_targets/oauth1_token_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_qq_path_segment"
+path = "fuzz_targets/qq_path_segment.rs"
 test = false
 doc = false
 bench = false
@@ -994,6 +1002,13 @@ bench = false
 [[bin]]
 name = "fuzz_canonicalize_signatures"
 path = "fuzz_targets/canonicalize_signatures.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hrw_checkpoint_coordinator"
+path = "fuzz_targets/hrw_checkpoint_coordinator.rs"
 test = false
 doc = false
 bench = false

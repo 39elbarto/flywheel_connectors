@@ -11,7 +11,8 @@ use fcp_webhook::{DeliveryStatus, EventMetadata};
 use libfuzzer_sys::fuzz_target;
 use serde_json::Value;
 
-const MAX_JSON_BYTES: usize = 4 * 1024;
+const MAX_JSON_BYTES: usize = 64 * 1024;
+const OVERSIZED_STATUS_LEN: usize = 16 * 1024;
 
 #[derive(Arbitrary, Debug)]
 struct Input {
@@ -21,6 +22,19 @@ struct Input {
 
 fn bounded_json(bytes: &[u8]) -> &[u8] {
     &bytes[..bytes.len().min(MAX_JSON_BYTES)]
+}
+
+fn assert_status_parse(input: &str, expected: DeliveryStatus) {
+    let parsed: DeliveryStatus =
+        serde_json::from_str(input).expect("known DeliveryStatus variant must parse");
+    assert_eq!(parsed, expected);
+}
+
+fn assert_status_rejected(input: &str) {
+    assert!(
+        serde_json::from_str::<DeliveryStatus>(input).is_err(),
+        "invalid DeliveryStatus JSON unexpectedly parsed: {input}"
+    );
 }
 
 fn assert_status_roundtrip(status: DeliveryStatus, expected_name: &str) {
@@ -41,7 +55,45 @@ fn generated_status(choice: u8) -> (DeliveryStatus, &'static str) {
     }
 }
 
+fn exercise_fixed_boundaries() {
+    assert_status_parse(r#""pending""#, DeliveryStatus::Pending);
+    assert_status_parse(r#""delivered""#, DeliveryStatus::Delivered);
+    assert_status_parse(r#""failed""#, DeliveryStatus::Failed);
+    assert_status_parse(r#""dead_lettered""#, DeliveryStatus::DeadLettered);
+
+    assert_status_rejected(r#""unknown""#);
+    assert_status_rejected(r#""dead-lettered""#);
+    assert_status_rejected(r#""PENDING""#);
+    assert_status_rejected("null");
+    assert_status_rejected("{}");
+    assert_status_rejected(r#""pending"#);
+    assert_status_rejected("[");
+
+    let metadata: EventMetadata =
+        serde_json::from_str("{}").expect("missing status must default in EventMetadata");
+    assert_eq!(metadata.status, DeliveryStatus::Pending);
+
+    let metadata: EventMetadata = serde_json::from_str(r#"{"status":"delivered"}"#)
+        .expect("known EventMetadata.status must parse");
+    assert_eq!(metadata.status, DeliveryStatus::Delivered);
+
+    assert!(
+        serde_json::from_str::<EventMetadata>(r#"{"status":"unknown"}"#).is_err(),
+        "unknown EventMetadata.status must not default"
+    );
+    assert!(
+        serde_json::from_str::<EventMetadata>(r#"{"status":null}"#).is_err(),
+        "explicit null EventMetadata.status must not default"
+    );
+    assert!(
+        serde_json::from_str::<EventMetadata>(r#"{"status":"pending""#).is_err(),
+        "malformed EventMetadata JSON must be rejected"
+    );
+}
+
 fuzz_target!(|data: &[u8]| {
+    exercise_fixed_boundaries();
+
     let mut unstructured = Unstructured::new(data);
     let Ok(input) = Input::arbitrary(&mut unstructured) else {
         return;
@@ -63,10 +115,23 @@ fuzz_target!(|data: &[u8]| {
         let _ = (metadata, wrapped_metadata);
     }
 
+    let unknown_status = String::from_utf8_lossy(raw);
+    let unknown_status_json = serde_json::json!(unknown_status.as_ref()).to_string();
+    if !matches!(
+        unknown_status.as_ref(),
+        "pending" | "delivered" | "failed" | "dead_lettered"
+    ) {
+        assert_status_rejected(&unknown_status_json);
+    }
+
+    let oversized_unknown = format!("\"{}\"", "x".repeat(OVERSIZED_STATUS_LEN));
+    assert_status_rejected(&oversized_unknown);
+    assert!(
+        serde_json::from_str::<EventMetadata>(&format!(r#"{{"status":{oversized_unknown}}}"#))
+            .is_err(),
+        "oversized unknown EventMetadata.status must be rejected"
+    );
+
     let (status, expected_name) = generated_status(input.status_choice);
     assert_status_roundtrip(status, expected_name);
-
-    let metadata: EventMetadata =
-        serde_json::from_str("{}").expect("missing status must default in EventMetadata");
-    assert_eq!(metadata.status, DeliveryStatus::Pending);
 });

@@ -161,7 +161,12 @@ expression: manifest
     ],
     "operation_pools": {}
   },
-  "signatures": null,
+  "signatures": {
+    "publisher_signatures": [],
+    "publisher_threshold": null,
+    "registry_signature": null,
+    "transparency_log_entry": "objectid:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
   "supply_chain": null,
   "policy": {
     "require_transparency_log": true,

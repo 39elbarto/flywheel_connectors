@@ -156,6 +156,9 @@ unit = "requests"
 enforcement = "hard"
 scope = "credential"
 
+[signatures]
+transparency_log_entry = "objectid:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
 [policy]
 require_transparency_log = true
 require_attestation_types = ["in-toto", "reproducible-build"]

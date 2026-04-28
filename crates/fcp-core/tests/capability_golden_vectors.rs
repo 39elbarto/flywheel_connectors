@@ -10,11 +10,11 @@
 
 use chrono::{Duration, Utc};
 use fcp_core::{
-    CapabilityConstraints, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
-    FcpError, IdValidationError, InstanceId, OperationId, PrincipalId, ZoneId, ZoneIdError,
-    validate_canonical_id,
+    validate_canonical_id, CapabilityConstraints, CapabilityId, CapabilityToken,
+    CapabilityVerifier, ConnectorId, FcpError, IdValidationError, InstanceId, OperationId,
+    PrincipalId, ZoneId, ZoneIdError,
 };
-use fcp_crypto::cose::{CapabilityTokenBuilder, CoseToken, CwtClaims, fcp2_claims};
+use fcp_crypto::cose::{fcp2_claims, CapabilityTokenBuilder, CoseToken, CwtClaims};
 use fcp_crypto::ed25519::Ed25519SigningKey;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -353,20 +353,17 @@ mod resource_constraints {
         // Serialize constraints
         let mut constraints_bytes = Vec::new();
         ciborium::into_writer(constraints, &mut constraints_bytes).unwrap();
-        let constraints_val: ciborium::Value =
-            ciborium::from_reader(&constraints_bytes[..]).unwrap();
-
-        let claims = CwtClaims::new()
+        let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.test")
             .zone_id("z:work")
-            .principal_id("user:test")
+            .principal("user:test")
             .operations(&["op.test"])
             .issuer("node:primary")
-            .not_before(now)
-            .expiration(now + Duration::hours(1))
-            .custom(fcp2_claims::CONSTRAINTS, constraints_val);
-
-        let cose_token = CoseToken::sign(sk, &claims).unwrap();
+            .validity(now, now + Duration::hours(1))
+            .try_constraints_cbor(&constraints_bytes)
+            .expect("test constraints CBOR should be valid")
+            .sign(sk)
+            .unwrap();
         CapabilityToken::from_raw(cose_token)
     }
 
@@ -949,20 +946,17 @@ mod adversarial_attacks {
 
         let mut constraints_bytes = Vec::new();
         ciborium::into_writer(&constraints, &mut constraints_bytes).unwrap();
-        let constraints_val: ciborium::Value =
-            ciborium::from_reader(&constraints_bytes[..]).unwrap();
-
-        let claims = CwtClaims::new()
+        let cose_token = CapabilityTokenBuilder::new()
             .capability_id("cap.files")
             .zone_id("z:work")
-            .principal_id("user:test")
+            .principal("user:test")
             .operations(&["op.read"])
             .issuer("node:primary")
-            .not_before(now)
-            .expiration(now + Duration::hours(1))
-            .custom(fcp2_claims::CONSTRAINTS, constraints_val);
-
-        let cose_token = CoseToken::sign(&sk, &claims).unwrap();
+            .validity(now, now + Duration::hours(1))
+            .try_constraints_cbor(&constraints_bytes)
+            .expect("test constraints CBOR should be valid")
+            .sign(&sk)
+            .unwrap();
         let token = CapabilityToken::from_raw(cose_token);
 
         let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), InstanceId::new());

@@ -28,7 +28,8 @@ use wasmtime_wasi::{
 };
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
+    let mut path =
+        std::fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -287,12 +288,10 @@ fn wasi_file_preopens_fail_closed() {
     std::fs::write(&readonly_file, b"readonly").unwrap();
     std::fs::write(&writable_file, b"writable").unwrap();
 
-    let readonly_runtime = WasiRuntime::new(WasiConfig {
+    let readonly_err = match WasiRuntime::new(WasiConfig {
         readonly_paths: vec![readonly_file.clone()],
         ..WasiConfig::default()
-    })
-    .unwrap();
-    let readonly_err = match readonly_runtime.create_store() {
+    }) {
         Ok(_) => panic!("expected readonly file preopen to be rejected"),
         Err(err) => err.to_string(),
     };
@@ -301,12 +300,10 @@ fn wasi_file_preopens_fail_closed() {
         "readonly file preopen must fail closed: {readonly_err}"
     );
 
-    let writable_runtime = WasiRuntime::new(WasiConfig {
+    let writable_err = match WasiRuntime::new(WasiConfig {
         writable_paths: vec![writable_file.clone()],
         ..WasiConfig::default()
-    })
-    .unwrap();
-    let writable_err = match writable_runtime.create_store() {
+    }) {
         Ok(_) => panic!("expected writable file preopen to be rejected"),
         Err(err) => err.to_string(),
     };

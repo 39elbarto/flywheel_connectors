@@ -184,5 +184,6 @@ async fn token_bucket_zero_rate_remains_unavailable() {
     assert_eq!(after_wait.limit, 0);
     assert_eq!(after_wait.remaining, 0);
     assert!(after_wait.is_limited);
+    assert_eq!(limiter.wait_time().await, Duration::MAX);
     assert!(!limiter.try_acquire().await);
 }

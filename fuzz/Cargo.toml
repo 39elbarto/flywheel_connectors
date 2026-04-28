@@ -582,6 +582,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_health_state"
+path = "fuzz_targets/health_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "graphql_ws_message"
 path = "fuzz_targets/graphql_ws_message.rs"
 test = false
@@ -1081,6 +1088,20 @@ bench = false
 [[bin]]
 name = "fuzz_ratelimit_validate"
 path = "fuzz_targets/ratelimit_validate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_request_id_roundtrip"
+path = "fuzz_targets/request_id_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_required_quorum"
+path = "fuzz_targets/required_quorum.rs"
 test = false
 doc = false
 bench = false

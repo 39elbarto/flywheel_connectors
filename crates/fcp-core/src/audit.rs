@@ -21,6 +21,127 @@ pub const EVENT_REVOCATION_ISSUED: &str = "revocation.issued";
 pub const EVENT_SECURITY_VIOLATION: &str = "security.violation";
 pub const EVENT_AUDIT_FORK_DETECTED: &str = "audit.fork_detected";
 
+/// Operator-visible evidence handle for audit, trace, and receipt drill-downs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OperatorEvidence {
+    /// Audit event object backing an operator-facing explanation.
+    AuditEvent {
+        #[serde(with = "operator_evidence_object_id")]
+        event_id: ObjectId,
+    },
+    /// Decision receipt object backing an allow or deny outcome.
+    DecisionReceipt {
+        #[serde(with = "operator_evidence_object_id")]
+        receipt_id: ObjectId,
+    },
+    /// Operation receipt object backing an invocation result.
+    OperationReceipt {
+        #[serde(with = "operator_evidence_object_id")]
+        receipt_id: ObjectId,
+    },
+    /// Correlation ID for trace lookup.
+    TraceContext { correlation_id: CorrelationId },
+    /// Durable object that can be retrieved by content address.
+    DurableObject {
+        #[serde(with = "operator_evidence_object_id")]
+        object_id: ObjectId,
+    },
+    /// Local artifact path plus digest for offline evidence bundles.
+    LocalArtifact { path: String, digest: String },
+}
+
+mod operator_evidence_object_id {
+    use std::fmt;
+
+    use serde::{
+        Deserializer, Serializer,
+        de::{Error, SeqAccess, Visitor},
+    };
+
+    use crate::ObjectId;
+
+    pub fn serialize<S>(object_id: &ObjectId, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        crate::util::hex_or_bytes::serialize(object_id.as_bytes(), serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<ObjectId, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer
+            .deserialize_any(ObjectIdVisitor)
+            .map(ObjectId::from_bytes)
+    }
+
+    struct ObjectIdVisitor;
+
+    impl<'de> Visitor<'de> for ObjectIdVisitor {
+        type Value = [u8; 32];
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a 32-byte ObjectId as bytes or hex text")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            Ok(*ObjectId::parse_prefixed(value)
+                .map_err(E::custom)?
+                .as_bytes())
+        }
+
+        fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            Self::copy_bytes(value)
+        }
+
+        fn visit_byte_buf<E>(self, value: Vec<u8>) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            Self::copy_bytes(&value)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut bytes = [0_u8; 32];
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                *byte = seq
+                    .next_element()?
+                    .ok_or_else(|| Error::invalid_length(index, &self))?;
+            }
+            if seq.next_element::<u8>()?.is_some() {
+                return Err(Error::invalid_length(33, &self));
+            }
+            Ok(bytes)
+        }
+    }
+
+    impl ObjectIdVisitor {
+        fn copy_bytes<E>(value: &[u8]) -> Result<[u8; 32], E>
+        where
+            E: Error,
+        {
+            if value.len() != 32 {
+                return Err(E::invalid_length(value.len(), &ObjectIdVisitor));
+            }
+
+            let mut bytes = [0_u8; 32];
+            bytes.copy_from_slice(value);
+            Ok(bytes)
+        }
+    }
+}
+
 /// Distributed trace context (NORMATIVE when present).
 ///
 /// W3C Trace Context compatible.

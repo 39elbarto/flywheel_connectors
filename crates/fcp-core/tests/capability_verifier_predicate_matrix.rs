@@ -422,6 +422,19 @@ fn capability_verifier_unbound_entrypoint_rejects_gateway_roundtrip_matrix() {
             expected: ExpectedReject::OperationNotGranted,
         },
     ];
+    let case_names = cases.iter().map(|case| case.name).collect::<Vec<_>>();
+    assert_eq!(
+        case_names.as_slice(),
+        [
+            "invalid_signature",
+            "wrong_zone",
+            "expired",
+            "not_yet_valid",
+            "capability_mismatch",
+            "operation_mismatch",
+        ],
+        "unbound gateway rejection matrix should keep every documented case pinned",
+    );
 
     for case in cases {
         let verifier = CapabilityVerifier::without_instance_binding(pub_key, ZoneId::work());

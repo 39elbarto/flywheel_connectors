@@ -124,6 +124,40 @@ fn duplicate_capability_chain_steps_remain_distinct_positions() {
 }
 
 #[test]
+fn capability_chain_cbor_preserves_unsorted_duplicate_step_order() {
+    let chain = CapabilityChain::new(vec![
+        object_id(0x33),
+        object_id(0x11),
+        object_id(0x11),
+        object_id(0x22),
+    ]);
+
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&chain, &mut bytes)
+        .expect("CapabilityChain encodes as ordered CBOR");
+    let decoded: CapabilityChain =
+        ciborium::de::from_reader(bytes.as_slice()).expect("CapabilityChain decodes from CBOR");
+    assert_eq!(decoded, chain);
+    assert_eq!(
+        decoded.as_slice(),
+        &[
+            object_id(0x33),
+            object_id(0x11),
+            object_id(0x11),
+            object_id(0x22),
+        ]
+    );
+
+    let cbor: CborValue =
+        ciborium::de::from_reader(bytes.as_slice()).expect("CapabilityChain decodes as CBOR value");
+    let items = expect_cbor_array(cbor);
+    assert_eq!(items.len(), 4);
+    for (item, expected_byte) in items.iter().zip([0x33, 0x11, 0x11, 0x22]) {
+        assert_eq!(expect_cbor_bytes(item), &[expected_byte; 32]);
+    }
+}
+
+#[test]
 fn capability_chain_json_roundtrip_preserves_order_and_hex_shape() {
     let chain = representative_chain();
 

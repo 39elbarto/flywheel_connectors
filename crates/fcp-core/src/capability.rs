@@ -947,6 +947,43 @@ pub struct CapabilityObject {
     pub valid_until: Option<u64>,
 }
 
+/// Ordered capability-delegation chain back to a root authority.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CapabilityChain(Vec<ObjectId>);
+
+impl CapabilityChain {
+    /// Construct a chain from ordered capability object identifiers.
+    #[must_use]
+    pub const fn new(chain: Vec<ObjectId>) -> Self {
+        Self(chain)
+    }
+
+    /// Borrow the ordered capability object identifiers.
+    #[must_use]
+    pub fn as_slice(&self) -> &[ObjectId] {
+        &self.0
+    }
+
+    /// Consume the chain and return the ordered object identifiers.
+    #[must_use]
+    pub fn into_inner(self) -> Vec<ObjectId> {
+        self.0
+    }
+
+    /// Number of capability object identifiers in the chain.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the chain carries no delegation identifiers.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// Role Object - named bundle of capabilities.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoleObject {

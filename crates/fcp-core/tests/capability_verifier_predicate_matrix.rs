@@ -11,6 +11,7 @@ const OTHER_CAPABILITY: &str = "cap.other";
 const OPERATION: &str = "op.matrix";
 const OTHER_OPERATION: &str = "op.other";
 const WORK_ZONE: &str = "z:work";
+const BEYOND_CLOCK_SKEW_MARGIN_SECS: i64 = 30;
 
 fn signing_key(seed: u8) -> Ed25519SigningKey {
     Ed25519SigningKey::from_bytes(&[seed; 32]).expect("fixed test key must parse")
@@ -207,7 +208,8 @@ fn capability_verifier_rejects_documented_predicate_matrix() {
     expired.expires = now - Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS + 1);
 
     let mut not_yet_valid = valid_spec(&key);
-    not_yet_valid.not_before = now + Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS + 1);
+    not_yet_valid.not_before =
+        now + Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS + BEYOND_CLOCK_SKEW_MARGIN_SECS);
     not_yet_valid.expires = now + Duration::hours(2);
 
     let mut instance_mismatch = valid_spec(&key);
@@ -370,7 +372,8 @@ fn capability_verifier_unbound_entrypoint_rejects_gateway_roundtrip_matrix() {
     expired.expires = now - Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS + 1);
 
     let mut not_yet_valid = valid_spec(&key);
-    not_yet_valid.not_before = now + Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS + 1);
+    not_yet_valid.not_before =
+        now + Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS + BEYOND_CLOCK_SKEW_MARGIN_SECS);
     not_yet_valid.expires = now + Duration::hours(2);
 
     let mut capability_mismatch = valid_spec(&key);

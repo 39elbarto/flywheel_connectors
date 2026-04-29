@@ -13,7 +13,7 @@ use crate::{ConnectorId, ObjectId, OperationId, ZoneId};
 use thiserror::Error;
 
 /// The type of limit that was exceeded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LimitType {
     /// Requests per time window (e.g., RPM/RPS).
@@ -24,6 +24,18 @@ pub enum LimitType {
     Burst,
     /// Quota exceeded (tokens/bytes/compute budget).
     Quota,
+}
+
+impl std::fmt::Display for LimitType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let label = match self {
+            Self::Rpm => "rpm",
+            Self::Concurrent => "concurrent",
+            Self::Burst => "burst",
+            Self::Quota => "quota",
+        };
+        f.write_str(label)
+    }
 }
 
 /// Rate limit backpressure level.

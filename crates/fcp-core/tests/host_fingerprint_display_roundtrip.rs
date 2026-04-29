@@ -55,6 +55,24 @@ fn display_fromstr_roundtrip_preserves_bytes() {
 }
 
 #[test]
+fn display_parse_roundtrip_preserves_constructed_digest_bytes() {
+    for digest in [
+        [0x00; HostFingerprint::DIGEST_LEN],
+        [0x7f; HostFingerprint::DIGEST_LEN],
+        [0xff; HostFingerprint::DIGEST_LEN],
+    ] {
+        let fingerprint = HostFingerprint::from_digest_bytes(digest);
+        let display = fingerprint.to_string();
+        let parsed: HostFingerprint = display.parse().expect("Display parses via FromStr");
+
+        assert_eq!(parsed, fingerprint);
+        assert_eq!(parsed.as_bytes(), &digest);
+        assert_eq!(display.len(), HostFingerprint::DISPLAY_LEN);
+        assert!(display.starts_with(HostFingerprint::PREFIX));
+    }
+}
+
+#[test]
 fn parse_rejects_noncanonical_format() {
     let raw_hex_without_prefix = &ZERO_FINGERPRINT[HostFingerprint::PREFIX.len()..];
     assert!(matches!(

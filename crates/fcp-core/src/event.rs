@@ -82,6 +82,26 @@ pub enum EventSeverity {
     Critical,
 }
 
+impl EventSeverity {
+    /// Return the canonical display and serde tag for this severity.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Notice => "notice",
+            Self::Warning => "warning",
+            Self::Error => "error",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+impl fmt::Display for EventSeverity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Event envelope wrapper for streaming events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {

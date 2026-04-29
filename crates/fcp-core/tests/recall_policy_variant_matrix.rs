@@ -33,10 +33,13 @@ fn recall_policy_display_tokens_are_pinned() {
 #[test]
 fn recall_policy_json_tags_are_pinned_and_roundtrip() -> TestResult {
     for (policy, _, serde_tag) in CASES {
+        let json_text = serde_json::to_string(policy)?;
+        assert_eq!(json_text, format!("\"{serde_tag}\""));
+
         let json = serde_json::to_value(policy)?;
         assert_eq!(json, serde_json::json!(serde_tag));
 
-        let decoded: RecallPolicy = serde_json::from_value(json)?;
+        let decoded: RecallPolicy = serde_json::from_str(&json_text)?;
         assert_eq!(decoded, *policy);
     }
 

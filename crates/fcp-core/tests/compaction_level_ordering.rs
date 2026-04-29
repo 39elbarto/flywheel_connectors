@@ -87,7 +87,11 @@ fn cmp_returns_documented_ordering_per_pair() {
             TaintLevel::HighlyTainted,
             Ordering::Equal,
         ),
-        (TaintLevel::Tainted, TaintLevel::Untainted, Ordering::Greater),
+        (
+            TaintLevel::Tainted,
+            TaintLevel::Untainted,
+            Ordering::Greater,
+        ),
         (
             TaintLevel::HighlyTainted,
             TaintLevel::Tainted,
@@ -260,12 +264,12 @@ fn is_tainted_truth_table_via_provenance() {
     let tainted = Provenance::tainted(zone.clone());
     let highly = Provenance::highly_tainted(zone);
 
-    assert!(!untainted.is_tainted(), "Untainted MUST be is_tainted=false");
-    assert!(tainted.is_tainted(), "Tainted MUST be is_tainted=true");
     assert!(
-        highly.is_tainted(),
-        "HighlyTainted MUST be is_tainted=true"
+        !untainted.is_tainted(),
+        "Untainted MUST be is_tainted=false"
     );
+    assert!(tainted.is_tainted(), "Tainted MUST be is_tainted=true");
+    assert!(highly.is_tainted(), "HighlyTainted MUST be is_tainted=true");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -369,4 +373,3 @@ fn distinct_variants_via_u8_are_distinct() {
     }
     assert_eq!(seen.len(), 3);
 }
-

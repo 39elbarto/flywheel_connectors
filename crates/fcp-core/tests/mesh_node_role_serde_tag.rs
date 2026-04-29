@@ -281,9 +281,7 @@ fn risk_tier_variants_pairwise_unequal() {
 fn quorum_purpose_variants_pairwise_unequal() {
     for i in 0..QUORUM_PURPOSE_SERDE.len() {
         for j in (i + 1)..QUORUM_PURPOSE_SERDE.len() {
-            assert_ne!(
-                QUORUM_PURPOSE_SERDE[i].0, QUORUM_PURPOSE_SERDE[j].0
-            );
+            assert_ne!(QUORUM_PURPOSE_SERDE[i].0, QUORUM_PURPOSE_SERDE[j].0);
         }
     }
 }
@@ -343,9 +341,11 @@ fn risk_tier_json_and_cbor_decode_to_same_variant() {
 
         let mut cbor = Vec::new();
         ciborium::ser::into_writer(variant, &mut cbor).expect("CBOR encode");
-        let from_cbor: RiskTier =
-            ciborium::de::from_reader(cbor.as_slice()).expect("CBOR decode");
+        let from_cbor: RiskTier = ciborium::de::from_reader(cbor.as_slice()).expect("CBOR decode");
 
-        assert_eq!(from_json, from_cbor, "JSON and CBOR disagree on {variant:?}");
+        assert_eq!(
+            from_json, from_cbor,
+            "JSON and CBOR disagree on {variant:?}"
+        );
     }
 }

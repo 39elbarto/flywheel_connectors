@@ -40,7 +40,9 @@ use fcp_core::ConnectorVersion;
 use semver::Version;
 
 fn v(input: &str) -> ConnectorVersion {
-    input.parse().unwrap_or_else(|err| panic!("parse {input}: {err}"))
+    input
+        .parse()
+        .unwrap_or_else(|err| panic!("parse {input}: {err}"))
 }
 
 fn hash_of<T: Hash + ?Sized>(t: &T) -> u64 {
@@ -200,7 +202,10 @@ fn build_metadata_orders_lexicographically_in_semver_crate() {
     let plain = v("1.2.3");
 
     // Lexicographic ordering of build metadata: alpha < beta.
-    assert!(b.is_compatible_with(&a), "newer build (beta) MUST satisfy older (alpha)");
+    assert!(
+        b.is_compatible_with(&a),
+        "newer build (beta) MUST satisfy older (alpha)"
+    );
     assert!(
         !a.is_compatible_with(&b),
         "older build (alpha) MUST NOT satisfy newer (beta) — pinned downgrade rejection"
@@ -262,10 +267,7 @@ fn from_str_display_roundtrip_preserves_equality() {
         let original = v(s);
         let displayed = original.to_string();
         let reparsed: ConnectorVersion = displayed.parse().expect("reparse");
-        assert_eq!(
-            original, reparsed,
-            "Display→FromStr lost equality for {s}"
-        );
+        assert_eq!(original, reparsed, "Display→FromStr lost equality for {s}");
         assert_eq!(
             hash_of(&original),
             hash_of(&reparsed),
@@ -293,12 +295,7 @@ fn parse_rejects_non_semver_strings() {
 fn json_form_is_transparent_bare_semver_string() {
     // `#[serde(transparent)]` on the newtype — the JSON form is the
     // quoted semver string, NOT a wrapping object.
-    let cases = [
-        "0.0.0",
-        "1.2.3",
-        "1.2.3-alpha.1",
-        "1.2.3-rc.1+build.42",
-    ];
+    let cases = ["0.0.0", "1.2.3", "1.2.3-alpha.1", "1.2.3-rc.1+build.42"];
     for s in cases {
         let parsed = v(s);
         let json = serde_json::to_string(&parsed).expect("serialize");
@@ -338,8 +335,7 @@ fn cbor_roundtrip_preserves_equality_and_hash() {
         let original = v(s);
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&original, &mut buf).expect("encode");
-        let back: ConnectorVersion =
-            ciborium::de::from_reader(buf.as_slice()).expect("decode");
+        let back: ConnectorVersion = ciborium::de::from_reader(buf.as_slice()).expect("decode");
         assert_eq!(original, back, "CBOR round-trip lost {s}");
         assert_eq!(hash_of(&original), hash_of(&back));
     }

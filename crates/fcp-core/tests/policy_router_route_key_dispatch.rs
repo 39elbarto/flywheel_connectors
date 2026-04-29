@@ -125,7 +125,9 @@ fn principal_deny_only_fires_for_principal_field() {
     let zone = ZoneId::work();
     let mut policy = empty_policy(zone.clone());
     policy.principal_deny = vec![pat("connector:foo")]; // matches connector text, in wrong list
-    let engine = PolicyEngine { zone_policy: policy };
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
 
     let input = input_for(
         zone,
@@ -147,7 +149,9 @@ fn connector_deny_only_fires_for_connector_field() {
     let zone = ZoneId::work();
     let mut policy = empty_policy(zone.clone());
     policy.connector_deny = vec![pat("user:alice")]; // matches principal literal, in wrong list
-    let engine = PolicyEngine { zone_policy: policy };
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
 
     let input = input_for(
         zone,
@@ -168,7 +172,9 @@ fn capability_deny_only_fires_for_capability_field() {
     let zone = ZoneId::work();
     let mut policy = empty_policy(zone.clone());
     policy.capability_deny = vec![pat("user:alice")]; // matches principal literal
-    let engine = PolicyEngine { zone_policy: policy };
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
 
     let input = input_for(
         zone,
@@ -194,7 +200,9 @@ fn principal_deny_wins_over_principal_allow() {
     let mut policy = empty_policy(zone.clone());
     policy.principal_allow = vec![pat("user:*")];
     policy.principal_deny = vec![pat("user:alice")];
-    let engine = PolicyEngine { zone_policy: policy };
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
 
     let input = input_for(
         zone,
@@ -217,7 +225,9 @@ fn connector_deny_wins_over_connector_allow() {
     let mut policy = empty_policy(zone.clone());
     policy.connector_allow = vec![pat("connector:*")];
     policy.connector_deny = vec![pat("connector:foo")];
-    let engine = PolicyEngine { zone_policy: policy };
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
 
     let input = input_for(
         zone,
@@ -239,7 +249,9 @@ fn capability_deny_wins_over_capability_allow() {
     let mut policy = empty_policy(zone.clone());
     policy.capability_allow = vec![pat("cap.*")];
     policy.capability_deny = vec![pat("cap.read")];
-    let engine = PolicyEngine { zone_policy: policy };
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
 
     let input = input_for(
         zone,
@@ -263,7 +275,9 @@ fn capability_deny_wins_over_capability_allow() {
 fn empty_principal_allow_does_not_default_deny() {
     let zone = ZoneId::work();
     let policy = empty_policy(zone.clone());
-    let engine = PolicyEngine { zone_policy: policy };
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
 
     let input = input_for(
         zone,
@@ -289,7 +303,9 @@ fn principal_allow_non_empty_requires_match() {
     let zone = ZoneId::work();
     let mut policy = empty_policy(zone.clone());
     policy.principal_allow = vec![pat("user:bob")]; // doesn't match alice
-    let engine = PolicyEngine { zone_policy: policy };
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
 
     let input = input_for(
         zone,
@@ -311,7 +327,9 @@ fn connector_allow_non_empty_requires_match() {
     let zone = ZoneId::work();
     let mut policy = empty_policy(zone.clone());
     policy.connector_allow = vec![pat("connector:trusted")];
-    let engine = PolicyEngine { zone_policy: policy };
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
 
     let input = input_for(
         zone,
@@ -332,7 +350,9 @@ fn capability_allow_non_empty_requires_match() {
     let zone = ZoneId::work();
     let mut policy = empty_policy(zone.clone());
     policy.capability_allow = vec![pat("cap.write")];
-    let engine = PolicyEngine { zone_policy: policy };
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
 
     let input = input_for(
         zone,
@@ -361,7 +381,9 @@ fn principal_deny_short_circuits_before_connector_deny() {
     let mut policy = empty_policy(zone.clone());
     policy.principal_deny = vec![pat("user:alice")];
     policy.connector_deny = vec![pat("connector:foo")];
-    let engine = PolicyEngine { zone_policy: policy };
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
 
     let input = input_for(
         zone,
@@ -383,7 +405,9 @@ fn connector_deny_short_circuits_before_capability_deny() {
     let mut policy = empty_policy(zone.clone());
     policy.connector_deny = vec![pat("connector:foo")];
     policy.capability_deny = vec![pat("cap.read")];
-    let engine = PolicyEngine { zone_policy: policy };
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
 
     let input = input_for(
         zone,
@@ -408,7 +432,9 @@ fn all_denies_before_any_allow_check() {
     let mut policy = empty_policy(zone.clone());
     policy.principal_allow = vec![pat("user:bob")]; // would NotAllowed
     policy.capability_deny = vec![pat("cap.read")]; // also denies
-    let engine = PolicyEngine { zone_policy: policy };
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
 
     let input = input_for(
         zone,
@@ -433,7 +459,9 @@ fn star_glob_matches_through_route_key() {
     let zone = ZoneId::work();
     let mut policy = empty_policy(zone.clone());
     policy.principal_deny = vec![pat("user:*")];
-    let engine = PolicyEngine { zone_policy: policy };
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
 
     for principal in ["user:alice", "user:bob", "user:"] {
         let input = input_for(
@@ -456,7 +484,9 @@ fn question_mark_glob_matches_one_ascii_char_through_route_key() {
     let zone = ZoneId::work();
     let mut policy = empty_policy(zone.clone());
     policy.connector_deny = vec![pat("connector:?")];
-    let engine = PolicyEngine { zone_policy: policy };
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
 
     // Matches single-char.
     let input = input_for(
@@ -492,7 +522,9 @@ fn exact_pattern_in_route_key_matches_only_exact_value() {
     let zone = ZoneId::work();
     let mut policy = empty_policy(zone.clone());
     policy.principal_deny = vec![pat("user:alice")];
-    let engine = PolicyEngine { zone_policy: policy };
+    let engine = PolicyEngine {
+        zone_policy: policy,
+    };
 
     // Exact match denies.
     let input_exact = input_for(
@@ -534,8 +566,7 @@ fn policy_pattern_json_form_pinned() {
         "PolicyPattern JSON shape is `{{\"pattern\": <glob>}}`"
     );
 
-    let back: PolicyPattern =
-        serde_json::from_value(json.clone()).expect("deserialize");
+    let back: PolicyPattern = serde_json::from_value(json.clone()).expect("deserialize");
     assert_eq!(back.pattern, "user:*");
     // Round-trip preserves serialization byte-for-byte.
     assert_eq!(serde_json::to_value(&back).unwrap(), json);
@@ -546,8 +577,7 @@ fn policy_pattern_cbor_roundtrip() {
     let p = pat("connector:*");
     let mut buf = Vec::new();
     ciborium::ser::into_writer(&p, &mut buf).expect("encode");
-    let back: PolicyPattern =
-        ciborium::de::from_reader(buf.as_slice()).expect("decode");
+    let back: PolicyPattern = ciborium::de::from_reader(buf.as_slice()).expect("decode");
     assert_eq!(back.pattern, "connector:*");
 }
 

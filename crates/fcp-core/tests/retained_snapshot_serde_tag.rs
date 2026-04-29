@@ -159,10 +159,9 @@ fn cbor_unit_variants_encode_as_text_strings() {
         ciborium::ser::into_writer(&variant, &mut buf).expect("encode");
         let value: CborValue = ciborium::de::from_reader(buf.as_slice()).expect("decode as Value");
         match value {
-            CborValue::Text(s) => assert_eq!(
-                s, expected_text,
-                "CBOR Text mismatch for {variant:?}"
-            ),
+            CborValue::Text(s) => {
+                assert_eq!(s, expected_text, "CBOR Text mismatch for {variant:?}")
+            }
             other => panic!("{variant:?} MUST encode as CBOR Text, got {other:?}"),
         }
     }
@@ -230,8 +229,7 @@ fn lease_expires_at_u64_max_round_trips() {
 
     let mut buf = Vec::new();
     ciborium::ser::into_writer(&original, &mut buf).expect("CBOR encode");
-    let from_cbor: EvictionPolicy =
-        ciborium::de::from_reader(buf.as_slice()).expect("CBOR decode");
+    let from_cbor: EvictionPolicy = ciborium::de::from_reader(buf.as_slice()).expect("CBOR decode");
     assert_eq!(original, from_cbor);
 }
 

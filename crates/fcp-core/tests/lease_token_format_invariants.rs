@@ -135,8 +135,8 @@ fn serde_accepts_every_display_token_as_input() {
     // for each variant is the Display token wrapped in quotes.
     for (variant, expected_token) in ALL_PURPOSES {
         let input = format!("\"{expected_token}\"");
-        let parsed: LeasePurpose = serde_json::from_str(&input)
-            .unwrap_or_else(|err| panic!("deserialize {input}: {err}"));
+        let parsed: LeasePurpose =
+            serde_json::from_str(&input).unwrap_or_else(|err| panic!("deserialize {input}: {err}"));
         assert_eq!(parsed, *variant, "serde round-trip via Display token");
     }
 }
@@ -203,7 +203,11 @@ fn lease_purpose_serves_as_hashmap_key() {
     for (variant, token) in ALL_PURPOSES {
         map.insert(*variant, token);
     }
-    assert_eq!(map.len(), ALL_PURPOSES.len(), "every variant a distinct key");
+    assert_eq!(
+        map.len(),
+        ALL_PURPOSES.len(),
+        "every variant a distinct key"
+    );
     for (variant, token) in ALL_PURPOSES {
         assert_eq!(map.get(variant), Some(token));
     }
@@ -257,11 +261,15 @@ fn lease_id_display_fromstr_roundtrip_bare_hex() {
     // Display is 64 lowercase hex chars (no prefix).
     assert_eq!(display.len(), 64, "Display MUST be 64 hex chars");
     assert!(
-        display.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        display
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
         "Display MUST be all-lowercase hex: {display}"
     );
 
-    let reparsed: LeaseId = display.parse().expect("FromStr accepts bare hex Display output");
+    let reparsed: LeaseId = display
+        .parse()
+        .expect("FromStr accepts bare hex Display output");
     assert_eq!(original, reparsed, "Display→FromStr lost identity");
 }
 
@@ -331,6 +339,9 @@ fn to_prefixed_string_canonical_roundtrip() {
         let id: LeaseId = ObjectId::from_bytes([seed; 32]);
         let prefixed = id.to_prefixed_string();
         let back = LeaseId::from_str(&prefixed).expect("round-trip");
-        assert_eq!(id, back, "prefixed-form round-trip lost identity for seed {seed:#x}");
+        assert_eq!(
+            id, back,
+            "prefixed-form round-trip lost identity for seed {seed:#x}"
+        );
     }
 }

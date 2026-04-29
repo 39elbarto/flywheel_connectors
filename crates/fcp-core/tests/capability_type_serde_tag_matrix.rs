@@ -90,13 +90,10 @@ fn safety_tier_cbor_encodes_as_text_not_integer() {
         ciborium::ser::into_writer(variant, &mut buf).expect("encode");
         let value: CborValue = ciborium::de::from_reader(buf.as_slice()).expect("decode as Value");
         match value {
-            CborValue::Text(s) => assert_eq!(
-                s, *expected,
-                "SafetyTier CBOR Text drift on {variant:?}"
-            ),
-            other => panic!(
-                "SafetyTier CBOR MUST encode as Text({expected:?}); got {other:?}"
-            ),
+            CborValue::Text(s) => {
+                assert_eq!(s, *expected, "SafetyTier CBOR Text drift on {variant:?}")
+            }
+            other => panic!("SafetyTier CBOR MUST encode as Text({expected:?}); got {other:?}"),
         }
     }
 }
@@ -123,7 +120,10 @@ fn safety_tier_variants_pairwise_distinct() {
     let mut seen_jsons = std::collections::HashSet::new();
     for (variant, _) in SAFETY_TIER_CASES {
         let json = serde_json::to_string(variant).expect("serialize");
-        assert!(seen_jsons.insert(json.clone()), "duplicate JSON form {json}");
+        assert!(
+            seen_jsons.insert(json.clone()),
+            "duplicate JSON form {json}"
+        );
     }
     assert_eq!(seen_jsons.len(), SAFETY_TIER_CASES.len());
 
@@ -181,8 +181,7 @@ fn risk_level_json_and_cbor_roundtrip() {
         // CBOR
         let mut buf = Vec::new();
         ciborium::ser::into_writer(variant, &mut buf).expect("CBOR encode");
-        let from_cbor: RiskLevel =
-            ciborium::de::from_reader(buf.as_slice()).expect("CBOR decode");
+        let from_cbor: RiskLevel = ciborium::de::from_reader(buf.as_slice()).expect("CBOR decode");
         assert_eq!(*variant, from_cbor);
     }
 }
@@ -242,8 +241,7 @@ fn idempotency_class_best_effort_uses_underscore_not_hyphen() {
 fn idempotency_class_json_and_cbor_roundtrip() {
     for (variant, _) in IDEMPOTENCY_CASES {
         let json = serde_json::to_string(variant).expect("JSON serialize");
-        let from_json: IdempotencyClass =
-            serde_json::from_str(&json).expect("JSON deserialize");
+        let from_json: IdempotencyClass = serde_json::from_str(&json).expect("JSON deserialize");
         assert_eq!(*variant, from_json);
 
         let mut buf = Vec::new();
@@ -293,9 +291,7 @@ fn every_capability_classifier_token_is_snake_case_lowercase_ascii() {
     // them ever contained accidental uppercase, hyphens, or non-ASCII.
     fn check(label: &str) {
         assert!(
-            label
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c == '_'),
+            label.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
             "token {label:?} contains non-snake_case characters"
         );
         assert!(!label.is_empty(), "token MUST be non-empty");
@@ -303,7 +299,10 @@ fn every_capability_classifier_token_is_snake_case_lowercase_ascii() {
             !label.starts_with('_') && !label.ends_with('_'),
             "token {label:?} MUST NOT start/end with `_`"
         );
-        assert!(!label.contains("__"), "token {label:?} MUST NOT contain `__`");
+        assert!(
+            !label.contains("__"),
+            "token {label:?} MUST NOT contain `__`"
+        );
     }
     for (_, label) in SAFETY_TIER_CASES {
         check(label);

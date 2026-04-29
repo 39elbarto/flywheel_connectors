@@ -240,9 +240,7 @@ fn resume_disposition_variants_pairwise_distinct() {
     assert_eq!(seen_labels.len(), 4);
     for i in 0..RESUME_DISPOSITION_CASES.len() {
         for j in (i + 1)..RESUME_DISPOSITION_CASES.len() {
-            assert_ne!(
-                RESUME_DISPOSITION_CASES[i].0, RESUME_DISPOSITION_CASES[j].0
-            );
+            assert_ne!(RESUME_DISPOSITION_CASES[i].0, RESUME_DISPOSITION_CASES[j].0);
         }
     }
 }

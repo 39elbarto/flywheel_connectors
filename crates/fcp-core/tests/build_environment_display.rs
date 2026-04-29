@@ -110,12 +110,12 @@ fn attestation_predicate_type_cbor_roundtrip_per_variant() {
 #[test]
 fn attestation_predicate_type_rejects_unknown_uri() {
     for bad in [
-        r#""SlsaProvenanceV1""#,                           // PascalCase variant name
-        r#""https://slsa.dev/provenance/v0""#,             // wrong version
-        r#""https://slsa.dev/provenance/v2""#,             // future version
-        r#""http://slsa.dev/provenance/v1""#,              // wrong scheme
-        r#""https://in-toto.io/Statement/v0""#,            // older in-toto
-        r#""""#,                                            // empty
+        r#""SlsaProvenanceV1""#,                // PascalCase variant name
+        r#""https://slsa.dev/provenance/v0""#,  // wrong version
+        r#""https://slsa.dev/provenance/v2""#,  // future version
+        r#""http://slsa.dev/provenance/v1""#,   // wrong scheme
+        r#""https://in-toto.io/Statement/v0""#, // older in-toto
+        r#""""#,                                // empty
     ] {
         let parsed = serde_json::from_str::<AttestationPredicateType>(bad);
         assert!(
@@ -166,8 +166,7 @@ fn attestation_metadata_json_roundtrip_preserves_fields() {
     };
 
     let json = serde_json::to_string(&metadata).expect("JSON serialize");
-    let from_json: AttestationMetadata =
-        serde_json::from_str(&json).expect("JSON deserialize");
+    let from_json: AttestationMetadata = serde_json::from_str(&json).expect("JSON deserialize");
     assert_eq!(from_json.build_started_at, metadata.build_started_at);
     assert_eq!(from_json.build_finished_at, metadata.build_finished_at);
     assert_eq!(from_json.invocation_id, metadata.invocation_id);

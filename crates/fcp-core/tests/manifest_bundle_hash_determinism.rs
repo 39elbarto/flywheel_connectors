@@ -51,10 +51,7 @@ fn policy_ref(seed: u8) -> PolicyBundlePolicyRef {
     PolicyBundlePolicyRef {
         object_id: format!("0x{:064x}", seed),
         schema_id: format!("fcp.policy:zone-policy@1.0.{seed}"),
-        object_hash: format!(
-            "blake3-256:{:0>64}",
-            format!("{seed:02x}").repeat(32)
-        ),
+        object_hash: format!("blake3-256:{:0>64}", format!("{seed:02x}").repeat(32)),
     }
 }
 
@@ -66,8 +63,15 @@ fn invoke_hash(
     previous_bundle: Option<&str>,
     policies: &[PolicyBundlePolicyRef],
 ) -> String {
-    compute_policy_bundle_hash(bundle_id, zone_id, policy_seq, created_at, previous_bundle, policies)
-        .expect("hash succeeds for non-empty policies")
+    compute_policy_bundle_hash(
+        bundle_id,
+        zone_id,
+        policy_seq,
+        created_at,
+        previous_bundle,
+        policies,
+    )
+    .expect("hash succeeds for non-empty policies")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -266,8 +270,14 @@ fn hash_output_format_is_blake3_256_with_64_char_hex_suffix() {
 fn policy_bundle_signing_bytes_are_deterministic_across_calls() {
     let zone = ZoneId::work();
     let policies = vec![policy_ref(1), policy_ref(2)];
-    let bundle_hash =
-        invoke_hash("bundle-1", &zone, 7, Some(fixed_dt(1_700_000_000)), None, &policies);
+    let bundle_hash = invoke_hash(
+        "bundle-1",
+        &zone,
+        7,
+        Some(fixed_dt(1_700_000_000)),
+        None,
+        &policies,
+    );
 
     // Build a PolicyBundle directly. The fields here are pinned by
     // policy.rs:328 — we don't need a valid signature for
@@ -319,12 +329,8 @@ fn policy_bundle_signing_bytes_change_when_bundle_hash_changes() {
     // whole point of the bundle_hash being a signed field.
     let zone = ZoneId::work();
     let policies = vec![policy_ref(1)];
-    let bundle_hash_a =
-        invoke_hash("bundle-1", &zone, 1, None, None, &policies);
-    let bundle_hash_b = format!(
-        "{POLICY_BUNDLE_HASH_PREFIX}{}",
-        "ff".repeat(32)
-    );
+    let bundle_hash_a = invoke_hash("bundle-1", &zone, 1, None, None, &policies);
+    let bundle_hash_b = format!("{POLICY_BUNDLE_HASH_PREFIX}{}", "ff".repeat(32));
     assert_ne!(bundle_hash_a, bundle_hash_b);
 
     let make_bundle = |bh: String| PolicyBundle {
@@ -355,4 +361,3 @@ fn policy_bundle_signing_bytes_change_when_bundle_hash_changes() {
         "different bundle_hash MUST produce different signing_bytes"
     );
 }
-

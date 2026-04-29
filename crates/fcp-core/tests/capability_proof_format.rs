@@ -75,8 +75,7 @@ fn signable_bytes_starts_with_versioned_domain_separator() {
 #[test]
 fn domain_separator_value_is_pinned() {
     assert_eq!(
-        DOMAIN_SEPARATOR,
-        b"FCP2-HOLDER-PROOF-V1",
+        DOMAIN_SEPARATOR, b"FCP2-HOLDER-PROOF-V1",
         "If the domain-separator literal changes, every existing holder \
          proof signature is silently invalidated — pin it loudly"
     );
@@ -102,14 +101,22 @@ fn length_prefixes_are_little_endian_u32_at_documented_offsets() {
 
     // Offset 20..24: little-endian u32 length of request_id.
     let req_len = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
-    assert_eq!(req_len as usize, "req-abc".len(), "request_id length prefix");
+    assert_eq!(
+        req_len as usize,
+        "req-abc".len(),
+        "request_id length prefix"
+    );
     off += 4;
     assert_eq!(&bytes[off..off + req_len as usize], b"req-abc");
     off += req_len as usize;
 
     // Next 4: u32 LE length of operation_id.
     let op_len = u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
-    assert_eq!(op_len as usize, "op.example".len(), "operation_id length prefix");
+    assert_eq!(
+        op_len as usize,
+        "op.example".len(),
+        "operation_id length prefix"
+    );
     off += 4;
     assert_eq!(&bytes[off..off + op_len as usize], b"op.example");
     off += op_len as usize;
@@ -289,11 +296,9 @@ fn cbor_signature_encoded_as_byte_string_not_hex() {
         })
         .expect("signature key");
     match sig_value {
-        CborValue::Bytes(b) => assert_eq!(
-            b.len(),
-            64,
-            "CBOR `signature` MUST be 64-byte byte string"
-        ),
+        CborValue::Bytes(b) => {
+            assert_eq!(b.len(), 64, "CBOR `signature` MUST be 64-byte byte string")
+        }
         CborValue::Text(t) => panic!(
             "CBOR `signature` MUST be Bytes (not Text); got Text({t:?}) — \
              hex_or_bytes serde swap regression"

@@ -140,7 +140,10 @@ fn transferring_is_not_terminal_regardless_of_payload() {
 fn json_tag_form_pinned_for_unit_variants() {
     // Internally-tagged on field "state" with snake_case rename.
     let cases = [
-        (MigratableComputationState::Running, r#"{"state":"running"}"#),
+        (
+            MigratableComputationState::Running,
+            r#"{"state":"running"}"#,
+        ),
         (
             MigratableComputationState::Suspended,
             r#"{"state":"suspended"}"#,
@@ -183,8 +186,7 @@ fn json_tag_form_pinned_for_transferring_with_nested_fields() {
 fn json_roundtrip_preserves_every_variant() {
     for variant in all_variants() {
         let json = serde_json::to_string(&variant).expect("serialize");
-        let back: MigratableComputationState =
-            serde_json::from_str(&json).expect("deserialize");
+        let back: MigratableComputationState = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(variant, back, "JSON round-trip lost variant {variant:?}");
     }
 }
@@ -263,8 +265,7 @@ fn cbor_map_carries_state_tag_field_for_every_variant() {
     for (variant, expected_label) in expected_labels {
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&variant, &mut buf).expect("encode");
-        let value: CborValue =
-            ciborium::de::from_reader(buf.as_slice()).expect("decode as Value");
+        let value: CborValue = ciborium::de::from_reader(buf.as_slice()).expect("decode as Value");
         let map = match value {
             CborValue::Map(m) => m,
             other => panic!("expected CBOR map for {variant:?}, got {other:?}"),
@@ -387,7 +388,10 @@ fn transferring_equality_depends_on_payload() {
 fn clone_preserves_equality_for_every_variant() {
     for variant in all_variants() {
         let cloned = variant.clone();
-        assert_eq!(variant, cloned, "Clone MUST preserve equality for {variant:?}");
+        assert_eq!(
+            variant, cloned,
+            "Clone MUST preserve equality for {variant:?}"
+        );
     }
 }
 

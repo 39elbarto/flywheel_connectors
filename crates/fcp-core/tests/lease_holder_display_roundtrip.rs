@@ -233,7 +233,10 @@ fn validate_handoff_rejects_self_transfer_with_holder_named() {
         .expect_err("self-transfer MUST be rejected");
     match err {
         LeaseTransferValidationError::SelfTransfer { holder: rejected } => {
-            assert_eq!(rejected, holder, "error MUST carry the offending holder verbatim");
+            assert_eq!(
+                rejected, holder,
+                "error MUST carry the offending holder verbatim"
+            );
         }
         other => panic!("expected SelfTransfer, got {other:?}"),
     }
@@ -357,21 +360,17 @@ fn distinct_holders_produce_distinct_lease_serializations() {
     ciborium::ser::into_writer(&lease_a, &mut buf_a).expect("encode a");
     let mut buf_b = Vec::new();
     ciborium::ser::into_writer(&lease_b, &mut buf_b).expect("encode b");
-    assert_ne!(buf_a, buf_b, "different holders MUST produce different CBOR");
+    assert_ne!(
+        buf_a, buf_b,
+        "different holders MUST produce different CBOR"
+    );
 }
 
 #[test]
 fn handoff_swapping_from_and_to_holders_changes_serialization() {
     let zone = ZoneId::work();
     let subject = ObjectId::from_bytes([0x42; 32]);
-    let h1 = build_handoff(
-        test_node("x"),
-        test_node("y"),
-        1,
-        2,
-        subject,
-        zone.clone(),
-    );
+    let h1 = build_handoff(test_node("x"), test_node("y"), 1, 2, subject, zone.clone());
     let h2 = build_handoff(test_node("y"), test_node("x"), 1, 2, subject, zone);
 
     let json_1 = serde_json::to_string(&h1).expect("serialize 1");

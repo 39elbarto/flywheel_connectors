@@ -154,8 +154,7 @@ fn cbor_roundtrip_preserves_step_insertion_order_across_all_kinds() {
 
     let mut buf = Vec::new();
     ciborium::ser::into_writer(&recipe, &mut buf).expect("encode");
-    let back: ProvisioningRecipe =
-        ciborium::de::from_reader(buf.as_slice()).expect("decode");
+    let back: ProvisioningRecipe = ciborium::de::from_reader(buf.as_slice()).expect("decode");
     assert_eq!(
         step_ids(&back),
         original_order,
@@ -205,11 +204,7 @@ fn every_step_kind_has_pinned_snake_case_type_tag_in_json() {
         .get("steps")
         .and_then(|v| v.as_array())
         .expect("steps array");
-    assert_eq!(
-        steps.len(),
-        6,
-        "all 6 step kinds MUST appear in the recipe"
-    );
+    assert_eq!(steps.len(), 6, "all 6 step kinds MUST appear in the recipe");
 
     let expected_tags = [
         "prompt_user",

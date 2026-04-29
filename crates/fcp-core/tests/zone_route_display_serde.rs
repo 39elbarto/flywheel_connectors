@@ -91,13 +91,7 @@ fn transport_mode_cbor_roundtrip_per_variant() {
 
 #[test]
 fn transport_mode_rejects_pascal_case_and_unknown() {
-    for bad in [
-        r#""Lan""#,
-        r#""DERP""#,
-        r#""Funnel""#,
-        r#""ipv6""#,
-        r#""""#,
-    ] {
+    for bad in [r#""Lan""#, r#""DERP""#, r#""Funnel""#, r#""ipv6""#, r#""""#] {
         let parsed = serde_json::from_str::<TransportMode>(bad);
         assert!(
             parsed.is_err(),
@@ -357,8 +351,7 @@ fn zone_transport_policy_json_and_cbor_decode_to_same_policy() {
     };
 
     let json = serde_json::to_string(&original).expect("JSON serialize");
-    let from_json: ZoneTransportPolicy =
-        serde_json::from_str(&json).expect("JSON deserialize");
+    let from_json: ZoneTransportPolicy = serde_json::from_str(&json).expect("JSON deserialize");
 
     let mut buf = Vec::new();
     ciborium::ser::into_writer(&original, &mut buf).expect("CBOR encode");

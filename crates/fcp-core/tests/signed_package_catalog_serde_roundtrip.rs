@@ -48,8 +48,9 @@ fn deterministic_key(seed: u8) -> Ed25519SigningKey {
 fn fixture_manifest() -> ConnectorManifestObject {
     ConnectorManifestObject {
         manifest_toml: "[connector]\nname = \"fcp.example\"\nversion = \"1.0.0\"".to_string(),
-        manifest_hash: "blake3-256:1111111111111111111111111111111111111111111111111111111111111111"
-            .to_string(),
+        manifest_hash:
+            "blake3-256:1111111111111111111111111111111111111111111111111111111111111111"
+                .to_string(),
     }
 }
 
@@ -144,12 +145,9 @@ fn signed_manifest_rejects_unrelated_key() {
 #[test]
 fn canonical_payload_bytes_are_deterministic_across_calls() {
     let key = deterministic_key(0x33);
-    let envelope = SignedManifest::sign(
-        ConnectorManifestObject::schema(),
-        fixture_manifest(),
-        &key,
-    )
-    .expect("sign");
+    let envelope =
+        SignedManifest::sign(ConnectorManifestObject::schema(), fixture_manifest(), &key)
+            .expect("sign");
 
     let bytes_a = envelope
         .canonical_payload_bytes()
@@ -167,17 +165,14 @@ fn canonical_payload_bytes_are_deterministic_across_calls() {
 #[test]
 fn canonical_payload_bytes_change_with_payload_content() {
     let key = deterministic_key(0x33);
-    let env_a = SignedManifest::sign(
-        ConnectorManifestObject::schema(),
-        fixture_manifest(),
-        &key,
-    )
-    .expect("sign a");
+    let env_a = SignedManifest::sign(ConnectorManifestObject::schema(), fixture_manifest(), &key)
+        .expect("sign a");
 
     let mut other = fixture_manifest();
     other.manifest_hash =
         "blake3-256:abcdef0000000000000000000000000000000000000000000000000000000000".to_string();
-    let env_b = SignedManifest::sign(ConnectorManifestObject::schema(), other, &key).expect("sign b");
+    let env_b =
+        SignedManifest::sign(ConnectorManifestObject::schema(), other, &key).expect("sign b");
 
     assert_ne!(
         env_a.canonical_payload_bytes().unwrap(),
@@ -197,12 +192,9 @@ fn canonical_payload_bytes_change_with_payload_content() {
 #[test]
 fn json_roundtrip_preserves_envelope_fields_for_manifest_payload() {
     let key = deterministic_key(0x44);
-    let original = SignedManifest::sign(
-        ConnectorManifestObject::schema(),
-        fixture_manifest(),
-        &key,
-    )
-    .expect("sign");
+    let original =
+        SignedManifest::sign(ConnectorManifestObject::schema(), fixture_manifest(), &key)
+            .expect("sign");
 
     let json = serde_json::to_string(&original).expect("serialize");
     let back: SignedManifest<ConnectorManifestObject> =
@@ -248,12 +240,9 @@ fn json_roundtrip_preserves_envelope_fields_for_binary_payload() {
 #[test]
 fn cbor_roundtrip_preserves_envelope_fields() {
     let key = deterministic_key(0x66);
-    let original = SignedManifest::sign(
-        ConnectorManifestObject::schema(),
-        fixture_manifest(),
-        &key,
-    )
-    .expect("sign");
+    let original =
+        SignedManifest::sign(ConnectorManifestObject::schema(), fixture_manifest(), &key)
+            .expect("sign");
 
     let mut buf = Vec::new();
     ciborium::ser::into_writer(&original, &mut buf).expect("encode");
@@ -276,12 +265,9 @@ fn cbor_roundtrip_preserves_envelope_fields() {
 #[test]
 fn canonical_bytes_roundtrip_via_envelope_schema() {
     let key = deterministic_key(0x77);
-    let original = SignedManifest::sign(
-        ConnectorManifestObject::schema(),
-        fixture_manifest(),
-        &key,
-    )
-    .expect("sign");
+    let original =
+        SignedManifest::sign(ConnectorManifestObject::schema(), fixture_manifest(), &key)
+            .expect("sign");
 
     let bytes = original
         .to_canonical_bytes()
@@ -299,12 +285,9 @@ fn canonical_bytes_roundtrip_via_envelope_schema() {
 #[test]
 fn canonical_bytes_are_deterministic() {
     let key = deterministic_key(0x88);
-    let envelope = SignedManifest::sign(
-        ConnectorManifestObject::schema(),
-        fixture_manifest(),
-        &key,
-    )
-    .expect("sign");
+    let envelope =
+        SignedManifest::sign(ConnectorManifestObject::schema(), fixture_manifest(), &key)
+            .expect("sign");
     let a = envelope.to_canonical_bytes().expect("encode a");
     let b = envelope.to_canonical_bytes().expect("encode b");
     assert_eq!(
@@ -344,8 +327,7 @@ fn manifest_signature_cbor_roundtrip_for_every_variant() {
     ] {
         let mut buf = Vec::new();
         ciborium::ser::into_writer(&variant, &mut buf).expect("encode");
-        let back: ManifestSignature =
-            ciborium::de::from_reader(buf.as_slice()).expect("decode");
+        let back: ManifestSignature = ciborium::de::from_reader(buf.as_slice()).expect("decode");
         assert_eq!(variant, back, "CBOR round-trip lost {variant:?}");
     }
 }
@@ -357,20 +339,17 @@ fn manifest_signature_cbor_roundtrip_for_every_variant() {
 #[test]
 fn payload_tampering_after_roundtrip_fails_verification() {
     let key = deterministic_key(0x99);
-    let original = SignedManifest::sign(
-        ConnectorManifestObject::schema(),
-        fixture_manifest(),
-        &key,
-    )
-    .expect("sign");
+    let original =
+        SignedManifest::sign(ConnectorManifestObject::schema(), fixture_manifest(), &key)
+            .expect("sign");
 
     let json = serde_json::to_string(&original).expect("serialize");
     let mut tampered: SignedManifest<ConnectorManifestObject> =
         serde_json::from_str(&json).expect("deserialize");
     // Flip one byte in the payload — same schema, same signer_kid, same
     // signature, but now the canonical bytes don't match.
-    tampered.payload.manifest_hash = "blake3-256:dead000000000000000000000000000000000000000000000000000000000000"
-        .to_string();
+    tampered.payload.manifest_hash =
+        "blake3-256:dead000000000000000000000000000000000000000000000000000000000000".to_string();
 
     let err = tampered
         .verify(&key.verifying_key())
@@ -381,12 +360,9 @@ fn payload_tampering_after_roundtrip_fails_verification() {
 #[test]
 fn signature_tampering_after_roundtrip_fails_verification() {
     let key = deterministic_key(0xAB);
-    let original = SignedManifest::sign(
-        ConnectorManifestObject::schema(),
-        fixture_manifest(),
-        &key,
-    )
-    .expect("sign");
+    let original =
+        SignedManifest::sign(ConnectorManifestObject::schema(), fixture_manifest(), &key)
+            .expect("sign");
 
     let mut tampered = original.clone();
     // Replace the signature with the all-zero signature — well-formed

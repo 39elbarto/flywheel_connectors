@@ -468,6 +468,39 @@ impl EventNack {
     }
 }
 
+/// Connector event stream message.
+///
+/// Wraps emitted event envelopes and acknowledgment control messages in one
+/// stable tagged enum for connector event streams.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorEvent {
+    /// Connector-emitted event envelope.
+    Envelope(EventEnvelope),
+    /// Positive acknowledgment for one or more event sequence numbers.
+    Ack(EventAck),
+    /// Negative acknowledgment requesting redelivery.
+    Nack(EventNack),
+}
+
+impl From<EventEnvelope> for ConnectorEvent {
+    fn from(value: EventEnvelope) -> Self {
+        Self::Envelope(value)
+    }
+}
+
+impl From<EventAck> for ConnectorEvent {
+    fn from(value: EventAck) -> Self {
+        Self::Ack(value)
+    }
+}
+
+impl From<EventNack> for ConnectorEvent {
+    fn from(value: EventNack) -> Self {
+        Self::Nack(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

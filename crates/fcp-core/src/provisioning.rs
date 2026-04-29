@@ -339,6 +339,27 @@ pub enum ProvisioningStepType {
     },
 }
 
+impl ProvisioningStepType {
+    /// Return the canonical step-kind display and serde tag.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::PromptUser { .. } => "prompt_user",
+            Self::PromptSecret { .. } => "prompt_secret",
+            Self::OpenUrl { .. } => "open_url",
+            Self::StoreSecret { .. } => "store_secret",
+            Self::Oauth { .. } => "oauth",
+            Self::Webhook { .. } => "webhook",
+        }
+    }
+}
+
+impl fmt::Display for ProvisioningStepType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// OAuth flow definition for provisioning (NORMATIVE when used).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

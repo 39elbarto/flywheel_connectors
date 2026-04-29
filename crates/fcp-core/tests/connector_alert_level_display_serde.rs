@@ -63,6 +63,19 @@ fn connector_alert_level_display_matches_canonical_serde_tag() {
 }
 
 #[test]
+fn connector_alert_level_tags_are_pairwise_distinct() {
+    assert_eq!(CASES.len(), 4);
+
+    for (left_index, left) in CASES.iter().enumerate() {
+        for right in &CASES[left_index + 1..] {
+            assert_ne!(left.value, right.value);
+            assert_ne!(left.tag, right.tag);
+            assert_ne!(left.value.to_string(), right.value.to_string());
+        }
+    }
+}
+
+#[test]
 fn connector_alert_level_json_tags_are_stable_and_roundtrip() -> TestResult {
     for case in CASES {
         let expected_json = format!(r#""{}""#, case.tag);

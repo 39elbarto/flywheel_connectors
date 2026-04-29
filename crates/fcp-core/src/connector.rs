@@ -238,6 +238,12 @@ impl ConnectorRoute {
     }
 }
 
+impl fmt::Display for ConnectorRoute {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl ConnectorLifecycleState {
     /// Return the canonical wire/display string.
     #[must_use]

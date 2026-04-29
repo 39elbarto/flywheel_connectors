@@ -76,6 +76,15 @@ fn connector_route_json_tags_are_stable_and_roundtrip() -> TestResult {
 }
 
 #[test]
+fn connector_route_display_matches_canonical_serde_tag_for_each_variant() {
+    for case in CASES {
+        let tag = case.json_tag.trim_matches('"');
+        assert_eq!(case.value.as_str(), tag);
+        assert_eq!(case.value.to_string(), tag);
+    }
+}
+
+#[test]
 fn connector_route_cbor_tags_are_stable_and_roundtrip() -> TestResult {
     for case in CASES {
         let mut encoded = Vec::new();

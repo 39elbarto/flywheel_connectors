@@ -28,7 +28,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt};
 
 use crate::NodeId;
 use crate::object::ObjectId;
@@ -290,6 +290,20 @@ pub enum PostureRequirement {
 }
 
 impl PostureRequirement {
+    /// Return the canonical requirement-kind display and serde tag.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::RequireTrue { .. } => "require_true",
+            Self::RequireFalse { .. } => "require_false",
+            Self::RequireEqual { .. } => "require_equal",
+            Self::RequireOneOf { .. } => "require_one_of",
+            Self::RequireMinVersion { .. } => "require_min_version",
+            Self::RequireMinValue { .. } => "require_min_value",
+            Self::RequireMaxValue { .. } => "require_max_value",
+        }
+    }
+
     /// Check if an attestation satisfies this requirement.
     #[must_use]
     pub fn is_satisfied_by(&self, attestation: &PostureAttestation) -> bool {
@@ -352,6 +366,12 @@ impl PostureRequirement {
             | Self::RequireMinValue { attribute, .. }
             | Self::RequireMaxValue { attribute, .. } => attribute,
         }
+    }
+}
+
+impl fmt::Display for PostureRequirement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

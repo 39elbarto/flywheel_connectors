@@ -17,9 +17,8 @@
 //!  - `RequireMaxValue { attribute, max_value }`     → `require_max_value`
 //!
 //! Used in posture_tests.rs fixtures via the builder but NOT yet
-//! pinned for serde tag matrix. Does NOT implement Display, so the
-//! bead's "Display" ask has no analogue — pinning targets the serde
-//! wire form and the `attribute()` accessor.
+//! pinned for Display plus serde tag matrix. Display intentionally
+//! returns the same canonical token as the serde `type` discriminator.
 //!
 //! Targets:
 //!
@@ -31,12 +30,15 @@
 //!      inspection (CBOR full round-trip on internally-tagged
 //!      with binary fields hits the Content-shim quirk; use
 //!      Value-inspection workaround).
-//!   5. **`attribute()` accessor** returns the right key per variant.
-//!   6. **PascalCase + unknown rejected**.
-//!   7. **7-variant count + pairwise distinct serializations**.
+//!   5. **Display** returns the same token as the serde tag.
+//!   6. **`attribute()` accessor** returns the right key per variant.
+//!   7. **PascalCase + unknown rejected**.
+//!   8. **7-variant count + pairwise distinct serializations**.
 
 use ciborium::value::Value as CborValue;
 use fcp_core::{PostureAttributeKey, PostureRequirement};
+
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. Per-variant `type` tag in JSON
@@ -48,7 +50,10 @@ fn require_true_type_tag_pinned() {
         attribute: PostureAttributeKey::DiskEncryption,
     };
     let value = serde_json::to_value(&req).expect("serialize");
-    assert_eq!(value.get("type").and_then(|v| v.as_str()), Some("require_true"));
+    assert_eq!(
+        value.get("type").and_then(|v| v.as_str()),
+        Some("require_true")
+    );
     assert_eq!(
         value.get("attribute").and_then(|v| v.as_str()),
         Some("disk_encryption")
@@ -61,7 +66,10 @@ fn require_false_type_tag_pinned() {
         attribute: PostureAttributeKey::FirewallEnabled,
     };
     let value = serde_json::to_value(&req).expect("serialize");
-    assert_eq!(value.get("type").and_then(|v| v.as_str()), Some("require_false"));
+    assert_eq!(
+        value.get("type").and_then(|v| v.as_str()),
+        Some("require_false")
+    );
 }
 
 #[test]
@@ -130,10 +138,7 @@ fn require_min_value_type_tag_pinned() {
         value.get("type").and_then(|v| v.as_str()),
         Some("require_min_value")
     );
-    assert_eq!(
-        value.get("min_value").and_then(|v| v.as_i64()),
-        Some(300)
-    );
+    assert_eq!(value.get("min_value").and_then(|v| v.as_i64()), Some(300));
 }
 
 #[test]
@@ -147,10 +152,7 @@ fn require_max_value_type_tag_pinned() {
         value.get("type").and_then(|v| v.as_str()),
         Some("require_max_value")
     );
-    assert_eq!(
-        value.get("max_value").and_then(|v| v.as_i64()),
-        Some(600)
-    );
+    assert_eq!(value.get("max_value").and_then(|v| v.as_i64()), Some(600));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -158,78 +160,88 @@ fn require_max_value_type_tag_pinned() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn json_roundtrip_preserves_require_true() {
+fn json_roundtrip_preserves_require_true() -> TestResult {
     let original = PostureRequirement::RequireTrue {
         attribute: PostureAttributeKey::DiskEncryption,
     };
-    let json = serde_json::to_string(&original).expect("serialize");
-    let back: PostureRequirement = serde_json::from_str(&json).expect("deserialize");
+    let json = serde_json::to_string(&original)?;
+    let back: PostureRequirement = serde_json::from_str(&json)?;
     match back {
         PostureRequirement::RequireTrue { attribute } => {
             assert_eq!(attribute, PostureAttributeKey::DiskEncryption);
         }
-        other => panic!("expected RequireTrue, got {other:?}"),
+        other => return Err(format!("expected RequireTrue, got {other:?}").into()),
     }
+
+    Ok(())
 }
 
 #[test]
-fn json_roundtrip_preserves_require_one_of_values_order() {
+fn json_roundtrip_preserves_require_one_of_values_order() -> TestResult {
     let original = PostureRequirement::RequireOneOf {
         attribute: PostureAttributeKey::OsType,
         values: vec!["a".to_string(), "b".to_string(), "c".to_string()],
     };
-    let json = serde_json::to_string(&original).expect("serialize");
-    let back: PostureRequirement = serde_json::from_str(&json).expect("deserialize");
+    let json = serde_json::to_string(&original)?;
+    let back: PostureRequirement = serde_json::from_str(&json)?;
     match back {
         PostureRequirement::RequireOneOf { attribute, values } => {
             assert_eq!(attribute, PostureAttributeKey::OsType);
             assert_eq!(values, vec!["a", "b", "c"]);
         }
-        other => panic!("expected RequireOneOf, got {other:?}"),
+        other => return Err(format!("expected RequireOneOf, got {other:?}").into()),
     }
+
+    Ok(())
 }
 
 #[test]
-fn json_roundtrip_preserves_min_value_with_negative_value() {
+fn json_roundtrip_preserves_min_value_with_negative_value() -> TestResult {
     let original = PostureRequirement::RequireMinValue {
         attribute: PostureAttributeKey::ScreenLockTimeout,
         min_value: -100,
     };
-    let json = serde_json::to_string(&original).expect("serialize");
-    let back: PostureRequirement = serde_json::from_str(&json).expect("deserialize");
+    let json = serde_json::to_string(&original)?;
+    let back: PostureRequirement = serde_json::from_str(&json)?;
     match back {
         PostureRequirement::RequireMinValue { min_value, .. } => assert_eq!(min_value, -100),
-        other => panic!("expected RequireMinValue, got {other:?}"),
+        other => return Err(format!("expected RequireMinValue, got {other:?}").into()),
     }
+
+    Ok(())
 }
 
 #[test]
-fn json_roundtrip_preserves_min_value_with_i64_max() {
+fn json_roundtrip_preserves_min_value_with_i64_max() -> TestResult {
     let original = PostureRequirement::RequireMinValue {
         attribute: PostureAttributeKey::ScreenLockTimeout,
         min_value: i64::MAX,
     };
-    let json = serde_json::to_string(&original).expect("serialize");
-    let back: PostureRequirement = serde_json::from_str(&json).expect("deserialize");
+    let json = serde_json::to_string(&original)?;
+    let back: PostureRequirement = serde_json::from_str(&json)?;
     match back {
         PostureRequirement::RequireMinValue { min_value, .. } => {
             assert_eq!(min_value, i64::MAX);
         }
-        other => panic!("expected RequireMinValue, got {other:?}"),
+        other => return Err(format!("expected RequireMinValue, got {other:?}").into()),
     }
+
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 3. CBOR `type` tag carried for every variant
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn cbor_type_tag(req: &PostureRequirement) -> String {
+fn cbor_type_tag(req: &PostureRequirement) -> TestResult<String> {
     let mut buf = Vec::new();
-    ciborium::ser::into_writer(req, &mut buf).expect("encode");
-    let value: CborValue = ciborium::de::from_reader(buf.as_slice()).expect("decode as Value");
+    ciborium::ser::into_writer(req, &mut buf)?;
+    let value: CborValue = ciborium::de::from_reader(buf.as_slice())?;
     let map = match value {
         CborValue::Map(m) => m,
-        other => panic!("PostureRequirement MUST encode as Map, got {other:?}"),
+        other => {
+            return Err(format!("PostureRequirement MUST encode as Map, got {other:?}").into());
+        }
     };
     let type_value = map
         .iter()
@@ -237,15 +249,15 @@ fn cbor_type_tag(req: &PostureRequirement) -> String {
             CborValue::Text(s) if s == "type" => Some(v),
             _ => None,
         })
-        .expect("missing `type` discriminator");
+        .ok_or("missing `type` discriminator")?;
     match type_value {
-        CborValue::Text(s) => s.clone(),
-        other => panic!("`type` MUST be Text, got {other:?}"),
+        CborValue::Text(s) => Ok(s.clone()),
+        other => Err(format!("`type` MUST be Text, got {other:?}").into()),
     }
 }
 
 #[test]
-fn cbor_type_tag_for_every_variant() {
+fn cbor_type_tag_for_every_variant() -> TestResult {
     let cases = [
         (
             PostureRequirement::RequireTrue {
@@ -297,11 +309,18 @@ fn cbor_type_tag_for_every_variant() {
     ];
     for (variant, expected) in cases {
         assert_eq!(
-            cbor_type_tag(&variant),
+            variant.to_string(),
+            expected,
+            "Display token drift on {variant:?}"
+        );
+        assert_eq!(
+            cbor_type_tag(&variant)?,
             expected,
             "CBOR type tag drift on {variant:?}"
         );
     }
+
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -360,11 +379,7 @@ fn attribute_accessor_returns_right_key_per_variant() {
         ),
     ];
     for (req, expected) in cases {
-        assert_eq!(
-            req.attribute(),
-            &expected,
-            "attribute() drift on {req:?}"
-        );
+        assert_eq!(req.attribute(), &expected, "attribute() drift on {req:?}");
     }
 }
 
@@ -411,34 +426,34 @@ fn rejects_camel_case_type_tag() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn seven_variants_produce_distinct_type_tags() {
+fn seven_variants_produce_distinct_type_tags() -> TestResult {
     let tags = [
         cbor_type_tag(&PostureRequirement::RequireTrue {
             attribute: PostureAttributeKey::DiskEncryption,
-        }),
+        })?,
         cbor_type_tag(&PostureRequirement::RequireFalse {
             attribute: PostureAttributeKey::DiskEncryption,
-        }),
+        })?,
         cbor_type_tag(&PostureRequirement::RequireEqual {
             attribute: PostureAttributeKey::OsType,
             value: "x".to_string(),
-        }),
+        })?,
         cbor_type_tag(&PostureRequirement::RequireOneOf {
             attribute: PostureAttributeKey::OsType,
             values: vec![],
-        }),
+        })?,
         cbor_type_tag(&PostureRequirement::RequireMinVersion {
             attribute: PostureAttributeKey::OsVersion,
             min_version: "1.0".to_string(),
-        }),
+        })?,
         cbor_type_tag(&PostureRequirement::RequireMinValue {
             attribute: PostureAttributeKey::ScreenLockTimeout,
             min_value: 0,
-        }),
+        })?,
         cbor_type_tag(&PostureRequirement::RequireMaxValue {
             attribute: PostureAttributeKey::ScreenLockTimeout,
             max_value: 0,
-        }),
+        })?,
     ];
     let unique: std::collections::HashSet<&String> = tags.iter().collect();
     assert_eq!(unique.len(), 7, "all 7 type tags MUST be distinct");
@@ -455,6 +470,8 @@ fn seven_variants_produce_distinct_type_tags() {
         ],
         "PostureRequirement variant declaration order pinned"
     );
+
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

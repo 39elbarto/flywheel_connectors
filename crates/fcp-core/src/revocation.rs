@@ -747,7 +747,8 @@ pub struct RevocationSeal {
 }
 
 /// Result of validating a seal against the current registry state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum SealValidation {
     /// Seal is still valid — `head_seq` has not advanced.
     Valid,
@@ -763,10 +764,26 @@ pub enum SealValidation {
 }
 
 impl SealValidation {
+    /// Stable variant label for registry-consistency reporting.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Stale { .. } => "stale",
+            Self::TokenMismatch => "token_mismatch",
+        }
+    }
+
     /// Whether the seal is still valid.
     #[must_use]
     pub const fn is_valid(&self) -> bool {
         matches!(self, Self::Valid)
+    }
+}
+
+impl fmt::Display for SealValidation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

@@ -159,6 +159,22 @@ pub enum DeviceSelector {
     HasCapability(String),
 }
 
+/// Stable mesh placement preference hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshPlacementHint {
+    /// Prefer nodes that already hold required object data or symbols.
+    DataLocality,
+    /// Prefer the lowest-latency eligible node.
+    LowLatency,
+    /// Prefer nodes with the most available compute resources.
+    HighResources,
+    /// Prefer nodes that can satisfy secret reconstruction locally.
+    SecretReconstructable,
+    /// Prefer direct placement over DERP-relayed placement when possible.
+    AvoidDerp,
+}
+
 /// Object placement policy (NORMATIVE when used).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectPlacementPolicy {

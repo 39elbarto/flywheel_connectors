@@ -94,23 +94,23 @@ fn capability_verifier_accepts_documented_entrypoint_matrix() {
 
     let mut spec = valid_spec(&key);
     spec.target_instance = Some(instance.as_str());
-    let token = token_from_spec(spec);
+    let signed_capability = token_from_spec(spec);
 
     let bound_verifier = CapabilityVerifier::new(pub_key, ZoneId::work(), instance.clone());
     let bound = bound_verifier
-        .verify_bound(token.clone(), &capability, &operation, &[])
+        .verify_bound(signed_capability.clone(), &capability, &operation, &[])
         .expect("bound verifier must accept matching instance token");
     assert_eq!(bound.claims().get_capability_id(), Some(CAPABILITY));
     assert_eq!(bound.claims().get_zone_id(), Some(WORK_ZONE));
 
     let claims = bound_verifier
-        .verify_claims(&token, &capability, &operation, &[])
+        .verify_claims(&signed_capability, &capability, &operation, &[])
         .expect("by-reference claims verification must share the same predicates");
     assert_eq!(claims.get_capability_id(), Some(CAPABILITY));
 
     let unbound_verifier = CapabilityVerifier::without_instance_binding(pub_key, ZoneId::work());
     let unbound = unbound_verifier
-        .verify_unbound(token.clone(), &capability, &operation, &[])
+        .verify_unbound(signed_capability.clone(), &capability, &operation, &[])
         .expect("unbound verifier must defer instance matching");
     let promoted = unbound
         .promote_with_instance(&instance)
@@ -118,7 +118,7 @@ fn capability_verifier_accepts_documented_entrypoint_matrix() {
     assert_eq!(promoted.claims().get_capability_id(), Some(CAPABILITY));
 
     let err = bound_verifier
-        .verify_unbound(token.clone(), &capability, &operation, &[])
+        .verify_unbound(signed_capability.clone(), &capability, &operation, &[])
         .expect_err("bound verifier must not run the unbound entrypoint");
     assert!(
         matches!(err, FcpError::Internal { ref message } if message.contains("verify_unbound")),
@@ -126,7 +126,7 @@ fn capability_verifier_accepts_documented_entrypoint_matrix() {
     );
 
     let err = unbound_verifier
-        .verify_bound(token, &capability, &operation, &[])
+        .verify_bound(signed_capability, &capability, &operation, &[])
         .expect_err("unbound verifier must not run the bound entrypoint");
     assert!(
         matches!(err, FcpError::Internal { ref message } if message.contains("verify_bound")),
@@ -321,20 +321,18 @@ fn capability_verifier_rejects_documented_predicate_matrix() {
     ];
 
     for case in cases {
-        let err = match case.verifier.verify_bound(
+        let result = case.verifier.verify_bound(
             case.token,
             &case.capability,
             &case.operation,
             &case.resources,
-        ) {
-            Err(err) => err,
-            Ok(token) => {
-                panic!(
-                    "{}: expected verifier predicate to reject, got accepted token {token:?}",
-                    case.name
-                )
-            }
-        };
+        );
+        assert!(
+            result.is_err(),
+            "{}: expected verifier predicate to reject",
+            case.name
+        );
+        let err = result.err().expect("asserted verifier result is err");
         assert!(
             case.expected.matches(&err),
             "{}: expected verifier predicate to reject with documented error, got {err:?}",
@@ -427,20 +425,20 @@ fn capability_verifier_unbound_entrypoint_rejects_gateway_roundtrip_matrix() {
 
     for case in cases {
         let verifier = CapabilityVerifier::without_instance_binding(pub_key, ZoneId::work());
-        let err = match verifier.verify_unbound(
+        let result = verifier.verify_unbound(
             case.capability_token,
             &case.capability,
             &case.operation,
             &[],
-        ) {
-            Err(err) => err,
-            Ok(accepted) => {
-                panic!(
-                    "{}: expected unbound verifier roundtrip to reject, got accepted token {accepted:?}",
-                    case.name
-                )
-            }
-        };
+        );
+        assert!(
+            result.is_err(),
+            "{}: expected unbound verifier roundtrip to reject",
+            case.name
+        );
+        let err = result
+            .err()
+            .expect("asserted unbound verifier result is err");
         assert!(
             case.expected.matches(&err),
             "{}: expected unbound verifier roundtrip to reject with documented error, got {err:?}",

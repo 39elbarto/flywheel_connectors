@@ -342,3 +342,109 @@ fn capability_verifier_rejects_documented_predicate_matrix() {
         );
     }
 }
+
+struct UnboundMatrixCase {
+    name: &'static str,
+    capability_token: CapabilityToken,
+    capability: CapabilityId,
+    operation: OperationId,
+    expected: ExpectedReject,
+}
+
+#[test]
+fn capability_verifier_unbound_entrypoint_rejects_gateway_roundtrip_matrix() {
+    let key = signing_key(31);
+    let pub_key = key.verifying_key().to_bytes();
+    let wrong_key = signing_key(32);
+    let now = Utc::now();
+    let capability = CapabilityId::from_static(CAPABILITY);
+    let operation = OperationId::from_static(OPERATION);
+
+    let bad_signature = valid_spec(&wrong_key);
+
+    let mut wrong_zone = valid_spec(&key);
+    wrong_zone.zone = "z:project:other";
+    wrong_zone.audience = Some("*");
+
+    let mut expired = valid_spec(&key);
+    expired.not_before = now - Duration::hours(2);
+    expired.expires = now - Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS + 1);
+
+    let mut not_yet_valid = valid_spec(&key);
+    not_yet_valid.not_before = now + Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS + 1);
+    not_yet_valid.expires = now + Duration::hours(2);
+
+    let mut capability_mismatch = valid_spec(&key);
+    capability_mismatch.capability = OTHER_CAPABILITY;
+
+    let mut operation_mismatch = valid_spec(&key);
+    operation_mismatch.operation = OTHER_OPERATION;
+
+    let cases = vec![
+        UnboundMatrixCase {
+            name: "invalid_signature",
+            capability_token: token_from_spec(bad_signature),
+            capability: capability.clone(),
+            operation: operation.clone(),
+            expected: ExpectedReject::InvalidSignature,
+        },
+        UnboundMatrixCase {
+            name: "wrong_zone",
+            capability_token: token_from_spec(wrong_zone),
+            capability: capability.clone(),
+            operation: operation.clone(),
+            expected: ExpectedReject::ZoneMismatch,
+        },
+        UnboundMatrixCase {
+            name: "expired",
+            capability_token: token_from_spec(expired),
+            capability: capability.clone(),
+            operation: operation.clone(),
+            expected: ExpectedReject::TokenExpired,
+        },
+        UnboundMatrixCase {
+            name: "not_yet_valid",
+            capability_token: token_from_spec(not_yet_valid),
+            capability: capability.clone(),
+            operation: operation.clone(),
+            expected: ExpectedReject::TokenNotYetValid,
+        },
+        UnboundMatrixCase {
+            name: "capability_mismatch",
+            capability_token: token_from_spec(capability_mismatch),
+            capability: capability.clone(),
+            operation: operation.clone(),
+            expected: ExpectedReject::OperationNotGranted,
+        },
+        UnboundMatrixCase {
+            name: "operation_mismatch",
+            capability_token: token_from_spec(operation_mismatch),
+            capability,
+            operation,
+            expected: ExpectedReject::OperationNotGranted,
+        },
+    ];
+
+    for case in cases {
+        let verifier = CapabilityVerifier::without_instance_binding(pub_key, ZoneId::work());
+        let err = match verifier.verify_unbound(
+            case.capability_token,
+            &case.capability,
+            &case.operation,
+            &[],
+        ) {
+            Err(err) => err,
+            Ok(accepted) => {
+                panic!(
+                    "{}: expected unbound verifier roundtrip to reject, got accepted token {accepted:?}",
+                    case.name
+                )
+            }
+        };
+        assert!(
+            case.expected.matches(&err),
+            "{}: expected unbound verifier roundtrip to reject with documented error, got {err:?}",
+            case.name
+        );
+    }
+}

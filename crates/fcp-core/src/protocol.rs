@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     convert::Infallible,
+    fmt,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
@@ -67,6 +68,138 @@ impl std::str::FromStr for RequestId {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(Self::new(s))
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Host Fingerprint
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Stable host identity fingerprint.
+///
+/// The string form is `blake3:<64 lowercase hex chars>`, where the digest is a
+/// BLAKE3 hash of host identity material under an FCP domain separator.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct HostFingerprint([u8; HOST_FINGERPRINT_DIGEST_LEN]);
+
+const HOST_FINGERPRINT_DIGEST_LEN: usize = 32;
+
+impl HostFingerprint {
+    /// Algorithm prefix used in the human-facing fingerprint form.
+    pub const PREFIX: &'static str = "blake3:";
+    /// Digest length in bytes.
+    pub const DIGEST_LEN: usize = HOST_FINGERPRINT_DIGEST_LEN;
+    /// Digest length in lowercase hexadecimal characters.
+    pub const HEX_LEN: usize = Self::DIGEST_LEN * 2;
+    /// Full display length including the algorithm prefix.
+    pub const DISPLAY_LEN: usize = Self::PREFIX.len() + Self::HEX_LEN;
+
+    /// Construct a host fingerprint from raw digest bytes.
+    #[must_use]
+    pub const fn from_digest_bytes(bytes: [u8; Self::DIGEST_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    /// Derive a host fingerprint from a host public key.
+    #[must_use]
+    pub fn from_host_public_key(host_public_key: &[u8; 32]) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"FCP-HOST-FINGERPRINT-V1");
+        hasher.update(host_public_key);
+        Self(*hasher.finalize().as_bytes())
+    }
+
+    /// Borrow the raw digest bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; Self::DIGEST_LEN] {
+        &self.0
+    }
+
+    /// Parse a host fingerprint from its canonical string form.
+    ///
+    /// # Errors
+    /// Returns [`HostFingerprintParseError`] when the prefix, hex length, case,
+    /// or hex content is not canonical.
+    pub fn parse(value: &str) -> Result<Self, HostFingerprintParseError> {
+        let Some(hex_value) = value.strip_prefix(Self::PREFIX) else {
+            return Err(HostFingerprintParseError::MissingPrefix);
+        };
+
+        if hex_value.len() != Self::HEX_LEN {
+            return Err(HostFingerprintParseError::WrongLength {
+                actual: hex_value.len(),
+            });
+        }
+
+        if hex_value.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            return Err(HostFingerprintParseError::UppercaseNotAllowed);
+        }
+
+        let bytes = hex::decode(hex_value).map_err(|_| HostFingerprintParseError::InvalidHex)?;
+        let digest: [u8; Self::DIGEST_LEN] =
+            bytes
+                .try_into()
+                .map_err(|bytes: Vec<u8>| HostFingerprintParseError::WrongLength {
+                    actual: bytes.len() * 2,
+                })?;
+        Ok(Self(digest))
+    }
+}
+
+impl fmt::Debug for HostFingerprint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("HostFingerprint")
+            .field(&self.to_string())
+            .finish()
+    }
+}
+
+impl fmt::Display for HostFingerprint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{}", Self::PREFIX, hex::encode(self.0))
+    }
+}
+
+impl std::str::FromStr for HostFingerprint {
+    type Err = HostFingerprintParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+impl TryFrom<String> for HostFingerprint {
+    type Error = HostFingerprintParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<HostFingerprint> for String {
+    fn from(fingerprint: HostFingerprint) -> Self {
+        fingerprint.to_string()
+    }
+}
+
+/// Parse failures for [`HostFingerprint`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum HostFingerprintParseError {
+    /// The `blake3:` prefix is missing.
+    #[error("host fingerprint must start with blake3:")]
+    MissingPrefix,
+    /// The hex digest has the wrong character length.
+    #[error("host fingerprint hex digest must be 64 lowercase characters")]
+    WrongLength {
+        /// Actual hex character length after the prefix.
+        actual: usize,
+    },
+    /// Uppercase hex is non-canonical.
+    #[error("host fingerprint hex digest must be lowercase")]
+    UppercaseNotAllowed,
+    /// The digest contains non-hex characters.
+    #[error("host fingerprint hex digest must be valid hex")]
+    InvalidHex,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

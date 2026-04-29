@@ -284,6 +284,18 @@ impl RegistryEntry {
     }
 }
 
+impl fmt::Display for RegistryEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}@{} {}",
+            self.connector_id,
+            self.version,
+            self.target.as_string()
+        )
+    }
+}
+
 /// Canonical schema used when computing manifest signing bytes.
 #[must_use]
 pub fn connector_manifest_signing_view_schema() -> SchemaId {

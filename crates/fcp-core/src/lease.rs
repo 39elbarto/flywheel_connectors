@@ -149,6 +149,143 @@ pub struct LeaseParams {
 /// Canonical identifier for a lease object referenced elsewhere in the mesh.
 pub type LeaseId = ObjectId;
 
+/// Display-safe opaque identifier for lease authority references.
+///
+/// A `LeaseToken` is not a secret. It is a stable, log-safe handle for
+/// referencing lease authority in receipts, handoff records, and audit trails
+/// without serializing the full lease object.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct LeaseToken(String);
+
+impl LeaseToken {
+    const PREFIX: &'static str = "lease:";
+    const MAX_LEN: usize = 256;
+
+    /// Create a new lease token identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LeaseTokenParseError`] if the token is not in canonical
+    /// `lease:<identifier>` form.
+    pub fn new(token: impl Into<String>) -> Result<Self, LeaseTokenParseError> {
+        Self::try_from(token.into())
+    }
+
+    /// Return the token identifier as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for LeaseToken {
+    type Error = LeaseTokenParseError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        validate_lease_token(&value)?;
+        Ok(Self(value))
+    }
+}
+
+impl From<LeaseToken> for String {
+    fn from(value: LeaseToken) -> Self {
+        value.0
+    }
+}
+
+impl std::str::FromStr for LeaseToken {
+    type Err = LeaseTokenParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::new(s.to_owned())
+    }
+}
+
+impl std::fmt::Display for LeaseToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+fn validate_lease_token(value: &str) -> Result<(), LeaseTokenParseError> {
+    if value.is_empty() {
+        return Err(LeaseTokenParseError::Empty);
+    }
+
+    if value.len() > LeaseToken::MAX_LEN {
+        return Err(LeaseTokenParseError::TooLong {
+            len: value.len(),
+            max: LeaseToken::MAX_LEN,
+        });
+    }
+
+    let Some(identifier) = value.strip_prefix(LeaseToken::PREFIX) else {
+        return Err(LeaseTokenParseError::MissingPrefix);
+    };
+
+    if identifier.is_empty() {
+        return Err(LeaseTokenParseError::MissingIdentifier);
+    }
+
+    for (relative_index, ch) in identifier.char_indices() {
+        let index = LeaseToken::PREFIX.len() + relative_index;
+        let first_char = relative_index == 0;
+        let valid =
+            ch.is_ascii_alphanumeric() || (!first_char && matches!(ch, '-' | '_' | '.' | ':'));
+
+        if !valid {
+            return Err(LeaseTokenParseError::InvalidChar { ch, index });
+        }
+    }
+
+    Ok(())
+}
+
+/// Error returned when parsing a [`LeaseToken`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseTokenParseError {
+    /// The token was empty.
+    Empty,
+    /// The token did not start with the canonical `lease:` prefix.
+    MissingPrefix,
+    /// The token had no identifier after the canonical prefix.
+    MissingIdentifier,
+    /// The token exceeded the maximum supported byte length.
+    TooLong {
+        /// Actual token length in bytes.
+        len: usize,
+        /// Maximum supported token length in bytes.
+        max: usize,
+    },
+    /// The token contained a character outside the display-safe grammar.
+    InvalidChar {
+        /// Invalid character.
+        ch: char,
+        /// Byte index of the invalid character.
+        index: usize,
+    },
+}
+
+impl std::fmt::Display for LeaseTokenParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("lease token must not be empty"),
+            Self::MissingPrefix => f.write_str("lease token must start with 'lease:'"),
+            Self::MissingIdentifier => f.write_str("lease token identifier must not be empty"),
+            Self::TooLong { len, max } => {
+                write!(f, "lease token too long ({len} bytes > {max} bytes)")
+            }
+            Self::InvalidChar { ch, index } => write!(
+                f,
+                "lease token contains invalid character '{ch}' at byte {index}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LeaseTokenParseError {}
+
 /// Auditable transfer of exclusive execution authority between nodes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaseHandoff {

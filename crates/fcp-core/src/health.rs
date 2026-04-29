@@ -2,6 +2,8 @@
 //!
 //! Based on FCP Specification Section 13 (Lifecycle Management).
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use crate::FcpError;
@@ -230,6 +232,39 @@ pub enum ConnectorHealth {
         /// When the connector became unavailable.
         since: chrono::DateTime<chrono::Utc>,
     },
+}
+
+/// Operator-facing alert level for connector health, cost, and availability signals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorAlertLevel {
+    /// No operator action is needed.
+    Ok,
+    /// Attention may be needed if the condition persists.
+    Warning,
+    /// Prompt operator action is required.
+    Critical,
+    /// The configured budget or safety limit has been exceeded.
+    Exceeded,
+}
+
+impl ConnectorAlertLevel {
+    /// Return the canonical wire/display tag.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Warning => "warning",
+            Self::Critical => "critical",
+            Self::Exceeded => "exceeded",
+        }
+    }
+}
+
+impl fmt::Display for ConnectorAlertLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl ConnectorHealth {

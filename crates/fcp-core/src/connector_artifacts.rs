@@ -208,6 +208,42 @@ impl ConnectorBinarySymbolSet {
     }
 }
 
+/// Connector bundle fetched from or emitted by a registry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorBundle {
+    pub manifest_toml: String,
+    pub binary: Vec<u8>,
+    pub target: ConnectorTarget,
+}
+
+impl ConnectorBundle {
+    /// Construct a connector bundle from its manifest text, binary payload, and target.
+    #[must_use]
+    pub fn new(
+        manifest_toml: impl Into<String>,
+        binary: impl Into<Vec<u8>>,
+        target: ConnectorTarget,
+    ) -> Self {
+        Self {
+            manifest_toml: manifest_toml.into(),
+            binary: binary.into(),
+            target,
+        }
+    }
+}
+
+impl fmt::Display for ConnectorBundle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} connector bundle (manifest_toml={} bytes, binary={} bytes)",
+            self.target.as_string(),
+            self.manifest_toml.len(),
+            self.binary.len()
+        )
+    }
+}
+
 /// Canonical registry entry for a mirrored connector package.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RegistryEntry {

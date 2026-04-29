@@ -1776,6 +1776,17 @@ pub enum ForkResolution {
     CrdtMerge,
 }
 
+impl fmt::Display for ForkResolution {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::ChooseByLease => "choose_by_lease",
+            Self::ManualResolution => "manual_resolution",
+            Self::CrdtMerge => "crdt_merge",
+        };
+        f.write_str(label)
+    }
+}
+
 impl ForkResolution {
     /// Check if this resolution strategy is valid for the given state model.
     #[must_use]

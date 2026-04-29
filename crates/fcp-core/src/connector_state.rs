@@ -1120,6 +1120,45 @@ impl DuplicateDeliveryClass {
     }
 }
 
+/// Recommended connector-state recovery action when observed state drifts from intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorRecoveryAction {
+    /// Restart the connector runtime.
+    RestartConnector,
+    /// Repair configuration or health before retrying.
+    RepairConnector,
+    /// Reinstall or restore connector artifacts.
+    ReinstallConnector,
+    /// Finish an in-flight rollout decision.
+    CompleteRollout,
+    /// Disable or uninstall the connector to match policy.
+    DisableConnector,
+    /// Manual operator investigation is required.
+    Investigate,
+}
+
+impl ConnectorRecoveryAction {
+    /// Stable label for logs, evidence, and operator surfaces.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::RestartConnector => "restart_connector",
+            Self::RepairConnector => "repair_connector",
+            Self::ReinstallConnector => "reinstall_connector",
+            Self::CompleteRollout => "complete_rollout",
+            Self::DisableConnector => "disable_connector",
+            Self::Investigate => "investigate",
+        }
+    }
+}
+
+impl std::fmt::Display for ConnectorRecoveryAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 /// Chosen disposition once prior work has been classified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -175,6 +175,26 @@ pub enum MeshPlacementHint {
     AvoidDerp,
 }
 
+impl MeshPlacementHint {
+    /// Stable text token used by serde and Display.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::DataLocality => "data_locality",
+            Self::LowLatency => "low_latency",
+            Self::HighResources => "high_resources",
+            Self::SecretReconstructable => "secret_reconstructable",
+            Self::AvoidDerp => "avoid_derp",
+        }
+    }
+}
+
+impl fmt::Display for MeshPlacementHint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Object placement policy (NORMATIVE when used).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ObjectPlacementPolicy {

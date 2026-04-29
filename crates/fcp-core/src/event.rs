@@ -2,6 +2,8 @@
 //!
 //! Based on FCP Specification Section 9 (Wire Protocol) - Event Messages.
 
+use std::{cmp::Ordering as CmpOrdering, fmt};
+
 use fcp_cbor::{CanonicalSerializer, SchemaId, SerializationError};
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -24,6 +26,44 @@ pub enum OrderingPolicy {
     /// No ordering guarantee. Sequence numbers may be used for deduplication
     /// but do not imply delivery order.
     Unordered,
+}
+
+impl OrderingPolicy {
+    /// Return the canonical policy display and serde tag.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Gateway => "gateway",
+            Self::PerKey => "per_key",
+            Self::Unordered => "unordered",
+        }
+    }
+
+    const fn strength_rank(self) -> u8 {
+        match self {
+            Self::Unordered => 0,
+            Self::PerKey => 1,
+            Self::Gateway => 2,
+        }
+    }
+}
+
+impl fmt::Display for OrderingPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialOrd for OrderingPolicy {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OrderingPolicy {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        self.strength_rank().cmp(&other.strength_rank())
+    }
 }
 
 /// Normalized event severity ordered from least to most severe.

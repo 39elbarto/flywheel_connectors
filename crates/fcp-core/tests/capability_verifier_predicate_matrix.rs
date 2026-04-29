@@ -112,6 +112,7 @@ fn capability_verifier_accepts_documented_entrypoint_matrix() {
     let unbound = unbound_verifier
         .verify_unbound(signed_capability.clone(), &capability, &operation, &[])
         .expect("unbound verifier must defer instance matching");
+    assert_eq!(unbound.claims().get_zone_id(), Some(WORK_ZONE));
     let promoted = unbound
         .promote_with_instance(&instance)
         .expect("deferred instance predicate must promote with the matching id");

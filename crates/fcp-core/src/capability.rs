@@ -2530,6 +2530,16 @@ pub struct BackoffDelays {
     next_retry: u32,
 }
 
+/// Retry-delay schedule produced by a [`BackoffPolicy`].
+pub type BackoffSchedule = BackoffDelays;
+
+impl BackoffDelays {
+    /// Reset this schedule to the first retry delay.
+    pub const fn reset(&mut self) {
+        self.next_retry = 0;
+    }
+}
+
 impl Iterator for BackoffDelays {
     type Item = Duration;
 

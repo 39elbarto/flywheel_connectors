@@ -1222,6 +1222,39 @@ impl CurrencyCost {
     }
 }
 
+/// Canonical target for operator-facing connector logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoggingTarget {
+    /// Connector stdout stream.
+    Stdout,
+    /// Connector stderr stream.
+    Stderr,
+    /// Host control-plane log stream.
+    Host,
+    /// Tamper-evident audit log stream.
+    Audit,
+}
+
+impl LoggingTarget {
+    /// Stable wire/display tag for this logging target.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+            Self::Host => "host",
+            Self::Audit => "audit",
+        }
+    }
+}
+
+impl fmt::Display for LoggingTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Usage metric kind for actual execution telemetry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

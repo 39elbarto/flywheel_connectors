@@ -4,7 +4,7 @@
 //! claim payload for request/object provenance is `Provenance`.
 
 use ciborium::value::Value as CborValue;
-use fcp_core::{Provenance, ProvenanceStep, TaintLevel, ZoneId};
+use fcp_core::{Provenance, ProvenanceStep, ZoneId};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 

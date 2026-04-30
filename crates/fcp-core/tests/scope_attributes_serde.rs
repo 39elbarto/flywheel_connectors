@@ -7,8 +7,8 @@ use fcp_core::{
     ConfidentialityLevel, DeclassificationScope, ElevationScope, ExecutionScope, InputConstraint,
     IntegrityLevel, ObjectId, ZoneId,
 };
-use serde::{de::DeserializeOwned, Serialize};
-use serde_json::{json, Value};
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::{Value, json};
 
 fn object_id(byte: u8) -> ObjectId {
     ObjectId::from_bytes([byte; 32])

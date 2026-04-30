@@ -173,8 +173,7 @@ fn fork_resolution_outcome_json_shape_pins_embedded_strategy() {
     ]
     .into_iter()
     .collect();
-    let actual: std::collections::BTreeSet<&str> =
-        obj_value.keys().map(String::as_str).collect();
+    let actual: std::collections::BTreeSet<&str> = obj_value.keys().map(String::as_str).collect();
     assert_eq!(actual, expected_keys, "outcome shape drift: {obj_value:?}");
 
     assert_eq!(obj_value.get("strategy"), Some(&json!("choose_by_lease")));
@@ -236,7 +235,11 @@ fn state_fork_detection_result_no_fork_externally_tagged_with_head_seq() {
     let v = serde_json::to_value(&result).unwrap();
     let obj_value = v.as_object().expect("externally tagged → outer object");
 
-    assert_eq!(obj_value.len(), 1, "external tag must produce single-key wrapper");
+    assert_eq!(
+        obj_value.len(),
+        1,
+        "external tag must produce single-key wrapper"
+    );
     let inner = obj_value
         .get("NoFork")
         .expect("NoFork variant key")

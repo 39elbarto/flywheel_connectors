@@ -235,7 +235,9 @@ fn degraded_mode_reason_works_as_hashmap_key() {
     // Pin distinct buckets per variant.
     let mut counts: std::collections::HashMap<DegradedModeReason, u32> =
         std::collections::HashMap::new();
-    *counts.entry(DegradedModeReason::NetworkPartition).or_insert(0) += 2;
+    *counts
+        .entry(DegradedModeReason::NetworkPartition)
+        .or_insert(0) += 2;
     *counts.entry(DegradedModeReason::NodeFailure).or_insert(0) += 1;
 
     assert_eq!(counts.get(&DegradedModeReason::NetworkPartition), Some(&2));

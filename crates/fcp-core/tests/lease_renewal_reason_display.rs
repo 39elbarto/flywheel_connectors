@@ -25,9 +25,7 @@
 //!   * Round-trip every `LeasePurpose` variant through JSON + CBOR.
 
 use ciborium::Value as CborValue;
-use fcp_core::{
-    LeasePurpose, LeaseValidationError, ObjectId, TailscaleNodeId, ZoneId,
-};
+use fcp_core::{LeasePurpose, LeaseValidationError, ObjectId, TailscaleNodeId, ZoneId};
 use serde_json::json;
 
 fn obj(byte: u8) -> ObjectId {
@@ -54,7 +52,10 @@ fn lease_validation_error_expired_display_pins_phrasing() {
         now: 1_700_000_500,
     };
     let msg = err.to_string();
-    assert_eq!(msg, "lease expired at 1700000000, current time is 1700000500");
+    assert_eq!(
+        msg,
+        "lease expired at 1700000000, current time is 1700000500"
+    );
 }
 
 #[test]
@@ -80,7 +81,10 @@ fn lease_validation_error_subject_mismatch_display_pins_phrasing() {
         got: got.clone(),
     };
     let msg = err.to_string();
-    assert_eq!(msg, format!("subject mismatch: expected {expected}, got {got}"));
+    assert_eq!(
+        msg,
+        format!("subject mismatch: expected {expected}, got {got}")
+    );
     assert!(msg.contains(&expected.to_string()));
     assert!(msg.contains(&got.to_string()));
 }
@@ -166,8 +170,7 @@ fn all_lease_validation_error_variants_have_distinct_display() {
             got: 0,
         },
     ];
-    let strings: std::collections::HashSet<_> =
-        variants.iter().map(ToString::to_string).collect();
+    let strings: std::collections::HashSet<_> = variants.iter().map(ToString::to_string).collect();
     assert_eq!(
         strings.len(),
         variants.len(),
@@ -202,7 +205,11 @@ fn lease_purpose_serde_matches_display_for_every_variant() {
     // otherwise log scrapers and wire payloads will disagree.
     for &(variant, expected) in ALL_PURPOSES {
         let value = serde_json::to_value(variant).unwrap();
-        assert_eq!(value, json!(expected), "serde for {variant:?} != `{expected}`");
+        assert_eq!(
+            value,
+            json!(expected),
+            "serde for {variant:?} != `{expected}`"
+        );
         assert_eq!(
             variant.to_string(),
             expected,

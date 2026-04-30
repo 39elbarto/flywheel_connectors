@@ -137,17 +137,17 @@ fn changing_zone_can_change_coordinator() {
     // weight in the selector contract. We verify by scanning a handful of
     // node-lists; HRW collision over zone is astronomically unlikely.
     let epoch = epoch();
-    let nodes = nodes(&["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"]);
+    let nodes = nodes(&[
+        "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+    ]);
 
     let work_coord = select_checkpoint_coordinator(&ZoneId::work(), &epoch, &nodes).unwrap();
-    let private_coord =
-        select_checkpoint_coordinator(&ZoneId::private(), &epoch, &nodes).unwrap();
+    let private_coord = select_checkpoint_coordinator(&ZoneId::private(), &epoch, &nodes).unwrap();
     let public_coord = select_checkpoint_coordinator(&ZoneId::public(), &epoch, &nodes).unwrap();
 
     // At least one zone pair must differ — otherwise zone is a dead input.
-    let all_same = work_coord == private_coord
-        && private_coord == public_coord
-        && work_coord == public_coord;
+    let all_same =
+        work_coord == private_coord && private_coord == public_coord && work_coord == public_coord;
     assert!(
         !all_same,
         "zone must influence coordinator selection across {} candidates — got {work_coord:?} / {private_coord:?} / {public_coord:?}",
@@ -168,11 +168,7 @@ fn removing_one_node_only_removes_that_node_from_ranking() {
 
     // Remove the SECOND-place node and rank the remainder.
     let runner_up = full_ranked[1].clone();
-    let trimmed: Vec<TailscaleNodeId> = full
-        .iter()
-        .filter(|n| **n != runner_up)
-        .cloned()
-        .collect();
+    let trimmed: Vec<TailscaleNodeId> = full.iter().filter(|n| **n != runner_up).cloned().collect();
     let trimmed_ranked = rank_checkpoint_coordinators(&zone, &epoch, &trimmed);
 
     let expected: Vec<TailscaleNodeId> = full_ranked
@@ -225,7 +221,11 @@ fn duplicate_inputs_are_not_silently_deduplicated() {
     let epoch = epoch();
     let dup = vec![node("alpha"), node("beta"), node("alpha")];
     let ranked = rank_checkpoint_coordinators(&zone, &epoch, &dup);
-    assert_eq!(ranked.len(), 3, "duplicates preserved in output: {ranked:?}");
+    assert_eq!(
+        ranked.len(),
+        3,
+        "duplicates preserved in output: {ranked:?}"
+    );
     let alpha_count = ranked.iter().filter(|n| n.as_str() == "alpha").count();
     assert_eq!(alpha_count, 2);
 }

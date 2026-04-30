@@ -88,7 +88,10 @@ fn pcs_mode_enabled_carries_epoch_commit_ref_alongside_mode_tag() {
 fn pcs_mode_rejects_pascal_case_tag() {
     let bad = json!({ "mode": "Enabled", "epoch": 1, "commit_ref": "00".repeat(32) });
     let result: Result<PcsMode, _> = serde_json::from_value(bad);
-    assert!(result.is_err(), "PascalCase mode tag must reject: {result:?}");
+    assert!(
+        result.is_err(),
+        "PascalCase mode tag must reject: {result:?}"
+    );
 
     let bad2 = json!({ "mode": "DISABLED" });
     let result: Result<PcsMode, _> = serde_json::from_value(bad2);
@@ -145,7 +148,10 @@ fn pcs_mode_cbor_pins_mode_tag_via_value_inspection() {
 
 #[test]
 fn key_management_mode_default_is_standard_rotation() {
-    assert_eq!(KeyManagementMode::default(), KeyManagementMode::StandardRotation);
+    assert_eq!(
+        KeyManagementMode::default(),
+        KeyManagementMode::StandardRotation
+    );
 }
 
 #[test]
@@ -187,7 +193,10 @@ fn key_management_mode_rejects_pascal_case_tag() {
         "epoch": 1
     });
     let result: Result<KeyManagementMode, _> = serde_json::from_value(bad);
-    assert!(result.is_err(), "PascalCase type tag must reject: {result:?}");
+    assert!(
+        result.is_err(),
+        "PascalCase type tag must reject: {result:?}"
+    );
 }
 
 #[test]
@@ -219,7 +228,10 @@ fn key_management_mode_cbor_pins_type_tag_via_value_inspection() {
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&KeyManagementMode::StandardRotation, &mut bytes).unwrap();
     let value: CborValue = ciborium::de::from_reader(&bytes[..]).unwrap();
-    assert_eq!(cbor_tag(&value, "type").as_deref(), Some("standard_rotation"));
+    assert_eq!(
+        cbor_tag(&value, "type").as_deref(),
+        Some("standard_rotation")
+    );
 }
 
 #[test]

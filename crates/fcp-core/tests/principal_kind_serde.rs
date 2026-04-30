@@ -5,7 +5,7 @@
 //! `Principal` as values such as `user`, `agent`, `service`, and `webhook`.
 
 use fcp_core::{Principal, TrustLevel};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn principal(kind: &str, id: &str, trust: TrustLevel, display: Option<&str>) -> Principal {
     Principal {
@@ -61,7 +61,12 @@ fn principal_kind_cbor_roundtrip_preserves_representative_kinds() {
 
 #[test]
 fn principal_kind_json_shape_pins_field_name_and_string_values() {
-    let value = json_value(&principal("agent", "planner", TrustLevel::Admin, Some("Planner")));
+    let value = json_value(&principal(
+        "agent",
+        "planner",
+        TrustLevel::Admin,
+        Some("Planner"),
+    ));
 
     assert_eq!(
         value,

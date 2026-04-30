@@ -191,7 +191,10 @@ fn json_roundtrip_preserves_populated_input_on_every_axis() {
     assert_eq!(back.transport, input.transport);
     assert_eq!(back.checkpoint_fresh, input.checkpoint_fresh);
     assert_eq!(back.revocation_fresh, input.revocation_fresh);
-    assert_eq!(back.execution_approval_required, input.execution_approval_required);
+    assert_eq!(
+        back.execution_approval_required,
+        input.execution_approval_required
+    );
     assert_eq!(back.safety_tier, input.safety_tier);
     assert_eq!(back.related_object_ids, input.related_object_ids);
     assert_eq!(back.request_object_id, input.request_object_id);
@@ -211,7 +214,10 @@ fn cbor_roundtrip_preserves_populated_input() {
     assert_eq!(back.transport, input.transport);
     assert_eq!(back.checkpoint_fresh, input.checkpoint_fresh);
     assert_eq!(back.revocation_fresh, input.revocation_fresh);
-    assert_eq!(back.execution_approval_required, input.execution_approval_required);
+    assert_eq!(
+        back.execution_approval_required,
+        input.execution_approval_required
+    );
     assert_eq!(back.safety_tier, input.safety_tier);
     assert_eq!(back.request_object_id, input.request_object_id);
     assert_eq!(back.request_input_hash, input.request_input_hash);

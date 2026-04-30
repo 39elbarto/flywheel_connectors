@@ -102,7 +102,9 @@ fn validate_rejects_invalid_start_char() {
 #[test]
 fn validate_accepts_digit_start() {
     // The grammar `^[a-z0-9][a-z0-9._:-]*$` allows digit start.
-    let id = "9cap".parse::<CapabilityId>().expect("digit start must parse");
+    let id = "9cap"
+        .parse::<CapabilityId>()
+        .expect("digit start must parse");
     assert_eq!(id.as_str(), "9cap");
 }
 
@@ -146,8 +148,7 @@ fn id_validation_error_variants_have_distinct_display() {
         IdValidationError::InvalidStartChar { ch: '.' },
         IdValidationError::InvalidChar { ch: '@', index: 3 },
     ];
-    let strings: std::collections::HashSet<_> =
-        variants.iter().map(ToString::to_string).collect();
+    let strings: std::collections::HashSet<_> = variants.iter().map(ToString::to_string).collect();
     assert_eq!(
         strings.len(),
         variants.len(),

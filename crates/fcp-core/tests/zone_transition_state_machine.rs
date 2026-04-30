@@ -71,11 +71,7 @@ fn is_enrolled_truth_table_only_approved_qualifies() {
     // any other state means the device is NOT actively a zone member.
     for &(variant, _) in ALL_STATUSES {
         let expected = variant == EnrollmentStatus::Approved;
-        assert_eq!(
-            variant.is_enrolled(),
-            expected,
-            "is_enrolled({variant:?})"
-        );
+        assert_eq!(variant.is_enrolled(), expected, "is_enrolled({variant:?})");
     }
 }
 
@@ -85,10 +81,7 @@ fn is_renewable_truth_table_includes_approved_and_expired_only() {
     // Approved + Expired qualify (re-approval / renewal flow).
     // Pending, Rejected, Revoked do NOT — they require a fresh request
     // (Pending), or are terminal (Rejected/Revoked).
-    let renewable_set = [
-        EnrollmentStatus::Approved,
-        EnrollmentStatus::Expired,
-    ];
+    let renewable_set = [EnrollmentStatus::Approved, EnrollmentStatus::Expired];
     for &(variant, _) in ALL_STATUSES {
         let expected = renewable_set.contains(&variant);
         assert_eq!(
@@ -106,10 +99,7 @@ fn rejected_and_revoked_are_terminal_neither_enrolled_nor_renewable() {
     // future helper that flips one of these without the other invalidates
     // the audit invariants downstream.
     for terminal in [EnrollmentStatus::Rejected, EnrollmentStatus::Revoked] {
-        assert!(
-            !terminal.is_enrolled(),
-            "{terminal:?} must not be enrolled"
-        );
+        assert!(!terminal.is_enrolled(), "{terminal:?} must not be enrolled");
         assert!(
             !terminal.is_renewable(),
             "{terminal:?} must not be renewable"
@@ -167,7 +157,10 @@ fn enrollment_status_distinct_variants_serialize_distinctly() {
     let mut seen = std::collections::HashSet::new();
     for &(variant, _) in ALL_STATUSES {
         let v = serde_json::to_value(variant).unwrap();
-        assert!(seen.insert(v.clone()), "duplicate JSON for {variant:?}: {v:?}");
+        assert!(
+            seen.insert(v.clone()),
+            "duplicate JSON for {variant:?}: {v:?}"
+        );
     }
 }
 
@@ -217,10 +210,7 @@ fn enrollment_status_implied_terminality_partition_is_consistent() {
     }
     assert_eq!(
         transient,
-        std::collections::HashSet::from([
-            EnrollmentStatus::Approved,
-            EnrollmentStatus::Expired,
-        ]),
+        std::collections::HashSet::from([EnrollmentStatus::Approved, EnrollmentStatus::Expired,]),
         "transient set"
     );
     assert_eq!(

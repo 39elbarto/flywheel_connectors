@@ -176,10 +176,16 @@ fn operation_intent_json_and_cbor_decode_to_same_struct() {
     let from_cbor: OperationIntent = ciborium::de::from_reader(&cbor_bytes[..]).unwrap();
 
     assert_eq!(from_json.request_object_id, from_cbor.request_object_id);
-    assert_eq!(from_json.capability_token_jti, from_cbor.capability_token_jti);
+    assert_eq!(
+        from_json.capability_token_jti,
+        from_cbor.capability_token_jti
+    );
     assert_eq!(from_json.idempotency_key, from_cbor.idempotency_key);
     assert_eq!(from_json.lease_seq, from_cbor.lease_seq);
-    assert_eq!(from_json.upstream_idempotency, from_cbor.upstream_idempotency);
+    assert_eq!(
+        from_json.upstream_idempotency,
+        from_cbor.upstream_idempotency
+    );
 }
 
 #[test]
@@ -216,9 +222,15 @@ fn intent_status_cbor_roundtrip_for_every_variant() {
 #[test]
 fn intent_status_rejects_pascal_case() {
     let bad: Result<IntentStatus, _> = serde_json::from_value(json!("InProgress"));
-    assert!(bad.is_err(), "snake_case enum must reject PascalCase: {bad:?}");
+    assert!(
+        bad.is_err(),
+        "snake_case enum must reject PascalCase: {bad:?}"
+    );
     let bad: Result<IntentStatus, _> = serde_json::from_value(json!("Pending"));
-    assert!(bad.is_err(), "snake_case enum must reject PascalCase: {bad:?}");
+    assert!(
+        bad.is_err(),
+        "snake_case enum must reject PascalCase: {bad:?}"
+    );
 }
 
 #[test]
@@ -249,7 +261,10 @@ fn operation_status_rejects_snake_case_inputs() {
         "OperationStatus must reject lowercase/snake_case input: {bad:?}"
     );
     let bad: Result<OperationStatus, _> = serde_json::from_value(json!("running"));
-    assert!(bad.is_err(), "OperationStatus must reject lowercase: {bad:?}");
+    assert!(
+        bad.is_err(),
+        "OperationStatus must reject lowercase: {bad:?}"
+    );
 }
 
 #[test]
@@ -293,7 +308,10 @@ fn operation_status_distinct_variants_serialize_distinctly() {
     let mut seen = std::collections::HashSet::new();
     for &(variant, _) in ALL_OPERATION_STATUSES {
         let v = serde_json::to_value(variant).unwrap();
-        assert!(seen.insert(v.clone()), "duplicate OperationStatus json: {v:?}");
+        assert!(
+            seen.insert(v.clone()),
+            "duplicate OperationStatus json: {v:?}"
+        );
     }
 }
 

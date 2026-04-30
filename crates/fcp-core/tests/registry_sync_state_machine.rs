@@ -69,7 +69,8 @@ fn record_in_state(state: LifecycleState) -> LifecycleRecord {
         LifecycleState::Uninstalled => &[LifecycleState::Uninstalled],
     };
     for &step in path {
-        r.transition(step, TransitionReason::ManualPromotion).unwrap();
+        r.transition(step, TransitionReason::ManualPromotion)
+            .unwrap();
     }
     assert_eq!(r.state, state);
     r
@@ -84,7 +85,10 @@ fn is_documented_legal(from: LifecycleState, to: LifecycleState) -> bool {
         (from, to),
         (Pending, Installing | Uninstalled)
             | (Installing | Production | RolledBack | Disabled, Canary)
-            | (Installing | Canary | Production | RolledBack | Disabled, Uninstalled)
+            | (
+                Installing | Canary | Production | RolledBack | Disabled,
+                Uninstalled
+            )
             | (Canary, Production | RolledBack | Disabled)
             | (Production, RolledBack | Disabled)
             | (RolledBack, Disabled)
@@ -231,7 +235,10 @@ fn failed_transition_leaves_state_and_history_untouched() {
 
     // Pending -> Production is illegal.
     let err = r
-        .transition(LifecycleState::Production, TransitionReason::ManualPromotion)
+        .transition(
+            LifecycleState::Production,
+            TransitionReason::ManualPromotion,
+        )
         .expect_err("Pending -> Production must fail");
     match err {
         LifecycleError::InvalidTransition { from, to } => {
@@ -255,7 +262,10 @@ fn invalid_transition_display_mentions_both_states() {
         to: LifecycleState::Production,
     };
     let msg = err.to_string();
-    assert!(msg.contains("pending"), "msg should mention from-state: {msg}");
+    assert!(
+        msg.contains("pending"),
+        "msg should mention from-state: {msg}"
+    );
     assert!(
         msg.contains("production"),
         "msg should mention to-state: {msg}"
@@ -310,8 +320,11 @@ fn transition_reason_serde_uses_internally_tagged_snake_case() {
 #[test]
 fn lifecycle_record_serde_roundtrip_preserves_full_transition_history() {
     let mut r = fresh_record();
-    r.transition(LifecycleState::Installing, TransitionReason::InstallComplete)
-        .unwrap();
+    r.transition(
+        LifecycleState::Installing,
+        TransitionReason::InstallComplete,
+    )
+    .unwrap();
     r.transition(LifecycleState::Canary, TransitionReason::ManualPromotion)
         .unwrap();
     r.transition(

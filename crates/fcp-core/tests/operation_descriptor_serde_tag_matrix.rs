@@ -26,8 +26,8 @@
 //!   * Distinct safety_tier values produce distinct JSON.
 
 use fcp_core::{
-    AgentHint, ApprovalMode, CapabilityId, IdempotencyClass, OperationId, OperationInfo,
-    RateLimit, RiskLevel, SafetyTier,
+    AgentHint, ApprovalMode, CapabilityId, IdempotencyClass, OperationId, OperationInfo, RateLimit,
+    RiskLevel, SafetyTier,
 };
 use serde_json::json;
 
@@ -117,8 +117,14 @@ fn minimal_omits_skip_when_none_optional_fields() {
     let v = serde_json::to_value(&info).unwrap();
     let obj = v.as_object().expect("must be object");
 
-    assert!(!obj.contains_key("description"), "description must be omitted when None");
-    assert!(!obj.contains_key("rate_limit"), "rate_limit must be omitted when None");
+    assert!(
+        !obj.contains_key("description"),
+        "description must be omitted when None"
+    );
+    assert!(
+        !obj.contains_key("rate_limit"),
+        "rate_limit must be omitted when None"
+    );
     assert!(
         !obj.contains_key("requires_approval"),
         "requires_approval must be omitted when None"
@@ -298,7 +304,10 @@ fn input_schema_preserves_arbitrary_json_value_shapes() {
         let mut cbor_bytes = Vec::new();
         ciborium::ser::into_writer(&info, &mut cbor_bytes).unwrap();
         let back_cbor: OperationInfo = ciborium::de::from_reader(&cbor_bytes[..]).unwrap();
-        assert_eq!(back_cbor.input_schema, shape, "CBOR shape drift on `{shape:?}`");
+        assert_eq!(
+            back_cbor.input_schema, shape,
+            "CBOR shape drift on `{shape:?}`"
+        );
     }
 }
 

@@ -140,7 +140,10 @@ fn handshake_request_minimal_omits_skip_when_none_fields() {
     let v = serde_json::to_value(&req).unwrap();
     let obj = v.as_object().expect("must be object");
 
-    assert!(!obj.contains_key("zone_dir"), "zone_dir must be omitted when None");
+    assert!(
+        !obj.contains_key("zone_dir"),
+        "zone_dir must be omitted when None"
+    );
     assert!(!obj.contains_key("host"), "host must be omitted when None");
     assert!(
         !obj.contains_key("transport_caps"),
@@ -249,8 +252,14 @@ fn host_info_skip_when_none_omits_version_and_build() {
     let v = serde_json::to_value(&host).unwrap();
     let obj = v.as_object().unwrap();
     assert_eq!(obj.get("name"), Some(&json!("minimal-hub")));
-    assert!(!obj.contains_key("version"), "version must be omitted when None");
-    assert!(!obj.contains_key("build"), "build must be omitted when None");
+    assert!(
+        !obj.contains_key("version"),
+        "version must be omitted when None"
+    );
+    assert!(
+        !obj.contains_key("build"),
+        "build must be omitted when None"
+    );
 
     let back: HostInfo = serde_json::from_value(v).unwrap();
     assert_eq!(back.name, "minimal-hub");
@@ -379,7 +388,10 @@ fn handshake_request_json_and_cbor_decode_to_same_struct() {
     assert_eq!(from_json.protocol_version, from_cbor.protocol_version);
     assert_eq!(from_json.host_public_key, from_cbor.host_public_key);
     assert_eq!(from_json.nonce, from_cbor.nonce);
-    assert_eq!(from_json.capabilities_requested, from_cbor.capabilities_requested);
+    assert_eq!(
+        from_json.capabilities_requested,
+        from_cbor.capabilities_requested
+    );
 }
 
 #[test]

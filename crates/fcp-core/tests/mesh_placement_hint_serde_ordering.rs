@@ -1,5 +1,8 @@
 use fcp_core::MeshPlacementHint;
 
+// `MeshPlacementHint` is the current fcp-core affinity/preference surface:
+// it carries zone-aware mesh placement preferences and exposes stable Ord +
+// Display semantics for policy code.
 const ASCENDING: [MeshPlacementHint; 5] = [
     MeshPlacementHint::DataLocality,
     MeshPlacementHint::LowLatency,
@@ -44,6 +47,14 @@ fn cbor_roundtrip_preserves_each_hint_variant() {
 }
 
 #[test]
+fn display_matches_stable_affinity_tokens() {
+    for (hint, expected_tag) in SERDE_TAGS {
+        assert_eq!(hint.as_str(), expected_tag);
+        assert_eq!(hint.to_string(), expected_tag);
+    }
+}
+
+#[test]
 fn ordering_is_total_and_matches_declared_preference_order() {
     let mut shuffled = [
         MeshPlacementHint::AvoidDerp,
@@ -66,6 +77,20 @@ fn ordering_is_total_and_matches_declared_preference_order() {
             assert_eq!(left.partial_cmp(right), Some(expected));
         }
     }
+}
+
+#[test]
+fn sorted_affinity_set_uses_declared_preference_order() {
+    let set = std::collections::BTreeSet::from([
+        MeshPlacementHint::AvoidDerp,
+        MeshPlacementHint::DataLocality,
+        MeshPlacementHint::SecretReconstructable,
+        MeshPlacementHint::LowLatency,
+        MeshPlacementHint::HighResources,
+    ]);
+
+    let ordered: Vec<_> = set.into_iter().collect();
+    assert_eq!(ordered, ASCENDING);
 }
 
 #[test]

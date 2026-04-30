@@ -174,6 +174,24 @@ pub struct ConnectorMetrics {
     pub bytes_received: u64,
 }
 
+impl fmt::Display for ConnectorMetrics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "requests_total={} requests_success={} requests_error={} connections_active={} events_emitted={} latency_p50_ms={} latency_p99_ms={} bytes_sent={} bytes_received={}",
+            self.requests_total,
+            self.requests_success,
+            self.requests_error,
+            self.connections_active,
+            self.events_emitted,
+            self.latency_p50_ms,
+            self.latency_p99_ms,
+            self.bytes_sent,
+            self.bytes_received
+        )
+    }
+}
+
 /// Runtime lifecycle state for a connector instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

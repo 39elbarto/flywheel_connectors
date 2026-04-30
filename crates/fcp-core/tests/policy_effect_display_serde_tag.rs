@@ -2,8 +2,8 @@
 //!
 //! fcp-core does not expose a type literally named `PolicyEffect`. The exported
 //! policy-change effect classifier is `PolicyPreviewDelta`, carried by
-//! `PolicyPreviewEntry::delta`. It does not implement `Display`; the stable
-//! operator-facing token is the serde scalar pinned here.
+//! `PolicyPreviewEntry::delta`. Its stable operator-facing `Display` token and
+//! serde scalar are pinned here.
 
 use ciborium::value::Value as CborValue;
 use fcp_core::PolicyPreviewDelta;
@@ -21,6 +21,22 @@ const POLICY_EFFECT_CASES: &[(PolicyPreviewDelta, &str)] = &[
 #[derive(Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 struct PreviewDeltaField {
     delta: PolicyPreviewDelta,
+}
+
+#[test]
+fn policy_effect_display_tokens_are_pinned_per_variant() {
+    for (variant, expected) in POLICY_EFFECT_CASES {
+        assert_eq!(
+            variant.as_str(),
+            *expected,
+            "PolicyPreviewDelta::as_str drift on {variant:?}"
+        );
+        assert_eq!(
+            variant.to_string(),
+            *expected,
+            "PolicyPreviewDelta Display drift on {variant:?}"
+        );
+    }
 }
 
 #[test]

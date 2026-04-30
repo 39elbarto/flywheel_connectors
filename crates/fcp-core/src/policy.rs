@@ -1899,6 +1899,25 @@ pub enum PolicyPreviewDelta {
     ReasonChanged,
 }
 
+impl PolicyPreviewDelta {
+    /// Stable operator-facing policy effect token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WouldAllow => "would_allow",
+            Self::WouldDeny => "would_deny",
+            Self::WouldRequireApproval => "would_require_approval",
+            Self::ReasonChanged => "reason_changed",
+        }
+    }
+}
+
+impl fmt::Display for PolicyPreviewDelta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Preview evaluation for a single sample.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyPreviewEntry {

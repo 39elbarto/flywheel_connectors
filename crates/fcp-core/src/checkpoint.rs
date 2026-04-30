@@ -13,7 +13,7 @@
 //! 5. **Finalization**: Once n-f signatures collected, checkpoint published
 //! 6. **Fork Detection**: Same `zone_id` + same seq + different `checkpoint_id` = fork
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt};
 
 use fcp_cbor::{CanonicalSerializer, SchemaId, SerializationError};
 use semver::Version;
@@ -75,6 +75,18 @@ pub enum CheckpointTrigger {
 }
 
 impl CheckpointTrigger {
+    /// Stable display token for checkpoint trigger variants.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::TimeElapsed { .. } => "time_elapsed",
+            Self::AuditChainGrowth { .. } => "audit_chain_growth",
+            Self::RevocationChainGrowth { .. } => "revocation_chain_growth",
+            Self::PolicyChange { .. } => "policy_change",
+            Self::Manual { .. } => "manual",
+        }
+    }
+
     /// Check if time-based trigger condition is met.
     #[must_use]
     pub const fn check_time_elapsed(elapsed_secs: u64, threshold_secs: u64) -> Option<Self> {
@@ -109,6 +121,12 @@ impl CheckpointTrigger {
         } else {
             None
         }
+    }
+}
+
+impl fmt::Display for CheckpointTrigger {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

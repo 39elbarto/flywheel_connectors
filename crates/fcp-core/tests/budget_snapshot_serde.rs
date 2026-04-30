@@ -92,7 +92,32 @@ fn budget_snapshot_cbor_roundtrip_preserves_all_fields() -> TestResult {
     let snapshot = populated_snapshot();
     let mut encoded = Vec::new();
     ciborium::ser::into_writer(&snapshot, &mut encoded)?;
-    assert!(!encoded.is_empty());
+    assert_eq!(
+        hex::encode(&encoded),
+        concat!(
+            "a4",
+            "677a6f6e655f6964", "667a3a776f726b",
+            "6b656e666f7263656d656e74", "6464656e79",
+            "6762756467657473", "82",
+            "a7",
+            "666d6574726963", "6b6170695f63726564697473",
+            "6475736564", "19251c",
+            "656c696d6974", "192710",
+            "6972656d61696e696e67", "1901f4",
+            "7177696e646f775f737461727465645f6174", "1a692b8900",
+            "7077696e646f775f7265736574735f6174", "1a692cda80",
+            "66737461747573", "626f6b",
+            "a7",
+            "666d6574726963", "66746f6b656e73",
+            "6475736564", "1a000f4241",
+            "656c696d6974", "1a000f4240",
+            "6972656d61696e696e67", "00",
+            "7177696e646f775f737461727465645f6174", "1a692b8900",
+            "7077696e646f775f7265736574735f6174", "1a692cda80",
+            "66737461747573", "686578636565646564",
+            "6a757064617465645f6174", "1a692b93f0",
+        )
+    );
 
     let decoded: UsageBudgetSnapshot = ciborium::de::from_reader(encoded.as_slice())?;
     assert_snapshots_equal(&decoded, &snapshot);
@@ -118,6 +143,16 @@ fn budget_snapshot_empty_budget_list_roundtrips_as_present_empty_array() -> Test
 
     let mut cbor = Vec::new();
     ciborium::ser::into_writer(&snapshot, &mut cbor)?;
+    assert_eq!(
+        hex::encode(&cbor),
+        concat!(
+            "a4",
+            "677a6f6e655f6964", "687a3a7075626c6963",
+            "6b656e666f7263656d656e74", "647761726e",
+            "6762756467657473", "80",
+            "6a757064617465645f6174", "00",
+        )
+    );
     let cbor_decoded: UsageBudgetSnapshot = ciborium::de::from_reader(cbor.as_slice())?;
     assert_snapshots_equal(&cbor_decoded, &snapshot);
 

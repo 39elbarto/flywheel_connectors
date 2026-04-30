@@ -109,9 +109,9 @@ fn prerequisite_status_cbor_encodes_as_text_not_integer() {
         let value: CborValue = ciborium::de::from_reader(buf.as_slice()).expect("decode as Value");
         match value {
             CborValue::Text(s) => assert_eq!(s, *expected, "CBOR Text drift on {variant:?}"),
-            other => panic!(
-                "PrerequisiteStatus MUST encode as CBOR Text({expected:?}); got {other:?}"
-            ),
+            other => {
+                panic!("PrerequisiteStatus MUST encode as CBOR Text({expected:?}); got {other:?}")
+            }
         }
     }
 }
@@ -214,10 +214,22 @@ fn prerequisite_status_to_descriptor_status_truth_table() {
         (PrerequisiteStatus::Satisfied, DescriptorStatus::Ready),
         (PrerequisiteStatus::Missing, DescriptorStatus::Missing),
         (PrerequisiteStatus::Drifted, DescriptorStatus::Drifted),
-        (PrerequisiteStatus::Unverifiable, DescriptorStatus::Unverifiable),
-        (PrerequisiteStatus::PolicyBlocked, DescriptorStatus::PolicyBlocked),
-        (PrerequisiteStatus::NotYetMeasured, DescriptorStatus::NotYetMeasured),
-        (PrerequisiteStatus::Unavailable, DescriptorStatus::Unavailable),
+        (
+            PrerequisiteStatus::Unverifiable,
+            DescriptorStatus::Unverifiable,
+        ),
+        (
+            PrerequisiteStatus::PolicyBlocked,
+            DescriptorStatus::PolicyBlocked,
+        ),
+        (
+            PrerequisiteStatus::NotYetMeasured,
+            DescriptorStatus::NotYetMeasured,
+        ),
+        (
+            PrerequisiteStatus::Unavailable,
+            DescriptorStatus::Unavailable,
+        ),
     ];
     for (prereq, expected_descriptor) in cases {
         let projected: DescriptorStatus = prereq.into();

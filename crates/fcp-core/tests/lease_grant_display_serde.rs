@@ -93,7 +93,9 @@ fn invalid_response() -> LeaseResponse {
 fn lease_response_granted_serializes_as_externally_tagged_single_key_object() {
     let response = LeaseResponse::Granted(Box::new(build_lease()));
     let value = serde_json::to_value(&response).expect("serialize");
-    let obj = value.as_object().expect("LeaseResponse encodes as JSON object");
+    let obj = value
+        .as_object()
+        .expect("LeaseResponse encodes as JSON object");
     assert_eq!(obj.len(), 1, "externally-tagged form is single-key");
     assert!(
         obj.contains_key("Granted"),
@@ -119,7 +121,11 @@ fn lease_response_denied_serializes_as_externally_tagged_single_key_object() {
     let obj = value.as_object().expect("object");
     assert_eq!(obj.len(), 1);
     assert!(obj.contains_key("Denied"));
-    let inner = obj.get("Denied").expect("payload").as_object().expect("inner object");
+    let inner = obj
+        .get("Denied")
+        .expect("payload")
+        .as_object()
+        .expect("inner object");
     assert_eq!(
         inner.get("current_holder").and_then(|v| v.as_str()),
         Some("holder-other")
@@ -128,10 +134,7 @@ fn lease_response_denied_serializes_as_externally_tagged_single_key_object() {
         inner.get("expires_at").and_then(|v| v.as_u64()),
         Some(1_700_000_000)
     );
-    assert_eq!(
-        inner.get("current_seq").and_then(|v| v.as_u64()),
-        Some(42)
-    );
+    assert_eq!(inner.get("current_seq").and_then(|v| v.as_u64()), Some(42));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -145,7 +148,11 @@ fn lease_response_invalid_serializes_with_reason_field() {
     let obj = value.as_object().expect("object");
     assert_eq!(obj.len(), 1);
     assert!(obj.contains_key("Invalid"));
-    let inner = obj.get("Invalid").expect("payload").as_object().expect("inner");
+    let inner = obj
+        .get("Invalid")
+        .expect("payload")
+        .as_object()
+        .expect("inner");
     assert_eq!(
         inner.get("reason").and_then(|v| v.as_str()),
         Some("wrong zone")
@@ -288,10 +295,7 @@ fn lease_request_json_shape_preserves_all_5_fields() {
         obj.get("requested_ttl").and_then(|v| v.as_u64()),
         Some(3_600)
     );
-    assert_eq!(
-        obj.get("renew_seq").and_then(|v| v.as_u64()),
-        Some(15)
-    );
+    assert_eq!(obj.get("renew_seq").and_then(|v| v.as_u64()), Some(15));
 }
 
 #[test]

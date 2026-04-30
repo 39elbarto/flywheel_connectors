@@ -141,8 +141,7 @@ fn rate_limit_enforcement_cbor_roundtrip_per_variant() {
     for (variant, _) in RATE_LIMIT_ENFORCEMENT_CASES {
         let mut buf = Vec::new();
         ciborium::ser::into_writer(variant, &mut buf).expect("encode");
-        let back: RateLimitEnforcement =
-            ciborium::de::from_reader(buf.as_slice()).expect("decode");
+        let back: RateLimitEnforcement = ciborium::de::from_reader(buf.as_slice()).expect("decode");
         assert_eq!(*variant, back);
     }
 }
@@ -225,9 +224,9 @@ fn rate_limit_enforcement_cbor_encodes_as_text_not_integer() {
         let value: CborValue = ciborium::de::from_reader(buf.as_slice()).expect("decode as Value");
         match value {
             CborValue::Text(s) => assert_eq!(s, *expected),
-            other => panic!(
-                "RateLimitEnforcement MUST encode as Text({expected:?}); got {other:?}"
-            ),
+            other => {
+                panic!("RateLimitEnforcement MUST encode as Text({expected:?}); got {other:?}")
+            }
         }
     }
 }

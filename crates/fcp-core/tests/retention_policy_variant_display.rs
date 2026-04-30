@@ -73,9 +73,7 @@ fn sample_policy() -> UsageBudgetPolicy {
 fn usage_budget_policy_json_shape_pinned() {
     let policy = sample_policy();
     let value = serde_json::to_value(&policy).expect("serialize");
-    let obj = value
-        .as_object()
-        .expect("UsageBudgetPolicy is JSON object");
+    let obj = value.as_object().expect("UsageBudgetPolicy is JSON object");
     assert_eq!(obj.len(), 2, "exactly 2 fields: enforcement + budgets");
     assert_eq!(
         obj.get("enforcement").and_then(|v| v.as_str()),
@@ -114,7 +112,10 @@ fn usage_budget_policy_json_roundtrip_preserves_all_fields() {
     let back: UsageBudgetPolicy = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(back.budgets.len(), original.budgets.len());
     // BudgetEnforcement is Copy + Eq.
-    assert_eq!(format!("{:?}", back.enforcement), format!("{:?}", original.enforcement));
+    assert_eq!(
+        format!("{:?}", back.enforcement),
+        format!("{:?}", original.enforcement)
+    );
     for (b, o) in back.budgets.iter().zip(&original.budgets) {
         assert_eq!(b.metric, o.metric);
         assert_eq!(b.limit, o.limit);
@@ -181,8 +182,7 @@ fn usage_budget_limit_u64_max_round_trips_through_json_and_cbor() {
         window_seconds: u64::MAX,
     };
     let json = serde_json::to_string(&limit).expect("serialize");
-    let from_json: UsageBudgetLimit =
-        serde_json::from_str(&json).expect("deserialize");
+    let from_json: UsageBudgetLimit = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(from_json.limit, u64::MAX);
     assert_eq!(from_json.window_seconds, u64::MAX);
 
@@ -277,8 +277,14 @@ fn usage_budget_snapshot_4_field_shape_with_nested_usage_list() {
     let obj = value.as_object().expect("object");
     assert_eq!(obj.len(), 4, "exactly 4 fields");
     assert_eq!(obj.get("zone_id").and_then(|v| v.as_str()), Some("z:work"));
-    assert_eq!(obj.get("enforcement").and_then(|v| v.as_str()), Some("warn"));
-    assert_eq!(obj.get("updated_at").and_then(|v| v.as_u64()), Some(1_700_000_500));
+    assert_eq!(
+        obj.get("enforcement").and_then(|v| v.as_str()),
+        Some("warn")
+    );
+    assert_eq!(
+        obj.get("updated_at").and_then(|v| v.as_u64()),
+        Some(1_700_000_500)
+    );
     let budgets = obj
         .get("budgets")
         .and_then(|v| v.as_array())
@@ -442,8 +448,7 @@ fn distinct_enforcement_in_policy_produces_distinct_json() {
 fn json_and_cbor_decode_to_same_usage_budget_policy() {
     let original = sample_policy();
     let json = serde_json::to_string(&original).expect("JSON serialize");
-    let from_json: UsageBudgetPolicy =
-        serde_json::from_str(&json).expect("JSON deserialize");
+    let from_json: UsageBudgetPolicy = serde_json::from_str(&json).expect("JSON deserialize");
 
     let mut cbor = Vec::new();
     ciborium::ser::into_writer(&original, &mut cbor).expect("CBOR encode");

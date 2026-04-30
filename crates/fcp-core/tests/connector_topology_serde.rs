@@ -52,7 +52,8 @@ fn ts_node_zone() -> ZoneId {
 
 #[test]
 fn device_selector_tag_variant_json_shape_pinned() {
-    let value = serde_json::to_value(&DeviceSelector::Tag("trusted".to_string())).expect("serialize");
+    let value =
+        serde_json::to_value(&DeviceSelector::Tag("trusted".to_string())).expect("serialize");
     assert_eq!(
         value,
         serde_json::json!({"Tag": "trusted"}),
@@ -84,8 +85,8 @@ fn device_selector_zone_variant_json_shape_pinned() {
 
 #[test]
 fn device_selector_has_capability_variant_json_shape_pinned() {
-    let value =
-        serde_json::to_value(&DeviceSelector::HasCapability("oauth".to_string())).expect("serialize");
+    let value = serde_json::to_value(&DeviceSelector::HasCapability("oauth".to_string()))
+        .expect("serialize");
     assert_eq!(value, serde_json::json!({"HasCapability": "oauth"}));
 }
 
@@ -300,8 +301,7 @@ fn object_placement_policy_cbor_roundtrip_preserves_all_fields() {
     };
     let mut buf = Vec::new();
     ciborium::ser::into_writer(&policy, &mut buf).expect("encode");
-    let back: ObjectPlacementPolicy =
-        ciborium::de::from_reader(buf.as_slice()).expect("decode");
+    let back: ObjectPlacementPolicy = ciborium::de::from_reader(buf.as_slice()).expect("decode");
     assert_eq!(back.min_nodes, policy.min_nodes);
     assert_eq!(back.max_node_fraction_bps, policy.max_node_fraction_bps);
     assert_eq!(back.target_coverage_bps, policy.target_coverage_bps);
@@ -398,8 +398,7 @@ fn placement_policy_json_and_cbor_decode_to_same_policy() {
     };
 
     let json = serde_json::to_string(&policy).expect("JSON serialize");
-    let from_json: ObjectPlacementPolicy =
-        serde_json::from_str(&json).expect("JSON deserialize");
+    let from_json: ObjectPlacementPolicy = serde_json::from_str(&json).expect("JSON deserialize");
 
     let mut cbor = Vec::new();
     ciborium::ser::into_writer(&policy, &mut cbor).expect("CBOR encode");

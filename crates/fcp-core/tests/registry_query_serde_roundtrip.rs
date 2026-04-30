@@ -89,7 +89,10 @@ fn revocation_check_result_json_shape_pinned_for_revoked_case() {
     assert_eq!(obj.get("is_revoked").and_then(|v| v.as_bool()), Some(true));
     assert_eq!(obj.get("stale_data").and_then(|v| v.as_bool()), Some(false));
     assert_eq!(obj.get("head_age_secs").and_then(|v| v.as_u64()), Some(60));
-    assert!(obj.contains_key("revocation"), "Some(revocation) MUST be present");
+    assert!(
+        obj.contains_key("revocation"),
+        "Some(revocation) MUST be present"
+    );
     assert!(obj.contains_key("scope"), "Some(scope) MUST be present");
     assert_eq!(
         obj.get("scope").and_then(|v| v.as_str()),
@@ -183,8 +186,7 @@ fn revocation_check_result_cbor_roundtrip_preserves_revoked_case() {
     let original = revoked_result();
     let mut buf = Vec::new();
     ciborium::ser::into_writer(&original, &mut buf).expect("encode");
-    let back: RevocationCheckResult =
-        ciborium::de::from_reader(buf.as_slice()).expect("decode");
+    let back: RevocationCheckResult = ciborium::de::from_reader(buf.as_slice()).expect("decode");
 
     assert_eq!(back.is_revoked, original.is_revoked);
     assert_eq!(back.revocation, original.revocation);
@@ -198,8 +200,7 @@ fn revocation_check_result_cbor_roundtrip_preserves_not_revoked_case() {
     let original = not_revoked_result();
     let mut buf = Vec::new();
     ciborium::ser::into_writer(&original, &mut buf).expect("encode");
-    let back: RevocationCheckResult =
-        ciborium::de::from_reader(buf.as_slice()).expect("decode");
+    let back: RevocationCheckResult = ciborium::de::from_reader(buf.as_slice()).expect("decode");
 
     assert_eq!(back.is_revoked, false);
     assert_eq!(back.revocation, None);
@@ -323,7 +324,7 @@ fn revocation_scope_rejects_lower_snake_case_for_multi_word_variants() {
     // The {snake_case Display, PascalCase serde} mismatch — pin
     // that lower snake_case is rejected as wire input.
     for bad in [
-        r#""capability""#,        // snake_case (would alias as_str output)
+        r#""capability""#, // snake_case (would alias as_str output)
         r#""issuer_key""#,
         r#""node_attestation""#,
         r#""zone_key""#,

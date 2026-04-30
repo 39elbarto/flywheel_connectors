@@ -219,9 +219,7 @@ fn policy_risk_code_variants_pairwise_distinct() {
 
     for i in 0..POLICY_RISK_CODE_CASES.len() {
         for j in (i + 1)..POLICY_RISK_CODE_CASES.len() {
-            assert_ne!(
-                POLICY_RISK_CODE_CASES[i].0, POLICY_RISK_CODE_CASES[j].0
-            );
+            assert_ne!(POLICY_RISK_CODE_CASES[i].0, POLICY_RISK_CODE_CASES[j].0);
         }
     }
 }
@@ -235,8 +233,7 @@ fn policy_risk_code_ord_follows_declaration_order() {
     // The enum carries `Ord, PartialOrd` — the derived ordering
     // follows source declaration order. Pin so any future
     // reordering is visible.
-    let cases: Vec<PolicyRiskCode> =
-        POLICY_RISK_CODE_CASES.iter().map(|(v, _)| *v).collect();
+    let cases: Vec<PolicyRiskCode> = POLICY_RISK_CODE_CASES.iter().map(|(v, _)| *v).collect();
     for window in cases.windows(2) {
         assert!(
             window[0] < window[1],
@@ -277,8 +274,7 @@ fn policy_risk_severity_cbor_roundtrip_per_variant() {
     for (variant, _) in POLICY_RISK_SEVERITY_CASES {
         let mut buf = Vec::new();
         ciborium::ser::into_writer(variant, &mut buf).expect("encode");
-        let back: PolicyRiskSeverity =
-            ciborium::de::from_reader(buf.as_slice()).expect("decode");
+        let back: PolicyRiskSeverity = ciborium::de::from_reader(buf.as_slice()).expect("decode");
         assert_eq!(*variant, back);
     }
 }

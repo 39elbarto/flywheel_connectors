@@ -340,8 +340,7 @@ fn json_and_cbor_decode_to_same_populated_context() {
 
     let mut cbor = Vec::new();
     ciborium::ser::into_writer(&original, &mut cbor).expect("CBOR encode");
-    let from_cbor: InvokeContext =
-        ciborium::de::from_reader(cbor.as_slice()).expect("CBOR decode");
+    let from_cbor: InvokeContext = ciborium::de::from_reader(cbor.as_slice()).expect("CBOR decode");
 
     assert_eq!(from_json.locale, from_cbor.locale);
     assert_eq!(from_json.pagination, from_cbor.pagination);

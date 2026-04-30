@@ -18,12 +18,10 @@ fn cbor_outcome_tag(outcome: &CheckOutcome) -> TestResult<Option<String>> {
         return Ok(None);
     };
 
-    Ok(entries
-        .iter()
-        .find_map(|(key, value)| match (key, value) {
-            (CborValue::Text(key), CborValue::Text(tag)) if key == "outcome" => Some(tag.clone()),
-            _ => None,
-        }))
+    Ok(entries.iter().find_map(|(key, value)| match (key, value) {
+        (CborValue::Text(key), CborValue::Text(tag)) if key == "outcome" => Some(tag.clone()),
+        _ => None,
+    }))
 }
 
 #[test]

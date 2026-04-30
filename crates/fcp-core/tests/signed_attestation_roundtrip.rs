@@ -192,12 +192,14 @@ fn attestation_full_json_shape_pinned() {
     ]
     .into_iter()
     .collect();
-    let actual_keys: std::collections::BTreeSet<&str> =
-        obj.keys().map(String::as_str).collect();
+    let actual_keys: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
     assert_eq!(actual_keys, expected_keys, "attestation shape drift");
 
     // Anchor a few critical scalars.
-    assert_eq!(obj.get("format"), Some(&json!(SUPPLY_CHAIN_ATTESTATION_FORMAT)));
+    assert_eq!(
+        obj.get("format"),
+        Some(&json!(SUPPLY_CHAIN_ATTESTATION_FORMAT))
+    );
     assert_eq!(
         obj.get("schema_version"),
         Some(&json!(SUPPLY_CHAIN_ATTESTATION_SCHEMA_VERSION))

@@ -263,7 +263,10 @@ fn health_state_five_variants_produce_distinct_state_tags() {
 
 #[test]
 fn budget_status_json_tag_pinned_per_variant() {
-    let cases = [(BudgetStatus::Ok, "ok"), (BudgetStatus::Exceeded, "exceeded")];
+    let cases = [
+        (BudgetStatus::Ok, "ok"),
+        (BudgetStatus::Exceeded, "exceeded"),
+    ];
     for (variant, expected) in cases {
         let json = serde_json::to_string(&variant).expect("serialize");
         assert_eq!(json, format!("\"{expected}\""));

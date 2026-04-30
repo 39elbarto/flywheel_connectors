@@ -28,8 +28,7 @@
 
 use fcp_cbor::SchemaId;
 use fcp_core::{
-    ConnectorBundle, ConnectorTarget, ConnectorVersion, ConnectorId, ObjectId,
-    RegistryEntry,
+    ConnectorBundle, ConnectorId, ConnectorTarget, ConnectorVersion, ObjectId, RegistryEntry,
 };
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -202,11 +201,11 @@ fn registry_entry_json_shape_pinned_with_optional_symbol_set_omitted() {
         obj.get("connector_id").and_then(|v| v.as_str()),
         Some("connector:fcp.test")
     );
-    assert_eq!(
-        obj.get("version").and_then(|v| v.as_str()),
-        Some("1.2.3")
-    );
-    let inner_target = obj.get("target").and_then(|v| v.as_object()).expect("target");
+    assert_eq!(obj.get("version").and_then(|v| v.as_str()), Some("1.2.3"));
+    let inner_target = obj
+        .get("target")
+        .and_then(|v| v.as_object())
+        .expect("target");
     assert_eq!(
         inner_target.get("os").and_then(|v| v.as_str()),
         Some("linux")
@@ -327,7 +326,9 @@ fn distinct_registry_entries_hash_distinctly_in_practice() {
     assert_ne!(base, diff_target);
     assert_ne!(hash_of(&base), hash_of(&diff_target));
 
-    let with_sym = base.clone().with_symbol_set_object_id(ObjectId::from_bytes([0x77; 32]));
+    let with_sym = base
+        .clone()
+        .with_symbol_set_object_id(ObjectId::from_bytes([0x77; 32]));
     assert_ne!(base, with_sym);
     assert_ne!(hash_of(&base), hash_of(&with_sym));
 }

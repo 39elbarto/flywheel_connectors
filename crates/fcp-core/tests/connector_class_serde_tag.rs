@@ -259,7 +259,11 @@ fn crdt_type_display_agrees_with_serde_tag_byte_for_byte() {
 
 #[test]
 fn crdt_type_count_is_four() {
-    assert_eq!(CRDT_TYPE_CASES.len(), 4, "CrdtType has 4 documented variants");
+    assert_eq!(
+        CRDT_TYPE_CASES.len(),
+        4,
+        "CrdtType has 4 documented variants"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -389,7 +393,12 @@ fn connector_state_model_rejects_singleton_camel_case() {
 
 #[test]
 fn crdt_type_rejects_pascal_case() {
-    for bad in [r#""LwwMap""#, r#""OrSet""#, r#""GCounter""#, r#""PnCounter""#] {
+    for bad in [
+        r#""LwwMap""#,
+        r#""OrSet""#,
+        r#""GCounter""#,
+        r#""PnCounter""#,
+    ] {
         let parsed = serde_json::from_str::<CrdtType>(bad);
         assert!(parsed.is_err(), "{bad} MUST be rejected");
     }

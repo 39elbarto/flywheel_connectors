@@ -64,7 +64,10 @@ const RESUME_REASON_CODE_CASES: &[(ResumeReasonCode, &str)] = &[
     (ResumeReasonCode::HandoffAuthorized, "handoff_authorized"),
     (ResumeReasonCode::CheckpointFresh, "checkpoint_fresh"),
     (ResumeReasonCode::CheckpointStale, "checkpoint_stale"),
-    (ResumeReasonCode::DuplicateClassified, "duplicate_classified"),
+    (
+        ResumeReasonCode::DuplicateClassified,
+        "duplicate_classified",
+    ),
     (ResumeReasonCode::ResumeAccepted, "resume_accepted"),
     (ResumeReasonCode::ResumeDenied, "resume_denied"),
     (ResumeReasonCode::EvidenceConflict, "evidence_conflict"),
@@ -167,9 +170,7 @@ fn pcs_event_type_variants_pairwise_distinct() {
 
     for i in 0..PCS_EVENT_TYPE_CASES.len() {
         for j in (i + 1)..PCS_EVENT_TYPE_CASES.len() {
-            assert_ne!(
-                PCS_EVENT_TYPE_CASES[i].0, PCS_EVENT_TYPE_CASES[j].0
-            );
+            assert_ne!(PCS_EVENT_TYPE_CASES[i].0, PCS_EVENT_TYPE_CASES[j].0);
         }
     }
 }
@@ -282,9 +283,7 @@ fn resume_reason_code_variants_pairwise_distinct() {
 
     for i in 0..RESUME_REASON_CODE_CASES.len() {
         for j in (i + 1)..RESUME_REASON_CODE_CASES.len() {
-            assert_ne!(
-                RESUME_REASON_CODE_CASES[i].0, RESUME_REASON_CODE_CASES[j].0
-            );
+            assert_ne!(RESUME_REASON_CODE_CASES[i].0, RESUME_REASON_CODE_CASES[j].0);
         }
     }
 }
@@ -312,14 +311,10 @@ fn pcs_event_type_and_resume_reason_code_use_disjoint_token_spaces() {
     // Operator dashboards reading both PCS audit and resume timeline
     // streams MUST distinguish event types by token alone. Pin
     // disjoint label spaces.
-    let pcs_tokens: std::collections::HashSet<&str> = PCS_EVENT_TYPE_CASES
-        .iter()
-        .map(|(_, s)| *s)
-        .collect();
-    let resume_tokens: std::collections::HashSet<&str> = RESUME_REASON_CODE_CASES
-        .iter()
-        .map(|(_, s)| *s)
-        .collect();
+    let pcs_tokens: std::collections::HashSet<&str> =
+        PCS_EVENT_TYPE_CASES.iter().map(|(_, s)| *s).collect();
+    let resume_tokens: std::collections::HashSet<&str> =
+        RESUME_REASON_CODE_CASES.iter().map(|(_, s)| *s).collect();
     let intersection: Vec<&&str> = pcs_tokens.intersection(&resume_tokens).collect();
     assert!(
         intersection.is_empty(),

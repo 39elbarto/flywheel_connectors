@@ -145,9 +145,9 @@ fn usage_metric_kind_cbor_encodes_as_text_not_integer() {
         let value: CborValue = ciborium::de::from_reader(buf.as_slice()).expect("decode as Value");
         match value {
             CborValue::Text(s) => assert_eq!(s, *expected, "CBOR Text drift on {variant:?}"),
-            other => panic!(
-                "UsageMetricKind MUST encode as CBOR Text({expected:?}); got {other:?}"
-            ),
+            other => {
+                panic!("UsageMetricKind MUST encode as CBOR Text({expected:?}); got {other:?}")
+            }
         }
     }
 }
@@ -176,7 +176,10 @@ fn prerequisite_kind_multi_word_variants_use_underscore() {
         (PrerequisiteKind::UserInput, "user_input"),
         (PrerequisiteKind::SecretInput, "secret_input"),
         (PrerequisiteKind::LaunchUrl, "launch_url"),
-        (PrerequisiteKind::CredentialPersistence, "credential_persistence"),
+        (
+            PrerequisiteKind::CredentialPersistence,
+            "credential_persistence",
+        ),
     ] {
         let json = serde_json::to_string(&variant).unwrap();
         assert_eq!(json, format!("\"{expected}\""));
@@ -274,9 +277,7 @@ fn usage_metric_kind_pairwise_distinct() {
 
     for i in 0..USAGE_METRIC_KIND_CASES.len() {
         for j in (i + 1)..USAGE_METRIC_KIND_CASES.len() {
-            assert_ne!(
-                USAGE_METRIC_KIND_CASES[i].0, USAGE_METRIC_KIND_CASES[j].0
-            );
+            assert_ne!(USAGE_METRIC_KIND_CASES[i].0, USAGE_METRIC_KIND_CASES[j].0);
         }
     }
 }
@@ -291,9 +292,7 @@ fn prerequisite_kind_pairwise_distinct() {
 
     for i in 0..PREREQUISITE_KIND_CASES.len() {
         for j in (i + 1)..PREREQUISITE_KIND_CASES.len() {
-            assert_ne!(
-                PREREQUISITE_KIND_CASES[i].0, PREREQUISITE_KIND_CASES[j].0
-            );
+            assert_ne!(PREREQUISITE_KIND_CASES[i].0, PREREQUISITE_KIND_CASES[j].0);
         }
     }
 }

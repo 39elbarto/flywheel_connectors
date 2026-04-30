@@ -77,10 +77,7 @@ fn capability_grant_json_shape_pinned_with_operation_some() {
         obj.get("capability").and_then(|v| v.as_str()),
         Some("cap.read")
     );
-    assert_eq!(
-        obj.get("operation").and_then(|v| v.as_str()),
-        Some("read")
-    );
+    assert_eq!(obj.get("operation").and_then(|v| v.as_str()), Some("read"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -278,8 +275,7 @@ fn vec_of_capability_grants_cbor_roundtrip_preserves_order() {
     ];
     let mut buf = Vec::new();
     ciborium::ser::into_writer(&original, &mut buf).expect("encode");
-    let back: Vec<CapabilityGrant> =
-        ciborium::de::from_reader(buf.as_slice()).expect("decode");
+    let back: Vec<CapabilityGrant> = ciborium::de::from_reader(buf.as_slice()).expect("decode");
     assert_eq!(back, original);
 }
 

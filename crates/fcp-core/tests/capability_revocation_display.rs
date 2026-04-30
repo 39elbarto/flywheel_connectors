@@ -104,9 +104,7 @@ fn revocation_decision_cbor_encodes_as_text_pascal_case() {
         let value: CborValue = ciborium::de::from_reader(buf.as_slice()).expect("decode as Value");
         match value {
             CborValue::Text(s) => assert_eq!(s, *expected),
-            other => panic!(
-                "RevocationDecision MUST encode as Text({expected:?}); got {other:?}"
-            ),
+            other => panic!("RevocationDecision MUST encode as Text({expected:?}); got {other:?}"),
         }
     }
 }
@@ -155,8 +153,7 @@ fn revocation_freshness_class_as_str_agrees_with_serde_tag_byte_for_byte() {
 fn revocation_freshness_class_json_roundtrip_per_variant() {
     for (variant, _) in REVOCATION_FRESHNESS_CLASS_CASES {
         let json = serde_json::to_string(variant).expect("serialize");
-        let back: RevocationFreshnessClass =
-            serde_json::from_str(&json).expect("deserialize");
+        let back: RevocationFreshnessClass = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(*variant, back);
     }
 }
@@ -261,7 +258,13 @@ fn revocation_decision_rejects_lower_snake_case() {
 #[test]
 fn revocation_freshness_class_rejects_pascal_case() {
     // Wire form is snake_case; PascalCase MUST be rejected.
-    for bad in [r#""Critical""#, r#""Risky""#, r#""Safe""#, r#""low""#, r#""""#] {
+    for bad in [
+        r#""Critical""#,
+        r#""Risky""#,
+        r#""Safe""#,
+        r#""low""#,
+        r#""""#,
+    ] {
         let parsed = serde_json::from_str::<RevocationFreshnessClass>(bad);
         assert!(parsed.is_err(), "{bad} MUST be rejected");
     }
@@ -310,10 +313,8 @@ fn revocation_decision_count_is_two() {
 
 #[test]
 fn revocation_decision_and_freshness_class_use_disjoint_token_spaces() {
-    let decision_tokens: std::collections::HashSet<&str> = REVOCATION_DECISION_CASES
-        .iter()
-        .map(|(_, s)| *s)
-        .collect();
+    let decision_tokens: std::collections::HashSet<&str> =
+        REVOCATION_DECISION_CASES.iter().map(|(_, s)| *s).collect();
     let class_tokens: std::collections::HashSet<&str> = REVOCATION_FRESHNESS_CLASS_CASES
         .iter()
         .map(|(_, s)| *s)
@@ -337,7 +338,10 @@ fn revocation_decision_serves_as_hashmap_key() {
     map.insert(RevocationDecision::NotRevoked, "not_revoked");
     map.insert(RevocationDecision::Revoked, "revoked");
     assert_eq!(map.len(), 2);
-    assert_eq!(map.get(&RevocationDecision::NotRevoked), Some(&"not_revoked"));
+    assert_eq!(
+        map.get(&RevocationDecision::NotRevoked),
+        Some(&"not_revoked")
+    );
 }
 
 #[test]

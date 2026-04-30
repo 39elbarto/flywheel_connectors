@@ -116,8 +116,7 @@ fn payload_hash_defaults_to_none_when_missing_from_wire_form() {
         "sub_blocks": 2,
         "alignment": 4
     }"#;
-    let info: ConnectorBinaryTransmissionInfo =
-        serde_json::from_str(json).expect("deserialize");
+    let info: ConnectorBinaryTransmissionInfo = serde_json::from_str(json).expect("deserialize");
     assert_eq!(info.transfer_length, 4096);
     assert_eq!(info.symbol_size, 512);
     assert_eq!(info.source_blocks, 8);
@@ -137,8 +136,7 @@ fn payload_hash_defaults_to_none_when_missing_from_wire_form() {
 fn json_roundtrip_preserves_all_fields_when_payload_hash_some() {
     let original = fixture_with_payload_hash();
     let json = serde_json::to_string(&original).expect("serialize");
-    let back: ConnectorBinaryTransmissionInfo =
-        serde_json::from_str(&json).expect("deserialize");
+    let back: ConnectorBinaryTransmissionInfo = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(back, original);
 }
 
@@ -146,8 +144,7 @@ fn json_roundtrip_preserves_all_fields_when_payload_hash_some() {
 fn json_roundtrip_preserves_all_fields_when_payload_hash_none() {
     let original = fixture_no_payload_hash();
     let json = serde_json::to_string(&original).expect("serialize");
-    let back: ConnectorBinaryTransmissionInfo =
-        serde_json::from_str(&json).expect("deserialize");
+    let back: ConnectorBinaryTransmissionInfo = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(back, original);
     assert_eq!(back.payload_hash, None);
 }
@@ -243,20 +240,14 @@ fn payload_hash_json_form_is_array_of_32_byte_values() {
     // the codebase.
     let info = fixture_with_payload_hash();
     let value = serde_json::to_value(&info).expect("serialize");
-    let hash_value = value
-        .get("payload_hash")
-        .expect("payload_hash present");
+    let hash_value = value.get("payload_hash").expect("payload_hash present");
     let arr = hash_value
         .as_array()
         .expect("payload_hash MUST be JSON array, not hex string");
     assert_eq!(arr.len(), 32, "payload_hash MUST be 32 bytes");
     // Verify the bytes match what we set (0..=31).
     for (i, v) in arr.iter().enumerate() {
-        assert_eq!(
-            v.as_u64(),
-            Some(i as u64),
-            "byte {i} mismatch: {v}"
-        );
+        assert_eq!(v.as_u64(), Some(i as u64), "byte {i} mismatch: {v}");
     }
 }
 
@@ -369,8 +360,7 @@ fn nested_in_connector_binary_symbol_set_preserved_through_cbor_roundtrip() {
 
     let mut buf = Vec::new();
     ciborium::ser::into_writer(&symbol_set, &mut buf).expect("encode");
-    let back: ConnectorBinarySymbolSet =
-        ciborium::de::from_reader(buf.as_slice()).expect("decode");
+    let back: ConnectorBinarySymbolSet = ciborium::de::from_reader(buf.as_slice()).expect("decode");
     assert_eq!(back.oti, symbol_set.oti);
 }
 

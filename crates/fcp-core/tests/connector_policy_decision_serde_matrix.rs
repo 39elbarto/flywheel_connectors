@@ -333,9 +333,9 @@ fn cbor_encodes_as_text_using_serde_form() {
                 s, *expected_serde,
                 "CBOR Text MUST be serde form (snake_case, no dot) for {variant:?}"
             ),
-            other => panic!(
-                "DecisionReasonCode MUST encode as Text({expected_serde:?}); got {other:?}"
-            ),
+            other => {
+                panic!("DecisionReasonCode MUST encode as Text({expected_serde:?}); got {other:?}")
+            }
         }
     }
 }
@@ -359,7 +359,10 @@ fn variants_pairwise_distinct_in_both_encodings() {
     let mut serde_seen = std::collections::HashSet::new();
     for (_, display, serde_tag) in ALL_REASON_CODES {
         assert!(display_seen.insert(*display), "duplicate Display {display}");
-        assert!(serde_seen.insert(*serde_tag), "duplicate serde tag {serde_tag}");
+        assert!(
+            serde_seen.insert(*serde_tag),
+            "duplicate serde tag {serde_tag}"
+        );
     }
     assert_eq!(display_seen.len(), 35);
     assert_eq!(serde_seen.len(), 35);

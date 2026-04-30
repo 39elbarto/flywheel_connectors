@@ -11,6 +11,31 @@
 use ciborium::Value as CborValue;
 use fcp_core::EnrollmentStatus;
 use serde_json::json;
+use std::error::Error;
+use std::fmt::Debug;
+
+type TestResult = Result<(), Box<dyn Error>>;
+
+fn err(message: impl Into<String>) -> Box<dyn Error> {
+    std::io::Error::other(message.into()).into()
+}
+
+fn ensure_eq<T>(actual: T, expected: T, context: &str) -> TestResult
+where
+    T: PartialEq + Debug,
+{
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(err(format!(
+            "{context}: expected {expected:?}, got {actual:?}"
+        )))
+    }
+}
+
+fn ensure(condition: bool, context: impl Into<String>) -> TestResult {
+    if condition { Ok(()) } else { Err(err(context)) }
+}
 
 const JOIN_RESPONSE_VARIANTS: &[(EnrollmentStatus, &str)] = &[
     (EnrollmentStatus::Pending, "pending"),
@@ -21,89 +46,103 @@ const JOIN_RESPONSE_VARIANTS: &[(EnrollmentStatus, &str)] = &[
 ];
 
 #[test]
-fn zone_join_response_display_and_json_tags_are_pinned() {
+fn zone_join_response_display_and_json_tags_are_pinned() -> TestResult {
     for &(variant, tag) in JOIN_RESPONSE_VARIANTS {
-        assert_eq!(
+        ensure_eq(
             variant.to_string(),
-            tag,
-            "Display for zone-join response {variant:?} drifted"
-        );
+            tag.to_string(),
+            &format!("Display for zone-join response {variant:?}"),
+        )?;
 
-        let json = serde_json::to_value(variant).unwrap();
-        assert_eq!(
+        let json = serde_json::to_value(variant)?;
+        ensure_eq(
             json,
             json!(tag),
-            "JSON serde tag for zone-join response {variant:?} drifted"
-        );
+            &format!("JSON serde tag for zone-join response {variant:?}"),
+        )?;
 
-        let decoded: EnrollmentStatus = serde_json::from_value(json).unwrap();
-        assert_eq!(decoded, variant);
+        let decoded: EnrollmentStatus = serde_json::from_value(json!(tag))?;
+        ensure_eq(decoded, variant, "JSON roundtrip")?;
     }
+
+    Ok(())
 }
 
 #[test]
-fn zone_join_response_cbor_tags_are_text_scalars() {
+fn zone_join_response_cbor_tags_are_text_scalars() -> TestResult {
     for &(variant, tag) in JOIN_RESPONSE_VARIANTS {
         let mut bytes = Vec::new();
-        ciborium::ser::into_writer(&variant, &mut bytes).unwrap();
+        ciborium::ser::into_writer(&variant, &mut bytes)?;
 
-        let decoded: EnrollmentStatus = ciborium::de::from_reader(bytes.as_slice()).unwrap();
-        assert_eq!(decoded, variant);
+        let decoded: EnrollmentStatus = ciborium::de::from_reader(bytes.as_slice())?;
+        ensure_eq(decoded, variant, "CBOR roundtrip")?;
 
-        let value: CborValue = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let value: CborValue = ciborium::de::from_reader(bytes.as_slice())?;
         match value {
-            CborValue::Text(text) => assert_eq!(text, tag),
-            other => panic!("zone-join response must encode as CBOR Text, got {other:?}"),
+            CborValue::Text(text) => ensure_eq(text, tag.to_string(), "CBOR text tag")?,
+            other => {
+                return Err(err(format!(
+                    "zone-join response must encode as CBOR Text, got {other:?}"
+                )));
+            }
         }
     }
+
+    Ok(())
 }
 
 #[test]
-fn zone_join_response_tags_are_distinct_and_complete() {
+fn zone_join_response_tags_are_distinct_and_complete() -> TestResult {
     let mut seen = std::collections::HashSet::new();
     for &(variant, tag) in JOIN_RESPONSE_VARIANTS {
-        assert!(
+        ensure(
             seen.insert(tag),
-            "duplicate zone-join response tag for {variant:?}: {tag}"
-        );
+            format!("duplicate zone-join response tag for {variant:?}: {tag}"),
+        )?;
     }
 
-    assert_eq!(
+    ensure_eq(
         seen,
         std::collections::HashSet::from(["pending", "approved", "rejected", "revoked", "expired"]),
-        "zone-join response variant set drifted"
-    );
+        "zone-join response variant set",
+    )?;
+
+    Ok(())
 }
 
 #[test]
-fn zone_join_response_rejects_noncanonical_tags() {
+fn zone_join_response_rejects_noncanonical_tags() -> TestResult {
     for bad in ["Pending", "Approved", "REJECTED", "revoked-zone", "unknown"] {
         let result: Result<EnrollmentStatus, _> = serde_json::from_value(json!(bad));
-        assert!(
+        ensure(
             result.is_err(),
-            "zone-join response must reject noncanonical tag `{bad}`, got {result:?}"
-        );
+            format!("zone-join response must reject noncanonical tag `{bad}`, got {result:?}"),
+        )?;
     }
+
+    Ok(())
 }
 
 #[test]
-fn zone_join_response_join_semantics_are_pinned() {
+fn zone_join_response_join_semantics_are_pinned() -> TestResult {
     for &(variant, _) in JOIN_RESPONSE_VARIANTS {
         let accepted = variant.is_enrolled();
         let renewable = variant.is_renewable();
 
-        assert_eq!(
+        ensure_eq(
             accepted,
             variant == EnrollmentStatus::Approved,
-            "{variant:?} join-accepted predicate drifted"
-        );
-        assert_eq!(
+            &format!("{variant:?} join-accepted predicate"),
+        )?;
+        ensure_eq(
             renewable,
             matches!(
                 variant,
                 EnrollmentStatus::Approved | EnrollmentStatus::Expired
             ),
-            "{variant:?} join-renewable predicate drifted"
-        );
+            &format!("{variant:?} join-renewable predicate"),
+        )?;
     }
+
+    Ok(())
 }

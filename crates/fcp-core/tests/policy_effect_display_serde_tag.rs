@@ -55,8 +55,7 @@ fn policy_effect_json_tags_are_pinned_per_variant() {
 fn policy_effect_json_and_cbor_roundtrip_preserves_variants() {
     for (variant, _) in POLICY_EFFECT_CASES {
         let json = serde_json::to_string(variant).expect("JSON serialize");
-        let from_json: PolicyPreviewDelta =
-            serde_json::from_str(&json).expect("JSON deserialize");
+        let from_json: PolicyPreviewDelta = serde_json::from_str(&json).expect("JSON deserialize");
         assert_eq!(*variant, from_json, "JSON round-trip lost {variant:?}");
 
         let mut cbor = Vec::new();

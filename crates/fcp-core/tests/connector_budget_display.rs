@@ -83,7 +83,7 @@ fn connector_budget_rejects_noncanonical_tags() {
 }
 
 #[test]
-fn connector_budget_tags_are_pairwise_distinct() {
+fn connector_budget_tags_are_pairwise_distinct() -> TestResult {
     assert_eq!(CASES.len(), 2);
     assert_ne!(BudgetStatus::Ok, BudgetStatus::Exceeded);
     assert_ne!(
@@ -91,7 +91,9 @@ fn connector_budget_tags_are_pairwise_distinct() {
         BudgetStatus::Exceeded.to_string()
     );
     assert_ne!(
-        serde_json::to_string(&BudgetStatus::Ok).expect("serialize ok"),
-        serde_json::to_string(&BudgetStatus::Exceeded).expect("serialize exceeded")
+        serde_json::to_string(&BudgetStatus::Ok)?,
+        serde_json::to_string(&BudgetStatus::Exceeded)?
     );
+
+    Ok(())
 }

@@ -74,7 +74,7 @@ fn indexed_lookup_v3_hit_matches_linear_scan_for_every_recipient() {
     let manifest = make_manifest_with_n_recipients(32);
     let recipients: Vec<TailscaleNodeId> =
         manifest.wrapped_keys.iter().map(|w| w.recipient.clone()).collect();
-    let indexed = IndexedZoneKeyManifest::new(manifest.clone());
+    let indexed = IndexedZoneKeyManifest::new(manifest.clone()).expect("unique recipients");
 
     for r in &recipients {
         let from_linear = manifest.wrapped_key_for(r);
@@ -92,7 +92,7 @@ fn indexed_lookup_v3_hit_matches_linear_scan_for_every_recipient() {
 #[test]
 fn indexed_lookup_miss_returns_none_like_linear_scan() {
     let manifest = make_manifest_with_n_recipients(8);
-    let indexed = IndexedZoneKeyManifest::new(manifest.clone());
+    let indexed = IndexedZoneKeyManifest::new(manifest.clone()).expect("unique recipients");
     let missing = node("nonexistent");
     assert!(manifest.wrapped_key_for(&missing).is_none());
     assert!(indexed.wrapped_key_for(&missing).is_none());
@@ -121,7 +121,7 @@ fn indexed_lookup_v4_hit_matches_linear_scan() {
         v4_recipients.push(recipient);
     }
 
-    let indexed = IndexedZoneKeyManifest::new(manifest.clone());
+    let indexed = IndexedZoneKeyManifest::new(manifest.clone()).expect("unique recipients");
     for r in &v4_recipients {
         let linear = manifest.wrapped_key_v4_for(r);
         let from_idx = indexed.wrapped_key_v4_for(r);
@@ -165,7 +165,7 @@ fn indexed_resolved_wrapped_key_for_prefers_v4_then_v3() {
         sealed: WrappedKey::from_xwing(bob_sealed),
     });
 
-    let indexed = IndexedZoneKeyManifest::new(manifest.clone());
+    let indexed = IndexedZoneKeyManifest::new(manifest.clone()).expect("unique recipients");
 
     // Alice resolves via V3 fallback in BOTH paths.
     let alice_lin = manifest.resolved_wrapped_key_for(&alice).expect("alice via linear");
@@ -189,7 +189,7 @@ fn indexed_into_inner_returns_byte_equal_manifest() {
     let original_cbor =
         fcp_cbor::to_canonical_cbor(&manifest).expect("original encodes");
 
-    let indexed = IndexedZoneKeyManifest::new(manifest);
+    let indexed = IndexedZoneKeyManifest::new(manifest).expect("unique recipients");
     let recovered = indexed.into_inner();
     let recovered_cbor =
         fcp_cbor::to_canonical_cbor(&recovered).expect("recovered encodes");
@@ -203,7 +203,7 @@ fn indexed_into_inner_returns_byte_equal_manifest() {
 #[test]
 fn indexed_manifest_borrow_exposes_non_lookup_fields() {
     let manifest = make_manifest_with_n_recipients(4);
-    let indexed = IndexedZoneKeyManifest::new(manifest.clone());
+    let indexed = IndexedZoneKeyManifest::new(manifest.clone()).expect("unique recipients");
     let m = indexed.manifest();
     assert_eq!(m.kem, manifest.kem);
     assert_eq!(m.zone_key_id, manifest.zone_key_id);
@@ -213,7 +213,7 @@ fn indexed_manifest_borrow_exposes_non_lookup_fields() {
 #[test]
 fn indexed_lookup_with_zero_recipients_works() {
     let manifest = make_manifest_with_n_recipients(0);
-    let indexed = IndexedZoneKeyManifest::new(manifest);
+    let indexed = IndexedZoneKeyManifest::new(manifest).expect("unique recipients");
     assert!(indexed.wrapped_key_for(&node("alice")).is_none());
     assert!(indexed.wrapped_key_v4_for(&node("alice")).is_none());
     assert!(indexed.resolved_wrapped_key_for(&node("alice")).is_none());

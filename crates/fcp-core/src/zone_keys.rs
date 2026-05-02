@@ -2,12 +2,12 @@
 //!
 //! Implements `ZoneKeyManifest` objects and HPKE-wrapped zone keys.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use fcp_crypto::{
-    CryptoError, Fcp2Aad, HpkeSealedBox, X25519PublicKey, X25519SecretKey, XWingSealedBox,
-    hpke_open, hpke_seal,
+    CryptoError, Fcp2Aad, Fcp4Aad, HpkeSealedBox, X25519PublicKey, X25519SecretKey, XWingKem,
+    XWingSealedBox, XWingSecretKey, hpke_open, hpke_seal,
 };
 use serde::{Deserialize, Serialize};
 
@@ -645,8 +645,17 @@ impl ZoneKeyManifest {
         out
     }
 
-    /// Reject manifests with split-view recipients (br-shbvv). See
-    /// [`Self::split_view_recipients`] for the structural definition.
+    /// Reject manifests with split-view recipients (br-shbvv) or
+    /// duplicate-recipient wraps (br-vzn2p).
+    ///
+    /// See [`Self::split_view_recipients`] for the structural
+    /// definition of the V3↔V4 split. The duplicate-recipient guard
+    /// rejects any manifest whose `wrapped_keys`, `wrapped_keys_v4`,
+    /// or `wrapped_object_id_keys` lists contain the same recipient
+    /// more than once: linear-scan lookup returns the FIRST entry
+    /// while [`IndexedZoneKeyManifest`] retains the LAST entry, so
+    /// duplicates would let two callers derive different wraps from
+    /// the same signed manifest.
     ///
     /// Strict issuers + verifiers should call this before publishing
     /// or applying a V4 manifest. Producers using only the
@@ -657,9 +666,46 @@ impl ZoneKeyManifest {
     ///
     /// # Errors
     ///
-    /// Returns [`ZoneKeyError::InconsistentRecipientWraps`] for the
-    /// first split-view recipient encountered.
+    /// Returns [`ZoneKeyError::DuplicateRecipientInManifest`] for the
+    /// first duplicate recipient encountered, otherwise
+    /// [`ZoneKeyError::InconsistentRecipientWraps`] for the first
+    /// split-view recipient encountered.
     pub fn validate_no_recipient_split_view(&self) -> ZoneKeyResult<()> {
+        fn first_duplicate<'a, E, F>(
+            entries: &'a [E],
+            recipient_of: F,
+        ) -> Option<&'a TailscaleNodeId>
+        where
+            F: Fn(&'a E) -> &'a TailscaleNodeId,
+        {
+            let mut seen: HashSet<&TailscaleNodeId> = HashSet::with_capacity(entries.len());
+            for e in entries {
+                let r = recipient_of(e);
+                if !seen.insert(r) {
+                    return Some(r);
+                }
+            }
+            None
+        }
+
+        if let Some(dup) = first_duplicate(&self.wrapped_keys, |e| &e.recipient) {
+            return Err(ZoneKeyError::DuplicateRecipientInManifest {
+                node_id: dup.as_str().to_string(),
+                list: "wrapped_keys",
+            });
+        }
+        if let Some(dup) = first_duplicate(&self.wrapped_keys_v4, |e| &e.recipient) {
+            return Err(ZoneKeyError::DuplicateRecipientInManifest {
+                node_id: dup.as_str().to_string(),
+                list: "wrapped_keys_v4",
+            });
+        }
+        if let Some(dup) = first_duplicate(&self.wrapped_object_id_keys, |e| &e.recipient) {
+            return Err(ZoneKeyError::DuplicateRecipientInManifest {
+                node_id: dup.as_str().to_string(),
+                list: "wrapped_object_id_keys",
+            });
+        }
         if let Some(first) = self.split_view_recipients().into_iter().next() {
             return Err(ZoneKeyError::InconsistentRecipientWraps {
                 node_id: first.as_str().to_string(),
@@ -815,38 +861,64 @@ impl IndexedZoneKeyManifest {
     /// cost once. The base manifest is consumed; reach back to it via
     /// [`Self::manifest`] (borrow) or [`Self::into_inner`] (consume).
     ///
-    /// **Duplicate recipient handling:** if the same recipient appears
-    /// in `wrapped_keys` more than once (which the manifest schema
-    /// allows in principle, though it is a malformed state), the
-    /// **last** occurrence wins for the lookup index. This matches
-    /// the implicit "last-writer-wins" semantics of `add_xwing_wrap`
-    /// and similar mutation helpers.
-    #[must_use]
-    pub fn new(manifest: ZoneKeyManifest) -> Self {
-        let wrapped_keys_index = manifest
-            .wrapped_keys
-            .iter()
-            .enumerate()
-            .map(|(i, e)| (e.recipient.clone(), i))
-            .collect();
-        let wrapped_keys_v4_index = manifest
-            .wrapped_keys_v4
-            .iter()
-            .enumerate()
-            .map(|(i, e)| (e.recipient.clone(), i))
-            .collect();
-        let wrapped_object_id_keys_index = manifest
-            .wrapped_object_id_keys
-            .iter()
-            .enumerate()
-            .map(|(i, e)| (e.recipient.clone(), i))
-            .collect();
-        Self {
+    /// **Duplicate recipient handling — fail closed (br-vzn2p):** if
+    /// the same recipient appears more than once in any of
+    /// `wrapped_keys`, `wrapped_keys_v4`, or `wrapped_object_id_keys`,
+    /// this constructor returns
+    /// [`ZoneKeyError::DuplicateRecipientInManifest`]. Linear-scan
+    /// lookup (`iter().find()`) returns the FIRST match while a
+    /// `HashMap`-backed index would retain the LAST inserted entry,
+    /// so silently accepting duplicates would let two callers derive
+    /// different effective wraps from the same signed manifest. That
+    /// is split-view ambiguity adjacent to
+    /// [`ZoneKeyError::InconsistentRecipientWraps`] and is rejected
+    /// pre-construction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZoneKeyError::DuplicateRecipientInManifest`] for the
+    /// first duplicate recipient encountered, naming the wrap list it
+    /// appeared in.
+    pub fn new(manifest: ZoneKeyManifest) -> ZoneKeyResult<Self> {
+        fn build_index<E, F>(
+            entries: &[E],
+            list: &'static str,
+            recipient_of: F,
+        ) -> ZoneKeyResult<HashMap<TailscaleNodeId, usize>>
+        where
+            F: Fn(&E) -> &TailscaleNodeId,
+        {
+            let mut idx = HashMap::with_capacity(entries.len());
+            for (i, e) in entries.iter().enumerate() {
+                let recipient = recipient_of(e);
+                if idx.insert(recipient.clone(), i).is_some() {
+                    return Err(ZoneKeyError::DuplicateRecipientInManifest {
+                        node_id: recipient.as_str().to_string(),
+                        list,
+                    });
+                }
+            }
+            Ok(idx)
+        }
+
+        let wrapped_keys_index = build_index(&manifest.wrapped_keys, "wrapped_keys", |e| {
+            &e.recipient
+        })?;
+        let wrapped_keys_v4_index =
+            build_index(&manifest.wrapped_keys_v4, "wrapped_keys_v4", |e| {
+                &e.recipient
+            })?;
+        let wrapped_object_id_keys_index = build_index(
+            &manifest.wrapped_object_id_keys,
+            "wrapped_object_id_keys",
+            |e| &e.recipient,
+        )?;
+        Ok(Self {
             inner: manifest,
             wrapped_keys_index,
             wrapped_keys_v4_index,
             wrapped_object_id_keys_index,
-        }
+        })
     }
 
     /// Borrow the underlying [`ZoneKeyManifest`] for fields that are
@@ -1047,6 +1119,38 @@ pub enum ZoneKeyError {
          non-promoted contents — V3 and V4 readers may resolve different zone keys"
     )]
     InconsistentRecipientWraps { node_id: String },
+    /// A recipient appears more than once in one of the wrap lists
+    /// (`wrapped_keys`, `wrapped_keys_v4`, or `wrapped_object_id_keys`)
+    /// of a [`ZoneKeyManifest`] (br-vzn2p).
+    ///
+    /// Linear-scan lookup (`iter().find()`) and indexed lookup
+    /// (`HashMap::insert` retains the LAST occurrence) would resolve
+    /// such a recipient to different wraps, reintroducing a split-view
+    /// ambiguity adjacent to [`Self::InconsistentRecipientWraps`].
+    /// Manifests with duplicate recipients are fail-closed at
+    /// `IndexedZoneKeyManifest::new` and at
+    /// [`ZoneKeyManifest::validate_no_recipient_split_view`].
+    #[error(
+        "duplicate recipient in manifest: recipient `{node_id}` appears more than once in \
+         `{list}` — linear and indexed lookups would resolve to different wraps"
+    )]
+    DuplicateRecipientInManifest {
+        node_id: String,
+        list: &'static str,
+    },
+    /// The recipient's effective wrap is a V4 X-Wing wrap, but the
+    /// caller invoked the V3-only [`ZoneKeyRing::apply_manifest`]
+    /// entry point — which has no X-Wing secret to open it.
+    /// Callers SHOULD switch to
+    /// [`ZoneKeyRing::apply_manifest_v4`] (br-f69kn) and pass the
+    /// recipient's X-Wing secret + an [`fcp_crypto::XWingKem`]
+    /// provider.
+    #[error(
+        "recipient `{node_id}` resolves to a V4 X-Wing wrap; call \
+         ZoneKeyRing::apply_manifest_v4 with an XWing secret + provider \
+         (br-f69kn)"
+    )]
+    XWingWrapRequiresV4Apply { node_id: String },
 }
 
 pub type ZoneKeyResult<T> = Result<T, ZoneKeyError>;
@@ -3921,6 +4025,187 @@ mod tests {
         // Should return the first match (issued_at_a)
         let found = manifest.wrapped_key_for(&node_id).unwrap();
         assert_eq!(found.issued_at, issued_at_a);
+    }
+
+    /// br-vzn2p: duplicate V3 recipients (different issued_at, so
+    /// distinct wrap material) are rejected fail-closed by
+    /// `IndexedZoneKeyManifest::new`. Without this guard the linear
+    /// scan returns the FIRST entry while the indexed lookup returns
+    /// the LAST, which lets two callers derive different wraps from
+    /// the same signed manifest.
+    #[test]
+    fn br_vzn2p_indexed_constructor_rejects_duplicate_v3_recipient() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("100.64.0.7");
+        let issued_at_a = 1_700_000_000;
+        let issued_at_b = 1_700_000_001;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let zone_key = random_zone_key();
+
+        let w1 = wrap_zone_key(&pk, &zone_id, &node_id, issued_at_a, &zone_key).unwrap();
+        let w2 = wrap_zone_key(&pk, &zone_id, &node_id, issued_at_b, &zone_key).unwrap();
+
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0x01; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0x11; 8]),
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at_a,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![w1, w2],
+            wrapped_object_id_keys: vec![],
+            rekey_policy: None,
+            signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
+        };
+
+        let err = IndexedZoneKeyManifest::new(manifest.clone())
+            .expect_err("duplicate V3 recipient must fail-close");
+        match err {
+            ZoneKeyError::DuplicateRecipientInManifest { node_id: id, list } => {
+                assert_eq!(id, node_id.as_str());
+                assert_eq!(list, "wrapped_keys");
+            }
+            other => panic!("expected DuplicateRecipientInManifest, got {other:?}"),
+        }
+
+        // The manifest's own validator must agree — fail-closed at the
+        // pre-publish gate as well as at the indexed-construction gate.
+        let val_err = manifest
+            .validate_no_recipient_split_view()
+            .expect_err("validator must reject duplicate V3 recipient");
+        assert!(matches!(
+            val_err,
+            ZoneKeyError::DuplicateRecipientInManifest { list: "wrapped_keys", .. }
+        ));
+    }
+
+    /// br-vzn2p: duplicate V4 recipients are rejected the same way.
+    /// Two distinct X-Wing wraps for the same recipient would let a
+    /// V4 reader resolve a different sealed box depending on whether
+    /// it walked the linear or indexed path.
+    #[test]
+    fn br_vzn2p_indexed_constructor_rejects_duplicate_v4_recipient() {
+        let zone_id = ZoneId::work();
+        let recipient = TailscaleNodeId::new("100.64.0.8");
+        let issued_at_a = 1_700_000_010;
+        let issued_at_b = 1_700_000_011;
+
+        let provider = XWingProvider::new();
+        let (pk_a, _sk_a) = provider.generate().unwrap();
+        let (pk_b, _sk_b) = provider.generate().unwrap();
+        let aad_a = Fcp4Aad::for_zone_key(zone_id.as_bytes(), recipient.as_str().as_bytes(), issued_at_a)
+            .encode()
+            .unwrap();
+        let aad_b = Fcp4Aad::for_zone_key(zone_id.as_bytes(), recipient.as_str().as_bytes(), issued_at_b)
+            .encode()
+            .unwrap();
+        let sealed_a = provider.seal(&pk_a, b"zone-key-bytes-a", &aad_a).unwrap();
+        let sealed_b = provider.seal(&pk_b, b"zone-key-bytes-b", &aad_b).unwrap();
+
+        let v4_a = WrappedZoneKeyV4 {
+            recipient: recipient.clone(),
+            issued_at: issued_at_a,
+            sealed: WrappedKey::from_xwing(sealed_a),
+        };
+        let v4_b = WrappedZoneKeyV4 {
+            recipient: recipient.clone(),
+            issued_at: issued_at_b,
+            sealed: WrappedKey::from_xwing(sealed_b),
+        };
+
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0x02; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0x12; 8]),
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at_a,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![],
+            wrapped_object_id_keys: vec![],
+            rekey_policy: None,
+            signature: test_signature(),
+            kem: ZoneKemAlgorithm::XWing,
+            wrapped_keys_v4: vec![v4_a, v4_b],
+        };
+
+        let err = IndexedZoneKeyManifest::new(manifest.clone())
+            .expect_err("duplicate V4 recipient must fail-close");
+        match err {
+            ZoneKeyError::DuplicateRecipientInManifest { node_id: id, list } => {
+                assert_eq!(id, recipient.as_str());
+                assert_eq!(list, "wrapped_keys_v4");
+            }
+            other => panic!("expected DuplicateRecipientInManifest, got {other:?}"),
+        }
+
+        let val_err = manifest
+            .validate_no_recipient_split_view()
+            .expect_err("validator must reject duplicate V4 recipient");
+        assert!(matches!(
+            val_err,
+            ZoneKeyError::DuplicateRecipientInManifest { list: "wrapped_keys_v4", .. }
+        ));
+    }
+
+    /// br-vzn2p: duplicate `wrapped_object_id_keys` entries close the
+    /// third (and final) wrap-list surface.
+    #[test]
+    fn br_vzn2p_indexed_constructor_rejects_duplicate_object_id_recipient() {
+        let zone_id = ZoneId::work();
+        let recipient = TailscaleNodeId::new("100.64.0.9");
+        let issued_at_a = 1_700_000_020;
+        let issued_at_b = 1_700_000_021;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let key_a = random_object_id_key();
+        let key_b = random_object_id_key();
+
+        let w1 = wrap_object_id_key(&pk, &zone_id, &recipient, issued_at_a, &key_a).unwrap();
+        let w2 = wrap_object_id_key(&pk, &zone_id, &recipient, issued_at_b, &key_b).unwrap();
+
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0x03; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0x13; 8]),
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at_a,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![],
+            wrapped_object_id_keys: vec![w1, w2],
+            rekey_policy: None,
+            signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
+        };
+
+        let err = IndexedZoneKeyManifest::new(manifest.clone())
+            .expect_err("duplicate object-id recipient must fail-close");
+        match err {
+            ZoneKeyError::DuplicateRecipientInManifest { node_id: id, list } => {
+                assert_eq!(id, recipient.as_str());
+                assert_eq!(list, "wrapped_object_id_keys");
+            }
+            other => panic!("expected DuplicateRecipientInManifest, got {other:?}"),
+        }
+
+        let val_err = manifest
+            .validate_no_recipient_split_view()
+            .expect_err("validator must reject duplicate object-id recipient");
+        assert!(matches!(
+            val_err,
+            ZoneKeyError::DuplicateRecipientInManifest { list: "wrapped_object_id_keys", .. }
+        ));
     }
 
     /// br-gtplu: when a recipient has only a V3 wrap (no entry in

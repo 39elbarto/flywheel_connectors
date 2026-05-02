@@ -95,7 +95,7 @@ fn bench_v3_hit_lookup(c: &mut Criterion) {
             });
         });
 
-        let indexed = IndexedZoneKeyManifest::new(manifest);
+        let indexed = IndexedZoneKeyManifest::new(manifest).expect("benchmark fixtures have unique recipients");
         group.bench_function(format!("indexed_o1/n={n}"), |b| {
             b.iter(|| {
                 let r = black_box(indexed.wrapped_key_for(black_box(&target)));
@@ -128,7 +128,7 @@ fn bench_v3_miss_lookup(c: &mut Criterion) {
             });
         });
 
-        let indexed = IndexedZoneKeyManifest::new(manifest);
+        let indexed = IndexedZoneKeyManifest::new(manifest).expect("benchmark fixtures have unique recipients");
         group.bench_function(format!("indexed_o1/n={n}"), |b| {
             b.iter(|| {
                 let r = black_box(indexed.wrapped_key_for(black_box(&missing)));
@@ -155,7 +155,10 @@ fn bench_index_construction(c: &mut Criterion) {
         let (manifest, _) = make_manifest(n);
         group.bench_function(format!("n={n}"), |b| {
             b.iter(|| {
-                let idx = black_box(IndexedZoneKeyManifest::new(black_box(manifest.clone())));
+                let idx = black_box(
+                    IndexedZoneKeyManifest::new(black_box(manifest.clone()))
+                        .expect("benchmark fixtures have unique recipients"),
+                );
                 drop(idx);
             });
         });

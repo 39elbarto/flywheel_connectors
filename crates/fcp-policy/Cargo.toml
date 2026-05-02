@@ -7,7 +7,9 @@ license = "Apache-2.0"
 publish = false
 
 [dependencies]
+blake3 = { workspace = true }
 fcp-core = { path = "../fcp-core" }
+fcp-crypto-pq = { path = "../fcp-crypto-pq" }
 fcp-evidence = { path = "../fcp-evidence" }
 hex = { workspace = true }
 serde = { workspace = true }

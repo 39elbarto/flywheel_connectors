@@ -317,8 +317,8 @@ pub mod lattice_delegation;
 
 pub use lattice_delegation::{
     DelegationCertificate, DelegationCertificateId, DelegationPeriod, LatticeDelegationError,
-    LatticeDelegationVerifier, LatticeSubToken, LatticeVerificationReceipt,
-    UnimplementedLatticeDelegationVerifier,
+    LatticeDelegationVerifier, LatticeDelegationVerifierImpl, LatticeSubToken,
+    LatticeVerificationReceipt, UnimplementedLatticeDelegationVerifier,
 };
 
 // ── Error Types ────────────────────────────────────────────────────

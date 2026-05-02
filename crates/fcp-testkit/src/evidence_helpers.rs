@@ -796,6 +796,422 @@ fn component_percentiles(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Swarm decision cards
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Schema tag for operator-facing adaptive decision cards.
+pub const SWARM_DECISION_CARD_SCHEMA_VERSION: &str = "swarm-decision-card/v1";
+
+/// Adaptive subsystem that produced a decision card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmDecisionDomain {
+    /// Host invoke scheduling or dispatch policy.
+    Scheduler,
+    /// Connector, task, or resource-pool placement policy.
+    Placement,
+    /// Admission, throttling, shedding, or retry backpressure policy.
+    Backpressure,
+}
+
+impl SwarmDecisionDomain {
+    /// Stable machine label for this decision domain.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Scheduler => "scheduler",
+            Self::Placement => "placement",
+            Self::Backpressure => "backpressure",
+        }
+    }
+}
+
+/// Action selected by an adaptive swarm component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmDecisionAction {
+    /// Admit work immediately.
+    Admit,
+    /// Dispatch work to an executor or connector.
+    Dispatch,
+    /// Delay work without rejecting it.
+    Delay,
+    /// Place work in a specific pool, node, or topology slot.
+    Place,
+    /// Throttle caller or downstream rate.
+    Throttle,
+    /// Shed work intentionally.
+    Shed,
+    /// Reject work without retry.
+    Reject,
+    /// Use deterministic conservative behavior instead of adaptive behavior.
+    Fallback,
+}
+
+impl SwarmDecisionAction {
+    /// Stable machine label for this action.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admit => "admit",
+            Self::Dispatch => "dispatch",
+            Self::Delay => "delay",
+            Self::Place => "place",
+            Self::Throttle => "throttle",
+            Self::Shed => "shed",
+            Self::Reject => "reject",
+            Self::Fallback => "fallback",
+        }
+    }
+}
+
+/// Calibration state recorded beside an adaptive decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmCalibrationStatus {
+    /// No adaptive calibration was needed for this decision.
+    NotRequired,
+    /// Calibration was present and within its accepted envelope.
+    Valid,
+    /// Calibration detected drift and adaptive behavior should fall back.
+    DriftDetected,
+    /// Required telemetry was absent.
+    MissingTelemetry,
+    /// Replay could not reproduce the selected action.
+    ReplayMismatch,
+}
+
+impl SwarmCalibrationStatus {
+    /// Whether this calibration state requires conservative fallback.
+    #[must_use]
+    pub const fn requires_fallback(self) -> bool {
+        matches!(
+            self,
+            Self::DriftDetected | Self::MissingTelemetry | Self::ReplayMismatch
+        )
+    }
+}
+
+/// One expected-loss term that contributed to an adaptive choice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmDecisionLossTerm {
+    /// Stable loss term name, such as `p99_queueing` or `zone_fairness`.
+    pub name: String,
+    /// Measured or modeled value for this term.
+    pub value: i64,
+    /// Weight in millionths, avoiding floating-point drift in evidence records.
+    pub weight_microunits: i64,
+    /// Unit label for the value.
+    pub unit: String,
+}
+
+impl SwarmDecisionLossTerm {
+    /// Build one deterministic expected-loss term.
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        value: i64,
+        weight_microunits: i64,
+        unit: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            value,
+            weight_microunits,
+            unit: unit.into(),
+        }
+    }
+
+    /// Weighted score for comparing terms and actions.
+    #[must_use]
+    pub fn weighted_score(&self) -> i128 {
+        i128::from(self.value).saturating_mul(i128::from(self.weight_microunits))
+    }
+}
+
+/// Next-best action retained so operators can inspect the counterfactual.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmDecisionCounterfactual {
+    /// Action that was not selected.
+    pub action: SwarmDecisionAction,
+    /// Deterministic expected-loss score for the counterfactual.
+    pub expected_loss_score: i64,
+    /// Short explanation for why the counterfactual lost.
+    pub reason: String,
+}
+
+impl SwarmDecisionCounterfactual {
+    /// Build a counterfactual action record.
+    #[must_use]
+    pub fn new(
+        action: SwarmDecisionAction,
+        expected_loss_score: i64,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            action,
+            expected_loss_score,
+            reason: reason.into(),
+        }
+    }
+}
+
+/// Source class for a replay or evidence pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmDecisionEvidenceKind {
+    /// Inline data in the card is sufficient for replay.
+    InlineSummary,
+    /// Durable artifact expected inside a replayable bundle.
+    BundleArtifact,
+    /// Live-only source. Cards with this pointer are not offline replayable.
+    LiveService,
+}
+
+/// Redaction-safe pointer to evidence that explains a decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmDecisionEvidencePointer {
+    /// Evidence source class.
+    pub kind: SwarmDecisionEvidenceKind,
+    /// Stable artifact or evidence handle.
+    pub handle: String,
+    /// Optional digest for bundle artifact integrity checks.
+    pub digest: Option<String>,
+    /// Whether the pointed artifact was redacted.
+    pub redacted: bool,
+}
+
+impl SwarmDecisionEvidencePointer {
+    /// Build a pointer to a bundle artifact.
+    #[must_use]
+    pub fn bundle_artifact(
+        handle: impl Into<String>,
+        digest: impl Into<String>,
+        redacted: bool,
+    ) -> Self {
+        Self {
+            kind: SwarmDecisionEvidenceKind::BundleArtifact,
+            handle: handle.into(),
+            digest: Some(digest.into()),
+            redacted,
+        }
+    }
+
+    /// Build an inline evidence pointer.
+    #[must_use]
+    pub fn inline_summary(handle: impl Into<String>) -> Self {
+        Self {
+            kind: SwarmDecisionEvidenceKind::InlineSummary,
+            handle: handle.into(),
+            digest: None,
+            redacted: false,
+        }
+    }
+
+    /// Build a live-service pointer for diagnostics that cannot be replayed offline.
+    #[must_use]
+    pub fn live_service(handle: impl Into<String>) -> Self {
+        Self {
+            kind: SwarmDecisionEvidenceKind::LiveService,
+            handle: handle.into(),
+            digest: None,
+            redacted: false,
+        }
+    }
+
+    /// Whether replay needs a live service for this pointer.
+    #[must_use]
+    pub const fn requires_live_service(&self) -> bool {
+        matches!(self.kind, SwarmDecisionEvidenceKind::LiveService)
+    }
+}
+
+/// Conservative fallback metadata for adaptive components.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmDecisionFallback {
+    /// Whether the selected action is already using fallback behavior.
+    pub active: bool,
+    /// Deterministic fallback action.
+    pub action: SwarmDecisionAction,
+    /// Reason fallback was or would be selected.
+    pub reason: Option<String>,
+}
+
+impl SwarmDecisionFallback {
+    /// Build inactive fallback metadata with the fallback action that remains available.
+    #[must_use]
+    pub const fn available(action: SwarmDecisionAction) -> Self {
+        Self {
+            active: false,
+            action,
+            reason: None,
+        }
+    }
+
+    /// Build active fallback metadata.
+    #[must_use]
+    pub fn active(action: SwarmDecisionAction, reason: impl Into<String>) -> Self {
+        Self {
+            active: true,
+            action,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
+/// Operator-facing card explaining one adaptive swarm decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmDecisionCard {
+    /// Card schema version.
+    pub schema_version: String,
+    /// Stable card identifier.
+    pub card_id: String,
+    /// Optional swarm scenario identifier.
+    pub scenario_id: Option<String>,
+    /// Adaptive subsystem that produced the decision.
+    pub domain: SwarmDecisionDomain,
+    /// Subject being scheduled, placed, admitted, throttled, or shed.
+    pub subject: String,
+    /// State label that the policy evaluated.
+    pub state: String,
+    /// Selected action.
+    pub action: SwarmDecisionAction,
+    /// Deterministic score for the selected action.
+    pub selected_loss_score: i64,
+    /// Expected-loss terms used to compute the selected action.
+    pub loss_terms: Vec<SwarmDecisionLossTerm>,
+    /// Calibration state for the adaptive policy.
+    pub calibration: SwarmCalibrationStatus,
+    /// Fallback metadata.
+    pub fallback: SwarmDecisionFallback,
+    /// Next-best action, when available.
+    pub counterfactual: Option<SwarmDecisionCounterfactual>,
+    /// Redaction-safe pointers to evidence used by the decision.
+    pub evidence_pointers: Vec<SwarmDecisionEvidencePointer>,
+    /// Offline replay inputs captured as stable JSON values.
+    pub replay_inputs: BTreeMap<String, Value>,
+    /// Creation time for the card.
+    pub created_at: DateTime<Utc>,
+}
+
+impl SwarmDecisionCard {
+    /// Build a decision card with the stable schema version.
+    #[must_use]
+    pub fn new(
+        card_id: impl Into<String>,
+        domain: SwarmDecisionDomain,
+        subject: impl Into<String>,
+        state: impl Into<String>,
+        action: SwarmDecisionAction,
+        selected_loss_score: i64,
+        fallback: SwarmDecisionFallback,
+    ) -> Self {
+        Self {
+            schema_version: SWARM_DECISION_CARD_SCHEMA_VERSION.to_string(),
+            card_id: card_id.into(),
+            scenario_id: None,
+            domain,
+            subject: subject.into(),
+            state: state.into(),
+            action,
+            selected_loss_score,
+            loss_terms: Vec::new(),
+            calibration: SwarmCalibrationStatus::NotRequired,
+            fallback,
+            counterfactual: None,
+            evidence_pointers: Vec::new(),
+            replay_inputs: BTreeMap::new(),
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Attach a swarm latency scenario identifier.
+    #[must_use]
+    pub fn with_scenario(mut self, scenario_id: impl Into<String>) -> Self {
+        self.scenario_id = Some(scenario_id.into());
+        self
+    }
+
+    /// Attach deterministic loss terms.
+    #[must_use]
+    pub fn with_loss_terms(mut self, loss_terms: Vec<SwarmDecisionLossTerm>) -> Self {
+        self.loss_terms = loss_terms;
+        self
+    }
+
+    /// Attach calibration state.
+    #[must_use]
+    pub const fn with_calibration(mut self, calibration: SwarmCalibrationStatus) -> Self {
+        self.calibration = calibration;
+        self
+    }
+
+    /// Attach the next-best action.
+    #[must_use]
+    pub fn with_counterfactual(mut self, counterfactual: SwarmDecisionCounterfactual) -> Self {
+        self.counterfactual = Some(counterfactual);
+        self
+    }
+
+    /// Attach redaction-safe evidence pointers.
+    #[must_use]
+    pub fn with_evidence_pointers(
+        mut self,
+        evidence_pointers: Vec<SwarmDecisionEvidencePointer>,
+    ) -> Self {
+        self.evidence_pointers = evidence_pointers;
+        self
+    }
+
+    /// Attach offline replay inputs.
+    #[must_use]
+    pub fn with_replay_inputs(mut self, replay_inputs: BTreeMap<String, Value>) -> Self {
+        self.replay_inputs = replay_inputs;
+        self
+    }
+
+    /// Loss term with the largest weighted score.
+    #[must_use]
+    pub fn dominant_loss_term(&self) -> Option<&SwarmDecisionLossTerm> {
+        self.loss_terms
+            .iter()
+            .max_by_key(|term| term.weighted_score())
+    }
+
+    /// Whether this card can be replayed from bundle artifacts without live services.
+    #[must_use]
+    pub fn is_replayable_offline(&self) -> bool {
+        !self.replay_inputs.is_empty()
+            && !self
+                .evidence_pointers
+                .iter()
+                .any(SwarmDecisionEvidencePointer::requires_live_service)
+    }
+
+    /// Whether the adaptive feature can be disabled while retaining auditability.
+    #[must_use]
+    pub fn safe_to_disable(&self) -> bool {
+        self.is_replayable_offline()
+            && (self.fallback.action == SwarmDecisionAction::Fallback
+                || self.fallback.active
+                || self.calibration.requires_fallback())
+    }
+
+    /// Render as a typed JSONL record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serde error if the card cannot be converted to JSON.
+    pub fn to_jsonl_value(&self) -> Result<Value, serde_json::Error> {
+        Ok(json!({
+            "record_type": "swarm_decision_card",
+            "schema_version": self.schema_version,
+            "card": serde_json::to_value(self)?,
+        }))
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Assertions
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1307,6 +1723,109 @@ mod tests {
         );
         assert_eq!(bundle.summaries[0].total.p99_ns, 750);
         Ok(())
+    }
+
+    #[test]
+    fn swarm_decision_card_serializes_operator_contract() -> Result<(), Box<dyn Error>> {
+        let card = SwarmDecisionCard::new(
+            "card-1",
+            SwarmDecisionDomain::Scheduler,
+            "invoke:gmail.search",
+            "queue_congested",
+            SwarmDecisionAction::Delay,
+            120,
+            SwarmDecisionFallback::available(SwarmDecisionAction::Fallback),
+        )
+        .with_scenario("host_batch_invoke_10000")
+        .with_loss_terms(vec![
+            SwarmDecisionLossTerm::new("p99_queueing", 3_000, 1_000_000, "ns"),
+            SwarmDecisionLossTerm::new("zone_fairness", 2, 2_000_000, "violations"),
+        ])
+        .with_calibration(SwarmCalibrationStatus::Valid)
+        .with_counterfactual(SwarmDecisionCounterfactual::new(
+            SwarmDecisionAction::Dispatch,
+            900,
+            "would amplify p99 queueing",
+        ))
+        .with_evidence_pointers(vec![
+            SwarmDecisionEvidencePointer::bundle_artifact(
+                "raw_samples.jsonl#host_batch_invoke_10000",
+                "blake3:abc123",
+                true,
+            ),
+            SwarmDecisionEvidencePointer::inline_summary("summary.p99_queueing"),
+        ])
+        .with_replay_inputs(BTreeMap::from([
+            ("queue_depth".to_string(), json!(512)),
+            ("zone".to_string(), json!("z:project:mail")),
+        ]));
+
+        let record = card.to_jsonl_value()?;
+        let roundtrip: SwarmDecisionCard = serde_json::from_value(record["card"].clone())?;
+
+        assert_eq!(roundtrip, card);
+        assert_eq!(record["record_type"], "swarm_decision_card");
+        assert_eq!(record["schema_version"], SWARM_DECISION_CARD_SCHEMA_VERSION);
+        assert_eq!(card.domain.as_str(), "scheduler");
+        assert_eq!(card.action.as_str(), "delay");
+        assert!(card.is_replayable_offline());
+        assert!(card.safe_to_disable());
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_decision_card_marks_live_only_evidence_non_replayable() {
+        let card = SwarmDecisionCard::new(
+            "card-live",
+            SwarmDecisionDomain::Backpressure,
+            "connector:stripe",
+            "downstream_throttled",
+            SwarmDecisionAction::Throttle,
+            25,
+            SwarmDecisionFallback::available(SwarmDecisionAction::Fallback),
+        )
+        .with_evidence_pointers(vec![SwarmDecisionEvidencePointer::live_service(
+            "https://live-host.example/status",
+        )])
+        .with_replay_inputs(BTreeMap::from([("retry_after_ms".to_string(), json!(250))]));
+
+        assert!(!card.is_replayable_offline());
+        assert!(!card.safe_to_disable());
+    }
+
+    #[test]
+    fn swarm_decision_card_identifies_dominant_loss_term() -> Result<(), &'static str> {
+        let card = SwarmDecisionCard::new(
+            "card-loss",
+            SwarmDecisionDomain::Placement,
+            "connector:github",
+            "numa_pressure",
+            SwarmDecisionAction::Place,
+            80,
+            SwarmDecisionFallback::available(SwarmDecisionAction::Fallback),
+        )
+        .with_loss_terms(vec![
+            SwarmDecisionLossTerm::new("rss_bytes", 512, 100, "bytes"),
+            SwarmDecisionLossTerm::new("cross_numa_hops", 7, 10_000, "count"),
+            SwarmDecisionLossTerm::new("cpu_headroom", 3, 1_000, "cores"),
+        ]);
+
+        let dominant = card
+            .dominant_loss_term()
+            .ok_or("decision card should have loss terms")?;
+
+        assert_eq!(dominant.name, "cross_numa_hops");
+        assert_eq!(dominant.weighted_score(), 70_000);
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_decision_card_calibration_statuses_pin_fallback_triggers() {
+        assert!(!SwarmCalibrationStatus::NotRequired.requires_fallback());
+        assert!(!SwarmCalibrationStatus::Valid.requires_fallback());
+        assert!(SwarmCalibrationStatus::DriftDetected.requires_fallback());
+        assert!(SwarmCalibrationStatus::MissingTelemetry.requires_fallback());
+        assert!(SwarmCalibrationStatus::ReplayMismatch.requires_fallback());
     }
 
     #[test]

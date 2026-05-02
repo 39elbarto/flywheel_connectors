@@ -47,7 +47,7 @@ pub mod purpose {
 }
 
 /// HPKE sealed box containing encapsulated key and ciphertext.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HpkeSealedBox {
     /// Encapsulated key (ephemeral public key).
     #[serde(with = "hex::serde")]

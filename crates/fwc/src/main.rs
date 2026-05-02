@@ -120,6 +120,7 @@ mod batch_progress;
 mod bench_cmd;
 #[cfg(test)]
 mod bench_helpers;
+mod bootstrap_migrate_owner_key;
 #[allow(dead_code)]
 mod catalog;
 #[allow(dead_code)] // Event checkpoint and replay from sequence/time.
@@ -290,7 +291,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use fcp_prelude::{ApprovalToken, CapabilityToken, ConnectorTarget, ZoneId};
 use fcp_crypto::{
     Ed25519Signature, Ed25519VerifyingKey, canonicalize::to_deterministic_cbor, cose::CoseToken,
 };
@@ -323,6 +323,7 @@ use fcp_kernel::{
     SupplyChainAttestation,
 };
 use fcp_manifest::ConnectorManifest;
+use fcp_prelude::{ApprovalToken, CapabilityToken, ConnectorTarget, ZoneId};
 use fcp_registry::{
     AttestationEvidence as RegistryAttestationEvidence, ConnectorBundle,
     MANIFEST_SIGNATURE_CONTEXT, ManifestSignatureArtifact, RegistryTrustPolicy, RegistryVerifier,
@@ -387,6 +388,7 @@ Examples:
   fwc auth list
   fwc auth add github --token <token>
   fwc auth status
+  fwc bootstrap migrate-owner-key --from v3 --to v4 --dry-run --evidence-bundle owner-migration.json
   fwc list
   fwc plan \"create a GitHub issue titled 'FWC: add workflow macros'\"
   fwc explain \"find the Notion page named Roadmap and append this summary\"
@@ -532,6 +534,9 @@ enum Commands {
     /// Verify or summarize supply-chain evidence for a connector artifact.
     #[command(name = "supply-chain")]
     SupplyChain(supply_chain_cmd::SupplyChainArgs),
+
+    /// Run bootstrap and owner-key transition ceremonies.
+    Bootstrap(BootstrapArgs),
 
     /// Work with audit-chain artifacts and reports.
     Audit(audit_chain::AuditArgs),
@@ -737,6 +742,20 @@ struct GuideArgs {
     /// Narrow the guide to a specific top-level command.
     #[arg(long)]
     command: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct BootstrapArgs {
+    #[command(subcommand)]
+    command: BootstrapCommand,
+}
+
+#[derive(Subcommand, Debug, Serialize)]
+#[serde(tag = "subcommand", content = "args", rename_all = "kebab-case")]
+enum BootstrapCommand {
+    /// Build the V3 Ed25519 to V4 ML-DSA-65 owner-key migration attestation.
+    #[command(name = "migrate-owner-key")]
+    MigrateOwnerKey(bootstrap_migrate_owner_key::MigrateOwnerKeyArgs),
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -3205,6 +3224,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Schema(args) => schema_dispatch(args, cli.host.as_deref())?,
         Commands::Examples(args) => examples_dispatch(args, cli.host.as_deref())?,
         Commands::SupplyChain(_) => passthrough_only_dispatch("supply-chain"),
+        Commands::Bootstrap(args) => bootstrap_dispatch(args)?,
         Commands::Audit(args) => audit_dispatch(args)?,
         Commands::Manifest(_) => passthrough_only_dispatch("manifest"),
         Commands::Net(_) => passthrough_only_dispatch("net"),
@@ -3250,6 +3270,18 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
     };
 
     Ok(outcome)
+}
+
+fn bootstrap_dispatch(args: &BootstrapArgs) -> Result<DispatchOutcome> {
+    match &args.command {
+        BootstrapCommand::MigrateOwnerKey(args) => {
+            let output = bootstrap_migrate_owner_key::run(args)?;
+            Ok(DispatchOutcome {
+                payload: serde_json::to_value(output)?,
+                exit_code: CliExitCode::Success,
+            })
+        }
+    }
 }
 
 // ── tail / watch dispatch ────────────────────────────────────────────────
@@ -25571,10 +25603,6 @@ mod tests {
     };
     use chrono::{Duration as ChronoDuration, Utc};
     use clap::CommandFactory;
-    use fcp_prelude::{
-        BudgetEnforcement, BudgetStatus, ConnectorHealth, ConnectorTarget, InvokeResponse,
-        RequestId, UsageBudgetSnapshot, UsageBudgetUsage, UsageMetricKind, ZoneId,
-    };
     use fcp_crypto::Ed25519SigningKey;
     use fcp_host::{
         BudgetReportResponse as HostBudgetReportResponse,
@@ -25583,6 +25611,10 @@ mod tests {
         DiscoveryResponse as HostDiscoveryResponse, DoctorReport as HostDoctorReport,
         IntrospectionResponse as HostIntrospectionResponse, ManagedConnectorConfig,
         PreflightResponse as HostPreflightResponse, StartupReconciliationReport,
+    };
+    use fcp_prelude::{
+        BudgetEnforcement, BudgetStatus, ConnectorHealth, ConnectorTarget, InvokeResponse,
+        RequestId, UsageBudgetSnapshot, UsageBudgetUsage, UsageMetricKind, ZoneId,
     };
     use fcp_registry::ManifestSignatureArtifact;
     use serde_json::{Value, json};

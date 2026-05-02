@@ -24,6 +24,7 @@
 //! - [`hpke_seal`] - HPKE (RFC 9180) for sealed boxes
 //! - [`cose`] - `COSE_Sign1/CWT` helpers for capability tokens
 //! - [`kid`] - Key identifier (KID) types
+//! - [`ml_dsa`] - FIPS 204 ML-DSA-65 (post-quantum signatures, owner-key V4)
 //! - [`owner_key`] - owner-key migration traits and attestation envelopes
 //! - [`shamir`] - Shamir secret sharing (split, seal, reconstruct) for owner-key distribution
 //! - [`canonicalize`] - Signature canonicalization helpers
@@ -96,6 +97,7 @@ pub mod hkdf;
 pub mod hpke_seal;
 pub mod kid;
 pub mod mac;
+pub mod ml_dsa;
 pub mod owner_key;
 pub mod shamir;
 pub mod x25519;
@@ -124,12 +126,12 @@ pub use hkdf::{
 pub use hpke_seal::{Fcp2Aad, HpkeSealedBox, hpke_open, hpke_seal};
 pub use kid::KeyId;
 pub use mac::{Blake3Mac, MacKey, blake3_mac, blake3_mac_full, blake3_mac_verify};
+pub use ml_dsa::{ML_DSA_65_SEED_SIZE, MlDsa65SigningKey, MlDsa65VerifyingKey};
 pub use owner_key::{
     HybridOwnerKeyIds, HybridOwnerSignature, HybridOwnerSigner, ML_DSA_65_PUBLIC_KEY_SIZE,
     ML_DSA_65_SECRET_KEY_SIZE, ML_DSA_65_SIGNATURE_SIZE, MlDsa65SignatureBytes,
-    MlDsa65VerifyingKeyBytes, OWNER_KEY_MIGRATION_ATTESTATION_SCHEMA,
-    OWNER_KEY_MIGRATION_DOMAIN, OwnerKeyAlgorithm, OwnerKeyMigrationAttestation,
-    OwnerKeyMigrationTranscript,
+    MlDsa65VerifyingKeyBytes, OWNER_KEY_MIGRATION_ATTESTATION_SCHEMA, OWNER_KEY_MIGRATION_DOMAIN,
+    OwnerKeyAlgorithm, OwnerKeyMigrationAttestation, OwnerKeyMigrationTranscript,
 };
 pub use shamir::{
     SealedShamirShare, ShamirError, ShamirResult, ShamirShare, ZeroizingSecret, open_share,
@@ -137,6 +139,6 @@ pub use shamir::{
 };
 pub use x25519::{X25519PublicKey, X25519SecretKey, X25519SharedSecret};
 pub use xwing::{
-    XWING_ENC_SIZE, XWING_MAX_CIPHERTEXT, XWING_PUBLIC_KEY_SIZE, XWING_SECRET_KEY_SIZE,
-    XWingKem, XWingPublicKey, XWingSealedBox, XWingSecretKey, XWingStub, XWingWireSize,
+    XWING_ENC_SIZE, XWING_MAX_CIPHERTEXT, XWING_PUBLIC_KEY_SIZE, XWING_SECRET_KEY_SIZE, XWingKem,
+    XWingPublicKey, XWingSealedBox, XWingSecretKey, XWingStub, XWingWireSize,
 };

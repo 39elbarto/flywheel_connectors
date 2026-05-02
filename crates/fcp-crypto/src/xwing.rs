@@ -59,7 +59,7 @@ use chacha20poly1305::{
 use rand_core_pq::{TryCryptoRng, TryRng};
 use serde::{Deserialize, Serialize};
 use x_wing::{
-    Decapsulate, Decapsulator, DecapsulationKey as RealDecapKey, Encapsulate,
+    Decapsulate, DecapsulationKey as RealDecapKey, Decapsulator, Encapsulate,
     EncapsulationKey as RealEncapKey, KeyExport,
 };
 
@@ -122,8 +122,13 @@ pub const FCP4_AAD_VERSION: u8 = 4;
 /// Internal layout is `pk_mlkem || pk_x25519`; consumers MUST treat it as
 /// opaque and round-trip through [`XWingPublicKey::from_bytes`] /
 /// [`XWingPublicKey::to_bytes`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct XWingPublicKey(Vec<u8>);
+///
+/// CBOR/serde encoding: a single 1216-byte `bstr`. Decoding does NOT
+/// validate length here — call [`XWingPublicKey::from_bytes`] for the
+/// length-checked entry point.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct XWingPublicKey(#[serde(with = "serde_bytes")] Vec<u8>);
 
 impl XWingPublicKey {
     /// Wrap raw public-key bytes.
@@ -506,15 +511,10 @@ impl XWingKem for XWingProvider {
         // SHAKE256 on first decap. This keeps the API symmetrical with
         // every other FCP key type and avoids pulling rand 0.9.
         let mut seed = [0u8; XWING_SECRET_KEY_SIZE];
-        getrandom::fill(&mut seed).map_err(|e| {
-            CryptoError::KeyDerivationFailed(format!("OS RNG unavailable: {e}"))
-        })?;
+        getrandom::fill(&mut seed)
+            .map_err(|e| CryptoError::KeyDerivationFailed(format!("OS RNG unavailable: {e}")))?;
         let real_sk: RealDecapKey = seed.into();
-        let pk_bytes = real_sk
-            .encapsulation_key()
-            .to_bytes()
-            .as_slice()
-            .to_vec();
+        let pk_bytes = real_sk.encapsulation_key().to_bytes().as_slice().to_vec();
         let pk = XWingPublicKey(pk_bytes);
         let sk = XWingSecretKey(seed);
         Ok((pk, sk))
@@ -598,7 +598,8 @@ impl XWingStub {
     }
 }
 
-const STUB_MSG: &str = "xwing not yet wired in this caller (see br-kyopb.1.2.4); switch to XWingProvider";
+const STUB_MSG: &str =
+    "xwing not yet wired in this caller (see br-kyopb.1.2.4); switch to XWingProvider";
 
 impl XWingKem for XWingStub {
     fn generate(&self) -> CryptoResult<(XWingPublicKey, XWingSecretKey)> {
@@ -748,9 +749,7 @@ mod tests {
     fn provider_open_rejects_wrong_aad() {
         let provider = XWingProvider::new();
         let (pk, sk) = provider.generate().unwrap();
-        let sealed = provider
-            .seal(&pk, b"payload", b"zone:work|node:7")
-            .unwrap();
+        let sealed = provider.seal(&pk, b"payload", b"zone:work|node:7").unwrap();
         let err = provider
             .open(&sk, &sealed, b"zone:home|node:7")
             .unwrap_err();

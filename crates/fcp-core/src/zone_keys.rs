@@ -6,7 +6,8 @@ use std::collections::HashMap;
 use std::fmt;
 
 use fcp_crypto::{
-    CryptoError, Fcp2Aad, HpkeSealedBox, X25519PublicKey, X25519SecretKey, hpke_open, hpke_seal,
+    CryptoError, Fcp2Aad, HpkeSealedBox, X25519PublicKey, X25519SecretKey, XWingSealedBox,
+    hpke_open, hpke_seal,
 };
 use serde::{Deserialize, Serialize};
 
@@ -109,12 +110,133 @@ pub enum ZoneKeyAlgorithm {
     XChaCha20Poly1305,
 }
 
+/// KEM used to wrap a zone key for a recipient.
+///
+/// Carried both at manifest level (default for the manifest) and on each
+/// [`WrappedZoneKeyV4`] entry so a single V4 manifest can mix V3
+/// (`HpkeX25519`) and V4 (`XWing`) recipients during the migration
+/// window. See `docs/post-quantum/x_wing_kem_design.md` §3.2 + §6.
+///
+/// Introduced under sub-bead `kyopb.1.2.3`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ZoneKemAlgorithm {
+    /// V3 baseline: HPKE(DHKEM-X25519, HKDF-SHA256, ChaCha20-Poly1305).
+    HpkeX25519,
+    /// V4 hybrid: X-Wing (X25519 + ML-KEM-768) + ChaCha20-Poly1305.
+    XWing,
+}
+
+impl Default for ZoneKemAlgorithm {
+    fn default() -> Self {
+        // Backward compatibility: V3 manifests have no `kem` field;
+        // serde substitutes the default, which MUST be `HpkeX25519`
+        // so the inferred KEM matches the V3 wire format.
+        Self::HpkeX25519
+    }
+}
+
+/// Per-recipient sealed-box variant: discriminates V3 HPKE wrap vs V4
+/// X-Wing wrap.
+///
+/// Carries the actual ciphertext for whichever KEM the sender chose for
+/// this recipient. The serde tag `"kem"` puts the discriminator in the
+/// JSON/CBOR map directly so a forensic reader can pick out the wrap
+/// type without decoding the inner sealed box.
+///
+/// Introduced under sub-bead `kyopb.1.2.3`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kem", rename_all = "snake_case")]
+pub enum WrappedKey {
+    /// V3 HPKE-X25519 sealed box (existing wire form).
+    HpkeX25519 {
+        /// HPKE sealed box: `enc || ciphertext`.
+        sealed: HpkeSealedBox,
+    },
+    /// V4 X-Wing hybrid sealed box.
+    XWing {
+        /// X-Wing sealed box: `enc || ciphertext` (per kyopb.1.2.2).
+        sealed: XWingSealedBox,
+    },
+}
+
+impl WrappedKey {
+    /// Lift a V3 HPKE sealed box into the V4 enum form.
+    #[must_use]
+    pub const fn from_hpke(sealed: HpkeSealedBox) -> Self {
+        Self::HpkeX25519 { sealed }
+    }
+
+    /// Lift a V4 X-Wing sealed box into the V4 enum form.
+    #[must_use]
+    pub const fn from_xwing(sealed: XWingSealedBox) -> Self {
+        Self::XWing { sealed }
+    }
+
+    /// Report which KEM produced this wrap.
+    #[must_use]
+    pub const fn kem(&self) -> ZoneKemAlgorithm {
+        match self {
+            Self::HpkeX25519 { .. } => ZoneKemAlgorithm::HpkeX25519,
+            Self::XWing { .. } => ZoneKemAlgorithm::XWing,
+        }
+    }
+
+    /// Borrow the V3 HPKE sealed box if this is the HPKE-X25519 variant.
+    #[must_use]
+    pub const fn hpke_sealed(&self) -> Option<&HpkeSealedBox> {
+        match self {
+            Self::HpkeX25519 { sealed } => Some(sealed),
+            Self::XWing { .. } => None,
+        }
+    }
+
+    /// Borrow the V4 X-Wing sealed box if this is the X-Wing variant.
+    #[must_use]
+    pub const fn xwing_sealed(&self) -> Option<&XWingSealedBox> {
+        match self {
+            Self::XWing { sealed } => Some(sealed),
+            Self::HpkeX25519 { .. } => None,
+        }
+    }
+}
+
+/// V4 wrapped zone-key entry — uses the [`WrappedKey`] enum so a single
+/// manifest can carry mixed V3+V4 wraps.
+///
+/// Lives alongside the legacy [`WrappedZoneKey`] (which still carries
+/// `HpkeSealedBox` directly) so V3 deserialisers continue to work
+/// unchanged. Senders that emit V4 manifests SHOULD use this list and
+/// can choose per recipient which KEM to wrap under.
+///
+/// Introduced under sub-bead `kyopb.1.2.3`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WrappedZoneKeyV4 {
+    pub recipient: TailscaleNodeId,
+    pub issued_at: u64,
+    pub sealed: WrappedKey,
+}
+
 /// Wrapped zone key entry (HPKE sealed box).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WrappedZoneKey {
     pub recipient: TailscaleNodeId,
     pub issued_at: u64,
     pub sealed: HpkeSealedBox,
+}
+
+impl WrappedZoneKey {
+    /// Lift a V3 wrap into the V4 [`WrappedZoneKeyV4`] form by tagging
+    /// it as `HpkeX25519`. Used by the V3→V4 schema migration helper
+    /// (see [`ZoneKeyManifest::migrated_to_v4`]).
+    #[must_use]
+    pub fn to_v4(&self) -> WrappedZoneKeyV4 {
+        WrappedZoneKeyV4 {
+            recipient: self.recipient.clone(),
+            issued_at: self.issued_at,
+            sealed: WrappedKey::from_hpke(self.sealed.clone()),
+        }
+    }
 }
 
 /// Wrapped `ObjectIdKey` entry (HPKE sealed box).
@@ -141,6 +263,16 @@ pub struct RekeyPolicy {
 }
 
 /// Zone key manifest object (owner-signed).
+///
+/// The `kem` field and `wrapped_keys_v4` list are V4 additions
+/// (sub-bead `kyopb.1.2.3`). They are placed at the end of the field
+/// list so the canonical CBOR encoding produced by serde derive places
+/// them last in the map; V3 deserialisers tolerate them as
+/// unknown-skipped fields, and V4 deserialisers find them via the
+/// declared field names. Both are `#[serde(default)]` so a V3 manifest
+/// (which omits both) deserialises with `kem = HpkeX25519` and an empty
+/// `wrapped_keys_v4` list, matching the V3 wire form's implicit
+/// semantics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZoneKeyManifest {
     pub header: ObjectHeader,
@@ -160,6 +292,18 @@ pub struct ZoneKeyManifest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rekey_policy: Option<RekeyPolicy>,
     pub signature: NodeSignature,
+    /// Default KEM advertised by this manifest (V4 addition; defaults to
+    /// `HpkeX25519` for backward compatibility with V3 manifests that
+    /// omit the field).
+    #[serde(default)]
+    pub kem: ZoneKemAlgorithm,
+    /// V4 wrapped-key entries. Empty in V3-only manifests; populated by
+    /// V4 senders alongside (or instead of) `wrapped_keys` so a single
+    /// manifest can carry mixed V3 + V4 wraps during the V3↔V4
+    /// migration window. See `WrappedKey` for per-recipient KEM
+    /// discrimination.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wrapped_keys_v4: Vec<WrappedZoneKeyV4>,
 }
 
 impl ZoneKeyManifest {
@@ -245,7 +389,87 @@ impl ZoneKeyManifest {
             wrapped_object_id_keys: vec![],
             rekey_policy: None,
             signature,
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         })
+    }
+
+    /// Find the V4 wrapped zone-key entry for a recipient. Looks only in
+    /// `wrapped_keys_v4`; callers that want V3 fallback should also
+    /// consult [`Self::wrapped_key_for`].
+    #[must_use]
+    pub fn wrapped_key_v4_for(&self, node_id: &TailscaleNodeId) -> Option<&WrappedZoneKeyV4> {
+        self.wrapped_keys_v4
+            .iter()
+            .find(|entry| entry.recipient == *node_id)
+    }
+
+    /// Resolve a recipient's wrap by trying V4 first, falling back to V3.
+    ///
+    /// Returns the [`WrappedKey`] enum directly so callers do not need to
+    /// know which list a recipient was published into. V4 senders that
+    /// also published a V3 wrap for this recipient (interop manifests)
+    /// will see the V4 form returned.
+    #[must_use]
+    pub fn resolved_wrapped_key_for(&self, node_id: &TailscaleNodeId) -> Option<WrappedKey> {
+        if let Some(v4) = self.wrapped_key_v4_for(node_id) {
+            return Some(v4.sealed.clone());
+        }
+        self.wrapped_key_for(node_id)
+            .map(|v3| WrappedKey::from_hpke(v3.sealed.clone()))
+    }
+
+    /// Produce a V4 view of this manifest by promoting every entry in
+    /// `wrapped_keys` to a `WrappedZoneKeyV4` tagged as `HpkeX25519`,
+    /// and setting the manifest-level `kem` field if requested.
+    ///
+    /// **Does NOT re-sign.** The caller is responsible for re-issuing the
+    /// owner signature against the migrated payload — the migration
+    /// helper is intentionally non-cryptographic and exists so callers
+    /// can shape a V4 manifest before handing it to the owner-key
+    /// signing flow.
+    ///
+    /// Originally V3 wraps are NOT removed; the V4 manifest carries
+    /// both lists so V3-only recipients keep working.
+    #[must_use]
+    pub fn migrated_to_v4(&self, manifest_kem: ZoneKemAlgorithm) -> Self {
+        let mut migrated = self.clone();
+        migrated.kem = manifest_kem;
+        // Promote any V3 wraps the migrated manifest doesn't already
+        // cover under wrapped_keys_v4 (under HpkeX25519 tag) so a single
+        // lookup against wrapped_keys_v4 suffices for any recipient.
+        for v3 in &self.wrapped_keys {
+            if migrated.wrapped_key_v4_for(&v3.recipient).is_none() {
+                migrated.wrapped_keys_v4.push(v3.to_v4());
+            }
+        }
+        migrated
+    }
+
+    /// Add a V4 X-Wing wrap for a recipient. If the recipient already
+    /// has a V4 entry, it is replaced; the V3 `wrapped_keys` list is
+    /// untouched (so a V4 sender can still publish HPKE wraps for V3
+    /// recipients in the same manifest).
+    pub fn add_xwing_wrap(
+        &mut self,
+        recipient: TailscaleNodeId,
+        issued_at: u64,
+        sealed: XWingSealedBox,
+    ) {
+        let entry = WrappedZoneKeyV4 {
+            recipient: recipient.clone(),
+            issued_at,
+            sealed: WrappedKey::from_xwing(sealed),
+        };
+        if let Some(slot) = self
+            .wrapped_keys_v4
+            .iter_mut()
+            .find(|e| e.recipient == recipient)
+        {
+            *slot = entry;
+        } else {
+            self.wrapped_keys_v4.push(entry);
+        }
     }
 }
 
@@ -610,6 +834,8 @@ mod tests {
             wrapped_object_id_keys: vec![wrapped_object],
             rekey_policy: None,
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         let mut ring = ZoneKeyRing::new(zone_id);
@@ -653,6 +879,8 @@ mod tests {
             wrapped_object_id_keys: vec![wrapped_object],
             rekey_policy: None,
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         let mut ring = ZoneKeyRing::new(ZoneId::private());
@@ -698,6 +926,8 @@ mod tests {
             wrapped_object_id_keys: vec![wrapped_object_1],
             rekey_policy: None,
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         let mut ring = ZoneKeyRing::new(zone_id.clone());
@@ -736,6 +966,8 @@ mod tests {
                 ..RekeyPolicy::default()
             }),
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         ring.apply_manifest(&manifest_2, &node_id, &sk).unwrap();
@@ -822,6 +1054,8 @@ mod tests {
             ],
             rekey_policy: None,
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         // All 3 nodes can apply the initial manifest
@@ -872,6 +1106,8 @@ mod tests {
                 ..RekeyPolicy::default()
             }),
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         // Nodes 1 and 2 can apply the new manifest
@@ -937,6 +1173,8 @@ mod tests {
             wrapped_object_id_keys: vec![wrapped_object_1],
             rekey_policy: None,
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         let mut ring = ZoneKeyRing::new(zone_id.clone());
@@ -971,6 +1209,8 @@ mod tests {
                 ..RekeyPolicy::default()
             }),
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         ring.apply_manifest(&manifest_2, &node_id, &sk).unwrap();
@@ -1028,6 +1268,8 @@ mod tests {
             wrapped_object_id_keys: vec![wrapped_object_1],
             rekey_policy: None,
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         let mut ring = ZoneKeyRing::new(zone_id.clone());
@@ -1059,6 +1301,8 @@ mod tests {
             wrapped_object_id_keys: vec![wrapped_object_2],
             rekey_policy: None,
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         ring.apply_manifest(&manifest_2, &node_id, &sk).unwrap();
@@ -1093,6 +1337,8 @@ mod tests {
                 ..RekeyPolicy::default()
             }),
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         ring.apply_manifest(&manifest_3, &node_id, &sk).unwrap();
@@ -1162,6 +1408,8 @@ mod tests {
             wrapped_object_id_keys: vec![wrapped_object],
             rekey_policy: None,
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         let mut ring = ZoneKeyRing::new(zone_id);
@@ -1235,6 +1483,8 @@ mod tests {
             wrapped_object_id_keys: vec![wrapped_obj_1_for_1, wrapped_obj_1_for_2],
             rekey_policy: None,
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         let mut ring_1 = ZoneKeyRing::new(zone_id.clone());
@@ -1299,6 +1549,8 @@ mod tests {
                 ..RekeyPolicy::default()
             }),
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         // All 3 nodes can apply the new manifest
@@ -1367,6 +1619,8 @@ mod tests {
                 ..RekeyPolicy::default()
             }),
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         // Manifest should apply successfully (expiration is metadata, not enforced in apply)
@@ -1411,6 +1665,8 @@ mod tests {
             wrapped_object_id_keys: vec![wrapped_object],
             rekey_policy: None,
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         let mut ring = ZoneKeyRing::new(zone_id);
@@ -1633,6 +1889,8 @@ mod tests {
             wrapped_object_id_keys: vec![], // Empty!
             rekey_policy: None,
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         let mut ring = ZoneKeyRing::new(zone_id);
@@ -1693,6 +1951,8 @@ mod tests {
             wrapped_object_id_keys: vec![wrapped_object],
             rekey_policy: None,
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         // node-1 found, node-2 not found
@@ -2270,6 +2530,8 @@ mod tests {
             wrapped_object_id_keys: vec![o1, o2, o3],
             rekey_policy: None,
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         // Each node selects its own wrapped key
@@ -2398,6 +2660,8 @@ mod tests {
                 rotate_object_id_key_on_membership_change: false,
             }),
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         let json = serde_json::to_string(&manifest).unwrap();
@@ -2598,6 +2862,8 @@ mod tests {
             wrapped_object_id_keys: vec![wrapped_obj],
             rekey_policy: None,
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         let json = serde_json::to_string(&manifest).unwrap();
@@ -2745,6 +3011,8 @@ mod tests {
                 rotate_object_id_key_on_membership_change: false,
             }),
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         let cloned = manifest.clone();
@@ -3020,6 +3288,8 @@ mod tests {
             wrapped_object_id_keys: vec![],
             rekey_policy: None,
             signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
         };
 
         // Should return the first match (issued_at_a)

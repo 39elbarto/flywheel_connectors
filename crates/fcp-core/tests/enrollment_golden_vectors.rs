@@ -116,6 +116,8 @@ fn create_test_manifest(_owner_key: &Ed25519SigningKey) -> ZoneKeyManifest {
         wrapped_object_id_keys: vec![],
         rekey_policy: None,
         signature,
+        kem: fcp_core::ZoneKemAlgorithm::HpkeX25519,
+        wrapped_keys_v4: vec![],
     }
 }
 

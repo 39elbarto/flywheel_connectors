@@ -51,7 +51,7 @@
 use chrono::{DateTime, Utc};
 use fcp_crypto::{
     Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, KeyId, OwnerSigner, X25519PublicKey,
-    canonical_signing_bytes, canonicalize::to_deterministic_cbor,
+    XWingPublicKey, canonical_signing_bytes, canonicalize::to_deterministic_cbor,
 };
 use serde::{Deserialize, Serialize};
 
@@ -734,6 +734,20 @@ pub struct NodeKeyAttestation {
 
     /// Key ID of the signer (owner or delegator).
     pub signer_kid: KeyId,
+
+    /// Optional V4 X-Wing encryption key (sub-bead `kyopb.1.2.3`).
+    ///
+    /// When present, V4-aware senders may seal zone keys to this node
+    /// under [`crate::WrappedKey::XWing`] instead of (or in addition to)
+    /// the legacy `encryption_key`. Absent → recipient is V3-only and
+    /// must be reached via HPKE-X25519.
+    ///
+    /// Placed after `signer_kid` so the serialized field order is
+    /// stable: V3 verifiers stop at the V3 fields and skip the unknown
+    /// trailing field; V4 verifiers find it by name. V3 manifests that
+    /// omit it deserialise with `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xwing_public_key: Option<XWingPublicKey>,
 }
 
 impl NodeKeyAttestation {
@@ -825,7 +839,26 @@ impl NodeKeyAttestation {
             expires_at,
             owner_signature,
             signer_kid: owner_key.owner_key_id(),
+            // V4 X-Wing key is opt-in via `with_xwing_public_key`;
+            // initial sign() leaves it None so V3 enrollment paths
+            // continue producing identical attestations.
+            xwing_public_key: None,
         })
+    }
+
+    /// Attach a V4 X-Wing encryption key to this attestation
+    /// (sub-bead `kyopb.1.2.3`).
+    ///
+    /// # Warning
+    ///
+    /// This mutates an already-signed attestation. Callers MUST re-sign
+    /// before publishing — the legacy `owner_signature` no longer
+    /// covers the new field. Intended for use during the V3→V4
+    /// rollover, where a node first publishes a V3 attestation, then
+    /// is re-attested by the owner with the new V4 key attached.
+    pub fn with_xwing_public_key(mut self, key: XWingPublicKey) -> Self {
+        self.xwing_public_key = Some(key);
+        self
     }
 
     /// Verify this attestation against the owner's public key.

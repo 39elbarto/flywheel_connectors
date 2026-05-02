@@ -75,6 +75,8 @@ rand_chacha = "0.3"
 proptest.workspace = true
 tracing-subscriber.workspace = true
 criterion.workspace = true
+# Self-audit metamorphic harness (6po63.1)
+semver.workspace = true
 
 [[bench]]
 name = "crypto_benchmarks"

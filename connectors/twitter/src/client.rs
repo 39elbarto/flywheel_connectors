@@ -23,6 +23,7 @@ const QUERY_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'+');
 
 use fcp_prelude::CredentialId;
+use fcp_prelude::log_redaction::redact_url;
 
 use crate::{
     config::{RateLimitInfo, TwitterConfig},
@@ -330,7 +331,18 @@ impl TwitterApiClient {
             let full_url = &full_url;
             let auth_header = &auth_header;
             async move {
-                debug!(method, endpoint, "Making Twitter API request");
+                // br-j9pq4: redact the endpoint via redact_url BEFORE
+                // emission. The endpoint string carries interpolated
+                // user_id / tweet_id (e.g.
+                // "/2/users/{user_id}/likes/{tweet_id}") that are PII
+                // for log-correlation purposes. Wrapping with the
+                // base_url lets the canonical redact_url helper
+                // operate (it requires a scheme://host prefix).
+                debug!(
+                    method,
+                    endpoint = %redact_url(url),
+                    "Making Twitter API request"
+                );
 
                 let mut req = match method {
                     "GET" => self.client.get(full_url.as_str()),
@@ -388,7 +400,14 @@ impl TwitterApiClient {
             let url = &url;
             let bearer_header = &bearer_header;
             async move {
-                debug!(method, endpoint, "Making Twitter API request (bearer auth)");
+                // br-j9pq4: same redaction discipline as request_oauth.
+                // endpoint may carry interpolated user_id / tweet_id;
+                // never log it raw.
+                debug!(
+                    method,
+                    endpoint = %redact_url(url),
+                    "Making Twitter API request (bearer auth)"
+                );
 
                 let mut req = match method {
                     "GET" => self.client.get(url.as_str()),
@@ -1335,5 +1354,113 @@ mod tests {
 
         let err = client.unlike_tweet("../evil", "123").await.unwrap_err();
         assert!(matches!(err, TwitterError::InvalidInput(_)));
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // br-j9pq4 — redact_url applied to retry-log endpoint field
+    //
+    // The retry-loop debug! emissions in request_oauth + request_bearer
+    // log `endpoint = %redact_url(url)`. Pin the redaction so a future
+    // refactor that drops the wrapper (or replaces redact_url with a
+    // different helper) gets caught by these tests rather than by a
+    // production log audit.
+    //
+    // Tests don't try to capture tracing output (flaky across test
+    // runners). Instead they exercise the same redaction primitive
+    // the log emission uses and assert the produced string is
+    // PII-free for the realistic Twitter URL shapes.
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn redact_url_strips_user_id_and_tweet_id_from_twitter_paths() {
+        // Numeric Twitter user_id + tweet_id MUST both be redacted.
+        // These are the exact path shapes the connector composes via
+        // `format!("/2/users/{user_id}/likes/{tweet_id}", ...)`.
+        // Note: redact_url's all-digits heuristic also redacts the
+        // "/2/" API-version segment. That is by-design — operators
+        // who need to disambiguate API version can read it from the
+        // host header or the connector manifest, not from a debug
+        // log. The security property the test pins is "no PII digit
+        // strings survive."
+        let cases = [
+            (
+                "https://api.twitter.com/2/users/12345678901234567/likes/9876543210987654321",
+                "https://api.twitter.com/<id>/users/<id>/likes/<id>",
+            ),
+            (
+                "https://api.twitter.com/2/users/42/retweets/1234567890",
+                "https://api.twitter.com/<id>/users/<id>/retweets/<id>",
+            ),
+            (
+                "https://api.twitter.com/2/tweets/9876543210987654321",
+                "https://api.twitter.com/<id>/tweets/<id>",
+            ),
+            (
+                "https://api.twitter.com/2/users/12345/tweets",
+                "https://api.twitter.com/<id>/users/<id>/tweets",
+            ),
+            (
+                "https://api.twitter.com/2/users/by/username/octocat",
+                "https://api.twitter.com/<id>/users/by/username/octocat",
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                redact_url(input),
+                expected,
+                "redact_url MUST strip Twitter user_id / tweet_id from {input}"
+            );
+            // Security property: the redacted output MUST contain
+            // ZERO ASCII digits. Catches a regression where a new
+            // numeric-looking segment slips through redaction.
+            let redacted = redact_url(input);
+            assert!(
+                !redacted.chars().any(|c| c.is_ascii_digit()),
+                "redacted form leaks digits: {redacted}"
+            );
+        }
+    }
+
+    #[test]
+    fn redact_url_drops_query_string_from_twitter_paginated_urls() {
+        // The OAuth path builds `full_url = format!("{url}?{query}")`.
+        // The retry-log emission uses `url` (sans query) AFTER
+        // redact_url, so query-string secrets cannot leak. Pin both
+        // halves.
+        let with_query = "https://api.twitter.com/2/users/123/tweets?max_results=100&pagination_token=secret-token-bytes";
+        let redacted = redact_url(with_query);
+        assert_eq!(
+            redacted,
+            "https://api.twitter.com/<id>/users/<id>/tweets",
+            "query string MUST be dropped + numeric segments redacted"
+        );
+        assert!(!redacted.contains("pagination_token"));
+        assert!(!redacted.contains("secret-token"));
+        assert!(!redacted.chars().any(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn redact_url_handles_twitter_search_recent_route() {
+        // Search routes carry query parameters but the path itself
+        // has no PII segments — only the API-version "/2/" gets
+        // redacted by the all-digits heuristic.
+        let input = "https://api.twitter.com/2/tweets/search/recent?query=fcp&max_results=10";
+        assert_eq!(
+            redact_url(input),
+            "https://api.twitter.com/<id>/tweets/search/recent",
+        );
+    }
+
+    #[test]
+    fn redact_url_handles_twitter_user_lookup_by_username() {
+        // Username route preserves the username (alphanumeric, length
+        // < 16 → not opaque-id heuristic). Operators inspecting logs
+        // can see WHICH username was looked up — that's a deliberate
+        // operator-debugging affordance, not a PII leak.
+        let input = "https://api.twitter.com/2/users/by/username/octocat";
+        assert_eq!(
+            redact_url(input),
+            "https://api.twitter.com/<id>/users/by/username/octocat",
+        );
     }
 }

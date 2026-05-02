@@ -17,7 +17,6 @@ bytes.workspace = true
 chrono.workspace = true
 constant_time_eq = "0.4"
 fcp-core = { path = "../fcp-core" }
-fcp-async-core = { path = "../fcp-async-core" }
 fcp-prelude = { path = "../fcp-prelude" }
 fcp-crypto = { path = "../fcp-crypto" }
 fcp-policy = { path = "../fcp-policy" }
@@ -26,7 +25,6 @@ fcp-raptorq = { path = "../fcp-raptorq" }
 fcp-store = { path = "../fcp-store" }
 fcp-telemetry = { path = "../fcp-telemetry" }
 fcp-tailscale = { path = "../fcp-tailscale" }
-futures-util.workspace = true
 hex.workspace = true
 hkdf = "0.12"
 hmac = "0.12"
@@ -42,6 +40,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+fcp-async-core = { path = "../fcp-async-core" }
 fcp-cbor = { path = "../fcp-cbor" }
 insta = { workspace = true, features = ["json"] }
 jsonschema.workspace = true

@@ -27,8 +27,8 @@ use xorf::Filter as _;
 
 use crate::admission::ObjectAdmissionClass;
 use crate::iblt::{Iblt, IbltDecodeResult};
-use fcp_crypto::{CryptoError, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_prelude::{EpochId, NodeSignature, ObjectId, TailscaleNodeId, ZoneId};
+use fcp_crypto::{CryptoError, Ed25519Signature, Ed25519VerifyingKey};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants (NORMATIVE defaults)
@@ -1639,7 +1639,7 @@ impl MeshGossip {
 
         let selected_peers = peers
             .iter()
-            .take(policy.fanout_cap(&self.config))
+            .take(self.config.max_revocation_push_peers)
             .cloned()
             .collect::<Vec<_>>();
         if !selected_peers.is_empty() {
@@ -4876,7 +4876,10 @@ mod tests {
             5_000
         );
         assert_eq!(PriorityGossipPolicy::EMERGENCY_QUORUM_WITNESSES, 3);
-        assert_eq!(PriorityGossipPolicy::EMERGENCY_RATE_LIMIT_PER_ZONE_SECS, 60);
+        assert_eq!(
+            PriorityGossipPolicy::EMERGENCY_RATE_LIMIT_PER_ZONE_SECS,
+            60
+        );
     }
 
     #[test]
@@ -4925,7 +4928,10 @@ mod tests {
             "Emergency must override max_revocation_push_peers"
         );
         // Verify DirectPush still honors the configured cap.
-        assert_eq!(PriorityGossipPolicy::DirectPush.fanout_cap(&config), 5);
+        assert_eq!(
+            PriorityGossipPolicy::DirectPush.fanout_cap(&config),
+            5
+        );
         // Non-direct-push policies have no fanout (they wait for the
         // next gossip round instead of bursting).
         assert_eq!(
@@ -4946,7 +4952,8 @@ mod tests {
             PriorityGossipPolicy::Emergency,
         ] {
             let json = serde_json::to_string(&variant).expect("encode");
-            let back: PriorityGossipPolicy = serde_json::from_str(&json).expect("decode");
+            let back: PriorityGossipPolicy =
+                serde_json::from_str(&json).expect("decode");
             assert_eq!(back, variant, "round-trip drift for {variant:?}");
         }
     }

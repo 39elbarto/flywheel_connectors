@@ -61,10 +61,10 @@ fn signature_vector_hmac_sha256_is_stable_and_validates() {
         "webhook.signature.verify",
         4,
         || {
-            let verifier = HmacSha256Verifier::new("secret");
+            let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
             let payload = b"test payload";
             let expected_signature =
-                "f1f1fc517bb886ad22c56e51dae135aad082b2e3337bed35e2e44cd299324bd8";
+                "74f48e1fdb659ef5181550c05b99a59db46d6b6f9458cfbd0eded260e3c3f1f3";
 
             let computed_signature = verifier.compute(payload);
             assert_eq!(computed_signature, expected_signature);
@@ -93,10 +93,10 @@ fn github_provider_vector_known_good_and_tampered_payloads() {
         "webhook.github.vector",
         5,
         || {
-            let handler = GitHubWebhook::new("gh_secret_test");
+            let handler = GitHubWebhook::new("gh_secret_test_2026");
             let payload = br#"{"action":"opened","issue":{"number":1}}"#;
             let expected_signature =
-                "a2c0fd1a0bef03e34345f687745a1690684332161d72bcded76b00110befdd88";
+                "56f3f2d01088b91ad0845e69f07cf5f25e04cf846f35ee44023dc4bafb63209e";
 
             let mut headers = HashMap::new();
             headers.insert(
@@ -119,7 +119,7 @@ fn github_provider_vector_known_good_and_tampered_payloads() {
                 Err(WebhookError::InvalidSignature)
             ));
 
-            let computed = HmacSha256Verifier::new("gh_secret_test").compute(payload);
+            let computed = HmacSha256Verifier::new("gh_secret_test_2026").compute(payload);
             assert_eq!(computed, expected_signature);
 
             json!({
@@ -139,8 +139,8 @@ fn stripe_provider_vector_known_good_and_tampered_payloads() {
         "webhook.stripe.vector",
         5,
         || {
-            let handler =
-                StripeWebhook::new("whsec_test").with_timestamp_tolerance(Duration::from_secs(5));
+            let handler = StripeWebhook::new("whsec_test_secret_2026")
+                .with_timestamp_tolerance(Duration::from_secs(5));
             let payload = br#"{"id":"evt_123","type":"payment_intent.succeeded"}"#;
             // Generate the timestamp + signature at test time against
             // Utc::now() so verify_and_parse, which reads the wall clock,
@@ -151,8 +151,8 @@ fn stripe_provider_vector_known_good_and_tampered_payloads() {
             // compliance contract this test asserts.
             let timestamp = Utc::now().timestamp();
             let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(payload));
-            let expected_signature =
-                HmacSha256Verifier::new("whsec_test").compute(signed_payload.as_bytes());
+            let expected_signature = HmacSha256Verifier::new("whsec_test_secret_2026")
+                .compute(signed_payload.as_bytes());
 
             let mut headers = HashMap::new();
             headers.insert(
@@ -174,7 +174,8 @@ fn stripe_provider_vector_known_good_and_tampered_payloads() {
             ));
 
             let signed = format!("{timestamp}.{}", String::from_utf8_lossy(payload));
-            let computed = HmacSha256Verifier::new("whsec_test").compute(signed.as_bytes());
+            let computed =
+                HmacSha256Verifier::new("whsec_test_secret_2026").compute(signed.as_bytes());
             assert_eq!(computed, expected_signature);
 
             json!({
@@ -195,7 +196,7 @@ fn replay_window_expires_entries_after_ttl() {
         "webhook.replay.window",
         2,
         || {
-            let verifier = HmacSha256Verifier::new("secret");
+            let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
             let config = WebhookConfig::new().with_idempotency_ttl(Duration::from_millis(1));
             let handler = WebhookHandler::with_config(verifier, "github", config);
 
@@ -224,7 +225,7 @@ fn payload_size_limits_enforce_boundary_conditions() {
         "webhook.payload.bounds",
         3,
         || {
-            let verifier = HmacSha256Verifier::new("secret");
+            let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
             let config = WebhookConfig::new().with_max_payload_size(8);
             let handler = WebhookHandler::with_config(verifier.clone(), "github", config);
 
@@ -258,9 +259,9 @@ fn parsed_webhook_events_include_default_taint_labels() {
         "webhook.taint.labeling",
         4,
         || {
-            let handler = GitHubWebhook::new("secret");
+            let handler = GitHubWebhook::new("webhook-test-secret-2026");
             let payload = br#"{"action":"opened","issue":{"number":1}}"#;
-            let signature = HmacSha256Verifier::new("secret").compute(payload);
+            let signature = HmacSha256Verifier::new("webhook-test-secret-2026").compute(payload);
 
             let mut headers = HashMap::new();
             headers.insert(

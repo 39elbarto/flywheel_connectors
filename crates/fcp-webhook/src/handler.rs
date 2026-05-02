@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_webhook_handler_verify() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier.clone(), "test");
 
         let body = b"test payload";
@@ -518,7 +518,7 @@ mod tests {
 
     #[test]
     fn test_payload_size_limit() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let config = WebhookConfig::new().with_max_payload_size(10);
         let handler = WebhookHandler::with_config(verifier, "test", config);
 
@@ -530,7 +530,7 @@ mod tests {
 
     #[test]
     fn test_ip_allowlist() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let config = WebhookConfig::new().with_ip_allowlist(vec!["192.168.1.1".to_string()]);
         let handler = WebhookHandler::with_config(verifier, "test", config);
 
@@ -540,7 +540,7 @@ mod tests {
 
     #[test]
     fn test_replay_detection() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier, "test");
 
         // First check should pass
@@ -603,7 +603,7 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = Arc::new(WebhookHandler::new(verifier, "test"));
         let event_id = "race_event";
 
@@ -693,7 +693,7 @@ mod tests {
 
     #[test]
     fn test_webhook_handler_accessors() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier, "github");
 
         assert_eq!(handler.provider(), "github");
@@ -705,7 +705,7 @@ mod tests {
 
     #[test]
     fn test_empty_allowlist_allows_all() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier, "test");
 
         // Empty allowlist should allow any IP
@@ -715,7 +715,7 @@ mod tests {
 
     #[test]
     fn test_claim_event_first_and_replay() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier, "test");
 
         assert!(handler.claim_event("evt_1").is_ok());
@@ -727,7 +727,7 @@ mod tests {
 
     #[test]
     fn record_event_rejects_active_duplicate_id() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier, "test");
 
         assert!(handler.record_event("evt_1").is_ok());
@@ -753,7 +753,7 @@ mod tests {
         const THREADS: usize = 16;
         const EVENT_ID: &str = "v3wrz-atomicity-regression";
 
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = Arc::new(WebhookHandler::new(verifier, "test"));
         let claim_ok = Arc::new(AtomicUsize::new(0));
         let claim_dup = Arc::new(AtomicUsize::new(0));
@@ -801,7 +801,7 @@ mod tests {
 
     #[test]
     fn test_idempotency_disabled_allows_replay() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let config = WebhookConfig::new().with_idempotency(false);
         let handler = WebhookHandler::with_config(verifier, "test", config);
 
@@ -860,7 +860,7 @@ mod tests {
 
     #[test]
     fn test_webhook_handler_debug() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier, "github");
         let debug = format!("{handler:?}");
         assert!(debug.contains("WebhookHandler"));
@@ -872,7 +872,7 @@ mod tests {
 
     #[test]
     fn test_verify_exact_payload_size_limit() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let config = WebhookConfig::new().with_max_payload_size(10);
         let handler = WebhookHandler::with_config(verifier.clone(), "test", config);
 
@@ -894,7 +894,7 @@ mod tests {
 
     #[test]
     fn test_verify_zero_max_payload_size() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let config = WebhookConfig::new().with_max_payload_size(0);
         let handler = WebhookHandler::with_config(verifier, "test", config);
 
@@ -910,7 +910,7 @@ mod tests {
 
     #[test]
     fn test_ip_allowlist_multiple_entries() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let config = WebhookConfig::new().with_ip_allowlist(vec![
             "192.168.1.1".to_string(),
             "10.0.0.1".to_string(),
@@ -929,7 +929,7 @@ mod tests {
 
     #[test]
     fn test_replay_detection_different_events() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier, "test");
 
         handler.record_event("evt_1").unwrap();
@@ -948,7 +948,7 @@ mod tests {
 
     #[test]
     fn test_replay_cleanup_ttl() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let config = WebhookConfig::new().with_idempotency_ttl(Duration::from_millis(1));
         let handler = WebhookHandler::with_config(verifier, "test", config);
 
@@ -967,7 +967,7 @@ mod tests {
 
     #[test]
     fn test_record_event_noop_when_idempotency_disabled() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let config = WebhookConfig::new().with_idempotency(false);
         let handler = WebhookHandler::with_config(verifier, "test", config);
 
@@ -978,7 +978,7 @@ mod tests {
 
     #[test]
     fn test_claim_event_when_idempotency_disabled() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let config = WebhookConfig::new().with_idempotency(false);
         let handler = WebhookHandler::with_config(verifier, "test", config);
 
@@ -1104,7 +1104,7 @@ mod tests {
 
     #[test]
     fn test_handler_shared_across_threads() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let shared = Arc::new(WebhookHandler::new(verifier, "test"));
 
         let mut success_count = 0_u32;
@@ -1146,7 +1146,7 @@ mod tests {
 
     #[test]
     fn test_verify_empty_body_empty_sig() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier, "test");
         // Empty signature will fail hex decode
         assert!(handler.verify(b"", "").is_err());
@@ -1154,7 +1154,7 @@ mod tests {
 
     #[test]
     fn test_check_ip_ipv6() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let config = WebhookConfig::new().with_ip_allowlist(vec!["::1".to_string()]);
         let handler = WebhookHandler::with_config(verifier, "test", config);
         assert!(handler.check_ip("::1").is_ok());
@@ -1163,21 +1163,21 @@ mod tests {
 
     #[test]
     fn test_handler_provider_unicode() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier, "provid\u{00E9}r");
         assert_eq!(handler.provider(), "provid\u{00E9}r");
     }
 
     #[test]
     fn test_handler_provider_empty_string() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier, "");
         assert_eq!(handler.provider(), "");
     }
 
     #[test]
     fn test_claim_event_many_unique_events() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier, "test");
 
         for i in 0..100 {
@@ -1197,7 +1197,7 @@ mod tests {
 
     #[test]
     fn test_claim_event_prunes_expired_entries_when_cache_is_full() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let config = WebhookConfig::new().with_idempotency_ttl(Duration::from_millis(1));
         let handler = WebhookHandler::with_config(verifier, "test", config);
         let expired = Utc::now() - chrono::Duration::seconds(1);
@@ -1362,7 +1362,7 @@ mod tests {
 
     #[test]
     fn test_handler_verify_empty_body_passes_size_check() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier.clone(), "test");
         let sig = verifier.compute(b"");
         // Empty body should pass size check and signature check
@@ -1371,7 +1371,7 @@ mod tests {
 
     #[test]
     fn test_handler_check_ip_empty_string() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let config = WebhookConfig::new().with_ip_allowlist(vec![String::new()]);
         let handler = WebhookHandler::with_config(verifier, "test", config);
         // Empty string in allowlist matches empty string IP
@@ -1381,7 +1381,7 @@ mod tests {
 
     #[test]
     fn test_handler_record_event_then_check() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier, "test");
         handler.record_event("unique_id_abc").unwrap();
         assert!(matches!(
@@ -1392,7 +1392,7 @@ mod tests {
 
     #[test]
     fn test_handler_claim_multiple_different_events() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier, "test");
         assert!(handler.claim_event("a").is_ok());
         assert!(handler.claim_event("b").is_ok());
@@ -1523,7 +1523,7 @@ mod tests {
 
     #[test]
     fn test_handler_with_config_uses_custom_config() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let config = WebhookConfig::new()
             .with_max_payload_size(512)
             .with_max_retries(7);
@@ -1535,7 +1535,7 @@ mod tests {
 
     #[test]
     fn test_handler_verify_signature_error_not_size_error() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let config = WebhookConfig::new().with_max_payload_size(1000);
         let handler = WebhookHandler::with_config(verifier, "test", config);
         // Body within size limit but bad sig
@@ -1560,7 +1560,7 @@ mod tests {
 
     #[test]
     fn test_replay_cleanup_preserves_recent_events() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let config = WebhookConfig::new()
             .with_idempotency(true)
             .with_idempotency_ttl(Duration::from_secs(3600));
@@ -1577,7 +1577,7 @@ mod tests {
 
     #[test]
     fn test_verify_payload_size_exactly_max_minus_one() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let config = WebhookConfig::new().with_max_payload_size(10);
         let handler = WebhookHandler::with_config(verifier.clone(), "test", config);
         let body = vec![b'a'; 9];
@@ -1587,7 +1587,7 @@ mod tests {
 
     #[test]
     fn test_handler_claim_event_unicode_id() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier, "test");
         assert!(handler.claim_event("evt_\u{00E9}\u{00F1}").is_ok());
         assert!(handler.claim_event("evt_\u{00E9}\u{00F1}").is_err());
@@ -1595,7 +1595,7 @@ mod tests {
 
     #[test]
     fn test_handler_claim_event_empty_id() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier, "test");
         assert!(handler.claim_event("").is_ok());
         assert!(handler.claim_event("").is_err());
@@ -1603,7 +1603,7 @@ mod tests {
 
     #[test]
     fn test_check_ip_unicode_ip() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let config = WebhookConfig::new().with_ip_allowlist(vec!["h\u{00F6}st".to_string()]);
         let handler = WebhookHandler::with_config(verifier, "test", config);
         assert!(handler.check_ip("h\u{00F6}st").is_ok());
@@ -1673,7 +1673,7 @@ mod tests {
 
     #[test]
     fn test_handler_config_idempotency_ttl_zero() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let config = WebhookConfig::new().with_idempotency_ttl(Duration::from_secs(0));
         let handler = WebhookHandler::with_config(verifier, "test", config);
         handler.record_event("evt_zero_ttl").unwrap();
@@ -1716,7 +1716,7 @@ mod tests {
 
     #[test]
     fn test_handler_record_and_claim_interaction() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier, "test");
         // Record an event first
         handler.record_event("evt_rc").unwrap();
@@ -1726,7 +1726,7 @@ mod tests {
 
     #[test]
     fn test_handler_claim_then_check_replay() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let handler = WebhookHandler::new(verifier, "test");
         assert!(handler.claim_event("evt_cc").is_ok());
         assert!(handler.check_replay("evt_cc").is_err());

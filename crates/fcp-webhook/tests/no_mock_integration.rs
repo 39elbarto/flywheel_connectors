@@ -96,7 +96,7 @@ fn pipeline_github_verify_route_deliver() {
 
 #[test]
 fn pipeline_github_push_routes_to_ci() {
-    let github = GitHubWebhook::new("secret");
+    let github = GitHubWebhook::new("webhook-test-secret-2026");
     let mut router = EventRouter::new();
     router.subscribe(
         EventSubscription::for_types(vec!["push".into()]),
@@ -108,7 +108,10 @@ fn pipeline_github_push_routes_to_ci() {
     );
 
     let body = br#"{"ref":"refs/heads/main","commits":[]}"#;
-    let sig = format!("sha256={}", HmacSha256Verifier::new("secret").compute(body));
+    let sig = format!(
+        "sha256={}",
+        HmacSha256Verifier::new("webhook-test-secret-2026").compute(body)
+    );
     let mut headers = HashMap::new();
     headers.insert("x-hub-signature-256".into(), sig);
     headers.insert("x-github-event".into(), "push".into());
@@ -121,8 +124,11 @@ fn pipeline_github_push_routes_to_ci() {
 
 #[test]
 fn pipeline_github_missing_delivery_keeps_distinct_event_headers_distinct() {
-    let github = GitHubWebhook::new("secret");
-    let handler = WebhookHandler::new(HmacSha256Verifier::new("secret"), "github");
+    let github = GitHubWebhook::new("webhook-test-secret-2026");
+    let handler = WebhookHandler::new(
+        HmacSha256Verifier::new("webhook-test-secret-2026"),
+        "github",
+    );
     let mut router = EventRouter::new();
     router.subscribe(
         EventSubscription::for_types(vec!["star".into()]),
@@ -134,7 +140,10 @@ fn pipeline_github_missing_delivery_keeps_distinct_event_headers_distinct() {
     );
 
     let body = br#"{"action":"created"}"#;
-    let sig = format!("sha256={}", HmacSha256Verifier::new("secret").compute(body));
+    let sig = format!(
+        "sha256={}",
+        HmacSha256Verifier::new("webhook-test-secret-2026").compute(body)
+    );
 
     let mut star_headers = HashMap::new();
     star_headers.insert("x-hub-signature-256".into(), sig.clone());
@@ -264,7 +273,7 @@ fn pipeline_slack_missing_event_id_keeps_distinct_timestamps_separate() {
 
 #[test]
 fn pipeline_linear_verify_and_route() {
-    let linear = LinearWebhook::new("linear_secret");
+    let linear = LinearWebhook::new("linear_secret_2026");
     let mut router = EventRouter::new();
     router.subscribe(
         EventSubscription::for_types(vec!["Issue".into()]),
@@ -273,7 +282,7 @@ fn pipeline_linear_verify_and_route() {
 
     let body =
         br#"{"type":"Issue","action":"create","webhookId":"wh_lin_1","data":{"title":"Bug fix"}}"#;
-    let sig = HmacSha256Verifier::new("linear_secret").compute(body);
+    let sig = HmacSha256Verifier::new("linear_secret_2026").compute(body);
     let mut headers = HashMap::new();
     headers.insert("linear-signature".into(), sig);
 
@@ -290,7 +299,7 @@ fn pipeline_linear_verify_and_route() {
 #[test]
 fn concurrent_multi_provider_idempotency() {
     let webhook_handler = Arc::new(WebhookHandler::new(
-        HmacSha256Verifier::new("secret"),
+        HmacSha256Verifier::new("webhook-test-secret-2026"),
         "multi",
     ));
 
@@ -321,7 +330,7 @@ fn concurrent_multi_provider_idempotency() {
 #[test]
 fn concurrent_same_event_only_one_wins() {
     let webhook_handler = Arc::new(WebhookHandler::new(
-        HmacSha256Verifier::new("secret"),
+        HmacSha256Verifier::new("webhook-test-secret-2026"),
         "race",
     ));
 
@@ -367,7 +376,7 @@ fn dlq_overflow_evicts_oldest_events() {
 #[test]
 fn dlq_reprocessing_after_clear() {
     let dlq = DeadLetterQueue::new(10);
-    let handler = WebhookHandler::new(HmacSha256Verifier::new("s"), "test");
+    let handler = WebhookHandler::new(HmacSha256Verifier::new("short-fixture-secret-2026"), "test");
 
     // Simulate 3 failed deliveries
     for i in 0..3 {
@@ -448,8 +457,8 @@ fn router_no_match_returns_empty() {
 
 #[test]
 fn hmac_sha256_different_secrets_reject_cross_verify() {
-    let v1 = HmacSha256Verifier::new("secret_alpha");
-    let v2 = HmacSha256Verifier::new("secret_beta");
+    let v1 = HmacSha256Verifier::new("secret_alpha_2026");
+    let v2 = HmacSha256Verifier::new("secret_beta_2026");
 
     let payload = b"webhook payload data";
     let sig1 = v1.compute(payload);
@@ -464,8 +473,8 @@ fn hmac_sha256_different_secrets_reject_cross_verify() {
 
 #[test]
 fn hmac_sha1_different_secrets_reject_cross_verify() {
-    let v1 = HmacSha1Verifier::new("secret_one");
-    let v2 = HmacSha1Verifier::new("secret_two");
+    let v1 = HmacSha1Verifier::new("secret_one_hmac_sha1_2026");
+    let v2 = HmacSha1Verifier::new("secret_two_hmac_sha1_2026");
 
     let payload = b"webhook data";
     let sig1 = v1.compute(payload);
@@ -508,10 +517,10 @@ fn ed25519_verify_with_keypair() {
 
 #[test]
 fn each_verifier_reports_correct_algorithm() {
-    let sha256 = HmacSha256Verifier::new("s");
+    let sha256 = HmacSha256Verifier::new("short-fixture-secret-2026");
     assert_eq!(sha256.algorithm(), SignatureAlgorithm::HmacSha256);
 
-    let sha1 = HmacSha1Verifier::new("s");
+    let sha1 = HmacSha1Verifier::new("short-fixture-secret-2026");
     assert_eq!(sha1.algorithm(), SignatureAlgorithm::HmacSha1);
 
     let ed_key = [
@@ -529,9 +538,12 @@ fn each_verifier_reports_correct_algorithm() {
 #[test]
 fn all_providers_set_taint_flags() {
     // GitHub
-    let gh = GitHubWebhook::new("s");
+    let gh = GitHubWebhook::new("short-fixture-secret-2026");
     let body = b"{}";
-    let sig = format!("sha256={}", HmacSha256Verifier::new("s").compute(body));
+    let sig = format!(
+        "sha256={}",
+        HmacSha256Verifier::new("short-fixture-secret-2026").compute(body)
+    );
     let mut h = HashMap::new();
     h.insert("x-hub-signature-256".into(), sig);
     h.insert("x-github-event".into(), "ping".into());
@@ -545,9 +557,9 @@ fn all_providers_set_taint_flags() {
     assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
 
     // Linear
-    let ln = LinearWebhook::new("s");
+    let ln = LinearWebhook::new("short-fixture-secret-2026");
     let body = br#"{"type":"Issue"}"#;
-    let sig = HmacSha256Verifier::new("s").compute(body);
+    let sig = HmacSha256Verifier::new("short-fixture-secret-2026").compute(body);
     let mut h = HashMap::new();
     h.insert("linear-signature".into(), sig);
     let event = ln.verify_and_parse(&h, body).unwrap();
@@ -560,11 +572,11 @@ fn all_providers_set_taint_flags() {
     assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
 
     // Stripe
-    let st = StripeWebhook::new("s");
+    let st = StripeWebhook::new("short-fixture-secret-2026");
     let body = br#"{"id":"e","type":"t"}"#;
     let ts = Utc::now().timestamp();
     let signed = format!("{ts}.{}", String::from_utf8_lossy(body));
-    let sig = HmacSha256Verifier::new("s").compute(signed.as_bytes());
+    let sig = HmacSha256Verifier::new("short-fixture-secret-2026").compute(signed.as_bytes());
     let mut h = HashMap::new();
     h.insert("stripe-signature".into(), format!("t={ts},v1={sig}"));
     let event = st.verify_and_parse(&h, body).unwrap();
@@ -577,11 +589,11 @@ fn all_providers_set_taint_flags() {
     assert!(event.metadata.taint_flags.contains(TaintFlag::PublicInput));
 
     // Slack
-    let sl = SlackWebhook::new("s");
+    let sl = SlackWebhook::new("short-fixture-secret-2026");
     let body = br#"{"type":"event_callback"}"#;
     let ts = Utc::now().timestamp();
     let base = format!("v0:{ts}:{}", String::from_utf8_lossy(body));
-    let computed = HmacSha256Verifier::new("s").compute(base.as_bytes());
+    let computed = HmacSha256Verifier::new("short-fixture-secret-2026").compute(base.as_bytes());
     let mut h = HashMap::new();
     h.insert("x-slack-signature".into(), format!("v0={computed}"));
     h.insert("x-slack-request-timestamp".into(), ts.to_string());
@@ -602,7 +614,11 @@ fn replay_protection_ttl_lifecycle() {
     let config = WebhookConfig::new()
         .with_idempotency(true)
         .with_idempotency_ttl(Duration::from_millis(50));
-    let handler = WebhookHandler::with_config(HmacSha256Verifier::new("s"), "test", config);
+    let handler = WebhookHandler::with_config(
+        HmacSha256Verifier::new("short-fixture-secret-2026"),
+        "test",
+        config,
+    );
 
     // Claim event
     assert!(handler.claim_event("evt_ttl_1").is_ok());
@@ -625,7 +641,7 @@ fn replay_protection_ttl_lifecycle() {
 #[test]
 fn ip_allowlist_enforcement_comprehensive() {
     let handler = WebhookHandler::with_config(
-        HmacSha256Verifier::new("s"),
+        HmacSha256Verifier::new("short-fixture-secret-2026"),
         "test",
         WebhookConfig::new().with_ip_allowlist(vec![
             "192.168.1.1".into(),
@@ -652,7 +668,7 @@ fn ip_allowlist_enforcement_comprehensive() {
 
 #[test]
 fn payload_size_enforcement_across_verifiers() {
-    let verifier = HmacSha256Verifier::new("secret");
+    let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
     let config = WebhookConfig::new().with_max_payload_size(64);
     let handler = WebhookHandler::with_config(verifier.clone(), "test", config);
 
@@ -803,7 +819,7 @@ fn module_constants_have_expected_values() {
 
 #[test]
 fn hmac_sha256_accepts_all_prefix_formats() {
-    let verifier = HmacSha256Verifier::new("secret");
+    let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
     let payload = b"test data";
     let raw = verifier.compute(payload);
 
@@ -819,7 +835,7 @@ fn hmac_sha256_accepts_all_prefix_formats() {
 
 #[test]
 fn hmac_sha1_accepts_sha1_prefix() {
-    let verifier = HmacSha1Verifier::new("secret");
+    let verifier = HmacSha1Verifier::new("webhook-test-secret-2026");
     let payload = b"test data";
     let raw = verifier.compute(payload);
 
@@ -831,7 +847,7 @@ fn hmac_sha1_accepts_sha1_prefix() {
 
 #[test]
 fn stripe_multiple_v1_signatures_any_valid_accepts() {
-    let secret = "whsec_multi";
+    let secret = "whsec_multi_secret_2026";
     let body = br#"{"id":"e","type":"t"}"#;
     let ts = Utc::now().timestamp();
     let signed = format!("{ts}.{}", String::from_utf8_lossy(body));
@@ -856,6 +872,12 @@ fn stripe_multiple_v1_signatures_any_valid_accepts() {
 fn error_variants_display_correctly() {
     let errors: Vec<(WebhookError, &str)> = vec![
         (WebhookError::InvalidSignature, "Invalid webhook signature"),
+        (
+            WebhookError::EmptySigningSecret {
+                algorithm: SignatureAlgorithm::HmacSha256,
+            },
+            "HMAC-SHA256 signing secret must not be empty",
+        ),
         (
             WebhookError::MissingSignature("X-Hub-Signature".into()),
             "Missing signature header: X-Hub-Signature",
@@ -972,7 +994,7 @@ fn event_header_lookup_case_insensitive() {
 
 #[test]
 fn known_hmac_sha256_vectors() {
-    let verifier = HmacSha256Verifier::new("secret");
+    let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
 
     // Vector 1: empty payload
     let empty_sig = verifier.compute(b"");
@@ -983,7 +1005,7 @@ fn known_hmac_sha256_vectors() {
     let sig = verifier.compute(b"test payload");
     assert_eq!(
         sig,
-        "f1f1fc517bb886ad22c56e51dae135aad082b2e3337bed35e2e44cd299324bd8"
+        "74f48e1fdb659ef5181550c05b99a59db46d6b6f9458cfbd0eded260e3c3f1f3"
     );
 
     // Vector 3: determinism — same input always produces same output
@@ -993,7 +1015,7 @@ fn known_hmac_sha256_vectors() {
 
 #[test]
 fn known_hmac_sha1_vectors() {
-    let verifier = HmacSha1Verifier::new("secret");
+    let verifier = HmacSha1Verifier::new("webhook-test-secret-2026");
     let sig = verifier.compute(b"test payload");
     assert_eq!(sig.len(), 40);
     assert!(sig.chars().all(|c| c.is_ascii_hexdigit()));
@@ -1007,7 +1029,7 @@ fn known_hmac_sha1_vectors() {
 
 #[test]
 fn record_event_rejects_active_replay() {
-    let handler = WebhookHandler::new(HmacSha256Verifier::new("s"), "test");
+    let handler = WebhookHandler::new(HmacSha256Verifier::new("short-fixture-secret-2026"), "test");
 
     handler.record_event("evt_r1").unwrap();
     assert!(matches!(
@@ -1023,7 +1045,7 @@ fn record_event_rejects_active_replay() {
 
 #[test]
 fn check_replay_does_not_record() {
-    let handler = WebhookHandler::new(HmacSha256Verifier::new("s"), "test");
+    let handler = WebhookHandler::new(HmacSha256Verifier::new("short-fixture-secret-2026"), "test");
 
     // check_replay returns Ok but does NOT record
     assert!(handler.check_replay("evt_c1").is_ok());
@@ -1039,7 +1061,7 @@ fn check_replay_does_not_record() {
 
 #[test]
 fn claim_event_is_atomic_check_and_record() {
-    let handler = WebhookHandler::new(HmacSha256Verifier::new("s"), "test");
+    let handler = WebhookHandler::new(HmacSha256Verifier::new("short-fixture-secret-2026"), "test");
 
     // First claim succeeds and records
     assert!(handler.claim_event("evt_a1").is_ok());
@@ -1061,13 +1083,13 @@ fn claim_event_is_atomic_check_and_record() {
 
 #[test]
 fn idempotency_disabled_full_pipeline() {
-    let verifier = HmacSha256Verifier::new("secret");
+    let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
     let config = WebhookConfig::new().with_idempotency(false);
     let handler = WebhookHandler::with_config(verifier.clone(), "test", config);
     let mut router = EventRouter::new();
     router.subscribe(EventSubscription::all(), "catch_all");
 
-    let github = GitHubWebhook::new("secret");
+    let github = GitHubWebhook::new("webhook-test-secret-2026");
     let body = br#"{"action":"created"}"#;
     let sig = format!("sha256={}", verifier.compute(body));
     let mut headers = HashMap::new();
@@ -1171,7 +1193,7 @@ fn dlq_all_returns_independent_clones() {
 
 #[test]
 fn stripe_rejects_far_future_timestamp() {
-    let secret = "whsec_future";
+    let secret = "whsec_future_secret_2026";
     let stripe = StripeWebhook::new(secret).with_timestamp_tolerance(Duration::from_secs(60));
 
     let body = br#"{"id":"e","type":"t"}"#;
@@ -1192,7 +1214,7 @@ fn stripe_rejects_far_future_timestamp() {
 
 #[test]
 fn stripe_accepts_timestamp_within_tolerance() {
-    let secret = "whsec_tolerance";
+    let secret = "whsec_tolerance_secret_2026";
     let stripe = StripeWebhook::new(secret).with_timestamp_tolerance(Duration::from_secs(300));
 
     let body = br#"{"id":"evt_ok","type":"invoice.paid"}"#;
@@ -1432,7 +1454,7 @@ fn ed25519_from_hex_full_pipeline() {
 
 #[test]
 fn empty_ip_allowlist_permits_all_ips() {
-    let handler = WebhookHandler::new(HmacSha256Verifier::new("s"), "test");
+    let handler = WebhookHandler::new(HmacSha256Verifier::new("short-fixture-secret-2026"), "test");
 
     // No allowlist configured → all IPs allowed
     assert!(handler.check_ip("192.168.0.1").is_ok());
@@ -1456,7 +1478,7 @@ fn signature_algorithm_display_all_variants() {
 #[test]
 fn multi_provider_pipeline_end_to_end() {
     // Setup: handler, router, DLQ
-    let handler = WebhookHandler::new(HmacSha256Verifier::new("shared"), "multi");
+    let handler = WebhookHandler::new(HmacSha256Verifier::new("shared-secret-2026"), "multi");
     let mut router = EventRouter::new();
     router.subscribe(
         EventSubscription::all().with_provider("github"),
@@ -1473,11 +1495,11 @@ fn multi_provider_pipeline_end_to_end() {
     let dlq = DeadLetterQueue::new(100);
 
     // GitHub event
-    let gh = GitHubWebhook::new("gh_secret");
+    let gh = GitHubWebhook::new("gh_secret_2026_long");
     let gh_body = br#"{"action":"opened"}"#;
     let gh_sig = format!(
         "sha256={}",
-        HmacSha256Verifier::new("gh_secret").compute(gh_body)
+        HmacSha256Verifier::new("gh_secret_2026_long").compute(gh_body)
     );
     let mut gh_headers = HashMap::new();
     gh_headers.insert("x-hub-signature-256".into(), gh_sig);
@@ -1489,9 +1511,9 @@ fn multi_provider_pipeline_end_to_end() {
     assert_eq!(gh_handlers, vec!["github_sync"]);
 
     // Linear event
-    let ln = LinearWebhook::new("ln_secret");
+    let ln = LinearWebhook::new("ln_secret_2026_long");
     let ln_body = br#"{"type":"Issue","webhookId":"wh_ln_1"}"#;
-    let ln_sig = HmacSha256Verifier::new("ln_secret").compute(ln_body);
+    let ln_sig = HmacSha256Verifier::new("ln_secret_2026_long").compute(ln_body);
     let mut ln_headers = HashMap::new();
     ln_headers.insert("linear-signature".into(), ln_sig);
     let ln_event = ln.verify_and_parse(&ln_headers, ln_body).unwrap();
@@ -1510,11 +1532,12 @@ fn multi_provider_pipeline_end_to_end() {
 
 #[test]
 fn timestamp_error_fields_populated() {
-    let stripe = StripeWebhook::new("s").with_timestamp_tolerance(Duration::from_secs(10));
+    let stripe = StripeWebhook::new("short-fixture-secret-2026")
+        .with_timestamp_tolerance(Duration::from_secs(10));
     let body = br#"{"id":"e","type":"t"}"#;
     let old_ts = 1_000_000_000_i64;
     let signed = format!("{old_ts}.{}", String::from_utf8_lossy(body));
-    let sig = HmacSha256Verifier::new("s").compute(signed.as_bytes());
+    let sig = HmacSha256Verifier::new("short-fixture-secret-2026").compute(signed.as_bytes());
     let mut headers = HashMap::new();
     headers.insert("stripe-signature".into(), format!("t={old_ts},v1={sig}"));
 
@@ -1538,7 +1561,7 @@ fn timestamp_error_fields_populated() {
 
 #[test]
 fn github_missing_signature_header() {
-    let gh = GitHubWebhook::new("secret");
+    let gh = GitHubWebhook::new("webhook-test-secret-2026");
     let body = br#"{"action":"push"}"#;
     let headers = HashMap::new(); // no headers at all
     let err = gh.verify_and_parse(&headers, body).unwrap_err();
@@ -1547,7 +1570,7 @@ fn github_missing_signature_header() {
 
 #[test]
 fn github_wrong_signature_rejected() {
-    let gh = GitHubWebhook::new("secret");
+    let gh = GitHubWebhook::new("webhook-test-secret-2026");
     let body = br#"{"action":"push"}"#;
     let mut headers = HashMap::new();
     headers.insert("x-hub-signature-256".to_string(), "sha256=0000".to_string());
@@ -1558,9 +1581,9 @@ fn github_wrong_signature_rejected() {
 
 #[test]
 fn github_invalid_json_body() {
-    let gh = GitHubWebhook::new("secret");
+    let gh = GitHubWebhook::new("webhook-test-secret-2026");
     let body = b"not json";
-    let sig = HmacSha256Verifier::new("secret").compute(body);
+    let sig = HmacSha256Verifier::new("webhook-test-secret-2026").compute(body);
     let mut headers = HashMap::new();
     headers.insert("x-hub-signature-256".to_string(), format!("sha256={sig}"));
     headers.insert("x-github-event".to_string(), "push".to_string());
@@ -1570,9 +1593,9 @@ fn github_invalid_json_body() {
 
 #[test]
 fn github_missing_event_type_defaults_to_unknown() {
-    let gh = GitHubWebhook::new("secret");
+    let gh = GitHubWebhook::new("webhook-test-secret-2026");
     let body = br#"{"action":"opened"}"#;
-    let sig = HmacSha256Verifier::new("secret").compute(body);
+    let sig = HmacSha256Verifier::new("webhook-test-secret-2026").compute(body);
     let mut headers = HashMap::new();
     headers.insert("x-hub-signature-256".to_string(), format!("sha256={sig}"));
     // no x-github-event header
@@ -1582,9 +1605,9 @@ fn github_missing_event_type_defaults_to_unknown() {
 
 #[test]
 fn github_missing_delivery_id_generates_uuid() {
-    let gh = GitHubWebhook::new("secret");
+    let gh = GitHubWebhook::new("webhook-test-secret-2026");
     let body = br#"{"action":"opened"}"#;
-    let sig = HmacSha256Verifier::new("secret").compute(body);
+    let sig = HmacSha256Verifier::new("webhook-test-secret-2026").compute(body);
     let mut headers = HashMap::new();
     headers.insert("x-hub-signature-256".to_string(), format!("sha256={sig}"));
     headers.insert("x-github-event".to_string(), "push".to_string());
@@ -1596,7 +1619,7 @@ fn github_missing_delivery_id_generates_uuid() {
 
 #[test]
 fn stripe_missing_signature_header() {
-    let stripe = StripeWebhook::new("secret");
+    let stripe = StripeWebhook::new("webhook-test-secret-2026");
     let body = br#"{"id":"e","type":"t"}"#;
     let headers = HashMap::new();
     let err = stripe.verify_and_parse(&headers, body).unwrap_err();
@@ -1605,7 +1628,7 @@ fn stripe_missing_signature_header() {
 
 #[test]
 fn stripe_malformed_signature_no_v1() {
-    let stripe = StripeWebhook::new("secret");
+    let stripe = StripeWebhook::new("webhook-test-secret-2026");
     let body = br#"{"id":"e","type":"t"}"#;
     let mut headers = HashMap::new();
     headers.insert("stripe-signature".to_string(), "t=12345".to_string());
@@ -1615,7 +1638,7 @@ fn stripe_malformed_signature_no_v1() {
 
 #[test]
 fn stripe_malformed_signature_no_timestamp() {
-    let stripe = StripeWebhook::new("secret");
+    let stripe = StripeWebhook::new("webhook-test-secret-2026");
     let body = br#"{"id":"e","type":"t"}"#;
     let mut headers = HashMap::new();
     headers.insert("stripe-signature".to_string(), "v1=abcdef".to_string());
@@ -1625,11 +1648,11 @@ fn stripe_malformed_signature_no_timestamp() {
 
 #[test]
 fn stripe_invalid_json_body() {
-    let stripe = StripeWebhook::new("secret");
+    let stripe = StripeWebhook::new("webhook-test-secret-2026");
     let body = b"not json";
     let ts = Utc::now().timestamp();
     let signed = format!("{ts}.{}", String::from_utf8_lossy(body));
-    let sig = HmacSha256Verifier::new("secret").compute(signed.as_bytes());
+    let sig = HmacSha256Verifier::new("webhook-test-secret-2026").compute(signed.as_bytes());
     let mut headers = HashMap::new();
     headers.insert("stripe-signature".to_string(), format!("t={ts},v1={sig}"));
     let err = stripe.verify_and_parse(&headers, body).unwrap_err();
@@ -1638,7 +1661,7 @@ fn stripe_invalid_json_body() {
 
 #[test]
 fn slack_missing_signature_header() {
-    let slack = SlackWebhook::new("secret");
+    let slack = SlackWebhook::new("webhook-test-secret-2026");
     let body = br#"{"type":"event"}"#;
     let mut headers = HashMap::new();
     headers.insert(
@@ -1651,7 +1674,7 @@ fn slack_missing_signature_header() {
 
 #[test]
 fn slack_missing_timestamp_header() {
-    let slack = SlackWebhook::new("secret");
+    let slack = SlackWebhook::new("webhook-test-secret-2026");
     let body = br#"{"type":"event"}"#;
     let mut headers = HashMap::new();
     headers.insert("x-slack-signature".to_string(), "v0=abc".to_string());
@@ -1661,7 +1684,7 @@ fn slack_missing_timestamp_header() {
 
 #[test]
 fn slack_non_numeric_timestamp() {
-    let slack = SlackWebhook::new("secret");
+    let slack = SlackWebhook::new("webhook-test-secret-2026");
     let body = br#"{"type":"event"}"#;
     let mut headers = HashMap::new();
     headers.insert("x-slack-signature".to_string(), "v0=abc".to_string());
@@ -1675,7 +1698,7 @@ fn slack_non_numeric_timestamp() {
 
 #[test]
 fn linear_missing_signature_header() {
-    let linear = LinearWebhook::new("secret");
+    let linear = LinearWebhook::new("webhook-test-secret-2026");
     let body = br#"{"type":"issue"}"#;
     let headers = HashMap::new();
     let err = linear.verify_and_parse(&headers, body).unwrap_err();
@@ -1684,7 +1707,7 @@ fn linear_missing_signature_header() {
 
 #[test]
 fn linear_wrong_signature() {
-    let linear = LinearWebhook::new("secret");
+    let linear = LinearWebhook::new("webhook-test-secret-2026");
     let body = br#"{"type":"issue"}"#;
     let mut headers = HashMap::new();
     headers.insert("linear-signature".to_string(), "0000dead".to_string());
@@ -1697,7 +1720,7 @@ fn linear_wrong_signature() {
 #[test]
 fn handler_rejects_oversized_payload_before_sig_check() {
     let handler = WebhookHandler::with_config(
-        HmacSha256Verifier::new("secret"),
+        HmacSha256Verifier::new("webhook-test-secret-2026"),
         "test",
         WebhookConfig::new().with_max_payload_size(10),
     );
@@ -1716,12 +1739,12 @@ fn handler_rejects_oversized_payload_before_sig_check() {
 #[test]
 fn handler_payload_at_exact_limit_passes_size_check() {
     let handler = WebhookHandler::with_config(
-        HmacSha256Verifier::new("secret"),
+        HmacSha256Verifier::new("webhook-test-secret-2026"),
         "test",
         WebhookConfig::new().with_max_payload_size(10),
     );
     let body = vec![b'x'; 10];
-    let sig = HmacSha256Verifier::new("secret").compute(&body);
+    let sig = HmacSha256Verifier::new("webhook-test-secret-2026").compute(&body);
     // Should pass size check, then pass sig check
     assert!(handler.verify(&body, &sig).is_ok());
 }
@@ -1729,7 +1752,7 @@ fn handler_payload_at_exact_limit_passes_size_check() {
 #[test]
 fn handler_payload_one_over_limit_rejected() {
     let handler = WebhookHandler::with_config(
-        HmacSha256Verifier::new("secret"),
+        HmacSha256Verifier::new("webhook-test-secret-2026"),
         "test",
         WebhookConfig::new().with_max_payload_size(10),
     );
@@ -1749,7 +1772,7 @@ fn handler_payload_one_over_limit_rejected() {
 #[test]
 fn ip_allowlist_empty_permits_all() {
     let handler = WebhookHandler::with_config(
-        HmacSha256Verifier::new("s"),
+        HmacSha256Verifier::new("short-fixture-secret-2026"),
         "test",
         WebhookConfig::new().with_ip_allowlist(vec![]),
     );
@@ -1761,7 +1784,7 @@ fn ip_allowlist_empty_permits_all() {
 #[test]
 fn ip_allowlist_exact_match_required() {
     let handler = WebhookHandler::with_config(
-        HmacSha256Verifier::new("s"),
+        HmacSha256Verifier::new("short-fixture-secret-2026"),
         "test",
         WebhookConfig::new()
             .with_ip_allowlist(vec!["192.168.1.1".to_string(), "10.0.0.1".to_string()]),
@@ -1775,7 +1798,7 @@ fn ip_allowlist_exact_match_required() {
 #[test]
 fn ip_allowlist_ipv6_address() {
     let handler = WebhookHandler::with_config(
-        HmacSha256Verifier::new("s"),
+        HmacSha256Verifier::new("short-fixture-secret-2026"),
         "test",
         WebhookConfig::new().with_ip_allowlist(vec!["::1".to_string(), "2001:db8::1".to_string()]),
     );
@@ -1788,7 +1811,7 @@ fn ip_allowlist_ipv6_address() {
 fn ip_allowlist_whitespace_not_trimmed() {
     // IP matching is exact string comparison — leading/trailing space matters
     let handler = WebhookHandler::with_config(
-        HmacSha256Verifier::new("s"),
+        HmacSha256Verifier::new("short-fixture-secret-2026"),
         "test",
         WebhookConfig::new().with_ip_allowlist(vec!["10.0.0.1".to_string()]),
     );
@@ -1802,7 +1825,7 @@ fn ip_allowlist_whitespace_not_trimmed() {
 #[test]
 fn idempotency_disabled_allows_duplicates() {
     let handler = WebhookHandler::with_config(
-        HmacSha256Verifier::new("s"),
+        HmacSha256Verifier::new("short-fixture-secret-2026"),
         "test",
         WebhookConfig::new().with_idempotency(false),
     );
@@ -1813,7 +1836,7 @@ fn idempotency_disabled_allows_duplicates() {
 
 #[test]
 fn record_then_check_replay_detects() {
-    let handler = WebhookHandler::new(HmacSha256Verifier::new("s"), "test");
+    let handler = WebhookHandler::new(HmacSha256Verifier::new("short-fixture-secret-2026"), "test");
     handler.record_event("evt-1").unwrap();
     let err = handler.check_replay("evt-1").unwrap_err();
     assert!(matches!(err, WebhookError::ReplayDetected { .. }));
@@ -1823,7 +1846,7 @@ fn record_then_check_replay_detects() {
 
 #[test]
 fn handler_with_hmac_sha1_verifier() {
-    let verifier = HmacSha1Verifier::new("secret");
+    let verifier = HmacSha1Verifier::new("webhook-test-secret-2026");
     let handler = WebhookHandler::new(verifier.clone(), "test-sha1");
     let body = b"test payload";
     let sig = verifier.compute(body);
@@ -1833,8 +1856,9 @@ fn handler_with_hmac_sha1_verifier() {
 
 #[test]
 fn hmac_sha256_rejects_sha1_signature() {
-    let sha256_handler = WebhookHandler::new(HmacSha256Verifier::new("secret"), "test");
-    let sha1_sig = HmacSha1Verifier::new("secret").compute(b"payload");
+    let sha256_handler =
+        WebhookHandler::new(HmacSha256Verifier::new("webhook-test-secret-2026"), "test");
+    let sha1_sig = HmacSha1Verifier::new("webhook-test-secret-2026").compute(b"payload");
     let err = sha256_handler.verify(b"payload", &sha1_sig).unwrap_err();
     assert!(matches!(err, WebhookError::InvalidSignature));
 }
@@ -1842,11 +1866,11 @@ fn hmac_sha256_rejects_sha1_signature() {
 #[test]
 fn verifier_algorithm_reports_correct_type() {
     assert_eq!(
-        HmacSha256Verifier::new("s").algorithm(),
+        HmacSha256Verifier::new("short-fixture-secret-2026").algorithm(),
         SignatureAlgorithm::HmacSha256
     );
     assert_eq!(
-        HmacSha1Verifier::new("s").algorithm(),
+        HmacSha1Verifier::new("short-fixture-secret-2026").algorithm(),
         SignatureAlgorithm::HmacSha1
     );
 }
@@ -1855,12 +1879,12 @@ fn verifier_algorithm_reports_correct_type() {
 
 #[test]
 fn different_secrets_reject_each_other() {
-    let gh_a = GitHubWebhook::new("secret-A");
-    let gh_b = GitHubWebhook::new("secret-B");
+    let gh_a = GitHubWebhook::new("secret-A-2026-long");
+    let gh_b = GitHubWebhook::new("secret-B-2026-long");
     let body = br#"{"action":"push"}"#;
 
     // Sign with A's secret
-    let sig_a = HmacSha256Verifier::new("secret-A").compute(body);
+    let sig_a = HmacSha256Verifier::new("secret-A-2026-long").compute(body);
     let mut headers = HashMap::new();
     headers.insert("x-hub-signature-256".to_string(), format!("sha256={sig_a}"));
     headers.insert("x-github-event".to_string(), "push".to_string());
@@ -1984,7 +2008,10 @@ fn delivery_status_serde_roundtrip() {
 
 #[test]
 fn pipeline_invalid_sig_skips_routing_and_dlq() {
-    let handler = WebhookHandler::new(HmacSha256Verifier::new("secret"), "github");
+    let handler = WebhookHandler::new(
+        HmacSha256Verifier::new("webhook-test-secret-2026"),
+        "github",
+    );
     let router = EventRouter::new();
     let dlq = DeadLetterQueue::new(10);
 
@@ -2000,7 +2027,10 @@ fn pipeline_invalid_sig_skips_routing_and_dlq() {
 
 #[test]
 fn pipeline_replay_detected_does_not_create_duplicate_events() {
-    let handler = WebhookHandler::new(HmacSha256Verifier::new("secret"), "github");
+    let handler = WebhookHandler::new(
+        HmacSha256Verifier::new("webhook-test-secret-2026"),
+        "github",
+    );
 
     // Claim event once
     handler.claim_event("evt-1").unwrap();
@@ -2038,8 +2068,11 @@ fn handler_provider_and_config_accessors() {
         .with_max_payload_size(1024)
         .with_max_retries(5)
         .with_idempotency(false);
-    let handler =
-        WebhookHandler::with_config(HmacSha256Verifier::new("s"), "custom-provider", config);
+    let handler = WebhookHandler::with_config(
+        HmacSha256Verifier::new("short-fixture-secret-2026"),
+        "custom-provider",
+        config,
+    );
 
     assert_eq!(handler.provider(), "custom-provider");
     assert_eq!(handler.config().max_payload_size, 1024);
@@ -2060,7 +2093,7 @@ fn handler_debug_does_not_leak_secret() {
 #[allow(clippy::similar_names)]
 fn handler_shared_across_threads() {
     let handler = Arc::new(WebhookHandler::new(
-        HmacSha256Verifier::new("secret"),
+        HmacSha256Verifier::new("webhook-test-secret-2026"),
         "test",
     ));
 

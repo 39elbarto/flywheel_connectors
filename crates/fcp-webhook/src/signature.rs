@@ -826,7 +826,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_unicode_secret() {
-        let verifier = HmacSha256Verifier::new("\u{1F511}key\u{00E9}");
+        let verifier = HmacSha256Verifier::new("\u{1F511}key\u{00E9}-webhook-secret");
         let sig = verifier.compute(b"test");
         assert!(verifier.verify(b"test", &sig).is_ok());
     }
@@ -963,7 +963,7 @@ mod tests {
     #[test]
     fn test_hmac_sha1_short_secret_rejected() {
         assert!(matches!(
-            HmacSha1Verifier::try_new([9u8; HMAC_SHA1_MIN_SIGNING_SECRET_BYTES - 1]),
+            HmacSha1Verifier::try_new([b'k'; HMAC_SHA1_MIN_SIGNING_SECRET_BYTES - 1]),
             Err(WebhookError::SigningSecretTooShort {
                 algorithm: SignatureAlgorithm::HmacSha1,
                 length,
@@ -974,7 +974,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha1_minimum_length_secret_accepted() {
-        assert!(HmacSha1Verifier::try_new([9u8; HMAC_SHA1_MIN_SIGNING_SECRET_BYTES]).is_ok());
+        assert!(HmacSha1Verifier::try_new([b'k'; HMAC_SHA1_MIN_SIGNING_SECRET_BYTES]).is_ok());
     }
 
     #[test]
@@ -1048,7 +1048,9 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_binary_secret() {
-        let secret = vec![0u8, 1, 2, 255, 254, 253];
+        let secret: Vec<u8> = (0..HMAC_SHA256_MIN_SIGNING_SECRET_BYTES)
+            .map(|byte| byte as u8)
+            .collect();
         let verifier = HmacSha256Verifier::new(&secret);
         let sig = verifier.compute(b"test");
         assert!(verifier.verify(b"test", &sig).is_ok());
@@ -1056,7 +1058,9 @@ mod tests {
 
     #[test]
     fn test_hmac_sha1_binary_secret() {
-        let secret = vec![0u8, 1, 2, 255, 254, 253];
+        let secret: Vec<u8> = (0..HMAC_SHA1_MIN_SIGNING_SECRET_BYTES)
+            .map(|byte| byte as u8)
+            .collect();
         let verifier = HmacSha1Verifier::new(&secret);
         let sig = verifier.compute(b"test");
         assert!(verifier.verify(b"test", &sig).is_ok());

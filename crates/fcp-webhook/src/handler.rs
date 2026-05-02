@@ -2,7 +2,7 @@
 //!
 //! Provides a unified interface for handling webhooks from any provider.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
@@ -113,6 +113,7 @@ pub struct WebhookHandler<V: SignatureVerifier> {
     verifier: V,
     provider: String,
     config: WebhookConfig,
+    ip_allowlist_index: HashSet<String>,
     seen_events: Arc<RwLock<SeenEventsState>>,
     next_cleanup_at_millis: AtomicI64,
 }
@@ -131,6 +132,7 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
             verifier,
             provider: provider.into(),
             config: WebhookConfig::default(),
+            ip_allowlist_index: HashSet::new(),
             seen_events: Arc::new(RwLock::new(SeenEventsState {
                 events: HashMap::new(),
                 last_cleanup: now,
@@ -143,10 +145,12 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
     #[must_use]
     pub fn with_config(verifier: V, provider: impl Into<String>, config: WebhookConfig) -> Self {
         let now = Utc::now();
+        let ip_allowlist_index = build_ip_allowlist_index(&config);
         Self {
             verifier,
             provider: provider.into(),
             config,
+            ip_allowlist_index,
             seen_events: Arc::new(RwLock::new(SeenEventsState {
                 events: HashMap::new(),
                 last_cleanup: now,
@@ -177,11 +181,11 @@ impl<V: SignatureVerifier> WebhookHandler<V> {
     /// # Errors
     /// Returns [`WebhookError::IpNotAllowed`] when `ip` is not present in a non-empty allowlist.
     pub fn check_ip(&self, ip: &str) -> WebhookResult<()> {
-        if self.config.ip_allowlist.is_empty() {
+        if self.ip_allowlist_index.is_empty() {
             return Ok(());
         }
 
-        if self.config.ip_allowlist.contains(&ip.to_string()) {
+        if self.ip_allowlist_index.contains(ip) {
             Ok(())
         } else {
             Err(WebhookError::IpNotAllowed(ip.to_string()))
@@ -400,10 +404,132 @@ const fn next_cleanup_deadline(last_cleanup: DateTime<Utc>) -> i64 {
         .saturating_add(CLEANUP_INTERVAL_MILLIS)
 }
 
+fn build_ip_allowlist_index(config: &WebhookConfig) -> HashSet<String> {
+    config.ip_allowlist.iter().cloned().collect()
+}
+
 /// Event router for dispatching webhooks.
 #[derive(Debug, Default)]
 pub struct EventRouter {
     subscriptions: Vec<(EventSubscription, String)>,
+    index: EventRoutingIndex,
+}
+
+#[derive(Debug, Default)]
+struct EventRoutingIndex {
+    exact_any_provider: HashMap<String, Vec<usize>>,
+    exact_by_provider: HashMap<String, HashMap<String, Vec<usize>>>,
+    all_any_provider: Vec<usize>,
+    all_by_provider: HashMap<String, Vec<usize>>,
+    prefix_any_provider: Vec<PrefixRoute>,
+    prefix_by_provider: HashMap<String, Vec<PrefixRoute>>,
+}
+
+#[derive(Debug, Clone)]
+struct PrefixRoute {
+    prefix: String,
+    route_index: usize,
+}
+
+impl EventRoutingIndex {
+    fn insert(&mut self, route_index: usize, subscription: &EventSubscription) {
+        for pattern in &subscription.event_types {
+            self.insert_pattern(route_index, subscription.provider.as_deref(), pattern);
+        }
+    }
+
+    fn insert_pattern(&mut self, route_index: usize, provider: Option<&str>, pattern: &str) {
+        if pattern == "*" {
+            self.insert_all(route_index, provider);
+            return;
+        }
+
+        if let Some(prefix) = pattern.strip_suffix('*') {
+            self.insert_prefix(route_index, provider, prefix);
+            return;
+        }
+
+        self.insert_exact(route_index, provider, pattern);
+    }
+
+    fn insert_exact(&mut self, route_index: usize, provider: Option<&str>, event_type: &str) {
+        if let Some(provider) = provider {
+            self.exact_by_provider
+                .entry(provider.to_string())
+                .or_default()
+                .entry(event_type.to_string())
+                .or_default()
+                .push(route_index);
+        } else {
+            self.exact_any_provider
+                .entry(event_type.to_string())
+                .or_default()
+                .push(route_index);
+        }
+    }
+
+    fn insert_all(&mut self, route_index: usize, provider: Option<&str>) {
+        if let Some(provider) = provider {
+            self.all_by_provider
+                .entry(provider.to_string())
+                .or_default()
+                .push(route_index);
+        } else {
+            self.all_any_provider.push(route_index);
+        }
+    }
+
+    fn insert_prefix(&mut self, route_index: usize, provider: Option<&str>, prefix: &str) {
+        let route = PrefixRoute {
+            prefix: prefix.to_string(),
+            route_index,
+        };
+        if let Some(provider) = provider {
+            self.prefix_by_provider
+                .entry(provider.to_string())
+                .or_default()
+                .push(route);
+        } else {
+            self.prefix_any_provider.push(route);
+        }
+    }
+
+    fn collect_candidate_routes(&self, event: &WebhookEvent, candidates: &mut Vec<usize>) {
+        candidates.extend_from_slice(&self.all_any_provider);
+
+        if let Some(provider_routes) = self.all_by_provider.get(event.provider.as_str()) {
+            candidates.extend_from_slice(provider_routes);
+        }
+
+        if let Some(global_exact) = self.exact_any_provider.get(event.event_type.as_str()) {
+            candidates.extend_from_slice(global_exact);
+        }
+
+        if let Some(provider_exact) = self.exact_by_provider.get(event.provider.as_str()) {
+            if let Some(routes) = provider_exact.get(event.event_type.as_str()) {
+                candidates.extend_from_slice(routes);
+            }
+        }
+
+        self.collect_prefix_routes(&self.prefix_any_provider, event, candidates);
+
+        if let Some(provider_prefixes) = self.prefix_by_provider.get(event.provider.as_str()) {
+            self.collect_prefix_routes(provider_prefixes, event, candidates);
+        }
+    }
+
+    fn collect_prefix_routes(
+        &self,
+        routes: &[PrefixRoute],
+        event: &WebhookEvent,
+        candidates: &mut Vec<usize>,
+    ) {
+        for route in routes {
+            if event.event_type.starts_with(route.prefix.as_str()) {
+                candidates.push(route.route_index);
+            }
+        }
+    }
 }
 
 impl EventRouter {
@@ -415,16 +541,25 @@ impl EventRouter {
 
     /// Add a subscription.
     pub fn subscribe(&mut self, subscription: EventSubscription, handler_id: impl Into<String>) {
+        let route_index = self.subscriptions.len();
+        self.index.insert(route_index, &subscription);
         self.subscriptions.push((subscription, handler_id.into()));
     }
 
     /// Get handlers that should receive an event.
     #[must_use]
     pub fn route(&self, event: &WebhookEvent) -> Vec<&str> {
+        let mut candidates = Vec::new();
+        self.index.collect_candidate_routes(event, &mut candidates);
+        candidates.sort_unstable();
+        candidates.dedup();
+
+        let mut seen_handlers = HashSet::with_capacity(candidates.len());
         let mut handlers = Vec::new();
-        for (subscription, handler) in &self.subscriptions {
-            let handler = handler.as_str();
-            if subscription.matches(event) && !handlers.contains(&handler) {
+
+        for route_index in candidates {
+            let handler = self.subscriptions[route_index].1.as_str();
+            if seen_handlers.insert(handler) {
                 handlers.push(handler);
             }
         }
@@ -580,6 +715,61 @@ mod tests {
 
         assert!(!handlers.contains(&"push_handler"));
         assert!(!handlers.contains(&"github_handler"));
+    }
+
+    #[test]
+    fn event_router_precomputes_exact_provider_index() {
+        let mut router = EventRouter::new();
+        router.subscribe(
+            EventSubscription::for_types(vec!["push".to_string()]).with_provider("github"),
+            "github_push",
+        );
+        router.subscribe(
+            EventSubscription::for_types(vec!["push".to_string()]),
+            "any_push",
+        );
+
+        assert_eq!(
+            router
+                .index
+                .exact_by_provider
+                .get("github")
+                .and_then(|routes| routes.get("push"))
+                .map(Vec::as_slice),
+            Some([0].as_slice())
+        );
+        assert_eq!(
+            router
+                .index
+                .exact_any_provider
+                .get("push")
+                .map(Vec::as_slice),
+            Some([1].as_slice())
+        );
+
+        let handlers = router.route(&WebhookEvent::new("1", "push", "github"));
+        assert_eq!(handlers, vec!["github_push", "any_push"]);
+    }
+
+    #[test]
+    fn event_router_index_preserves_order_and_dedupes_handlers() {
+        let mut router = EventRouter::new();
+        router.subscribe(EventSubscription::all(), "shared");
+        router.subscribe(
+            EventSubscription::for_types(vec!["issue.*".to_string()]),
+            "issue_prefix",
+        );
+        router.subscribe(
+            EventSubscription::for_types(vec!["issue.opened".to_string()]),
+            "shared",
+        );
+        router.subscribe(
+            EventSubscription::all().with_provider("github"),
+            "github_all",
+        );
+
+        let handlers = router.route(&WebhookEvent::new("1", "issue.opened", "github"));
+        assert_eq!(handlers, vec!["shared", "issue_prefix", "github_all"]);
     }
 
     #[test]

@@ -90,6 +90,18 @@ pub use revocation_cascade::{
     RevocationRecord, check_revocation_chain,
 };
 
+// ── Owner-Key Migration Verification (kyopb.1.1.1) ─────────────────
+
+pub mod owner_migration_verifier;
+
+pub use owner_migration_verifier::{
+    ML_DSA_65_PUBLIC_KEY_SIZE, ML_DSA_65_SIGNATURE_SIZE, MlDsa65SignatureBytes,
+    MlDsa65SignatureVerifier, MlDsa65VerifyingKeyBytes, OWNER_KEY_MIGRATION_ATTESTATION_SCHEMA,
+    OWNER_KEY_MIGRATION_DOMAIN, OwnerKeyMigrationAttestation, OwnerKeyMigrationTranscript,
+    OwnerMigrationResult, OwnerMigrationVerificationContext, OwnerMigrationVerificationError,
+    OwnerMigrationVerificationReceipt, TrustedV3OwnerMap, verify_owner_key_migration_attestation,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

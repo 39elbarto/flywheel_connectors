@@ -18,7 +18,7 @@ pub const AUTH_TAG_SIZE: usize = 16;
 pub const SYMBOL_AAD_SIZE: usize = 86;
 
 /// `SymbolEnvelope` errors.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum SymbolEnvelopeError {
     #[error("AEAD encryption failed")]
     EncryptFailed,
@@ -31,6 +31,56 @@ pub enum SymbolEnvelopeError {
         expected: ZoneKeyId,
         found: ZoneKeyId,
     },
+}
+
+/// Plain `RaptorQ` symbol frame used by higher-level object protocols.
+///
+/// `SymbolEnvelope` is the encrypted FCPS transmission unit. This type is the
+/// canonical, serializable inner frame for protocols that need to describe or
+/// test a symbol stream before choosing transport encryption. `object_id`
+/// identifies the object being reconstructed, `oti` pins the expected decoder
+/// parameters, and `(esi, data)` is the raw encoding symbol accepted by
+/// [`crate::RaptorQDecoder::add_symbol`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RaptorQSymbolFrame {
+    /// Content address of the complete object represented by this stream.
+    pub object_id: ObjectId,
+    /// Transmission information required to initialize a decoder.
+    pub oti: crate::ObjectTransmissionInformation,
+    /// Encoding Symbol ID.
+    pub esi: u32,
+    /// Raw symbol payload.
+    pub data: Vec<u8>,
+}
+
+impl RaptorQSymbolFrame {
+    /// Build a raw symbol frame.
+    #[must_use]
+    pub fn new(
+        object_id: ObjectId,
+        oti: crate::ObjectTransmissionInformation,
+        esi: u32,
+        data: Vec<u8>,
+    ) -> Self {
+        Self {
+            object_id,
+            oti,
+            esi,
+            data,
+        }
+    }
+
+    /// Return the symbol payload length.
+    #[must_use]
+    pub fn symbol_len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Whether the frame payload is the expected fixed symbol size.
+    #[must_use]
+    pub fn has_expected_symbol_size(&self) -> bool {
+        self.data.len() == usize::from(self.oti.symbol_size())
+    }
 }
 
 /// Full symbol envelope with encryption (NORMATIVE).
@@ -823,16 +873,10 @@ mod tests {
         let expected = ZoneKeyId::from_bytes([0x11; 8]);
         let found = ZoneKeyId::from_bytes([0x22; 8]);
         let e = SymbolEnvelopeError::ZoneKeyIdMismatch { expected, found };
-        if let SymbolEnvelopeError::ZoneKeyIdMismatch {
-            expected: e,
-            found: f,
-        } = e
-        {
-            assert_eq!(e.as_bytes(), &[0x11; 8]);
-            assert_eq!(f.as_bytes(), &[0x22; 8]);
-        } else {
-            panic!("wrong variant");
-        }
+        assert_eq!(
+            e,
+            SymbolEnvelopeError::ZoneKeyIdMismatch { expected, found }
+        );
     }
 
     // ── sender subkey isolation ──

@@ -42,6 +42,7 @@ mod offline;
 mod process_snapshot;
 mod quarantine;
 mod repair;
+mod resume_handshake;
 mod symbol_store;
 
 pub use coverage::{CoverageEvaluation, CoverageHealth, SymbolDistribution};
@@ -84,4 +85,11 @@ pub use offline::{
 pub use process_snapshot::{
     ProcessSnapshotError, ProcessSnapshotFormat, ProcessSnapshotManifest,
     ProcessSnapshotTrustAnchors, pin_capability_token,
+};
+pub use resume_handshake::{
+    CapabilityAvailability, DEFAULT_RESUME_HANDSHAKE_TIMEOUT_MS, RehydrationStatus,
+    ResumeHandshakeError, ResumeHandshakeMessage, ResumeHandshakeRequest,
+    ResumeHandshakeTranscript, ResumeReplayOp, ResumeRollbackPlan, ResumeRollbackReason,
+    ResumeSnapshotSymbol, ResumeSourceLeaseRelease, ResumeTargetAck, ResumeTargetComplete,
+    SnapshotFreshness,
 };

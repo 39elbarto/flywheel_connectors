@@ -39,5 +39,10 @@ rand = "0.9"
 
 [dev-dependencies]
 base64.workspace = true
+criterion.workspace = true
 sha1 = "0.10"
 wiremock = "0.6"
+
+[[bench]]
+name = "sse_parser"
+harness = false

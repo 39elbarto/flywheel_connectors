@@ -173,6 +173,8 @@ const fn retained_buffer_overflow(
 struct SseParser {
     /// Buffer for incomplete data.
     buffer: BytesMut,
+    /// First retained byte not yet scanned for a line ending.
+    parse_cursor: usize,
     /// Current event being built.
     event_type: Option<String>,
     /// Accumulated data lines.
@@ -200,6 +202,7 @@ impl SseParser {
     fn with_max_data_bytes(max_data_bytes: usize) -> Self {
         Self {
             buffer: BytesMut::new(),
+            parse_cursor: 0,
             event_type: None,
             data_lines: Vec::new(),
             event_id: None,
@@ -224,6 +227,7 @@ impl SseParser {
             } else if self.buffer.starts_with(b"\n") || self.buffer.starts_with(b"\r") {
                 self.buffer.advance(1);
             }
+            self.parse_cursor = 0;
 
             let line_str = String::from_utf8_lossy(&line);
 
@@ -243,12 +247,14 @@ impl SseParser {
     }
 
     /// Find the end of a line in the buffer.
-    fn find_line_end(&self) -> Option<usize> {
-        for (i, byte) in self.buffer.iter().enumerate() {
+    fn find_line_end(&mut self) -> Option<usize> {
+        let start = self.parse_cursor.min(self.buffer.len());
+        for (offset, byte) in self.buffer[start..].iter().enumerate() {
             if *byte == b'\n' || *byte == b'\r' {
-                return Some(i);
+                return Some(start + offset);
             }
         }
+        self.parse_cursor = self.buffer.len();
         None
     }
 
@@ -364,6 +370,58 @@ pub mod __fuzz {
             events.extend(parser.parse(&bytes));
         }
         (events, parser.retained_bytes())
+    }
+}
+
+/// Benchmark-only entry points for parser microbenchmarks.
+#[doc(hidden)]
+pub mod __bench {
+    use bytes::BytesMut;
+
+    use super::{Bytes, SseEvent, SseParser};
+
+    /// Harness that lets Criterion time a single parse after setup has already
+    /// populated a retained incomplete line.
+    #[derive(Debug)]
+    pub struct SseParserBenchHarness {
+        parser: SseParser,
+    }
+
+    impl SseParserBenchHarness {
+        /// Build a parser whose retained buffer has already been scanned and
+        /// contains no line terminator.
+        #[must_use]
+        pub fn with_retained_long_line(retained_bytes: usize, max_data_bytes: usize) -> Self {
+            let mut parser = SseParser::with_max_data_bytes(max_data_bytes);
+            parser.buffer = BytesMut::from(vec![b'x'; retained_bytes].as_slice());
+            parser.parse_cursor = retained_bytes;
+            Self { parser }
+        }
+
+        /// Build an empty parser with the supplied retained-payload cap.
+        #[must_use]
+        pub fn empty(max_data_bytes: usize) -> Self {
+            Self {
+                parser: SseParser::with_max_data_bytes(max_data_bytes),
+            }
+        }
+
+        /// Parse one chunk and return complete events.
+        pub fn parse_chunk(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
+            self.parser.parse(&Bytes::copy_from_slice(chunk))
+        }
+
+        /// Bytes currently retained by the parser.
+        #[must_use]
+        pub fn retained_bytes(&self) -> usize {
+            self.parser.retained_bytes()
+        }
+
+        /// Cursor position for benchmark sanity checks.
+        #[must_use]
+        pub const fn parse_cursor(&self) -> usize {
+            self.parser.parse_cursor
+        }
     }
 }
 
@@ -1098,6 +1156,23 @@ mod tests {
         let events = parser.parse(&Bytes::from("lo\n\n"));
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "hello");
+    }
+
+    #[test]
+    fn test_parse_cursor_advances_over_retained_incomplete_line() {
+        let mut parser = SseParser::new();
+
+        assert!(parser.parse(&Bytes::from("data: retained")).is_empty());
+        assert_eq!(parser.parse_cursor, parser.buffer.len());
+
+        assert!(parser.parse(&Bytes::from(" still incomplete")).is_empty());
+        assert_eq!(parser.parse_cursor, parser.buffer.len());
+
+        let events = parser.parse(&Bytes::from("\n\n"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "retained still incomplete");
+        assert_eq!(parser.parse_cursor, 0);
+        assert_eq!(parser.retained_bytes(), 0);
     }
 
     #[test]

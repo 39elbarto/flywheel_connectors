@@ -7,21 +7,23 @@
 //!
 //! # Check Ordering (NORMATIVE)
 //!
-//! The enforcement pipeline runs 12 checks in sequence, short-circuiting
+//! The enforcement pipeline runs 14 checks in sequence, short-circuiting
 //! at the first denial:
 //!
 //! 1. **Canonical decode** — validates request has required non-empty fields
 //! 2. **Zone membership** — validates principal is allowed in the zone
 //! 3. **Capability verify** — validates capability claims include the required capability
-//! 4. **Holder proof** — validates holder-bound tokens present a verified holder proof
-//! 5. **Checkpoint freshness** — validates checkpoint age is within window
-//! 6. **Revocation freshness** — validates revocation list age is within window
-//! 7. **Taint approval** — validates critical taints have approval tokens
-//! 8. **Policy ceiling** — validates zone policy permits connector/operation
-//! 9. **Capability constraints** — validates token constraints against request details
-//! 10. **Connector manifest** — validates manifest includes the operation
-//! 11. **Budget** — validates request is within the current usage budget
-//! 12. **Rate limit** — validates request is within rate quota
+//! 4. **Revocation cascade** — validates token and issuer-chain revocation before use
+//! 5. **Deployment tier** — validates the request tier is admissible under host posture
+//! 6. **Holder proof** — validates holder-bound tokens present a verified holder proof
+//! 7. **Checkpoint freshness** — validates checkpoint age is within window
+//! 8. **Revocation freshness** — validates revocation list age is within window
+//! 9. **Taint approval** — validates critical taints have approval tokens
+//! 10. **Policy ceiling** — validates zone policy permits connector/operation
+//! 11. **Capability constraints** — validates token constraints against request details
+//! 12. **Connector manifest** — validates manifest includes the operation
+//! 13. **Budget** — validates request is within the current usage budget
+//! 14. **Rate limit** — validates request is within rate quota
 
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +41,10 @@ pub enum EnforcementCheckId {
     ZoneMembership,
     /// Validates capability claims include the required capability.
     CapabilityVerify,
+    /// Validates the presented token and its issuer chain against the
+    /// revocation cascade walker before any holder proof or downstream
+    /// token-state validation can treat the token as usable.
+    RevocationCascade,
     /// Validates the request's `SafetyTier` is admissible under the host's
     /// current `DeploymentClassification` (br-nsrx3 / hr0rr.A).
     ///
@@ -78,6 +84,7 @@ impl EnforcementCheckId {
             Self::CanonicalDecode => "canonical_decode",
             Self::ZoneMembership => "zone_membership",
             Self::CapabilityVerify => "capability_verify",
+            Self::RevocationCascade => "revocation_cascade",
             Self::DeploymentTier => "deployment_tier",
             Self::HolderProof => "holder_proof",
             Self::CheckpointFreshness => "checkpoint_freshness",
@@ -108,7 +115,7 @@ pub struct EnforcementCheckOrder;
 
 impl EnforcementCheckOrder {
     /// Total number of checks in the canonical pipeline.
-    pub const COUNT: usize = 13;
+    pub const COUNT: usize = 14;
 
     /// Returns the canonical check ordering.
     ///
@@ -120,6 +127,7 @@ impl EnforcementCheckOrder {
             EnforcementCheckId::CanonicalDecode,
             EnforcementCheckId::ZoneMembership,
             EnforcementCheckId::CapabilityVerify,
+            EnforcementCheckId::RevocationCascade,
             EnforcementCheckId::DeploymentTier,
             EnforcementCheckId::HolderProof,
             EnforcementCheckId::CheckpointFreshness,
@@ -140,16 +148,17 @@ impl EnforcementCheckOrder {
             EnforcementCheckId::CanonicalDecode => 0,
             EnforcementCheckId::ZoneMembership => 1,
             EnforcementCheckId::CapabilityVerify => 2,
-            EnforcementCheckId::DeploymentTier => 3,
-            EnforcementCheckId::HolderProof => 4,
-            EnforcementCheckId::CheckpointFreshness => 5,
-            EnforcementCheckId::RevocationFreshness => 6,
-            EnforcementCheckId::TaintApproval => 7,
-            EnforcementCheckId::PolicyCeiling => 8,
-            EnforcementCheckId::CapabilityConstraints => 9,
-            EnforcementCheckId::ConnectorManifest => 10,
-            EnforcementCheckId::Budget => 11,
-            EnforcementCheckId::RateLimit => 12,
+            EnforcementCheckId::RevocationCascade => 3,
+            EnforcementCheckId::DeploymentTier => 4,
+            EnforcementCheckId::HolderProof => 5,
+            EnforcementCheckId::CheckpointFreshness => 6,
+            EnforcementCheckId::RevocationFreshness => 7,
+            EnforcementCheckId::TaintApproval => 8,
+            EnforcementCheckId::PolicyCeiling => 9,
+            EnforcementCheckId::CapabilityConstraints => 10,
+            EnforcementCheckId::ConnectorManifest => 11,
+            EnforcementCheckId::Budget => 12,
+            EnforcementCheckId::RateLimit => 13,
         }
     }
 
@@ -241,35 +250,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_order_has_13_checks() {
-        // br-nsrx3: count grew from 12 to 13 with the addition of
-        // EnforcementCheckId::DeploymentTier (slotted right after
-        // CapabilityVerify so deployment-mode tier admission runs
-        // before the expensive HolderProof / freshness / budget
-        // checks).
-        assert_eq!(EnforcementCheckOrder::canonical_order().len(), 13);
-        assert_eq!(EnforcementCheckOrder::COUNT, 13);
+    fn canonical_order_has_14_checks() {
+        // br-yowdy: count grew from 13 to 14 with the addition of
+        // EnforcementCheckId::RevocationCascade (slotted right after
+        // CapabilityVerify so revoked issuer chains are rejected before
+        // holder proof / freshness / budget checks).
+        assert_eq!(EnforcementCheckOrder::canonical_order().len(), 14);
+        assert_eq!(EnforcementCheckOrder::COUNT, 14);
     }
 
     #[test]
     fn canonical_order_starts_with_decode_ends_with_rate_limit() {
         let order = EnforcementCheckOrder::canonical_order();
         assert_eq!(order[0], EnforcementCheckId::CanonicalDecode);
-        // Last index = COUNT - 1 = 12 after br-nsrx3.
-        assert_eq!(order[EnforcementCheckOrder::COUNT - 1], EnforcementCheckId::RateLimit);
+        // Last index = COUNT - 1 = 13 after br-yowdy.
+        assert_eq!(
+            order[EnforcementCheckOrder::COUNT - 1],
+            EnforcementCheckId::RateLimit
+        );
     }
 
     #[test]
-    fn canonical_order_places_deployment_tier_after_capability_verify() {
-        // br-nsrx3 invariant: DeploymentTier MUST sit at index 3
-        // (right after CapabilityVerify at index 2). A future
-        // refactor that re-orders these checks breaks the
-        // "tier-admission before expensive crypto/budget checks"
-        // efficiency property.
+    fn canonical_order_places_cascade_before_deployment_and_holder_proof() {
+        // br-yowdy invariant: the cascade walker MUST sit immediately
+        // after capability verification. DeploymentTier remains before
+        // HolderProof, but revoked issuer chains are rejected first.
         let order = EnforcementCheckOrder::canonical_order();
         assert_eq!(order[2], EnforcementCheckId::CapabilityVerify);
-        assert_eq!(order[3], EnforcementCheckId::DeploymentTier);
-        assert_eq!(order[4], EnforcementCheckId::HolderProof);
+        assert_eq!(order[3], EnforcementCheckId::RevocationCascade);
+        assert_eq!(order[4], EnforcementCheckId::DeploymentTier);
+        assert_eq!(order[5], EnforcementCheckId::HolderProof);
     }
 
     #[test]

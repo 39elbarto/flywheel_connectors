@@ -46,6 +46,8 @@ fn preflight_check_display_and_serde_tags_are_pinned() -> TestResult {
         (EnforcementCheckId::CanonicalDecode, "canonical_decode"),
         (EnforcementCheckId::ZoneMembership, "zone_membership"),
         (EnforcementCheckId::CapabilityVerify, "capability_verify"),
+        (EnforcementCheckId::RevocationCascade, "revocation_cascade"),
+        (EnforcementCheckId::DeploymentTier, "deployment_tier"),
         (EnforcementCheckId::HolderProof, "holder_proof"),
         (
             EnforcementCheckId::CheckpointFreshness,

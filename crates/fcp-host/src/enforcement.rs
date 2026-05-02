@@ -11,20 +11,27 @@
 //! 1. Canonical decode — validates request has required non-empty fields
 //! 2. Zone membership — validates principal is allowed in the zone
 //! 3. Capability verify — validates capability claims include the operation's required capability
-//! 4. Holder proof — validates holder-bound tokens present a verified holder proof
-//! 5. Checkpoint freshness — validates checkpoint age is within window
-//! 6. Revocation freshness — validates revocation list age is within window
-//! 7. Taint approval — validates critical taints have approval tokens
-//! 8. Policy ceiling — validates zone policy permits connector/operation
-//! 9. Capability constraints — validates token constraints against request details
-//! 10. Connector manifest — validates manifest includes the operation
-//! 11. Budget — validates request is within the current usage budget
-//! 12. Rate limit — validates request is within rate quota
+//! 4. Revocation cascade — validates token and issuer-chain revocation before use
+//! 5. Deployment tier — validates request tier is admissible under host posture
+//! 6. Holder proof — validates holder-bound tokens present a verified holder proof
+//! 7. Checkpoint freshness — validates checkpoint age is within window
+//! 8. Revocation freshness — validates revocation list age is within window
+//! 9. Taint approval — validates critical taints have approval tokens
+//! 10. Policy ceiling — validates zone policy permits connector/operation
+//! 11. Capability constraints — validates token constraints against request details
+//! 12. Connector manifest — validates manifest includes the operation
+//! 13. Budget — validates request is within the current usage budget
+//! 14. Rate limit — validates request is within rate quota
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
+use fcp_crypto::kid::KeyId;
+use fcp_evidence::{
+    AttestationChain, CascadeConfig, CascadeHop, CascadeReceipt, CascadeRejection,
+    RevocationRecord, check_revocation_chain,
+};
 use fcp_kernel::{ConnectorId, OperationId};
 use fcp_policy::{
     CapabilityConstraintEnforcer, ConstraintDenialKind, DefaultConstraintEnforcer,
@@ -109,6 +116,8 @@ pub struct EnforcementConfig {
     pub zone_allowed_operations: HashMap<ZoneId, HashSet<AllowedOperation>>,
     /// Current revocation registry (optional).
     pub revocation_registry: Option<Arc<RevocationRegistry>>,
+    /// Revocation-cascade verifier for token and issuer-chain checks.
+    pub revocation_cascade: Option<Arc<RevocationCascadeVerifier>>,
 }
 
 impl Default for EnforcementConfig {
@@ -126,6 +135,7 @@ impl Default for EnforcementConfig {
             zone_allowed_connectors: HashMap::new(),
             zone_allowed_operations: HashMap::new(),
             revocation_registry: None,
+            revocation_cascade: None,
         }
     }
 }
@@ -162,6 +172,13 @@ impl EnforcementConfig {
     #[must_use]
     pub fn with_revocation_registry(mut self, registry: Arc<RevocationRegistry>) -> Self {
         self.revocation_registry = Some(registry);
+        self
+    }
+
+    /// Set the revocation-cascade verifier.
+    #[must_use]
+    pub fn with_revocation_cascade(mut self, verifier: Arc<RevocationCascadeVerifier>) -> Self {
+        self.revocation_cascade = Some(verifier);
         self
     }
 
@@ -227,6 +244,140 @@ impl EnforcementConfig {
     }
 }
 
+/// Host-side adapter around the bounded fcp-evidence revocation cascade walker.
+///
+/// The walker itself is intentionally storage-agnostic; this verifier provides
+/// the concrete lookup tables and chain selection shape used by fcp-host. When
+/// no explicit chain is registered for an issuer KID, the verifier uses a
+/// single-key root chain for that KID. That keeps the production live path
+/// running the same bounded walker even before mesh attestation edges are
+/// available, while still enforcing direct and per-hop revocations whenever the
+/// host has populated them.
+#[derive(Debug, Clone)]
+pub struct RevocationCascadeVerifier {
+    config: CascadeConfig,
+    registry_age_secs: u64,
+    chains: Vec<(KeyId, AttestationChain)>,
+    direct_revocations: Vec<(ObjectId, RevocationRecord)>,
+    hop_revocations: Vec<(KeyId, CascadeHop, RevocationRecord)>,
+}
+
+impl Default for RevocationCascadeVerifier {
+    fn default() -> Self {
+        Self::new(CascadeConfig::default())
+    }
+}
+
+impl RevocationCascadeVerifier {
+    /// Create a verifier with the supplied cascade-walk policy.
+    #[must_use]
+    pub fn new(config: CascadeConfig) -> Self {
+        Self {
+            config,
+            registry_age_secs: 0,
+            chains: Vec::new(),
+            direct_revocations: Vec::new(),
+            hop_revocations: Vec::new(),
+        }
+    }
+
+    /// Override the age of the revocation snapshot used by lookups.
+    #[must_use]
+    pub fn with_registry_age_secs(mut self, age_secs: u64) -> Self {
+        self.registry_age_secs = age_secs;
+        self
+    }
+
+    /// Register the attestation chain to use for a specific issuer KID.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`CascadeRejection`] when the chain violates the walker's
+    /// bounded-chain invariants.
+    pub fn with_chain_for_issuer(
+        mut self,
+        issuer_kid: KeyId,
+        chain: AttestationChain,
+    ) -> Result<Self, CascadeRejection> {
+        chain.validate()?;
+        self.chains.push((issuer_kid, chain));
+        Ok(self)
+    }
+
+    /// Add a direct token revocation record to the verifier's lookup table.
+    #[must_use]
+    pub fn with_direct_revocation(mut self, token_id: ObjectId, record: RevocationRecord) -> Self {
+        self.direct_revocations.push((token_id, record));
+        self
+    }
+
+    /// Add a KID-scoped revocation record to the verifier's lookup table.
+    #[must_use]
+    pub fn with_hop_revocation(
+        mut self,
+        kid: KeyId,
+        hop: CascadeHop,
+        record: RevocationRecord,
+    ) -> Self {
+        self.hop_revocations.push((kid, hop, record));
+        self
+    }
+
+    /// Verify that the token and every issuer-chain hop remain unrevoked.
+    ///
+    /// # Errors
+    ///
+    /// Returns the concrete cascade rejection reason emitted by the bounded
+    /// walker.
+    pub fn verify(
+        &self,
+        token_id: ObjectId,
+        issuer_kid: KeyId,
+    ) -> Result<CascadeReceipt, CascadeRejection> {
+        if let Some((_, chain)) = self
+            .chains
+            .iter()
+            .find(|(configured_issuer, _)| configured_issuer == &issuer_kid)
+        {
+            return self.verify_with_chain(token_id, issuer_kid, chain);
+        }
+
+        let implicit_chain = AttestationChain::rooted_at(issuer_kid.clone());
+        self.verify_with_chain(token_id, issuer_kid, &implicit_chain)
+    }
+
+    fn verify_with_chain(
+        &self,
+        token_id: ObjectId,
+        issuer_kid: KeyId,
+        chain: &AttestationChain,
+    ) -> Result<CascadeReceipt, CascadeRejection> {
+        check_revocation_chain(
+            token_id,
+            issuer_kid,
+            chain,
+            &self.config,
+            self.registry_age_secs,
+            |probe_token| self.direct_revocation(probe_token),
+            |probe_kid, hop| self.hop_revocation(probe_kid, hop),
+        )
+    }
+
+    fn direct_revocation(&self, token_id: &ObjectId) -> Option<RevocationRecord> {
+        self.direct_revocations
+            .iter()
+            .find(|(revoked_id, _)| revoked_id == token_id)
+            .map(|(_, record)| *record)
+    }
+
+    fn hop_revocation(&self, kid: &KeyId, hop: CascadeHop) -> Option<RevocationRecord> {
+        self.hop_revocations
+            .iter()
+            .find(|(revoked_kid, revoked_hop, _)| revoked_kid == kid && *revoked_hop == hop)
+            .map(|(_, _, record)| *record)
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Enforcement context
 // ─────────────────────────────────────────────────────────────────────────────
@@ -270,6 +421,8 @@ pub struct EnforcementContext {
     pub timestamp_ms: u64,
     /// ID of the presented capability token (if any).
     pub token_id: Option<ObjectId>,
+    /// COSE protected-header KID of the issuer key that signed the token.
+    pub issuer_kid: Option<KeyId>,
     /// ID of the node attestation for the presenting node.
     pub node_attestation_id: Option<ObjectId>,
     /// ID of the issuer key that signed the token.
@@ -327,6 +480,7 @@ pub struct EnforcementContextBuilder {
     approval_scopes: Vec<String>,
     timestamp_ms: u64,
     token_id: Option<ObjectId>,
+    issuer_kid: Option<KeyId>,
     node_attestation_id: Option<ObjectId>,
     issuer_key_id: Option<ObjectId>,
     binary_artifact_id: Option<ObjectId>,
@@ -456,6 +610,14 @@ impl EnforcementContextBuilder {
         self
     }
 
+    /// Set the presented capability token's object ID and issuer KID.
+    #[must_use]
+    pub fn revocation_cascade_inputs(mut self, token_id: ObjectId, issuer_kid: KeyId) -> Self {
+        self.token_id = Some(token_id);
+        self.issuer_kid = Some(issuer_kid);
+        self
+    }
+
     /// Set whether the token requires a verified holder proof.
     #[must_use]
     pub const fn holder_proof_required(mut self, required: bool) -> Self {
@@ -566,6 +728,7 @@ impl EnforcementContextBuilder {
             approval_scopes: self.approval_scopes,
             timestamp_ms: self.timestamp_ms,
             token_id: self.token_id,
+            issuer_kid: self.issuer_kid,
             node_attestation_id: self.node_attestation_id,
             issuer_key_id: self.issuer_key_id,
             binary_artifact_id: self.binary_artifact_id,
@@ -1007,6 +1170,43 @@ impl EnforcementCheck for CapabilityVerifyCheck {
                     required_capability, ctx.operation
                 ),
             }
+        }
+    }
+}
+
+/// Validates that the presented token and issuer chain are not revoked.
+pub struct CascadeRevocationCheck;
+
+impl EnforcementCheck for CascadeRevocationCheck {
+    fn name(&self) -> &'static str {
+        "revocation_cascade"
+    }
+
+    fn check(&self, ctx: &EnforcementContext, config: &EnforcementConfig) -> CheckOutcome {
+        let Some(verifier) = config.revocation_cascade.as_deref() else {
+            return CheckOutcome::Skip {
+                reason: "revocation cascade verifier is not configured".into(),
+            };
+        };
+        let Some(token_id) = ctx.token_id else {
+            return CheckOutcome::Deny {
+                reason_code: "REVOCATION_CASCADE_TOKEN_ID_MISSING".into(),
+                explanation: "revocation cascade cannot run without the capability token id".into(),
+            };
+        };
+        let Some(issuer_kid) = ctx.issuer_kid.clone() else {
+            return CheckOutcome::Deny {
+                reason_code: "REVOCATION_CASCADE_ISSUER_KID_MISSING".into(),
+                explanation: "revocation cascade cannot run without the token issuer KID".into(),
+            };
+        };
+
+        match verifier.verify(token_id, issuer_kid) {
+            Ok(_) => CheckOutcome::Allow,
+            Err(err) => CheckOutcome::Deny {
+                reason_code: "REVOCATION_CASCADE_REJECTED".into(),
+                explanation: format!("revocation cascade rejected token: {err}"),
+            },
         }
     }
 }
@@ -1692,6 +1892,7 @@ impl EnforcementPipeline {
             EnforcementCheckId::CanonicalDecode => Box::new(CanonicalDecodeCheck),
             EnforcementCheckId::ZoneMembership => Box::new(ZoneMembershipCheck),
             EnforcementCheckId::CapabilityVerify => Box::new(CapabilityVerifyCheck),
+            EnforcementCheckId::RevocationCascade => Box::new(CascadeRevocationCheck),
             EnforcementCheckId::DeploymentTier => Box::new(DeploymentTierCheck::new()),
             EnforcementCheckId::HolderProof => Box::new(HolderProofCheck),
             EnforcementCheckId::CheckpointFreshness => Box::new(CheckpointFreshnessCheck),
@@ -1747,6 +1948,7 @@ fn test_context() -> EnforcementContext {
         approval_scopes: Vec::new(),
         timestamp_ms: 1_700_000_000_000,
         token_id: None,
+        issuer_kid: None,
         node_attestation_id: None,
         issuer_key_id: None,
         binary_artifact_id: None,
@@ -1779,9 +1981,7 @@ fn test_context() -> EnforcementContext {
 #[cfg(test)]
 fn test_mesh_active_classification() -> std::sync::Arc<DeploymentClassification> {
     use crate::deployment_mode::{MeshQuorumSignals, classify_deployment_mode};
-    std::sync::Arc::new(classify_deployment_mode(
-        MeshQuorumSignals::fully_active(3),
-    ))
+    std::sync::Arc::new(classify_deployment_mode(MeshQuorumSignals::fully_active(3)))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5319,21 +5519,27 @@ mod tests {
 
     #[test]
     fn pipeline_includes_deployment_tier_check_in_canonical_position() {
-        // The canonical order from fcp-core MUST place DeploymentTier
-        // right after CapabilityVerify (index 3 of 13). Pin both the
-        // count AND the slot.
+        // br-yowdy inserts RevocationCascade right after CapabilityVerify;
+        // DeploymentTier remains immediately after that cascade gate and
+        // before HolderProof. Pin the count and all three adjacent slots.
         let pipeline = EnforcementPipeline::default();
         let names = pipeline.check_names();
         assert_eq!(names.len(), EnforcementCheckOrder::COUNT);
+        let cascade_pos = names.iter().position(|n| *n == "revocation_cascade");
+        assert_eq!(
+            cascade_pos,
+            Some(3),
+            "revocation_cascade MUST be at canonical index 3 (right after capability_verify); got {cascade_pos:?}"
+        );
         let pos = names.iter().position(|n| *n == "deployment_tier");
         assert_eq!(
             pos,
-            Some(3),
-            "deployment_tier MUST be at canonical index 3 (right after capability_verify); got {pos:?}"
+            Some(4),
+            "deployment_tier MUST be at canonical index 4 (after revocation_cascade); got {pos:?}"
         );
-        // Sanity: capability_verify is index 2, holder_proof is 4.
+        // Sanity: capability_verify is index 2, holder_proof is 5.
         assert_eq!(names[2], "capability_verify");
-        assert_eq!(names[4], "holder_proof");
+        assert_eq!(names[5], "holder_proof");
     }
 
     #[test]

@@ -38,7 +38,10 @@ use fcp_crypto::{
     canonicalize::to_deterministic_cbor,
     cose::fcp2_claims,
     ed25519::{Ed25519Signature, Ed25519VerifyingKey, PUBLIC_KEY_SIZE},
+    kid::KeyId,
 };
+#[cfg(test)]
+use fcp_evidence::{AttestationChain, CascadeConfig, CascadeHop, RevocationRecord};
 use fcp_evidence::{SoftwareBillOfMaterials, SupplyChainAttestation};
 use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
@@ -62,13 +65,13 @@ use fcp_host::{
     LogQueryResponse, ManagedConnectorConfig, MeshQuorumSignals, OperationResult,
     OperationResultStatus, PreflightRequest, PreflightResponse, ReceiptQueryRequest,
     ReceiptQueryResponse, ReceiptSummary, RequestPriority, ResilienceError, ResilienceLayer,
-    RolloutController, RolloutDecision, RolloutObservation, RolloutOutcome, SafetyTierExt,
-    SanitizedConnectorConfig, SimulateCostConfidence, SimulateCostEstimate, SimulatePhase,
-    SimulateReceipt, SimulateReceiptQueryRequest, SimulateReceiptQueryResponse,
-    SimulateResourceAvailability, StartupReconciliationReport, SupplyChainGate,
-    SupplyChainGateConfig, admit_safety_tier, capability_constraint_audit_descriptor,
-    classify_deployment_mode, diff_sanitized_config_values, emit_boot_log,
-    emit_capability_constraint_denial_audit_event, merge_connector_health,
+    RevocationCascadeVerifier, RolloutController, RolloutDecision, RolloutObservation,
+    RolloutOutcome, SafetyTierExt, SanitizedConnectorConfig, SimulateCostConfidence,
+    SimulateCostEstimate, SimulatePhase, SimulateReceipt, SimulateReceiptQueryRequest,
+    SimulateReceiptQueryResponse, SimulateResourceAvailability, StartupReconciliationReport,
+    SupplyChainGate, SupplyChainGateConfig, admit_safety_tier,
+    capability_constraint_audit_descriptor, classify_deployment_mode, diff_sanitized_config_values,
+    emit_boot_log, emit_capability_constraint_denial_audit_event, merge_connector_health,
 };
 use fcp_host::{DeploymentClassification, DeploymentTierRefusal, HostError, HostResult};
 use fcp_kernel::{
@@ -1148,6 +1151,7 @@ struct AppState {
     rollout: Arc<RolloutController<SubprocessRegistry, HostAdminStateStore>>,
     supply_chain: Arc<SupplyChainGate>,
     capability_verifying_key: Option<Ed25519VerifyingKey>,
+    revocation_cascade: Arc<RevocationCascadeVerifier>,
     approval_verifying_key: Option<Ed25519VerifyingKey>,
     admin_bearer_token: Option<Arc<str>>,
     connectors_file: Option<PathBuf>,
@@ -1742,6 +1746,63 @@ fn capability_token_b64(token: &fcp_core::CapabilityToken) -> HostResult<String>
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
+fn object_id_from_token_id_bytes(token_id: &[u8]) -> ObjectId {
+    if token_id.len() == 32 {
+        let mut bytes = [0_u8; 32];
+        bytes.copy_from_slice(token_id);
+        ObjectId::from_bytes(bytes)
+    } else {
+        ObjectId::from_unscoped_bytes(token_id)
+    }
+}
+
+fn revocation_cascade_token_id(
+    token: &fcp_core::CapabilityToken,
+    claims: &fcp_crypto::cose::CwtClaims,
+) -> HostResult<ObjectId> {
+    if let Some(token_id) = claims.get_jti() {
+        return Ok(object_id_from_token_id_bytes(token_id));
+    }
+
+    let bytes = token.raw().to_cbor().map_err(|error| {
+        HostError::PreflightFailed(format!(
+            "revocation cascade could not derive a token id from the capability token: {error}"
+        ))
+    })?;
+    Ok(ObjectId::from_unscoped_bytes(&bytes))
+}
+
+fn revocation_cascade_issuer_kid(token: &fcp_core::CapabilityToken) -> HostResult<KeyId> {
+    let kid = token.raw().get_key_id().map_err(|error| {
+        HostError::PreflightFailed(format!(
+            "revocation cascade could not read the token issuer KID: {error}"
+        ))
+    })?;
+    KeyId::try_from_slice(&kid).map_err(|error| {
+        HostError::PreflightFailed(format!(
+            "revocation cascade rejected token issuer KID: {error}"
+        ))
+    })
+}
+
+fn verify_live_revocation_cascade(
+    state: &AppState,
+    token: &fcp_core::CapabilityToken,
+    claims: &fcp_crypto::cose::CwtClaims,
+) -> HostResult<()> {
+    let token_id = revocation_cascade_token_id(token, claims)?;
+    let issuer_kid = revocation_cascade_issuer_kid(token)?;
+    state
+        .revocation_cascade
+        .verify(token_id, issuer_kid)
+        .map_err(|error| {
+            HostError::PreflightFailed(format!(
+                "capability token rejected by revocation cascade: {error}"
+            ))
+        })?;
+    Ok(())
+}
+
 fn capability_constraints_from_claims(
     claims: &fcp_crypto::cose::CwtClaims,
 ) -> HostResult<CapabilityConstraints> {
@@ -2102,6 +2163,12 @@ async fn verify_live_request(
             HostError::PreflightFailed(format!("capability token rejected: {error}"))
         })?;
     let verified_claims = verified_token.claims();
+
+    // m8j0q.A.9 / br-yowdy: reject directly-revoked tokens and revoked
+    // issuer-chain hops through the bounded fcp-evidence cascade walker before
+    // the live request can proceed into holder proof or persisted token-state
+    // validation.
+    verify_live_revocation_cascade(state, &request.capability_token, verified_claims)?;
 
     enforce_live_deployment_tier(request, tool.safety_tier)?;
 
@@ -3082,6 +3149,7 @@ async fn async_main() -> HostResult<()> {
         rollout,
         supply_chain,
         capability_verifying_key,
+        revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
         approval_verifying_key,
         admin_bearer_token: resolve_admin_bearer_token()?,
         connectors_file: loaded_configs.connectors_file,
@@ -6384,6 +6452,7 @@ mod tests {
             rollout,
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
+            revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
             approval_verifying_key: None,
             admin_bearer_token: None,
             connectors_file: Some(connectors_file),
@@ -6804,6 +6873,7 @@ mod tests {
             )),
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: Some(signing_key.verifying_key()),
+            revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
             approval_verifying_key: None,
             admin_bearer_token: None,
             connectors_file: None,
@@ -6846,6 +6916,159 @@ mod tests {
             invoke_count.load(Ordering::SeqCst),
             0,
             "DeploymentTier denial must happen before connector dispatch"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn cascade_chain_caller_rejects_revoked_issuer_before_token_validation() {
+        let connector_id = "fcp.test.cascade-caller:utility:1.0.0";
+        let operation_id = "test.echo";
+        let capability_id = "cap.test.echo";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let issuer_kid = signing_key.verifying_key().key_id();
+        let node_kid = KeyId::from_bytes([0x23; 8]);
+        let owner_kid = KeyId::from_bytes([0x42; 8]);
+        let mut chain = AttestationChain::rooted_at(owner_kid.clone());
+        chain
+            .attest_issuance(issuer_kid.clone(), node_kid.clone())
+            .expect("issuer edge");
+        chain.attest_node(node_kid, owner_kid).expect("node edge");
+        let cascade = RevocationCascadeVerifier::new(CascadeConfig::default())
+            .with_chain_for_issuer(issuer_kid.clone(), chain)
+            .expect("valid cascade chain")
+            .with_hop_revocation(
+                issuer_kid,
+                CascadeHop::IssuerKey,
+                RevocationRecord {
+                    revoked_at_unix_ms: 1_700_000_000_000,
+                },
+            );
+
+        let introspection = serde_json::to_value(dispatcher_introspection(
+            operation_id,
+            capability_id,
+            SafetyTier::Safe,
+        ))
+        .expect("test introspection should serialize");
+        let invoke_count = Arc::new(AtomicU64::new(0));
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(8);
+        let runner_invoke_count = Arc::clone(&invoke_count);
+        let runner_task = task::spawn(async move {
+            while let Some(request) = runner_rx.recv().await {
+                match request.method.as_str() {
+                    "introspect" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": introspection.clone(),
+                        })));
+                    }
+                    "invoke" => {
+                        runner_invoke_count.fetch_add(1, Ordering::SeqCst);
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": {
+                                "message": "cascade revocation should deny before dispatch"
+                            },
+                        })));
+                    }
+                    method => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": { "message": format!("unexpected method {method}") },
+                        })));
+                    }
+                }
+            }
+        });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let connector_key = ConnectorId::from_static(connector_id);
+        let mut connectors = HashMap::new();
+        connectors.insert(
+            connector_key.clone(),
+            RegistryEntry {
+                config: ConnectorConfig {
+                    id: connector_id.to_string(),
+                    binary: "dispatcher-test".to_string(),
+                    name: Some("Cascade Caller Test Connector".to_string()),
+                    description: None,
+                    args: Vec::new(),
+                    env: BTreeMap::new(),
+                    config: None,
+                    categories: vec!["test".to_string()],
+                    version: None,
+                    allowed_zones: Vec::new(),
+                    allowed_operations: Vec::new(),
+                },
+                connector,
+            },
+        );
+        let registry = Arc::new(SubprocessRegistry {
+            state: Arc::new(RwLock::new(RegistryState { connectors })),
+            resilience: Arc::new(ResilienceLayer::default()),
+            version: Arc::new(AtomicU64::new(1)),
+            capability_verifying_key: None,
+        });
+        let budget = Arc::new(BudgetPolicyEngine::new());
+        let discovery = Arc::new(DiscoveryEndpoint::new(
+            Arc::clone(&registry),
+            Arc::clone(&budget),
+        ));
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = Arc::new(AppState {
+            registry: Arc::clone(&registry),
+            doctor: DoctorService::new(Arc::clone(&registry)),
+            budget,
+            discovery,
+            cancellation: Arc::new(CancellationController::new()),
+            lifecycle: Arc::clone(&lifecycle),
+            rollout: Arc::new(RolloutController::new(
+                Arc::clone(&registry),
+                Arc::clone(&lifecycle),
+            )),
+            supply_chain: Arc::new(SupplyChainGate::default()),
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            revocation_cascade: Arc::new(cascade),
+            approval_verifying_key: None,
+            admin_bearer_token: None,
+            connectors_file: None,
+            zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            started_at: Instant::now(),
+        });
+        let token_id = [0x5a; 32];
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_key,
+            operation: OperationId::from_static(operation_id),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "revoked issuer should fail cascade" }),
+            capability_token: test_capability_token_with_token_id(
+                &signing_key,
+                capability_id,
+                operation_id,
+                ZoneId::work().as_str(),
+                connector_id,
+                &token_id,
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let error = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("revoked issuer must reject through cascade walker");
+        let message = error.to_string();
+        assert!(
+            message.contains("revocation cascade") && message.contains("revoked at hop 0"),
+            "expected cascade rejection before token validation, got: {message}"
+        );
+        assert_eq!(
+            invoke_count.load(Ordering::SeqCst),
+            0,
+            "cascade rejection must happen before connector invoke dispatch"
         );
     }
 
@@ -9329,6 +9552,7 @@ done"#;
             )),
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
+            revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
             approval_verifying_key: None,
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
@@ -9362,6 +9586,7 @@ done"#;
             )),
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
+            revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
             approval_verifying_key: None,
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
@@ -9400,6 +9625,7 @@ done"#;
             )),
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
+            revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
             approval_verifying_key: None,
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
@@ -9438,6 +9664,7 @@ done"#;
             )),
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
+            revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
             approval_verifying_key: None,
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
@@ -9493,6 +9720,7 @@ done"#;
             )),
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
+            revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
             approval_verifying_key: None,
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
@@ -9535,6 +9763,7 @@ done"#;
             )),
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
+            revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
             approval_verifying_key: None,
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
@@ -9641,6 +9870,7 @@ done"#;
             rollout,
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
+            revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
             approval_verifying_key: None,
             admin_bearer_token: None,
             connectors_file: None,
@@ -9689,6 +9919,7 @@ done"#;
             rollout: Arc::clone(&rollout),
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
+            revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
             approval_verifying_key: None,
             admin_bearer_token: None,
             connectors_file: None,
@@ -10076,6 +10307,7 @@ done"#;
             )),
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
+            revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
             approval_verifying_key: None,
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,

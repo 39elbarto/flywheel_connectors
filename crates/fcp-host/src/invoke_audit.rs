@@ -39,6 +39,14 @@ use std::sync::{Arc, Mutex, RwLock};
 use fcp_audit::{AuditEntry, AuditEntryBuilder, AuditError, Severity};
 use serde_json::json;
 
+/// br-uwlj5 / br-1a73y: defence-in-depth bound on the optimistic-CAS
+/// retry loop in [`InvokeAuditChain::append`]. Sized so that even
+/// with thousands of concurrent same-zone appenders the natural
+/// happy path completes well under the bound; hitting it indicates
+/// pathological per-zone writer overload (operator response: scale
+/// the writer fan-in or shard the per-zone Mutex).
+pub const CAS_RETRY_BUDGET: usize = 64;
+
 /// Event type strings for invoke-chain audit entries.
 pub mod event_types {
     /// Emitted after preflight (zone, capability, revocation) PASSES,
@@ -241,11 +249,29 @@ impl InvokeAuditChain {
     /// # Errors
     ///
     /// Returns [`AuditError`] if canonical-CBOR encoding of the entry
-    /// payload fails (cannot happen for normal field values).
+    /// payload fails (cannot happen for normal field values), or
+    /// [`AuditError::ContentionExhausted`] if the optimistic-CAS retry
+    /// budget [`CAS_RETRY_BUDGET`] is exceeded under per-zone writer
+    /// overload.
     pub fn append(
         &self,
         ctx: &InvokeAuditContext,
         phase: InvokePhase,
+    ) -> Result<AuditEntry, AuditError> {
+        self.append_with_retry_budget(ctx, phase, CAS_RETRY_BUDGET)
+    }
+
+    /// Same as [`Self::append`] but with a caller-supplied CAS retry
+    /// budget. Production callers should always use [`Self::append`]
+    /// (which passes [`CAS_RETRY_BUDGET`]). This entry point exists so
+    /// regression tests for the contention-exhausted bail can drive
+    /// the bound deterministically with a tiny budget instead of
+    /// trying to construct a real pathological storm.
+    pub fn append_with_retry_budget(
+        &self,
+        ctx: &InvokeAuditContext,
+        phase: InvokePhase,
+        retry_budget: usize,
     ) -> Result<AuditEntry, AuditError> {
         let event_type = phase.event_type();
         let severity = phase.severity();
@@ -328,11 +354,18 @@ impl InvokeAuditChain {
             // (should be impossible without thousands of concurrent
             // same-zone appenders): bail with an error after a
             // reasonable bound rather than spinning forever.
-            if attempts > 64 {
-                return Err(AuditError::SerializationError(
-                    "invoke audit append: 64 CAS retries exhausted under same-zone contention"
-                        .into(),
-                ));
+            //
+            // br-1a73y: bail with the contention-specific variant so
+            // operator telemetry attributes the failure to per-zone
+            // writer overload (correct response: scale or shard the
+            // per-zone Mutex) rather than to a serialisation /
+            // canonicalisation bug (which is what the previous
+            // `SerializationError` taxonomy implied).
+            if attempts > retry_budget {
+                return Err(AuditError::ContentionExhausted {
+                    zone_id: ctx.zone_id.clone(),
+                    attempts,
+                });
             }
         }
     }
@@ -705,5 +738,81 @@ mod tests {
                 "entry {i} must hash-link under contention"
             );
         }
+    }
+
+    /// br-1a73y: when the optimistic-CAS retry budget is exhausted
+    /// the bail MUST surface as `AuditError::ContentionExhausted`
+    /// (not the misleading `SerializationError` the prior taxonomy
+    /// used). This regression drives the bail deterministically by
+    /// passing a tiny `retry_budget` and racing many concurrent
+    /// appenders on a single zone — at least one appender will be
+    /// out-CAS'd more times than the budget allows.
+    #[test]
+    fn br_1a73y_cas_retry_budget_exhaustion_returns_contention_exhausted_variant() {
+        use std::sync::Arc as StdArc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::thread;
+
+        // Tiny retry budget so even modest contention trips it.
+        const RETRY_BUDGET: usize = 1;
+        const THREADS: usize = 32;
+        const APPENDS_PER: usize = 8;
+
+        let chain = StdArc::new(InvokeAuditChain::new());
+        let contention_failures = StdArc::new(AtomicUsize::new(0));
+        let mut handles = Vec::with_capacity(THREADS);
+        for t in 0..THREADS {
+            let chain_arc = StdArc::clone(&chain);
+            let failures = StdArc::clone(&contention_failures);
+            handles.push(thread::spawn(move || {
+                for i in 0..APPENDS_PER {
+                    let c = InvokeAuditContext {
+                        zone_id: "z:contention-storm".into(),
+                        actor: format!("agent:t-{t}"),
+                        connector_id: "github".into(),
+                        operation: "list_repos".into(),
+                        operation_id: format!("op-{t}-{i}"),
+                        correlation_id: None,
+                        occurred_at: 1_700_000_000,
+                    };
+                    match chain_arc.append_with_retry_budget(
+                        &c,
+                        InvokePhase::PreflightAllow,
+                        RETRY_BUDGET,
+                    ) {
+                        Ok(_) => {}
+                        Err(AuditError::ContentionExhausted {
+                            zone_id, attempts,
+                        }) => {
+                            failures.fetch_add(1, Ordering::SeqCst);
+                            // Operator-diagnostic fields populated.
+                            assert_eq!(zone_id, "z:contention-storm");
+                            assert!(
+                                attempts > RETRY_BUDGET,
+                                "ContentionExhausted must report attempts > budget"
+                            );
+                        }
+                        Err(other) => panic!(
+                            "expected Ok or ContentionExhausted, got {other:?} \
+                             (br-1a73y: any other variant means the bail returned the \
+                             wrong taxonomy and operator telemetry will mis-route)"
+                        ),
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+
+        let total = contention_failures.load(Ordering::SeqCst);
+        assert!(
+            total > 0,
+            "br-1a73y: with RETRY_BUDGET={RETRY_BUDGET} and {THREADS} threads racing on one \
+             zone, the test scenario must trip the bail at least once — got 0. If this \
+             flakes, raise THREADS or APPENDS_PER, do NOT raise RETRY_BUDGET above 1 \
+             (the test is asserting that the bail returns the right variant when it \
+             fires, not that it must always fire)"
+        );
     }
 }

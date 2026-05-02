@@ -2092,6 +2092,29 @@ pub enum AuditError {
         /// Sequence number of the entry whose issuer key was unknown.
         seq: u64,
     },
+
+    /// Optimistic-CAS retry budget exhausted under same-zone
+    /// contention (br-1a73y).
+    ///
+    /// The per-zone audit-chain writer bounds CAS retries against
+    /// pathological storms. Hitting that bound means the per-zone
+    /// `Mutex` is overloaded — too many concurrent writers racing on
+    /// the same zone. The bail itself is correct (no panic, no chain
+    /// corruption), but the operator's correct response is to look at
+    /// concurrent-writer counts and consider scaling the per-zone
+    /// `Mutex` into a per-shard layout — NOT to investigate
+    /// serialisation or canonicalisation bugs (which is what the
+    /// previous `SerializationError` taxonomy implied).
+    #[error(
+        "audit chain CAS retry budget exhausted: zone `{zone_id}` after {attempts} \
+         attempts under same-zone contention — scale per-zone writer or shard"
+    )]
+    ContentionExhausted {
+        /// Zone whose audit chain saturated the CAS retry budget.
+        zone_id: String,
+        /// Number of CAS attempts before the budget tripped.
+        attempts: usize,
+    },
 }
 
 impl AuditError {
@@ -2111,6 +2134,7 @@ impl AuditError {
             Self::SignatureInvalid { .. } => "FCP-5016",
             Self::UnknownIssuer { .. } => "FCP-5017",
             Self::EmptySignedHead { .. } => "FCP-5018",
+            Self::ContentionExhausted { .. } => "FCP-5019",
         }
     }
 }

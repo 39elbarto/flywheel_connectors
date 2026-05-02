@@ -57,11 +57,13 @@ use chacha20poly1305::{
     aead::{Aead, Payload},
 };
 use rand_core_pq::{TryCryptoRng, TryRng};
+use serde::{Deserialize, Serialize};
 use x_wing::{
     Decapsulate, Decapsulator, DecapsulationKey as RealDecapKey, Encapsulate,
     EncapsulationKey as RealEncapKey, KeyExport,
 };
 
+use crate::canonicalize::to_deterministic_cbor_with_capacity;
 use crate::error::{CryptoError, CryptoResult};
 use crate::hkdf::hkdf_sha256_array;
 
@@ -92,6 +94,28 @@ pub const XWING_MAX_CIPHERTEXT: usize = 64 * 1024;
 
 /// HKDF info string used by the FCP V4 X-Wing AEAD layer.
 pub const XWING_AEAD_INFO: &[u8] = b"FCP4-XWING-AEAD";
+
+/// FCP V4 purpose strings for X-Wing AAD binding.
+///
+/// Mirrors [`crate::hpke_seal::purpose`] for V3, with the `FCP4-` prefix
+/// so a V3 AAD can never collide with a V4 AAD even if every other field
+/// is identical (cross-version-replay defence).
+pub mod purpose {
+    /// Purpose string for V4 zone encryption keys.
+    pub const ZONE_KEY: &[u8] = b"FCP4-ZONE-KEY";
+    /// Purpose string for V4 `ObjectId` derivation keys.
+    pub const OBJECTID_KEY: &[u8] = b"FCP4-OBJECTID-KEY";
+    /// Purpose string for V4 owner secret shares.
+    pub const OWNER_SHARE: &[u8] = b"FCP4-OWNER-SHARE";
+    /// Purpose string for V4 generic secret shares.
+    pub const SECRET_SHARE: &[u8] = b"FCP4-SECRET-SHARE";
+}
+
+/// Wire-format version tag carried inside [`Fcp4Aad`] so a V3 verifier
+/// that ever fed Fcp4Aad bytes through its decoder cannot accidentally
+/// authenticate it. Belt-and-suspenders defence on top of the
+/// `FCP4-`-prefixed [`purpose`] strings.
+pub const FCP4_AAD_VERSION: u8 = 4;
 
 /// X-Wing public key (opaque wire bytes).
 ///
@@ -176,19 +200,43 @@ impl XWingSecretKey {
 
 /// X-Wing sealed box: a fixed-size encapsulated key plus the AEAD ciphertext
 /// over the wrapped payload.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// # Wire format (CBOR, finalised under `kyopb.1.2.2`)
+///
+/// Both fields serialise as CBOR byte-strings (`bstr`) under their
+/// declared text keys, producing the canonical map:
+///
+/// ```cbor
+/// {
+///   "enc":        bstr(1120),    ; X-Wing ciphertext: ct_mlkem || ct_x25519
+///   "ciphertext": bstr,          ; ChaCha20-Poly1305 output incl. 16-byte tag
+/// }
+/// ```
+///
+/// Use [`XWingSealedBox::to_canonical_cbor`] /
+/// [`XWingSealedBox::from_canonical_cbor`] for the deterministic on-the-
+/// wire form (RFC 8949 §4.2.1 length-then-bytewise key ordering, fixed
+/// indefinite-length forms forbidden). The plain `to_bytes` /
+/// `from_bytes` form is the legacy concatenation `enc || ciphertext`
+/// kept for symmetry with [`crate::hpke_seal::HpkeSealedBox`]; new V4
+/// callers should prefer the CBOR form.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct XWingSealedBox {
     /// V4 KEM ciphertext: `ct_mlkem || ct_x25519`, exactly
     /// [`XWING_ENC_SIZE`] bytes.
+    #[serde(with = "serde_bytes")]
     pub enc: Vec<u8>,
     /// AEAD ciphertext (ChaCha20-Poly1305) including the 16-byte
     /// authentication tag. AEAD key is derived from the X-Wing shared
     /// secret via HKDF-SHA256(IKM=ss, salt=aad, info=`FCP4-XWING-AEAD`).
+    #[serde(with = "serde_bytes")]
     pub ciphertext: Vec<u8>,
 }
 
 impl XWingSealedBox {
-    /// Encode to bytes: `enc || ciphertext`.
+    /// Encode to bytes: `enc || ciphertext` (legacy concat form).
+    ///
+    /// Prefer [`Self::to_canonical_cbor`] for new V4 wire payloads.
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.enc.len() + self.ciphertext.len());
@@ -222,6 +270,150 @@ impl XWingSealedBox {
             enc: enc.to_vec(),
             ciphertext: ciphertext.to_vec(),
         })
+    }
+
+    /// Encode to deterministic (RFC 8949 §4.2.1) CBOR bytes.
+    ///
+    /// This is the canonical V4 wire form — same encoder the rest of
+    /// FCP uses for signed objects, so a sealed box embedded in a
+    /// [`crate::hpke_seal::Fcp2Aad`]-style transcript hashes
+    /// reproducibly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::SerializationError`] if CBOR encoding
+    /// fails (cannot happen for valid byte payloads in the current
+    /// `ciborium` version).
+    pub fn to_canonical_cbor(&self) -> CryptoResult<Vec<u8>> {
+        // Pre-size: 1120-byte enc + ~24-byte map/key overhead +
+        // ciphertext length (typically ≤ a few KiB for zone keys).
+        let cap = self.enc.len() + self.ciphertext.len() + 64;
+        to_deterministic_cbor_with_capacity(self, cap)
+    }
+
+    /// Decode from canonical CBOR bytes.
+    ///
+    /// Validates the lengths of both fields against
+    /// [`XWING_ENC_SIZE`] and [`XWING_MAX_CIPHERTEXT`] before returning.
+    ///
+    /// # Errors
+    ///
+    /// - [`CryptoError::SerializationError`] if the input is not valid
+    ///   CBOR or does not match the [`XWingSealedBox`] schema.
+    /// - [`CryptoError::HpkeFailed`] if either field's length is out of
+    ///   bounds.
+    pub fn from_canonical_cbor(bytes: &[u8]) -> CryptoResult<Self> {
+        if bytes.len() > XWING_MAX_CIPHERTEXT + 256 {
+            // 256-byte slack covers CBOR map + key overhead.
+            return Err(CryptoError::HpkeFailed(format!(
+                "xwing CBOR sealed box too large: {} bytes exceeds {} byte limit",
+                bytes.len(),
+                XWING_MAX_CIPHERTEXT + 256
+            )));
+        }
+        let decoded: Self = ciborium::from_reader(bytes)
+            .map_err(|e| CryptoError::SerializationError(format!("xwing sealed box CBOR: {e}")))?;
+        const AEAD_TAG: usize = 16;
+        if decoded.enc.len() != XWING_ENC_SIZE {
+            return Err(CryptoError::HpkeFailed(format!(
+                "xwing sealed box `enc` field must be {} bytes, got {}",
+                XWING_ENC_SIZE,
+                decoded.enc.len()
+            )));
+        }
+        if decoded.ciphertext.len() < AEAD_TAG {
+            return Err(CryptoError::HpkeFailed(
+                "xwing sealed box `ciphertext` shorter than AEAD tag".into(),
+            ));
+        }
+        if decoded.ciphertext.len() > XWING_MAX_CIPHERTEXT {
+            return Err(CryptoError::HpkeFailed(format!(
+                "xwing sealed box `ciphertext` exceeds {XWING_MAX_CIPHERTEXT}-byte cap"
+            )));
+        }
+        Ok(decoded)
+    }
+}
+
+/// FCP V4 AAD (Additional Authenticated Data) for X-Wing-sealed payloads.
+///
+/// Mirrors [`crate::hpke_seal::Fcp2Aad`] structurally so callers porting
+/// from V3 can swap one for the other without restructuring their
+/// transcript code, but uses [`purpose`]'s `FCP4-`-prefixed labels and
+/// carries an explicit [`FCP4_AAD_VERSION`] byte so the encoded bytes
+/// can never collide with a V3 AAD encoding.
+///
+/// Serialised as deterministic CBOR (`to_deterministic_cbor`) before
+/// being fed into [`XWingProvider::seal`] / [`XWingProvider::open`] as
+/// the AAD argument — encoded bytes participate in both the AEAD's tag
+/// and (via HKDF salt) the AEAD-key derivation, so any field mismatch
+/// causes a clean decryption failure.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Fcp4Aad {
+    /// Wire-format version tag; always [`FCP4_AAD_VERSION`].
+    pub version: u8,
+    /// Zone identifier (or hash).
+    #[serde(with = "serde_bytes")]
+    pub zone_id: Vec<u8>,
+    /// Recipient node identifier.
+    #[serde(with = "serde_bytes")]
+    pub recipient_node_id: Vec<u8>,
+    /// Purpose string from [`purpose`] (e.g. `purpose::ZONE_KEY`).
+    #[serde(with = "serde_bytes")]
+    pub purpose: Vec<u8>,
+    /// Issuance timestamp (Unix seconds).
+    pub issued_at: u64,
+}
+
+impl Fcp4Aad {
+    /// Construct AAD for V4 zone-key distribution.
+    #[must_use]
+    pub fn for_zone_key(zone_id: &[u8], recipient_node_id: &[u8], issued_at: u64) -> Self {
+        Self {
+            version: FCP4_AAD_VERSION,
+            zone_id: zone_id.to_vec(),
+            recipient_node_id: recipient_node_id.to_vec(),
+            purpose: purpose::ZONE_KEY.to_vec(),
+            issued_at,
+        }
+    }
+
+    /// Construct AAD for V4 `ObjectId`-key distribution.
+    #[must_use]
+    pub fn for_objectid_key(zone_id: &[u8], recipient_node_id: &[u8], issued_at: u64) -> Self {
+        Self {
+            version: FCP4_AAD_VERSION,
+            zone_id: zone_id.to_vec(),
+            recipient_node_id: recipient_node_id.to_vec(),
+            purpose: purpose::OBJECTID_KEY.to_vec(),
+            issued_at,
+        }
+    }
+
+    /// Construct AAD for V4 secret-share distribution.
+    #[must_use]
+    pub fn for_secret_share(zone_id: &[u8], recipient_node_id: &[u8], issued_at: u64) -> Self {
+        Self {
+            version: FCP4_AAD_VERSION,
+            zone_id: zone_id.to_vec(),
+            recipient_node_id: recipient_node_id.to_vec(),
+            purpose: purpose::SECRET_SHARE.to_vec(),
+            issued_at,
+        }
+    }
+
+    /// Encode to deterministic CBOR bytes for use as the AAD argument
+    /// to [`XWingProvider::seal`] / [`XWingProvider::open`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::SerializationError`] on CBOR encoding
+    /// failure (cannot happen for valid byte fields in the current
+    /// `ciborium` version).
+    pub fn encode(&self) -> CryptoResult<Vec<u8>> {
+        // Typical AAD CBOR is ~140 bytes (8 zone + 32 node + 13-17
+        // purpose + 8 timestamp + 1 version + map/key overhead).
+        to_deterministic_cbor_with_capacity(self, 160)
     }
 }
 

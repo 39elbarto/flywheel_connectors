@@ -94,36 +94,59 @@ in the manifest. Acceptable; we already cap manifests at 64 KiB
 
 ### 3.1 Sealed-box envelope (`XWingSealedBox`)
 
+**Finalised under sub-bead `kyopb.1.2.2`.** This section describes the
+canonical V4 wire form as actually implemented in
+`crates/fcp-crypto/src/xwing.rs`; earlier draft notes about an
+integer-keyed CBOR map were superseded for consistency with
+[`crate::hpke_seal::HpkeSealedBox`] (the V3 sealed-box type uses serde
+derive with text keys, and aligning V4 with that minimises porting
+friction).
+
 ```rust
+#[derive(Serialize, Deserialize)]
 struct XWingSealedBox {
     // V4 KEM ciphertext: ct_mlkem (1088 B) || ct_x25519 (32 B)
-    enc:        [u8; 1120],
+    #[serde(with = "serde_bytes")]
+    enc:        Vec<u8>,   // exactly 1120 bytes; decoder rejects otherwise
 
     // ChaCha20-Poly1305 ciphertext over the wrapped key material.
     // AEAD key is HKDF-SHA256(IKM = ss, salt = aad_bytes, info = "FCP4-XWING-AEAD")
-    // truncated to 32 bytes.
+    // truncated to 32 bytes (full 32-byte HKDF output, no truncation).
+    #[serde(with = "serde_bytes")]
     ciphertext: Vec<u8>,
 }
 ```
 
-CBOR shape (canonical, deterministic encoding via `fcp_crypto::canonicalize`):
+Canonical CBOR shape (deterministic per RFC 8949 §4.2.1, produced by
+`XWingSealedBox::to_canonical_cbor`, which delegates to
+`fcp_crypto::canonicalize::to_deterministic_cbor_with_capacity`):
 
 ```cbor
 {
-    1: bstr (1120 bytes),  ; enc
-    2: bstr,               ; ciphertext (length = plaintext_len + 16 tag)
+    "enc":        bstr (1120 bytes),
+    "ciphertext": bstr (length = plaintext_len + 16 tag)
 }
 ```
 
+Map ordering is RFC 8949 length-then-bytewise: `"enc"` (3 bytes) precedes
+`"ciphertext"` (10 bytes), pinned by
+`tests/x_wing_wire.rs::x_wing_wire_sealed_box_cbor_is_a_two_field_text_keyed_map`.
+
 Encoding choices:
 
-- The `enc` field is **fixed-length**; deserialisers MUST reject anything
-  other than 1120 bytes.
-- The `ciphertext` field MUST be ≤ `XWING_MAX_CIPHERTEXT = 64 * 1024` bytes
-  (mirrors the existing HPKE cap in `hpke_seal.rs:35`).
+- The `enc` field is **fixed-length**; both
+  `XWingSealedBox::from_canonical_cbor` and the legacy
+  `XWingSealedBox::from_bytes` reject anything other than 1120 bytes.
+- The `ciphertext` field MUST be ≥ 16 bytes (the AEAD tag) and
+  ≤ `XWING_MAX_CIPHERTEXT = 64 * 1024` bytes (mirrors the existing HPKE
+  cap in `hpke_seal.rs`); the CBOR decoder caps total input at
+  `XWING_MAX_CIPHERTEXT + 256` bytes for the map/key overhead.
 - We do **not** use the IETF "OneShot encrypt" HPKE wrapper here, because
   X-Wing is the KEM-only primitive; AEAD framing is layered above it
   inside FCP exactly the way it is for HPKE today.
+- A legacy concat form `XWingSealedBox::to_bytes` (`enc || ciphertext`)
+  is preserved for symmetry with `HpkeSealedBox`. New V4 callers SHOULD
+  use the canonical CBOR form.
 
 ### 3.2 KEM identifier in `ZoneKeyManifest`
 
@@ -158,11 +181,35 @@ compatibility (see §6).
 
 ### 3.3 AAD binding
 
-`Fcp2Aad` is reused unchanged (purpose string `b"FCP2-ZONE-KEY"` →
-`b"FCP4-ZONE-KEY"` for the new path), and is fed into the AEAD `seal`
-and `open` calls, exactly as today. The AEAD key is derived from the
-X-Wing shared secret via HKDF-SHA256 with the AAD bytes as `salt`, so the
-AAD is bound to both the AEAD nonce/auth-tag and the KDF output.
+**Finalised under sub-bead `kyopb.1.2.2`.** A V4-specific
+[`Fcp4Aad`](../../crates/fcp-crypto/src/xwing.rs) struct mirrors V3's
+`Fcp2Aad` shape with two changes:
+
+1. The `purpose` field uses the [`xwing::purpose`] module's
+   `FCP4-`-prefixed labels (`FCP4-ZONE-KEY`, `FCP4-OBJECTID-KEY`,
+   `FCP4-OWNER-SHARE`, `FCP4-SECRET-SHARE`).
+2. A leading `version: u8 = FCP4_AAD_VERSION (=4)` byte is added as
+   belt-and-suspenders defence, so a V3 verifier that ever fed a
+   `Fcp4Aad`-encoded blob through its decoder cannot accidentally
+   authenticate it.
+
+The encoded bytes from `Fcp4Aad::encode()` are passed as the `aad`
+argument to `XWingProvider::seal` / `open`. Inside, `aad` participates
+in two places:
+
+1. As the **HKDF-SHA256 salt** when deriving the per-encap AEAD key:
+   `aead_key = HKDF-SHA256(IKM=ss, salt=aad, info="FCP4-XWING-AEAD")[0..32]`.
+2. As the **AEAD AAD** for the ChaCha20-Poly1305 `seal`/`open` call.
+
+This double-binding means any single field flip — `zone_id`,
+`recipient_node_id`, `purpose`, `issued_at`, or `version` — produces a
+clean decryption failure (`provider_open_rejects_wrong_aad` and
+`x_wing_wire_aad_field_flip_breaks_open` pin this).
+
+Cross-version-replay invariant: encoding the *same* logical
+`(zone, recipient, issued_at)` triple under V3 (`Fcp2Aad`) and V4
+(`Fcp4Aad`) MUST yield distinct CBOR. Pinned by
+`tests/x_wing_wire.rs::x_wing_wire_fcp4_aad_cbor_diverges_from_fcp2_for_same_logical_inputs`.
 
 ## 4. Key Generation, Encap, Decap
 
@@ -200,10 +247,22 @@ ciphertext = ChaCha20Poly1305(aead_key, nonce_zero, plaintext, aad.encode())
 Notes:
 
 - `LABEL = b"\\.//^\\"` per draft-connolly §3.
-- `nonce_zero` is **required** for one-shot KEM/DEM construction: the AEAD
-  key is unique per `enc` (because `ss` is bound to the ephemeral pk),
-  so a fresh nonce per (key, recipient) pair is unnecessary. This matches
-  how RFC 9180 HPKE single-shot mode operates.
+- **AEAD profile (locked under sub-bead `kyopb.1.2.2`):**
+  ChaCha20-Poly1305 with the 12-byte all-zero nonce. The earlier design
+  draft considered XChaCha20-Poly1305 for nonce-misuse resistance; the
+  finalised choice is plain ChaCha20-Poly1305 because (a) it matches the
+  V3 zone-key path (`hpke_seal.rs`) so operators see one AEAD across
+  the migration, (b) per-encap HKDF derivation makes the AEAD key
+  unique per encapsulation regardless of nonce, and (c) it is the
+  RFC 9180 HPKE single-shot pattern.
+- **`nonce_zero` is sound** for one-shot KEM/DEM construction: the AEAD
+  key is unique per `enc` (because `ss` is bound to the ephemeral pk
+  and the X25519/ML-KEM combiner outputs), so a fresh nonce per
+  (key, recipient) pair is unnecessary. The same trick HPKE single-shot
+  mode uses (RFC 9180 §5.2).
+- **HKDF info string** `b"FCP4-XWING-AEAD"` is a fixed constant;
+  pinned in `xwing.rs::XWING_AEAD_INFO` and verified in
+  `tests/x_wing_wire.rs::x_wing_wire_aead_profile_constants_are_pinned`.
 
 ### 4.3 Decapsulation (`xwing_open`)
 
@@ -393,13 +452,19 @@ interesting cost and was discussed in §2.1.
 
 ## 10. Open Questions (to resolve in sub-beads)
 
-- **Q1.** RustCrypto `ml-kem` (pure Rust, easier to audit) vs.
-  `pqcrypto-mlkem` (PQClean C bindings, faster, more eyes on it).
-  Decide in `kyopb.1.2.1`.
-- **Q2.** Should the AEAD layer over the X-Wing shared secret be
-  `XChaCha20Poly1305` (24-byte nonce, lets us pick a fixed all-zero
-  nonce *or* a random one) instead of ChaCha20-Poly1305? Probably yes
-  for V4 to give us nonce-misuse resistance. Decide in `kyopb.1.2.2`.
+- **Q1. (RESOLVED in `kyopb.1.2.1`.)** RustCrypto `ml-kem` (pure Rust,
+  easier to audit) vs. `pqcrypto-mlkem` (PQClean C bindings, faster,
+  more eyes on it). **Decision:** RustCrypto `x-wing = "0.1.0-rc.0"`
+  (pure Rust composition over `ml-kem` 0.3 + `x25519-dalek` per
+  draft-06). Full rationale in
+  `docs/architecture/adr/kyopb121-xwing-kem-vendor.md`.
+- **Q2. (RESOLVED in `kyopb.1.2.2`.)** AEAD profile over the X-Wing
+  shared secret. **Decision:** ChaCha20-Poly1305 with 12-byte all-zero
+  nonce. Considered XChaCha20-Poly1305 for nonce-misuse resistance and
+  rejected: per-encap HKDF derivation already makes the AEAD key
+  unique per encapsulation, and matching V3's HPKE profile minimises
+  operator surface during the V3↔V4 cohabitation window. See §4.2 for
+  the full plumbing.
 - **Q3.** Where do we store the V4 X-Wing public key alongside the V3
   X25519 encryption key in `NodeKeyAttestation`? Add a sibling field
   vs. a polymorphic `encryption_keys: Vec<EncryptionKey>` list.

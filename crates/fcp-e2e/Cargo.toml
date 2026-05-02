@@ -310,3 +310,8 @@ fcp-mesh = { workspace = true }
 # unrelated to ab8sb's handshake assertion fix but blocks verification of
 # that fix via `cargo test -p fcp-e2e --test llm_router_compliance_e2e`).
 fcp-sandbox = { workspace = true }
+# Secretless-connectors E2E (e99o6): tracing-capture subscriber for
+# verifying that bearer-token bytes never appear in connector log
+# events; zeroize for the wipe-on-drop secret wrapper.
+tracing-subscriber = { workspace = true }
+zeroize = { workspace = true }

@@ -8,7 +8,7 @@
 > target. `FCP_Specification_V2.md` is retained as historical / legacy-interoperability context.
 > When descriptions conflict, trust V3 for intended semantics and the code for current behavior.
 
-A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. The current tree includes **32 platform crates** under `crates/`, **150 connector crates** under `connectors/`, and a single agent-first CLI (`fwc`) that refuses to fabricate runtime state. Connector maturity is intentionally described as uneven: all 150 currently ship a `manifest.toml` and tests, 138 follow the full `src/client.rs` + `src/connector.rs` + `src/types.rs` layout, and a smaller set remain thinner or explicitly incubating/quarantined.
+A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. The current tree includes **34 platform crates** under `crates/`, **150 connector crates** under `connectors/`, and a single agent-first CLI (`fwc`) that refuses to fabricate runtime state. Connector maturity is intentionally described as uneven: all 150 currently ship a `manifest.toml` and tests, 138 follow the full `src/client.rs` + `src/connector.rs` + `src/types.rs` layout, and a smaller set remain thinner or explicitly incubating/quarantined.
 
 ---
 
@@ -739,7 +739,7 @@ The live tree currently contains 150 connector crates. All 150 ship a `manifest.
 
 The authoritative inventory is the `connectors/` directory or manifest-backed `fwc list --offline`, not a handwritten static table. The older audits in [`docs/connector_census_v3.md`](docs/connector_census_v3.md) and [`docs/V3_Connector_Audit_Matrix.md`](docs/V3_Connector_Audit_Matrix.md) are useful historical snapshots, but they only cover an earlier 89-connector window and should not be treated as the live inventory. Recent additions in the current wave include BlueBubbles, Synology Chat, Google Places, Email Generic, Sonos, Hue, Apple Notes, and Apple Reminders.
 
-Inventory presence also does not mean end-to-end proof. A few connectors are explicitly non-live today, including `huggingface`, `tlon`, and `zalo` (`status = "incubating"`) plus `zalouser` (`status = "quarantined"`), and the representative category table below should be read as workspace coverage rather than a supervised-flow integration pass list.
+Inventory presence also does not mean end-to-end proof. A few connectors are explicitly non-live today, including `huggingface` and `tlon` (`status = "incubating"`) plus `zalouser` (`status = "quarantined"`), and the representative category table below should be read as workspace coverage rather than a supervised-flow integration pass list.
 
 | Category | Representative Connectors |
 |----------|---------------------------|
@@ -1583,7 +1583,7 @@ control-plane failover.
 
 ## Project Structure
 
-This is a schematic map, not an exhaustive directory dump. The current tree contains 32 crates under `crates/` and 150 connector crates under `connectors/`. All 150 connector crates currently ship manifests and tests; 138 use the full `client.rs`/`connector.rs`/`types.rs` layout, while a smaller set are thinner or explicitly incubating/quarantined. Default workspace operations focus on a curated subset of platform crates; connector crates are usually targeted explicitly.
+This is a schematic map, not an exhaustive directory dump. The current tree contains 34 crates under `crates/` and 150 connector crates under `connectors/`. All 150 connector crates currently ship manifests and tests; 138 use the full `client.rs`/`connector.rs`/`types.rs` layout, while a smaller set are thinner or explicitly incubating/quarantined. Default workspace operations focus on a curated subset of platform crates; connector crates are usually targeted explicitly.
 
 ```
 flywheel_connectors/

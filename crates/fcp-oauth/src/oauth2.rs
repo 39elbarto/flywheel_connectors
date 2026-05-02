@@ -22,6 +22,7 @@ use crate::{
 
 const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
 const JSON_CONTENT_TYPE: &str = "application/json";
+const EMPTY_AUTHORIZATION_CODE_MESSAGE: &str = "authorization code must not be empty or whitespace";
 
 /// Encode a single OAuth credential component using Appendix B
 /// `application/x-www-form-urlencoded` rules.
@@ -625,6 +626,8 @@ impl OAuth2Client {
         code: &str,
         pkce: Option<&Pkce>,
     ) -> OAuthResult<OAuthTokens> {
+        reject_empty_authorization_code(code)?;
+
         if self.config.use_pkce && pkce.is_none() {
             return Err(OAuthError::InvalidConfig(
                 "authorization_code flow requires per-flow PKCE code_verifier".into(),
@@ -943,10 +946,22 @@ impl AuthorizationCallback {
             });
         }
 
-        self.code
-            .clone()
-            .ok_or_else(|| OAuthError::InvalidTokenResponse("Missing authorization code".into()))
+        let code = self
+            .code
+            .as_ref()
+            .ok_or_else(|| OAuthError::InvalidTokenResponse("Missing authorization code".into()))?;
+        reject_empty_authorization_code(code)?;
+        Ok(code.clone())
     }
+}
+
+fn reject_empty_authorization_code(code: &str) -> OAuthResult<()> {
+    if code.trim().is_empty() {
+        return Err(OAuthError::InvalidTokenResponse(
+            EMPTY_AUTHORIZATION_CODE_MESSAGE.into(),
+        ));
+    }
+    Ok(())
 }
 
 fn reject_duplicate_callback_params(query: &str) -> OAuthResult<()> {
@@ -1039,6 +1054,40 @@ mod tests {
 
         let code = callback.validate("expected_state").unwrap();
         assert_eq!(code, "auth_code_123");
+    }
+
+    #[test]
+    fn test_callback_empty_code_rejected() {
+        let callback = AuthorizationCallback {
+            code: Some(String::new()),
+            state: Some("expected_state".to_string()),
+            error: None,
+            error_description: None,
+            error_uri: None,
+        };
+
+        let result = callback.validate("expected_state");
+        assert!(
+            matches!(result, Err(OAuthError::InvalidTokenResponse(ref msg)) if msg == EMPTY_AUTHORIZATION_CODE_MESSAGE),
+            "empty code must fail closed, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_callback_whitespace_code_rejected() {
+        let callback = AuthorizationCallback {
+            code: Some(" \t\n ".to_string()),
+            state: Some("expected_state".to_string()),
+            error: None,
+            error_description: None,
+            error_uri: None,
+        };
+
+        let result = callback.validate("expected_state");
+        assert!(
+            matches!(result, Err(OAuthError::InvalidTokenResponse(ref msg)) if msg == EMPTY_AUTHORIZATION_CODE_MESSAGE),
+            "whitespace code must fail closed, got {result:?}"
+        );
     }
 
     #[test]
@@ -1258,6 +1307,16 @@ mod tests {
     }
 
     #[test]
+    fn test_callback_from_query_empty_code_rejected() {
+        let callback = AuthorizationCallback::from_query("code=&state=state").unwrap();
+        let result = callback.validate("state");
+        assert!(
+            matches!(result, Err(OAuthError::InvalidTokenResponse(ref msg)) if msg == EMPTY_AUTHORIZATION_CODE_MESSAGE),
+            "empty query code must fail closed, got {result:?}"
+        );
+    }
+
+    #[test]
     fn test_authorization_url_with_default_scopes() {
         let config = test_config().with_scopes(vec!["profile".into()]);
         let client = OAuth2Client::new(config).unwrap();
@@ -1319,6 +1378,63 @@ mod tests {
             assert_eq!(tokens.access_token(), "access-123");
             assert_eq!(tokens.refresh_token(), Some("refresh-123"));
             assert_eq!(tokens.scopes(), &["read", "write"]);
+        });
+    }
+
+    #[test]
+    fn test_exchange_code_rejects_empty_code_before_token_request() {
+        run_with_test_runtime(async {
+            let server = MockServer::start().await;
+            let config = OAuth2Config::new(
+                "test_client_id",
+                "test_client_secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_redirect_uri("https://localhost:3000/callback")
+            .with_pkce(false);
+            let client = OAuth2Client::new(config).unwrap();
+
+            let err = client.exchange_code("").await.unwrap_err();
+            assert!(
+                matches!(err, OAuthError::InvalidTokenResponse(ref msg) if msg == EMPTY_AUTHORIZATION_CODE_MESSAGE),
+                "empty code should be rejected before exchange, got {err:?}"
+            );
+            let requests = server.received_requests().await.unwrap_or_default();
+            assert!(
+                requests.is_empty(),
+                "empty code must not reach token endpoint"
+            );
+        });
+    }
+
+    #[test]
+    fn test_exchange_code_with_pkce_rejects_whitespace_code_before_token_request() {
+        run_with_test_runtime(async {
+            let server = MockServer::start().await;
+            let config = OAuth2Config::new(
+                "test_client_id",
+                "test_client_secret",
+                format!("{}/authorize", server.uri()),
+                format!("{}/token", server.uri()),
+            )
+            .with_redirect_uri("https://localhost:3000/callback");
+            let client = OAuth2Client::new(config).unwrap();
+            let pkce = Pkce::with_method(PkceMethod::S256);
+
+            let err = client
+                .exchange_code_with_pkce(" \t\n ", &pkce)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, OAuthError::InvalidTokenResponse(ref msg) if msg == EMPTY_AUTHORIZATION_CODE_MESSAGE),
+                "whitespace code should be rejected before exchange, got {err:?}"
+            );
+            let requests = server.received_requests().await.unwrap_or_default();
+            assert!(
+                requests.is_empty(),
+                "whitespace code must not reach token endpoint"
+            );
         });
     }
 
@@ -3157,6 +3273,39 @@ mod tests {
             .validate_callback(&callback)
             .expect_err("validated session must not be reusable");
         assert!(matches!(err, OAuthError::AuthorizationSessionConsumed));
+    }
+
+    #[test]
+    fn test_authorization_session_empty_code_does_not_consume_session() {
+        let client = OAuth2Client::new(test_config()).unwrap();
+        let session = client.authorization_session(&["openid"]).unwrap();
+        let empty_code_callback = AuthorizationCallback {
+            code: Some(String::new()),
+            state: Some(session.state().to_string()),
+            error: None,
+            error_description: None,
+            error_uri: None,
+        };
+
+        let err = session
+            .validate_callback(&empty_code_callback)
+            .expect_err("empty code must fail validation");
+        assert!(
+            matches!(err, OAuthError::InvalidTokenResponse(ref msg) if msg == EMPTY_AUTHORIZATION_CODE_MESSAGE),
+            "empty code should be a validation failure, got {err:?}"
+        );
+
+        let valid_callback = AuthorizationCallback {
+            code: Some("auth-code".into()),
+            state: Some(session.state().to_string()),
+            error: None,
+            error_description: None,
+            error_uri: None,
+        };
+        let grant = session
+            .validate_callback(&valid_callback)
+            .expect("failed validation must not consume the session");
+        assert_eq!(grant.code(), "auth-code");
     }
 
     #[test]

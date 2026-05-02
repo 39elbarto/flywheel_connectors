@@ -223,10 +223,11 @@ fn callback_validate_fails_on_state_mismatch() {
 
 #[test]
 fn callback_validate_fails_on_error_response() {
-    let callback =
-        AuthorizationCallback::from_query("error=access_denied&error_description=User+denied")
-            .unwrap();
-    let err = callback.validate("any").unwrap_err();
+    let callback = AuthorizationCallback::from_query(
+        "error=access_denied&error_description=User+denied&state=expected",
+    )
+    .unwrap();
+    let err = callback.validate("expected").unwrap_err();
     assert!(matches!(err, OAuthError::AuthorizationError { .. }));
 }
 

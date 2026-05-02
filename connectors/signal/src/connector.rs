@@ -790,7 +790,8 @@ impl SignalConnector {
                     });
                 }
             };
-            verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
+            let _bound =
+                verifier.verify_bound(req.capability_token, &required_cap, &req.operation, &[])?;
         } else {
             return Err(FcpError::NotConfigured);
         }

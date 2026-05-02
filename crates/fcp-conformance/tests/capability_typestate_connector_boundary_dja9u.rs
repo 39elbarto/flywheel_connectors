@@ -13,8 +13,8 @@
 //!
 //! Live tree adoption (per the dja9u bead's evidence scan):
 //!
-//! - 49 connectors USE_TYPESTATE (verify_bound / promote_with_*).
-//! - 31 connectors USE_LEGACY_VERIFY (deprecated `verifier.verify(...)`
+//! - 69 connectors USE_TYPESTATE (verify_bound / promote_with_*).
+//! - 9 connectors USE_LEGACY_VERIFY (deprecated `verifier.verify(...)`
 //!   alias — same code path as `verify_bound` but discards the
 //!   `BoundVerified` token, so the connector can no longer prove to
 //!   downstream code that the token was structurally verified).
@@ -69,11 +69,6 @@ const LEGACY_VERIFY_MARKER: &str = "verifier.verify(";
 /// `grep -lE "verifier\\.verify\\(" connectors/*/src/connector.rs`
 /// at the time the dja9u commit landed.
 const LEGACY_VERIFY_ALLOWLIST: &[&str] = &[
-    "paypal",
-    "pinecone",
-    "plaid",
-    "signal",
-    "square",
     "supabase",
     "teams",
     "twitch",
@@ -147,13 +142,18 @@ const TYPESTATE_ENFORCED_ALLOWLIST: &[&str] = &[
     "openai",
     "outlook",
     "package-registry",
+    "paypal",
     "perplexity-search",
+    "pinecone",
+    "plaid",
     "qdrant",
     "qq",
     "s3",
     "shopify",
+    "signal",
     "slack",
     "sonos",
+    "square",
     "stripe",
     "synology-chat",
     "telegram",
@@ -290,13 +290,13 @@ fn dja9u_allowlists_match_pinned_baseline_counts() {
     // typestate size in this assertion.
     assert_eq!(
         LEGACY_VERIFY_ALLOWLIST.len(),
-        14,
+        9,
         "LEGACY_VERIFY_ALLOWLIST size drifted; update this assertion to \
          match"
     );
     assert_eq!(
         TYPESTATE_ENFORCED_ALLOWLIST.len(),
-        64,
+        69,
         "TYPESTATE_ENFORCED_ALLOWLIST size drifted; update this assertion \
          to match"
     );

@@ -773,7 +773,7 @@ impl PineconeConnector {
         })?;
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
+            let _bound = verifier.verify_bound(token, &cap_id, &op_id, &[])?;
         } else {
             return Err(FcpError::NotHandshaken);
         }

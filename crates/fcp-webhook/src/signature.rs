@@ -8,6 +8,11 @@ use sha2::Sha256;
 
 use crate::{WebhookError, WebhookResult};
 
+/// Minimum HMAC-SHA256 signing secret length accepted by webhook verifiers.
+pub const HMAC_SHA256_MIN_SIGNING_SECRET_BYTES: usize = 16;
+/// Minimum HMAC-SHA1 signing secret length accepted by webhook verifiers.
+pub const HMAC_SHA1_MIN_SIGNING_SECRET_BYTES: usize = 20;
+
 const HMAC_SHA256_SIGNATURE_BYTES_LEN: usize = 32;
 #[cfg(test)]
 const HMAC_SHA256_SIGNATURE_HEX_LEN: usize = HMAC_SHA256_SIGNATURE_BYTES_LEN * 2;
@@ -48,6 +53,27 @@ fn decode_hmac_hex_candidate<const N: usize>(signature: &str) -> ([u8; N], bool)
     }
 
     (decoded, valid)
+}
+
+fn validate_hmac_signing_secret(algorithm: SignatureAlgorithm, secret: &[u8]) -> WebhookResult<()> {
+    if secret.is_empty() || secret.iter().all(u8::is_ascii_whitespace) {
+        return Err(WebhookError::EmptySigningSecret { algorithm });
+    }
+
+    let min_length = match algorithm {
+        SignatureAlgorithm::HmacSha256 => HMAC_SHA256_MIN_SIGNING_SECRET_BYTES,
+        SignatureAlgorithm::HmacSha1 => HMAC_SHA1_MIN_SIGNING_SECRET_BYTES,
+        SignatureAlgorithm::Ed25519 => 0,
+    };
+    if secret.len() < min_length {
+        return Err(WebhookError::SigningSecretTooShort {
+            algorithm,
+            length: secret.len(),
+            min_length,
+        });
+    }
+
+    Ok(())
 }
 
 /// Signature algorithm.
@@ -94,9 +120,20 @@ impl HmacSha256Verifier {
     /// Create a new HMAC-SHA256 verifier.
     #[must_use]
     pub fn new(secret: impl AsRef<[u8]>) -> Self {
-        Self {
-            secret: secret.as_ref().to_vec(),
-        }
+        Self::try_new(secret).expect("HMAC-SHA256 signing secret must meet minimum length")
+    }
+
+    /// Try to create a new HMAC-SHA256 verifier.
+    ///
+    /// # Errors
+    /// Returns [`WebhookError::EmptySigningSecret`] when the secret is empty or whitespace-only,
+    /// and [`WebhookError::SigningSecretTooShort`] when it is below the HMAC-SHA256 length floor.
+    pub fn try_new(secret: impl AsRef<[u8]>) -> WebhookResult<Self> {
+        let secret = secret.as_ref();
+        validate_hmac_signing_secret(SignatureAlgorithm::HmacSha256, secret)?;
+        Ok(Self {
+            secret: secret.to_vec(),
+        })
     }
 
     /// Compute signature for a payload.
@@ -159,9 +196,20 @@ impl HmacSha1Verifier {
     /// Create a new HMAC-SHA1 verifier.
     #[must_use]
     pub fn new(secret: impl AsRef<[u8]>) -> Self {
-        Self {
-            secret: secret.as_ref().to_vec(),
-        }
+        Self::try_new(secret).expect("HMAC-SHA1 signing secret must meet minimum length")
+    }
+
+    /// Try to create a new HMAC-SHA1 verifier.
+    ///
+    /// # Errors
+    /// Returns [`WebhookError::EmptySigningSecret`] when the secret is empty or whitespace-only,
+    /// and [`WebhookError::SigningSecretTooShort`] when it is below the HMAC-SHA1 length floor.
+    pub fn try_new(secret: impl AsRef<[u8]>) -> WebhookResult<Self> {
+        let secret = secret.as_ref();
+        validate_hmac_signing_secret(SignatureAlgorithm::HmacSha1, secret)?;
+        Ok(Self {
+            secret: secret.to_vec(),
+        })
     }
 
     /// Compute signature for a payload.
@@ -283,7 +331,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_verify() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let payload = b"test payload";
         let signature = verifier.compute(payload);
 
@@ -293,7 +341,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_with_prefix() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let payload = b"test payload";
         let signature = format!("sha256={}", verifier.compute(payload));
 
@@ -302,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha1_verify() {
-        let verifier = HmacSha1Verifier::new("secret");
+        let verifier = HmacSha1Verifier::new("webhook-test-secret-2026");
         let payload = b"test payload";
         let signature = verifier.compute(payload);
 
@@ -312,7 +360,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha1_with_prefix() {
-        let verifier = HmacSha1Verifier::new("secret");
+        let verifier = HmacSha1Verifier::new("webhook-test-secret-2026");
         let payload = b"test payload";
         let signature = format!("sha1={}", verifier.compute(payload));
 
@@ -418,23 +466,23 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_debug_redacts_secret() {
-        let v = HmacSha256Verifier::new("supersecret");
+        let v = HmacSha256Verifier::new("supersecret-webhook-2026");
         let debug = format!("{v:?}");
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("supersecret"));
+        assert!(!debug.contains("supersecret-webhook-2026"));
     }
 
     #[test]
     fn test_hmac_sha1_debug_redacts_secret() {
-        let v = HmacSha1Verifier::new("supersecret");
+        let v = HmacSha1Verifier::new("supersecret-webhook-2026");
         let debug = format!("{v:?}");
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("supersecret"));
+        assert!(!debug.contains("supersecret-webhook-2026"));
     }
 
     #[test]
     fn test_hmac_sha256_with_v1_prefix() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let payload = b"test payload";
         let signature = format!("v1={}", verifier.compute(payload));
         assert!(verifier.verify(payload, &signature).is_ok());
@@ -442,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_with_v0_prefix() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let payload = b"test payload";
         let signature = format!("v0={}", verifier.compute(payload));
         assert!(verifier.verify(payload, &signature).is_ok());
@@ -450,13 +498,13 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_algorithm() {
-        let v = HmacSha256Verifier::new("secret");
+        let v = HmacSha256Verifier::new("webhook-test-secret-2026");
         assert_eq!(v.algorithm(), SignatureAlgorithm::HmacSha256);
     }
 
     #[test]
     fn test_hmac_sha1_algorithm() {
-        let v = HmacSha1Verifier::new("secret");
+        let v = HmacSha1Verifier::new("webhook-test-secret-2026");
         assert_eq!(v.algorithm(), SignatureAlgorithm::HmacSha1);
     }
 
@@ -496,14 +544,14 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_wrong_payload_fails() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let sig = verifier.compute(b"original");
         assert!(verifier.verify(b"tampered", &sig).is_err());
     }
 
     #[test]
     fn test_hmac_sha1_with_sha1_prefix() {
-        let verifier = HmacSha1Verifier::new("secret");
+        let verifier = HmacSha1Verifier::new("webhook-test-secret-2026");
         let payload = b"test payload";
         let signature = format!("sha1={}", verifier.compute(payload));
         assert!(verifier.verify(payload, &signature).is_ok());
@@ -513,7 +561,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_empty_payload() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let sig = verifier.compute(b"");
         assert!(verifier.verify(b"", &sig).is_ok());
         assert!(verifier.verify(b"x", &sig).is_err());
@@ -521,22 +569,52 @@ mod tests {
 
     #[test]
     fn test_hmac_sha1_empty_payload() {
-        let verifier = HmacSha1Verifier::new("secret");
+        let verifier = HmacSha1Verifier::new("webhook-test-secret-2026");
         let sig = verifier.compute(b"");
         assert!(verifier.verify(b"", &sig).is_ok());
         assert!(verifier.verify(b"x", &sig).is_err());
     }
 
     #[test]
-    fn test_hmac_sha256_empty_secret() {
-        let verifier = HmacSha256Verifier::new("");
-        let sig = verifier.compute(b"test");
-        assert!(verifier.verify(b"test", &sig).is_ok());
+    fn test_hmac_sha256_empty_secret_rejected() {
+        assert!(matches!(
+            HmacSha256Verifier::try_new(""),
+            Err(WebhookError::EmptySigningSecret {
+                algorithm: SignatureAlgorithm::HmacSha256
+            })
+        ));
+    }
+
+    #[test]
+    fn test_hmac_sha256_whitespace_secret_rejected() {
+        assert!(matches!(
+            HmacSha256Verifier::try_new(" \t\n"),
+            Err(WebhookError::EmptySigningSecret {
+                algorithm: SignatureAlgorithm::HmacSha256
+            })
+        ));
+    }
+
+    #[test]
+    fn test_hmac_sha256_short_secret_rejected() {
+        assert!(matches!(
+            HmacSha256Verifier::try_new([7u8; HMAC_SHA256_MIN_SIGNING_SECRET_BYTES - 1]),
+            Err(WebhookError::SigningSecretTooShort {
+                algorithm: SignatureAlgorithm::HmacSha256,
+                length,
+                min_length: HMAC_SHA256_MIN_SIGNING_SECRET_BYTES,
+            }) if length == HMAC_SHA256_MIN_SIGNING_SECRET_BYTES - 1
+        ));
+    }
+
+    #[test]
+    fn test_hmac_sha256_minimum_length_secret_accepted() {
+        assert!(HmacSha256Verifier::try_new([7u8; HMAC_SHA256_MIN_SIGNING_SECRET_BYTES]).is_ok());
     }
 
     #[test]
     fn test_hmac_sha256_binary_payload() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let payload: Vec<u8> = (0..=255).collect();
         let sig = verifier.compute(&payload);
         assert!(verifier.verify(&payload, &sig).is_ok());
@@ -544,7 +622,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_deterministic() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let sig1 = verifier.compute(b"test");
         let sig2 = verifier.compute(b"test");
         assert_eq!(sig1, sig2);
@@ -552,8 +630,8 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_different_secrets_different_sigs() {
-        let v1 = HmacSha256Verifier::new("secret1");
-        let v2 = HmacSha256Verifier::new("secret2");
+        let v1 = HmacSha256Verifier::new("secret-one-webhook-2026");
+        let v2 = HmacSha256Verifier::new("secret-two-webhook-2026");
         let sig1 = v1.compute(b"test");
         let sig2 = v2.compute(b"test");
         assert_ne!(sig1, sig2);
@@ -561,15 +639,15 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_cross_verify_fails() {
-        let v1 = HmacSha256Verifier::new("secret1");
-        let v2 = HmacSha256Verifier::new("secret2");
+        let v1 = HmacSha256Verifier::new("secret-one-webhook-2026");
+        let v2 = HmacSha256Verifier::new("secret-two-webhook-2026");
         let sig1 = v1.compute(b"test");
         assert!(v2.verify(b"test", &sig1).is_err());
     }
 
     #[test]
     fn test_hmac_sha256_signature_is_hex() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let sig = verifier.compute(b"test");
         // Should be 64 hex characters (256 bits = 32 bytes = 64 hex chars)
         assert_eq!(sig.len(), 64);
@@ -578,7 +656,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha1_signature_is_hex() {
-        let verifier = HmacSha1Verifier::new("secret");
+        let verifier = HmacSha1Verifier::new("webhook-test-secret-2026");
         let sig = verifier.compute(b"test");
         // Should be 40 hex characters (160 bits = 20 bytes = 40 hex chars)
         assert_eq!(sig.len(), 40);
@@ -637,7 +715,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_clone() {
-        let v1 = HmacSha256Verifier::new("secret");
+        let v1 = HmacSha256Verifier::new("webhook-test-secret-2026");
         let v2 = v1.clone();
         let sig = v1.compute(b"test");
         assert!(v2.verify(b"test", &sig).is_ok());
@@ -645,7 +723,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha1_clone() {
-        let v1 = HmacSha1Verifier::new("secret");
+        let v1 = HmacSha1Verifier::new("webhook-test-secret-2026");
         let v2 = v1.clone();
         let sig = v1.compute(b"test");
         assert!(v2.verify(b"test", &sig).is_ok());
@@ -667,13 +745,13 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_invalid_hex_in_signature() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         assert!(verifier.verify(b"test", "not-valid-hex!").is_err());
     }
 
     #[test]
     fn test_hmac_sha256_malformed_signature_candidates_fail_closed() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let payload = b"timing-edge-payload";
         let valid = verifier.compute(payload);
 
@@ -716,7 +794,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_unicode_payload() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let payload = "\u{1F600}\u{1F4A9}\u{00E9}\u{00F1}\u{00FC}".as_bytes();
         let sig = verifier.compute(payload);
         assert!(verifier.verify(payload, &sig).is_ok());
@@ -724,7 +802,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha1_unicode_payload() {
-        let verifier = HmacSha1Verifier::new("secret");
+        let verifier = HmacSha1Verifier::new("webhook-test-secret-2026");
         let payload = "\u{1F600}\u{1F4A9}\u{00E9}\u{00F1}\u{00FC}".as_bytes();
         let sig = verifier.compute(payload);
         assert!(verifier.verify(payload, &sig).is_ok());
@@ -732,7 +810,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_large_payload() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let payload = vec![b'X'; 1_000_000]; // 1MB
         let sig = verifier.compute(&payload);
         assert!(verifier.verify(&payload, &sig).is_ok());
@@ -740,7 +818,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha1_large_payload() {
-        let verifier = HmacSha1Verifier::new("secret");
+        let verifier = HmacSha1Verifier::new("webhook-test-secret-2026");
         let payload = vec![b'X'; 1_000_000]; // 1MB
         let sig = verifier.compute(&payload);
         assert!(verifier.verify(&payload, &sig).is_ok());
@@ -763,7 +841,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha1_deterministic() {
-        let verifier = HmacSha1Verifier::new("key");
+        let verifier = HmacSha1Verifier::new("hmac-test-key-material-2026");
         let sig1 = verifier.compute(b"data");
         let sig2 = verifier.compute(b"data");
         assert_eq!(sig1, sig2);
@@ -771,29 +849,29 @@ mod tests {
 
     #[test]
     fn test_hmac_sha1_different_secrets_different_sigs() {
-        let v1 = HmacSha1Verifier::new("key1");
-        let v2 = HmacSha1Verifier::new("key2");
+        let v1 = HmacSha1Verifier::new("hmac-test-key-one-2026");
+        let v2 = HmacSha1Verifier::new("hmac-test-key-two-2026");
         assert_ne!(v1.compute(b"data"), v2.compute(b"data"));
     }
 
     #[test]
     fn test_hmac_sha1_cross_verify_fails() {
-        let v1 = HmacSha1Verifier::new("key1");
-        let v2 = HmacSha1Verifier::new("key2");
+        let v1 = HmacSha1Verifier::new("hmac-test-key-one-2026");
+        let v2 = HmacSha1Verifier::new("hmac-test-key-two-2026");
         let sig = v1.compute(b"test");
         assert!(v2.verify(b"test", &sig).is_err());
     }
 
     #[test]
     fn test_hmac_sha1_wrong_payload_fails() {
-        let verifier = HmacSha1Verifier::new("secret");
+        let verifier = HmacSha1Verifier::new("webhook-test-secret-2026");
         let sig = verifier.compute(b"original");
         assert!(verifier.verify(b"tampered", &sig).is_err());
     }
 
     #[test]
     fn test_hmac_sha256_signature_lowercase_hex() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let sig = verifier.compute(b"test");
         // Ensure output is lowercase hex
         assert!(
@@ -804,7 +882,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_verify_uppercase_hex() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let sig = verifier.compute(b"test");
         let upper = sig.to_uppercase();
         // Uppercase hex should fail because hex::decode of uppercase gives different bytes
@@ -848,7 +926,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_newline_in_payload() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let payload = b"line1\nline2\r\nline3";
         let sig = verifier.compute(payload);
         assert!(verifier.verify(payload, &sig).is_ok());
@@ -856,28 +934,58 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_null_bytes_in_payload() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let payload = b"\x00\x00\x01\x00";
         let sig = verifier.compute(payload);
         assert!(verifier.verify(payload, &sig).is_ok());
     }
 
     #[test]
-    fn test_hmac_sha1_empty_secret() {
-        let verifier = HmacSha1Verifier::new("");
-        let sig = verifier.compute(b"test");
-        assert!(verifier.verify(b"test", &sig).is_ok());
+    fn test_hmac_sha1_empty_secret_rejected() {
+        assert!(matches!(
+            HmacSha1Verifier::try_new(""),
+            Err(WebhookError::EmptySigningSecret {
+                algorithm: SignatureAlgorithm::HmacSha1
+            })
+        ));
+    }
+
+    #[test]
+    fn test_hmac_sha1_whitespace_secret_rejected() {
+        assert!(matches!(
+            HmacSha1Verifier::try_new(" \t\n"),
+            Err(WebhookError::EmptySigningSecret {
+                algorithm: SignatureAlgorithm::HmacSha1
+            })
+        ));
+    }
+
+    #[test]
+    fn test_hmac_sha1_short_secret_rejected() {
+        assert!(matches!(
+            HmacSha1Verifier::try_new([9u8; HMAC_SHA1_MIN_SIGNING_SECRET_BYTES - 1]),
+            Err(WebhookError::SigningSecretTooShort {
+                algorithm: SignatureAlgorithm::HmacSha1,
+                length,
+                min_length: HMAC_SHA1_MIN_SIGNING_SECRET_BYTES,
+            }) if length == HMAC_SHA1_MIN_SIGNING_SECRET_BYTES - 1
+        ));
+    }
+
+    #[test]
+    fn test_hmac_sha1_minimum_length_secret_accepted() {
+        assert!(HmacSha1Verifier::try_new([9u8; HMAC_SHA1_MIN_SIGNING_SECRET_BYTES]).is_ok());
     }
 
     #[test]
     fn test_hmac_sha1_invalid_hex_in_signature() {
-        let verifier = HmacSha1Verifier::new("secret");
+        let verifier = HmacSha1Verifier::new("webhook-test-secret-2026");
         assert!(verifier.verify(b"test", "not-valid-hex!").is_err());
     }
 
     #[test]
     fn test_hmac_sha1_malformed_signature_candidates_fail_closed() {
-        let verifier = HmacSha1Verifier::new("secret");
+        let verifier = HmacSha1Verifier::new("webhook-test-secret-2026");
         let payload = b"timing-edge-payload";
         let valid = verifier.compute(payload);
 
@@ -903,28 +1011,28 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_verify_with_sha256_prefix_tampered() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let sig = format!("sha256={}", verifier.compute(b"original"));
         assert!(verifier.verify(b"tampered", &sig).is_err());
     }
 
     #[test]
     fn test_hmac_sha256_verify_with_v1_prefix_tampered() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let sig = format!("v1={}", verifier.compute(b"original"));
         assert!(verifier.verify(b"tampered", &sig).is_err());
     }
 
     #[test]
     fn test_hmac_sha256_verify_with_v0_prefix_tampered() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let sig = format!("v0={}", verifier.compute(b"original"));
         assert!(verifier.verify(b"tampered", &sig).is_err());
     }
 
     #[test]
     fn test_hmac_sha256_single_byte_payload() {
-        let verifier = HmacSha256Verifier::new("key");
+        let verifier = HmacSha256Verifier::new("hmac-test-key-material-2026");
         let sig = verifier.compute(b"x");
         assert!(verifier.verify(b"x", &sig).is_ok());
         assert!(verifier.verify(b"y", &sig).is_err());
@@ -932,7 +1040,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha1_single_byte_payload() {
-        let verifier = HmacSha1Verifier::new("key");
+        let verifier = HmacSha1Verifier::new("hmac-test-key-material-2026");
         let sig = verifier.compute(b"x");
         assert!(verifier.verify(b"x", &sig).is_ok());
         assert!(verifier.verify(b"y", &sig).is_err());
@@ -956,7 +1064,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_different_payloads_different_sigs() {
-        let verifier = HmacSha256Verifier::new("key");
+        let verifier = HmacSha256Verifier::new("hmac-test-key-material-2026");
         let sig1 = verifier.compute(b"payload_a");
         let sig2 = verifier.compute(b"payload_b");
         assert_ne!(sig1, sig2);
@@ -964,7 +1072,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha1_different_payloads_different_sigs() {
-        let verifier = HmacSha1Verifier::new("key");
+        let verifier = HmacSha1Verifier::new("hmac-test-key-material-2026");
         let sig1 = verifier.compute(b"payload_a");
         let sig2 = verifier.compute(b"payload_b");
         assert_ne!(sig1, sig2);
@@ -1019,14 +1127,14 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_verify_empty_signature_string() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         // Empty string should fail (empty hex decodes to empty bytes)
         assert!(verifier.verify(b"test", "").is_err());
     }
 
     #[test]
     fn test_hmac_sha1_verify_empty_signature_string() {
-        let verifier = HmacSha1Verifier::new("secret");
+        let verifier = HmacSha1Verifier::new("webhook-test-secret-2026");
         assert!(verifier.verify(b"test", "").is_err());
     }
 
@@ -1058,7 +1166,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_verify_truncated_signature() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let sig = verifier.compute(b"test");
         // Truncate to half length - should fail verification
         let truncated = &sig[..32];
@@ -1067,7 +1175,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha1_verify_truncated_signature() {
-        let verifier = HmacSha1Verifier::new("secret");
+        let verifier = HmacSha1Verifier::new("webhook-test-secret-2026");
         let sig = verifier.compute(b"test");
         let truncated = &sig[..20];
         assert!(verifier.verify(b"test", truncated).is_err());
@@ -1075,7 +1183,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_verify_with_unknown_prefix() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let sig = verifier.compute(b"test");
         // Unknown prefix is not stripped, whole string treated as hex
         let prefixed = format!("unknown={sig}");
@@ -1084,14 +1192,14 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_compute_is_lowercase_hex() {
-        let verifier = HmacSha256Verifier::new("key");
+        let verifier = HmacSha256Verifier::new("hmac-test-key-material-2026");
         let sig = verifier.compute(b"message");
         assert_eq!(sig, sig.to_lowercase());
     }
 
     #[test]
     fn test_hmac_sha1_compute_is_lowercase_hex() {
-        let verifier = HmacSha1Verifier::new("key");
+        let verifier = HmacSha1Verifier::new("hmac-test-key-material-2026");
         let sig = verifier.compute(b"message");
         assert_eq!(sig, sig.to_lowercase());
     }
@@ -1129,7 +1237,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_sha256_prefix_strip_takes_priority() {
-        let verifier = HmacSha256Verifier::new("key");
+        let verifier = HmacSha256Verifier::new("hmac-test-key-material-2026");
         let sig = verifier.compute(b"data");
         // sha256= prefix is tried first
         let prefixed = format!("sha256={sig}");
@@ -1138,7 +1246,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_v1_prefix_used_when_no_sha256() {
-        let verifier = HmacSha256Verifier::new("key");
+        let verifier = HmacSha256Verifier::new("hmac-test-key-material-2026");
         let sig = verifier.compute(b"data");
         let prefixed = format!("v1={sig}");
         assert!(verifier.verify(b"data", &prefixed).is_ok());
@@ -1146,7 +1254,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_v0_prefix_used_when_no_sha256_or_v1() {
-        let verifier = HmacSha256Verifier::new("key");
+        let verifier = HmacSha256Verifier::new("hmac-test-key-material-2026");
         let sig = verifier.compute(b"data");
         let prefixed = format!("v0={sig}");
         assert!(verifier.verify(b"data", &prefixed).is_ok());
@@ -1154,7 +1262,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_two_different_payloads_differ() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let sig_a = verifier.compute(b"aaaa");
         let sig_b = verifier.compute(b"aaab");
         assert_ne!(sig_a, sig_b);
@@ -1184,7 +1292,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha256_verify_extra_long_hex_signature() {
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         // 65 hex chars (one byte too many) - valid hex but wrong length for HMAC
         let too_long = "a".repeat(66);
         assert!(verifier.verify(b"test", &too_long).is_err());
@@ -1192,7 +1300,7 @@ mod tests {
 
     #[test]
     fn test_hmac_sha1_verify_extra_long_hex_signature() {
-        let verifier = HmacSha1Verifier::new("secret");
+        let verifier = HmacSha1Verifier::new("webhook-test-secret-2026");
         let too_long = "a".repeat(HMAC_SHA1_SIGNATURE_HEX_LEN + 2);
         assert!(verifier.verify(b"test", &too_long).is_err());
     }

@@ -178,10 +178,18 @@ impl GitHubWebhook {
     /// Create a new GitHub webhook handler.
     #[must_use]
     pub fn new(secret: impl AsRef<[u8]>) -> Self {
-        Self {
-            verifier: HmacSha256Verifier::new(secret),
+        Self::try_new(secret).expect("GitHub webhook signing secret must meet minimum length")
+    }
+
+    /// Try to create a new GitHub webhook handler.
+    ///
+    /// # Errors
+    /// Returns an error when the signing secret is empty, whitespace-only, or too short.
+    pub fn try_new(secret: impl AsRef<[u8]>) -> WebhookResult<Self> {
+        Ok(Self {
+            verifier: HmacSha256Verifier::try_new(secret)?,
             max_payload_size: default_max_payload_size(),
-        }
+        })
     }
 
     /// Override the maximum webhook body size this handler will verify
@@ -259,12 +267,20 @@ impl StripeWebhook {
     /// Create a new Stripe webhook handler.
     #[must_use]
     pub fn new(secret: impl AsRef<[u8]>) -> Self {
-        Self {
-            verifier: HmacSha256Verifier::new(secret),
+        Self::try_new(secret).expect("Stripe webhook signing secret must meet minimum length")
+    }
+
+    /// Try to create a new Stripe webhook handler.
+    ///
+    /// # Errors
+    /// Returns an error when the signing secret is empty, whitespace-only, or too short.
+    pub fn try_new(secret: impl AsRef<[u8]>) -> WebhookResult<Self> {
+        Ok(Self {
+            verifier: HmacSha256Verifier::try_new(secret)?,
             timestamp_tolerance: default_timestamp_tolerance(),
             max_payload_size: default_max_payload_size(),
             clock_source: WebhookClockSource::SystemUtc,
-        }
+        })
     }
 
     /// Set timestamp tolerance.
@@ -461,12 +477,20 @@ impl SlackWebhook {
     /// Create a new Slack webhook handler.
     #[must_use]
     pub fn new(signing_secret: impl AsRef<[u8]>) -> Self {
-        Self {
-            verifier: HmacSha256Verifier::new(signing_secret),
+        Self::try_new(signing_secret).expect("Slack webhook signing secret must meet minimum length")
+    }
+
+    /// Try to create a new Slack webhook handler.
+    ///
+    /// # Errors
+    /// Returns an error when the signing secret is empty, whitespace-only, or too short.
+    pub fn try_new(signing_secret: impl AsRef<[u8]>) -> WebhookResult<Self> {
+        Ok(Self {
+            verifier: HmacSha256Verifier::try_new(signing_secret)?,
             timestamp_tolerance: default_timestamp_tolerance(),
             max_payload_size: default_max_payload_size(),
             clock_source: WebhookClockSource::SystemUtc,
-        }
+        })
     }
 
     /// Override the maximum webhook body size this handler will verify
@@ -621,10 +645,19 @@ impl LinearWebhook {
     /// Create a new Linear webhook handler.
     #[must_use]
     pub fn new(signing_secret: impl AsRef<[u8]>) -> Self {
-        Self {
-            verifier: HmacSha256Verifier::new(signing_secret),
+        Self::try_new(signing_secret)
+            .expect("Linear webhook signing secret must meet minimum length")
+    }
+
+    /// Try to create a new Linear webhook handler.
+    ///
+    /// # Errors
+    /// Returns an error when the signing secret is empty, whitespace-only, or too short.
+    pub fn try_new(signing_secret: impl AsRef<[u8]>) -> WebhookResult<Self> {
+        Ok(Self {
+            verifier: HmacSha256Verifier::try_new(signing_secret)?,
             max_payload_size: default_max_payload_size(),
-        }
+        })
     }
 
     /// Override the maximum webhook body size this handler will verify
@@ -703,11 +736,72 @@ mod tests {
     // ── Regression tests for audit findings ──
 
     #[test]
+    fn providers_reject_empty_hmac_signing_secrets() {
+        assert!(matches!(
+            GitHubWebhook::try_new(""),
+            Err(WebhookError::EmptySigningSecret { .. })
+        ));
+        assert!(matches!(
+            StripeWebhook::try_new(""),
+            Err(WebhookError::EmptySigningSecret { .. })
+        ));
+        assert!(matches!(
+            SlackWebhook::try_new(""),
+            Err(WebhookError::EmptySigningSecret { .. })
+        ));
+        assert!(matches!(
+            LinearWebhook::try_new(""),
+            Err(WebhookError::EmptySigningSecret { .. })
+        ));
+    }
+
+    #[test]
+    fn providers_reject_whitespace_hmac_signing_secrets() {
+        assert!(matches!(
+            GitHubWebhook::try_new(" \t\n"),
+            Err(WebhookError::EmptySigningSecret { .. })
+        ));
+        assert!(matches!(
+            StripeWebhook::try_new(" \t\n"),
+            Err(WebhookError::EmptySigningSecret { .. })
+        ));
+        assert!(matches!(
+            SlackWebhook::try_new(" \t\n"),
+            Err(WebhookError::EmptySigningSecret { .. })
+        ));
+        assert!(matches!(
+            LinearWebhook::try_new(" \t\n"),
+            Err(WebhookError::EmptySigningSecret { .. })
+        ));
+    }
+
+    #[test]
+    fn providers_reject_short_hmac_signing_secrets() {
+        let short = [b'x'; crate::HMAC_SHA256_MIN_SIGNING_SECRET_BYTES - 1];
+        assert!(matches!(
+            GitHubWebhook::try_new(short),
+            Err(WebhookError::SigningSecretTooShort { .. })
+        ));
+        assert!(matches!(
+            StripeWebhook::try_new(short),
+            Err(WebhookError::SigningSecretTooShort { .. })
+        ));
+        assert!(matches!(
+            SlackWebhook::try_new(short),
+            Err(WebhookError::SigningSecretTooShort { .. })
+        ));
+        assert!(matches!(
+            LinearWebhook::try_new(short),
+            Err(WebhookError::SigningSecretTooShort { .. })
+        ));
+    }
+
+    #[test]
     fn github_rejects_oversized_body_before_verification() {
         // [HIGH] GitHubWebhook::verify_and_parse must cap body size before
         // running HMAC verification so an attacker cannot amplify CPU cost
         // with an unbounded payload.
-        let handler = GitHubWebhook::new("secret").with_max_payload_size(64);
+        let handler = GitHubWebhook::new("webhook-test-secret-2026").with_max_payload_size(64);
         let body = vec![b'x'; 128];
 
         let mut headers = HashMap::new();
@@ -731,7 +825,7 @@ mod tests {
         // [HIGH] Same guard on the Stripe handler: reject oversized
         // bodies before parsing the signature header or building the
         // signed_payload allocation.
-        let handler = StripeWebhook::new("secret").with_max_payload_size(32);
+        let handler = StripeWebhook::new("webhook-test-secret-2026").with_max_payload_size(32);
         let body = vec![b'y'; 128];
 
         let mut headers = HashMap::new();
@@ -795,7 +889,7 @@ mod tests {
         // [MEDIUM] Same guard on the Slack handler: reject oversized
         // bodies before parsing the signature header or building the
         // `v0:{ts}:{body}` base-string allocation.
-        let handler = SlackWebhook::new("secret").with_max_payload_size(32);
+        let handler = SlackWebhook::new("webhook-test-secret-2026").with_max_payload_size(32);
         let body = vec![b'z'; 128];
 
         let mut headers = HashMap::new();
@@ -817,7 +911,7 @@ mod tests {
         // [MEDIUM] LinearWebhook::verify_and_parse must cap body size
         // before running HMAC verification so an attacker cannot
         // amplify CPU cost with an unbounded payload.
-        let handler = LinearWebhook::new("secret").with_max_payload_size(64);
+        let handler = LinearWebhook::new("webhook-test-secret-2026").with_max_payload_size(64);
         let body = vec![b'q'; 128];
 
         let mut headers = HashMap::new();
@@ -835,7 +929,7 @@ mod tests {
 
     #[test]
     fn test_github_webhook() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
 
         let body = br#"{"action": "opened", "issue": {"number": 1}}"#;
         let signature = format!("sha256={}", handler.verifier.compute(body));
@@ -861,7 +955,7 @@ mod tests {
 
     #[test]
     fn github_rejects_non_sha256_signature_prefix() {
-        let handler = GitHubWebhook::new("shared-secret");
+        let handler = GitHubWebhook::new("shared-secret-2026");
         let body = br#"{"zen":"Keep it logically awesome."}"#;
         let raw_signature = handler.verifier.compute(body);
 
@@ -907,7 +1001,7 @@ mod tests {
 
     #[test]
     fn test_linear_webhook() {
-        let handler = LinearWebhook::new("secret");
+        let handler = LinearWebhook::new("webhook-test-secret-2026");
 
         let body = br#"{"type": "Issue", "action": "create", "webhookId": "wh_123"}"#;
         let signature = handler.verifier.compute(body);
@@ -931,7 +1025,7 @@ mod tests {
 
     #[test]
     fn linear_rejects_cross_provider_signature_prefixes() {
-        let handler = LinearWebhook::new("secret");
+        let handler = LinearWebhook::new("webhook-test-secret-2026");
         let body = br#"{"type":"Issue","webhookId":"wh_linear_prefix"}"#;
         let raw_signature = handler.verifier.compute(body);
 
@@ -971,7 +1065,7 @@ mod tests {
 
     #[test]
     fn test_github_missing_signature() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
         let headers = HashMap::new();
         let result = handler.verify_and_parse(&headers, b"{}");
         assert!(matches!(result, Err(WebhookError::MissingSignature(_))));
@@ -979,7 +1073,7 @@ mod tests {
 
     #[test]
     fn test_github_invalid_signature() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
         let mut headers = HashMap::new();
         headers.insert(
             "x-hub-signature-256".to_string(),
@@ -1005,8 +1099,8 @@ mod tests {
 
     #[test]
     fn test_stripe_timestamp_tolerance() {
-        let handler =
-            StripeWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(60));
+        let handler = StripeWebhook::new("webhook-test-secret-2026")
+            .with_timestamp_tolerance(Duration::from_secs(60));
 
         // A timestamp far in the past
         let result = handler.validate_timestamp(1_000_000_000);
@@ -1022,7 +1116,7 @@ mod tests {
 
     #[test]
     fn test_linear_missing_signature() {
-        let handler = LinearWebhook::new("secret");
+        let handler = LinearWebhook::new("webhook-test-secret-2026");
         let headers = HashMap::new();
         let result = handler.verify_and_parse(&headers, b"{}");
         assert!(matches!(result, Err(WebhookError::MissingSignature(_))));
@@ -1030,14 +1124,14 @@ mod tests {
 
     #[test]
     fn test_slack_webhook_construction() {
-        let handler = SlackWebhook::new("signing-secret");
+        let handler = SlackWebhook::new("signing-secret-2026");
         let debug = format!("{handler:?}");
         assert!(debug.contains("SlackWebhook"));
     }
 
     #[test]
     fn test_slack_missing_signature() {
-        let handler = SlackWebhook::new("secret");
+        let handler = SlackWebhook::new("webhook-test-secret-2026");
         let headers = HashMap::new();
         let result = handler.verify_and_parse(&headers, b"{}");
         assert!(matches!(result, Err(WebhookError::MissingSignature(_))));
@@ -1045,7 +1139,7 @@ mod tests {
 
     #[test]
     fn test_slack_missing_timestamp() {
-        let handler = SlackWebhook::new("secret");
+        let handler = SlackWebhook::new("webhook-test-secret-2026");
         let mut headers = HashMap::new();
         headers.insert("x-slack-signature".to_string(), "v0=abc".to_string());
         let result = handler.verify_and_parse(&headers, b"{}");
@@ -1126,8 +1220,8 @@ mod tests {
 
     #[test]
     fn test_github_secret_rotation() {
-        let old_handler = GitHubWebhook::new("old-secret");
-        let new_handler = GitHubWebhook::new("new-secret");
+        let old_handler = GitHubWebhook::new("old-secret-2026-long");
+        let new_handler = GitHubWebhook::new("new-secret-2026-long");
         let body = br#"{"action":"opened","issue":{"number":7}}"#;
 
         let old_signature = format!("sha256={}", old_handler.verifier.compute(body));
@@ -1213,8 +1307,8 @@ mod tests {
                 "github_issue_handler",
             );
 
-            let old_handler = GitHubWebhook::new("old-secret");
-            let new_handler = GitHubWebhook::new("new-secret");
+            let old_handler = GitHubWebhook::new("old-secret-2026-long");
+            let new_handler = GitHubWebhook::new("new-secret-2026-long");
             let body =
                 br#"{"action":"opened","issue":{"number":7,"title":"Lifecycle regression"}}"#;
 
@@ -1279,7 +1373,7 @@ mod tests {
 
     #[test]
     fn test_slack_invalid_timestamp_format() {
-        let handler = SlackWebhook::new("secret");
+        let handler = SlackWebhook::new("webhook-test-secret-2026");
         let mut headers = HashMap::new();
         headers.insert("x-slack-signature".to_string(), "v0=abc".to_string());
         headers.insert(
@@ -1292,7 +1386,7 @@ mod tests {
 
     #[test]
     fn test_slack_rejects_oversized_timestamp_value() {
-        let handler = SlackWebhook::new("secret");
+        let handler = SlackWebhook::new("webhook-test-secret-2026");
         let mut headers = HashMap::new();
         headers.insert("x-slack-signature".to_string(), "v0=abc".to_string());
         headers.insert(
@@ -1309,7 +1403,7 @@ mod tests {
 
     #[test]
     fn test_slack_expired_timestamp() {
-        let handler = SlackWebhook::new("secret");
+        let handler = SlackWebhook::new("webhook-test-secret-2026");
         let old_timestamp = 1_000_000_000_i64;
         let mut headers = HashMap::new();
         headers.insert("x-slack-signature".to_string(), "v0=abc123".to_string());
@@ -1327,8 +1421,8 @@ mod tests {
 
     #[test]
     fn test_slack_timestamp_exactly_at_boundary_rejected() {
-        let handler =
-            SlackWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(300));
+        let handler = SlackWebhook::new("webhook-test-secret-2026")
+            .with_timestamp_tolerance(Duration::from_secs(300));
         let now = 1_700_000_000_i64;
         assert!(matches!(
             handler.validate_timestamp_at(now - 300, now),
@@ -1339,7 +1433,7 @@ mod tests {
 
     #[test]
     fn test_slack_verify_and_parse_uses_injected_clock() {
-        let signing_secret = "test-secret";
+        let signing_secret = "test-secret-2026-long";
         let fixed_now = 1_700_000_000_i64;
         let timestamp = fixed_now - 299;
         let handler = SlackWebhook::new(signing_secret)
@@ -1364,7 +1458,7 @@ mod tests {
 
     #[test]
     fn slack_rejects_non_v0_signature_version() {
-        let signing_secret = "test-secret";
+        let signing_secret = "test-secret-2026-long";
         let fixed_now = 1_700_000_000_i64;
         let timestamp = fixed_now;
         let handler = SlackWebhook::new(signing_secret)
@@ -1397,7 +1491,7 @@ mod tests {
 
     #[test]
     fn test_slack_extracts_nested_event_type() {
-        let signing_secret = "test-secret";
+        let signing_secret = "test-secret-2026-long";
         let handler = SlackWebhook::new(signing_secret);
         let body = br#"{"event":{"type":"message"}}"#;
 
@@ -1419,7 +1513,7 @@ mod tests {
 
     #[test]
     fn test_slack_preserves_top_level_control_event_type() {
-        let signing_secret = "test-secret";
+        let signing_secret = "test-secret-2026-long";
         let handler = SlackWebhook::new(signing_secret);
         let body = br#"{"type":"url_verification","challenge":"abc"}"#;
 
@@ -1468,7 +1562,7 @@ mod tests {
 
     #[test]
     fn test_stripe_missing_signature_header() {
-        let handler = StripeWebhook::new("secret");
+        let handler = StripeWebhook::new("webhook-test-secret-2026");
         let headers = HashMap::new();
         let result = handler.verify_and_parse(&headers, b"{}");
         assert!(matches!(result, Err(WebhookError::MissingSignature(_))));
@@ -1476,9 +1570,10 @@ mod tests {
 
     #[test]
     fn test_stripe_expired_timestamp() {
-        let handler = StripeWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(5));
+        let handler = StripeWebhook::new("webhook-test-secret-2026")
+            .with_timestamp_tolerance(Duration::from_secs(5));
         let old_ts = 1_000_000_000_i64;
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let signed_payload = format!("{old_ts}.{{}}");
         let sig = verifier.compute(signed_payload.as_bytes());
         let sig_header = format!("t={old_ts},v1={sig}");
@@ -1512,7 +1607,7 @@ mod tests {
 
     #[test]
     fn test_github_missing_delivery_uses_deterministic_fallback_id() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
         let body = br#"{"action": "created"}"#;
         let signature = format!("sha256={}", handler.verifier.compute(body));
 
@@ -1530,7 +1625,7 @@ mod tests {
 
     #[test]
     fn test_github_missing_delivery_fallback_distinguishes_event_headers() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
         let body = br#"{"action": "created"}"#;
         let signature = format!("sha256={}", handler.verifier.compute(body));
 
@@ -1558,7 +1653,7 @@ mod tests {
 
     #[test]
     fn test_github_defaults_event_type_to_unknown() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
         let body = b"{}";
         let signature = format!("sha256={}", handler.verifier.compute(body));
 
@@ -1572,7 +1667,7 @@ mod tests {
 
     #[test]
     fn test_github_invalid_json_body() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
         let body = b"not valid json";
         let signature = format!("sha256={}", handler.verifier.compute(body));
 
@@ -1586,7 +1681,7 @@ mod tests {
 
     #[test]
     fn test_linear_invalid_json_body() {
-        let handler = LinearWebhook::new("secret");
+        let handler = LinearWebhook::new("webhook-test-secret-2026");
         let body = b"not json";
         let signature = handler.verifier.compute(body);
 
@@ -1599,7 +1694,7 @@ mod tests {
 
     #[test]
     fn test_linear_missing_webhook_id_uses_deterministic_fallback_id() {
-        let handler = LinearWebhook::new("secret");
+        let handler = LinearWebhook::new("webhook-test-secret-2026");
         let body = br#"{"type": "Issue", "action": "update"}"#;
         let signature = handler.verifier.compute(body);
 
@@ -1616,7 +1711,7 @@ mod tests {
 
     #[test]
     fn test_linear_taint_flags_present() {
-        let handler = LinearWebhook::new("secret");
+        let handler = LinearWebhook::new("webhook-test-secret-2026");
         let body = br#"{"type": "Comment", "webhookId": "wh_456"}"#;
         let signature = handler.verifier.compute(body);
 
@@ -1649,7 +1744,7 @@ mod tests {
 
     #[test]
     fn test_github_case_insensitive_headers() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
         let body = br#"{"action": "opened"}"#;
         let signature = format!("sha256={}", handler.verifier.compute(body));
 
@@ -1666,7 +1761,7 @@ mod tests {
 
     #[test]
     fn test_github_duplicate_case_insensitive_signature_headers_rejected() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
         let body = br#"{"action": "opened"}"#;
         let signature = format!("sha256={}", handler.verifier.compute(body));
 
@@ -1689,12 +1784,12 @@ mod tests {
 
     #[test]
     fn test_stripe_case_insensitive_header() {
-        let handler = StripeWebhook::new("secret");
+        let handler = StripeWebhook::new("webhook-test-secret-2026");
         let body = br#"{"id":"evt_1","type":"charge.created"}"#;
 
         let timestamp = Utc::now().timestamp();
         let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(body));
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let sig = verifier.compute(signed_payload.as_bytes());
 
         let mut headers = HashMap::new();
@@ -1709,12 +1804,13 @@ mod tests {
 
     #[test]
     fn test_stripe_duplicate_case_insensitive_signature_headers_rejected() {
-        let handler = StripeWebhook::new("secret");
+        let handler = StripeWebhook::new("webhook-test-secret-2026");
         let body = br#"{"id":"evt_dup","type":"charge.created"}"#;
 
         let timestamp = Utc::now().timestamp();
         let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(body));
-        let sig = HmacSha256Verifier::new("secret").compute(signed_payload.as_bytes());
+        let sig =
+            HmacSha256Verifier::new("webhook-test-secret-2026").compute(signed_payload.as_bytes());
 
         let mut headers = HashMap::new();
         let signature_header = format!("t={timestamp},v1={sig}");
@@ -1734,12 +1830,12 @@ mod tests {
 
     #[test]
     fn test_stripe_defaults_event_fields_when_missing() {
-        let handler = StripeWebhook::new("secret");
+        let handler = StripeWebhook::new("webhook-test-secret-2026");
         let body = b"{}"; // No id or type fields
 
         let timestamp = Utc::now().timestamp();
         let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(body));
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let sig = verifier.compute(signed_payload.as_bytes());
 
         let mut headers = HashMap::new();
@@ -1764,7 +1860,8 @@ mod tests {
     #[test]
     fn test_stripe_empty_event_id_uses_deterministic_fallback_id() {
         let timestamp = Utc::now().timestamp();
-        let handler = StripeWebhook::new("secret").with_fixed_now_for_tests(timestamp);
+        let handler =
+            StripeWebhook::new("webhook-test-secret-2026").with_fixed_now_for_tests(timestamp);
         let body = br#"{"id":"","type":"payment_intent.succeeded","data":{}}"#;
 
         let mut signed_payload = timestamp.to_string().into_bytes();
@@ -1794,7 +1891,7 @@ mod tests {
     #[test]
     fn test_stripe_missing_event_id_uses_deterministic_fallback_without_aliasing_distinct_payloads()
     {
-        let secret = "secret";
+        let secret = "webhook-test-secret-2026";
         let stripe = StripeWebhook::new(secret);
         let handler = WebhookHandler::new(HmacSha256Verifier::new(secret), "stripe");
 
@@ -1850,7 +1947,7 @@ mod tests {
 
     #[test]
     fn test_stripe_missing_event_id_does_not_alias_same_payload_across_timestamps() {
-        let secret = "secret";
+        let secret = "webhook-test-secret-2026";
         let stripe = StripeWebhook::new(secret);
         let body = br#"{"type":"charge.created"}"#;
         let verifier = HmacSha256Verifier::new(secret);
@@ -1883,7 +1980,7 @@ mod tests {
 
     #[test]
     fn test_slack_event_id_from_payload() {
-        let signing_secret = "test-secret";
+        let signing_secret = "test-secret-2026-long";
         let handler = SlackWebhook::new(signing_secret);
         let body = br#"{"type":"event_callback","event_id":"Ev12345"}"#;
 
@@ -1905,7 +2002,7 @@ mod tests {
 
     #[test]
     fn test_slack_empty_event_id_uses_deterministic_fallback_id() {
-        let signing_secret = "test-secret";
+        let signing_secret = "test-secret-2026-long";
         let timestamp = Utc::now().timestamp();
         let handler = SlackWebhook::new(signing_secret).with_fixed_now_for_tests(timestamp);
         let body = br#"{"type":"event_callback","event_id":"","event":{"type":"message"}}"#;
@@ -1936,7 +2033,7 @@ mod tests {
 
     #[test]
     fn test_github_preserves_all_headers() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
         let body = br#"{"ref":"refs/heads/main"}"#;
         let signature = format!("sha256={}", handler.verifier.compute(body));
 
@@ -2014,7 +2111,7 @@ mod tests {
 
     #[test]
     fn test_stripe_webhook_debug() {
-        let handler = StripeWebhook::new("whsec_test");
+        let handler = StripeWebhook::new("whsec_test_secret_2026");
         let debug = format!("{handler:?}");
         assert!(debug.contains("StripeWebhook"));
         assert!(debug.contains("[REDACTED]"));
@@ -2022,7 +2119,7 @@ mod tests {
 
     #[test]
     fn test_linear_webhook_debug() {
-        let handler = LinearWebhook::new("lin_secret");
+        let handler = LinearWebhook::new("lin_secret_2026_long");
         let debug = format!("{handler:?}");
         assert!(debug.contains("LinearWebhook"));
         assert!(debug.contains("[REDACTED]"));
@@ -2038,7 +2135,7 @@ mod tests {
 
     #[test]
     fn test_github_large_json_payload() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
         let large_obj = serde_json::json!({
             "commits": (0..100).map(|i| serde_json::json!({
                 "id": format!("sha_{i}"),
@@ -2070,7 +2167,7 @@ mod tests {
 
     #[test]
     fn test_github_unicode_payload() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
         let body = br#"{"action": "\u00e9\u00f1\u00fc", "repo": "test"}"#;
         let signature = format!("sha256={}", handler.verifier.compute(body));
 
@@ -2124,8 +2221,8 @@ mod tests {
 
     #[test]
     fn test_stripe_timestamp_exactly_at_boundary() {
-        let handler =
-            StripeWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(300));
+        let handler = StripeWebhook::new("webhook-test-secret-2026")
+            .with_timestamp_tolerance(Duration::from_secs(300));
         let now = 1_700_000_000_i64;
         // Exact replay-window boundary must fail closed.
         assert!(matches!(
@@ -2138,7 +2235,8 @@ mod tests {
 
     #[test]
     fn test_stripe_zero_tolerance() {
-        let handler = StripeWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(0));
+        let handler = StripeWebhook::new("webhook-test-secret-2026")
+            .with_timestamp_tolerance(Duration::from_secs(0));
         let now = 1_700_000_000_i64;
         // With zero tolerance, only exact match passes.
         assert!(handler.validate_timestamp_at(now, now).is_ok());
@@ -2174,7 +2272,7 @@ mod tests {
 
     #[test]
     fn test_linear_empty_webhook_id_uses_deterministic_fallback_id() {
-        let handler = LinearWebhook::new("secret");
+        let handler = LinearWebhook::new("webhook-test-secret-2026");
         let body = br#"{"type": "", "webhookId": ""}"#;
         let signature = handler.verifier.compute(body);
 
@@ -2189,7 +2287,7 @@ mod tests {
 
     #[test]
     fn test_github_preserves_payload_structure() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
         let body = br#"{"action":"opened","issue":{"number":42,"title":"Bug report","labels":[{"name":"bug"}]}}"#;
         let signature = format!("sha256={}", handler.verifier.compute(body));
 
@@ -2206,11 +2304,11 @@ mod tests {
 
     #[test]
     fn test_stripe_invalid_json_body() {
-        let handler = StripeWebhook::new("secret");
+        let handler = StripeWebhook::new("webhook-test-secret-2026");
         let body = b"not valid json at all";
         let timestamp = Utc::now().timestamp();
         let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(body));
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let sig = verifier.compute(signed_payload.as_bytes());
 
         let mut headers = HashMap::new();
@@ -2225,11 +2323,11 @@ mod tests {
 
     #[test]
     fn test_stripe_wrong_secret_fails() {
-        let handler = StripeWebhook::new("correct_secret");
+        let handler = StripeWebhook::new("correct_secret_2026");
         let body = br#"{"id":"evt_1","type":"test"}"#;
         let timestamp = Utc::now().timestamp();
         let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(body));
-        let wrong_verifier = HmacSha256Verifier::new("wrong_secret");
+        let wrong_verifier = HmacSha256Verifier::new("wrong_secret_2026");
         let sig = wrong_verifier.compute(signed_payload.as_bytes());
 
         let mut headers = HashMap::new();
@@ -2244,7 +2342,7 @@ mod tests {
 
     #[test]
     fn test_slack_case_insensitive_headers() {
-        let signing_secret = "test-secret";
+        let signing_secret = "test-secret-2026-long";
         let handler = SlackWebhook::new(signing_secret);
         let body = br#"{"type":"event_callback"}"#;
 
@@ -2266,7 +2364,7 @@ mod tests {
 
     #[test]
     fn test_linear_case_insensitive_header() {
-        let handler = LinearWebhook::new("secret");
+        let handler = LinearWebhook::new("webhook-test-secret-2026");
         let body = br#"{"type": "Issue", "webhookId": "wh_1"}"#;
         let signature = handler.verifier.compute(body);
 
@@ -2292,7 +2390,7 @@ mod tests {
 
     #[test]
     fn test_github_empty_body_valid_json() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
         let body = b"{}";
         let signature = format!("sha256={}", handler.verifier.compute(body));
         let mut headers = HashMap::new();
@@ -2308,7 +2406,7 @@ mod tests {
 
     #[test]
     fn test_github_array_body() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
         let body = b"[1,2,3]";
         let signature = format!("sha256={}", handler.verifier.compute(body));
         let mut headers = HashMap::new();
@@ -2346,15 +2444,15 @@ mod tests {
 
     #[test]
     fn test_stripe_validate_timestamp_current() {
-        let handler = StripeWebhook::new("secret");
+        let handler = StripeWebhook::new("webhook-test-secret-2026");
         let now = Utc::now().timestamp();
         assert!(handler.validate_timestamp(now).is_ok());
     }
 
     #[test]
     fn test_stripe_validate_timestamp_far_future() {
-        let handler =
-            StripeWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(60));
+        let handler = StripeWebhook::new("webhook-test-secret-2026")
+            .with_timestamp_tolerance(Duration::from_secs(60));
         let far_future = Utc::now().timestamp() + 1_000_000;
         assert!(matches!(
             handler.validate_timestamp(far_future),
@@ -2364,15 +2462,15 @@ mod tests {
 
     #[test]
     fn test_stripe_validate_timestamp_within_tolerance() {
-        let handler =
-            StripeWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(300));
+        let handler = StripeWebhook::new("webhook-test-secret-2026")
+            .with_timestamp_tolerance(Duration::from_secs(300));
         let recent = Utc::now().timestamp() - 100;
         assert!(handler.validate_timestamp(recent).is_ok());
     }
 
     #[test]
     fn test_linear_invalid_signature() {
-        let handler = LinearWebhook::new("secret");
+        let handler = LinearWebhook::new("webhook-test-secret-2026");
         let body = br#"{"type":"Issue"}"#;
         let mut headers = HashMap::new();
         headers.insert("linear-signature".to_string(), "deadbeef".to_string());
@@ -2382,7 +2480,7 @@ mod tests {
 
     #[test]
     fn test_linear_defaults_type_to_unknown() {
-        let handler = LinearWebhook::new("secret");
+        let handler = LinearWebhook::new("webhook-test-secret-2026");
         let body = br#"{"data": {"id": 1}}"#;
         let signature = handler.verifier.compute(body);
         let mut headers = HashMap::new();
@@ -2394,7 +2492,7 @@ mod tests {
 
     #[test]
     fn test_slack_preserves_headers() {
-        let signing_secret = "test-secret";
+        let signing_secret = "test-secret-2026-long";
         let handler = SlackWebhook::new(signing_secret);
         let body = br#"{"type":"event_callback"}"#;
 
@@ -2417,7 +2515,7 @@ mod tests {
 
     #[test]
     fn test_slack_defaults_event_type_unknown() {
-        let signing_secret = "test-secret";
+        let signing_secret = "test-secret-2026-long";
         let handler = SlackWebhook::new(signing_secret);
         let body = br#"{"data":"no type field here"}"#;
 
@@ -2439,7 +2537,7 @@ mod tests {
 
     #[test]
     fn test_slack_missing_event_id_uses_deterministic_fallback_id() {
-        let signing_secret = "test-secret";
+        let signing_secret = "test-secret-2026-long";
         let handler = SlackWebhook::new(signing_secret);
         let body = br#"{"type":"event_callback"}"#; // No event_id field
 
@@ -2471,7 +2569,7 @@ mod tests {
 
     #[test]
     fn test_slack_missing_event_id_does_not_alias_same_payload_across_timestamps() {
-        let signing_secret = "test-secret";
+        let signing_secret = "test-secret-2026-long";
         let handler = SlackWebhook::new(signing_secret);
         let body = br#"{"type":"url_verification","challenge":"abc"}"#;
         let verifier = HmacSha256Verifier::new(signing_secret);
@@ -2512,7 +2610,7 @@ mod tests {
 
     #[test]
     fn test_slack_verifies_against_literal_timestamp_header_value() {
-        let signing_secret = "test-secret";
+        let signing_secret = "test-secret-2026-long";
         let handler = SlackWebhook::new(signing_secret);
         let body = br#"{"type":"url_verification","challenge":"abc"}"#;
         let timestamp_str = format!("0{}", Utc::now().timestamp());
@@ -2541,7 +2639,7 @@ mod tests {
 
     #[test]
     fn test_slack_invalid_json_body() {
-        let signing_secret = "test-secret";
+        let signing_secret = "test-secret-2026-long";
         let handler = SlackWebhook::new(signing_secret);
         let body = b"not-json";
 
@@ -2563,12 +2661,12 @@ mod tests {
 
     #[test]
     fn test_slack_wrong_signature_fails() {
-        let handler = SlackWebhook::new("correct_secret");
+        let handler = SlackWebhook::new("correct_secret_2026");
         let body = br#"{"type":"event_callback"}"#;
 
         let timestamp = Utc::now().timestamp();
         let base_string = format!("v0:{timestamp}:{}", String::from_utf8_lossy(body));
-        let wrong_verifier = HmacSha256Verifier::new("wrong_secret");
+        let wrong_verifier = HmacSha256Verifier::new("wrong_secret_2026");
         let computed = wrong_verifier.compute(base_string.as_bytes());
 
         let mut headers = HashMap::new();
@@ -2607,11 +2705,11 @@ mod tests {
 
     #[test]
     fn test_stripe_preserves_headers() {
-        let handler = StripeWebhook::new("secret");
+        let handler = StripeWebhook::new("webhook-test-secret-2026");
         let body = br#"{"id":"evt_1","type":"test"}"#;
         let timestamp = Utc::now().timestamp();
         let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(body));
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let sig = verifier.compute(signed_payload.as_bytes());
 
         let mut headers = HashMap::new();
@@ -2627,7 +2725,7 @@ mod tests {
 
     #[test]
     fn test_linear_preserves_headers() {
-        let handler = LinearWebhook::new("secret");
+        let handler = LinearWebhook::new("webhook-test-secret-2026");
         let body = br#"{"type":"Issue","webhookId":"wh_1"}"#;
         let signature = handler.verifier.compute(body);
 
@@ -2642,9 +2740,9 @@ mod tests {
 
     #[test]
     fn test_github_webhook_wrong_secret() {
-        let handler = GitHubWebhook::new("correct");
+        let handler = GitHubWebhook::new("correct-secret-2026");
         let body = br#"{"action":"test"}"#;
-        let wrong_verifier = HmacSha256Verifier::new("wrong");
+        let wrong_verifier = HmacSha256Verifier::new("wrong-secret-2026");
         let signature = format!("sha256={}", wrong_verifier.compute(body));
 
         let mut headers = HashMap::new();
@@ -2673,11 +2771,11 @@ mod tests {
 
     #[test]
     fn test_stripe_multiple_v1_one_correct() {
-        let handler = StripeWebhook::new("secret");
+        let handler = StripeWebhook::new("webhook-test-secret-2026");
         let body = br#"{"id":"evt_1","type":"test"}"#;
         let timestamp = Utc::now().timestamp();
         let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(body));
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let correct_sig = verifier.compute(signed_payload.as_bytes());
         let sig_header = format!("t={timestamp},v1=wrong_sig,v1={correct_sig}");
 
@@ -2692,7 +2790,7 @@ mod tests {
 
     #[test]
     fn test_github_webhook_sets_provider_github() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
         let body = br#"{"action":"test"}"#;
         let signature = format!("sha256={}", handler.verifier.compute(body));
         let mut headers = HashMap::new();
@@ -2705,11 +2803,11 @@ mod tests {
 
     #[test]
     fn test_stripe_webhook_sets_provider_stripe() {
-        let handler = StripeWebhook::new("secret");
+        let handler = StripeWebhook::new("webhook-test-secret-2026");
         let body = br#"{"id":"evt_1","type":"charge.created"}"#;
         let timestamp = Utc::now().timestamp();
         let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(body));
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let sig = verifier.compute(signed_payload.as_bytes());
         let mut headers = HashMap::new();
         headers.insert(
@@ -2722,7 +2820,7 @@ mod tests {
 
     #[test]
     fn test_linear_webhook_sets_provider_linear() {
-        let handler = LinearWebhook::new("secret");
+        let handler = LinearWebhook::new("webhook-test-secret-2026");
         let body = br#"{"type":"Issue","webhookId":"wh_1"}"#;
         let signature = handler.verifier.compute(body);
         let mut headers = HashMap::new();
@@ -2761,7 +2859,7 @@ mod tests {
 
     #[test]
     fn test_stripe_verifies_against_literal_timestamp_header_value() {
-        let secret = "secret";
+        let secret = "webhook-test-secret-2026";
         let handler = StripeWebhook::new(secret);
         let body = br#"{"type":"charge.created"}"#;
         let timestamp_str = format!("0{}", Utc::now().timestamp());
@@ -2797,7 +2895,7 @@ mod tests {
 
     #[test]
     fn test_github_webhook_with_nested_payload() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
         let body = br#"{"action":"opened","pull_request":{"number":42,"head":{"ref":"feature","sha":"abc123"}}}"#;
         let signature = format!("sha256={}", handler.verifier.compute(body));
         let mut headers = HashMap::new();
@@ -2812,8 +2910,8 @@ mod tests {
 
     #[test]
     fn test_stripe_validate_timestamp_negative() {
-        let handler =
-            StripeWebhook::new("secret").with_timestamp_tolerance(Duration::from_secs(300));
+        let handler = StripeWebhook::new("webhook-test-secret-2026")
+            .with_timestamp_tolerance(Duration::from_secs(300));
         // Negative timestamp is far in the past
         assert!(matches!(
             handler.validate_timestamp(-1),
@@ -2823,7 +2921,7 @@ mod tests {
 
     #[test]
     fn test_github_webhook_taint_flags_are_set() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
         let body = br#"{"action":"test"}"#;
         let signature = format!("sha256={}", handler.verifier.compute(body));
         let mut headers = HashMap::new();
@@ -2842,11 +2940,11 @@ mod tests {
 
     #[test]
     fn test_stripe_taint_flags_are_set() {
-        let handler = StripeWebhook::new("secret");
+        let handler = StripeWebhook::new("webhook-test-secret-2026");
         let body = br#"{"id":"evt_t","type":"charge.created"}"#;
         let timestamp = Utc::now().timestamp();
         let signed_payload = format!("{timestamp}.{}", String::from_utf8_lossy(body));
-        let verifier = HmacSha256Verifier::new("secret");
+        let verifier = HmacSha256Verifier::new("webhook-test-secret-2026");
         let sig = verifier.compute(signed_payload.as_bytes());
         let mut headers = HashMap::new();
         headers.insert(
@@ -2909,7 +3007,7 @@ mod tests {
 
     #[test]
     fn test_linear_webhook_unicode_payload() {
-        let handler = LinearWebhook::new("secret");
+        let handler = LinearWebhook::new("webhook-test-secret-2026");
         let body = br#"{"type":"Comment","webhookId":"wh_\u00e9","data":"unicode \u00f1"}"#;
         let signature = handler.verifier.compute(body);
         let mut headers = HashMap::new();
@@ -2920,7 +3018,7 @@ mod tests {
 
     #[test]
     fn test_github_null_payload_value() {
-        let handler = GitHubWebhook::new("secret");
+        let handler = GitHubWebhook::new("webhook-test-secret-2026");
         let body = b"null";
         let signature = format!("sha256={}", handler.verifier.compute(body));
         let mut headers = HashMap::new();
@@ -2960,7 +3058,7 @@ mod tests {
 
     #[test]
     fn test_slack_wrong_secret_different_from_missing() {
-        let handler = SlackWebhook::new("correct");
+        let handler = SlackWebhook::new("correct-secret-2026");
         let body = br#"{"type":"test"}"#;
         let timestamp = Utc::now().timestamp();
 
@@ -2974,7 +3072,7 @@ mod tests {
 
         // Wrong signature
         let base_string = format!("v0:{timestamp}:{}", String::from_utf8_lossy(body));
-        let wrong = HmacSha256Verifier::new("wrong");
+        let wrong = HmacSha256Verifier::new("wrong-secret-2026");
         let computed = wrong.compute(base_string.as_bytes());
         let mut headers_wrong = HashMap::new();
         headers_wrong.insert("x-slack-signature".to_string(), format!("v0={computed}"));
@@ -2988,7 +3086,7 @@ mod tests {
 
     #[test]
     fn test_linear_wrong_secret_different_from_missing() {
-        let handler = LinearWebhook::new("correct");
+        let handler = LinearWebhook::new("correct-secret-2026");
         let body = br#"{"type":"Issue"}"#;
 
         // Missing signature
@@ -2999,7 +3097,7 @@ mod tests {
         ));
 
         // Wrong signature
-        let wrong = HmacSha256Verifier::new("wrong");
+        let wrong = HmacSha256Verifier::new("wrong-secret-2026");
         let wrong_sig = wrong.compute(body);
         let mut headers = HashMap::new();
         headers.insert("linear-signature".to_string(), wrong_sig);

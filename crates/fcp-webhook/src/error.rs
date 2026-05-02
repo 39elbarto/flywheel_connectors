@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
+use crate::signature::SignatureAlgorithm;
+
 /// HTTP status used by the host when connector budgets are exhausted.
 pub const HOST_BACKPRESSURE_STATUS: u16 = 503;
 /// Header carrying host backpressure reason for connector clients.
@@ -149,6 +151,24 @@ pub enum WebhookError {
     #[error("Invalid webhook signature")]
     InvalidSignature,
 
+    /// Signing secret is empty or whitespace-only.
+    #[error("{algorithm} signing secret must not be empty")]
+    EmptySigningSecret {
+        /// Signature algorithm using the rejected secret.
+        algorithm: SignatureAlgorithm,
+    },
+
+    /// Signing secret is below the algorithm-specific length floor.
+    #[error("{algorithm} signing secret too short: {length} bytes is below minimum {min_length}")]
+    SigningSecretTooShort {
+        /// Signature algorithm using the rejected secret.
+        algorithm: SignatureAlgorithm,
+        /// Observed secret length.
+        length: usize,
+        /// Minimum accepted secret length.
+        min_length: usize,
+    },
+
     /// Missing signature header.
     #[error("Missing signature header: {0}")]
     MissingSignature(String),
@@ -231,6 +251,30 @@ mod tests {
     fn invalid_signature_display() {
         let e = WebhookError::InvalidSignature;
         assert_eq!(e.to_string(), "Invalid webhook signature");
+    }
+
+    #[test]
+    fn empty_signing_secret_display() {
+        let e = WebhookError::EmptySigningSecret {
+            algorithm: SignatureAlgorithm::HmacSha256,
+        };
+        assert_eq!(
+            e.to_string(),
+            "HMAC-SHA256 signing secret must not be empty"
+        );
+    }
+
+    #[test]
+    fn signing_secret_too_short_display() {
+        let e = WebhookError::SigningSecretTooShort {
+            algorithm: SignatureAlgorithm::HmacSha1,
+            length: 19,
+            min_length: 20,
+        };
+        assert_eq!(
+            e.to_string(),
+            "HMAC-SHA1 signing secret too short: 19 bytes is below minimum 20"
+        );
     }
 
     #[test]
@@ -637,6 +681,14 @@ mod tests {
     fn error_debug_all_variants() {
         let variants: Vec<WebhookError> = vec![
             WebhookError::InvalidSignature,
+            WebhookError::EmptySigningSecret {
+                algorithm: SignatureAlgorithm::HmacSha1,
+            },
+            WebhookError::SigningSecretTooShort {
+                algorithm: SignatureAlgorithm::HmacSha256,
+                length: 15,
+                min_length: 16,
+            },
             WebhookError::MissingSignature("h".into()),
             WebhookError::TimestampValidation {
                 reason: "r".into(),
@@ -750,6 +802,14 @@ mod tests {
         use std::time::Duration;
         let variants: Vec<WebhookError> = vec![
             WebhookError::InvalidSignature,
+            WebhookError::EmptySigningSecret {
+                algorithm: SignatureAlgorithm::HmacSha256,
+            },
+            WebhookError::SigningSecretTooShort {
+                algorithm: SignatureAlgorithm::HmacSha1,
+                length: 19,
+                min_length: 20,
+            },
             WebhookError::MissingSignature(String::new()),
             WebhookError::TimestampValidation {
                 reason: String::new(),

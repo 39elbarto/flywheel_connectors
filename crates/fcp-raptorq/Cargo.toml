@@ -37,3 +37,7 @@ serde_json.workspace = true
 [[bench]]
 name = "decode_repair_tail"
 harness = false
+
+[[bench]]
+name = "encode_decode"
+harness = false

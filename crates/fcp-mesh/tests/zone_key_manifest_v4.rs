@@ -175,7 +175,12 @@ fn zone_key_manifest_v4_migrated_to_v4_promotes_v3_wraps() {
         vec![alice_v3.clone(), bob_v3.clone()],
     );
 
-    let v4_manifest = v3_manifest.migrated_to_v4(ZoneKemAlgorithm::XWing);
+    // br-z8bsg: migrated_to_v4 returns UnsignedV4Manifest (typestate
+    // enforcement). Inspection is via .as_payload(); a real publisher
+    // would call .sign(owner_signature) to get a publishable
+    // ZoneKeyManifest.
+    let unsigned = v3_manifest.migrated_to_v4(ZoneKemAlgorithm::XWing);
+    let v4_manifest = unsigned.as_payload();
 
     assert_eq!(v4_manifest.kem, ZoneKemAlgorithm::XWing);
     assert_eq!(
@@ -223,12 +228,14 @@ fn zone_key_manifest_v4_migrated_to_v4_is_idempotent_for_already_migrated_recipi
         wrap_zone_key(&alice_sk.public_key(), &zone, &alice, 1_700_000_000, &zone_key).unwrap();
 
     let v3 = make_v3_manifest(&zone, 1_700_000_000, vec![alice_v3]);
+    // br-z8bsg: typestate. once.migrated_to_v4 delegates re-migration
+    // through the unsigned wrapper.
     let once = v3.migrated_to_v4(ZoneKemAlgorithm::XWing);
     let twice = once.migrated_to_v4(ZoneKemAlgorithm::XWing);
 
-    assert_eq!(once.wrapped_keys_v4.len(), 1);
+    assert_eq!(once.as_payload().wrapped_keys_v4.len(), 1);
     assert_eq!(
-        twice.wrapped_keys_v4.len(),
+        twice.as_payload().wrapped_keys_v4.len(),
         1,
         "second migration must NOT duplicate wraps"
     );

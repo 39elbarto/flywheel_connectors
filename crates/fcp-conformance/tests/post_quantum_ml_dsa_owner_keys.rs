@@ -153,9 +153,14 @@ impl HybridOwnerFixture {
 #[test]
 fn ml_dsa_65_and_ed25519_hybrid_signatures_verify_for_v3_and_v4_manifest_payloads() {
     let v3 = v3_manifest();
+    // br-z8bsg: migrated_to_v4 returns UnsignedV4Manifest; serialise
+    // its inner payload via .as_payload(). The hybrid signatures
+    // computed below are exactly what an owner would sign over the
+    // pre-publication payload.
     let v4 = v3.migrated_to_v4(ZoneKemAlgorithm::XWing);
     let v3_payload = fcp_cbor::to_canonical_cbor(&v3).expect("V3 manifest canonical CBOR");
-    let v4_payload = fcp_cbor::to_canonical_cbor(&v4).expect("V4 manifest canonical CBOR");
+    let v4_payload =
+        fcp_cbor::to_canonical_cbor(v4.as_payload()).expect("V4 manifest canonical CBOR");
     let fixture = HybridOwnerFixture::new(&v3_payload, &v4_payload);
 
     for (name, payload) in [("v3-manifest", &v3_payload), ("v4-manifest", &v4_payload)] {
@@ -174,9 +179,14 @@ fn ml_dsa_65_and_ed25519_hybrid_signatures_verify_for_v3_and_v4_manifest_payload
 #[test]
 fn hybrid_owner_manifest_signatures_reject_cross_payload_swaps() {
     let v3 = v3_manifest();
+    // br-z8bsg: migrated_to_v4 returns UnsignedV4Manifest; serialise
+    // its inner payload via .as_payload(). The hybrid signatures
+    // computed below are exactly what an owner would sign over the
+    // pre-publication payload.
     let v4 = v3.migrated_to_v4(ZoneKemAlgorithm::XWing);
     let v3_payload = fcp_cbor::to_canonical_cbor(&v3).expect("V3 manifest canonical CBOR");
-    let v4_payload = fcp_cbor::to_canonical_cbor(&v4).expect("V4 manifest canonical CBOR");
+    let v4_payload =
+        fcp_cbor::to_canonical_cbor(v4.as_payload()).expect("V4 manifest canonical CBOR");
     let fixture = HybridOwnerFixture::new(&v3_payload, &v4_payload);
 
     let v3_transcript = HybridOwnerObjectTranscript::new(

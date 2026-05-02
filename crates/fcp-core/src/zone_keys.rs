@@ -762,7 +762,7 @@ impl UnsignedV4Manifest {
     ///
     /// The name is deliberately verbose so a careless production grep
     /// for `.sign(` does not pick this up.
-    #[cfg(any(test, feature = "test-only-bypass-signing"))]
+    #[cfg(test)]
     #[must_use]
     pub fn into_inner_unsigned_for_testing_only(self) -> ZoneKeyManifest {
         self.inner

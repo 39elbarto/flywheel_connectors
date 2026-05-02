@@ -108,13 +108,16 @@ fn split_view_validate_passes_on_promoted_v3_via_migrated_to_v4() {
 
     let mut m = empty_v4_manifest();
     m.wrapped_keys = vec![v3_wrap];
+    // br-z8bsg: migrated_to_v4 returns UnsignedV4Manifest; the
+    // structural split-view validators live on the inner payload.
     let migrated = m.migrated_to_v4(ZoneKemAlgorithm::XWing);
 
     assert!(
-        migrated.split_view_recipients().is_empty(),
+        migrated.as_payload().split_view_recipients().is_empty(),
         "promoted V3→V4 wraps must be treated as safe (byte-equal HpkeX25519)"
     );
     migrated
+        .as_payload()
         .validate_no_recipient_split_view()
         .expect("promoted wraps safe");
 }

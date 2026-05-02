@@ -59,23 +59,34 @@ fn fixture_manifest() -> ZoneKeyManifest {
 #[test]
 fn zone_key_manifest_v3_to_v4_migration_is_byte_deterministic() {
     let source = fixture_manifest();
+    // br-z8bsg: migrated_to_v4 returns UnsignedV4Manifest. The
+    // determinism property is over the migrated PAYLOAD, accessed via
+    // .as_payload(); the eventual owner signature is out of scope
+    // here.
     let first = source.migrated_to_v4(ZoneKemAlgorithm::XWing);
     let second = source.migrated_to_v4(ZoneKemAlgorithm::XWing);
     let third = source.clone().migrated_to_v4(ZoneKemAlgorithm::XWing);
 
-    assert_eq!(first.kem, ZoneKemAlgorithm::XWing);
-    assert_eq!(second.kem, ZoneKemAlgorithm::XWing);
-    assert_eq!(third.kem, ZoneKemAlgorithm::XWing);
-    assert_eq!(first.wrapped_keys.len(), 2, "V3 wraps stay present");
+    assert_eq!(first.as_payload().kem, ZoneKemAlgorithm::XWing);
+    assert_eq!(second.as_payload().kem, ZoneKemAlgorithm::XWing);
+    assert_eq!(third.as_payload().kem, ZoneKemAlgorithm::XWing);
     assert_eq!(
-        first.wrapped_keys_v4.len(),
+        first.as_payload().wrapped_keys.len(),
+        2,
+        "V3 wraps stay present"
+    );
+    assert_eq!(
+        first.as_payload().wrapped_keys_v4.len(),
         2,
         "V3 wraps are promoted into the V4 list"
     );
 
-    let first_bytes = fcp_cbor::to_canonical_cbor(&first).expect("first V4 manifest encodes");
-    let second_bytes = fcp_cbor::to_canonical_cbor(&second).expect("second V4 manifest encodes");
-    let third_bytes = fcp_cbor::to_canonical_cbor(&third).expect("third V4 manifest encodes");
+    let first_bytes =
+        fcp_cbor::to_canonical_cbor(first.as_payload()).expect("first V4 manifest encodes");
+    let second_bytes =
+        fcp_cbor::to_canonical_cbor(second.as_payload()).expect("second V4 manifest encodes");
+    let third_bytes =
+        fcp_cbor::to_canonical_cbor(third.as_payload()).expect("third V4 manifest encodes");
     assert_eq!(
         first_bytes, second_bytes,
         "canonical CBOR must be deterministic across migration runs"

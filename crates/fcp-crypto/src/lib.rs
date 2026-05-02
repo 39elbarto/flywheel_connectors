@@ -139,6 +139,7 @@ pub use shamir::{
 };
 pub use x25519::{X25519PublicKey, X25519SecretKey, X25519SharedSecret};
 pub use xwing::{
-    XWING_ENC_SIZE, XWING_MAX_CIPHERTEXT, XWING_PUBLIC_KEY_SIZE, XWING_SECRET_KEY_SIZE, XWingKem,
-    XWingPublicKey, XWingSealedBox, XWingSecretKey, XWingStub, XWingWireSize,
+    XWING_AEAD_INFO, XWING_ENC_SIZE, XWING_ENCAPSULATION_RANDOMNESS_SIZE, XWING_MAX_CIPHERTEXT,
+    XWING_PUBLIC_KEY_SIZE, XWING_SECRET_KEY_SIZE, XWING_SHARED_SECRET_SIZE, XWingKem,
+    XWingProvider, XWingPublicKey, XWingSealedBox, XWingSecretKey, XWingStub, XWingWireSize,
 };

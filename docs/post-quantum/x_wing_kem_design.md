@@ -67,7 +67,7 @@ X25519 half still seals the secret — and vice versa for a CRQC.
 | Field             | Bytes  | Notes                                         |
 | ----------------- | -----: | --------------------------------------------- |
 | Public key        | 1216   | `pk_mlkem` (1184) ‖ `pk_x25519` (32)          |
-| Secret key        | 2464   | `sk_mlkem` (2400) ‖ `sk_x25519` (32) ‖ `pk_x25519` (32) |
+| Secret key        | 32     | 32-byte seed (X-Wing draft 06; expanded to ~2.4 KiB on demand via SHAKE256, see ADR kyopb121-xwing-kem-vendor) |
 | Ciphertext (enc)  | 1120   | `ct_mlkem` (1088) ‖ `ct_x25519` (32)          |
 | Shared secret     | 32     | output of combiner                            |
 
@@ -173,7 +173,9 @@ AAD is bound to both the AEAD nonce/auth-tag and the KDF output.
 sk_x25519            = X25519.scalar_clamp(seed_x25519_32B)
 pk_x25519            = X25519.derive_public(sk_x25519)
 pk = pk_mlkem || pk_x25519                     // 1216 B
-sk = sk_mlkem || sk_x25519 || pk_x25519        // 2464 B
+sk = 32-byte seed                              // wire/storage form (draft 06)
+                                                // expand: SHAKE256(seed) → sk_mlkem || sk_x25519
+                                                // pk_x25519 = X25519.derive_public(sk_x25519)
 ```
 
 Both seeds come from `OsRng` (or a caller-provided `CryptoRng + RngCore`

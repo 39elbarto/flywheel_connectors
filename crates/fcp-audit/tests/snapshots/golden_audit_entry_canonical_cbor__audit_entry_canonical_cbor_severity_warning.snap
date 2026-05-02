@@ -1,0 +1,33 @@
+---
+source: crates/fcp-audit/tests/golden_audit_entry_canonical_cbor.rs
+expression: "dump(\"AuditEntry (Severity::Warning, full fixture) canonical CBOR\", &bytes,)"
+---
+AuditEntry (Severity::Warning, full fixture) canonical CBOR
+len = 432
+0000  ad 62 69 64 75 61 75 64 69 74 2d 66 69 78 74 75   .biduaudit-fixtu
+0010  72 65 2d 77 61 72 6e 69 6e 67 63 73 65 71 18 2a   re-warningcseq.*
+0020  64 70 72 65 76 72 61 75 64 69 74 2d 66 69 78 74   dprevraudit-fixt
+0030  75 72 65 2d 70 72 65 76 65 61 63 74 6f 72 73 75   ure-preveactorsu
+0040  73 65 72 3a 67 6f 6c 64 65 6e 2d 66 69 78 74 75   ser:golden-fixtu
+0050  72 65 67 7a 6f 6e 65 5f 69 64 66 7a 3a 77 6f 72   regzone_idfz:wor
+0060  6b 68 6d 65 74 61 64 61 74 61 a2 6d 66 69 78 74   khmetadata.mfixt
+0070  75 72 65 5f 6c 61 62 65 6c 78 21 67 6f 6c 64 65   ure_labelx!golde
+0080  6e 5f 61 75 64 69 74 5f 65 6e 74 72 79 5f 63 61   n_audit_entry_ca
+0090  6e 6f 6e 69 63 61 6c 5f 63 62 6f 72 6e 73 65 76   nonical_cbornsev
+00a0  65 72 69 74 79 5f 6c 61 62 65 6c 67 77 61 72 6e   erity_labelgwarn
+00b0  69 6e 67 68 73 65 76 65 72 69 74 79 67 77 61 72   inghseveritygwar
+00c0  6e 69 6e 67 6a 65 76 65 6e 74 5f 74 79 70 65 71   ningjevent_typeq
+00d0  63 61 70 61 62 69 6c 69 74 79 2e 69 6e 76 6f 6b   capability.invok
+00e0  65 6b 6f 63 63 75 72 72 65 64 5f 61 74 1a 65 53   ekoccurred_at.eS
+00f0  f1 00 6c 63 6f 6e 6e 65 63 74 6f 72 5f 69 64 78   ..lconnector_idx
+0100  18 66 63 70 2e 67 6f 6c 64 65 6e 3a 75 74 69 6c   .fcp.golden:util
+0110  69 74 79 3a 31 2e 30 2e 30 6c 6f 70 65 72 61 74   ity:1.0.0loperat
+0120  69 6f 6e 5f 69 64 70 6f 70 2e 67 6f 6c 64 65 6e   ion_idpop.golden
+0130  2e 69 6e 76 6f 6b 65 6d 74 72 61 63 65 5f 63 6f   .invokemtrace_co
+0140  6e 74 65 78 74 a3 65 66 6c 61 67 73 00 67 73 70   ntext.eflags.gsp
+0150  61 6e 5f 69 64 76 73 70 61 6e 2d 69 64 2d 67 6f   an_idvspan-id-go
+0160  6c 64 65 6e 2d 66 69 78 74 75 72 65 68 74 72 61   lden-fixturehtra
+0170  63 65 5f 69 64 77 74 72 61 63 65 2d 69 64 2d 67   ce_idwtrace-id-g
+0180  6f 6c 64 65 6e 2d 66 69 78 74 75 72 65 6e 63 6f   olden-fixturenco
+0190  72 72 65 6c 61 74 69 6f 6e 5f 69 64 73 63 6f 72   rrelation_idscor
+01a0  72 2d 67 6f 6c 64 65 6e 2d 66 69 78 74 75 72 65   r-golden-fixture

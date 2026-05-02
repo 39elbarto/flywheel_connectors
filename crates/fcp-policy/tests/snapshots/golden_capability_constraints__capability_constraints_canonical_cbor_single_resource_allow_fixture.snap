@@ -1,0 +1,8 @@
+---
+source: crates/fcp-policy/tests/golden_capability_constraints.rs
+expression: "dump(\"CapabilityConstraints (single resource_allow fixture) canonical CBOR\",\n&bytes,)"
+---
+CapabilityConstraints (single resource_allow fixture) canonical CBOR
+len = 30
+0000  a1 6e 72 65 73 6f 75 72 63 65 5f 61 6c 6c 6f 77   .nresource_allow
+0010  81 6c 2f 76 31 2f 6d 65 73 73 61 67 65 73         .l/v1/messages

@@ -1,0 +1,5 @@
+---
+source: crates/fcp-policy/tests/golden_capability_constraints.rs
+expression: warning_text
+---
+WARN: V2MeshNative requested on a single-host deployment without explicit degraded-mode opt-in; falling back to V1HostFirst.

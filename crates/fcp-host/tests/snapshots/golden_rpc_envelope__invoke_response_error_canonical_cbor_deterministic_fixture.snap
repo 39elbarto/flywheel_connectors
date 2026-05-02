@@ -1,0 +1,15 @@
+---
+source: crates/fcp-host/tests/golden_rpc_envelope.rs
+expression: "dump(\"InvokeResponse (Error status, PermissionDenied) canonical CBOR\",\n&bytes,)"
+---
+InvokeResponse (Error status, PermissionDenied) canonical CBOR
+len = 141
+0000  a5 62 69 64 74 72 65 71 2d 67 6f 6c 64 65 6e 2d   .bidtreq-golden-
+0010  66 69 78 74 75 72 65 2d 32 64 74 79 70 65 68 72   fixture-2dtypehr
+0020  65 73 70 6f 6e 73 65 65 65 72 72 6f 72 a3 64 63   esponseeerror.dc
+0030  6f 64 65 19 07 d1 67 6d 65 73 73 61 67 65 78 1b   ode...gmessagex.
+0040  67 6f 6c 64 65 6e 20 66 69 78 74 75 72 65 20 75   golden fixture u
+0050  6e 61 75 74 68 6f 72 69 7a 65 64 68 63 61 74 65   nauthorizedhcate
+0060  67 6f 72 79 6c 55 6e 61 75 74 68 6f 72 69 7a 65   gorylUnauthorize
+0070  64 66 73 74 61 74 75 73 65 65 72 72 6f 72 6d 72   dfstatuseerrormr
+0080  65 73 6f 75 72 63 65 5f 75 72 69 73 80            esource_uris.

@@ -1,0 +1,12 @@
+---
+source: crates/fcp-audit/tests/golden_audit_entry_canonical_cbor.rs
+expression: "dump(\"AuditEntry::signing_bytes (Critical fixture, all fields populated)\",\n&bytes,)"
+---
+AuditEntry::signing_bytes (Critical fixture, all fields populated)
+len = 95
+0000  46 43 50 32 2d 41 55 44 49 54 2d 45 4e 54 52 59   FCP2-AUDIT-ENTRY
+0010  2d 53 49 47 2d 56 31 40 00 00 00 62 64 36 35 35   -SIG-V1@...bd655
+0020  61 30 32 64 36 64 32 35 35 39 36 34 65 32 35 63   a02d6d255964e25c
+0030  37 38 36 30 33 36 63 37 35 36 66 61 65 65 30 37   786036c756faee07
+0040  35 36 63 63 61 37 62 62 62 36 30 36 61 39 63 33   56cca7bbb606a9c3
+0050  38 65 64 36 33 39 66 32 32 61 64 00 00 00 00      8ed639f22ad....

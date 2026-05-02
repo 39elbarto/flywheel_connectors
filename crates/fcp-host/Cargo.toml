@@ -72,6 +72,7 @@ tempfile = "3"
 insta.workspace = true
 criterion.workspace = true
 proptest = { workspace = true }
+uuid = { workspace = true }
 
 [[bench]]
 name = "cold_start"

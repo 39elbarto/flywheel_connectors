@@ -1,0 +1,15 @@
+---
+source: crates/fcp-mesh/tests/golden_symbol_messages.rs
+expression: "dump(\"DecodeStatus::transcript_bytes (mid-decode, missing_hint populated)\",\n&bytes,)"
+---
+DecodeStatus::transcript_bytes (mid-decode, missing_hint populated)
+len = 130
+0000  46 43 50 32 2d 44 45 43 4f 44 45 2d 53 54 41 54   FCP2-DECODE-STAT
+0010  55 53 2d 56 32 55 55 55 55 55 55 55 55 55 55 55   US-V2UUUUUUUUUUU
+0020  55 55 55 55 55 55 55 55 55 55 55 55 55 55 55 55   UUUUUUUUUUUUUUUU
+0030  55 55 55 55 55 06 00 00 00 7a 3a 77 6f 72 6b 66   UUUUU....z:workf
+0040  66 66 66 66 66 66 66 61 1e 00 00 00 00 00 00 0a   fffffffa........
+0050  00 00 00 31 30 30 2e 36 34 2e 30 2e 33 0d f0 fe   ...100.64.0.3...
+0060  ca 00 00 00 00 f4 01 00 00 eb 03 00 00 00 04 00   ................
+0070  00 00 0a 00 00 00 14 00 00 00 1e 00 00 00 28 00   ..............(.
+0080  00 00                                             ..

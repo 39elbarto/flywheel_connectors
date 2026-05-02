@@ -20,6 +20,7 @@ tracing = "0.1"
 [dev-dependencies]
 fcp-async-core = { path = "../fcp-async-core" }
 fcp-cbor = { workspace = true }
+insta = { workspace = true, features = ["json"] }
 proptest = { workspace = true }
 semver = { workspace = true }
 tracing-subscriber = { workspace = true }

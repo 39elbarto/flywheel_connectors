@@ -1,0 +1,34 @@
+---
+source: crates/fcp-audit/tests/golden_audit_entry_canonical_cbor.rs
+expression: "dump(\"AuditEntry (Severity::Critical, full fixture) canonical CBOR\", &bytes,)"
+---
+AuditEntry (Severity::Critical, full fixture) canonical CBOR
+len = 435
+0000  ad 62 69 64 76 61 75 64 69 74 2d 66 69 78 74 75   .bidvaudit-fixtu
+0010  72 65 2d 63 72 69 74 69 63 61 6c 63 73 65 71 18   re-criticalcseq.
+0020  2a 64 70 72 65 76 72 61 75 64 69 74 2d 66 69 78   *dprevraudit-fix
+0030  74 75 72 65 2d 70 72 65 76 65 61 63 74 6f 72 73   ture-preveactors
+0040  75 73 65 72 3a 67 6f 6c 64 65 6e 2d 66 69 78 74   user:golden-fixt
+0050  75 72 65 67 7a 6f 6e 65 5f 69 64 66 7a 3a 77 6f   uregzone_idfz:wo
+0060  72 6b 68 6d 65 74 61 64 61 74 61 a2 6d 66 69 78   rkhmetadata.mfix
+0070  74 75 72 65 5f 6c 61 62 65 6c 78 21 67 6f 6c 64   ture_labelx!gold
+0080  65 6e 5f 61 75 64 69 74 5f 65 6e 74 72 79 5f 63   en_audit_entry_c
+0090  61 6e 6f 6e 69 63 61 6c 5f 63 62 6f 72 6e 73 65   anonical_cbornse
+00a0  76 65 72 69 74 79 5f 6c 61 62 65 6c 68 63 72 69   verity_labelhcri
+00b0  74 69 63 61 6c 68 73 65 76 65 72 69 74 79 68 63   ticalhseverityhc
+00c0  72 69 74 69 63 61 6c 6a 65 76 65 6e 74 5f 74 79   riticaljevent_ty
+00d0  70 65 71 63 61 70 61 62 69 6c 69 74 79 2e 69 6e   peqcapability.in
+00e0  76 6f 6b 65 6b 6f 63 63 75 72 72 65 64 5f 61 74   vokekoccurred_at
+00f0  1a 65 53 f1 00 6c 63 6f 6e 6e 65 63 74 6f 72 5f   .eS..lconnector_
+0100  69 64 78 18 66 63 70 2e 67 6f 6c 64 65 6e 3a 75   idx.fcp.golden:u
+0110  74 69 6c 69 74 79 3a 31 2e 30 2e 30 6c 6f 70 65   tility:1.0.0lope
+0120  72 61 74 69 6f 6e 5f 69 64 70 6f 70 2e 67 6f 6c   ration_idpop.gol
+0130  64 65 6e 2e 69 6e 76 6f 6b 65 6d 74 72 61 63 65   den.invokemtrace
+0140  5f 63 6f 6e 74 65 78 74 a3 65 66 6c 61 67 73 00   _context.eflags.
+0150  67 73 70 61 6e 5f 69 64 76 73 70 61 6e 2d 69 64   gspan_idvspan-id
+0160  2d 67 6f 6c 64 65 6e 2d 66 69 78 74 75 72 65 68   -golden-fixtureh
+0170  74 72 61 63 65 5f 69 64 77 74 72 61 63 65 2d 69   trace_idwtrace-i
+0180  64 2d 67 6f 6c 64 65 6e 2d 66 69 78 74 75 72 65   d-golden-fixture
+0190  6e 63 6f 72 72 65 6c 61 74 69 6f 6e 5f 69 64 73   ncorrelation_ids
+01a0  63 6f 72 72 2d 67 6f 6c 64 65 6e 2d 66 69 78 74   corr-golden-fixt
+01b0  75 72 65                                          ure

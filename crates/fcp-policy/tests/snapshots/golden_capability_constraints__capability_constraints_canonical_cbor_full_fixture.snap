@@ -1,0 +1,18 @@
+---
+source: crates/fcp-policy/tests/golden_capability_constraints.rs
+expression: "dump(\"CapabilityConstraints (full fixture, every field populated) canonical CBOR\",\n&bytes,)"
+---
+CapabilityConstraints (full fixture, every field populated) canonical CBOR
+len = 182
+0000  a6 69 6d 61 78 5f 62 79 74 65 73 1a 00 10 00 00   .imax_bytes.....
+0010  69 6d 61 78 5f 63 61 6c 6c 73 18 64 6d 72 65 73   imax_calls.dmres
+0020  6f 75 72 63 65 5f 64 65 6e 79 81 6b 2f 76 31 2f   ource_deny.k/v1/
+0030  61 64 6d 69 6e 2f 2a 6e 72 65 73 6f 75 72 63 65   admin/*nresource
+0040  5f 61 6c 6c 6f 77 82 6c 2f 76 31 2f 6d 65 73 73   _allow.l/v1/mess
+0050  61 67 65 73 6d 2f 76 31 2f 74 68 72 65 61 64 73   agesm/v1/threads
+0060  2f 2a 6f 69 64 65 6d 70 6f 74 65 6e 63 79 5f 6b   /*oidempotency_k
+0070  65 79 6f 69 64 65 6d 2d 66 69 78 74 75 72 65 2d   eyoidem-fixture-
+0080  76 31 70 63 72 65 64 65 6e 74 69 61 6c 5f 61 6c   v1pcredential_al
+0090  6c 6f 77 82 50 42 42 42 42 42 42 42 42 42 42 42   low.PBBBBBBBBBBB
+00a0  42 42 42 42 42 50 69 69 69 69 69 69 69 69 69 69   BBBBBPiiiiiiiiii
+00b0  69 69 69 69 69 69                                 iiiiii

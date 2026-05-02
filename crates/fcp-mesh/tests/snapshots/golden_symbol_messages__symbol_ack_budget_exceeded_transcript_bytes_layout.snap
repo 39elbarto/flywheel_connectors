@@ -1,0 +1,13 @@
+---
+source: crates/fcp-mesh/tests/golden_symbol_messages.rs
+expression: "dump(\"SymbolAck::transcript_bytes (BudgetExceeded fixture)\", &bytes,)"
+---
+SymbolAck::transcript_bytes (BudgetExceeded fixture)
+len = 103
+0000  46 43 50 32 2d 53 59 4d 42 4f 4c 2d 41 43 4b 2d   FCP2-SYMBOL-ACK-
+0010  56 32 33 33 33 33 33 33 33 33 33 33 33 33 33 33   V233333333333333
+0020  33 33 33 33 33 33 33 33 33 33 33 33 33 33 33 33   3333333333333333
+0030  33 33 06 00 00 00 7a 3a 77 6f 72 6b 44 44 44 44   33....z:workDDDD
+0040  44 44 44 44 fe c0 00 00 00 00 00 00 0a 00 00 00   DDDD............
+0050  31 30 30 2e 36 34 2e 30 2e 32 08 07 06 05 04 03   100.64.0.2......
+0060  02 01 03 fa 00 00 00                              .......

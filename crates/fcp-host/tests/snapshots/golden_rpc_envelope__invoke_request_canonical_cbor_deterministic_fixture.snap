@@ -1,0 +1,44 @@
+---
+source: crates/fcp-host/tests/golden_rpc_envelope.rs
+expression: "dump(\"InvokeRequest (deterministic Ed25519-signed token, fixed validity) canonical CBOR\",\n&bytes,)"
+---
+InvokeRequest (deterministic Ed25519-signed token, fixed validity) canonical CBOR
+len = 597
+0000  a9 62 69 64 74 72 65 71 2d 67 6f 6c 64 65 6e 2d   .bidtreq-golden-
+0010  66 69 78 74 75 72 65 2d 31 64 74 79 70 65 66 69   fixture-1dtypefi
+0020  6e 76 6f 6b 65 65 69 6e 70 75 74 a2 67 66 69 78   nvokeeinput.gfix
+0030  74 75 72 65 66 67 6f 6c 64 65 6e 67 76 65 72 73   turefgoldengvers
+0040  69 6f 6e 01 67 7a 6f 6e 65 5f 69 64 66 7a 3a 77   ion.gzone_idfz:w
+0050  6f 72 6b 69 6f 70 65 72 61 74 69 6f 6e 70 6f 70   orkioperationpop
+0060  2e 67 6f 6c 64 65 6e 2e 69 6e 76 6f 6b 65 6a 70   .golden.invokejp
+0070  72 6f 76 65 6e 61 6e 63 65 a4 65 63 68 61 69 6e   rovenance.echain
+0080  80 65 74 61 69 6e 74 69 55 6e 74 61 69 6e 74 65   .etaintiUntainte
+0090  64 68 65 6c 65 76 61 74 65 64 f4 6b 6f 72 69 67   dhelevated.korig
+00a0  69 6e 5f 7a 6f 6e 65 66 7a 3a 77 6f 72 6b 6c 63   in_zonefz:worklc
+00b0  6f 6e 6e 65 63 74 6f 72 5f 69 64 78 18 66 63 70   onnector_idx.fcp
+00c0  2e 67 6f 6c 64 65 6e 3a 75 74 69 6c 69 74 79 3a   .golden:utility:
+00d0  31 2e 30 2e 30 6e 63 6f 72 72 65 6c 61 74 69 6f   1.0.0ncorrelatio
+00e0  6e 5f 69 64 50 c0 c0 c0 c0 c0 c0 c0 c0 c0 c0 c0   n_idP...........
+00f0  c0 c0 c0 c0 c0 70 63 61 70 61 62 69 6c 69 74 79   .....pcapability
+0100  5f 74 6f 6b 65 6e 59 01 4c 84 4d a2 01 27 04 48   _tokenY.L.M..'.H
+0110  58 15 98 53 3f 33 e5 ef a0 58 f8 ac 01 73 6e 6f   X..S?3...X...sno
+0120  64 65 3a 67 6f 6c 64 65 6e 2d 67 61 74 65 77 61   de:golden-gatewa
+0130  79 03 66 7a 3a 77 6f 72 6b 04 1a 6b 36 ec 7f 05   y.fz:work..k6...
+0140  1a 69 55 b9 00 3a 00 01 00 00 71 63 61 70 2e 67   .iU..:....qcap.g
+0150  6f 6c 64 65 6e 2e 69 6e 76 6f 6b 65 3a 00 01 00   olden.invoke:...
+0160  01 66 7a 3a 77 6f 72 6b 3a 00 01 00 02 81 70 6f   .fz:work:.....po
+0170  70 2e 67 6f 6c 64 65 6e 2e 69 6e 76 6f 6b 65 3a   p.golden.invoke:
+0180  00 01 00 03 73 75 73 65 72 3a 67 6f 6c 64 65 6e   ....suser:golden
+0190  2d 66 69 78 74 75 72 65 3a 00 01 00 0c a1 6e 72   -fixture:.....nr
+01a0  65 73 6f 75 72 63 65 5f 61 6c 6c 6f 77 81 6a 2f   esource_allow.j/
+01b0  76 31 2f 67 6f 6c 64 65 6e 3a 00 01 00 0d 81 a2   v1/golden:......
+01c0  69 6f 70 65 72 61 74 69 6f 6e 70 6f 70 2e 67 6f   ioperationpop.go
+01d0  6c 64 65 6e 2e 69 6e 76 6f 6b 65 6a 63 61 70 61   lden.invokejcapa
+01e0  62 69 6c 69 74 79 71 63 61 70 2e 67 6f 6c 64 65   bilityqcap.golde
+01f0  6e 2e 69 6e 76 6f 6b 65 3a 00 01 00 0e 6f 69 6e   n.invoke:....oin
+0200  73 74 61 6e 63 65 3a 67 6f 6c 64 65 6e 3a 00 01   stance:golden:..
+0210  00 0f 01 58 40 77 8d 80 84 37 06 41 17 34 a0 7f   ...X@w...7.A.4..
+0220  be fb d8 88 ba 75 e1 d5 e1 d7 13 9b 63 67 bb 28   .....u......cg.(
+0230  92 96 6a b5 33 2d 37 60 7b 8e fc 01 35 d8 44 c8   ..j.3-7`{...5.D.
+0240  2e 5b 51 57 18 be da 73 07 63 36 3b b7 60 51 b0   .[QW...s.c6;.`Q.
+0250  ee ad 70 cb 0f                                    ..p..

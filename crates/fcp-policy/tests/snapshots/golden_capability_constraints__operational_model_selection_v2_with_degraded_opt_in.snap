@@ -1,0 +1,11 @@
+---
+source: crates/fcp-policy/tests/golden_capability_constraints.rs
+expression: "serde_json::json!({\n    \"requested\": format!(\"{:?}\", selection.requested), \"effective\":\n    format!(\"{:?}\", selection.effective), \"single_host_detected\":\n    selection.single_host_detected, \"degraded_v2_opt_in\":\n    selection.degraded_v2_opt_in, \"warning\": selection.warning,\n})"
+---
+{
+  "degraded_v2_opt_in": true,
+  "effective": "V2MeshNative",
+  "requested": "V2MeshNative",
+  "single_host_detected": true,
+  "warning": null
+}

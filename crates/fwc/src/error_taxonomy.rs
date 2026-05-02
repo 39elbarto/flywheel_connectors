@@ -659,8 +659,15 @@ pub fn structured_from_fcp_error(err: &FcpError) -> StructuredError {
             limit,
             window_seconds,
         } => {
+            // Pass `metric` directly to serde_json::json! so the
+            // canonical snake_case wire form (per UsageMetricKind's
+            // serde rename_all = "snake_case") matches the
+            // fcp-core::FcpError::details() path. Previously this
+            // used `format!("{metric:?}")` which emitted PascalCase
+            // Debug output, breaking wire-format consistency
+            // between fwc CLI errors and admin-API responses (br-i57zy).
             se.details = Some(serde_json::json!({
-                "metric": format!("{metric:?}"),
+                "metric": metric,
                 "used": used,
                 "limit": limit,
                 "window_seconds": window_seconds,
@@ -699,8 +706,16 @@ pub fn structured_from_fcp_error(err: &FcpError) -> StructuredError {
             claim_type,
             detail,
         } => {
+            // Pass `kind` directly to serde_json::json! so the
+            // canonical snake_case wire form (per
+            // CapabilityConstraintErrorKind's serde rename_all =
+            // "snake_case") matches the fcp-core::FcpError::details()
+            // path. Previously this used `format!("{kind:?}")` which
+            // emitted PascalCase Debug output, breaking wire-format
+            // consistency between fwc CLI errors and admin-API
+            // responses (br-i57zy).
             se.details = Some(serde_json::json!({
-                "kind": format!("{kind:?}"),
+                "kind": kind,
                 "claim_type": claim_type,
                 "detail": detail,
             }));
@@ -2387,6 +2402,116 @@ mod tests {
         assert_eq!(details["used"], 1000);
         assert_eq!(details["limit"], 500);
         assert_eq!(details["window_seconds"], 3600);
+    }
+
+    #[test]
+    fn structured_from_budget_exceeded_metric_is_snake_case_per_serde(
+    ) {
+        // br-i57zy: the `metric` field MUST serialize via serde
+        // (snake_case) — NOT via Debug (PascalCase). Pin one
+        // representative variant per observed casing class.
+        for (variant, expected_wire) in [
+            (fcp_kernel::UsageMetricKind::Requests, "requests"),
+            (fcp_kernel::UsageMetricKind::Tokens, "tokens"),
+            (fcp_kernel::UsageMetricKind::Bytes, "bytes"),
+        ] {
+            let err = FcpError::BudgetExceeded {
+                metric: variant,
+                used: 1,
+                limit: 1,
+                window_seconds: 1,
+            };
+            let se = structured_from_fcp_error(&err);
+            let details = se.details.as_ref().unwrap();
+            assert_eq!(
+                details["metric"], expected_wire,
+                "metric must serialize as snake_case `{expected_wire}`, got {:?}",
+                details["metric"]
+            );
+        }
+    }
+
+    #[test]
+    fn structured_from_budget_exceeded_metric_matches_canonical_fcp_core_path(
+    ) {
+        // br-i57zy invariant: the fwc taxonomy path MUST agree
+        // byte-for-byte with the fcp-core::FcpError::details() path
+        // for the metric field. Otherwise downstream tooling that
+        // parses both paths sees inconsistent JSON shapes.
+        let err = FcpError::BudgetExceeded {
+            metric: fcp_kernel::UsageMetricKind::Tokens,
+            used: 100,
+            limit: 50,
+            window_seconds: 60,
+        };
+        let fwc_metric = structured_from_fcp_error(&err)
+            .details
+            .as_ref()
+            .unwrap()["metric"]
+            .clone();
+        let canonical_metric = err.details().unwrap()["metric"].clone();
+        assert_eq!(
+            fwc_metric, canonical_metric,
+            "fwc taxonomy `metric` field diverges from canonical fcp-core path"
+        );
+    }
+
+    #[test]
+    fn structured_from_capability_constraint_denied_has_details() {
+        let err = FcpError::CapabilityConstraintDenied {
+            kind: fcp_core::CapabilityConstraintErrorKind::ExactMismatch,
+            claim_type: "issuer".into(),
+            detail: "expected 'X' got 'Y'".into(),
+        };
+        let se = structured_from_fcp_error(&err);
+        assert_eq!(se.code, "FCP_ERR_CAPABILITY_DENIED");
+        let details = se.details.as_ref().unwrap();
+        assert_eq!(details["claim_type"], "issuer");
+        assert_eq!(details["detail"], "expected 'X' got 'Y'");
+    }
+
+    #[test]
+    fn structured_from_capability_constraint_denied_kind_is_snake_case_per_serde(
+    ) {
+        // br-i57zy: the `kind` field MUST serialize via serde
+        // (snake_case) — NOT via Debug (PascalCase). Sample the
+        // first variant to lock the casing contract.
+        let err = FcpError::CapabilityConstraintDenied {
+            kind: fcp_core::CapabilityConstraintErrorKind::ExactMismatch,
+            claim_type: "issuer".into(),
+            detail: "drift".into(),
+        };
+        let details_value = structured_from_fcp_error(&err).details.unwrap();
+        // `exact_mismatch` is the snake_case form of ExactMismatch
+        // per CapabilityConstraintErrorKind's
+        // #[serde(rename_all = "snake_case")] derive.
+        assert_eq!(
+            details_value["kind"], "exact_mismatch",
+            "kind must serialize as snake_case `exact_mismatch`, got {:?}",
+            details_value["kind"]
+        );
+    }
+
+    #[test]
+    fn structured_from_capability_constraint_denied_kind_matches_canonical_fcp_core_path(
+    ) {
+        // br-i57zy invariant: fwc taxonomy and fcp-core canonical
+        // path produce identical JSON for the kind field.
+        let err = FcpError::CapabilityConstraintDenied {
+            kind: fcp_core::CapabilityConstraintErrorKind::ExactMismatch,
+            claim_type: "issuer".into(),
+            detail: "drift".into(),
+        };
+        let fwc_kind = structured_from_fcp_error(&err)
+            .details
+            .as_ref()
+            .unwrap()["kind"]
+            .clone();
+        let canonical_kind = err.details().unwrap()["kind"].clone();
+        assert_eq!(
+            fwc_kind, canonical_kind,
+            "fwc taxonomy `kind` field diverges from canonical fcp-core path"
+        );
     }
 
     #[test]

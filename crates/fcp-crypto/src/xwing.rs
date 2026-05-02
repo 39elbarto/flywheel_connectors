@@ -62,6 +62,7 @@ use x_wing::{
     Decapsulate, DecapsulationKey as RealDecapKey, Decapsulator, Encapsulate,
     EncapsulationKey as RealEncapKey, KeyExport,
 };
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::canonicalize::to_deterministic_cbor_with_capacity;
 use crate::error::{CryptoError, CryptoResult};
@@ -165,7 +166,7 @@ impl XWingPublicKey {
 ///
 /// Wrapped in a dedicated newtype so a redacting `Debug` impl can avoid
 /// leaking secret material into logs.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct XWingSecretKey([u8; XWING_SECRET_KEY_SIZE]);
 
 impl core::fmt::Debug for XWingSecretKey {
@@ -199,6 +200,20 @@ impl XWingSecretKey {
     /// Borrow the raw bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// X-Wing shared secret material returned by encapsulation/decapsulation.
+#[derive(Zeroize, ZeroizeOnDrop)]
+struct XWingSharedSecret([u8; XWING_SHARED_SECRET_SIZE]);
+
+impl XWingSharedSecret {
+    fn from_bytes(bytes: [u8; XWING_SHARED_SECRET_SIZE]) -> Self {
+        Self(bytes)
+    }
+
+    fn as_bytes(&self) -> &[u8; XWING_SHARED_SECRET_SIZE] {
         &self.0
     }
 }
@@ -510,13 +525,13 @@ impl XWingKem for XWingProvider {
         // those with `getrandom` and let the upstream expand them via
         // SHAKE256 on first decap. This keeps the API symmetrical with
         // every other FCP key type and avoids pulling rand 0.9.
-        let mut seed = [0u8; XWING_SECRET_KEY_SIZE];
-        getrandom::fill(&mut seed)
+        let mut seed = Zeroizing::new([0u8; XWING_SECRET_KEY_SIZE]);
+        getrandom::fill(seed.as_mut())
             .map_err(|e| CryptoError::KeyDerivationFailed(format!("OS RNG unavailable: {e}")))?;
-        let real_sk: RealDecapKey = seed.into();
+        let real_sk: RealDecapKey = (*seed).into();
         let pk_bytes = real_sk.encapsulation_key().to_bytes().as_slice().to_vec();
         let pk = XWingPublicKey(pk_bytes);
-        let sk = XWingSecretKey(seed);
+        let sk = XWingSecretKey(*seed);
         Ok((pk, sk))
     }
 
@@ -531,8 +546,8 @@ impl XWingKem for XWingProvider {
         })?;
         let mut rng = OsRngV10;
         let (ct, ss) = pk.encapsulate_with_rng(&mut rng);
-        let ss_bytes: [u8; 32] = ss.into();
-        let aead = build_aead(&ss_bytes, aad)?;
+        let shared_secret = XWingSharedSecret::from_bytes(ss.into());
+        let aead = build_aead(&shared_secret, aad)?;
         let nonce = Nonce::from([0u8; 12]);
         let ciphertext = aead
             .encrypt(
@@ -567,8 +582,8 @@ impl XWingKem for XWingProvider {
             <[u8; XWING_ENC_SIZE]>::try_from(sealed.enc.as_slice()).expect("length checked above");
         let ct = x_wing::Ciphertext::from(ct_arr);
         let ss = real_sk.decapsulate(&ct);
-        let ss_bytes: [u8; 32] = ss.into();
-        let aead = build_aead(&ss_bytes, aad)?;
+        let shared_secret = XWingSharedSecret::from_bytes(ss.into());
+        let aead = build_aead(&shared_secret, aad)?;
         let nonce = Nonce::from([0u8; 12]);
         aead.decrypt(
             &nonce,
@@ -625,13 +640,15 @@ impl XWingKem for XWingStub {
     }
 }
 
-fn build_aead(shared_secret: &[u8; 32], aad: &[u8]) -> CryptoResult<ChaCha20Poly1305> {
+fn build_aead(shared_secret: &XWingSharedSecret, aad: &[u8]) -> CryptoResult<ChaCha20Poly1305> {
     // HKDF-SHA256(IKM = ss, salt = aad, info = "FCP4-XWING-AEAD") → 32 B.
     // Binding `aad` into the salt makes the derived AEAD key context-
     // dependent on top of the AAD that the AEAD itself authenticates.
-    let key_arr: [u8; 32] = hkdf_sha256_array(Some(aad), shared_secret, XWING_AEAD_INFO)
-        .map_err(|e| CryptoError::KeyDerivationFailed(format!("xwing AEAD HKDF: {e}")))?;
-    Ok(ChaCha20Poly1305::new((&key_arr).into()))
+    let key_arr = Zeroizing::new(
+        hkdf_sha256_array(Some(aad), shared_secret.as_bytes(), XWING_AEAD_INFO)
+            .map_err(|e| CryptoError::KeyDerivationFailed(format!("xwing AEAD HKDF: {e}")))?,
+    );
+    Ok(ChaCha20Poly1305::new((&*key_arr).into()))
 }
 
 /// `getrandom`-backed adapter implementing `rand_core` v0.10's
@@ -700,6 +717,25 @@ mod tests {
         let dbg = format!("{sk:?}");
         assert!(dbg.contains("redacted"), "Debug must redact: {dbg}");
         assert!(!dbg.contains("ab"), "Debug must not leak hex: {dbg}");
+    }
+
+    #[test]
+    fn x_wing_zeroize_secret_and_shared_secret_types_are_zeroize_on_drop() {
+        fn assert_zeroize_on_drop<T: Zeroize + ZeroizeOnDrop>() {}
+
+        assert_zeroize_on_drop::<XWingSecretKey>();
+        assert_zeroize_on_drop::<XWingSharedSecret>();
+    }
+
+    #[test]
+    fn x_wing_zeroize_clears_secret_and_shared_secret_bytes() {
+        let mut secret = XWingSecretKey::from_bytes(&[0xABu8; XWING_SECRET_KEY_SIZE]).unwrap();
+        secret.zeroize();
+        assert_eq!(secret.as_bytes(), &[0u8; XWING_SECRET_KEY_SIZE]);
+
+        let mut shared_secret = XWingSharedSecret::from_bytes([0xCDu8; XWING_SHARED_SECRET_SIZE]);
+        shared_secret.zeroize();
+        assert_eq!(shared_secret.as_bytes(), &[0u8; XWING_SHARED_SECRET_SIZE]);
     }
 
     #[test]

@@ -417,7 +417,7 @@ fn trace_capture_default_redaction_redacts_session_id() {
         .record(make_session(1, "t1", "secret-session-123"))
         .unwrap();
 
-    let redacted = capture.redacted_snapshot();
+    let redacted = capture.snapshot();
     assert!(redacted.redacted);
     if let TraceEvent::Session(s) = &redacted.events[0] {
         assert_eq!(s.session_id, "[REDACTED]");
@@ -585,7 +585,7 @@ fn trace_capture_export_to_path_redacted() {
         .unwrap();
 
     capture
-        .export_to_path(&path, true, TraceExportFormat::Json)
+        .export_to_path(&path, TraceExportFormat::Json)
         .unwrap();
 
     let json = std::fs::read_to_string(&path).unwrap();
@@ -1297,8 +1297,8 @@ fn full_trace_pipeline_capture_redact_export() {
 
     capture.finish();
 
-    // Unredacted snapshot
-    let raw = capture.snapshot();
+    // Explicit debug-only unredacted snapshot.
+    let raw = capture.debug_unredacted_snapshot();
     assert_eq!(raw.events.len(), 3);
     assert!(!raw.redacted);
     if let TraceEvent::Session(s) = &raw.events[1] {

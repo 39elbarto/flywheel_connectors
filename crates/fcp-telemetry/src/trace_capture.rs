@@ -106,7 +106,16 @@ impl RedactionPolicy {
     /// Add a field to redact.
     #[must_use]
     pub fn with_field(mut self, field: impl Into<String>) -> Self {
-        self.redact_fields.insert(field.into());
+        self.redact_fields.insert(field.into().to_lowercase());
+        self
+    }
+
+    /// Add multiple fields to redact.
+    #[must_use]
+    pub fn with_fields(mut self, fields: &[&str]) -> Self {
+        for field in fields {
+            self.redact_fields.insert((*field).to_lowercase());
+        }
         self
     }
 
@@ -162,6 +171,133 @@ impl RedactionPolicy {
         } else {
             self.redaction_marker.clone()
         }
+    }
+
+    /// Check whether this policy has no active redaction rules.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.redact_fields.is_empty() && self.redact_prefixes.is_empty()
+    }
+}
+
+const MESH_IDENTIFIER_REDACTION_FIELDS: &[&str] = &[
+    "id",
+    "trace_id",
+    "capturing_node",
+    "source_node",
+    "target_node",
+    "peer_node",
+    "node_id",
+    "conflict_holder",
+    "object_id",
+    "subject_id",
+    "zone_id",
+    "connector_id",
+    "session_id",
+    "evidence",
+];
+
+const MESH_SENSITIVE_REDACTION_FIELDS: &[&str] = &[
+    "owner_key",
+    "owner_public_key",
+    "public_key",
+    "verifying_key",
+    "signed_head",
+    "signed_head_bytes",
+    "signed_head_cbor",
+    "capture_bytes",
+];
+
+/// Redaction level for exported mesh traces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshTraceRedactionLevel {
+    /// Export raw trace contents. Intended only for local deterministic replay.
+    None,
+    /// Redact node/object identifiers and known sensitive capture fields.
+    Identifiers,
+    /// Redact all known sensitive fields, hashing redacted values for correlation.
+    Full,
+}
+
+impl Default for MeshTraceRedactionLevel {
+    fn default() -> Self {
+        Self::Identifiers
+    }
+}
+
+impl MeshTraceRedactionLevel {
+    /// Environment variable controlling mesh trace redaction.
+    pub const ENV_VAR: &'static str = "MESH_TRACE_REDACTION_LEVEL";
+
+    /// Parse a redaction level value.
+    #[must_use]
+    pub fn parse_value(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "identifiers" => Some(Self::Identifiers),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+
+    /// Resolve redaction level from [`Self::ENV_VAR`].
+    #[must_use]
+    pub fn from_env() -> Self {
+        std::env::var(Self::ENV_VAR)
+            .ok()
+            .and_then(|value| Self::parse_value(&value))
+            .unwrap_or_default()
+    }
+
+    fn policy(self) -> Option<RedactionPolicy> {
+        match self {
+            Self::None => None,
+            Self::Identifiers => Some(
+                RedactionPolicy::default()
+                    .with_fields(MESH_IDENTIFIER_REDACTION_FIELDS)
+                    .with_fields(MESH_SENSITIVE_REDACTION_FIELDS),
+            ),
+            Self::Full => Some(
+                RedactionPolicy::default()
+                    .with_fields(MESH_IDENTIFIER_REDACTION_FIELDS)
+                    .with_fields(MESH_SENSITIVE_REDACTION_FIELDS)
+                    .with_hash_redacted(true),
+            ),
+        }
+    }
+}
+
+fn redact_string_field(policy: &RedactionPolicy, field_name: &str, value: &str) -> String {
+    if policy.should_redact(field_name) {
+        policy.redact_value(value)
+    } else {
+        value.to_string()
+    }
+}
+
+fn redact_option_string_field(
+    policy: &RedactionPolicy,
+    field_name: &str,
+    value: &Option<String>,
+) -> Option<String> {
+    value
+        .as_ref()
+        .map(|inner| redact_string_field(policy, field_name, inner))
+}
+
+fn redact_vec_string_field(
+    policy: &RedactionPolicy,
+    field_name: &str,
+    value: &[String],
+) -> Vec<String> {
+    if policy.should_redact(field_name) {
+        value
+            .iter()
+            .map(|inner| policy.redact_value(inner))
+            .collect()
+    } else {
+        value.to_vec()
     }
 }
 
@@ -250,9 +386,17 @@ pub struct RoutingDecision {
 }
 
 impl RoutingDecision {
-    fn with_redaction(&self, _policy: &RedactionPolicy) -> Self {
-        // Routing decisions don't typically contain sensitive fields
-        self.clone()
+    fn with_redaction(&self, policy: &RedactionPolicy) -> Self {
+        Self {
+            timestamp: self.timestamp,
+            trace_id: redact_string_field(policy, "trace_id", &self.trace_id),
+            source_node: redact_string_field(policy, "source_node", &self.source_node),
+            target_node: redact_option_string_field(policy, "target_node", &self.target_node),
+            object_id: redact_string_field(policy, "object_id", &self.object_id),
+            path_type: self.path_type.clone(),
+            decision: self.decision.clone(),
+            reason: redact_option_string_field(policy, "reason", &self.reason),
+        }
     }
 }
 
@@ -278,9 +422,17 @@ pub struct AdmissionOutcome {
 }
 
 impl AdmissionOutcome {
-    fn with_redaction(&self, _policy: &RedactionPolicy) -> Self {
-        // Admission outcomes don't typically contain sensitive fields
-        self.clone()
+    fn with_redaction(&self, policy: &RedactionPolicy) -> Self {
+        Self {
+            timestamp: self.timestamp,
+            trace_id: redact_string_field(policy, "trace_id", &self.trace_id),
+            peer_node: redact_string_field(policy, "peer_node", &self.peer_node),
+            request_type: self.request_type.clone(),
+            decision: self.decision.clone(),
+            reason_code: self.reason_code.clone(),
+            budget_remaining: self.budget_remaining,
+            authenticated: self.authenticated,
+        }
     }
 }
 
@@ -302,8 +454,15 @@ pub struct GossipEvent {
 }
 
 impl GossipEvent {
-    fn with_redaction(&self, _policy: &RedactionPolicy) -> Self {
-        self.clone()
+    fn with_redaction(&self, policy: &RedactionPolicy) -> Self {
+        Self {
+            timestamp: self.timestamp,
+            trace_id: redact_string_field(policy, "trace_id", &self.trace_id),
+            gossip_type: self.gossip_type.clone(),
+            object_count: self.object_count,
+            peer_node: redact_option_string_field(policy, "peer_node", &self.peer_node),
+            success: self.success,
+        }
     }
 }
 
@@ -329,8 +488,21 @@ pub struct LeaseEvent {
 }
 
 impl LeaseEvent {
-    fn with_redaction(&self, _policy: &RedactionPolicy) -> Self {
-        self.clone()
+    fn with_redaction(&self, policy: &RedactionPolicy) -> Self {
+        Self {
+            timestamp: self.timestamp,
+            trace_id: redact_string_field(policy, "trace_id", &self.trace_id),
+            operation: self.operation.clone(),
+            subject_id: redact_string_field(policy, "subject_id", &self.subject_id),
+            purpose: self.purpose.clone(),
+            node_id: redact_string_field(policy, "node_id", &self.node_id),
+            success: self.success,
+            conflict_holder: redact_option_string_field(
+                policy,
+                "conflict_holder",
+                &self.conflict_holder,
+            ),
+        }
     }
 }
 
@@ -355,12 +527,19 @@ pub struct SessionEvent {
 
 impl SessionEvent {
     fn with_redaction(&self, policy: &RedactionPolicy) -> Self {
-        let mut redacted = self.clone();
-        // Session IDs might be sensitive in some contexts
-        if policy.should_redact("session_id") {
-            redacted.session_id = policy.redact_value(&self.session_id);
+        Self {
+            timestamp: self.timestamp,
+            trace_id: redact_string_field(policy, "trace_id", &self.trace_id),
+            session_id: redact_string_field(policy, "session_id", &self.session_id),
+            kind: self.kind.clone(),
+            peer_node: redact_string_field(policy, "peer_node", &self.peer_node),
+            suite: self.suite.clone(),
+            failure_reason: redact_option_string_field(
+                policy,
+                "failure_reason",
+                &self.failure_reason,
+            ),
         }
-        redacted
     }
 }
 
@@ -386,8 +565,17 @@ pub struct PolicyDecision {
 }
 
 impl PolicyDecision {
-    fn with_redaction(&self, _policy: &RedactionPolicy) -> Self {
-        self.clone()
+    fn with_redaction(&self, policy: &RedactionPolicy) -> Self {
+        Self {
+            timestamp: self.timestamp,
+            trace_id: redact_string_field(policy, "trace_id", &self.trace_id),
+            zone_id: redact_string_field(policy, "zone_id", &self.zone_id),
+            operation: self.operation.clone(),
+            connector_id: redact_string_field(policy, "connector_id", &self.connector_id),
+            decision: self.decision.clone(),
+            reason_code: self.reason_code.clone(),
+            evidence: redact_vec_string_field(policy, "evidence", &self.evidence),
+        }
     }
 }
 
@@ -471,11 +659,15 @@ impl CapturedTrace {
     #[must_use]
     pub fn with_redaction(&self, policy: &RedactionPolicy) -> Self {
         Self {
-            id: self.id.clone(),
+            id: redact_string_field(policy, "id", &self.id),
             version: self.version,
             started_at: self.started_at,
             ended_at: self.ended_at,
-            capturing_node: self.capturing_node.clone(),
+            capturing_node: redact_option_string_field(
+                policy,
+                "capturing_node",
+                &self.capturing_node,
+            ),
             events: self
                 .events
                 .iter()
@@ -562,6 +754,8 @@ pub struct TraceCaptureConfig {
     pub sample_rate: f64,
     /// Redaction policy to apply.
     pub redaction_policy: RedactionPolicy,
+    /// Redaction level for exported mesh traces.
+    pub redaction_level: MeshTraceRedactionLevel,
 }
 
 impl Default for TraceCaptureConfig {
@@ -571,7 +765,8 @@ impl Default for TraceCaptureConfig {
             max_events: 10_000,
             max_size_bytes: 10 * 1024 * 1024, // 10 MB
             sample_rate: 1.0,
-            redaction_policy: RedactionPolicy::default(),
+            redaction_policy: RedactionPolicy::none(),
+            redaction_level: MeshTraceRedactionLevel::from_env(),
         }
     }
 }
@@ -616,6 +811,35 @@ impl TraceCaptureConfig {
     pub fn with_redaction(mut self, policy: RedactionPolicy) -> Self {
         self.redaction_policy = policy;
         self
+    }
+
+    /// Set mesh trace export redaction level.
+    #[must_use]
+    pub const fn with_redaction_level(mut self, level: MeshTraceRedactionLevel) -> Self {
+        self.redaction_level = level;
+        self
+    }
+
+    fn effective_redaction_policy(&self) -> Option<RedactionPolicy> {
+        let mut policy = self.redaction_level.policy();
+
+        if !self.redaction_policy.is_empty() {
+            match &mut policy {
+                Some(effective) => {
+                    effective
+                        .redact_fields
+                        .extend(self.redaction_policy.redact_fields.iter().cloned());
+                    effective
+                        .redact_prefixes
+                        .extend(self.redaction_policy.redact_prefixes.iter().cloned());
+                    effective.hash_redacted |= self.redaction_policy.hash_redacted;
+                    effective.redaction_marker = self.redaction_policy.redaction_marker.clone();
+                }
+                None => policy = Some(self.redaction_policy.clone()),
+            }
+        }
+
+        policy
     }
 }
 
@@ -743,16 +967,29 @@ impl TraceCapture {
         self.trace.finish();
     }
 
-    /// Snapshot the current trace (unredacted).
+    /// Snapshot the current trace with redaction applied.
     #[must_use]
     pub fn snapshot(&self) -> CapturedTrace {
+        self.redacted_snapshot()
+    }
+
+    /// Snapshot the current trace without redaction.
+    ///
+    /// This is only for deterministic replay and local debugging. Production
+    /// export paths should use [`Self::snapshot`] or [`Self::export_to_path`],
+    /// both of which redact sensitive trace fields by default.
+    #[must_use]
+    pub fn debug_unredacted_snapshot(&self) -> CapturedTrace {
         self.trace.clone()
     }
 
     /// Snapshot the current trace with redaction applied.
     #[must_use]
     pub fn redacted_snapshot(&self) -> CapturedTrace {
-        self.trace.with_redaction(&self.config.redaction_policy)
+        self.config.effective_redaction_policy().map_or_else(
+            || self.trace.clone(),
+            |policy| self.trace.with_redaction(&policy),
+        )
     }
 
     /// Export the trace to a file in the chosen format.
@@ -763,15 +1000,29 @@ impl TraceCapture {
     pub fn export_to_path<P: AsRef<Path>>(
         &self,
         path: P,
-        redacted: bool,
         format: TraceExportFormat,
     ) -> Result<(), TraceError> {
-        let trace = if redacted {
-            self.redacted_snapshot()
-        } else {
-            self.snapshot()
-        };
+        let trace = self.snapshot();
+        match format {
+            TraceExportFormat::Json => trace.write_json(path),
+            TraceExportFormat::Cbor => trace.write_cbor(path),
+        }
+    }
 
+    /// Export the unredacted trace to a file in the chosen format.
+    ///
+    /// This is intended for local deterministic replay fixtures only. Operator
+    /// and production export paths should use [`Self::export_to_path`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization or IO fails.
+    pub fn debug_export_unredacted_to_path<P: AsRef<Path>>(
+        &self,
+        path: P,
+        format: TraceExportFormat,
+    ) -> Result<(), TraceError> {
+        let trace = self.debug_unredacted_snapshot();
         match format {
             TraceExportFormat::Json => trace.write_json(path),
             TraceExportFormat::Cbor => trace.write_cbor(path),
@@ -866,6 +1117,163 @@ mod tests {
         // Different input should produce different hash
         let redacted3 = policy.redact_value("different-value");
         assert_ne!(redacted, redacted3);
+    }
+
+    #[test]
+    fn test_mesh_trace_redaction_level_parse_values() {
+        assert_eq!(
+            MeshTraceRedactionLevel::parse_value("none"),
+            Some(MeshTraceRedactionLevel::None)
+        );
+        assert_eq!(
+            MeshTraceRedactionLevel::parse_value("identifiers"),
+            Some(MeshTraceRedactionLevel::Identifiers)
+        );
+        assert_eq!(
+            MeshTraceRedactionLevel::parse_value("full"),
+            Some(MeshTraceRedactionLevel::Full)
+        );
+        assert_eq!(
+            MeshTraceRedactionLevel::parse_value(" FULL "),
+            Some(MeshTraceRedactionLevel::Full)
+        );
+        assert_eq!(MeshTraceRedactionLevel::parse_value("raw"), None);
+    }
+
+    #[test]
+    fn test_mesh_trace_export_default_redacts_identifiers_and_capture_bytes() {
+        let owner_public_key = "owner-public-key-cleartext-lmp9l";
+        let signed_head_bytes = "signed-head-bytes-cleartext-lmp9l";
+        let path = std::env::temp_dir().join(format!(
+            "fcp-telemetry-lmp9l-default-{}-{}.json",
+            std::process::id(),
+            current_time_ms()
+        ));
+
+        let config = TraceCaptureConfig::new().enabled();
+        let mut capture =
+            TraceCapture::new("capture-node-secret-lmp9l", config).with_node("node-secret-lmp9l");
+
+        capture
+            .record(TraceEvent::Routing(RoutingDecision {
+                timestamp: 1,
+                trace_id: "trace-secret-lmp9l".to_string(),
+                source_node: "node-source-secret-lmp9l".to_string(),
+                target_node: Some("node-target-secret-lmp9l".to_string()),
+                object_id: "object-secret-lmp9l".to_string(),
+                path_type: "direct".to_string(),
+                decision: "routed".to_string(),
+                reason: None,
+            }))
+            .unwrap();
+        capture
+            .record(TraceEvent::Policy(PolicyDecision {
+                timestamp: 2,
+                trace_id: "trace-secret-lmp9l".to_string(),
+                zone_id: "z:secret-lmp9l".to_string(),
+                operation: "invoke".to_string(),
+                connector_id: "connector-secret-lmp9l".to_string(),
+                decision: "allow".to_string(),
+                reason_code: "OK".to_string(),
+                evidence: vec![owner_public_key.to_string(), signed_head_bytes.to_string()],
+            }))
+            .unwrap();
+        capture
+            .record(TraceEvent::Session(SessionEvent {
+                timestamp: 3,
+                trace_id: "trace-secret-lmp9l".to_string(),
+                session_id: "session-secret-lmp9l".to_string(),
+                kind: "established".to_string(),
+                peer_node: "node-peer-secret-lmp9l".to_string(),
+                suite: Some("suite-test".to_string()),
+                failure_reason: None,
+            }))
+            .unwrap();
+
+        capture
+            .export_to_path(&path, TraceExportFormat::Json)
+            .expect("export redacted trace");
+
+        let json = std::fs::read_to_string(&path).expect("read exported trace");
+        for leaked in [
+            "capture-node-secret-lmp9l",
+            "node-secret-lmp9l",
+            "node-source-secret-lmp9l",
+            "node-target-secret-lmp9l",
+            "node-peer-secret-lmp9l",
+            "object-secret-lmp9l",
+            "session-secret-lmp9l",
+            owner_public_key,
+            signed_head_bytes,
+        ] {
+            assert!(
+                !json.contains(leaked),
+                "default mesh trace export leaked {leaked}"
+            );
+        }
+        assert!(json.contains("[REDACTED]"));
+
+        let parsed = CapturedTrace::from_json(&json).expect("parse exported trace");
+        assert!(parsed.redacted);
+    }
+
+    #[test]
+    fn test_mesh_trace_full_redaction_hashes_sensitive_values() {
+        let owner_public_key = "owner-public-key-hash-lmp9l";
+        let config = TraceCaptureConfig::new()
+            .enabled()
+            .with_redaction_level(MeshTraceRedactionLevel::Full);
+        let mut capture = TraceCapture::new("capture-full-lmp9l", config);
+
+        capture
+            .record(TraceEvent::Policy(PolicyDecision {
+                timestamp: 1,
+                trace_id: "trace-full-lmp9l".to_string(),
+                zone_id: "z:full-lmp9l".to_string(),
+                operation: "invoke".to_string(),
+                connector_id: "connector-full-lmp9l".to_string(),
+                decision: "allow".to_string(),
+                reason_code: "OK".to_string(),
+                evidence: vec![owner_public_key.to_string()],
+            }))
+            .unwrap();
+
+        let snapshot = capture.snapshot();
+        assert!(matches!(&snapshot.events[0], TraceEvent::Policy(_)));
+        let TraceEvent::Policy(policy) = &snapshot.events[0] else {
+            return;
+        };
+        assert!(policy.evidence[0].starts_with("[REDACTED:"));
+        assert_ne!(policy.evidence[0], owner_public_key);
+    }
+
+    #[test]
+    fn test_mesh_trace_none_redaction_preserves_debug_output() {
+        let config = TraceCaptureConfig::new()
+            .enabled()
+            .with_redaction_level(MeshTraceRedactionLevel::None);
+        let mut capture = TraceCapture::new("capture-none-lmp9l", config);
+
+        capture
+            .record(TraceEvent::Session(SessionEvent {
+                timestamp: 1,
+                trace_id: "trace-none-lmp9l".to_string(),
+                session_id: "session-none-lmp9l".to_string(),
+                kind: "established".to_string(),
+                peer_node: "peer-none-lmp9l".to_string(),
+                suite: None,
+                failure_reason: None,
+            }))
+            .unwrap();
+
+        let snapshot = capture.snapshot();
+        assert!(!snapshot.redacted);
+        assert!(matches!(&snapshot.events[0], TraceEvent::Session(_)));
+        let TraceEvent::Session(session) = &snapshot.events[0] else {
+            return;
+        };
+        assert_eq!(session.session_id, "session-none-lmp9l");
+        assert_eq!(session.peer_node, "peer-none-lmp9l");
     }
 
     #[test]
@@ -1672,7 +2080,9 @@ mod tests {
         let config = TraceCaptureConfig::new().enabled();
         let capture = TraceCapture::new("node-test", config).with_node("my-node");
         let snap = capture.snapshot();
-        assert_eq!(snap.capturing_node, Some("my-node".to_string()));
+        assert_eq!(snap.capturing_node, Some("[REDACTED]".to_string()));
+        let raw = capture.debug_unredacted_snapshot();
+        assert_eq!(raw.capturing_node, Some("my-node".to_string()));
     }
 
     #[test]
@@ -1726,8 +2136,8 @@ mod tests {
             panic!("Expected Session event");
         }
 
-        // Unredacted snapshot should preserve original
-        let raw = capture.snapshot();
+        // Explicit debug-only unredacted snapshot should preserve original.
+        let raw = capture.debug_unredacted_snapshot();
         assert!(!raw.redacted);
         if let TraceEvent::Session(sess) = &raw.events[0] {
             assert_eq!(sess.session_id, "secret-sid");

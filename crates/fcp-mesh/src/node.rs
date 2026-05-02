@@ -2245,21 +2245,27 @@ impl MeshNode {
         metrics
     }
 
-    /// Snapshot trace capture (if enabled).
+    /// Snapshot trace capture with redaction applied (if enabled).
     #[must_use]
     pub fn trace_snapshot(&self) -> Option<CapturedTrace> {
         self.trace_capture.as_ref().map(TraceCapture::snapshot)
     }
 
-    /// Snapshot trace capture with redaction (if enabled).
+    /// Snapshot trace capture with redaction applied (if enabled).
     #[must_use]
     pub fn trace_redacted_snapshot(&self) -> Option<CapturedTrace> {
-        self.trace_capture
-            .as_ref()
-            .map(TraceCapture::redacted_snapshot)
+        self.trace_snapshot()
     }
 
-    /// Export trace capture to a file.
+    /// Snapshot trace capture without redaction for deterministic replay/debug flows.
+    #[must_use]
+    pub fn trace_debug_unredacted_snapshot(&self) -> Option<CapturedTrace> {
+        self.trace_capture
+            .as_ref()
+            .map(TraceCapture::debug_unredacted_snapshot)
+    }
+
+    /// Export trace capture to a file with redaction applied.
     ///
     /// # Errors
     ///
@@ -2268,14 +2274,32 @@ impl MeshNode {
     pub fn export_trace_to_path<P: AsRef<Path>>(
         &self,
         path: P,
-        redacted: bool,
         format: TraceExportFormat,
     ) -> Result<(), MeshNodeError> {
         let Some(capture) = self.trace_capture.as_ref() else {
             return Err(MeshNodeError::TraceNotEnabled);
         };
 
-        capture.export_to_path(path, redacted, format)?;
+        capture.export_to_path(path, format)?;
+        Ok(())
+    }
+
+    /// Export unredacted trace capture for deterministic replay/debug flows.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MeshNodeError::TraceNotEnabled` if capture is disabled or
+    /// `MeshNodeError::TraceExport` if serialization/IO fails.
+    pub fn debug_export_unredacted_trace_to_path<P: AsRef<Path>>(
+        &self,
+        path: P,
+        format: TraceExportFormat,
+    ) -> Result<(), MeshNodeError> {
+        let Some(capture) = self.trace_capture.as_ref() else {
+            return Err(MeshNodeError::TraceNotEnabled);
+        };
+
+        capture.debug_export_unredacted_to_path(path, format)?;
         Ok(())
     }
 
@@ -5276,6 +5300,10 @@ mod tests {
 
         let snapshot = node.trace_snapshot().unwrap();
         assert_eq!(snapshot.events.len(), 1);
+        assert!(snapshot.redacted);
+        if let TraceEvent::Session(session) = &snapshot.events[0] {
+            assert_eq!(session.session_id, "[REDACTED]");
+        }
     }
 
     // ---- Export trace to path ----
@@ -5283,12 +5311,68 @@ mod tests {
     #[test]
     fn export_trace_fails_without_capture() {
         let node = test_node("node-1");
-        let result = node.export_trace_to_path("/tmp/test.json", false, TraceExportFormat::Json);
+        let result = node.export_trace_to_path("/tmp/test.json", TraceExportFormat::Json);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
             MeshNodeError::TraceNotEnabled
         ));
+    }
+
+    #[test]
+    fn export_trace_redacts_mesh_identifiers_by_default() {
+        let mut node = test_node_with_trace("mesh-node-secret-lmp9l");
+        let owner_public_key = "mesh-owner-public-key-cleartext-lmp9l";
+        let signed_head_bytes = "mesh-signed-head-bytes-cleartext-lmp9l";
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "fcp-mesh-lmp9l-default-{}-{nonce}.json",
+            std::process::id()
+        ));
+
+        node.ingest_trace_event_for_replay(TraceEvent::Session(SessionEvent {
+            timestamp: 1,
+            trace_id: "mesh-trace-secret-lmp9l".to_string(),
+            session_id: "mesh-session-secret-lmp9l".to_string(),
+            kind: "established".to_string(),
+            peer_node: "mesh-peer-secret-lmp9l".to_string(),
+            suite: Some("suite-test".to_string()),
+            failure_reason: None,
+        }))
+        .expect("record session trace event");
+        node.ingest_trace_event_for_replay(TraceEvent::Policy(
+            fcp_telemetry::trace_capture::PolicyDecision {
+                timestamp: 2,
+                trace_id: "mesh-trace-secret-lmp9l".to_string(),
+                zone_id: "z:mesh-secret-lmp9l".to_string(),
+                operation: "invoke".to_string(),
+                connector_id: "mesh-connector-secret-lmp9l".to_string(),
+                decision: "allow".to_string(),
+                reason_code: "OK".to_string(),
+                evidence: vec![owner_public_key.to_string(), signed_head_bytes.to_string()],
+            },
+        ))
+        .expect("record policy trace event");
+
+        node.export_trace_to_path(&path, TraceExportFormat::Json)
+            .expect("export redacted mesh trace");
+
+        let json = std::fs::read_to_string(&path).expect("read exported mesh trace");
+        for leaked in [
+            "mesh-node-secret-lmp9l",
+            "mesh-peer-secret-lmp9l",
+            "mesh-session-secret-lmp9l",
+            "z:mesh-secret-lmp9l",
+            "mesh-connector-secret-lmp9l",
+            owner_public_key,
+            signed_head_bytes,
+        ] {
+            assert!(!json.contains(leaked), "mesh trace export leaked {leaked}");
+        }
+        assert!(json.contains("[REDACTED]"));
     }
 
     // ---- Planner singleton holder from peer ----

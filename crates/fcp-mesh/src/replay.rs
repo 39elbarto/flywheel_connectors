@@ -146,7 +146,7 @@ impl TraceReplayEngine {
         }
 
         let replayed_trace = node
-            .trace_snapshot()
+            .trace_debug_unredacted_snapshot()
             .ok_or(TraceReplayError::TraceCaptureUnavailable)?;
 
         let (diffs, summary) = compare_traces(trace, &replayed_trace);

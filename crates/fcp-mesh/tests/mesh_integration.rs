@@ -22,10 +22,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use chrono::{SecondsFormat, Utc};
-use fcp_prelude::{
-    ConnectorId, DecisionReasonCode, EpochId, ObjectId, TailscaleNodeId, ZoneId,
-    ZoneTransportPolicy,
-};
 use fcp_mesh::admission::{AdmissionController, AdmissionError, AdmissionPolicy, PeerBudget};
 use fcp_mesh::device::{
     AvailabilityProfile, CpuArch, DeviceProfile, GpuProfile, GpuVendor, InstalledConnector,
@@ -38,6 +34,10 @@ use fcp_mesh::planner::{
     ExecutionPlanner, HeldLease, LeasePurpose, NodeInfo, PlannerContext, PlannerInput,
 };
 use fcp_mesh::transport::{TransportPath, TransportPathKind, TransportSelector};
+use fcp_prelude::{
+    ConnectorId, DecisionReasonCode, EpochId, ObjectId, TailscaleNodeId, ZoneId,
+    ZoneTransportPolicy,
+};
 use fcp_tailscale::NodeId;
 use jsonschema::Validator;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt};
@@ -207,18 +207,18 @@ mod meshnode {
 
     use bytes::Bytes;
     use fcp_cbor::SchemaId;
+    use fcp_mesh::admission::AdmissionError;
+    use fcp_mesh::admission::ObjectAdmissionClass;
+    use fcp_mesh::{
+        ControlPlaneEnvelope, InMemoryControlPlaneHandler, MeshNode, MeshNodeConfig, MeshSession,
+        RetentionClass, SymbolRequestError, TraceReplayEngine,
+    };
     use fcp_prelude::{
         CheckpointTransferEncoding, ComputationCheckpoint, ComputationMigrationError, Lease,
         LeaseHandoff, LeaseParams, LeasePurpose as CoreLeasePurpose, MigratableComputation,
         MigratableComputationState, MigrationCapabilityContext, ObjectHeader, Provenance,
         RetentionClass as ObjectRetentionClass, SignatureSet, StorageMeta, StoredObject, Uuid,
         ZoneKey, ZoneKeyAlgorithm, ZoneKeyId, current_timestamp,
-    };
-    use fcp_mesh::admission::AdmissionError;
-    use fcp_mesh::admission::ObjectAdmissionClass;
-    use fcp_mesh::{
-        ControlPlaneEnvelope, InMemoryControlPlaneHandler, MeshNode, MeshNodeConfig, MeshSession,
-        RetentionClass, SymbolRequestError, TraceReplayEngine,
     };
     use fcp_protocol::session::{
         MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, TransportLimits,
@@ -1959,14 +1959,29 @@ mod meshnode {
         let object_id = test_object_id("meshnode-trace-export");
         let mut node = build_mesh_node_with_trace("node-export", 91, 7);
 
+        let session = MeshSession::new(
+            MeshSessionId::new(),
+            NodeId::new("trace-export-peer"),
+            SessionCryptoSuite::Suite1,
+            SessionKeys {
+                k_mac_i2r: [1u8; 32],
+                k_mac_r2i: [2u8; 32],
+                k_ctx: [3u8; 32],
+            },
+            TransportLimits::default(),
+            true,
+            0,
+            SessionReplayPolicy::default(),
+        );
+        node.register_session(session, 0);
         node.announce_object(&zone_id, &object_id, ObjectAdmissionClass::Admitted, 5_000);
 
         let json_path = trace_temp_path("fcp-mesh-trace", "json");
         let cbor_path = trace_temp_path("fcp-mesh-trace", "cbor");
 
-        node.export_trace_to_path(&json_path, false, TraceExportFormat::Json)
+        node.export_trace_to_path(&json_path, TraceExportFormat::Json)
             .expect("export json trace");
-        node.export_trace_to_path(&cbor_path, true, TraceExportFormat::Cbor)
+        node.export_trace_to_path(&cbor_path, TraceExportFormat::Cbor)
             .expect("export cbor trace");
 
         let json_bytes = std::fs::read(&json_path).expect("read json trace");
@@ -1980,8 +1995,21 @@ mod meshnode {
         assert!(!cbor_trace.events.is_empty());
         assert_eq!(json_trace.events.len(), cbor_trace.events.len());
         assert!(
+            json_trace.redacted,
+            "default json export should mark trace redacted"
+        );
+        let json_session_id = json_trace.events.iter().find_map(|event| match event {
+            TraceEvent::Session(session) => Some(session.session_id.as_str()),
+            _ => None,
+        });
+        assert_eq!(
+            json_session_id,
+            Some("[REDACTED]"),
+            "default json export should redact session_id"
+        );
+        assert!(
             cbor_trace.redacted,
-            "redacted export should mark trace redacted"
+            "default cbor export should mark trace redacted"
         );
 
         let _ = std::fs::remove_file(&json_path);
@@ -5500,13 +5528,13 @@ mod real_component_integration {
 
     use bytes::Bytes;
     use fcp_cbor::SchemaId;
-    use fcp_prelude::{
-        Decision, DecisionReasonCode, EpochId, NodeSignature, ObjectHeader, Provenance, ZoneKeyId,
-    };
     use fcp_crypto::Ed25519SigningKey;
     use fcp_mesh::admission::{AdmissionError, AdmissionPolicy, ObjectAdmissionClass, PeerBudget};
     use fcp_mesh::gossip::{GossipConfig, GossipSummary};
     use fcp_mesh::{MeshNode, MeshNodeConfig, MeshSession, SymbolRequestError};
+    use fcp_prelude::{
+        Decision, DecisionReasonCode, EpochId, NodeSignature, ObjectHeader, Provenance, ZoneKeyId,
+    };
     use fcp_protocol::session::{
         MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, TransportLimits,
     };

@@ -73,8 +73,12 @@
 //! `EMERGENCY_QUORUM_WITNESSES = 3` (which is about
 //! after-the-fact quorum proof, not about routine availability).
 
+use fcp_crypto::ed25519::{Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey};
+use fcp_crypto::error::CryptoError;
+use fcp_crypto::kid::KeyId;
 use fcp_prelude::SafetyTier;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// Minimum number of healthy mesh peers required to transition out
 /// of [`DeploymentMode::Evaluation`]. Matches bead hr0rr.1 §"Sequence"
@@ -85,8 +89,7 @@ pub const MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE: u32 = 2;
 /// Operator-visible warning string emitted every health-check while
 /// running in [`DeploymentMode::Evaluation`]. Stable across releases
 /// because operator runbooks and log-search dashboards key off it.
-pub const EVALUATION_MODE_HEALTH_WARNING: &str =
-    "WARN: Host-first mode is for evaluation only. Production deployments require mesh-active mode.";
+pub const EVALUATION_MODE_HEALTH_WARNING: &str = "WARN: Host-first mode is for evaluation only. Production deployments require mesh-active mode.";
 
 /// Runtime classification of how the host is currently deployed.
 ///
@@ -248,6 +251,13 @@ pub enum DeploymentClassificationReason {
     /// revocation snapshot is within the freshness SLA — full
     /// [`DeploymentMode::MeshActive`] admitted.
     MeshQuorumActive,
+    /// Signed-signals attestation could not be validated (br-5f8t1).
+    /// Either the attesting KID is not in the trust set or the
+    /// Ed25519 signature did not verify. Fail-soft callers
+    /// downgrade to [`DeploymentMode::Evaluation`] and surface this
+    /// reason so operators can see WHY the host is in evaluation
+    /// mode (vs. a routine peer-count shortfall).
+    SignedSignalsRejected,
 }
 
 impl DeploymentClassificationReason {
@@ -259,6 +269,7 @@ impl DeploymentClassificationReason {
             Self::LeaseCoordinatorUnreachable => "lease_coordinator_unreachable",
             Self::RevocationSnapshotStale => "revocation_snapshot_stale",
             Self::MeshQuorumActive => "mesh_quorum_active",
+            Self::SignedSignalsRejected => "signed_signals_rejected",
         }
     }
 }
@@ -272,6 +283,182 @@ impl DeploymentClassificationReason {
 ///   3. Healthy peer count < threshold → Evaluation (insufficient
 ///      quorum).
 ///   4. Otherwise → MeshActive.
+
+/// Domain-separation tag for signed [`MeshQuorumSignals`].
+///
+/// Prevents a signed-signals byte string from being re-interpreted
+/// as any other FCP signature transcript. A new domain tag MUST be
+/// minted whenever the [`MeshQuorumSignals`] field set evolves so
+/// signatures over the old shape never validate against a new
+/// classifier.
+pub const MESH_QUORUM_SIGNALS_DOMAIN: &[u8] = b"FCP3-MESH-QUORUM-SIGNALS-V1";
+
+/// Signed wrapper around [`MeshQuorumSignals`] (br-5f8t1 — defends
+/// against the unsigned-signals falsification attack).
+///
+/// Production callers MUST use this — never feed a raw
+/// [`MeshQuorumSignals`] to the deployment classifier on a path that
+/// can promote the host to [`DeploymentMode::MeshActive`]. The bare
+/// [`classify_deployment_mode`] function remains available for
+/// trusted-input contexts (tests, replay bundles where authenticity
+/// is already proven by an outer envelope).
+///
+/// The signature commits to a domain-separated canonical encoding
+/// of the underlying signals plus the attesting KID, so the same
+/// signed bytes cannot be replayed against a different attesting
+/// node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedMeshQuorumSignals {
+    /// The raw signals being attested.
+    pub signals: MeshQuorumSignals,
+    /// KeyId of the node that signed these signals. Resolved to a
+    /// verifying key by the caller's key resolver at verify time.
+    pub attesting_kid: KeyId,
+    /// Ed25519 signature over [`Self::signing_bytes`].
+    pub signature: Ed25519Signature,
+}
+
+impl SignedMeshQuorumSignals {
+    /// Bytes the signature commits to. Domain-separated by
+    /// [`MESH_QUORUM_SIGNALS_DOMAIN`] so the same payload signed
+    /// here cannot be replayed against any other FCP signature
+    /// transcript.
+    ///
+    /// Layout: `MESH_QUORUM_SIGNALS_DOMAIN || attesting_kid_bytes ||
+    /// healthy_peer_count_le || lease_coordinator_byte ||
+    /// revocation_snapshot_fresh_byte`. Fixed-size fields packed
+    /// little-endian — no length-prefixed canonical CBOR needed
+    /// because every field is bounded.
+    #[must_use]
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(
+            MESH_QUORUM_SIGNALS_DOMAIN.len()
+                + fcp_crypto::kid::KID_SIZE
+                + 4 // healthy_peer_count
+                + 1 // lease_coordinator state byte
+                + 1, // revocation_snapshot_fresh
+        );
+        out.extend_from_slice(MESH_QUORUM_SIGNALS_DOMAIN);
+        out.extend_from_slice(self.attesting_kid.as_slice());
+        out.extend_from_slice(&self.signals.healthy_peer_count.to_le_bytes());
+        out.push(match self.signals.lease_coordinator_reachable {
+            None => 0_u8,
+            Some(false) => 1_u8,
+            Some(true) => 2_u8,
+        });
+        out.push(u8::from(self.signals.revocation_snapshot_fresh));
+        out
+    }
+
+    /// Verify the signature against `verifying_key`.
+    ///
+    /// # Errors
+    /// Returns the verifier's [`CryptoError`] on signature
+    /// verification failure.
+    pub fn verify(&self, verifying_key: &Ed25519VerifyingKey) -> Result<(), CryptoError> {
+        verifying_key.verify(&self.signing_bytes(), &self.signature)
+    }
+}
+
+impl MeshQuorumSignals {
+    /// Sign this signals snapshot with the host's signing key,
+    /// producing a [`SignedMeshQuorumSignals`] that the deployment
+    /// classifier accepts on the production path.
+    #[must_use]
+    pub fn sign(self, signing_key: &Ed25519SigningKey) -> SignedMeshQuorumSignals {
+        let attesting_kid = signing_key.key_id();
+        // Pre-build a transcript-stable wrapper so signing_bytes()
+        // produces the exact bytes verify() will check later.
+        let mut wrapped = SignedMeshQuorumSignals {
+            signals: self,
+            attesting_kid,
+            signature: Ed25519Signature::from_bytes(&[0_u8; 64]),
+        };
+        let signature = signing_key.sign(&wrapped.signing_bytes());
+        wrapped.signature = signature;
+        wrapped
+    }
+}
+
+/// Errors returned by [`classify_deployment_mode_verified`].
+#[derive(Debug, Error)]
+pub enum DeploymentClassifierError {
+    /// The attesting node KID is not in the resolver's trust set.
+    #[error("attesting node {attesting_kid} not in trust set")]
+    UnknownAttestingNode { attesting_kid: String },
+    /// Signature verification failed.
+    #[error("mesh quorum signals signature verification failed: {source}")]
+    SignatureVerificationFailed {
+        #[source]
+        source: CryptoError,
+    },
+}
+
+/// Production classifier path: verify the signed quorum signals
+/// against the resolver-supplied verifying key for the attesting
+/// node, THEN classify (br-5f8t1).
+///
+/// `resolve_key` looks up the trusted verifying key for the
+/// attesting node. Callers MUST seed this resolver from
+/// owner-attested sources (e.g., the same per-zone trust set the
+/// revocation cascade walker uses). A resolver that returns a key
+/// for an unverified node breaks the chain of trust.
+///
+/// On signature failure the classifier returns
+/// [`DeploymentClassifierError`] — callers that want fail-soft
+/// degradation MUST explicitly map this to
+/// [`DeploymentMode::Evaluation`] (which is what
+/// [`classify_deployment_mode_verified_or_evaluation`] does).
+///
+/// # Errors
+///
+/// Returns [`DeploymentClassifierError::UnknownAttestingNode`] if
+/// the resolver returns `None`, or
+/// [`DeploymentClassifierError::SignatureVerificationFailed`] if
+/// the signature does not verify.
+pub fn classify_deployment_mode_verified<F>(
+    signed: &SignedMeshQuorumSignals,
+    resolve_key: F,
+) -> Result<DeploymentClassification, DeploymentClassifierError>
+where
+    F: FnOnce(&KeyId) -> Option<Ed25519VerifyingKey>,
+{
+    let key = resolve_key(&signed.attesting_kid).ok_or_else(|| {
+        DeploymentClassifierError::UnknownAttestingNode {
+            attesting_kid: signed.attesting_kid.to_hex(),
+        }
+    })?;
+    signed
+        .verify(&key)
+        .map_err(|source| DeploymentClassifierError::SignatureVerificationFailed { source })?;
+    Ok(classify_deployment_mode(signed.signals))
+}
+
+/// Fail-soft variant of [`classify_deployment_mode_verified`]:
+/// signature verification failure produces a structured Evaluation
+/// classification (with [`DeploymentClassificationReason::SignedSignalsRejected`])
+/// rather than an `Err`. Use on hot paths that must always produce
+/// some classification rather than abort — the security promise is
+/// the same (an attacker cannot promote to MeshActive without a
+/// valid signature).
+#[must_use]
+pub fn classify_deployment_mode_verified_or_evaluation<F>(
+    signed: &SignedMeshQuorumSignals,
+    resolve_key: F,
+) -> DeploymentClassification
+where
+    F: FnOnce(&KeyId) -> Option<Ed25519VerifyingKey>,
+{
+    match classify_deployment_mode_verified(signed, resolve_key) {
+        Ok(classification) => classification,
+        Err(_) => DeploymentClassification {
+            mode: DeploymentMode::Evaluation,
+            signals: signed.signals,
+            reason: DeploymentClassificationReason::SignedSignalsRejected,
+        },
+    }
+}
+
 #[must_use]
 pub fn classify_deployment_mode(signals: MeshQuorumSignals) -> DeploymentClassification {
     if !signals.revocation_snapshot_fresh {
@@ -424,7 +611,10 @@ mod tests {
         let signals = MeshQuorumSignals::fully_active(2);
         let result = classify_deployment_mode(signals);
         assert_eq!(result.mode, DeploymentMode::MeshActive);
-        assert_eq!(result.reason, DeploymentClassificationReason::MeshQuorumActive);
+        assert_eq!(
+            result.reason,
+            DeploymentClassificationReason::MeshQuorumActive
+        );
     }
 
     #[test]
@@ -440,10 +630,7 @@ mod tests {
         let result = classify_deployment_mode(MeshQuorumSignals::single_host_evaluation());
         assert_eq!(result.mode, DeploymentMode::Evaluation);
         match result.reason {
-            DeploymentClassificationReason::InsufficientMeshQuorum {
-                observed,
-                required,
-            } => {
+            DeploymentClassificationReason::InsufficientMeshQuorum { observed, required } => {
                 assert_eq!(observed, 0);
                 assert_eq!(required, MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE);
             }
@@ -602,8 +789,7 @@ mod tests {
     #[test]
     fn admit_safety_tier_allows_dangerous_in_mesh_active() {
         let class = classify_deployment_mode(MeshQuorumSignals::fully_active(3));
-        admit_safety_tier(&class, SafetyTier::Dangerous)
-            .expect("Dangerous admits in MeshActive");
+        admit_safety_tier(&class, SafetyTier::Dangerous).expect("Dangerous admits in MeshActive");
     }
 
     #[test]
@@ -626,7 +812,9 @@ mod tests {
                 .expect_err("Forbidden never admits");
             assert!(matches!(
                 err,
-                DeploymentTierRefusal::TierForbidden { tier: SafetyTier::Forbidden }
+                DeploymentTierRefusal::TierForbidden {
+                    tier: SafetyTier::Forbidden
+                }
             ));
         }
     }
@@ -646,7 +834,10 @@ mod tests {
             .expect_err("Risky refused due to stale revocation");
         match err {
             DeploymentTierRefusal::TierRequiresMeshActive { reason, .. } => {
-                assert_eq!(reason, DeploymentClassificationReason::RevocationSnapshotStale);
+                assert_eq!(
+                    reason,
+                    DeploymentClassificationReason::RevocationSnapshotStale
+                );
             }
             other => panic!("expected TierRequiresMeshActive, got {other:?}"),
         }
@@ -724,8 +915,7 @@ mod tests {
     fn deployment_classification_round_trips_through_json() {
         let class = classify_deployment_mode(MeshQuorumSignals::fully_active(3));
         let json = serde_json::to_string(&class).expect("encode");
-        let back: DeploymentClassification =
-            serde_json::from_str(&json).expect("decode");
+        let back: DeploymentClassification = serde_json::from_str(&json).expect("decode");
         assert_eq!(back, class);
     }
 
@@ -746,8 +936,7 @@ mod tests {
         ];
         for original in cases {
             let json = serde_json::to_string(&original).expect("encode");
-            let back: DeploymentTierRefusal =
-                serde_json::from_str(&json).expect("decode");
+            let back: DeploymentTierRefusal = serde_json::from_str(&json).expect("decode");
             assert_eq!(back, original);
         }
     }
@@ -768,7 +957,8 @@ mod tests {
                 DeploymentClassificationReason::InsufficientMeshQuorum { .. }
                 | DeploymentClassificationReason::LeaseCoordinatorUnreachable
                 | DeploymentClassificationReason::RevocationSnapshotStale
-                | DeploymentClassificationReason::MeshQuorumActive => (),
+                | DeploymentClassificationReason::MeshQuorumActive
+                | DeploymentClassificationReason::SignedSignalsRejected => (),
             }
         }
     }
@@ -831,6 +1021,211 @@ mod tests {
         assert!(matches!(
             lost_peers.reason,
             DeploymentClassificationReason::InsufficientMeshQuorum { .. }
+        ));
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // br-5f8t1 — SignedMeshQuorumSignals (defends against unsigned-
+    // signals falsification → forced MeshActive).
+    //
+    // Pin the production-path classifier discipline: only signed
+    // signals attested by a trusted KID can promote the host to
+    // MeshActive. Unsigned, mis-signed, or unknown-attester signals
+    // either error (verified path) or fail-soft to Evaluation
+    // (verified_or_evaluation path). Defaults stay fail-closed.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn signing_key_a() -> Ed25519SigningKey {
+        Ed25519SigningKey::from_bytes(&[0xA1_u8; 32]).expect("valid signing key A")
+    }
+
+    fn signing_key_b() -> Ed25519SigningKey {
+        Ed25519SigningKey::from_bytes(&[0xB2_u8; 32]).expect("valid signing key B")
+    }
+
+    fn fully_active_signed_by_a() -> SignedMeshQuorumSignals {
+        MeshQuorumSignals::fully_active(3).sign(&signing_key_a())
+    }
+
+    fn evaluation_signed_by_a() -> SignedMeshQuorumSignals {
+        MeshQuorumSignals::single_host_evaluation().sign(&signing_key_a())
+    }
+
+    #[test]
+    fn signed_signals_round_trip_under_attesting_key_verifies() {
+        let signed = fully_active_signed_by_a();
+        signed
+            .verify(&signing_key_a().verifying_key())
+            .expect("signature MUST verify under the attesting key");
+    }
+
+    #[test]
+    fn signed_signals_under_wrong_key_fails_verification() {
+        let signed = fully_active_signed_by_a();
+        signed
+            .verify(&signing_key_b().verifying_key())
+            .expect_err("signature MUST NOT verify under a different key");
+    }
+
+    #[test]
+    fn signed_signals_classifier_promotes_to_mesh_active_when_signature_valid_and_quorum_healthy()
+    {
+        let signed = fully_active_signed_by_a();
+        let classification = classify_deployment_mode_verified(&signed, |kid| {
+            (kid == &signing_key_a().key_id()).then(|| signing_key_a().verifying_key())
+        })
+        .expect("verified classifier accepts valid signature + healthy quorum");
+        assert_eq!(classification.mode, DeploymentMode::MeshActive);
+        assert_eq!(
+            classification.reason,
+            DeploymentClassificationReason::MeshQuorumActive
+        );
+    }
+
+    #[test]
+    fn signed_signals_classifier_rejects_unknown_attesting_kid() {
+        let signed = fully_active_signed_by_a();
+        let err = classify_deployment_mode_verified(&signed, |_| None)
+            .expect_err("verified classifier MUST reject unknown attesting KID");
+        assert!(matches!(
+            err,
+            DeploymentClassifierError::UnknownAttestingNode { .. }
+        ));
+    }
+
+    #[test]
+    fn signed_signals_classifier_rejects_signature_under_wrong_key() {
+        let signed = fully_active_signed_by_a();
+        let err = classify_deployment_mode_verified(&signed, |_| {
+            Some(signing_key_b().verifying_key())
+        })
+        .expect_err("verified classifier MUST reject signature under wrong key");
+        assert!(matches!(
+            err,
+            DeploymentClassifierError::SignatureVerificationFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn signed_signals_classifier_rejects_tampered_signals() {
+        // Sign healthy(3) signals, then mutate the signals field
+        // post-signing. Verification MUST fail because signing_bytes
+        // recomputes from the (now-tampered) signals + the
+        // attached signature was over the ORIGINAL signals.
+        let mut tampered = fully_active_signed_by_a();
+        tampered.signals.healthy_peer_count = 999;
+        let err = classify_deployment_mode_verified(&tampered, |_| {
+            Some(signing_key_a().verifying_key())
+        })
+        .expect_err("verified classifier MUST reject post-signing tampering");
+        assert!(matches!(
+            err,
+            DeploymentClassifierError::SignatureVerificationFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn signed_signals_attesting_kid_in_signing_bytes_prevents_kid_swap() {
+        // Sign signals with key A (kid_A), then mutate
+        // attesting_kid → kid_B but keep the signature bytes. The
+        // signing transcript includes attesting_kid, so swapping
+        // it post-signing must invalidate the signature.
+        let mut swapped = fully_active_signed_by_a();
+        swapped.attesting_kid = signing_key_b().key_id();
+        // Resolver returns key_a (the actual signer's key); swap
+        // changed attesting_kid in the transcript so signature
+        // verification fails because the bytes-being-verified differ
+        // from what was signed.
+        let err = classify_deployment_mode_verified(&swapped, |_| {
+            Some(signing_key_a().verifying_key())
+        })
+        .expect_err("kid swap MUST invalidate the signature");
+        assert!(matches!(
+            err,
+            DeploymentClassifierError::SignatureVerificationFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn signed_signals_classifier_evaluation_signals_yield_evaluation_even_when_signed() {
+        // Even with a valid signature, signals that classify to
+        // Evaluation (single-host, no peers) MUST stay in Evaluation.
+        // Signature is about authenticity, not about authorizing a
+        // mode upgrade beyond what the signals support.
+        let signed = evaluation_signed_by_a();
+        let classification = classify_deployment_mode_verified(&signed, |_| {
+            Some(signing_key_a().verifying_key())
+        })
+        .expect("signature valid");
+        assert_eq!(classification.mode, DeploymentMode::Evaluation);
+        // Reason is the underlying signals reason, NOT
+        // SignedSignalsRejected (which is reserved for verification
+        // failure).
+        assert_ne!(
+            classification.reason,
+            DeploymentClassificationReason::SignedSignalsRejected
+        );
+    }
+
+    #[test]
+    fn signed_signals_fail_soft_path_evaluates_on_signature_failure() {
+        // The fail-soft variant MUST NEVER produce MeshActive when
+        // verification fails — instead returns Evaluation with
+        // SignedSignalsRejected reason so audit consumers can see
+        // the bypass attempt.
+        let signed = fully_active_signed_by_a();
+        let classification = classify_deployment_mode_verified_or_evaluation(&signed, |_| {
+            Some(signing_key_b().verifying_key()) // wrong key
+        });
+        assert_eq!(classification.mode, DeploymentMode::Evaluation);
+        assert_eq!(
+            classification.reason,
+            DeploymentClassificationReason::SignedSignalsRejected
+        );
+    }
+
+    #[test]
+    fn signed_signals_fail_soft_path_unknown_attester_evaluates() {
+        // Same fail-soft contract for the unknown-attester case.
+        let signed = fully_active_signed_by_a();
+        let classification = classify_deployment_mode_verified_or_evaluation(&signed, |_| None);
+        assert_eq!(classification.mode, DeploymentMode::Evaluation);
+        assert_eq!(
+            classification.reason,
+            DeploymentClassificationReason::SignedSignalsRejected
+        );
+    }
+
+    #[test]
+    fn signed_signals_signing_bytes_have_domain_separator() {
+        // The signed transcript MUST be prefixed by the
+        // MESH_QUORUM_SIGNALS_DOMAIN tag so a signature over signed
+        // signals cannot be replayed against any other FCP signature
+        // transcript.
+        let signed = fully_active_signed_by_a();
+        let bytes = signed.signing_bytes();
+        assert!(
+            bytes.starts_with(MESH_QUORUM_SIGNALS_DOMAIN),
+            "signing_bytes MUST begin with MESH_QUORUM_SIGNALS_DOMAIN"
+        );
+    }
+
+    #[test]
+    fn signed_signals_admit_safety_tier_refuses_risky_when_signature_invalid() {
+        // End-to-end: an attacker presenting forged signals MUST NOT
+        // be able to admit a Risky operation through the
+        // (signed-classifier + admit_safety_tier) chain.
+        let attacker_signed = fully_active_signed_by_a();
+        // Resolver returns the WRONG key (signature won't verify).
+        let classification = classify_deployment_mode_verified_or_evaluation(
+            &attacker_signed,
+            |_| Some(signing_key_b().verifying_key()),
+        );
+        let refusal = admit_safety_tier(&classification, SafetyTier::Risky)
+            .expect_err("Risky MUST be refused under unverified signals");
+        assert!(matches!(
+            refusal,
+            DeploymentTierRefusal::TierRequiresMeshActive { .. }
         ));
     }
 }

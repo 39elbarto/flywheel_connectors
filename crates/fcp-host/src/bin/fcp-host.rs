@@ -507,6 +507,18 @@ struct RegistryEntry {
     connector: Arc<SubprocessConnector>,
 }
 
+/// br-l9tt6: atomic snapshot of a connector's allow-list governance
+/// fields. Captured under a single registry read-lock so the
+/// `allowed_zones`, `allowed_operations`, and `enforce_empty_allow_lists`
+/// values are guaranteed to come from the SAME admin-state generation.
+/// See `SubprocessRegistry::allow_list_snapshot`.
+#[derive(Debug, Clone)]
+struct AllowListSnapshot {
+    allowed_zones: Vec<String>,
+    allowed_operations: Vec<String>,
+    enforce_empty_allow_lists: bool,
+}
+
 #[derive(Default)]
 struct RegistryState {
     connectors: HashMap<ConnectorId, RegistryEntry>,
@@ -794,47 +806,38 @@ impl SubprocessRegistry {
         connector.invoke(request).await
     }
 
-    /// Snapshot of a connector's allowed-zone set, if configured.
+    /// br-l9tt6: snapshot the three allow-list governance fields
+    /// (`allowed_zones`, `allowed_operations`, `enforce_empty_allow_lists`)
+    /// under a SINGLE read-lock acquisition.
     ///
-    /// `Some(set)` means the operator pinned the connector to those zones
-    /// and `verify_live_request` MUST reject requests outside them. `None`
-    /// means the connector is unknown. An empty `set` means the operator
-    /// did not configure the binding (back-compat permissive path).
-    async fn allowed_zones(&self, connector_id: &ConnectorId) -> Option<Vec<String>> {
-        let state = self.state.read().await;
-        state
-            .connectors
-            .get(connector_id)
-            .map(|entry| entry.config.allowed_zones.clone())
-    }
-
-    /// Snapshot of a connector's allowed-operations set, if configured.
+    /// Each individual accessor (`allowed_zones`, `allowed_operations`,
+    /// `enforce_empty_allow_lists`) takes its own `state.read().await`,
+    /// so callers that needed all three were exposed to a TOCTOU race
+    /// between reads: a concurrent admin-state writer could update the
+    /// connector entry between the two awaits, letting a request gate
+    /// mix a STALE allow-list snapshot with a FRESH `enforce_empty`
+    /// flag (or vice-versa). Under the right interleaving the gate
+    /// fell through with the operator's OLD permissive list even
+    /// though the operator had just clamped to deny-all.
     ///
-    /// `Some(set)` means the operator pinned the connector's invokable
-    /// operations and `verify_live_request` MUST reject requests whose
-    /// `operation` is not present here, even if the connector's runtime
-    /// introspection advertises the op. `None` means the connector is
-    /// unknown. An empty `set` means the operator did not pin the list
-    /// (back-compat permissive path — operation gating falls back to
-    /// the introspection check at the verify_live_request boundary).
-    /// br-ike8x.
-    async fn allowed_operations(&self, connector_id: &ConnectorId) -> Option<Vec<String>> {
+    /// This helper closes the race by performing all three reads
+    /// inside one read-guard scope so the writer cannot interleave.
+    /// Production gates in `verify_live_request` MUST use this helper
+    /// (one call per request) instead of the per-field accessors.
+    /// Returns `None` when the connector is unknown.
+    async fn allow_list_snapshot(
+        &self,
+        connector_id: &ConnectorId,
+    ) -> Option<AllowListSnapshot> {
         let state = self.state.read().await;
-        state
-            .connectors
-            .get(connector_id)
-            .map(|entry| entry.config.allowed_operations.clone())
-    }
-
-    /// br-v2kt4: whether this connector's empty allow-lists should be
-    /// treated as fail-closed (deny-all) instead of the legacy permissive
-    /// back-compat path. Returns `None` when the connector is unknown.
-    async fn enforce_empty_allow_lists(&self, connector_id: &ConnectorId) -> Option<bool> {
-        let state = self.state.read().await;
-        state
-            .connectors
-            .get(connector_id)
-            .map(|entry| entry.config.enforce_empty_allow_lists)
+        state.connectors.get(connector_id).map(|entry| {
+            let cfg = &entry.config;
+            AllowListSnapshot {
+                allowed_zones: cfg.allowed_zones.clone(),
+                allowed_operations: cfg.allowed_operations.clone(),
+                enforce_empty_allow_lists: cfg.enforce_empty_allow_lists,
+            }
+        })
     }
 
     async fn connector_requires_singleton_writer(&self, connector_id: &ConnectorId) -> bool {
@@ -2947,14 +2950,23 @@ async fn verify_live_request(
     // br-v2kt4: explicit fail-closed semantics for empty allowed_zones
     // when the operator opted in via enforce_empty_allow_lists. Default
     // (false) preserves the back-compat permissive path.
-    if let Some(allowed) = state.registry.allowed_zones(&request.connector_id).await {
-        let enforce_empty = state
-            .registry
-            .enforce_empty_allow_lists(&request.connector_id)
-            .await
-            .unwrap_or(false);
+    //
+    // br-l9tt6: snapshot ALL THREE allow-list fields under one registry
+    // read-lock so the zone gate and the operation gate that follows
+    // both decide against the SAME admin-state generation. The earlier
+    // shape took two separate `state.read().await` acquisitions per
+    // gate (allow-list, then `enforce_empty`), which let a concurrent
+    // admin writer interleave between them and produce a
+    // stale-allow-list + fresh-enforce-flag mix — a real fail-OPEN
+    // window during in-flight config updates.
+    let allow_snapshot = state
+        .registry
+        .allow_list_snapshot(&request.connector_id)
+        .await;
+    if let Some(snapshot) = &allow_snapshot {
+        let allowed = &snapshot.allowed_zones;
         if allowed.is_empty() {
-            if enforce_empty {
+            if snapshot.enforce_empty_allow_lists {
                 return Err(HostError::PreflightFailed(format!(
                     "connector `{}` has no `allowed_zones` and is configured \
                      enforce_empty_allow_lists=true; deny-all (br-v2kt4)",
@@ -2986,18 +2998,12 @@ async fn verify_live_request(
     // host gateway rejects requests whose `operation` is not in it.
     // Empty preserves pre-pinning behavior for back-compat.
     // br-v2kt4: same explicit fail-closed shape for empty allowed_operations.
-    if let Some(allowed_ops) = state
-        .registry
-        .allowed_operations(&request.connector_id)
-        .await
-    {
-        let enforce_empty = state
-            .registry
-            .enforce_empty_allow_lists(&request.connector_id)
-            .await
-            .unwrap_or(false);
+    // br-l9tt6: re-uses the snapshot captured above so both gates
+    // decide against the same atomic read.
+    if let Some(snapshot) = &allow_snapshot {
+        let allowed_ops = &snapshot.allowed_operations;
         if allowed_ops.is_empty() {
-            if enforce_empty {
+            if snapshot.enforce_empty_allow_lists {
                 return Err(HostError::PreflightFailed(format!(
                     "connector `{}` has no `allowed_operations` and is configured \
                      enforce_empty_allow_lists=true; deny-all (br-v2kt4)",
@@ -8229,6 +8235,132 @@ mod tests {
                 "v2kt4 deny-all must NOT fire when flag is at default false: {msg}"
             );
         }
+    }
+
+    /// br-l9tt6 (P2 review-mode): the v2kt4 fail-closed gates used to
+    /// take TWO separate `state.read().await` acquisitions per request
+    /// (one for the allow-list snapshot, one for the
+    /// `enforce_empty_allow_lists` flag). A concurrent admin writer
+    /// holding the registry write lock between those reads could let a
+    /// request decide against a STALE allow-list mixed with a FRESH
+    /// flag — producing the inconsistent pairs
+    /// `(allowed_zones=['z:work'], enforce_empty=true)` (deny-all
+    /// silently bypassed when zone matches) or
+    /// `(allowed_zones=[], enforce_empty=false)` (would-be permissive
+    /// path observed even though operator just clamped to deny-all).
+    ///
+    /// This regression races a writer that strictly alternates the
+    /// connector entry between two CONSISTENT states against many
+    /// concurrent reader calls into `allow_list_snapshot` and asserts
+    /// every observed snapshot is one of the two consistent states —
+    /// never the inconsistent mix the old two-read pattern allowed.
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn br_l9tt6_allow_list_snapshot_is_atomic_under_concurrent_admin_writer() {
+        let connector_id = "fcp.test.l9tt6-snapshot-race:utility:1.0.0";
+        let connector_key = ConnectorId::from_static(connector_id);
+
+        // No-op runner: drains rpc requests so the channel doesn't fill.
+        // The test never invokes the connector — only `allow_list_snapshot`,
+        // which reads `entry.config` under the registry read-lock.
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(8);
+        let runner_task = task::spawn(async move {
+            while let Some(req) = runner_rx.recv().await {
+                let _ = req.response_tx.send(Ok(json!({})));
+            }
+        });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+
+        // State A: legacy permissive — non-empty allow lists, enforce=false.
+        let initial_config = ConnectorConfig {
+            id: connector_id.to_string(),
+            binary: "dispatcher-test".to_string(),
+            name: Some("l9tt6 snapshot race fixture".to_string()),
+            description: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            config: None,
+            categories: vec!["test".to_string()],
+            version: None,
+            allowed_zones: vec!["z:work".to_string()],
+            allowed_operations: vec!["op.a".to_string()],
+            enforce_empty_allow_lists: false,
+        };
+        let registry =
+            dispatcher_registry_with_connector(connector_id, connector, initial_config);
+
+        // Writer: strictly alternates the connector entry between
+        // State A (['z:work'], ['op.a'], false) and State B ([], [], true).
+        // Each write happens under the registry write-lock, so a
+        // correctly-atomic reader can ONLY observe one of these two
+        // generations.
+        let writer_registry = Arc::clone(&registry);
+        let writer_key = connector_key.clone();
+        const ITERATIONS: usize = 2_000;
+        let writer = task::spawn(async move {
+            for i in 0..ITERATIONS {
+                let mut guard = writer_registry.state.write().await;
+                if let Some(entry) = guard.connectors.get_mut(&writer_key) {
+                    if i % 2 == 0 {
+                        // State B: clamp to deny-all.
+                        entry.config.allowed_zones.clear();
+                        entry.config.allowed_operations.clear();
+                        entry.config.enforce_empty_allow_lists = true;
+                    } else {
+                        // State A: legacy permissive.
+                        entry.config.allowed_zones = vec!["z:work".to_string()];
+                        entry.config.allowed_operations = vec!["op.a".to_string()];
+                        entry.config.enforce_empty_allow_lists = false;
+                    }
+                }
+                drop(guard);
+                // Yield so readers can interleave between writes.
+                fcp_async_core::task::yield_now().await;
+            }
+        });
+
+        // Spawn several concurrent reader tasks. Each captures a
+        // snapshot many times. Every snapshot MUST be either State A
+        // or State B — never a mix.
+        const READERS: usize = 4;
+        const READS_PER_READER: usize = 2_000;
+        let mut readers = Vec::with_capacity(READERS);
+        for _ in 0..READERS {
+            let r = Arc::clone(&registry);
+            let key = connector_key.clone();
+            readers.push(task::spawn(async move {
+                let mut inconsistent_observations = 0_usize;
+                for _ in 0..READS_PER_READER {
+                    let snapshot = r
+                        .allow_list_snapshot(&key)
+                        .await
+                        .expect("connector entry exists");
+                    let state_a = !snapshot.allowed_zones.is_empty()
+                        && !snapshot.allowed_operations.is_empty()
+                        && !snapshot.enforce_empty_allow_lists;
+                    let state_b = snapshot.allowed_zones.is_empty()
+                        && snapshot.allowed_operations.is_empty()
+                        && snapshot.enforce_empty_allow_lists;
+                    if !(state_a || state_b) {
+                        inconsistent_observations += 1;
+                    }
+                    fcp_async_core::task::yield_now().await;
+                }
+                inconsistent_observations
+            }));
+        }
+
+        writer.await.expect("writer task");
+        let mut total_inconsistent = 0_usize;
+        for r in readers {
+            total_inconsistent += r.await.expect("reader task");
+        }
+
+        assert_eq!(
+            total_inconsistent, 0,
+            "br-l9tt6: allow_list_snapshot returned an inconsistent allow-list / \
+             enforce-flag pair under concurrent admin writer — the snapshot must \
+             capture all three fields under one read-lock acquisition"
+        );
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

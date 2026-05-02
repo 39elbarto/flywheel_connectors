@@ -23,7 +23,7 @@
 | `fcp-mesh` | Mesh routing, gossip, admission | ~160+ | Inline |
 | `fcp-raptorq` | Fountain codes | ~720+ | Inline |
 | `fcp-conformance` | Protocol conformance | ~200+ | `crates/fcp-conformance/tests/` |
-| `fcp-testkit` | Shared fixtures, live-suite, evidence | ~700+ | Inline + `crates/fcp-testkit/tests/` |
+| `fcp-testkit` | Shared fixtures, live-suite, evidence, swarm-latency harness primitives | ~700+ | Inline + `crates/fcp-testkit/tests/` |
 | `fcp-e2e` | End-to-end harness | ~100+ | `crates/fcp-e2e/tests/` |
 
 ## Rerun Commands
@@ -76,6 +76,9 @@ rch exec -- cargo test -p fcp-testkit -- live_suite
 
 # Evidence helpers
 rch exec -- cargo test -p fcp-testkit -- evidence_helpers
+
+# Swarm latency evidence model (1k/10k scenarios, p50/p95/p99/p999, JSONL records)
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-latency-testkit cargo test -p fcp-testkit latency --lib
 
 # Streaming health model
 rch exec -- cargo test -p fcp-streaming -- health
@@ -279,7 +282,7 @@ rch exec -- cargo test -p fcp-testkit --test runtime_lifecycle_acceptance
 | --- | --- |
 | `crates/fcp-testkit/tests/runtime_lifecycle_acceptance.rs` | Health tracker, supervisor config, polling cursor, streaming session, session-script DSL, evidence, cleanup, HealthState serialization (30 tests) |
 | `crates/fcp-testkit/src/live_suite.rs` | Live-suite gating, secrets, cost budget, synthetic tenants, cleanup guards, environment manifests, prerequisite reports (88 tests) |
-| `crates/fcp-testkit/src/evidence_helpers.rs` | Evidence collector, audit events, receipts, decisions, secret redaction (25 tests) |
+| `crates/fcp-testkit/src/evidence_helpers.rs` | Evidence collector, audit events, receipts, decisions, secret redaction, swarm-latency scenarios, environment fingerprints, raw samples, p50/p95/p99/p999 summaries, JSONL evidence records (30 tests) |
 | `crates/fcp-host/tests/no_mock_integration.rs` | BudgetPolicyEngine, DoctorService, discovery→introspect→preflight pipeline (2,597 lines) |
 | `crates/fcp-host/tests/host_connector_integration.rs` | Real subprocess connector integration (4,207 lines) |
 | `crates/fcp-e2e/tests/host_resilience_e2e.rs` | Circuit breaker, bulkhead, adaptive load shedding (73 tests) |

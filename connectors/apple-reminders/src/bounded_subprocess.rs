@@ -29,7 +29,7 @@
 //! does not.
 
 use std::io::Read;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -159,7 +159,9 @@ pub fn run_with_timeout(
 /// connector error logging documents that stderr is bounded.
 fn drain_to_cap<R: Read>(mut pipe: R) -> Vec<u8> {
     let mut buf = Vec::with_capacity(4096);
-    let _ = (&mut pipe).take(MAX_OUTPUT_BYTES as u64).read_to_end(&mut buf);
+    let _ = (&mut pipe)
+        .take(MAX_OUTPUT_BYTES as u64)
+        .read_to_end(&mut buf);
     buf
 }
 
@@ -207,8 +209,8 @@ mod tests {
         // Sleep 30s but timeout in 1s — must return Timeout, not
         // hang waiting for the sleep to finish.
         let started = Instant::now();
-        let err = run_with_timeout(sleep_command(30), Duration::from_secs(1))
-            .expect_err("must time out");
+        let err =
+            run_with_timeout(sleep_command(30), Duration::from_secs(1)).expect_err("must time out");
         let elapsed = started.elapsed();
         match err {
             SubprocessError::Timeout { timeout_secs } => {
@@ -227,8 +229,8 @@ mod tests {
 
     #[test]
     fn nonzero_exit_status_returns_status_with_stderr() {
-        let out = run_with_timeout(fail_command("oops"), Duration::from_secs(5))
-            .expect("command runs");
+        let out =
+            run_with_timeout(fail_command("oops"), Duration::from_secs(5)).expect("command runs");
         assert!(!out.status.success());
         assert!(String::from_utf8_lossy(&out.stderr).contains("oops"));
     }

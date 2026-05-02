@@ -357,6 +357,20 @@ mod tests {
     }
 
     #[test]
+    fn bounded_subprocess_wait_maps_to_process_error() {
+        let err = map_subprocess_error(bounded_subprocess::SubprocessError::Wait(
+            "try_wait failed after child exit".into(),
+        ));
+
+        match err {
+            AppleNotesError::Process(message) => {
+                assert!(message.contains("try_wait failed after child exit"));
+            }
+            other => panic!("expected process error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_note_summaries_single_line() {
         let value = AppleNotesClient::parse_note_summaries("id-1\tTitle\tInbox\n");
         assert_eq!(value["notes"][0]["id"], "id-1");

@@ -359,6 +359,20 @@ mod tests {
     }
 
     #[test]
+    fn bounded_subprocess_wait_maps_to_process_error() {
+        let err = map_subprocess_error(bounded_subprocess::SubprocessError::Wait(
+            "try_wait failed after child exit".into(),
+        ));
+
+        match err {
+            AppleRemindersError::Process(message) => {
+                assert!(message.contains("try_wait failed after child exit"));
+            }
+            other => panic!("expected process error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn normalize_script_output_accepts_carriage_returns() {
         assert_eq!(normalize_script_output("a\rb\r\nc\n"), "a\nb\nc\n");
     }

@@ -10,15 +10,18 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use fcp_async_core::time;
+use fcp_crypto::{CwtClaims, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_prelude::{
     CapabilityVerifier, FcpError, InvokeRequest, InvokeValidationError, ObjectId, OperationIntent,
     OperationReceipt, RevocationRegistry, TailscaleNodeId, ZoneId, ZoneKey, ZoneKeyAlgorithm,
     ZoneTransportPolicy,
 };
-use fcp_crypto::{CwtClaims, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_protocol::{DecodeStatus, SymbolAck, SymbolRequest};
 use fcp_raptorq::RaptorQConfig;
 use fcp_store::{ObjectStore, QuarantineStore, SymbolStore};
@@ -28,9 +31,10 @@ use fcp_telemetry::trace_capture::{
     AdmissionOutcome, CapturedTrace, GossipEvent, LeaseEvent, RoutingDecision, SessionEvent,
     TraceCapture, TraceCaptureConfig, TraceEvent, TraceExportFormat,
 };
+use futures_util::StreamExt;
 use hex::encode;
 use thiserror::Error;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::admission::{
     AdmissionController, AdmissionError, AdmissionPolicy, ObjectAdmissionClass,
@@ -41,9 +45,10 @@ use crate::degraded::{
     DegradedTransportError, RetentionClass,
 };
 use crate::device::DeviceProfile;
+use crate::emergency_revocation::{QuorumStatus, RevocationWitness, effective_quorum_target};
 use crate::gossip::{
     GossipConfig, GossipMessage, GossipRequest, GossipResponse, GossipSummary, MeshGossip,
-    RevocationPushMessage,
+    PriorityGossipPolicy, RevocationPushMessage,
 };
 use crate::planner::{
     CandidateNode, ExecutionPlanner, HeldLease, LeasePurpose, NodeInfo, PlannerContext,
@@ -262,6 +267,10 @@ pub enum MeshNodeError {
     /// Gossip payload exceeded the pre-deserialize raw byte budget.
     #[error("gossip payload too large: {len} bytes exceeds max {max}")]
     GossipPayloadTooLarge { len: usize, max: usize },
+
+    /// Emergency revocation witness did not match or verify.
+    #[error("invalid emergency revocation witness from {peer}: {reason}")]
+    InvalidEmergencyRevocationWitness { peer: String, reason: String },
 }
 
 /// Enforcement errors for control-plane requests.
@@ -350,6 +359,29 @@ pub struct VerifiedRevocationPush {
     pub new_rev_seq: u64,
     /// Push timestamp.
     pub timestamp: u64,
+}
+
+/// Result of an emergency revocation burst-push attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmergencyRevocationBurstReport {
+    /// Verified inbound revocation that triggered the burst.
+    pub verified_push: VerifiedRevocationPush,
+    /// Peers selected for priority direct gossip push.
+    pub selected_peers: Vec<TailscaleNodeId>,
+    /// Valid witness signatures collected from peers.
+    pub witnesses: Vec<RevocationWitness>,
+    /// Selected peers that did not produce a valid witness before completion.
+    pub fallback_peers: Vec<TailscaleNodeId>,
+    /// Quorum outcome for this burst attempt.
+    pub quorum_status: QuorumStatus,
+}
+
+impl EmergencyRevocationBurstReport {
+    /// Whether the caller should fall back to a slower propagation path.
+    #[must_use]
+    pub const fn fallback_required(&self) -> bool {
+        !self.quorum_status.is_reached()
+    }
 }
 
 /// Structured result of dispatching an inbound gossip message.
@@ -1742,6 +1774,248 @@ impl MeshNode {
         })
     }
 
+    fn emergency_revocation_priority_peers(
+        &self,
+        zone_id: &ZoneId,
+        source_peer: &NodeId,
+    ) -> Vec<TailscaleNodeId> {
+        let mut candidates = self
+            .peers
+            .iter()
+            .filter(|(peer, state)| {
+                peer.as_str() != source_peer.as_str()
+                    && *peer != &self.local_node
+                    && state.zones.contains(zone_id)
+                    && self.peer_signing_keys.contains_key(*peer)
+            })
+            .map(|(peer, state)| {
+                (
+                    self.is_peer_authenticated(peer),
+                    state.last_seen_ms,
+                    peer.as_str().to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        candidates.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| right.1.cmp(&left.1))
+                .then_with(|| left.2.cmp(&right.2))
+        });
+
+        candidates
+            .into_iter()
+            .map(|(_, _, peer)| TailscaleNodeId::new(peer))
+            .collect()
+    }
+
+    fn verify_emergency_revocation_witness(
+        witness_keys: &HashMap<NodeId, Ed25519VerifyingKey>,
+        witness: &RevocationWitness,
+        zone_id: &ZoneId,
+        revocation_head_seq: u64,
+        revoked_ids_hash: [u8; 32],
+    ) -> Result<(), MeshNodeError> {
+        if &witness.zone_id != zone_id {
+            return Err(MeshNodeError::InvalidEmergencyRevocationWitness {
+                peer: witness.witnessing_node.as_str().to_string(),
+                reason: format!("zone mismatch: expected {zone_id}, got {}", witness.zone_id),
+            });
+        }
+        if witness.revocation_head_seq != revocation_head_seq {
+            return Err(MeshNodeError::InvalidEmergencyRevocationWitness {
+                peer: witness.witnessing_node.as_str().to_string(),
+                reason: format!(
+                    "revocation head mismatch: expected {revocation_head_seq}, got {}",
+                    witness.revocation_head_seq
+                ),
+            });
+        }
+        if witness.revoked_ids_hash != revoked_ids_hash {
+            return Err(MeshNodeError::InvalidEmergencyRevocationWitness {
+                peer: witness.witnessing_node.as_str().to_string(),
+                reason: "revoked object set hash mismatch".to_string(),
+            });
+        }
+
+        let peer = NodeId::new(witness.witnessing_node.as_str());
+        let key = witness_keys
+            .get(&peer)
+            .ok_or_else(|| MeshNodeError::PeerSigningKeyMissing {
+                peer: witness.witnessing_node.as_str().to_string(),
+            })?;
+        witness.verify_signature(key).map_err(|_| {
+            MeshNodeError::InvalidEmergencyRevocationWitness {
+                peer: witness.witnessing_node.as_str().to_string(),
+                reason: "signature verification failed".to_string(),
+            }
+        })
+    }
+
+    /// Verify a received emergency revocation, burst-push it to priority
+    /// peers in parallel, and collect peer witness confirmations.
+    ///
+    /// The supplied dispatcher is the transport boundary: it must send the
+    /// provided gossip message to the selected peer and return that peer's
+    /// signed [`RevocationWitness`] after the peer has applied the revocation.
+    /// The loop uses [`PriorityGossipPolicy::EMERGENCY_BURST_FANOUT`] parallel
+    /// send paths and stops as soon as the effective quorum target is reached.
+    ///
+    /// # Errors
+    ///
+    /// Returns verification errors for the received revocation push. Per-peer
+    /// send and witness failures are recorded as fallback peers rather than
+    /// aborting the whole burst, so one slow or bad peer cannot block the
+    /// emergency path.
+    pub async fn handle_emergency_revocation_burst<F, Fut>(
+        &mut self,
+        push: RevocationPushMessage,
+        now_secs: u64,
+        dispatcher: F,
+    ) -> Result<EmergencyRevocationBurstReport, MeshNodeError>
+    where
+        F: Fn(TailscaleNodeId, GossipMessage) -> Fut + Clone,
+        Fut: Future<Output = Result<RevocationWitness, MeshNodeError>>,
+    {
+        let verified_push = self.handle_revocation_push(push.clone(), now_secs)?;
+        let source_peer = verified_push.from.clone();
+        let mut priority_peers =
+            self.emergency_revocation_priority_peers(&verified_push.zone_id, &source_peer);
+        let now_ms = now_secs.saturating_mul(1_000);
+        let fanout_plan = self.gossip.plan_revocation_push_fanout(
+            &verified_push.zone_id,
+            &priority_peers,
+            PriorityGossipPolicy::Emergency,
+            now_ms,
+        );
+        priority_peers = fanout_plan.selected_peers;
+
+        let target =
+            effective_quorum_target(u32::try_from(priority_peers.len()).unwrap_or(u32::MAX));
+        if target == 0 {
+            return Ok(EmergencyRevocationBurstReport {
+                verified_push,
+                selected_peers: priority_peers,
+                witnesses: Vec::new(),
+                fallback_peers: Vec::new(),
+                quorum_status: QuorumStatus::Reached {
+                    witnesses: 0,
+                    target: 0,
+                    elapsed_ms: 0,
+                },
+            });
+        }
+
+        let witness_keys = priority_peers
+            .iter()
+            .filter_map(|peer| {
+                let node_id = NodeId::new(peer.as_str());
+                self.peer_signing_keys
+                    .get(&node_id)
+                    .cloned()
+                    .map(|key| (node_id, key))
+            })
+            .collect::<HashMap<_, _>>();
+        let revoked_ids_hash = RevocationWitness::compute_revoked_ids_hash(&push.revoked_ids);
+        let revocation_head_seq = push.new_rev_seq;
+        let zone_id = push.zone_id.clone();
+        let deadline =
+            Duration::from_millis(PriorityGossipPolicy::EMERGENCY_PROPAGATION_DEADLINE_MS);
+        let started_at = Instant::now();
+        let dispatch_peers = priority_peers.clone();
+        let stream = futures_util::stream::iter(dispatch_peers.into_iter().map(|peer| {
+            let dispatcher = dispatcher.clone();
+            let message = GossipMessage::RevocationPush(push.clone());
+            async move {
+                let result = dispatcher(peer.clone(), message).await;
+                (peer, result)
+            }
+        }))
+        .buffer_unordered(PriorityGossipPolicy::EMERGENCY_BURST_FANOUT);
+
+        futures_util::pin_mut!(stream);
+        let mut witnesses = Vec::new();
+        let mut witnessed_nodes = HashSet::new();
+        let mut failed_peers = HashSet::new();
+
+        while witnesses.len() < usize::try_from(target).unwrap_or(usize::MAX) {
+            let Some(remaining) = deadline.checked_sub(started_at.elapsed()) else {
+                break;
+            };
+            let next_result = match time::timeout(remaining, stream.next()).await {
+                Ok(Some(result)) => result,
+                Ok(None) | Err(_) => break,
+            };
+
+            let (peer, result) = next_result;
+            match result {
+                Ok(witness) => {
+                    if let Err(error) = Self::verify_emergency_revocation_witness(
+                        &witness_keys,
+                        &witness,
+                        &zone_id,
+                        revocation_head_seq,
+                        revoked_ids_hash,
+                    ) {
+                        failed_peers.insert(peer.as_str().to_string());
+                        debug!(peer = %peer.as_str(), error = %error, "emergency revocation witness rejected");
+                        continue;
+                    }
+                    witnessed_nodes.insert(witness.witnessing_node.as_str().to_string());
+                    witnesses.push(witness);
+                }
+                Err(error) => {
+                    failed_peers.insert(peer.as_str().to_string());
+                    debug!(peer = %peer.as_str(), error = %error, "emergency revocation push failed");
+                }
+            }
+        }
+
+        let fallback_peers = priority_peers
+            .iter()
+            .filter(|peer| {
+                !witnessed_nodes.contains(peer.as_str()) || failed_peers.contains(peer.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let witness_count = u32::try_from(witnesses.len()).unwrap_or(u32::MAX);
+        let elapsed_ms = if witness_count >= target {
+            u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+        } else {
+            PriorityGossipPolicy::EMERGENCY_PROPAGATION_DEADLINE_MS
+        };
+        let quorum_status = if witness_count >= target {
+            QuorumStatus::Reached {
+                witnesses: witness_count,
+                target,
+                elapsed_ms,
+            }
+        } else {
+            warn!(
+                zone_id = %verified_push.zone_id,
+                witnesses = witness_count,
+                target,
+                fallback_peers = fallback_peers.len(),
+                "emergency revocation quorum not reached before deadline; falling back to slower propagation"
+            );
+            QuorumStatus::NotReached {
+                witnesses: witness_count,
+                target,
+                elapsed_ms,
+            }
+        };
+
+        Ok(EmergencyRevocationBurstReport {
+            verified_push,
+            selected_peers: priority_peers,
+            witnesses,
+            fallback_peers,
+            quorum_status,
+        })
+    }
+
     /// Verify and answer a bounded gossip request.
     ///
     /// Requests currently authenticate via the enrolled transport peer
@@ -2264,8 +2538,8 @@ mod tests {
     use crate::device::DeviceProfileBuilder;
     use crate::planner::{LeasePurpose, PlannerContext};
     use bytes::Bytes;
-    use fcp_prelude::{EpochId, ObjectId, TailscaleNodeId, ZoneId, ZoneKeyId};
     use fcp_crypto::Ed25519SigningKey;
+    use fcp_prelude::{EpochId, ObjectId, TailscaleNodeId, ZoneId, ZoneKeyId};
     use fcp_protocol::session::{
         MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, TransportLimits,
     };
@@ -2337,6 +2611,52 @@ mod tests {
                 .to_bytes(),
             now,
         ));
+    }
+
+    fn enroll_revocation_peer(
+        node: &mut MeshNode,
+        peer: &NodeId,
+        signing_key: &Ed25519SigningKey,
+        zone_id: &ZoneId,
+        last_seen_ms: u64,
+        authenticated: bool,
+    ) {
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile(peer.as_str()),
+            HashSet::new(),
+            vec![],
+            last_seen_ms,
+        );
+        node.update_peer_zones(peer, zone_set(zone_id.clone()));
+        if authenticated {
+            node.admission_mut()
+                .set_authenticated(peer, true, last_seen_ms);
+        }
+    }
+
+    fn signed_revocation_witness(
+        peer: &TailscaleNodeId,
+        push: &RevocationPushMessage,
+        signing_key: &Ed25519SigningKey,
+        witnessed_at_unix_ms: u64,
+    ) -> RevocationWitness {
+        let witness = RevocationWitness::new(
+            peer.clone(),
+            push.zone_id.clone(),
+            push.new_rev_seq,
+            RevocationWitness::compute_revoked_ids_hash(&push.revoked_ids),
+            witnessed_at_unix_ms,
+        );
+        let signature = fcp_core::NodeSignature::new(
+            fcp_core::NodeId::new(peer.as_str()),
+            signing_key
+                .sign(&witness.witness_signing_bytes())
+                .to_bytes(),
+            witnessed_at_unix_ms,
+        );
+        witness.with_signature(signature)
     }
 
     fn test_session(peer_name: &str) -> MeshSession {
@@ -3677,6 +3997,182 @@ mod tests {
             .expect("push should verify");
         assert_eq!(verified.new_rev_seq, 42);
         assert_eq!(verified.revoked_ids.len(), 1);
+    }
+
+    #[test]
+    fn emergency_revocation_burst_reaches_majority_without_waiting_for_stuck_peer() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let source = NodeId::new("source-peer");
+        let source_key = Ed25519SigningKey::generate();
+        let owner_key = Ed25519SigningKey::generate();
+        node.register_zone_owner_key(zone_id.clone(), owner_key.verifying_key());
+        enroll_revocation_peer(&mut node, &source, &source_key, &zone_id, 1_000, true);
+
+        let peer_fast_1 = NodeId::new("peer-fast-1");
+        let peer_fast_2 = NodeId::new("peer-fast-2");
+        let peer_stuck = NodeId::new("peer-stuck");
+        let fast_key_1 = Ed25519SigningKey::generate();
+        let fast_key_2 = Ed25519SigningKey::generate();
+        let stuck_key = Ed25519SigningKey::generate();
+        enroll_revocation_peer(&mut node, &peer_fast_1, &fast_key_1, &zone_id, 3_000, true);
+        enroll_revocation_peer(&mut node, &peer_fast_2, &fast_key_2, &zone_id, 2_000, true);
+        enroll_revocation_peer(&mut node, &peer_stuck, &stuck_key, &zone_id, 1_500, true);
+
+        let mut push = RevocationPushMessage::new(
+            TailscaleNodeId::new(source.as_str()),
+            zone_id.clone(),
+            vec![ObjectId::from_bytes([0x41; 32])],
+            42,
+            1_000,
+        );
+        sign_push_with_owner(&mut push, &source_key, &owner_key, 1_000);
+
+        let witness_keys = Arc::new(HashMap::from([
+            (peer_fast_1.as_str().to_string(), fast_key_1),
+            (peer_fast_2.as_str().to_string(), fast_key_2),
+            (peer_stuck.as_str().to_string(), stuck_key),
+        ]));
+        let report = fcp_async_core::runtime::block_on_sync({
+            let witness_keys = Arc::clone(&witness_keys);
+            async {
+                node.handle_emergency_revocation_burst(push, 1_000, move |peer, message| {
+                    let witness_keys = Arc::clone(&witness_keys);
+                    async move {
+                        let GossipMessage::RevocationPush(push) = message else {
+                            return Err(MeshNodeError::GossipDecode(
+                                "expected revocation push".to_string(),
+                            ));
+                        };
+                        if peer.as_str() == "peer-stuck" {
+                            return std::future::pending().await;
+                        }
+                        let Some(signing_key) = witness_keys.get(peer.as_str()) else {
+                            return Err(MeshNodeError::PeerSigningKeyMissing {
+                                peer: peer.as_str().to_string(),
+                            });
+                        };
+                        Ok(signed_revocation_witness(
+                            &peer,
+                            &push,
+                            signing_key,
+                            1_000_000,
+                        ))
+                    }
+                })
+                .await
+            }
+        })
+        .expect("runtime")
+        .expect("emergency revocation burst");
+
+        assert!(report.quorum_status.is_reached());
+        assert!(!report.fallback_required());
+        assert_eq!(report.selected_peers.len(), 3);
+        assert_eq!(report.witnesses.len(), 2);
+        assert!(
+            report
+                .fallback_peers
+                .iter()
+                .any(|peer| peer.as_str() == "peer-stuck"),
+            "stuck peer must remain visible for slower fallback/audit"
+        );
+    }
+
+    #[test]
+    fn emergency_revocation_burst_falls_back_when_majority_missing() {
+        let mut node = test_node("node-1");
+        let zone_id = ZoneId::work();
+        let source = NodeId::new("source-peer");
+        let source_key = Ed25519SigningKey::generate();
+        let owner_key = Ed25519SigningKey::generate();
+        node.register_zone_owner_key(zone_id.clone(), owner_key.verifying_key());
+        enroll_revocation_peer(&mut node, &source, &source_key, &zone_id, 1_000, true);
+
+        let peer_ok = NodeId::new("peer-ok");
+        let peer_failed_1 = NodeId::new("peer-failed-1");
+        let peer_failed_2 = NodeId::new("peer-failed-2");
+        let ok_key = Ed25519SigningKey::generate();
+        let failed_key_1 = Ed25519SigningKey::generate();
+        let failed_key_2 = Ed25519SigningKey::generate();
+        enroll_revocation_peer(&mut node, &peer_ok, &ok_key, &zone_id, 3_000, true);
+        enroll_revocation_peer(
+            &mut node,
+            &peer_failed_1,
+            &failed_key_1,
+            &zone_id,
+            2_000,
+            true,
+        );
+        enroll_revocation_peer(
+            &mut node,
+            &peer_failed_2,
+            &failed_key_2,
+            &zone_id,
+            1_000,
+            true,
+        );
+
+        let mut push = RevocationPushMessage::new(
+            TailscaleNodeId::new(source.as_str()),
+            zone_id.clone(),
+            vec![ObjectId::from_bytes([0x42; 32])],
+            43,
+            1_000,
+        );
+        sign_push_with_owner(&mut push, &source_key, &owner_key, 1_000);
+
+        let witness_keys = Arc::new(HashMap::from([(peer_ok.as_str().to_string(), ok_key)]));
+        let report = fcp_async_core::runtime::block_on_sync({
+            let witness_keys = Arc::clone(&witness_keys);
+            async {
+                node.handle_emergency_revocation_burst(push, 1_000, move |peer, message| {
+                    let witness_keys = Arc::clone(&witness_keys);
+                    async move {
+                        let GossipMessage::RevocationPush(push) = message else {
+                            return Err(MeshNodeError::GossipDecode(
+                                "expected revocation push".to_string(),
+                            ));
+                        };
+                        if peer.as_str() != "peer-ok" {
+                            return Err(MeshNodeError::GossipDecode(
+                                "peer dropped emergency revocation".to_string(),
+                            ));
+                        }
+                        let Some(signing_key) = witness_keys.get(peer.as_str()) else {
+                            return Err(MeshNodeError::PeerSigningKeyMissing {
+                                peer: peer.as_str().to_string(),
+                            });
+                        };
+                        Ok(signed_revocation_witness(
+                            &peer,
+                            &push,
+                            signing_key,
+                            1_000_000,
+                        ))
+                    }
+                })
+                .await
+            }
+        })
+        .expect("runtime")
+        .expect("emergency revocation burst");
+
+        assert!(
+            matches!(
+                report.quorum_status,
+                QuorumStatus::NotReached {
+                    witnesses: 1,
+                    target: 2,
+                    ..
+                }
+            ),
+            "expected missing quorum, got {:?}",
+            report.quorum_status
+        );
+        assert!(report.fallback_required());
+        assert_eq!(report.witnesses.len(), 1);
+        assert_eq!(report.fallback_peers.len(), 2);
     }
 
     #[test]

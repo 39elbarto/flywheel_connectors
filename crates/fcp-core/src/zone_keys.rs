@@ -471,6 +471,79 @@ impl ZoneKeyManifest {
             self.wrapped_keys_v4.push(entry);
         }
     }
+
+    /// Find recipients that have BOTH a V3 (`wrapped_keys`) entry and a
+    /// V4 (`wrapped_keys_v4`) entry whose contents could plausibly
+    /// resolve to a different zone key — the "split-view" case from
+    /// the security audit (br-shbvv).
+    ///
+    /// Returns recipients whose two wraps are NOT the safe
+    /// "promoted-V3" form: either the V4 wrap is the [`WrappedKey::XWing`]
+    /// variant (different KEM, ciphertexts inherently differ) or the
+    /// V4 wrap is [`WrappedKey::HpkeX25519`] but its sealed bytes do
+    /// NOT match the V3 wrap's sealed bytes (signalling the issuer
+    /// re-sealed under a different zone key — the load-bearing
+    /// failure mode).
+    ///
+    /// Without the recipient's secret key, the verifier cannot
+    /// cryptographically prove the two wraps decrypt to the same
+    /// material. This check is a structural lower bound on safety:
+    /// recipients that appear here MIGHT decrypt to identical zone
+    /// keys, but the manifest builder did not produce them via the
+    /// safe `migrated_to_v4` path. Strict callers should treat any
+    /// non-empty result as a manifest validation failure (see
+    /// [`Self::validate_no_recipient_split_view`]).
+    #[must_use]
+    pub fn split_view_recipients(&self) -> Vec<TailscaleNodeId> {
+        let mut out = Vec::new();
+        for v4_entry in &self.wrapped_keys_v4 {
+            let Some(v3_entry) = self
+                .wrapped_keys
+                .iter()
+                .find(|e| e.recipient == v4_entry.recipient)
+            else {
+                continue;
+            };
+            let safe = match &v4_entry.sealed {
+                WrappedKey::HpkeX25519 { sealed: v4_sealed } => {
+                    // Promoted V3: bytes must match the V3 entry's
+                    // sealed bytes exactly. Ed25519/X25519 byte
+                    // equality is a public-data comparison so a plain
+                    // `==` is fine here.
+                    v4_sealed.enc == v3_entry.sealed.enc
+                        && v4_sealed.ciphertext == v3_entry.sealed.ciphertext
+                }
+                WrappedKey::XWing { .. } => false,
+            };
+            if !safe {
+                out.push(v4_entry.recipient.clone());
+            }
+        }
+        out
+    }
+
+    /// Reject manifests with split-view recipients (br-shbvv). See
+    /// [`Self::split_view_recipients`] for the structural definition.
+    ///
+    /// Strict issuers + verifiers should call this before publishing
+    /// or applying a V4 manifest. Producers using only the
+    /// [`Self::migrated_to_v4`] + [`Self::add_xwing_wrap`] helpers
+    /// satisfy the invariant by construction (the helpers either
+    /// promote V3 wraps byte-for-byte or add V4-only entries for
+    /// recipients absent from V3).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ZoneKeyError::InconsistentRecipientWraps`] for the
+    /// first split-view recipient encountered.
+    pub fn validate_no_recipient_split_view(&self) -> ZoneKeyResult<()> {
+        if let Some(first) = self.split_view_recipients().into_iter().next() {
+            return Err(ZoneKeyError::InconsistentRecipientWraps {
+                node_id: first.as_str().to_string(),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Zone key ring storing active/known keys by id.
@@ -564,6 +637,7 @@ impl ZoneKeyRing {
                 found: manifest.zone_id.as_str().to_string(),
             });
         }
+        manifest.validate_no_recipient_split_view()?;
 
         let wrapped_zone = manifest.wrapped_key_for(node_id).ok_or_else(|| {
             ZoneKeyError::MissingWrappedZoneKey {
@@ -601,6 +675,20 @@ pub enum ZoneKeyError {
     MissingWrappedZoneKey { node_id: String },
     #[error("missing wrapped ObjectIdKey for node `{node_id}`")]
     MissingWrappedObjectIdKey { node_id: String },
+    /// V3 + V4 wraps for the same recipient point at structurally
+    /// distinct sealed boxes (br-shbvv).
+    ///
+    /// Means the V3 reader and the V4 reader would resolve different
+    /// (zone-key, manifest) pairs — silent zone partitioning. A V4
+    /// manifest carrying both wraps for one recipient is only safe
+    /// when the V4 wrap is the `HpkeX25519` variant with byte-equal
+    /// sealed bytes to the V3 wrap (i.e. the entry was promoted
+    /// through `migrated_to_v4`, not produced via `add_xwing_wrap`).
+    #[error(
+        "split-view manifest: recipient `{node_id}` has both V3 and V4 wraps with \
+         non-promoted contents — V3 and V4 readers may resolve different zone keys"
+    )]
+    InconsistentRecipientWraps { node_id: String },
 }
 
 pub type ZoneKeyResult<T> = Result<T, ZoneKeyError>;
@@ -711,6 +799,7 @@ mod tests {
     use crate::{NodeId, NodeSignature, ObjectHeader, Provenance};
     use fcp_cbor::SchemaId;
     use fcp_crypto::x25519::X25519SecretKey;
+    use fcp_crypto::{Fcp4Aad, XWingKem, XWingProvider};
     use rand::RngCore;
     use semver::Version;
 
@@ -888,6 +977,181 @@ mod tests {
             .apply_manifest(&manifest, &node_id, &sk)
             .expect_err("zone mismatch");
         assert!(matches!(err, ZoneKeyError::ZoneIdMismatch { .. }));
+    }
+
+    #[test]
+    fn zone_key_manifest_multi_recipient_v3_v4_wraps_resolve_same_zone_key() {
+        let zone_id = ZoneId::work();
+        let issued_at = 1_700_010_000;
+        let zone_key = random_zone_key();
+
+        let alice = TailscaleNodeId::new("alice-v3");
+        let alice_sk = X25519SecretKey::generate();
+        let alice_v3 = wrap_zone_key(
+            &alice_sk.public_key(),
+            &zone_id,
+            &alice,
+            issued_at,
+            &zone_key,
+        )
+        .expect("alice v3 wrap");
+
+        let bob = TailscaleNodeId::new("bob-v4");
+        let xwing = XWingProvider::new();
+        let (bob_pk, bob_sk) = xwing.generate().expect("bob xwing keypair");
+        let bob_aad = Fcp4Aad::for_zone_key(zone_id.as_bytes(), bob.as_str().as_bytes(), issued_at)
+            .encode()
+            .expect("bob aad");
+        let bob_v4 = xwing
+            .seal(&bob_pk, zone_key.as_bytes(), &bob_aad)
+            .expect("bob v4 wrap");
+
+        let carol = TailscaleNodeId::new("carol-promoted");
+        let carol_sk = X25519SecretKey::generate();
+        let carol_v3 = wrap_zone_key(
+            &carol_sk.public_key(),
+            &zone_id,
+            &carol,
+            issued_at,
+            &zone_key,
+        )
+        .expect("carol v3 wrap");
+
+        let mut manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0xA1; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0xB1; 8]),
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![alice_v3.clone(), carol_v3.clone()],
+            wrapped_object_id_keys: vec![],
+            rekey_policy: None,
+            signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
+        }
+        .migrated_to_v4(ZoneKemAlgorithm::XWing);
+        manifest.add_xwing_wrap(bob.clone(), issued_at, bob_v4);
+
+        manifest
+            .validate_no_recipient_split_view()
+            .expect("builder-produced V4 manifest has no split-view recipients");
+
+        let alice_opened = unwrap_zone_key(
+            &alice_sk,
+            &zone_id,
+            manifest.wrapped_key_for(&alice).expect("alice v3 wrap"),
+        )
+        .expect("alice opens v3");
+        assert_eq!(alice_opened.as_bytes(), zone_key.as_bytes());
+
+        let bob_resolved = manifest
+            .resolved_wrapped_key_for(&bob)
+            .expect("bob v4 wrap resolves");
+        let bob_opened = xwing
+            .open(
+                &bob_sk,
+                bob_resolved.xwing_sealed().expect("bob xwing sealed"),
+                &bob_aad,
+            )
+            .expect("bob opens v4");
+        assert_eq!(bob_opened.as_slice(), zone_key.as_bytes());
+
+        let carol_v3_opened = unwrap_zone_key(
+            &carol_sk,
+            &zone_id,
+            manifest.wrapped_key_for(&carol).expect("carol v3 wrap"),
+        )
+        .expect("carol opens v3");
+        let carol_v4_resolved = manifest
+            .resolved_wrapped_key_for(&carol)
+            .expect("carol promoted v4 wrap resolves");
+        let WrappedKey::HpkeX25519 { sealed } = carol_v4_resolved else {
+            panic!("carol promoted wrap must stay HPKE");
+        };
+        let carol_v4 = WrappedZoneKey {
+            recipient: carol.clone(),
+            issued_at,
+            sealed,
+        };
+        let carol_v4_opened =
+            unwrap_zone_key(&carol_sk, &zone_id, &carol_v4).expect("carol opens promoted v4");
+
+        assert_eq!(carol_v3_opened.as_bytes(), zone_key.as_bytes());
+        assert_eq!(carol_v4_opened.as_bytes(), zone_key.as_bytes());
+        assert_eq!(
+            blake3::hash(alice_opened.as_bytes()),
+            blake3::hash(bob_opened.as_slice()),
+            "all recipients must derive the same ZoneKey bytes"
+        );
+        assert_eq!(
+            blake3::hash(bob_opened.as_slice()),
+            blake3::hash(carol_v4_opened.as_bytes()),
+            "promoted V3+V4 recipient must not split the zone key"
+        );
+    }
+
+    #[test]
+    fn apply_manifest_rejects_v3_v4_split_view_for_same_recipient() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("split-view-node");
+        let issued_at = 1_700_020_000;
+
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let canonical_zone_key = ZoneKey::from_bytes([0x11; ZONE_KEY_LEN]);
+        let divergent_zone_key = ZoneKey::from_bytes([0x22; ZONE_KEY_LEN]);
+        let object_id_key = random_object_id_key();
+
+        let v3_wrap =
+            wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &canonical_zone_key).unwrap();
+        let divergent_v4_hpke =
+            wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &divergent_zone_key).unwrap();
+        let wrapped_object =
+            wrap_object_id_key(&pk, &zone_id, &node_id, issued_at, &object_id_key).unwrap();
+
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0xC1; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0xD1; 8]),
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![v3_wrap],
+            wrapped_object_id_keys: vec![wrapped_object],
+            rekey_policy: None,
+            signature: test_signature(),
+            kem: ZoneKemAlgorithm::XWing,
+            wrapped_keys_v4: vec![divergent_v4_hpke.to_v4()],
+        };
+
+        let err = manifest
+            .validate_no_recipient_split_view()
+            .expect_err("divergent V3/V4 recipient wrap must fail validation");
+        assert!(matches!(
+            err,
+            ZoneKeyError::InconsistentRecipientWraps { node_id: id }
+                if id == node_id.as_str()
+        ));
+
+        let mut ring = ZoneKeyRing::new(zone_id);
+        let err = ring
+            .apply_manifest(&manifest, &node_id, &sk)
+            .expect_err("apply must reject split-view manifests before installing a key");
+        assert!(matches!(
+            err,
+            ZoneKeyError::InconsistentRecipientWraps { node_id: id }
+                if id == node_id.as_str()
+        ));
+        assert!(
+            ring.active_zone_key_id.is_none(),
+            "failed manifest must not mutate active key state"
+        );
     }
 
     /// Test key rotation: applying a new manifest rotates the active key while

@@ -38,6 +38,10 @@ insta.workspace = true
 name = "peer_scans"
 harness = false
 
+[[bench]]
+name = "status_conversion"
+harness = false
+
 [[test]]
 name = "no_mock_integration"
 required-features = ["test-mocks"]

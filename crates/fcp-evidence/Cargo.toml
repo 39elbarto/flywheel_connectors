@@ -8,11 +8,18 @@ publish = false
 
 [dependencies]
 fcp-core = { path = "../fcp-core" }
+fcp-cbor = { path = "../fcp-cbor" }
+fcp-crypto = { path = "../fcp-crypto" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+ciborium = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 fcp-async-core = { path = "../fcp-async-core" }
+proptest = { workspace = true }
 
 [lints]
 workspace = true

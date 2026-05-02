@@ -125,6 +125,16 @@ pub use constraint_enforcer::{
     ConstraintEvaluation, DefaultConstraintEnforcer, RequestDescriptor,
 };
 
+// ── Constraint Enforcement Receipts (m8j0q.A.7) ───────────────────
+//
+// Re-exported from fcp-evidence (canonical home) so consumers can write
+// `fcp_policy::ConstraintEnforcementReceipt` without importing both crates.
+
+pub use fcp_evidence::{
+    ConstraintEnforcementReceipt, ConstraintsEvaluatedSummary, EvaluationOutcomeRecord,
+    ReceiptBody, ReceiptError, ReceiptId, RequestDescriptorHash,
+};
+
 // ── Error Types ────────────────────────────────────────────────────
 
 pub use fcp_core::{FcpError, FcpResult};

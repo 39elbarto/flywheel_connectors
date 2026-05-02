@@ -70,6 +70,16 @@ pub use fcp_core::{ConnectorId, OperationId, ZoneId};
 
 pub use fcp_core::{FcpError, FcpResult};
 
+// ── Constraint Enforcement Receipts (m8j0q.A.7) ────────────────────
+
+pub mod constraint_receipt;
+
+pub use constraint_receipt::{
+    ConstraintEnforcementReceipt, ConstraintsEvaluatedSummary, EvaluationOutcomeRecord,
+    RECEIPT_ID_DOMAIN, RECEIPT_SIGNING_DOMAIN, ReceiptBody, ReceiptError, ReceiptId,
+    RequestDescriptorHash,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

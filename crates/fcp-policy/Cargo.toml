@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 fcp-core = { path = "../fcp-core" }
+fcp-evidence = { path = "../fcp-evidence" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = "0.1"

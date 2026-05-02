@@ -63,7 +63,7 @@ _Audit note:_ In the current host-backed path, `allowed_zones` is opt-in. An emp
 | **Mesh-Stored Policy Objects** | `IMPLEMENTED` | Zone definitions and policy bundles exist as owner-signed objects; the wider mesh-backed cutover remains in progress. | `fcp-core/src/policy.rs` (128 tests) |
 | **Symbol-First Protocol** | `IMPLEMENTED` | RaptorQ/object-symbol framing, reconstruction, and repair machinery exist in-tree for multipath aggregation and offline resilience. | `fcp-raptorq/` (96+ tests, golden vectors) |
 | **Mesh-Native Architecture** | `IMPLEMENTED` | **Steady-state target (converging).** Every device is a peer and the mesh is the center of gravity. Gossip, IBLT, XOR filters, and LiveTruthResolver are built and tested; production cutover gating is in progress. | `fcp-mesh/src/` (259+ tests, gossip/IBLT/XOR), `fwc/src/truth.rs` (78 tests) |
-| **Computation Migration** | `DESIGNED` | **TARGET ONLY.** Migration state machines and framework code exist, but automatic optimal-device execution is not yet an operational guarantee. | `fcp-core/src/migration.rs` (205 tests) |
+| **Computation Migration** | `IMPLEMENTED` | Reference migrate-and-resume proof exists for a connector operation, including CRIU-format checkpoint handoff, lease transfer, replay, and byte-equivalent completion; automatic optimal-device execution is still hardening. | `fcp-core/src/migration.rs`, `crates/fcp-e2e/tests/computation_migration_reference.rs` |
 
 > **Audit status**: All 16 feature status labels verified accurate as of 2026-04-10. See [docs/Claims_vs_Reality_Audit_C2_4.md](docs/Claims_vs_Reality_Audit_C2_4.md) for the full reconciliation table with evidence.
 

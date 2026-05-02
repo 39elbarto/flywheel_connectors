@@ -60,6 +60,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+migration_supported = true
 
 [provides.operations."whisper.transcribe".rate_limit]
 max = 60

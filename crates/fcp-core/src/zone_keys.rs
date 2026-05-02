@@ -901,9 +901,8 @@ impl IndexedZoneKeyManifest {
             Ok(idx)
         }
 
-        let wrapped_keys_index = build_index(&manifest.wrapped_keys, "wrapped_keys", |e| {
-            &e.recipient
-        })?;
+        let wrapped_keys_index =
+            build_index(&manifest.wrapped_keys, "wrapped_keys", |e| &e.recipient)?;
         let wrapped_keys_v4_index =
             build_index(&manifest.wrapped_keys_v4, "wrapped_keys_v4", |e| {
                 &e.recipient
@@ -1050,11 +1049,31 @@ impl ZoneKeyRing {
         }
     }
 
-    /// Apply a zone key manifest for the local node and update active keys.
+    /// Apply a zone-key manifest for the local node, dispatching the
+    /// recipient wrap across V4 (`wrapped_keys_v4`) and V3
+    /// (`wrapped_keys`) lists via
+    /// [`ZoneKeyManifest::resolved_wrapped_key_for`].
+    ///
+    /// This entry point handles HPKE-X25519 wraps only — it has no
+    /// X-Wing secret to open V4 X-Wing wraps with. Recipients whose
+    /// resolved wrap is [`WrappedKey::XWing`] cause an
+    /// [`ZoneKeyError::XWingWrapRequiresV4Apply`] return — callers
+    /// MUST switch to [`Self::apply_manifest_v4`] for those
+    /// recipients (br-f69kn).
+    ///
+    /// V4-only manifests whose wraps are produced by the safe
+    /// [`ZoneKeyManifest::migrated_to_v4`] helper carry only
+    /// HPKE-X25519 wraps in `wrapped_keys_v4` and apply cleanly here
+    /// without an X-Wing secret. Manifests built with explicit
+    /// [`ZoneKeyManifest::add_xwing_wrap`] entries require
+    /// [`Self::apply_manifest_v4`] for those recipients.
     ///
     /// # Errors
-    /// Returns `ZoneKeyError` if the manifest is for a different zone or
-    /// required wrapped keys are missing/invalid.
+    /// Returns [`ZoneKeyError`] if the manifest is for a different
+    /// zone, fails the split-view / duplicate-recipient guard, the
+    /// recipient has no resolvable wrap, the resolved wrap is
+    /// [`WrappedKey::XWing`] (apply via [`Self::apply_manifest_v4`]
+    /// instead), or HPKE opening fails.
     pub fn apply_manifest(
         &mut self,
         manifest: &ZoneKeyManifest,
@@ -1069,12 +1088,96 @@ impl ZoneKeyRing {
         }
         manifest.validate_no_recipient_split_view()?;
 
-        let wrapped_zone = manifest.wrapped_key_for(node_id).ok_or_else(|| {
-            ZoneKeyError::MissingWrappedZoneKey {
-                node_id: node_id.as_str().to_string(),
+        let wrapped = resolve_wrap_or_error(manifest, node_id)?;
+        let issued_at = wrapped_issued_at(manifest, node_id);
+
+        let zone_key = match wrapped {
+            WrappedKey::HpkeX25519 { sealed } => {
+                let temp = WrappedZoneKey {
+                    recipient: node_id.clone(),
+                    issued_at,
+                    sealed,
+                };
+                unwrap_zone_key(node_secret, &manifest.zone_id, &temp)?
             }
-        })?;
-        let zone_key = unwrap_zone_key(node_secret, &manifest.zone_id, wrapped_zone)?;
+            WrappedKey::XWing { .. } => {
+                return Err(ZoneKeyError::XWingWrapRequiresV4Apply {
+                    node_id: node_id.as_str().to_string(),
+                });
+            }
+        };
+
+        self.finalize_apply(manifest, node_id, node_secret, zone_key)
+    }
+
+    /// V4-aware variant of [`Self::apply_manifest`]: opens both
+    /// [`WrappedKey::HpkeX25519`] and [`WrappedKey::XWing`] wraps
+    /// using the X-Wing secret and an [`XWingKem`] provider for the
+    /// hybrid path (br-f69kn). Recipients whose effective wrap is
+    /// HPKE-X25519 still use `node_secret` — `xwing_secret` /
+    /// `xwing_kem` are only consulted on the X-Wing branch.
+    ///
+    /// The [`ObjectIdKey`] path still uses the V3 HPKE wrap
+    /// (`wrapped_object_id_keys`) because the manifest layout did
+    /// not promote it to V4. A V4-only zone-key manifest whose
+    /// `wrapped_object_id_keys` list is empty for this recipient
+    /// fails with [`ZoneKeyError::MissingWrappedObjectIdKey`].
+    ///
+    /// # Errors
+    /// Returns [`ZoneKeyError`] for any of the same conditions as
+    /// [`Self::apply_manifest`], plus an X-Wing decryption failure
+    /// from a wrong key, tampered ciphertext, or wrong AAD.
+    pub fn apply_manifest_v4<K: XWingKem + ?Sized>(
+        &mut self,
+        manifest: &ZoneKeyManifest,
+        node_id: &TailscaleNodeId,
+        node_secret: &X25519SecretKey,
+        xwing_secret: &XWingSecretKey,
+        xwing_kem: &K,
+    ) -> ZoneKeyResult<()> {
+        if manifest.zone_id != self.zone_id {
+            return Err(ZoneKeyError::ZoneIdMismatch {
+                expected: self.zone_id.as_str().to_string(),
+                found: manifest.zone_id.as_str().to_string(),
+            });
+        }
+        manifest.validate_no_recipient_split_view()?;
+
+        let wrapped = resolve_wrap_or_error(manifest, node_id)?;
+        let issued_at = wrapped_issued_at(manifest, node_id);
+
+        let zone_key = match wrapped {
+            WrappedKey::HpkeX25519 { sealed } => {
+                let temp = WrappedZoneKey {
+                    recipient: node_id.clone(),
+                    issued_at,
+                    sealed,
+                };
+                unwrap_zone_key(node_secret, &manifest.zone_id, &temp)?
+            }
+            WrappedKey::XWing { sealed } => unwrap_zone_key_v4_xwing(
+                xwing_kem,
+                xwing_secret,
+                &manifest.zone_id,
+                node_id,
+                issued_at,
+                &sealed,
+            )?,
+        };
+
+        self.finalize_apply(manifest, node_id, node_secret, zone_key)
+    }
+
+    /// Common tail of [`Self::apply_manifest`] and
+    /// [`Self::apply_manifest_v4`]: install the unwrapped zone key
+    /// and unwrap the V3 `ObjectIdKey` for the same recipient.
+    fn finalize_apply(
+        &mut self,
+        manifest: &ZoneKeyManifest,
+        node_id: &TailscaleNodeId,
+        node_secret: &X25519SecretKey,
+        zone_key: ZoneKey,
+    ) -> ZoneKeyResult<()> {
         self.insert_zone_key(manifest.zone_key_id, zone_key);
         self.active_zone_key_id = Some(manifest.zone_key_id);
 
@@ -1090,6 +1193,64 @@ impl ZoneKeyRing {
 
         Ok(())
     }
+}
+
+/// Resolve a recipient's effective wrap (V4 first, V3 fallback) or
+/// return [`ZoneKeyError::MissingWrappedZoneKey`].
+fn resolve_wrap_or_error(
+    manifest: &ZoneKeyManifest,
+    node_id: &TailscaleNodeId,
+) -> ZoneKeyResult<WrappedKey> {
+    manifest
+        .resolved_wrapped_key_for(node_id)
+        .ok_or_else(|| ZoneKeyError::MissingWrappedZoneKey {
+            node_id: node_id.as_str().to_string(),
+        })
+}
+
+/// Look up `issued_at` for a recipient, preferring the V4 entry
+/// (which is byte-equal to the V3 entry's `issued_at` for migrated
+/// wraps and authoritative for pure V4-only wraps).
+///
+/// Caller must have already verified that
+/// [`ZoneKeyManifest::resolved_wrapped_key_for`] returned `Some(_)`
+/// for `node_id`, so at least one of the two lists carries this
+/// recipient.
+fn wrapped_issued_at(manifest: &ZoneKeyManifest, node_id: &TailscaleNodeId) -> u64 {
+    manifest
+        .wrapped_key_v4_for(node_id)
+        .map(|w| w.issued_at)
+        .or_else(|| manifest.wrapped_key_for(node_id).map(|w| w.issued_at))
+        .unwrap_or_default()
+}
+
+/// Open a V4 X-Wing-sealed zone-key wrap into a [`ZoneKey`].
+///
+/// Mirrors the V3 [`unwrap_zone_key`] contract but routes through
+/// the hybrid X-Wing path: the AAD is the canonical [`Fcp4Aad`]
+/// (vs the V3 [`Fcp2Aad`]) and decap goes through the supplied
+/// [`XWingKem`] provider so callers can swap implementations
+/// (br-f69kn).
+fn unwrap_zone_key_v4_xwing<K: XWingKem + ?Sized>(
+    xwing_kem: &K,
+    xwing_secret: &XWingSecretKey,
+    zone_id: &ZoneId,
+    recipient: &TailscaleNodeId,
+    issued_at: u64,
+    sealed: &XWingSealedBox,
+) -> ZoneKeyResult<ZoneKey> {
+    let aad = Fcp4Aad::for_zone_key(zone_id.as_bytes(), recipient.as_str().as_bytes(), issued_at)
+        .encode()?;
+    let opened = xwing_kem.open(xwing_secret, sealed, &aad)?;
+    if opened.len() != ZONE_KEY_LEN {
+        return Err(ZoneKeyError::InvalidKeyLength {
+            expected: ZONE_KEY_LEN,
+            found: opened.len(),
+        });
+    }
+    let mut bytes = [0u8; ZONE_KEY_LEN];
+    bytes.copy_from_slice(&opened);
+    Ok(ZoneKey::from_bytes(bytes))
 }
 
 /// Zone key distribution errors.
@@ -1134,10 +1295,7 @@ pub enum ZoneKeyError {
         "duplicate recipient in manifest: recipient `{node_id}` appears more than once in \
          `{list}` — linear and indexed lookups would resolve to different wraps"
     )]
-    DuplicateRecipientInManifest {
-        node_id: String,
-        list: &'static str,
-    },
+    DuplicateRecipientInManifest { node_id: String, list: &'static str },
     /// The recipient's effective wrap is a V4 X-Wing wrap, but the
     /// caller invoked the V3-only [`ZoneKeyRing::apply_manifest`]
     /// entry point — which has no X-Wing secret to open it.
@@ -1399,6 +1557,257 @@ mod tests {
         );
         assert_eq!(ring.active_zone_key(), Some(&zone_key));
         assert_eq!(ring.active_object_id_key(), Some(&object_id_key));
+    }
+
+    /// br-f69kn regression: pre-fix, `ZoneKeyRing::apply_manifest`
+    /// looked up the recipient via `wrapped_key_for(node_id)` which
+    /// reads only the V3 `wrapped_keys` list. A V4-only manifest
+    /// (no V3 wraps at all) — for instance one produced by V4-only
+    /// senders or by stripping `wrapped_keys` after migration —
+    /// would fail with `MissingWrappedZoneKey` even though every
+    /// recipient had a valid V4 wrap in `wrapped_keys_v4`. The fix
+    /// resolves through `resolved_wrapped_key_for` and dispatches
+    /// HPKE-X25519 vs X-Wing wraps. This test constructs a V4-only
+    /// multi-recipient manifest with mixed promoted-V3 (HpkeX25519)
+    /// and pure-V4 (XWing) wraps and verifies every recipient can
+    /// successfully apply via `apply_manifest_v4`.
+    #[test]
+    fn apply_manifest_v4_resolves_v4_only_multi_recipient_manifest_for_every_recipient() {
+        let zone_id = ZoneId::work();
+        let issued_at = 1_700_010_500;
+        let zone_key = random_zone_key();
+        let object_id_key = random_object_id_key();
+
+        let xwing = XWingProvider::new();
+
+        // Recipient A: HPKE-X25519 V4 wrap (the byte-equal "promoted"
+        // form from migrated_to_v4). Apply must open via the
+        // X25519 secret.
+        let alice = TailscaleNodeId::new("alice-promoted-v4");
+        let alice_sk = X25519SecretKey::generate();
+        let alice_v3 = wrap_zone_key(
+            &alice_sk.public_key(),
+            &zone_id,
+            &alice,
+            issued_at,
+            &zone_key,
+        )
+        .expect("alice v3 wrap");
+        let alice_object = wrap_object_id_key(
+            &alice_sk.public_key(),
+            &zone_id,
+            &alice,
+            issued_at,
+            &object_id_key,
+        )
+        .expect("alice object wrap");
+
+        // Recipient B: X-Wing V4-only wrap. Apply must open via the
+        // X-Wing secret + provider.
+        let bob = TailscaleNodeId::new("bob-pure-v4");
+        let bob_x25519 = X25519SecretKey::generate();
+        let (bob_xwing_pk, bob_xwing_sk) = xwing.generate().expect("bob xwing keypair");
+        let bob_aad = Fcp4Aad::for_zone_key(zone_id.as_bytes(), bob.as_str().as_bytes(), issued_at)
+            .encode()
+            .expect("bob aad");
+        let bob_xwing_sealed = xwing
+            .seal(&bob_xwing_pk, zone_key.as_bytes(), &bob_aad)
+            .expect("bob xwing wrap");
+        // Bob still needs an HPKE-wrapped object_id_key entry: the
+        // ObjectIdKey list was not promoted to V4.
+        let bob_object = wrap_object_id_key(
+            &bob_x25519.public_key(),
+            &zone_id,
+            &bob,
+            issued_at,
+            &object_id_key,
+        )
+        .expect("bob object wrap");
+
+        // Recipient C: another X-Wing V4-only wrap with a different
+        // X-Wing key, so we exercise per-recipient AAD binding.
+        let carol = TailscaleNodeId::new("carol-pure-v4");
+        let carol_x25519 = X25519SecretKey::generate();
+        let (carol_xwing_pk, carol_xwing_sk) = xwing.generate().expect("carol xwing keypair");
+        let carol_aad =
+            Fcp4Aad::for_zone_key(zone_id.as_bytes(), carol.as_str().as_bytes(), issued_at)
+                .encode()
+                .expect("carol aad");
+        let carol_xwing_sealed = xwing
+            .seal(&carol_xwing_pk, zone_key.as_bytes(), &carol_aad)
+            .expect("carol xwing wrap");
+        let carol_object = wrap_object_id_key(
+            &carol_x25519.public_key(),
+            &zone_id,
+            &carol,
+            issued_at,
+            &object_id_key,
+        )
+        .expect("carol object wrap");
+
+        // Build a V4-ONLY manifest: wrapped_keys is empty, all
+        // entries live in wrapped_keys_v4. Alice's wrap is the
+        // HpkeX25519 variant (the promoted-V3 form); Bob and Carol
+        // are pure XWing wraps.
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0xF1; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0xF2; 8]),
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![],
+            wrapped_object_id_keys: vec![alice_object, bob_object, carol_object],
+            rekey_policy: None,
+            signature: test_signature(),
+            kem: ZoneKemAlgorithm::XWing,
+            wrapped_keys_v4: vec![
+                WrappedZoneKeyV4 {
+                    recipient: alice.clone(),
+                    issued_at,
+                    sealed: WrappedKey::from_hpke(alice_v3.sealed.clone()),
+                },
+                WrappedZoneKeyV4 {
+                    recipient: bob.clone(),
+                    issued_at,
+                    sealed: WrappedKey::from_xwing(bob_xwing_sealed),
+                },
+                WrappedZoneKeyV4 {
+                    recipient: carol.clone(),
+                    issued_at,
+                    sealed: WrappedKey::from_xwing(carol_xwing_sealed),
+                },
+            ],
+        };
+
+        // Sanity: this is a V4-only manifest.
+        assert!(manifest.wrapped_keys.is_empty());
+        assert_eq!(manifest.wrapped_keys_v4.len(), 3);
+
+        // Pre-fix behaviour: legacy apply_manifest would fail for
+        // BOB and CAROL (no V3 wrap to find) and for ALICE too
+        // (her V3 list is empty). Post-fix, apply_manifest opens
+        // Alice's HPKE-X25519 V4 wrap without an X-Wing secret.
+        let mut alice_ring = ZoneKeyRing::new(zone_id.clone());
+        alice_ring
+            .apply_manifest(&manifest, &alice, &alice_sk)
+            .expect("alice (HpkeX25519 V4 wrap) applies via apply_manifest");
+        assert_eq!(alice_ring.active_zone_key(), Some(&zone_key));
+        assert_eq!(alice_ring.active_object_id_key(), Some(&object_id_key));
+
+        // Pre-fix, apply_manifest for Bob would fail with
+        // MissingWrappedZoneKey because wrapped_keys is empty.
+        // Post-fix, the V3-only entry point recognises the X-Wing
+        // wrap and surfaces the precise XWingWrapRequiresV4Apply
+        // error so callers know to switch entry points.
+        let mut bob_v3_ring = ZoneKeyRing::new(zone_id.clone());
+        let bob_v3_err = bob_v3_ring
+            .apply_manifest(&manifest, &bob, &bob_x25519)
+            .expect_err("legacy V3-only apply must reject X-Wing wrap with the typed error");
+        assert!(
+            matches!(bob_v3_err, ZoneKeyError::XWingWrapRequiresV4Apply { ref node_id }
+                if node_id == bob.as_str()),
+            "expected XWingWrapRequiresV4Apply for bob, got {bob_v3_err:?}"
+        );
+
+        // V4 entry point opens every recipient's wrap, including
+        // Bob and Carol's pure X-Wing wraps. ALSO includes Alice's
+        // HPKE wrap routed through the same V4 entry point — so a
+        // caller that always uses apply_manifest_v4 with both
+        // secrets in hand never has to switch APIs.
+        let mut alice_v4_ring = ZoneKeyRing::new(zone_id.clone());
+        let (_, alice_xwing_throwaway_sk) = xwing.generate().expect("throwaway xwing keypair");
+        alice_v4_ring
+            .apply_manifest_v4(
+                &manifest,
+                &alice,
+                &alice_sk,
+                &alice_xwing_throwaway_sk,
+                &xwing,
+            )
+            .expect("alice (HPKE V4 wrap) applies via apply_manifest_v4");
+        assert_eq!(alice_v4_ring.active_zone_key(), Some(&zone_key));
+
+        let mut bob_ring = ZoneKeyRing::new(zone_id.clone());
+        bob_ring
+            .apply_manifest_v4(&manifest, &bob, &bob_x25519, &bob_xwing_sk, &xwing)
+            .expect("bob (X-Wing V4 wrap) applies via apply_manifest_v4");
+        assert_eq!(bob_ring.active_zone_key(), Some(&zone_key));
+        assert_eq!(bob_ring.active_object_id_key(), Some(&object_id_key));
+
+        let mut carol_ring = ZoneKeyRing::new(zone_id);
+        carol_ring
+            .apply_manifest_v4(&manifest, &carol, &carol_x25519, &carol_xwing_sk, &xwing)
+            .expect("carol (X-Wing V4 wrap) applies via apply_manifest_v4");
+        assert_eq!(carol_ring.active_zone_key(), Some(&zone_key));
+    }
+
+    /// br-f69kn: a recipient with a V4 X-Wing wrap whose
+    /// `apply_manifest_v4` call passes the WRONG X-Wing secret must
+    /// surface a CryptoError-derived ZoneKeyError, not a silent
+    /// wrong-key zone-key install.
+    #[test]
+    fn apply_manifest_v4_wrong_xwing_secret_fails_loudly() {
+        let zone_id = ZoneId::work();
+        let issued_at = 1_700_010_600;
+        let zone_key = random_zone_key();
+        let object_id_key = random_object_id_key();
+
+        let xwing = XWingProvider::new();
+        let bob = TailscaleNodeId::new("bob-wrong-key");
+        let bob_x25519 = X25519SecretKey::generate();
+        let (bob_xwing_pk, _bob_xwing_sk) = xwing.generate().expect("bob xwing keypair");
+        let (_other_pk, attacker_sk) = xwing.generate().expect("attacker xwing keypair");
+
+        let aad = Fcp4Aad::for_zone_key(zone_id.as_bytes(), bob.as_str().as_bytes(), issued_at)
+            .encode()
+            .expect("aad");
+        let sealed = xwing
+            .seal(&bob_xwing_pk, zone_key.as_bytes(), &aad)
+            .expect("seal");
+        let bob_object = wrap_object_id_key(
+            &bob_x25519.public_key(),
+            &zone_id,
+            &bob,
+            issued_at,
+            &object_id_key,
+        )
+        .expect("object wrap");
+
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0xC1; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0xC2; 8]),
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![],
+            wrapped_object_id_keys: vec![bob_object],
+            rekey_policy: None,
+            signature: test_signature(),
+            kem: ZoneKemAlgorithm::XWing,
+            wrapped_keys_v4: vec![WrappedZoneKeyV4 {
+                recipient: bob.clone(),
+                issued_at,
+                sealed: WrappedKey::from_xwing(sealed),
+            }],
+        };
+
+        let mut ring = ZoneKeyRing::new(zone_id);
+        let result = ring.apply_manifest_v4(&manifest, &bob, &bob_x25519, &attacker_sk, &xwing);
+        assert!(
+            matches!(result, Err(ZoneKeyError::Crypto(_))),
+            "wrong X-Wing secret must fail loudly with Crypto(_), got {result:?}"
+        );
+        assert_eq!(
+            ring.active_zone_key(),
+            None,
+            "no zone key should be installed on a failed apply"
+        );
     }
 
     #[test]
@@ -4081,7 +4490,10 @@ mod tests {
             .expect_err("validator must reject duplicate V3 recipient");
         assert!(matches!(
             val_err,
-            ZoneKeyError::DuplicateRecipientInManifest { list: "wrapped_keys", .. }
+            ZoneKeyError::DuplicateRecipientInManifest {
+                list: "wrapped_keys",
+                ..
+            }
         ));
     }
 
@@ -4099,12 +4511,20 @@ mod tests {
         let provider = XWingProvider::new();
         let (pk_a, _sk_a) = provider.generate().unwrap();
         let (pk_b, _sk_b) = provider.generate().unwrap();
-        let aad_a = Fcp4Aad::for_zone_key(zone_id.as_bytes(), recipient.as_str().as_bytes(), issued_at_a)
-            .encode()
-            .unwrap();
-        let aad_b = Fcp4Aad::for_zone_key(zone_id.as_bytes(), recipient.as_str().as_bytes(), issued_at_b)
-            .encode()
-            .unwrap();
+        let aad_a = Fcp4Aad::for_zone_key(
+            zone_id.as_bytes(),
+            recipient.as_str().as_bytes(),
+            issued_at_a,
+        )
+        .encode()
+        .unwrap();
+        let aad_b = Fcp4Aad::for_zone_key(
+            zone_id.as_bytes(),
+            recipient.as_str().as_bytes(),
+            issued_at_b,
+        )
+        .encode()
+        .unwrap();
         let sealed_a = provider.seal(&pk_a, b"zone-key-bytes-a", &aad_a).unwrap();
         let sealed_b = provider.seal(&pk_b, b"zone-key-bytes-b", &aad_b).unwrap();
 
@@ -4151,7 +4571,10 @@ mod tests {
             .expect_err("validator must reject duplicate V4 recipient");
         assert!(matches!(
             val_err,
-            ZoneKeyError::DuplicateRecipientInManifest { list: "wrapped_keys_v4", .. }
+            ZoneKeyError::DuplicateRecipientInManifest {
+                list: "wrapped_keys_v4",
+                ..
+            }
         ));
     }
 
@@ -4204,7 +4627,10 @@ mod tests {
             .expect_err("validator must reject duplicate object-id recipient");
         assert!(matches!(
             val_err,
-            ZoneKeyError::DuplicateRecipientInManifest { list: "wrapped_object_id_keys", .. }
+            ZoneKeyError::DuplicateRecipientInManifest {
+                list: "wrapped_object_id_keys",
+                ..
+            }
         ));
     }
 
@@ -4248,7 +4674,10 @@ mod tests {
             resolved.path_label()
         );
         assert_eq!(resolved.path_label(), "v3_fallback");
-        assert!(matches!(resolved.wrapped_key(), WrappedKey::HpkeX25519 { .. }));
+        assert!(matches!(
+            resolved.wrapped_key(),
+            WrappedKey::HpkeX25519 { .. }
+        ));
     }
 
     /// br-gtplu: when a recipient has a V4 wrap (and possibly also a

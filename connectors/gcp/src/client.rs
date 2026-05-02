@@ -1,3 +1,4 @@
+use fcp_prelude::log_redaction::redact_url;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -509,7 +510,7 @@ impl GcpClient {
             let client = self.client.clone();
             let token = token.clone();
             async move {
-                debug!(attempt, url = %url, "GET single");
+                debug!(attempt, url = %redact_url(&url), "GET single");
                 let req = authenticate_request_static(client.get(&url), &token);
                 handle_response::<T>(req, attempt).await
             }
@@ -535,7 +536,7 @@ impl GcpClient {
             let token = token.clone();
             let body = body.clone();
             async move {
-                debug!(attempt, url = %url, "POST json");
+                debug!(attempt, url = %redact_url(&url), "POST json");
                 let req = authenticate_request_static(client.post(&url), &token).json(&body);
                 handle_response::<T>(req, attempt).await
             }
@@ -558,7 +559,7 @@ impl GcpClient {
             let client = self.client.clone();
             let token = token.clone();
             async move {
-                debug!(attempt, url = %url, "POST empty");
+                debug!(attempt, url = %redact_url(&url), "POST empty");
                 let req = authenticate_request_static(client.post(&url), &token)
                     .header("Content-Length", "0");
                 handle_response::<serde_json::Value>(req, attempt).await
@@ -578,7 +579,7 @@ impl GcpClient {
             let client = self.client.clone();
             let token = token.clone();
             async move {
-                debug!(attempt, url = %url, "DELETE");
+                debug!(attempt, url = %redact_url(&url), "DELETE");
                 let req = authenticate_request_static(client.delete(&url), &token);
                 handle_response::<serde_json::Value>(req, attempt).await
             }

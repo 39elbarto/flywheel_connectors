@@ -1,5 +1,6 @@
 //! `DocuSign` API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -210,7 +211,7 @@ impl DocuSignClient {
         query: Option<&[(&str, String)]>,
     ) -> DocuSignResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET request");
+        debug!(url = %redact_url(&url), "GET request");
         let mut req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
@@ -228,7 +229,7 @@ impl DocuSignClient {
         query: Option<&[(&str, String)]>,
     ) -> DocuSignResult<Vec<u8>> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET raw request");
+        debug!(url = %redact_url(&url), "GET raw request");
         let mut req = self.add_auth(self.client.get(&url));
         if let Some(q) = query {
             req = req.query(q);
@@ -244,7 +245,7 @@ impl DocuSignClient {
         body: &serde_json::Value,
     ) -> DocuSignResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "POST request");
+        debug!(url = %redact_url(&url), "POST request");
         let req = self
             .add_auth(self.client.post(&url))
             .header("Accept", "application/json")
@@ -256,7 +257,7 @@ impl DocuSignClient {
     #[instrument(skip(self, body), fields(url))]
     async fn put(&self, path: &str, body: &serde_json::Value) -> DocuSignResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "PUT request");
+        debug!(url = %redact_url(&url), "PUT request");
         let req = self
             .add_auth(self.client.put(&url))
             .header("Accept", "application/json")

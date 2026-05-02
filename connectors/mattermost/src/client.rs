@@ -1,5 +1,6 @@
 //! Mattermost HTTP API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -435,7 +436,7 @@ impl MattermostClient {
     pub async fn download_file(&self, file_id: &str) -> MattermostResult<FileDownload> {
         let encoded_file_id = encode_path_segment(file_id);
         let url = format!("{}/api/v4/files/{encoded_file_id}", self.base_url);
-        debug!(url = %url, "GET");
+        debug!(url = %redact_url(url.as_str()), "GET");
 
         let response = self
             .client
@@ -468,7 +469,7 @@ impl MattermostClient {
         contents: Vec<u8>,
     ) -> MattermostResult<UploadFileResponse> {
         let url = format!("{}/api/v4/files", self.base_url);
-        debug!(url = %url, "POST multipart");
+        debug!(url = %redact_url(url.as_str()), "POST multipart");
 
         let mut part = Part::bytes(contents).file_name(request.filename.clone());
         if let Some(content_type) = non_empty_trimmed(request.content_type.as_deref()) {
@@ -498,7 +499,7 @@ impl MattermostClient {
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> MattermostResult<T> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET");
+        debug!(url = %redact_url(url.as_str()), "GET");
 
         let response = self
             .client
@@ -510,7 +511,7 @@ impl MattermostClient {
     }
 
     async fn get_url<T: DeserializeOwned>(&self, url: reqwest::Url) -> MattermostResult<T> {
-        debug!(url = %url, "GET");
+        debug!(url = %redact_url(url.as_str()), "GET");
 
         let response = self
             .client
@@ -527,7 +528,7 @@ impl MattermostClient {
         body: &B,
     ) -> MattermostResult<T> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "POST");
+        debug!(url = %redact_url(url.as_str()), "POST");
 
         let response = self
             .client
@@ -545,7 +546,7 @@ impl MattermostClient {
         body: &B,
     ) -> MattermostResult<T> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "PUT");
+        debug!(url = %redact_url(url.as_str()), "PUT");
 
         let response = self
             .client
@@ -559,7 +560,7 @@ impl MattermostClient {
 
     async fn post_empty(&self, path: &str) -> MattermostResult<()> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "POST (empty body)");
+        debug!(url = %redact_url(url.as_str()), "POST (empty body)");
 
         let response = self
             .client
@@ -572,7 +573,7 @@ impl MattermostClient {
 
     async fn delete_path(&self, path: &str) -> MattermostResult<()> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "DELETE");
+        debug!(url = %redact_url(url.as_str()), "DELETE");
 
         let response = self
             .client
@@ -584,7 +585,7 @@ impl MattermostClient {
     }
 
     async fn delete_url(&self, url: reqwest::Url) -> MattermostResult<()> {
-        debug!(url = %url, "DELETE");
+        debug!(url = %redact_url(url.as_str()), "DELETE");
 
         let response = self
             .client

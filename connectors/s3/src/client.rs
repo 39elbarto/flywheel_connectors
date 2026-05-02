@@ -5,6 +5,7 @@
 //! implementation uses bearer-style auth headers for mock/test friendliness
 //! and constructs standard S3 REST API URLs.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::fmt::Write;
 use std::time::Duration;
@@ -552,7 +553,7 @@ impl S3Client {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.to_string();
             async move {
-                debug!(attempt, url, "S3 GET request");
+                debug!(attempt, url = %redact_url(&url), "S3 GET request");
                 let result = self
                     .apply_auth(self.client.get(&url))
                     .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
@@ -627,7 +628,7 @@ impl S3Client {
             let url = url.to_string();
             let body_clone = body_owned.clone();
             async move {
-                debug!(attempt, url, "S3 PUT request");
+                debug!(attempt, url = %redact_url(&url), "S3 PUT request");
                 let result = self
                     .apply_auth(self.client.put(&url))
                     .header("content-type", "application/octet-stream")
@@ -680,7 +681,7 @@ impl S3Client {
             let url = url.to_string();
             let copy_source = copy_source.to_string();
             async move {
-                debug!(attempt, url, copy_source, "S3 COPY request");
+                debug!(attempt, url = %redact_url(&url), copy_source, "S3 COPY request");
                 let result = self
                     .apply_auth(self.client.put(&url))
                     .header("x-amz-copy-source", &copy_source)
@@ -727,7 +728,7 @@ impl S3Client {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.to_string();
             async move {
-                debug!(attempt, url, "S3 PUT(empty) request");
+                debug!(attempt, url = %redact_url(&url), "S3 PUT(empty) request");
                 let result = self
                     .apply_auth(self.client.put(&url))
                     .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
@@ -782,7 +783,7 @@ impl S3Client {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.to_string();
             async move {
-                debug!(attempt, url, "S3 DELETE request");
+                debug!(attempt, url = %redact_url(&url), "S3 DELETE request");
                 let result = self
                     .apply_auth(self.client.delete(&url))
                     .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")
@@ -837,7 +838,7 @@ impl S3Client {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.to_string();
             async move {
-                debug!(attempt, url, "S3 HEAD request");
+                debug!(attempt, url = %redact_url(&url), "S3 HEAD request");
                 let result = self
                     .apply_auth(self.client.head(&url))
                     .header("x-amz-content-sha256", "UNSIGNED-PAYLOAD")

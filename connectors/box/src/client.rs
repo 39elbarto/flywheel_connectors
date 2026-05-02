@@ -1,5 +1,6 @@
 //! `Box` API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -167,7 +168,7 @@ impl BoxClient {
         query: Option<&[(&str, String)]>,
     ) -> BoxResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET request");
+        debug!(url = %redact_url(&url), "GET request");
         let mut req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
@@ -183,7 +184,7 @@ impl BoxClient {
     #[instrument(skip(self, body), fields(url))]
     async fn post(&self, path: &str, body: &serde_json::Value) -> BoxResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "POST request");
+        debug!(url = %redact_url(&url), "POST request");
         let req = self
             .add_auth(self.client.post(&url))
             .header("Accept", "application/json")
@@ -199,7 +200,7 @@ impl BoxClient {
         form: reqwest::multipart::Form,
     ) -> BoxResult<serde_json::Value> {
         let url = format!("{}{path}", self.upload_url);
-        debug!(url = %url, "POST upload request");
+        debug!(url = %redact_url(&url), "POST upload request");
         let req = self.add_auth(self.client.post(&url)).multipart(form);
         let resp = req.send().await?;
         self.handle_response(resp).await
@@ -208,7 +209,7 @@ impl BoxClient {
     #[instrument(skip(self), fields(url))]
     async fn delete(&self, path: &str) -> BoxResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "DELETE request");
+        debug!(url = %redact_url(&url), "DELETE request");
         let req = self
             .add_auth(self.client.delete(&url))
             .header("Accept", "application/json");

@@ -1,3 +1,4 @@
+use fcp_prelude::log_redaction::redact_url;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
@@ -429,7 +430,7 @@ impl PayPalClient {
                 let token = token.clone();
                 let idempotency_key = idempotency_key.clone();
                 async move {
-                    debug!(attempt, url = %url, "POST invoice send");
+                    debug!(attempt, url = %redact_url(&url), "POST invoice send");
                     let mut req = client.post(&url).bearer_auth(&token).json(&json!({}));
                     if let Some(key) = &idempotency_key {
                         req = req.header("PayPal-Request-Id", key.as_str());
@@ -524,7 +525,7 @@ impl PayPalClient {
                 let client = self.client.clone();
                 let token = token.clone();
                 async move {
-                    debug!(attempt, url = %url, "GET");
+                    debug!(attempt, url = %redact_url(&url), "GET");
                     let req = client.get(&url).bearer_auth(&token);
                     handle_response::<T>(req, attempt).await
                 }
@@ -567,7 +568,7 @@ impl PayPalClient {
                 let body = body.clone();
                 let idempotency_key = idempotency_key.clone();
                 async move {
-                    debug!(attempt, url = %url, "POST");
+                    debug!(attempt, url = %redact_url(&url), "POST");
                     let mut req = client.post(&url).bearer_auth(&token).json(&body);
                     if let Some(key) = &idempotency_key {
                         req = req.header("PayPal-Request-Id", key.as_str());

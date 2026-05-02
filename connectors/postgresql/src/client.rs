@@ -1,5 +1,6 @@
 //! `PostgreSQL` REST API client (`Supabase`/`PostgREST`-compatible).
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -179,7 +180,7 @@ impl PostgresClient {
         timeout_ms: Option<u64>,
     ) -> PostgresResult<serde_json::Value> {
         let url = format!("{}/rest/v1/rpc/query", self.base_url);
-        debug!(url = %url, "POST pg.query");
+        debug!(url = %redact_url(&url), "POST pg.query");
         let mut body = json!({
             "sql": sql,
             "params": params,
@@ -204,7 +205,7 @@ impl PostgresClient {
         params: &[serde_json::Value],
     ) -> PostgresResult<serde_json::Value> {
         let url = format!("{}/rest/v1/rpc/query", self.base_url);
-        debug!(url = %url, "POST pg.execute");
+        debug!(url = %redact_url(&url), "POST pg.execute");
         let body = json!({
             "sql": sql,
             "params": params,
@@ -227,7 +228,7 @@ impl PostgresClient {
         params: &[serde_json::Value],
     ) -> PostgresResult<serde_json::Value> {
         let url = format!("{}/rest/v1/rpc/explain", self.base_url);
-        debug!(url = %url, "POST pg.explain");
+        debug!(url = %redact_url(&url), "POST pg.explain");
         let body = json!({
             "sql": sql,
             "params": params,
@@ -251,7 +252,7 @@ impl PostgresClient {
             let encoded = utf8_percent_encode(s, NON_ALPHANUMERIC);
             url = format!("{url}?schema={encoded}");
         }
-        debug!(url = %url, "GET pg.schema.tables");
+        debug!(url = %redact_url(&url), "GET pg.schema.tables");
         let req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
@@ -267,7 +268,7 @@ impl PostgresClient {
             "{}/rest/v1/schema/columns?table={encoded_table}",
             self.base_url
         );
-        debug!(url = %url, "GET pg.schema.columns");
+        debug!(url = %redact_url(&url), "GET pg.schema.columns");
         let req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
@@ -283,7 +284,7 @@ impl PostgresClient {
             "{}/rest/v1/schema/indexes?table={encoded_table}",
             self.base_url
         );
-        debug!(url = %url, "GET pg.schema.indexes");
+        debug!(url = %redact_url(&url), "GET pg.schema.indexes");
         let req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
@@ -300,7 +301,7 @@ impl PostgresClient {
         isolation_level: Option<&str>,
     ) -> PostgresResult<serde_json::Value> {
         let url = format!("{}/rest/v1/rpc/transaction", self.base_url);
-        debug!(url = %url, "POST pg.transaction.begin");
+        debug!(url = %redact_url(&url), "POST pg.transaction.begin");
         let mut body = json!({ "action": "begin" });
         if let Some(level) = isolation_level {
             body["isolation_level"] = json!(level);
@@ -318,7 +319,7 @@ impl PostgresClient {
     #[instrument(skip(self))]
     pub async fn transaction_commit(&self, txn_id: &str) -> PostgresResult<serde_json::Value> {
         let url = format!("{}/rest/v1/rpc/transaction", self.base_url);
-        debug!(url = %url, "POST pg.transaction.commit");
+        debug!(url = %redact_url(&url), "POST pg.transaction.commit");
         let body = json!({
             "action": "commit",
             "txn_id": txn_id,
@@ -336,7 +337,7 @@ impl PostgresClient {
     #[instrument(skip(self))]
     pub async fn transaction_rollback(&self, txn_id: &str) -> PostgresResult<serde_json::Value> {
         let url = format!("{}/rest/v1/rpc/transaction", self.base_url);
-        debug!(url = %url, "POST pg.transaction.rollback");
+        debug!(url = %redact_url(&url), "POST pg.transaction.rollback");
         let body = json!({
             "action": "rollback",
             "txn_id": txn_id,
@@ -360,7 +361,7 @@ impl PostgresClient {
         params: &[Vec<serde_json::Value>],
     ) -> PostgresResult<serde_json::Value> {
         let url = format!("{}/rest/v1/rpc/batch", self.base_url);
-        debug!(url = %url, "POST pg.batch");
+        debug!(url = %redact_url(&url), "POST pg.batch");
         let body = json!({
             "statements": statements,
             "params": params,
@@ -382,7 +383,7 @@ impl PostgresClient {
         params: &[serde_json::Value],
     ) -> PostgresResult<serde_json::Value> {
         let url = format!("{}/rest/v1/rpc/prepared", self.base_url);
-        debug!(url = %url, "POST pg.prepared");
+        debug!(url = %redact_url(&url), "POST pg.prepared");
         let body = json!({
             "name": name,
             "params": params,
@@ -402,7 +403,7 @@ impl PostgresClient {
     #[instrument(skip(self))]
     pub async fn health(&self) -> PostgresResult<serde_json::Value> {
         let url = format!("{}/rest/v1/health", self.base_url);
-        debug!(url = %url, "GET pg.health");
+        debug!(url = %redact_url(&url), "GET pg.health");
         let req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");

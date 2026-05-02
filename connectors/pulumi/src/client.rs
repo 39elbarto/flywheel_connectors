@@ -1,5 +1,6 @@
 //! `Pulumi` API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -177,7 +178,7 @@ impl PulumiClient {
         query: Option<&[(&str, String)]>,
     ) -> PulumiResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET request");
+        debug!(url = %redact_url(&url), "GET request");
         let mut req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
@@ -191,7 +192,7 @@ impl PulumiClient {
     #[instrument(skip(self, body), fields(url))]
     async fn post(&self, path: &str, body: &serde_json::Value) -> PulumiResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "POST request");
+        debug!(url = %redact_url(&url), "POST request");
         let req = self
             .add_auth(self.client.post(&url))
             .header("Accept", "application/json")
@@ -203,7 +204,7 @@ impl PulumiClient {
     #[instrument(skip(self), fields(url))]
     async fn delete(&self, path: &str) -> PulumiResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "DELETE request");
+        debug!(url = %redact_url(&url), "DELETE request");
         let req = self
             .add_auth(self.client.delete(&url))
             .header("Accept", "application/json");

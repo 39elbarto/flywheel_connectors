@@ -1,5 +1,6 @@
 //! Kubernetes API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::fmt::Write as _;
 use std::time::Duration;
@@ -220,7 +221,7 @@ impl KubernetesClient {
     #[instrument(skip(self), fields(url))]
     async fn get(&self, path: &str) -> KubernetesResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET request");
+        debug!(url = %redact_url(&url), "GET request");
         let req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
@@ -231,7 +232,7 @@ impl KubernetesClient {
     #[instrument(skip(self), fields(url))]
     async fn get_text(&self, path: &str) -> KubernetesResult<String> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET text request");
+        debug!(url = %redact_url(&url), "GET text request");
         let req = self.add_auth(self.client.get(&url));
         let resp = req.send().await?;
         self.handle_text_response(resp).await
@@ -244,7 +245,7 @@ impl KubernetesClient {
         body: &serde_json::Value,
     ) -> KubernetesResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "PATCH request");
+        debug!(url = %redact_url(&url), "PATCH request");
         let req = self
             .add_auth(self.client.patch(&url))
             .header("Accept", "application/json")
@@ -261,7 +262,7 @@ impl KubernetesClient {
         body: &serde_json::Value,
     ) -> KubernetesResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "POST request");
+        debug!(url = %redact_url(&url), "POST request");
         let req = self
             .add_auth(self.client.post(&url))
             .header("Accept", "application/json")
@@ -278,7 +279,7 @@ impl KubernetesClient {
         body: &serde_json::Value,
     ) -> KubernetesResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "PUT request");
+        debug!(url = %redact_url(&url), "PUT request");
         let req = self
             .add_auth(self.client.put(&url))
             .header("Accept", "application/json")
@@ -291,7 +292,7 @@ impl KubernetesClient {
     #[instrument(skip(self), fields(url))]
     async fn delete(&self, path: &str) -> KubernetesResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "DELETE request");
+        debug!(url = %redact_url(&url), "DELETE request");
         let req = self
             .add_auth(self.client.delete(&url))
             .header("Accept", "application/json");

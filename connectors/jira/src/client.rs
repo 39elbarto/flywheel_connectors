@@ -1,5 +1,6 @@
 //! Jira REST API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -776,7 +777,7 @@ impl JiraClient {
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
-            debug!(attempt, url, "Jira API GET");
+            debug!(attempt, url = %redact_url(&url), "Jira API GET");
 
             match self.client.get(url).send().await {
                 Ok(response) => match self.handle_response(response).await {
@@ -806,7 +807,7 @@ impl JiraClient {
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
-            debug!(attempt, url, "Jira API POST");
+            debug!(attempt, url = %redact_url(&url), "Jira API POST");
 
             match self.client.post(url).json(body).send().await {
                 Ok(response) => match self.handle_response(response).await {
@@ -833,7 +834,7 @@ impl JiraClient {
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
-            debug!(attempt, url, "Jira API POST (no content)");
+            debug!(attempt, url = %redact_url(&url), "Jira API POST (no content)");
 
             match self.client.post(url).json(body).send().await {
                 Ok(response) => {
@@ -884,7 +885,7 @@ impl JiraClient {
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
-            debug!(attempt, url, "Jira API PUT");
+            debug!(attempt, url = %redact_url(&url), "Jira API PUT");
 
             match self.client.put(url).json(body).send().await {
                 Ok(response) => match self.handle_response(response).await {
@@ -911,7 +912,7 @@ impl JiraClient {
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
-            debug!(attempt, url, "Jira API PUT (no content)");
+            debug!(attempt, url = %redact_url(&url), "Jira API PUT (no content)");
 
             match self.client.put(url).json(body).send().await {
                 Ok(response) => {
@@ -959,7 +960,7 @@ impl JiraClient {
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
-            debug!(attempt, url, "Jira API DELETE");
+            debug!(attempt, url = %redact_url(&url), "Jira API DELETE");
 
             match self.client.delete(url).send().await {
                 Ok(response) => {

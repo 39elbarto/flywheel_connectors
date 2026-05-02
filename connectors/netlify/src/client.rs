@@ -1,3 +1,4 @@
+use fcp_prelude::log_redaction::redact_url;
 use std::time::Duration;
 
 use reqwest::{Client, RequestBuilder};
@@ -252,7 +253,7 @@ impl NetlifyClient {
             let client = self.client.clone();
             let auth = self.auth.clone();
             async move {
-                debug!(attempt, url = %url, "GET list");
+                debug!(attempt, url = %redact_url(&url), "GET list");
                 let req = authenticate_request(client.get(&url), &auth);
                 handle_list_response::<T>(req, attempt).await
             }
@@ -274,7 +275,7 @@ impl NetlifyClient {
             let client = self.client.clone();
             let auth = self.auth.clone();
             async move {
-                debug!(attempt, url = %url, "GET single");
+                debug!(attempt, url = %redact_url(&url), "GET single");
                 let req = authenticate_request(client.get(&url), &auth);
                 handle_response::<T>(req, attempt).await
             }
@@ -299,7 +300,7 @@ impl NetlifyClient {
             let auth = self.auth.clone();
             let body = body.clone();
             async move {
-                debug!(attempt, url = %url, "POST");
+                debug!(attempt, url = %redact_url(&url), "POST");
                 let req = authenticate_request(client.post(&url), &auth).json(&body);
                 handle_response::<T>(req, attempt).await
             }
@@ -324,7 +325,7 @@ impl NetlifyClient {
             let auth = self.auth.clone();
             let body = body.clone();
             async move {
-                debug!(attempt, url = %url, "POST list");
+                debug!(attempt, url = %redact_url(&url), "POST list");
                 let req = authenticate_request(client.post(&url), &auth).json(&body);
                 handle_list_response::<T>(req, attempt).await
             }
@@ -346,7 +347,7 @@ impl NetlifyClient {
             let client = self.client.clone();
             let auth = self.auth.clone();
             async move {
-                debug!(attempt, url = %url, "DELETE");
+                debug!(attempt, url = %redact_url(&url), "DELETE");
                 let req = authenticate_request(client.delete(&url), &auth);
                 handle_response::<T>(req, attempt).await
             }

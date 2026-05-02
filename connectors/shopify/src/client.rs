@@ -1,3 +1,4 @@
+use fcp_prelude::log_redaction::redact_url;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -238,7 +239,7 @@ impl ShopifyClient {
             let client = self.client.clone();
             let auth = self.auth.clone();
             async move {
-                debug!(attempt, url = %url, "GET");
+                debug!(attempt, url = %redact_url(&url), "GET");
                 let req = authenticate(client.get(&url), &auth);
                 handle_response::<T>(req, attempt).await
             }
@@ -266,7 +267,7 @@ impl ShopifyClient {
             let body = body.clone();
             let idempotency_key = idempotency_key.clone();
             async move {
-                debug!(attempt, url = %url, "POST");
+                debug!(attempt, url = %redact_url(&url), "POST");
                 let mut req = authenticate(client.post(&url), &auth).json(&body);
                 if let Some(key) = &idempotency_key {
                     req = req.header("X-Shopify-Idempotency-Key", key.as_str());
@@ -297,7 +298,7 @@ impl ShopifyClient {
             let body = body.clone();
             let idempotency_key = idempotency_key.clone();
             async move {
-                debug!(attempt, url = %url, "PUT");
+                debug!(attempt, url = %redact_url(&url), "PUT");
                 let mut req = authenticate(client.put(&url), &auth).json(&body);
                 if let Some(key) = &idempotency_key {
                     req = req.header("X-Shopify-Idempotency-Key", key.as_str());
@@ -322,7 +323,7 @@ impl ShopifyClient {
             let client = self.client.clone();
             let auth = self.auth.clone();
             async move {
-                debug!(attempt, url = %url, "DELETE");
+                debug!(attempt, url = %redact_url(&url), "DELETE");
                 let req = authenticate(client.delete(&url), &auth);
                 let resp = match req.send().await {
                     Ok(r) => r,

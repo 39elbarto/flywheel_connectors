@@ -2,6 +2,7 @@
 
 #![allow(clippy::doc_markdown)]
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -170,7 +171,7 @@ impl LinkedInClient {
     #[instrument(skip(self), fields(url))]
     async fn get(&self, path: &str) -> LinkedInResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET request");
+        debug!(url = %redact_url(&url), "GET request");
         let req = Self::add_restli_header(self.add_auth(self.client.get(&url)))
             .header("Accept", "application/json");
         let resp = req.send().await?;
@@ -184,7 +185,7 @@ impl LinkedInClient {
         body: &serde_json::Value,
     ) -> LinkedInResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "POST request");
+        debug!(url = %redact_url(&url), "POST request");
         let req = Self::add_restli_header(self.add_auth(self.client.post(&url)))
             .header("Accept", "application/json")
             .json(body);
@@ -195,7 +196,7 @@ impl LinkedInClient {
     #[instrument(skip(self), fields(url))]
     async fn delete(&self, path: &str) -> LinkedInResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "DELETE request");
+        debug!(url = %redact_url(&url), "DELETE request");
         let req = Self::add_restli_header(self.add_auth(self.client.delete(&url)))
             .header("Accept", "application/json");
         let resp = req.send().await?;

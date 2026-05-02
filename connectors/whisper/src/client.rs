@@ -1,5 +1,6 @@
 //! Whisper API client for OpenAI-compatible endpoints.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -160,7 +161,7 @@ impl WhisperClient {
     #[instrument(skip(self, body))]
     pub async fn transcribe(&self, body: serde_json::Value) -> WhisperResult<serde_json::Value> {
         let url = format!("{}/audio/transcriptions", self.base_url);
-        debug!(url = %url, "POST transcribe");
+        debug!(url = %redact_url(&url), "POST transcribe");
         let req = self
             .add_auth(self.client.post(&url))
             .header("Content-Type", "application/json")
@@ -174,7 +175,7 @@ impl WhisperClient {
     #[instrument(skip(self, body))]
     pub async fn translate(&self, body: serde_json::Value) -> WhisperResult<serde_json::Value> {
         let url = format!("{}/audio/translations", self.base_url);
-        debug!(url = %url, "POST translate");
+        debug!(url = %redact_url(&url), "POST translate");
         let req = self
             .add_auth(self.client.post(&url))
             .header("Content-Type", "application/json")
@@ -188,7 +189,7 @@ impl WhisperClient {
     #[instrument(skip(self))]
     pub async fn list_models(&self) -> WhisperResult<serde_json::Value> {
         let url = format!("{}/models", self.base_url);
-        debug!(url = %url, "GET models");
+        debug!(url = %redact_url(&url), "GET models");
         let req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");

@@ -1,5 +1,6 @@
 //! `HubSpot` API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -182,7 +183,7 @@ impl HubSpotClient {
     #[instrument(skip(self), fields(url))]
     async fn get(&self, path: &str) -> HubSpotResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET request");
+        debug!(url = %redact_url(&url), "GET request");
 
         let req = self.client.get(&url);
         let req = self.add_auth(req);
@@ -193,7 +194,7 @@ impl HubSpotClient {
     #[instrument(skip(self, body), fields(url))]
     async fn post(&self, path: &str, body: &serde_json::Value) -> HubSpotResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "POST request");
+        debug!(url = %redact_url(&url), "POST request");
 
         let req = self.client.post(&url).json(body);
         let req = self.add_auth(req);
@@ -208,7 +209,7 @@ impl HubSpotClient {
         body: &serde_json::Value,
     ) -> HubSpotResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "PATCH request");
+        debug!(url = %redact_url(&url), "PATCH request");
 
         let req = self.client.patch(&url).json(body);
         let req = self.add_auth(req);
@@ -219,7 +220,7 @@ impl HubSpotClient {
     #[instrument(skip(self, body), fields(url))]
     async fn put(&self, path: &str, body: &serde_json::Value) -> HubSpotResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "PUT request");
+        debug!(url = %redact_url(&url), "PUT request");
 
         let req = self.client.put(&url).json(body);
         let req = self.add_auth(req);
@@ -230,7 +231,7 @@ impl HubSpotClient {
     #[instrument(skip(self), fields(url))]
     async fn delete(&self, path: &str) -> HubSpotResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "DELETE request");
+        debug!(url = %redact_url(&url), "DELETE request");
 
         let req = self.client.delete(&url);
         let req = self.add_auth(req);

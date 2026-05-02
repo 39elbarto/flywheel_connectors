@@ -1,5 +1,6 @@
 //! Azure API client primitives and shared request logic.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::time::Duration;
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};

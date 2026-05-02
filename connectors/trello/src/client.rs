@@ -1,5 +1,6 @@
 //! Trello API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -188,7 +189,7 @@ impl TrelloClient {
     #[instrument(skip(self), fields(url))]
     async fn get(&self, path: &str) -> TrelloResult<serde_json::Value> {
         let url = self.build_url(path);
-        debug!(url = %url, "GET request");
+        debug!(url = %redact_url(&url), "GET request");
         let req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
@@ -199,7 +200,7 @@ impl TrelloClient {
     #[instrument(skip(self, body), fields(url))]
     async fn post(&self, path: &str, body: &serde_json::Value) -> TrelloResult<serde_json::Value> {
         let url = self.build_url(path);
-        debug!(url = %url, "POST request");
+        debug!(url = %redact_url(&url), "POST request");
         let req = self
             .add_auth(self.client.post(&url))
             .header("Accept", "application/json")
@@ -211,7 +212,7 @@ impl TrelloClient {
     #[instrument(skip(self, body), fields(url))]
     async fn put(&self, path: &str, body: &serde_json::Value) -> TrelloResult<serde_json::Value> {
         let url = self.build_url(path);
-        debug!(url = %url, "PUT request");
+        debug!(url = %redact_url(&url), "PUT request");
         let req = self
             .add_auth(self.client.put(&url))
             .header("Accept", "application/json")
@@ -223,7 +224,7 @@ impl TrelloClient {
     #[instrument(skip(self), fields(url))]
     async fn delete(&self, path: &str) -> TrelloResult<serde_json::Value> {
         let url = self.build_url(path);
-        debug!(url = %url, "DELETE request");
+        debug!(url = %redact_url(&url), "DELETE request");
         let req = self
             .add_auth(self.client.delete(&url))
             .header("Accept", "application/json");

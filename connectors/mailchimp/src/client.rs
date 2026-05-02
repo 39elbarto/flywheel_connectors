@@ -2,6 +2,7 @@
 
 #![allow(clippy::doc_markdown)]
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -200,7 +201,7 @@ impl MailchimpClient {
     #[instrument(skip(self), fields(url))]
     async fn get(&self, path: &str) -> MailchimpResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET request");
+        debug!(url = %redact_url(&url), "GET request");
         let req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
@@ -211,7 +212,7 @@ impl MailchimpClient {
     #[instrument(skip(self), fields(url))]
     async fn post_empty(&self, path: &str) -> MailchimpResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "POST request (empty body)");
+        debug!(url = %redact_url(&url), "POST request (empty body)");
         let req = self
             .add_auth(self.client.post(&url))
             .header("Accept", "application/json");
@@ -222,7 +223,7 @@ impl MailchimpClient {
     #[instrument(skip(self), fields(url))]
     async fn delete(&self, path: &str) -> MailchimpResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "DELETE request");
+        debug!(url = %redact_url(&url), "DELETE request");
         let req = self
             .add_auth(self.client.delete(&url))
             .header("Accept", "application/json");

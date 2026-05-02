@@ -1,3 +1,4 @@
+use fcp_prelude::log_redaction::redact_url;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -250,7 +251,7 @@ impl DockerHubClient {
             let client = self.client.clone();
             let auth_header_value = auth_header_value.clone();
             async move {
-                debug!(attempt, url = %url, "GET paginated");
+                debug!(attempt, url = %redact_url(&url), "GET paginated");
                 let req = authenticate_request(client.get(&url), auth_header_value.as_deref());
                 handle_paginated_response::<T>(req, attempt).await
             }
@@ -273,7 +274,7 @@ impl DockerHubClient {
             let client = self.client.clone();
             let auth_header_value = auth_header_value.clone();
             async move {
-                debug!(attempt, url = %url, "GET single");
+                debug!(attempt, url = %redact_url(&url), "GET single");
                 let req = authenticate_request(client.get(&url), auth_header_value.as_deref());
                 handle_response::<T>(req, attempt).await
             }
@@ -299,7 +300,7 @@ impl DockerHubClient {
             let auth_header_value = auth_header_value.clone();
             let body = body.clone();
             async move {
-                debug!(attempt, url = %url, "POST");
+                debug!(attempt, url = %redact_url(&url), "POST");
                 let req = authenticate_request(client.post(&url), auth_header_value.as_deref())
                     .json(&body);
                 handle_response::<T>(req, attempt).await
@@ -323,7 +324,7 @@ impl DockerHubClient {
             let client = self.client.clone();
             let auth_header_value = auth_header_value.clone();
             async move {
-                debug!(attempt, url = %url, "DELETE");
+                debug!(attempt, url = %redact_url(&url), "DELETE");
                 let req = authenticate_request(client.delete(&url), auth_header_value.as_deref());
                 handle_response::<T>(req, attempt).await
             }

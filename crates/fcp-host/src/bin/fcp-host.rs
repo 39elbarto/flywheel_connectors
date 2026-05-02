@@ -1675,6 +1675,14 @@ struct AppState {
     /// from connector inventory so a connector-config rollout cannot
     /// accidentally drop policy state.
     zone_policies: Arc<RwLock<HashMap<ZoneId, ZonePolicyObject>>>,
+    /// Per-zone hash-linked invoke audit chain (br-mvax3).
+    ///
+    /// Appended at four phases of every `/rpc/invoke`: preflight allow,
+    /// preflight deny, dispatch result, dispatch error. Makes the
+    /// README `every operation produces an audit event` claim
+    /// literally true even when the connector returns no `receipt_id`
+    /// or fails before producing a receipt.
+    invoke_audit: Arc<fcp_host::InvokeAuditChain>,
     started_at: Instant,
 }
 
@@ -3964,6 +3972,7 @@ async fn async_main() -> HostResult<()> {
         admin_bearer_token: resolve_admin_bearer_token()?,
         connectors_file: loaded_configs.connectors_file,
         zone_policies: Arc::new(RwLock::new(zone_policies)),
+        invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
         started_at: Instant::now(),
     });
 
@@ -5721,11 +5730,47 @@ async fn invoke_handler(
         "processing invoke request"
     );
 
+    // br-mvax3: build an audit context once so every phase append for
+    // this request shares zone/actor/connector/operation/correlation.
+    let audit_ctx = fcp_host::InvokeAuditContext {
+        zone_id: zone_id.to_string(),
+        actor: asserted_principal
+            .clone()
+            .unwrap_or_else(|| "anonymous".to_string()),
+        connector_id: connector_id.to_string(),
+        operation: operation_name.clone(),
+        operation_id: operation_id.clone(),
+        correlation_id: correlation_id.clone(),
+        occurred_at: u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        )
+        .unwrap_or(0),
+    };
+
     let preflight = evaluate_live_preflight(&state, &request, asserted_principal.as_deref()).await;
     if !preflight.allowed {
         let reason = preflight
             .reason
             .unwrap_or_else(|| "preflight denied invoke request".to_string());
+        // br-mvax3: deny path MUST append a hash-linked audit event so
+        // the README "every operation produces an audit event" claim is
+        // literally true even for denied requests.
+        if let Err(err) = state.invoke_audit.append(
+            &audit_ctx,
+            fcp_host::InvokePhase::PreflightDeny {
+                reason: reason.clone(),
+            },
+        ) {
+            tracing::warn!(
+                event = "invoke_audit_append_error",
+                phase = "deny",
+                error = %err,
+                "failed to append invoke deny audit event"
+            );
+        }
         tracing::warn!(
             event = "invoke_error",
             connector_id = %connector_id,
@@ -5737,6 +5782,20 @@ async fn invoke_handler(
             "invoke request failed preflight"
         );
         return Err(map_host_error(HostError::PreflightFailed(reason)));
+    }
+
+    // br-mvax3: preflight allow → append hash-linked audit event before
+    // dispatch (matches README's End-to-End Request Flow §11).
+    if let Err(err) = state
+        .invoke_audit
+        .append(&audit_ctx, fcp_host::InvokePhase::PreflightAllow)
+    {
+        tracing::warn!(
+            event = "invoke_audit_append_error",
+            phase = "allow",
+            error = %err,
+            "failed to append invoke allow audit event"
+        );
     }
 
     // br-ug5fk: cancellation ownership must follow the verified token
@@ -5769,6 +5828,26 @@ async fn invoke_handler(
                 duration_ms,
             )
             .await;
+            // br-mvax3: append hash-linked audit event AFTER dispatch.
+            // Fires whether or not the connector returned a receipt_id —
+            // this is the failure mode the bead called out (the old
+            // ReceiptSummary path silently produced zero events for
+            // receipt-less connector returns).
+            if let Err(err) = state.invoke_audit.append(
+                &audit_ctx,
+                fcp_host::InvokePhase::DispatchResult {
+                    receipt_id: response.receipt_id.as_ref().map(ToString::to_string),
+                    success: matches!(response.status, InvokeStatus::Ok),
+                    duration_ms,
+                },
+            ) {
+                tracing::warn!(
+                    event = "invoke_audit_append_error",
+                    phase = "result",
+                    error = %err,
+                    "failed to append invoke result audit event"
+                );
+            }
             tracing::info!(
                 event = "invoke_response",
                 connector_id = %connector_id,
@@ -5782,6 +5861,7 @@ async fn invoke_handler(
             Ok(Json(response))
         }
         Err(err) => {
+            let duration_ms = started_at.elapsed().as_millis() as u64;
             record_invoke_budget_usage(
                 state.budget.as_ref(),
                 Some(&zone_id),
@@ -5790,6 +5870,22 @@ async fn invoke_handler(
                 None,
             )
             .await;
+            // br-mvax3: dispatch error path also appends — the invoke
+            // chain is exhaustive across all four phases.
+            if let Err(audit_err) = state.invoke_audit.append(
+                &audit_ctx,
+                fcp_host::InvokePhase::DispatchError {
+                    error: err.to_string(),
+                    duration_ms,
+                },
+            ) {
+                tracing::warn!(
+                    event = "invoke_audit_append_error",
+                    phase = "error",
+                    error = %audit_err,
+                    "failed to append invoke error audit event"
+                );
+            }
             tracing::warn!(
                 event = "invoke_error",
                 connector_id = %connector_id,
@@ -5797,7 +5893,7 @@ async fn invoke_handler(
                 operation_id = %operation_id,
                 correlation_id,
                 error = %err,
-                duration_ms = started_at.elapsed().as_millis() as u64,
+                duration_ms,
                 "invoke request failed"
             );
             Err(map_host_error(err))
@@ -7073,6 +7169,7 @@ mod tests {
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(zone_policies)),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         })
     }
@@ -7455,6 +7552,7 @@ mod tests {
             admin_bearer_token: None,
             connectors_file: Some(connectors_file),
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         })
     }
@@ -8045,6 +8143,7 @@ mod tests {
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         });
 
@@ -8424,6 +8523,7 @@ mod tests {
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         });
         let token_id = [0x5a; 32];
@@ -11205,6 +11305,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
 
@@ -11240,6 +11341,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
 
@@ -11280,6 +11382,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
 
@@ -11320,6 +11423,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
 
@@ -11377,6 +11481,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
 
@@ -11421,6 +11526,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
 
@@ -11530,6 +11636,7 @@ done"#;
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
         let cloned = state.clone();
@@ -11580,6 +11687,7 @@ done"#;
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         });
         let version = semver::Version::new(1, 2, 0);
@@ -11969,6 +12077,7 @@ done"#;
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         })
     }

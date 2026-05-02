@@ -41,6 +41,7 @@ mod error;
 // health responses.
 #[allow(dead_code)]
 mod health;
+mod invoke_audit;
 mod migration_linux;
 #[cfg(target_os = "macos")]
 mod migration_macos;
@@ -64,6 +65,7 @@ pub use doctor::*;
 pub use emergency_revocation::*;
 pub use enforcement::*;
 pub use error::*;
+pub use invoke_audit::*;
 pub use migration_linux::*;
 #[cfg(target_os = "macos")]
 pub use migration_macos::*;

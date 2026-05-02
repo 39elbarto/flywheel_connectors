@@ -13,6 +13,7 @@ unsafe_code = "deny"
 
 [dependencies]
 # Core FCP types
+fcp-audit = { path = "../fcp-audit" }
 fcp-core = { path = "../fcp-core" }
 # Canonical type-import surface (orw5s migration target).
 fcp-prelude = { path = "../fcp-prelude" }

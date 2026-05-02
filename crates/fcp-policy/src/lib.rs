@@ -114,7 +114,16 @@ pub use fcp_core::pcs;
 
 // ── Shared Identity Types ──────────────────────────────────────────
 
-pub use fcp_core::{ConnectorId, InstanceId, OperationId};
+pub use fcp_core::{ConnectorId, InstanceId, ObjectId, OperationId};
+
+// ── Capability Constraint Enforcement (m8j0q.A.1) ─────────────────
+
+pub mod constraint_enforcer;
+
+pub use constraint_enforcer::{
+    CapabilityConstraintEnforcer, ConstraintDenialKind, ConstraintDenialReason,
+    ConstraintEvaluation, DefaultConstraintEnforcer, RequestDescriptor,
+};
 
 // ── Error Types ────────────────────────────────────────────────────
 

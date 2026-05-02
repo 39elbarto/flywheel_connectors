@@ -41,6 +41,7 @@ criterion.workspace = true
 fcp-bootstrap.workspace = true
 jsonschema.workspace = true
 semver.workspace = true
+proptest.workspace = true
 rand = "0.9"
 trybuild = "1"
 

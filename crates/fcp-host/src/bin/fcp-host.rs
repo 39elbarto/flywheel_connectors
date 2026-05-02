@@ -42,7 +42,12 @@ use fcp_crypto::{
 };
 #[cfg(test)]
 use fcp_evidence::{AttestationChain, CascadeConfig, CascadeHop, RevocationRecord};
-use fcp_evidence::{SoftwareBillOfMaterials, SupplyChainAttestation};
+use fcp_evidence::{
+    FcpCryptoMlDsa65Verifier, HybridOwnerObjectKind, HybridOwnerObjectSignatures,
+    HybridOwnerObjectTranscript, MlDsa65VerifyingKeyBytes, OwnerKeyMigrationAttestation,
+    OwnerMigrationVerificationContext, SoftwareBillOfMaterials, SupplyChainAttestation,
+    TrustedV3OwnerMap, verify_hybrid_owner_object,
+};
 use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
     BatchOptions, BatchStatus, BudgetAction, BudgetPolicyEngine, BudgetReportRequest,
@@ -108,6 +113,99 @@ use tower::ServiceExt;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 type ConnectorConfig = ManagedConnectorConfig;
+
+const HYBRID_OWNER_EVIDENCE_TAG: &str = "fcp.hybrid_owner.evidence_cbor";
+const HYBRID_OWNER_CONTEXT_FILE_ENV: &str = "FCP_HOST_HYBRID_OWNER_CONTEXT_FILE";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HybridOwnerInvokeEvidence {
+    signatures: HybridOwnerObjectSignatures,
+    migration_attestation: OwnerKeyMigrationAttestation,
+    v4_verifying_key: MlDsa65VerifyingKeyBytes,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HybridOwnerProductionConfig {
+    trusted_v3_owner_keys: Vec<Ed25519VerifyingKey>,
+    prior_v3_attestation_bytes: Vec<u8>,
+    new_v4_attestation_bytes: Vec<u8>,
+    #[serde(default)]
+    last_accepted_migration_epoch: u64,
+}
+
+#[derive(Debug, Clone)]
+struct HybridOwnerProductionVerifier {
+    trusted_v3_owner_keys: Vec<Ed25519VerifyingKey>,
+    prior_v3_attestation_bytes: Vec<u8>,
+    new_v4_attestation_bytes: Vec<u8>,
+    last_accepted_migration_epoch: u64,
+}
+
+impl HybridOwnerProductionVerifier {
+    fn new(
+        trusted_v3_owner_keys: Vec<Ed25519VerifyingKey>,
+        prior_v3_attestation_bytes: Vec<u8>,
+        new_v4_attestation_bytes: Vec<u8>,
+        last_accepted_migration_epoch: u64,
+    ) -> Self {
+        Self {
+            trusted_v3_owner_keys,
+            prior_v3_attestation_bytes,
+            new_v4_attestation_bytes,
+            last_accepted_migration_epoch,
+        }
+    }
+
+    fn from_config(config: HybridOwnerProductionConfig) -> Self {
+        Self::new(
+            config.trusted_v3_owner_keys,
+            config.prior_v3_attestation_bytes,
+            config.new_v4_attestation_bytes,
+            config.last_accepted_migration_epoch,
+        )
+    }
+
+    fn migration_context(&self) -> OwnerMigrationVerificationContext {
+        OwnerMigrationVerificationContext::new(
+            TrustedV3OwnerMap::from_keys(self.trusted_v3_owner_keys.iter().cloned()),
+            self.prior_v3_attestation_bytes.clone(),
+            self.new_v4_attestation_bytes.clone(),
+            self.last_accepted_migration_epoch,
+            Utc::now().timestamp().try_into().unwrap_or(0),
+        )
+    }
+
+    fn verify_capability_token(
+        &self,
+        zone_id: &ZoneId,
+        token: &fcp_core::CapabilityToken,
+        evidence: &HybridOwnerInvokeEvidence,
+    ) -> HostResult<()> {
+        let payload = token.raw().to_cbor().map_err(|error| {
+            HostError::PreflightFailed(format!(
+                "hybrid owner capability token payload serialization failed: {error}"
+            ))
+        })?;
+        let transcript = HybridOwnerObjectTranscript::new(
+            HybridOwnerObjectKind::CapabilityToken,
+            zone_id.clone(),
+            &payload,
+        );
+        verify_hybrid_owner_object(
+            &transcript,
+            &evidence.signatures,
+            &evidence.migration_attestation,
+            &evidence.v4_verifying_key,
+            &self.migration_context(),
+            &FcpCryptoMlDsa65Verifier,
+        )
+        .map(|_| ())
+        .map_err(|error| {
+            HostError::PreflightFailed(format!("hybrid owner capability token rejected: {error}"))
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CliAction {
@@ -1561,6 +1659,7 @@ struct AppState {
     supply_chain: Arc<SupplyChainGate>,
     capability_verifying_key: Option<Ed25519VerifyingKey>,
     revocation_cascade: Arc<RevocationCascadeVerifier>,
+    hybrid_owner_verifier: Option<Arc<HybridOwnerProductionVerifier>>,
     approval_verifying_key: Option<Ed25519VerifyingKey>,
     admin_bearer_token: Option<Arc<str>>,
     connectors_file: Option<PathBuf>,
@@ -1576,6 +1675,14 @@ struct AppState {
     /// from connector inventory so a connector-config rollout cannot
     /// accidentally drop policy state.
     zone_policies: Arc<RwLock<HashMap<ZoneId, ZonePolicyObject>>>,
+    /// Per-zone hash-linked invoke audit chain (br-mvax3).
+    ///
+    /// Appended at four phases of every `/rpc/invoke`: preflight allow,
+    /// preflight deny, dispatch result, dispatch error. Makes the
+    /// README `every operation produces an audit event` claim
+    /// literally true even when the connector returns no `receipt_id`
+    /// or fails before producing a receipt.
+    invoke_audit: Arc<fcp_host::InvokeAuditChain>,
     started_at: Instant,
 }
 
@@ -1658,6 +1765,7 @@ Startup configuration is supplied via environment variables:
   FCP_HOST_ADMIN_BEARER_TOKEN
   FCP_HOST_CAPABILITY_PUBLIC_KEY or FCP_HOST_CAPABILITY_PUBLIC_KEY_FILE
   FCP_HOST_APPROVAL_PUBLIC_KEY or FCP_HOST_APPROVAL_PUBLIC_KEY_FILE
+  FCP_HOST_HYBRID_OWNER_CONTEXT_FILE
   FCP_HOST_SELF_CHECK_TIMEOUT_MS
   FCP_HOST_SUPPLY_CHAIN_*
   FCP_HOST_HRW_LEASE_LOCAL_NODE
@@ -2212,6 +2320,49 @@ fn verify_live_revocation_cascade(
             ))
         })?;
     Ok(())
+}
+
+fn decode_hybrid_owner_invoke_evidence(raw: &str) -> HostResult<HybridOwnerInvokeEvidence> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(raw.trim())
+        .map_err(|error| {
+            HostError::PreflightFailed(format!(
+                "hybrid owner evidence tag is not valid base64 CBOR: {error}"
+            ))
+        })?;
+    ciborium::from_reader(bytes.as_slice()).map_err(|error| {
+        HostError::PreflightFailed(format!(
+            "hybrid owner evidence tag is not a valid evidence envelope: {error}"
+        ))
+    })
+}
+
+fn hybrid_owner_invoke_evidence(
+    request: &InvokeRequest,
+) -> HostResult<Option<HybridOwnerInvokeEvidence>> {
+    let Some(raw) = request
+        .context
+        .as_ref()
+        .and_then(|context| context.request_tags.get(HYBRID_OWNER_EVIDENCE_TAG))
+    else {
+        return Ok(None);
+    };
+    decode_hybrid_owner_invoke_evidence(raw).map(Some)
+}
+
+fn verify_live_hybrid_owner_capability(
+    state: &AppState,
+    request: &InvokeRequest,
+) -> HostResult<()> {
+    let Some(verifier) = state.hybrid_owner_verifier.as_deref() else {
+        return Ok(());
+    };
+    let evidence = hybrid_owner_invoke_evidence(request)?.ok_or_else(|| {
+        HostError::PreflightFailed(format!(
+            "missing hybrid owner evidence tag `{HYBRID_OWNER_EVIDENCE_TAG}` for owner-governed capability token"
+        ))
+    })?;
+    verifier.verify_capability_token(&request.zone_id, &request.capability_token, &evidence)
 }
 
 fn capability_constraints_from_claims(
@@ -2801,6 +2952,7 @@ async fn verify_live_request(
     // the live request can proceed into holder proof or persisted token-state
     // validation.
     verify_live_revocation_cascade(state, &request.capability_token, verified_claims)?;
+    verify_live_hybrid_owner_capability(state, request)?;
 
     enforce_live_deployment_tier(request, tool.safety_tier)?;
 
@@ -3516,6 +3668,25 @@ fn parse_zone_policies_json(raw: &str) -> HostResult<HashMap<ZoneId, ZonePolicyO
     Ok(policies)
 }
 
+fn resolve_hybrid_owner_production_verifier()
+-> HostResult<Option<Arc<HybridOwnerProductionVerifier>>> {
+    let Some(path) = read_optional_trimmed_env_string(HYBRID_OWNER_CONTEXT_FILE_ENV)? else {
+        return Ok(None);
+    };
+    let raw = std::fs::read_to_string(&path).map_err(|err| {
+        HostError::Internal(format!(
+            "failed to read hybrid owner context file '{}': {err}",
+            path
+        ))
+    })?;
+    let config: HybridOwnerProductionConfig = serde_json::from_str(&raw).map_err(|err| {
+        HostError::InvalidFilter(format!("invalid hybrid owner context json: {err}"))
+    })?;
+    Ok(Some(Arc::new(HybridOwnerProductionVerifier::from_config(
+        config,
+    ))))
+}
+
 fn resolve_self_check_timeout() -> HostResult<Option<Duration>> {
     let Some(raw) = read_optional_trimmed_env_string("FCP_HOST_SELF_CHECK_TIMEOUT_MS")? else {
         return Ok(None);
@@ -3783,6 +3954,7 @@ async fn async_main() -> HostResult<()> {
     let supply_chain = Arc::new(SupplyChainGate::with_config(
         resolve_supply_chain_gate_config()?,
     ));
+    let hybrid_owner_verifier = resolve_hybrid_owner_production_verifier()?;
     let cancellation = Arc::new(CancellationController::new());
     let state = Arc::new(AppState {
         registry,
@@ -3795,10 +3967,12 @@ async fn async_main() -> HostResult<()> {
         supply_chain,
         capability_verifying_key,
         revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
+        hybrid_owner_verifier,
         approval_verifying_key,
         admin_bearer_token: resolve_admin_bearer_token()?,
         connectors_file: loaded_configs.connectors_file,
         zone_policies: Arc::new(RwLock::new(zone_policies)),
+        invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
         started_at: Instant::now(),
     });
 
@@ -5556,11 +5730,47 @@ async fn invoke_handler(
         "processing invoke request"
     );
 
+    // br-mvax3: build an audit context once so every phase append for
+    // this request shares zone/actor/connector/operation/correlation.
+    let audit_ctx = fcp_host::InvokeAuditContext {
+        zone_id: zone_id.to_string(),
+        actor: asserted_principal
+            .clone()
+            .unwrap_or_else(|| "anonymous".to_string()),
+        connector_id: connector_id.to_string(),
+        operation: operation_name.clone(),
+        operation_id: operation_id.clone(),
+        correlation_id: correlation_id.clone(),
+        occurred_at: u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        )
+        .unwrap_or(0),
+    };
+
     let preflight = evaluate_live_preflight(&state, &request, asserted_principal.as_deref()).await;
     if !preflight.allowed {
         let reason = preflight
             .reason
             .unwrap_or_else(|| "preflight denied invoke request".to_string());
+        // br-mvax3: deny path MUST append a hash-linked audit event so
+        // the README "every operation produces an audit event" claim is
+        // literally true even for denied requests.
+        if let Err(err) = state.invoke_audit.append(
+            &audit_ctx,
+            fcp_host::InvokePhase::PreflightDeny {
+                reason: reason.clone(),
+            },
+        ) {
+            tracing::warn!(
+                event = "invoke_audit_append_error",
+                phase = "deny",
+                error = %err,
+                "failed to append invoke deny audit event"
+            );
+        }
         tracing::warn!(
             event = "invoke_error",
             connector_id = %connector_id,
@@ -5572,6 +5782,20 @@ async fn invoke_handler(
             "invoke request failed preflight"
         );
         return Err(map_host_error(HostError::PreflightFailed(reason)));
+    }
+
+    // br-mvax3: preflight allow → append hash-linked audit event before
+    // dispatch (matches README's End-to-End Request Flow §11).
+    if let Err(err) = state
+        .invoke_audit
+        .append(&audit_ctx, fcp_host::InvokePhase::PreflightAllow)
+    {
+        tracing::warn!(
+            event = "invoke_audit_append_error",
+            phase = "allow",
+            error = %err,
+            "failed to append invoke allow audit event"
+        );
     }
 
     // br-ug5fk: cancellation ownership must follow the verified token
@@ -6903,10 +7127,12 @@ mod tests {
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key,
             revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
+            hybrid_owner_verifier: None,
             approval_verifying_key: None,
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(zone_policies)),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         })
     }
@@ -7124,6 +7350,128 @@ mod tests {
         )
     }
 
+    struct HybridOwnerProductionFixture {
+        v3_signing_key: fcp_crypto::ed25519::Ed25519SigningKey,
+        v4_signing_key: fcp_crypto::MlDsa65SigningKey,
+        v4_verifying_key: MlDsa65VerifyingKeyBytes,
+        prior_v3_attestation: Vec<u8>,
+        new_v4_attestation: Vec<u8>,
+        migration_attestation: OwnerKeyMigrationAttestation,
+    }
+
+    impl HybridOwnerProductionFixture {
+        fn new() -> Self {
+            let v3_signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+            let v4_signing_key =
+                fcp_crypto::MlDsa65SigningKey::generate().expect("generate ML-DSA-65 key");
+            let v4_verifying_key = evidence_v4_key(&v4_signing_key);
+            let prior_v3_attestation = b"host-last-v3-owner-state".to_vec();
+            let new_v4_attestation = b"host-first-v4-owner-state".to_vec();
+            let now: u64 = Utc::now().timestamp().try_into().unwrap_or(1_800_000_000);
+            let migration_transcript = fcp_evidence::OwnerKeyMigrationTranscript::new(
+                v3_signing_key.verifying_key().key_id(),
+                v4_verifying_key.key_id(),
+                blake3_hash(&prior_v3_attestation),
+                blake3_hash(&new_v4_attestation),
+                11,
+                now.saturating_sub(60),
+                now.saturating_add(3600),
+            );
+            let migration_bytes = migration_transcript.signing_bytes();
+            let migration_attestation = OwnerKeyMigrationAttestation::new(
+                migration_transcript,
+                v3_signing_key.sign(&migration_bytes),
+                evidence_v4_signature(
+                    &v4_signing_key
+                        .sign_deterministic(&migration_bytes, b"")
+                        .expect("sign migration bridge"),
+                ),
+            );
+            Self {
+                v3_signing_key,
+                v4_signing_key,
+                v4_verifying_key,
+                prior_v3_attestation,
+                new_v4_attestation,
+                migration_attestation,
+            }
+        }
+
+        fn verifier(&self) -> Arc<HybridOwnerProductionVerifier> {
+            Arc::new(HybridOwnerProductionVerifier::new(
+                vec![self.v3_signing_key.verifying_key()],
+                self.prior_v3_attestation.clone(),
+                self.new_v4_attestation.clone(),
+                10,
+            ))
+        }
+
+        fn verifier_with_prior_v3_attestation(
+            &self,
+            prior_v3_attestation: Vec<u8>,
+        ) -> Arc<HybridOwnerProductionVerifier> {
+            Arc::new(HybridOwnerProductionVerifier::new(
+                vec![self.v3_signing_key.verifying_key()],
+                prior_v3_attestation,
+                self.new_v4_attestation.clone(),
+                10,
+            ))
+        }
+
+        fn evidence_for_token(
+            &self,
+            zone_id: &ZoneId,
+            token: &fcp_core::CapabilityToken,
+        ) -> HybridOwnerInvokeEvidence {
+            let payload = token
+                .raw()
+                .to_cbor()
+                .expect("test capability token should serialize");
+            let transcript = fcp_evidence::HybridOwnerObjectTranscript::new(
+                fcp_evidence::HybridOwnerObjectKind::CapabilityToken,
+                zone_id.clone(),
+                &payload,
+            );
+            let signing_bytes = transcript.signing_bytes();
+            HybridOwnerInvokeEvidence {
+                signatures: HybridOwnerObjectSignatures::new(
+                    self.v3_signing_key.sign(&signing_bytes),
+                    evidence_v4_signature(
+                        &self
+                            .v4_signing_key
+                            .sign_deterministic(&signing_bytes, b"")
+                            .expect("sign hybrid owner object"),
+                    ),
+                ),
+                migration_attestation: self.migration_attestation.clone(),
+                v4_verifying_key: self.v4_verifying_key.clone(),
+            }
+        }
+    }
+
+    fn evidence_v4_key(signing_key: &fcp_crypto::MlDsa65SigningKey) -> MlDsa65VerifyingKeyBytes {
+        MlDsa65VerifyingKeyBytes::try_from_bytes(signing_key.verifying_key().as_bytes().to_vec())
+            .expect("valid evidence ML-DSA-65 key")
+    }
+
+    fn evidence_v4_signature(
+        signature: &fcp_crypto::owner_key::MlDsa65SignatureBytes,
+    ) -> fcp_evidence::MlDsa65SignatureBytes {
+        fcp_evidence::MlDsa65SignatureBytes::try_from_bytes(signature.as_bytes().to_vec())
+            .expect("valid evidence ML-DSA-65 signature")
+    }
+
+    fn hybrid_owner_evidence_tag(evidence: &HybridOwnerInvokeEvidence) -> String {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(evidence, &mut bytes)
+            .expect("test hybrid owner evidence should serialize");
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    fn blake3_hash(bytes: &[u8]) -> [u8; 32] {
+        *blake3::hash(bytes).as_bytes()
+    }
+
     fn failing_admin_state_path(dir: &tempfile::TempDir) -> std::path::PathBuf {
         let blocker = dir.path().join("admin-state-blocker");
         std::fs::write(&blocker, "block persistence here").expect("write blocker file");
@@ -7162,10 +7510,12 @@ mod tests {
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
             revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
+            hybrid_owner_verifier: None,
             approval_verifying_key: None,
             admin_bearer_token: None,
             connectors_file: Some(connectors_file),
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         })
     }
@@ -7751,10 +8101,12 @@ mod tests {
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: Some(signing_key.verifying_key()),
             revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
+            hybrid_owner_verifier: None,
             approval_verifying_key: None,
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         });
 
@@ -8129,10 +8481,12 @@ mod tests {
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: Some(signing_key.verifying_key()),
             revocation_cascade: Arc::new(cascade),
+            hybrid_owner_verifier: None,
             approval_verifying_key: None,
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         });
         let token_id = [0x5a; 32];
@@ -8173,6 +8527,258 @@ mod tests {
             invoke_count.load(Ordering::SeqCst),
             0,
             "cascade rejection must happen before connector invoke dispatch"
+        );
+    }
+
+    fn hybrid_owner_context(evidence: &HybridOwnerInvokeEvidence) -> fcp_core::InvokeContext {
+        let mut context = fcp_core::InvokeContext::default();
+        context.request_tags.insert(
+            HYBRID_OWNER_EVIDENCE_TAG.to_string(),
+            hybrid_owner_evidence_tag(evidence),
+        );
+        context
+    }
+
+    fn hybrid_owner_production_state(
+        connector_id: &'static str,
+        capability_id: &'static str,
+        operation_id: &'static str,
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+        hybrid_owner_verifier: Arc<HybridOwnerProductionVerifier>,
+    ) -> (Arc<AppState>, ConnectorId) {
+        let introspection = serde_json::to_value(dispatcher_introspection(
+            operation_id,
+            capability_id,
+            SafetyTier::Safe,
+        ))
+        .expect("test introspection should serialize");
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(8);
+        let runner_task = task::spawn(async move {
+            while let Some(request) = runner_rx.recv().await {
+                match request.method.as_str() {
+                    "introspect" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": introspection.clone(),
+                        })));
+                    }
+                    "invoke" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": {
+                                "message": "hybrid owner production test should not dispatch"
+                            },
+                        })));
+                    }
+                    method => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": { "message": format!("unexpected method {method}") },
+                        })));
+                    }
+                }
+            }
+        });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let registry = dispatcher_registry_with_connector(
+            connector_id,
+            connector,
+            ConnectorConfig {
+                id: connector_id.to_string(),
+                binary: "dispatcher-test".to_string(),
+                name: Some("Hybrid Owner Production Test Connector".to_string()),
+                description: None,
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                config: None,
+                categories: vec!["test".to_string()],
+                version: None,
+                allowed_zones: Vec::new(),
+                allowed_operations: Vec::new(),
+            },
+        );
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let mut policies = HashMap::new();
+        policies.insert(ZoneId::work(), host_runtime_policy(ZoneId::work()));
+        let base_state = dispatcher_app_state(
+            registry,
+            lifecycle,
+            Some(signing_key.verifying_key()),
+            policies,
+        );
+        (
+            Arc::new(AppState {
+                hybrid_owner_verifier: Some(hybrid_owner_verifier),
+                ..(*base_state).clone()
+            }),
+            ConnectorId::from_static(connector_id),
+        )
+    }
+
+    fn hybrid_owner_production_request(
+        connector_id: ConnectorId,
+        operation_id: &'static str,
+        zone_id: ZoneId,
+        token: fcp_core::CapabilityToken,
+        context: Option<fcp_core::InvokeContext>,
+    ) -> InvokeRequest {
+        InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id,
+            operation: OperationId::from_static(operation_id),
+            zone_id,
+            input: json!({ "message": "hybrid owner production authorization" }),
+            capability_token: token,
+            holder_proof: None,
+            context,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn hybrid_owner_production_accepts_valid_capability_evidence() {
+        let connector_id = "fcp.test.hybrid-owner-valid:utility:1.0.0";
+        let operation_id = "test.echo";
+        let capability_id = "cap.test.echo";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let fixture = HybridOwnerProductionFixture::new();
+        let (state, connector_key) = hybrid_owner_production_state(
+            connector_id,
+            capability_id,
+            operation_id,
+            &signing_key,
+            fixture.verifier(),
+        );
+        let zone_id = ZoneId::work();
+        let token =
+            test_capability_token(&signing_key, capability_id, operation_id, zone_id.as_str());
+        let evidence = fixture.evidence_for_token(&zone_id, &token);
+        let request = hybrid_owner_production_request(
+            connector_key,
+            operation_id,
+            zone_id,
+            token,
+            Some(hybrid_owner_context(&evidence)),
+        );
+
+        let verified = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect("valid hybrid owner capability evidence should pass live auth");
+
+        assert_eq!(verified.principal, "user:test");
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn hybrid_owner_production_rejects_missing_evidence_tag() {
+        let connector_id = "fcp.test.hybrid-owner-missing:utility:1.0.0";
+        let operation_id = "test.echo";
+        let capability_id = "cap.test.echo";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let fixture = HybridOwnerProductionFixture::new();
+        let (state, connector_key) = hybrid_owner_production_state(
+            connector_id,
+            capability_id,
+            operation_id,
+            &signing_key,
+            fixture.verifier(),
+        );
+        let zone_id = ZoneId::work();
+        let token =
+            test_capability_token(&signing_key, capability_id, operation_id, zone_id.as_str());
+        let request =
+            hybrid_owner_production_request(connector_key, operation_id, zone_id, token, None);
+
+        let error = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("missing hybrid owner evidence must fail closed");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("missing hybrid owner evidence"),
+            "expected missing hybrid evidence rejection, got: {message}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn hybrid_owner_production_rejects_tampered_v4_counter_signature() {
+        let connector_id = "fcp.test.hybrid-owner-tampered-v4:utility:1.0.0";
+        let operation_id = "test.echo";
+        let capability_id = "cap.test.echo";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let fixture = HybridOwnerProductionFixture::new();
+        let (state, connector_key) = hybrid_owner_production_state(
+            connector_id,
+            capability_id,
+            operation_id,
+            &signing_key,
+            fixture.verifier(),
+        );
+        let zone_id = ZoneId::work();
+        let token =
+            test_capability_token(&signing_key, capability_id, operation_id, zone_id.as_str());
+        let mut evidence = fixture.evidence_for_token(&zone_id, &token);
+        let mut tampered_signature = evidence.signatures.signed_with_v4.as_bytes().to_vec();
+        tampered_signature[0] ^= 0x01;
+        evidence.signatures.signed_with_v4 =
+            fcp_evidence::MlDsa65SignatureBytes::try_from_bytes(tampered_signature)
+                .expect("tampered signature keeps valid length");
+        let request = hybrid_owner_production_request(
+            connector_key,
+            operation_id,
+            zone_id,
+            token,
+            Some(hybrid_owner_context(&evidence)),
+        );
+
+        let error = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("tampered V4 owner counter-signature must fail closed");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("hybrid owner capability token rejected")
+                && message.contains("V4 ML-DSA-65 owner-object signature"),
+            "expected V4 hybrid owner signature rejection, got: {message}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn hybrid_owner_production_rejects_missing_v3_attestation_context() {
+        let connector_id = "fcp.test.hybrid-owner-missing-v3:utility:1.0.0";
+        let operation_id = "test.echo";
+        let capability_id = "cap.test.echo";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let fixture = HybridOwnerProductionFixture::new();
+        let (state, connector_key) = hybrid_owner_production_state(
+            connector_id,
+            capability_id,
+            operation_id,
+            &signing_key,
+            fixture.verifier_with_prior_v3_attestation(b"missing-v3-state".to_vec()),
+        );
+        let zone_id = ZoneId::work();
+        let token =
+            test_capability_token(&signing_key, capability_id, operation_id, zone_id.as_str());
+        let evidence = fixture.evidence_for_token(&zone_id, &token);
+        let request = hybrid_owner_production_request(
+            connector_key,
+            operation_id,
+            zone_id,
+            token,
+            Some(hybrid_owner_context(&evidence)),
+        );
+
+        let error = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("missing V3 owner attestation context must fail closed");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("prior V3 attestation hash mismatch"),
+            "expected V3 attestation bridge rejection, got: {message}"
         );
     }
 
@@ -10657,10 +11263,12 @@ done"#;
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
             revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
+            hybrid_owner_verifier: None,
             approval_verifying_key: None,
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
 
@@ -10691,10 +11299,12 @@ done"#;
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
             revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
+            hybrid_owner_verifier: None,
             approval_verifying_key: None,
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
 
@@ -10730,10 +11340,12 @@ done"#;
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
             revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
+            hybrid_owner_verifier: None,
             approval_verifying_key: None,
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
 
@@ -10769,10 +11381,12 @@ done"#;
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
             revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
+            hybrid_owner_verifier: None,
             approval_verifying_key: None,
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
 
@@ -10825,10 +11439,12 @@ done"#;
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
             revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
+            hybrid_owner_verifier: None,
             approval_verifying_key: None,
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
 
@@ -10868,10 +11484,12 @@ done"#;
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
             revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
+            hybrid_owner_verifier: None,
             approval_verifying_key: None,
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
 
@@ -10976,10 +11594,12 @@ done"#;
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
             revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
+            hybrid_owner_verifier: None,
             approval_verifying_key: None,
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         };
         let cloned = state.clone();
@@ -11025,10 +11645,12 @@ done"#;
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
             revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
+            hybrid_owner_verifier: None,
             approval_verifying_key: None,
             admin_bearer_token: None,
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         });
         let version = semver::Version::new(1, 2, 0);
@@ -11413,10 +12035,12 @@ done"#;
             supply_chain: Arc::new(SupplyChainGate::default()),
             capability_verifying_key: None,
             revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
+            hybrid_owner_verifier: None,
             approval_verifying_key: None,
             admin_bearer_token: Some(Arc::<str>::from("topsecret".to_string())),
             connectors_file: None,
             zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            invoke_audit: Arc::new(fcp_host::InvokeAuditChain::new()),
             started_at: Instant::now(),
         })
     }

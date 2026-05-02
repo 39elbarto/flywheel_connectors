@@ -73,10 +73,18 @@ pub enum FcpError {
     #[error("Resource not allowed: {resource}")]
     ResourceNotAllowed { resource: String },
 
-    #[error("Capability constraint denied: {reason}: claim {claim_type}: {detail}")]
+    #[error("Capability constraint denied ({kind}) on claim '{claim_type}': {detail}")]
     CapabilityConstraintDenied {
-        reason: String,
+        /// Categorical reason for the denial. Stable across releases — audit
+        /// consumers and replay tooling depend on the discriminant.
+        kind: CapabilityConstraintErrorKind,
+        /// The constraint claim that produced the denial (e.g. `"host_allowlist"`,
+        /// `"resource_uri"`, `"max_calls"`). Free-form so policy authors can
+        /// label per-deployment claim shapes without bumping the enum.
         claim_type: String,
+        /// Operator-readable specifics (observed value, expected pattern, ...).
+        /// Never contains raw payload bytes — only the narrow descriptor that
+        /// reproduces the denial in audit logs.
         detail: String,
     },
 
@@ -242,6 +250,102 @@ impl ErrorCategory {
             Self::External => "External Service",
             Self::Internal => "Internal",
         }
+    }
+}
+
+/// Categorical reason for an [`FcpError::CapabilityConstraintDenied`] (m8j0q.A.3).
+///
+/// Audit consumers, replay tooling, and conformance vectors depend on this
+/// discriminant being **stable across releases**. Adding a new variant is a
+/// SemVer-breaking change in the FCP error taxonomy; renaming or reordering
+/// variants is forbidden — the serde tag (`snake_case` of the variant name)
+/// is the wire format.
+///
+/// All variants are non-retryable: a capability constraint denial is a
+/// security decision, never a transient failure. See
+/// [`FcpError::is_retryable`] — `CapabilityConstraintDenied { .. }` returns
+/// `false` for every `kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityConstraintErrorKind {
+    /// Observed value did not exactly match the constraint's allowlist or
+    /// expected value (e.g. host not in `host_allowlist`, principal not the
+    /// bound principal, object id not in `object_id_allowlist`).
+    ExactMismatch,
+    /// Observed value fell outside an allowed numeric or temporal range
+    /// (e.g. request_time before `not_before`, observed_calls > `max_calls`,
+    /// observed_bytes > `max_bytes`).
+    OutOfRange,
+    /// The constraint claim referenced a type that this enforcer does not
+    /// know how to evaluate. Indicates either a forward-rolled token
+    /// (issued by a newer mint) or a deployment-config drift.
+    UnsupportedClaimType,
+    /// A claim that the policy marks MANDATORY for this operation was
+    /// absent from the capability token's `CapabilityConstraints`. Default
+    /// deny (C3.4) — the absence itself is the denial.
+    MissingMandatoryConstraint,
+    /// The constraint claim was syntactically present but could not be
+    /// parsed (malformed CBOR fragment, incompatible schema version,
+    /// failed validation in [`fcp_auth_schema`]). Distinct from
+    /// `UnsupportedClaimType` — the type IS known, the bytes are bad.
+    ConstraintParseError,
+}
+
+impl CapabilityConstraintErrorKind {
+    /// Stable machine label used in logs, audit events, and the wire-format
+    /// `serde` tag. MUST match `serde(rename_all = "snake_case")`.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::ExactMismatch => "exact_mismatch",
+            Self::OutOfRange => "out_of_range",
+            Self::UnsupportedClaimType => "unsupported_claim_type",
+            Self::MissingMandatoryConstraint => "missing_mandatory_constraint",
+            Self::ConstraintParseError => "constraint_parse_error",
+        }
+    }
+
+    /// Operator-readable explanation of the kind.
+    ///
+    /// Used by `to_response().ai_hint` to give the operator a one-line
+    /// description without dumping the full CBOR claim back at them.
+    #[must_use]
+    pub const fn explanation(&self) -> &'static str {
+        match self {
+            Self::ExactMismatch => {
+                "Observed value did not match the constraint's exact allowlist or expected value"
+            }
+            Self::OutOfRange => "Observed value fell outside an allowed numeric or temporal range",
+            Self::UnsupportedClaimType => {
+                "The capability token references a constraint claim type this enforcer does not know how to evaluate"
+            }
+            Self::MissingMandatoryConstraint => {
+                "A constraint claim that policy marks MANDATORY for this operation was absent from the token (default-deny per C3.4)"
+            }
+            Self::ConstraintParseError => {
+                "The constraint claim could not be parsed (malformed CBOR fragment, incompatible schema version, or failed validation)"
+            }
+        }
+    }
+
+    /// Enumerate every variant in declaration order. Used by the variant-
+    /// matrix conformance test and by audit replay tools that build a
+    /// per-kind histogram.
+    #[must_use]
+    pub const fn all() -> [Self; 5] {
+        [
+            Self::ExactMismatch,
+            Self::OutOfRange,
+            Self::UnsupportedClaimType,
+            Self::MissingMandatoryConstraint,
+            Self::ConstraintParseError,
+        ]
+    }
+}
+
+impl std::fmt::Display for CapabilityConstraintErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -445,13 +549,14 @@ impl FcpError {
                 )),
             ),
             Self::CapabilityConstraintDenied {
-                reason,
+                kind,
                 claim_type,
-                ..
+                detail,
             } => (
                 "FCP-3005".into(),
                 Some(format!(
-                    "Capability constraint '{claim_type}' denied the request: {reason}. Request a narrower operation, a matching resource scope, or a new capability token."
+                    "Capability constraint '{claim_type}' denied the request ({kind}): {}. {detail} Request a narrower operation, a matching resource scope, or a new capability token. Security denials are non-retryable.",
+                    kind.explanation()
                 )),
             ),
 
@@ -622,11 +727,11 @@ impl FcpError {
                 "window_seconds": window_seconds,
             })),
             Self::CapabilityConstraintDenied {
-                reason,
+                kind,
                 claim_type,
                 detail,
             } => Some(serde_json::json!({
-                "reason": reason,
+                "kind": kind,
                 "claim_type": claim_type,
                 "detail": detail,
             })),
@@ -3310,6 +3415,226 @@ mod tests {
                 "Response message should match Display for {:?}",
                 err.category()
             );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // m8j0q.A.3 — CapabilityConstraintErrorKind variant matrix + denial taxonomy
+    //
+    // These tests pin the wire-format serde shape, the Display / explanation
+    // text per kind, and the non-retryability invariant (security denials
+    // MUST NEVER retry). Adding a new kind requires extending all five
+    // matrix loops below — a refactor that adds a variant but forgets to
+    // wire it up to one of these checks fails compile or test before it
+    // can ship.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn denial(kind: CapabilityConstraintErrorKind) -> FcpError {
+        FcpError::CapabilityConstraintDenied {
+            kind,
+            claim_type: "host_allowlist".into(),
+            detail: "host=evil.example.com".into(),
+        }
+    }
+
+    #[test]
+    fn constraint_kind_all_returns_every_variant_in_declaration_order() {
+        let all = CapabilityConstraintErrorKind::all();
+        // Length lock: extending the enum without updating the matrix
+        // tests is a compile-time slip that this assert catches.
+        assert_eq!(all.len(), 5);
+        assert_eq!(
+            all,
+            [
+                CapabilityConstraintErrorKind::ExactMismatch,
+                CapabilityConstraintErrorKind::OutOfRange,
+                CapabilityConstraintErrorKind::UnsupportedClaimType,
+                CapabilityConstraintErrorKind::MissingMandatoryConstraint,
+                CapabilityConstraintErrorKind::ConstraintParseError,
+            ]
+        );
+    }
+
+    #[test]
+    fn constraint_kind_as_str_matches_serde_snake_case() {
+        // The wire format MUST be snake_case of the variant name; audit
+        // consumers and replay tools key off these literals.
+        assert_eq!(
+            CapabilityConstraintErrorKind::ExactMismatch.as_str(),
+            "exact_mismatch"
+        );
+        assert_eq!(
+            CapabilityConstraintErrorKind::OutOfRange.as_str(),
+            "out_of_range"
+        );
+        assert_eq!(
+            CapabilityConstraintErrorKind::UnsupportedClaimType.as_str(),
+            "unsupported_claim_type"
+        );
+        assert_eq!(
+            CapabilityConstraintErrorKind::MissingMandatoryConstraint.as_str(),
+            "missing_mandatory_constraint"
+        );
+        assert_eq!(
+            CapabilityConstraintErrorKind::ConstraintParseError.as_str(),
+            "constraint_parse_error"
+        );
+    }
+
+    #[test]
+    fn constraint_kind_display_matches_as_str() {
+        for kind in CapabilityConstraintErrorKind::all() {
+            assert_eq!(format!("{kind}"), kind.as_str());
+        }
+    }
+
+    #[test]
+    fn constraint_kind_serde_round_trip_per_variant() {
+        // Conformance vector: every kind round-trips through JSON
+        // byte-equivalent. This pins the wire format.
+        for kind in CapabilityConstraintErrorKind::all() {
+            let json = serde_json::to_string(&kind).expect("serialize");
+            assert_eq!(
+                json,
+                format!("\"{}\"", kind.as_str()),
+                "JSON shape MUST be the snake_case literal for {kind}"
+            );
+            let back: CapabilityConstraintErrorKind =
+                serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, kind);
+        }
+    }
+
+    #[test]
+    fn constraint_kind_explanation_is_non_empty_per_variant() {
+        // Every kind MUST carry an operator-readable explanation —
+        // operators reading audit logs deserve a one-line description
+        // without dumping the full CWT claim back.
+        for kind in CapabilityConstraintErrorKind::all() {
+            let explanation = kind.explanation();
+            assert!(
+                !explanation.is_empty(),
+                "explanation must be non-empty for {kind}"
+            );
+            // No kind's explanation should accidentally collide with
+            // another kind's explanation (would mask which check failed).
+            for other in CapabilityConstraintErrorKind::all() {
+                if other != kind {
+                    assert_ne!(
+                        explanation,
+                        other.explanation(),
+                        "explanations MUST be distinct: {kind} collides with {other}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn constraint_denied_display_includes_kind_claim_and_detail() {
+        let err = denial(CapabilityConstraintErrorKind::ExactMismatch);
+        let display = err.to_string();
+        assert!(display.contains("exact_mismatch"), "got: {display}");
+        assert!(display.contains("host_allowlist"), "got: {display}");
+        assert!(display.contains("evil.example.com"), "got: {display}");
+    }
+
+    #[test]
+    fn constraint_denied_categorizes_as_capability() {
+        for kind in CapabilityConstraintErrorKind::all() {
+            assert_eq!(denial(kind).category(), ErrorCategory::Capability);
+        }
+    }
+
+    #[test]
+    fn constraint_denied_uses_fcp_3005_error_code() {
+        for kind in CapabilityConstraintErrorKind::all() {
+            assert_eq!(denial(kind).numeric_code(), 3005);
+            assert_eq!(denial(kind).error_code(), "FCP-3005");
+        }
+    }
+
+    #[test]
+    fn constraint_denied_is_never_retryable() {
+        // Security denials MUST NEVER retry. A bug that flips this to
+        // true would let a denied request be silently re-issued by a
+        // retry loop — exactly the failure mode capability constraints
+        // exist to prevent.
+        for kind in CapabilityConstraintErrorKind::all() {
+            let err = denial(kind);
+            assert!(
+                !err.is_retryable(),
+                "CapabilityConstraintDenied with kind {kind} MUST NOT be retryable"
+            );
+            assert_eq!(
+                err.retry_after(),
+                None,
+                "non-retryable error MUST have no retry_after for kind {kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn constraint_denied_to_response_carries_fcp_3005_and_kind_in_ai_hint() {
+        for kind in CapabilityConstraintErrorKind::all() {
+            let response = denial(kind).to_response();
+            assert_eq!(response.code, "FCP-3005", "wrong code for {kind}");
+            let hint = response
+                .ai_recovery_hint
+                .as_deref()
+                .unwrap_or_else(|| panic!("missing ai_hint for {kind}"));
+            assert!(
+                hint.contains(kind.as_str()),
+                "ai_hint must mention kind label for {kind}: got {hint}"
+            );
+            assert!(
+                hint.contains("non-retryable"),
+                "ai_hint must signal non-retryability for {kind}: got {hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn constraint_denied_detail_json_includes_kind_field() {
+        // Wire-format pin: the per-error detail JSON MUST surface the
+        // kind in the `kind` key (not the legacy `reason` key).
+        for kind in CapabilityConstraintErrorKind::all() {
+            let err = denial(kind);
+            let detail = err.details().expect("details populated");
+            assert_eq!(
+                detail.get("kind").and_then(|v| v.as_str()),
+                Some(kind.as_str()),
+                "detail_json kind field for {kind}"
+            );
+            assert_eq!(
+                detail.get("claim_type").and_then(|v| v.as_str()),
+                Some("host_allowlist")
+            );
+            assert_eq!(
+                detail.get("detail").and_then(|v| v.as_str()),
+                Some("host=evil.example.com")
+            );
+        }
+    }
+
+    #[test]
+    fn constraint_denied_round_trips_through_serde_per_kind() {
+        // Whole-error serde round-trip — pins the FcpError variant tag
+        // shape AND the nested kind enum together, so a refactor that
+        // breaks either layer trips this test.
+        for kind in CapabilityConstraintErrorKind::all() {
+            let err = denial(kind);
+            let json = serde_json::to_string(&err).expect("serialize");
+            let back: FcpError = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back.to_string(), err.to_string());
+            // Discriminant survives the round-trip.
+            match back {
+                FcpError::CapabilityConstraintDenied {
+                    kind: round_tripped_kind,
+                    ..
+                } => assert_eq!(round_tripped_kind, kind),
+                other => panic!("variant changed across serde for {kind}: {other:?}"),
+            }
         }
     }
 }

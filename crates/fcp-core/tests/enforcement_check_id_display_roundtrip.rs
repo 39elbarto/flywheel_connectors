@@ -17,10 +17,10 @@
 //! covers what exists:
 //!
 //!   1. **Per-variant label pinning** — the exact `as_str()` /
-//!      `Display` form for every one of the 11 variants.
+//!      `Display` form for every one of the 12 variants.
 //!   2. **Display agrees with `as_str()`** — both implementations
 //!      MUST emit the same bytes.
-//!   3. **All 11 labels pairwise distinct** — required so audit
+//!   3. **All 12 labels pairwise distinct** — required so audit
 //!      logs can unambiguously discriminate checks.
 //!   4. **Equality + Hash via the derive** — Copy + Eq + Hash on
 //!      every variant; clones and copies hash identically.
@@ -44,7 +44,7 @@ fn hash_of<T: Hash + ?Sized>(v: &T) -> u64 {
     h.finish()
 }
 
-/// All 11 variants paired with their NORMATIVE label (enforcement.rs:62-76).
+/// All 12 variants paired with their NORMATIVE label.
 const VARIANTS: &[(EnforcementCheckId, &str)] = &[
     (EnforcementCheckId::CanonicalDecode, "canonical_decode"),
     (EnforcementCheckId::ZoneMembership, "zone_membership"),
@@ -60,6 +60,10 @@ const VARIANTS: &[(EnforcementCheckId, &str)] = &[
     ),
     (EnforcementCheckId::TaintApproval, "taint_approval"),
     (EnforcementCheckId::PolicyCeiling, "policy_ceiling"),
+    (
+        EnforcementCheckId::CapabilityConstraints,
+        "capability_constraints",
+    ),
     (EnforcementCheckId::ConnectorManifest, "connector_manifest"),
     (EnforcementCheckId::Budget, "budget"),
     (EnforcementCheckId::RateLimit, "rate_limit"),
@@ -111,7 +115,7 @@ fn display_agrees_with_as_str_byte_for_byte() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn all_eleven_labels_pairwise_distinct() {
+fn all_twelve_labels_pairwise_distinct() {
     use std::collections::HashSet;
     let labels: HashSet<&'static str> = VARIANTS.iter().map(|(_, s)| *s).collect();
     assert_eq!(
@@ -123,11 +127,11 @@ fn all_eleven_labels_pairwise_distinct() {
 }
 
 #[test]
-fn label_count_matches_documented_eleven() {
+fn label_count_matches_documented_twelve() {
     assert_eq!(
         VARIANTS.len(),
-        11,
-        "EnforcementCheckId variant count drifted from documented 11"
+        12,
+        "EnforcementCheckId variant count drifted from documented 12"
     );
 }
 
@@ -182,7 +186,7 @@ fn distinct_variants_hash_distinctly_in_practice() {
     assert_eq!(
         unique.len(),
         hashes.len(),
-        "11 variants MUST hash to distinct u64s: {hashes:?}"
+        "12 variants MUST hash to distinct u64s: {hashes:?}"
     );
 }
 

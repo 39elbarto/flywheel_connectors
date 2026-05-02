@@ -35,9 +35,10 @@ use fcp_async_core::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_async_core::task::{self, JoinHandle};
 use fcp_core::{
-    ApprovalToken, CapabilityVerifier, CostEstimateConfidence, Decision, PolicySimulationInput,
-    ResourceAvailability, RolloutPolicy, SafetyTier, TransportMode, UsageMetric, UsageMetricKind,
-    ZoneId, ZonePolicyObject, simulate_policy_decision,
+    ApprovalToken, CapabilityConstraints, CapabilityVerifier, CostEstimateConfidence, Decision,
+    ObjectId, PolicySimulationInput, ResourceAvailability, RolloutPolicy, SafetyTier,
+    TransportMode, UsageMetric, UsageMetricKind, ZoneId, ZonePolicyObject,
+    simulate_policy_decision,
 };
 #[cfg(test)]
 use fcp_core::{DecisionReceiptPolicy, ObjectHeader, Provenance, ZoneTransportPolicy};
@@ -81,6 +82,10 @@ use fcp_kernel::{
     HealthSnapshot, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, LifecycleError,
     LifecycleManager, LifecycleState, LifecycleStatus, RateLimitDeclarations, RequestId,
     SelfCheckReport, SimulateRequest, SimulateResponse,
+};
+use fcp_policy::{
+    CapabilityConstraintEnforcer, ConstraintEvaluation, DefaultConstraintEnforcer, PrincipalId,
+    RequestDescriptor,
 };
 use futures_util::future::join_all;
 use hyper::body::Incoming;
@@ -1733,6 +1738,85 @@ fn capability_token_b64(token: &fcp_core::CapabilityToken) -> HostResult<String>
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
+fn capability_constraints_from_claims(
+    claims: &fcp_crypto::cose::CwtClaims,
+) -> HostResult<CapabilityConstraints> {
+    let Some(encoded_constraints) = claims.get(fcp2_claims::CONSTRAINTS) else {
+        return Err(HostError::PreflightFailed(
+            "capability token is missing constraints required for live execution".to_string(),
+        ));
+    };
+
+    let mut bytes = Vec::new();
+    ciborium::into_writer(encoded_constraints, &mut bytes).map_err(|error| {
+        HostError::PreflightFailed(format!(
+            "failed to reserialize capability constraints claim: {error}"
+        ))
+    })?;
+    ciborium::from_reader(&bytes[..]).map_err(|error| {
+        HostError::PreflightFailed(format!(
+            "failed to decode capability constraints claim: {error}"
+        ))
+    })
+}
+
+fn live_constraint_resource_uri(input: &Value) -> Option<String> {
+    ["resource_uri", "resource", "uri", "url"]
+        .iter()
+        .find_map(|key| {
+            input
+                .get(*key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
+}
+
+fn enforce_live_capability_constraints(
+    request: &InvokeRequest,
+    claims: &fcp_crypto::cose::CwtClaims,
+    principal: &str,
+    resource_uri: Option<&str>,
+) -> HostResult<()> {
+    let constraints = capability_constraints_from_claims(claims)?;
+    let input_cbor = to_deterministic_cbor(&request.input).map_err(|error| {
+        HostError::PreflightFailed(format!(
+            "failed to canonicalize request input for capability constraints: {error}"
+        ))
+    })?;
+    let requested_at_unix_ms = u64::try_from(Utc::now().timestamp_millis()).map_err(|_| {
+        HostError::PreflightFailed(
+            "system clock produced a negative timestamp for capability constraint enforcement"
+                .to_string(),
+        )
+    })?;
+    let principal = PrincipalId::new(principal).map_err(|error| {
+        HostError::PreflightFailed(format!(
+            "capability token principal is not canonical for constraint enforcement: {error}"
+        ))
+    })?;
+
+    let descriptor = RequestDescriptor {
+        object_id: ObjectId::from_unscoped_bytes(request.id.0.as_bytes()),
+        operation: request.operation.clone(),
+        principal,
+        host: String::new(),
+        resource_uri: resource_uri.unwrap_or_default().to_string(),
+        requested_at_unix_ms,
+        observed_calls: 1,
+        observed_bytes: input_cbor.len().try_into().unwrap_or(u64::MAX),
+    };
+
+    match DefaultConstraintEnforcer::new().evaluate(&constraints, &descriptor) {
+        ConstraintEvaluation::Allow => Ok(()),
+        ConstraintEvaluation::Deny(reason) => Err(HostError::PreflightFailed(format!(
+            "capability constraint denied during live execution ({:?}): {}",
+            reason.kind, reason.explanation
+        ))),
+    }
+}
+
 const HOST_STATE_MISSING_VERIFYING_KEY_REASON_PREFIX: &str =
     "No verifying key found for token key ID ";
 
@@ -1832,6 +1916,11 @@ async fn verify_live_request(
                 .to_string(),
         )
     })?;
+    let constraint_resource_uri = live_constraint_resource_uri(&request.input);
+    let constraint_resource_uris = constraint_resource_uri
+        .iter()
+        .cloned()
+        .collect::<Vec<String>>();
     // The gateway has no link from a capability token back to the
     // specific SubprocessConnector instance that will ultimately
     // execute the operation — handshake uses `requested_instance_id:
@@ -1857,7 +1946,7 @@ async fn verify_live_request(
             request.capability_token.clone(),
             &tool.capability,
             &request.operation,
-            &[],
+            &constraint_resource_uris,
         )
         .map_err(|error| {
             HostError::PreflightFailed(format!("capability token rejected: {error}"))
@@ -1955,6 +2044,13 @@ async fn verify_live_request(
             receipt.reason_code
         )));
     }
+
+    enforce_live_capability_constraints(
+        request,
+        verified_claims,
+        principal,
+        constraint_resource_uri.as_deref(),
+    )?;
 
     Ok(VerifiedLiveRequest {
         principal: principal.to_owned(),
@@ -5893,14 +5989,17 @@ mod tests {
         })
     }
 
+    fn constraints_cbor(constraints: &fcp_core::CapabilityConstraints) -> Vec<u8> {
+        let mut cbor = Vec::new();
+        ciborium::into_writer(constraints, &mut cbor).expect("test constraints should serialize");
+        cbor
+    }
+
     fn wildcard_constraints_cbor() -> Vec<u8> {
-        let constraints = fcp_core::CapabilityConstraints {
+        constraints_cbor(&fcp_core::CapabilityConstraints {
             resource_allow: vec!["*".to_string()],
             ..Default::default()
-        };
-        let mut cbor = Vec::new();
-        ciborium::into_writer(&constraints, &mut cbor).expect("test constraints should serialize");
-        cbor
+        })
     }
 
     fn test_capability_grants_value(capability_id: &str, operation_id: &str) -> ciborium::Value {
@@ -5958,6 +6057,31 @@ mod tests {
     ) -> fcp_core::CapabilityToken {
         let now = Utc::now();
         let constraints = wildcard_constraints_cbor();
+        fcp_core::CapabilityToken::from_raw(
+            fcp_crypto::cose::CapabilityTokenBuilder::new()
+                .capability_id(capability_id)
+                .zone_id(zone_id)
+                .principal("user:test")
+                .issuer("node:test")
+                .audience("*")
+                .operations(&[operation_id])
+                .validity(now, now + chrono::Duration::hours(1))
+                .try_constraints_cbor(&constraints)
+                .expect("test constraints CBOR should be valid")
+                .sign(signing_key)
+                .expect("test capability token should sign"),
+        )
+    }
+
+    fn test_capability_token_with_constraints(
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+        capability_id: &str,
+        operation_id: &str,
+        zone_id: &str,
+        constraints: &fcp_core::CapabilityConstraints,
+    ) -> fcp_core::CapabilityToken {
+        let now = Utc::now();
+        let constraints = constraints_cbor(constraints);
         fcp_core::CapabilityToken::from_raw(
             fcp_crypto::cose::CapabilityTokenBuilder::new()
                 .capability_id(capability_id)
@@ -6395,6 +6519,84 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn verify_live_request_rejects_capability_constraint_denial() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping constraint-denial test");
+            return;
+        }
+
+        let connector_id = "fcp.test.constraint-denial:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        register_test_capability_issuer(
+            lifecycle.as_ref(),
+            &signing_key,
+            connector_id,
+            "cap.test.echo",
+            "test.echo",
+            ZoneId::work().as_str(),
+        )
+        .await;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![subprocess_test_connector_config(connector_id)],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+
+        let mut policies: HashMap<ZoneId, ZonePolicyObject> = HashMap::new();
+        policies.insert(ZoneId::work(), host_runtime_policy(ZoneId::work()));
+
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            zone_policies: Arc::new(RwLock::new(policies)),
+            ..(*base_state).clone()
+        });
+
+        let constraints = fcp_core::CapabilityConstraints {
+            resource_allow: vec!["*".to_string()],
+            max_calls: Some(0),
+            ..Default::default()
+        };
+        let token = test_capability_token_with_constraints(
+            &signing_key,
+            "cap.test.echo",
+            "test.echo",
+            ZoneId::work().as_str(),
+            &constraints,
+        );
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "constraint denial should fail before dispatch" }),
+            capability_token: token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let error = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("max_calls=0 capability constraint must reject live execution");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("capability constraint denied") && msg.contains("max_calls"),
+            "expected live capability-constraint denial, got: {msg}"
+        );
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

@@ -73,6 +73,13 @@ pub enum FcpError {
     #[error("Resource not allowed: {resource}")]
     ResourceNotAllowed { resource: String },
 
+    #[error("Capability constraint denied: {reason}: claim {claim_type}: {detail}")]
+    CapabilityConstraintDenied {
+        reason: String,
+        claim_type: String,
+        detail: String,
+    },
+
     // ─────────────────────────────────────────────────────────────────────────
     // Zone errors (FCP-4xxx)
     // ─────────────────────────────────────────────────────────────────────────
@@ -257,7 +264,8 @@ impl FcpError {
             Self::CapabilityDenied { .. }
             | Self::RateLimited { .. }
             | Self::OperationNotGranted { .. }
-            | Self::ResourceNotAllowed { .. } => ErrorCategory::Capability,
+            | Self::ResourceNotAllowed { .. }
+            | Self::CapabilityConstraintDenied { .. } => ErrorCategory::Capability,
 
             Self::ZoneViolation { .. }
             | Self::TaintViolation { .. }
@@ -308,6 +316,7 @@ impl FcpError {
             Self::RateLimited { .. } => 3002,
             Self::OperationNotGranted { .. } => 3003,
             Self::ResourceNotAllowed { .. } => 3004,
+            Self::CapabilityConstraintDenied { .. } => 3005,
 
             Self::ZoneViolation { .. } => 4001,
             Self::TaintViolation { .. } => 4002,
@@ -433,6 +442,16 @@ impl FcpError {
                 "FCP-3004".into(),
                 Some(format!(
                     "Access to resource '{resource}' is not permitted. Verify the resource is within the connector's allowed scope."
+                )),
+            ),
+            Self::CapabilityConstraintDenied {
+                reason,
+                claim_type,
+                ..
+            } => (
+                "FCP-3005".into(),
+                Some(format!(
+                    "Capability constraint '{claim_type}' denied the request: {reason}. Request a narrower operation, a matching resource scope, or a new capability token."
                 )),
             ),
 
@@ -601,6 +620,15 @@ impl FcpError {
                 "used": used,
                 "limit": limit,
                 "window_seconds": window_seconds,
+            })),
+            Self::CapabilityConstraintDenied {
+                reason,
+                claim_type,
+                detail,
+            } => Some(serde_json::json!({
+                "reason": reason,
+                "claim_type": claim_type,
+                "detail": detail,
             })),
             Self::ZoneViolation {
                 source_zone,

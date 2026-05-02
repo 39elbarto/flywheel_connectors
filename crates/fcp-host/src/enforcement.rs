@@ -6,7 +6,8 @@
 //!
 //! # Architecture
 //!
-//! The pipeline comprises 11 concrete checks executed in sequence:
+//! The pipeline comprises concrete checks executed in the sequence declared by
+//! `fcp_core::EnforcementCheckOrder`:
 //! 1. Canonical decode — validates request has required non-empty fields
 //! 2. Zone membership — validates principal is allowed in the zone
 //! 3. Capability verify — validates capability claims include the operation's required capability
@@ -15,17 +16,23 @@
 //! 6. Revocation freshness — validates revocation list age is within window
 //! 7. Taint approval — validates critical taints have approval tokens
 //! 8. Policy ceiling — validates zone policy permits connector/operation
-//! 9. Connector manifest — validates manifest includes the operation
-//! 10. Budget — validates request is within the current usage budget
-//! 11. Rate limit — validates request is within rate quota
+//! 9. Capability constraints — validates token constraints against request details
+//! 10. Connector manifest — validates manifest includes the operation
+//! 11. Budget — validates request is within the current usage budget
+//! 12. Rate limit — validates request is within rate quota
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use fcp_core::{IdValidationError, ObjectId, RevocationRegistry, ZoneIdError};
+use fcp_core::{
+    CapabilityConstraints, EnforcementCheckId, EnforcementCheckOrder, IdValidationError, ObjectId,
+    PrincipalId, RevocationRegistry, ZoneIdError,
+};
 use fcp_kernel::{ConnectorId, OperationId};
-use fcp_policy::ZoneId;
+use fcp_policy::{
+    CapabilityConstraintEnforcer, DefaultConstraintEnforcer, RequestDescriptor, ZoneId,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Enforcement configuration
@@ -239,6 +246,18 @@ pub struct EnforcementContext {
     pub capability_claims: Vec<String>,
     /// Capability ID required by the requested operation, if resolved.
     pub required_capability: Option<String>,
+    /// Parsed constraints from the presented capability token.
+    pub capability_constraints: Option<CapabilityConstraints>,
+    /// Content-addressed object targeted by the request, when constraint checks need it.
+    pub constraint_object_id: Option<ObjectId>,
+    /// Egress host targeted by the request, when constraint checks need it.
+    pub constraint_host: Option<String>,
+    /// Resource URI targeted by the request, when constraint checks need it.
+    pub constraint_resource_uri: Option<String>,
+    /// Cumulative invocations observed against this capability so far.
+    pub constraint_observed_calls: u32,
+    /// Cumulative bytes transferred against this capability so far.
+    pub constraint_observed_bytes: u64,
     /// Active taint flags on the request.
     pub taint_flags: Vec<String>,
     /// Approval scopes presented with the request.
@@ -283,6 +302,12 @@ pub struct EnforcementContextBuilder {
     principal: Option<String>,
     capability_claims: Vec<String>,
     required_capability: Option<String>,
+    capability_constraints: Option<CapabilityConstraints>,
+    constraint_object_id: Option<ObjectId>,
+    constraint_host: Option<String>,
+    constraint_resource_uri: Option<String>,
+    constraint_observed_calls: u32,
+    constraint_observed_bytes: u64,
     taint_flags: Vec<String>,
     approval_scopes: Vec<String>,
     timestamp_ms: u64,
@@ -354,6 +379,42 @@ impl EnforcementContextBuilder {
     #[must_use]
     pub fn required_capability(mut self, capability: impl Into<String>) -> Self {
         self.required_capability = Some(capability.into());
+        self
+    }
+
+    /// Set the parsed capability-token constraints.
+    #[must_use]
+    pub fn capability_constraints(mut self, constraints: CapabilityConstraints) -> Self {
+        self.capability_constraints = Some(constraints);
+        self
+    }
+
+    /// Set the request object id used by capability-constraint checks.
+    #[must_use]
+    pub fn constraint_object_id(mut self, object_id: ObjectId) -> Self {
+        self.constraint_object_id = Some(object_id);
+        self
+    }
+
+    /// Set the request egress host used by capability-constraint checks.
+    #[must_use]
+    pub fn constraint_host(mut self, host: impl Into<String>) -> Self {
+        self.constraint_host = Some(host.into());
+        self
+    }
+
+    /// Set the resource URI used by capability-constraint checks.
+    #[must_use]
+    pub fn constraint_resource_uri(mut self, resource_uri: impl Into<String>) -> Self {
+        self.constraint_resource_uri = Some(resource_uri.into());
+        self
+    }
+
+    /// Set cumulative usage counters used by capability-constraint checks.
+    #[must_use]
+    pub const fn constraint_usage(mut self, observed_calls: u32, observed_bytes: u64) -> Self {
+        self.constraint_observed_calls = observed_calls;
+        self.constraint_observed_bytes = observed_bytes;
         self
     }
 
@@ -455,6 +516,12 @@ impl EnforcementContextBuilder {
             principal: self.principal?,
             capability_claims: self.capability_claims,
             required_capability: self.required_capability,
+            capability_constraints: self.capability_constraints,
+            constraint_object_id: self.constraint_object_id,
+            constraint_host: self.constraint_host,
+            constraint_resource_uri: self.constraint_resource_uri,
+            constraint_observed_calls: self.constraint_observed_calls,
+            constraint_observed_bytes: self.constraint_observed_bytes,
             taint_flags: self.taint_flags,
             approval_scopes: self.approval_scopes,
             timestamp_ms: self.timestamp_ms,
@@ -933,6 +1000,64 @@ impl EnforcementCheck for PolicyCeilingCheck {
     }
 }
 
+/// Validates capability-token constraints against request details.
+pub struct CapabilityConstraintsCheck;
+
+impl EnforcementCheck for CapabilityConstraintsCheck {
+    fn name(&self) -> &'static str {
+        "capability_constraints"
+    }
+
+    fn check(&self, ctx: &EnforcementContext, _config: &EnforcementConfig) -> CheckOutcome {
+        let Some(constraints) = &ctx.capability_constraints else {
+            return CheckOutcome::Skip {
+                reason: "capability constraints not provided".into(),
+            };
+        };
+
+        let Some(object_id) = ctx.constraint_object_id else {
+            return CheckOutcome::Deny {
+                reason_code: "CONSTRAINT_REQUEST_DESCRIPTOR_INCOMPLETE".into(),
+                explanation:
+                    "capability constraints were provided but request object_id is missing".into(),
+            };
+        };
+
+        let operation = match parse_operation_id_for_check(&ctx.operation) {
+            Ok(operation) => operation,
+            Err(outcome) => return outcome,
+        };
+        let principal = match PrincipalId::new(ctx.principal.as_str()) {
+            Ok(principal) => principal,
+            Err(err) => {
+                return CheckOutcome::Deny {
+                    reason_code: "INVALID_PRINCIPAL_ID".into(),
+                    explanation: format!("principal '{}' is not canonical: {err}", ctx.principal),
+                };
+            }
+        };
+
+        let descriptor = RequestDescriptor {
+            object_id,
+            operation,
+            principal,
+            host: ctx.constraint_host.clone().unwrap_or_default(),
+            resource_uri: ctx.constraint_resource_uri.clone().unwrap_or_default(),
+            requested_at_unix_ms: ctx.timestamp_ms,
+            observed_calls: ctx.constraint_observed_calls,
+            observed_bytes: ctx.constraint_observed_bytes,
+        };
+
+        match DefaultConstraintEnforcer::new().evaluate(constraints, &descriptor) {
+            fcp_policy::ConstraintEvaluation::Allow => CheckOutcome::Allow,
+            fcp_policy::ConstraintEvaluation::Deny(reason) => CheckOutcome::Deny {
+                reason_code: "CAPABILITY_CONSTRAINT_DENIED".into(),
+                explanation: reason.explanation,
+            },
+        }
+    }
+}
+
 /// Validates that the connector manifest allows the requested operation.
 pub struct ConnectorManifestCheck;
 
@@ -1012,7 +1137,7 @@ pub struct RevocationCheck;
 
 impl EnforcementCheck for RevocationCheck {
     fn name(&self) -> &'static str {
-        "revocation"
+        "revocation_freshness"
     }
 
     fn check(&self, ctx: &EnforcementContext, config: &EnforcementConfig) -> CheckOutcome {
@@ -1109,7 +1234,7 @@ impl EnforcementCheck for RevocationCheck {
 ///   (line ~1800), fail-closed pending live signature verification.
 /// - Persisted lifecycle verify: `state.lifecycle.verify_capability_token`.
 ///
-/// The pipeline + its 11 checks remain useful as a structural
+/// The pipeline + its canonical checks remain useful as a structural
 /// reference for the canonical check ordering and for callers that
 /// want to run a check in isolation (e.g.,
 /// `ConnectorManifestCheck.check(&ctx, &config)` directly). The
@@ -1122,7 +1247,7 @@ pub struct EnforcementPipeline {
 }
 
 impl EnforcementPipeline {
-    /// Create a pipeline with the default 11 checks and default config.
+    /// Create a pipeline with the default canonical checks and default config.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -1224,21 +1349,29 @@ impl EnforcementPipeline {
         }
     }
 
-    /// The default set of 11 checks in canonical order.
+    /// The default checks in canonical order.
     fn default_checks() -> Vec<Box<dyn EnforcementCheck>> {
-        vec![
-            Box::new(CanonicalDecodeCheck),
-            Box::new(ZoneMembershipCheck),
-            Box::new(CapabilityVerifyCheck),
-            Box::new(HolderProofCheck),
-            Box::new(CheckpointFreshnessCheck),
-            Box::new(RevocationCheck),
-            Box::new(TaintApprovalCheck),
-            Box::new(PolicyCeilingCheck),
-            Box::new(ConnectorManifestCheck),
-            Box::new(BudgetCheck),
-            Box::new(RateLimitCheck),
-        ]
+        EnforcementCheckOrder::canonical_order()
+            .into_iter()
+            .map(Self::check_for_id)
+            .collect()
+    }
+
+    fn check_for_id(check: EnforcementCheckId) -> Box<dyn EnforcementCheck> {
+        match check {
+            EnforcementCheckId::CanonicalDecode => Box::new(CanonicalDecodeCheck),
+            EnforcementCheckId::ZoneMembership => Box::new(ZoneMembershipCheck),
+            EnforcementCheckId::CapabilityVerify => Box::new(CapabilityVerifyCheck),
+            EnforcementCheckId::HolderProof => Box::new(HolderProofCheck),
+            EnforcementCheckId::CheckpointFreshness => Box::new(CheckpointFreshnessCheck),
+            EnforcementCheckId::RevocationFreshness => Box::new(RevocationCheck),
+            EnforcementCheckId::TaintApproval => Box::new(TaintApprovalCheck),
+            EnforcementCheckId::PolicyCeiling => Box::new(PolicyCeilingCheck),
+            EnforcementCheckId::CapabilityConstraints => Box::new(CapabilityConstraintsCheck),
+            EnforcementCheckId::ConnectorManifest => Box::new(ConnectorManifestCheck),
+            EnforcementCheckId::Budget => Box::new(BudgetCheck),
+            EnforcementCheckId::RateLimit => Box::new(RateLimitCheck),
+        }
     }
 }
 
@@ -1273,6 +1406,12 @@ fn test_context() -> EnforcementContext {
         principal: "agent-alpha".into(),
         capability_claims: vec!["messages.write".into()],
         required_capability: Some("messages.write".into()),
+        capability_constraints: None,
+        constraint_object_id: None,
+        constraint_host: None,
+        constraint_resource_uri: None,
+        constraint_observed_calls: 0,
+        constraint_observed_bytes: 0,
         taint_flags: Vec::new(),
         approval_scopes: Vec::new(),
         timestamp_ms: 1_700_000_000_000,
@@ -1300,6 +1439,10 @@ fn test_context() -> EnforcementContext {
 mod tests {
     use super::*;
     use fcp_cbor::SchemaId;
+
+    fn constraint_object_id() -> ObjectId {
+        ObjectId::from_unscoped_bytes(b"constraint-object")
+    }
 
     // ── EnforcementConfig ──
 
@@ -1562,6 +1705,34 @@ mod tests {
     }
 
     #[test]
+    fn builder_with_capability_constraints_descriptor() {
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["/messages/*".into()],
+            ..CapabilityConstraints::default()
+        };
+        let object_id = constraint_object_id();
+        let ctx = EnforcementContextBuilder::new()
+            .request_id("r1")
+            .connector_id("slack:utility:1.0.0")
+            .operation("messages.write")
+            .zone_id("z:prod")
+            .principal("agent-alpha")
+            .capability_constraints(constraints)
+            .constraint_object_id(object_id)
+            .constraint_host("api.example.com")
+            .constraint_resource_uri("/messages/1")
+            .constraint_usage(3, 512)
+            .build()
+            .unwrap();
+        assert!(ctx.capability_constraints.is_some());
+        assert_eq!(ctx.constraint_object_id, Some(object_id));
+        assert_eq!(ctx.constraint_host.as_deref(), Some("api.example.com"));
+        assert_eq!(ctx.constraint_resource_uri.as_deref(), Some("/messages/1"));
+        assert_eq!(ctx.constraint_observed_calls, 3);
+        assert_eq!(ctx.constraint_observed_bytes, 512);
+    }
+
+    #[test]
     fn builder_with_taint_flags() {
         let ctx = EnforcementContextBuilder::new()
             .request_id("r1")
@@ -1727,6 +1898,12 @@ mod tests {
         assert!(ctx.manifest_allowed_operations.is_empty());
         assert!(ctx.capability_claims.is_empty());
         assert!(ctx.required_capability.is_none());
+        assert!(ctx.capability_constraints.is_none());
+        assert!(ctx.constraint_object_id.is_none());
+        assert!(ctx.constraint_host.is_none());
+        assert!(ctx.constraint_resource_uri.is_none());
+        assert_eq!(ctx.constraint_observed_calls, 0);
+        assert_eq!(ctx.constraint_observed_bytes, 0);
         assert!(ctx.taint_flags.is_empty());
         assert!(ctx.approval_scopes.is_empty());
     }
@@ -2265,7 +2442,7 @@ mod tests {
 
     #[test]
     fn revocation_freshness_name() {
-        assert_eq!(RevocationCheck.name(), "revocation");
+        assert_eq!(RevocationCheck.name(), "revocation_freshness");
     }
 
     #[test]
@@ -2551,6 +2728,85 @@ mod tests {
         assert!(outcome.is_allow());
     }
 
+    // ── CapabilityConstraintsCheck ──
+
+    #[test]
+    fn capability_constraints_name() {
+        assert_eq!(CapabilityConstraintsCheck.name(), "capability_constraints");
+    }
+
+    #[test]
+    fn capability_constraints_skip_when_not_provided() {
+        let ctx = test_context();
+        let config = EnforcementConfig::default();
+        let outcome = CapabilityConstraintsCheck.check(&ctx, &config);
+        assert!(outcome.is_skip());
+    }
+
+    #[test]
+    fn capability_constraints_deny_empty_constraint_set() {
+        let mut ctx = test_context();
+        ctx.capability_constraints = Some(CapabilityConstraints::default());
+        ctx.constraint_object_id = Some(constraint_object_id());
+        let config = EnforcementConfig::default();
+        let outcome = CapabilityConstraintsCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+        if let CheckOutcome::Deny {
+            reason_code,
+            explanation,
+        } = &outcome
+        {
+            assert_eq!(reason_code, "CAPABILITY_CONSTRAINT_DENIED");
+            assert!(explanation.contains("default-deny"));
+        }
+    }
+
+    #[test]
+    fn capability_constraints_allow_matching_resource() {
+        let mut ctx = test_context();
+        ctx.capability_constraints = Some(CapabilityConstraints {
+            resource_allow: vec!["/messages/*".into()],
+            ..CapabilityConstraints::default()
+        });
+        ctx.constraint_object_id = Some(constraint_object_id());
+        ctx.constraint_resource_uri = Some("/messages/123".into());
+        let config = EnforcementConfig::default();
+        let outcome = CapabilityConstraintsCheck.check(&ctx, &config);
+        assert!(outcome.is_allow(), "got {outcome:?}");
+    }
+
+    #[test]
+    fn capability_constraints_deny_resource_mismatch() {
+        let mut ctx = test_context();
+        ctx.capability_constraints = Some(CapabilityConstraints {
+            resource_allow: vec!["/messages/*".into()],
+            ..CapabilityConstraints::default()
+        });
+        ctx.constraint_object_id = Some(constraint_object_id());
+        ctx.constraint_resource_uri = Some("/admin/keys".into());
+        let config = EnforcementConfig::default();
+        let outcome = CapabilityConstraintsCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+        if let CheckOutcome::Deny { reason_code, .. } = &outcome {
+            assert_eq!(reason_code, "CAPABILITY_CONSTRAINT_DENIED");
+        }
+    }
+
+    #[test]
+    fn capability_constraints_deny_missing_request_descriptor() {
+        let mut ctx = test_context();
+        ctx.capability_constraints = Some(CapabilityConstraints {
+            resource_allow: vec!["/messages/*".into()],
+            ..CapabilityConstraints::default()
+        });
+        let config = EnforcementConfig::default();
+        let outcome = CapabilityConstraintsCheck.check(&ctx, &config);
+        assert!(outcome.is_deny());
+        if let CheckOutcome::Deny { reason_code, .. } = &outcome {
+            assert_eq!(reason_code, "CONSTRAINT_REQUEST_DESCRIPTOR_INCOMPLETE");
+        }
+    }
+
     // ── ConnectorManifestCheck ──
 
     #[test]
@@ -2795,31 +3051,20 @@ mod tests {
     // ── EnforcementPipeline ──
 
     #[test]
-    fn pipeline_default_has_11_checks() {
+    fn pipeline_default_has_canonical_checks() {
         let pipeline = EnforcementPipeline::new();
-        assert_eq!(pipeline.check_count(), 11);
+        assert_eq!(pipeline.check_count(), EnforcementCheckOrder::COUNT);
     }
 
     #[test]
     fn pipeline_default_check_order() {
-        // The revocation check's reported step name is `"revocation"`
-        // (see `RevocationCheck::name`) — not `"revocation_freshness"`.
-        // The test was stale relative to the production rename; the
-        // sibling assertion at `revocation_freshness_name` already
-        // pins the canonical name.
         let pipeline = EnforcementPipeline::new();
         let names = pipeline.check_names();
-        assert_eq!(names[0], "canonical_decode");
-        assert_eq!(names[1], "zone_membership");
-        assert_eq!(names[2], "capability_verify");
-        assert_eq!(names[3], "holder_proof");
-        assert_eq!(names[4], "checkpoint_freshness");
-        assert_eq!(names[5], "revocation");
-        assert_eq!(names[6], "taint_approval");
-        assert_eq!(names[7], "policy_ceiling");
-        assert_eq!(names[8], "connector_manifest");
-        assert_eq!(names[9], "budget");
-        assert_eq!(names[10], "rate_limit");
+        let canonical: Vec<&str> = EnforcementCheckOrder::canonical_order()
+            .iter()
+            .map(EnforcementCheckId::as_str)
+            .collect();
+        assert_eq!(names, canonical);
     }
 
     #[test]
@@ -2848,7 +3093,7 @@ mod tests {
         let decision = pipeline.evaluate(&ctx);
         assert!(decision.is_allowed());
         assert!(decision.elapsed_ms >= 0.0);
-        assert_eq!(decision.checks_executed(), 11);
+        assert_eq!(decision.checks_executed(), EnforcementCheckOrder::COUNT);
     }
 
     #[test]
@@ -2933,18 +3178,13 @@ mod tests {
 
     #[test]
     fn pipeline_evaluate_deny_at_revocation_freshness() {
-        // The revocation check's `name()` is `"revocation"`, not
-        // `"revocation_freshness"`. The function name still reads as
-        // `_revocation_freshness` because the *condition under test*
-        // is the revocation freshness window — but the produced
-        // `check_name` field carries the canonical step name.
         let pipeline = EnforcementPipeline::new();
         let mut ctx = test_context();
         ctx.revocation_list_age_ms = Some(999_999);
         let decision = pipeline.evaluate(&ctx);
         assert!(!decision.is_allowed());
         if let PipelineOutcome::Deny { check_name, .. } = &decision.outcome {
-            assert_eq!(check_name, "revocation");
+            assert_eq!(check_name, "revocation_freshness");
         }
     }
 
@@ -2973,6 +3213,25 @@ mod tests {
         assert!(!decision.is_allowed());
         if let PipelineOutcome::Deny { check_name, .. } = &decision.outcome {
             assert_eq!(check_name, "policy_ceiling");
+        }
+    }
+
+    #[test]
+    fn pipeline_evaluate_deny_at_capability_constraints() {
+        let pipeline = EnforcementPipeline::new();
+        let mut ctx = test_context();
+        ctx.capability_constraints = Some(CapabilityConstraints::default());
+        ctx.constraint_object_id = Some(constraint_object_id());
+        let decision = pipeline.evaluate(&ctx);
+        assert!(!decision.is_allowed());
+        if let PipelineOutcome::Deny {
+            check_name,
+            reason_code,
+            ..
+        } = &decision.outcome
+        {
+            assert_eq!(check_name, "capability_constraints");
+            assert_eq!(reason_code, "CAPABILITY_CONSTRAINT_DENIED");
         }
     }
 
@@ -3030,7 +3289,10 @@ mod tests {
         ctx.rate_limit = Some(100);
         let decision = pipeline.evaluate(&ctx);
         assert!(!decision.is_allowed());
-        assert_eq!(decision.checks_executed(), 10);
+        assert_eq!(
+            decision.checks_executed(),
+            EnforcementCheckOrder::index_of(EnforcementCheckId::Budget) + 1
+        );
         if let PipelineOutcome::Deny {
             check_name,
             reason_code,
@@ -3040,6 +3302,31 @@ mod tests {
             assert_eq!(check_name, "budget");
             assert_eq!(reason_code, "BUDGET_EXCEEDED");
         }
+    }
+
+    #[test]
+    fn pipeline_constraints_run_after_policy_before_manifest_and_budget() {
+        let pipeline = EnforcementPipeline::new();
+        let names = pipeline.check_names();
+        let constraints = names
+            .iter()
+            .position(|name| *name == "capability_constraints")
+            .expect("constraints check present");
+        let policy = names
+            .iter()
+            .position(|name| *name == "policy_ceiling")
+            .expect("policy check present");
+        let manifest = names
+            .iter()
+            .position(|name| *name == "connector_manifest")
+            .expect("manifest check present");
+        let budget = names
+            .iter()
+            .position(|name| *name == "budget")
+            .expect("budget check present");
+        assert!(policy < constraints);
+        assert!(constraints < manifest);
+        assert!(constraints < budget);
     }
 
     #[test]
@@ -3089,7 +3376,7 @@ mod tests {
         let config = EnforcementConfig::new().with_checkpoint_max_age_ms(100);
         let pipeline = EnforcementPipeline::with_config(config);
         assert_eq!(pipeline.config().checkpoint_max_age_ms, 100);
-        assert_eq!(pipeline.check_count(), 11);
+        assert_eq!(pipeline.check_count(), EnforcementCheckOrder::COUNT);
     }
 
     #[test]
@@ -3114,7 +3401,7 @@ mod tests {
     #[test]
     fn pipeline_default_trait() {
         let pipeline = EnforcementPipeline::default();
-        assert_eq!(pipeline.check_count(), 11);
+        assert_eq!(pipeline.check_count(), EnforcementCheckOrder::COUNT);
     }
 
     // ── Custom check implementation ──
@@ -4332,7 +4619,7 @@ mod tests {
         let ctx = test_context();
         let decision = pipeline.evaluate(&ctx);
         assert!(decision.is_allowed());
-        assert_eq!(decision.checks_executed(), 11);
+        assert_eq!(decision.checks_executed(), EnforcementCheckOrder::COUNT);
         // With zone membership configured, it should be allow not skip
         let zone_check = &decision.checks_run[1];
         assert_eq!(zone_check.name, "zone_membership");

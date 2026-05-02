@@ -7,7 +7,7 @@
 //!
 //! # Check Ordering (NORMATIVE)
 //!
-//! The enforcement pipeline runs 11 checks in sequence, short-circuiting
+//! The enforcement pipeline runs 12 checks in sequence, short-circuiting
 //! at the first denial:
 //!
 //! 1. **Canonical decode** — validates request has required non-empty fields
@@ -18,9 +18,10 @@
 //! 6. **Revocation freshness** — validates revocation list age is within window
 //! 7. **Taint approval** — validates critical taints have approval tokens
 //! 8. **Policy ceiling** — validates zone policy permits connector/operation
-//! 9. **Connector manifest** — validates manifest includes the operation
-//! 10. **Budget** — validates request is within the current usage budget
-//! 11. **Rate limit** — validates request is within rate quota
+//! 9. **Capability constraints** — validates token constraints against request details
+//! 10. **Connector manifest** — validates manifest includes the operation
+//! 11. **Budget** — validates request is within the current usage budget
+//! 12. **Rate limit** — validates request is within rate quota
 
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +49,8 @@ pub enum EnforcementCheckId {
     TaintApproval,
     /// Validates zone policy permits connector/operation.
     PolicyCeiling,
+    /// Validates capability-token constraints against request details.
+    CapabilityConstraints,
     /// Validates manifest includes the operation.
     ConnectorManifest,
     /// Validates request is within the current usage budget.
@@ -69,6 +72,7 @@ impl EnforcementCheckId {
             Self::RevocationFreshness => "revocation_freshness",
             Self::TaintApproval => "taint_approval",
             Self::PolicyCeiling => "policy_ceiling",
+            Self::CapabilityConstraints => "capability_constraints",
             Self::ConnectorManifest => "connector_manifest",
             Self::Budget => "budget",
             Self::RateLimit => "rate_limit",
@@ -92,7 +96,7 @@ pub struct EnforcementCheckOrder;
 
 impl EnforcementCheckOrder {
     /// Total number of checks in the canonical pipeline.
-    pub const COUNT: usize = 11;
+    pub const COUNT: usize = 12;
 
     /// Returns the canonical check ordering.
     ///
@@ -109,6 +113,7 @@ impl EnforcementCheckOrder {
             EnforcementCheckId::RevocationFreshness,
             EnforcementCheckId::TaintApproval,
             EnforcementCheckId::PolicyCeiling,
+            EnforcementCheckId::CapabilityConstraints,
             EnforcementCheckId::ConnectorManifest,
             EnforcementCheckId::Budget,
             EnforcementCheckId::RateLimit,
@@ -127,9 +132,10 @@ impl EnforcementCheckOrder {
             EnforcementCheckId::RevocationFreshness => 5,
             EnforcementCheckId::TaintApproval => 6,
             EnforcementCheckId::PolicyCeiling => 7,
-            EnforcementCheckId::ConnectorManifest => 8,
-            EnforcementCheckId::Budget => 9,
-            EnforcementCheckId::RateLimit => 10,
+            EnforcementCheckId::CapabilityConstraints => 8,
+            EnforcementCheckId::ConnectorManifest => 9,
+            EnforcementCheckId::Budget => 10,
+            EnforcementCheckId::RateLimit => 11,
         }
     }
 
@@ -221,16 +227,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_order_has_11_checks() {
-        assert_eq!(EnforcementCheckOrder::canonical_order().len(), 11);
-        assert_eq!(EnforcementCheckOrder::COUNT, 11);
+    fn canonical_order_has_12_checks() {
+        assert_eq!(EnforcementCheckOrder::canonical_order().len(), 12);
+        assert_eq!(EnforcementCheckOrder::COUNT, 12);
     }
 
     #[test]
     fn canonical_order_starts_with_decode_ends_with_rate_limit() {
         let order = EnforcementCheckOrder::canonical_order();
         assert_eq!(order[0], EnforcementCheckId::CanonicalDecode);
-        assert_eq!(order[10], EnforcementCheckId::RateLimit);
+        assert_eq!(order[11], EnforcementCheckId::RateLimit);
     }
 
     #[test]
@@ -274,6 +280,14 @@ mod tests {
         ));
         assert!(EnforcementCheckOrder::runs_before(
             EnforcementCheckId::HolderProof,
+            EnforcementCheckId::RateLimit,
+        ));
+        assert!(EnforcementCheckOrder::runs_before(
+            EnforcementCheckId::PolicyCeiling,
+            EnforcementCheckId::CapabilityConstraints,
+        ));
+        assert!(EnforcementCheckOrder::runs_before(
+            EnforcementCheckId::CapabilityConstraints,
             EnforcementCheckId::RateLimit,
         ));
     }

@@ -1,5 +1,6 @@
 //! Twitch Helix API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
 };
@@ -158,7 +159,7 @@ impl TwitchClient {
             let client_id = client_id.clone();
             let query = query_owned.clone();
             async move {
-                debug!(attempt, %url, "Twitch GET");
+                debug!(attempt, url = %redact_url(&url), "Twitch GET");
                 let resp = match client
                     .get(&url)
                     .bearer_auth(&token)

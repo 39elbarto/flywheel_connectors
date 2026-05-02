@@ -1,5 +1,6 @@
 //! n8n API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -155,7 +156,7 @@ impl N8nClient {
     #[instrument(skip(self), fields(url))]
     async fn get(&self, path: &str) -> N8nResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET request");
+        debug!(url = %redact_url(&url), "GET request");
         let req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
@@ -166,7 +167,7 @@ impl N8nClient {
     #[instrument(skip(self, body), fields(url))]
     async fn patch(&self, path: &str, body: &serde_json::Value) -> N8nResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "PATCH request");
+        debug!(url = %redact_url(&url), "PATCH request");
         let req = self
             .add_auth(self.client.patch(&url))
             .header("Accept", "application/json")

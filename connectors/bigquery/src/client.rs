@@ -1,5 +1,6 @@
 //! `BigQuery` API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -218,9 +219,9 @@ impl BigQueryClient {
         }
     }
 
-    #[instrument(skip(self), fields(url = %url))]
+    #[instrument(skip(self), fields(url = %redact_url(url.as_str())))]
     async fn get(&self, url: Url) -> BigQueryResult<serde_json::Value> {
-        debug!(url = %url, "GET request");
+        debug!(url = %redact_url(url.as_str()), "GET request");
         let req = self
             .add_auth(self.client.get(url))
             .header("Accept", "application/json");
@@ -228,9 +229,9 @@ impl BigQueryClient {
         self.handle_response(resp).await
     }
 
-    #[instrument(skip(self, body), fields(url = %url))]
+    #[instrument(skip(self, body), fields(url = %redact_url(url.as_str())))]
     async fn post(&self, url: Url, body: &serde_json::Value) -> BigQueryResult<serde_json::Value> {
-        debug!(url = %url, "POST request");
+        debug!(url = %redact_url(url.as_str()), "POST request");
         let req = self
             .add_auth(self.client.post(url))
             .header("Accept", "application/json")

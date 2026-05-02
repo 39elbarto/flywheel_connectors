@@ -1,5 +1,6 @@
 //! `MongoDB` Atlas Data API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -169,7 +170,7 @@ impl MongoDbClient {
         body: &serde_json::Value,
     ) -> MongoDbResult<serde_json::Value> {
         let url = format!("{}/action/{action}", self.base_url);
-        debug!(url = %url, "POST request");
+        debug!(url = %redact_url(&url), "POST request");
         let req = self
             .add_auth(self.client.post(&url))
             .header("Content-Type", "application/json")

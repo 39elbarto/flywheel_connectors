@@ -1,5 +1,6 @@
 //! arXiv and Semantic Scholar API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -94,7 +95,7 @@ impl ArxivClient {
     #[instrument(skip(self), fields(url))]
     async fn arxiv_get(&self, path: &str) -> ArxivResult<String> {
         let url = format!("{}{path}", self.arxiv_base_url);
-        debug!(url = %url, "arXiv GET request");
+        debug!(url = %redact_url(&url), "arXiv GET request");
         let resp = self
             .client
             .get(&url)
@@ -112,7 +113,7 @@ impl ArxivClient {
 
     #[instrument(skip(self), fields(url))]
     async fn arxiv_get_bytes(&self, url: &str) -> ArxivResult<Vec<u8>> {
-        debug!(url = %url, "arXiv GET bytes request");
+        debug!(url = %redact_url(&url), "arXiv GET bytes request");
         let resp = self.client.get(url).send().await?;
         let status = resp.status();
         if status.is_success() {
@@ -143,7 +144,7 @@ impl ArxivClient {
     #[instrument(skip(self), fields(url))]
     async fn scholar_get(&self, path: &str) -> ArxivResult<serde_json::Value> {
         let url = format!("{}{path}", self.scholar_base_url);
-        debug!(url = %url, "Scholar GET request");
+        debug!(url = %redact_url(&url), "Scholar GET request");
         let req = self.add_scholar_auth(self.client.get(&url).header("Accept", "application/json"));
         let resp = req.send().await?;
         self.handle_scholar_response(resp).await

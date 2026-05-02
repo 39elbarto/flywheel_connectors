@@ -1,5 +1,6 @@
 //! Calendly API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
 use reqwest::{Client, RequestBuilder, Url};
 use std::time::Duration;
@@ -321,7 +322,7 @@ impl CalendlyClient {
             let client = self.client.clone();
             let token = self.access_token.clone();
             async move {
-                debug!(attempt, url = %url, "Calendly GET");
+                debug!(attempt, url = %redact_url(&url), "Calendly GET");
                 let request = if token.is_empty() {
                     client.get(&url)
                 } else {
@@ -362,7 +363,7 @@ impl CalendlyClient {
             let token = self.access_token.clone();
             let body = body.clone();
             async move {
-                debug!(attempt, url = %url, "Calendly POST");
+                debug!(attempt, url = %redact_url(&url), "Calendly POST");
                 let request = if token.is_empty() {
                     client.post(&url)
                 } else {

@@ -1,5 +1,6 @@
 //! `Logseq` API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -163,7 +164,7 @@ impl LogseqClient {
         body: &serde_json::Value,
     ) -> LogseqResult<serde_json::Value> {
         let url = format!("{}{endpoint}", self.base_url);
-        debug!(url = %url, "POST request");
+        debug!(url = %redact_url(&url), "POST request");
         let req = self
             .add_auth(self.client.post(&url))
             .header("Accept", "application/json")

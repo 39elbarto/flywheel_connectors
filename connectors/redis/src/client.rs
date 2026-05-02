@@ -1,5 +1,6 @@
 //! Redis REST API client (Upstash-compatible).
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -170,7 +171,7 @@ impl RedisClient {
     #[instrument(skip(self, args), fields(cmd = args.first().copied().unwrap_or("UNKNOWN")))]
     pub async fn execute_command(&self, args: &[&str]) -> RedisResult<serde_json::Value> {
         let url = &self.base_url;
-        debug!(url = %url, "POST Redis command");
+        debug!(url = %redact_url(&url), "POST Redis command");
         let req = self
             .add_auth(self.client.post(url))
             .header("Content-Type", "application/json")

@@ -1,5 +1,6 @@
 //! `HTTP` client for the `Google Places API (New)`.
 
+use fcp_prelude::log_redaction::redact_url;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -113,7 +114,7 @@ impl GooglePlacesClient {
         if let Some(open_now) = input.open_now {
             body["openNow"] = json!(open_now);
         }
-        debug!(url = %url, query = %input.query, "Google Places text search");
+        debug!(url = %redact_url(&url), query = %input.query, "Google Places text search");
         let response = self
             .client
             .post(url)

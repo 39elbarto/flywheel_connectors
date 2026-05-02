@@ -533,7 +533,7 @@ impl AzureClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             async move {
-                debug!(attempt, %url, "Azure Blob GET");
+                debug!(attempt, url = %redact_url(&url), "Azure Blob GET");
                 let builder = self
                     .apply_auth(self.http.get(&url))
                     .header("x-ms-version", self.blob_api_version());
@@ -621,7 +621,7 @@ impl AzureClient {
             let body_bytes = body_bytes.clone();
             let ct = ct.clone();
             async move {
-                debug!(attempt, %url, "Azure Blob PUT");
+                debug!(attempt, url = %redact_url(&url), "Azure Blob PUT");
                 let builder = self
                     .apply_auth(self.http.put(&url))
                     .header("x-ms-version", self.blob_api_version())
@@ -721,7 +721,7 @@ impl AzureClient {
             let url = url.clone();
             let body = body.clone();
             async move {
-                debug!(attempt, %url, "Azure KeyVault PUT secret");
+                debug!(attempt, url = %redact_url(&url), "Azure KeyVault PUT secret");
                 let builder = self
                     .apply_auth(self.http.put(&url))
                     .query(&query)
@@ -770,7 +770,7 @@ impl AzureClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.to_string();
             async move {
-                debug!(attempt, %url, "Azure API GET");
+                debug!(attempt, url = %redact_url(&url), "Azure API GET");
                 let builder = self
                     .apply_auth(self.http.get(&url))
                     .query(query)
@@ -806,7 +806,7 @@ impl AzureClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.to_string();
             async move {
-                debug!(attempt, %url, "Azure Blob GET");
+                debug!(attempt, url = %redact_url(&url), "Azure Blob GET");
                 let builder = self
                     .apply_auth(self.http.get(&url))
                     .query(query)
@@ -843,7 +843,7 @@ impl AzureClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.to_string();
             async move {
-                debug!(attempt, %url, "Azure KeyVault GET");
+                debug!(attempt, url = %redact_url(&url), "Azure KeyVault GET");
                 let builder = self
                     .apply_auth(self.http.get(&url))
                     .query(query)

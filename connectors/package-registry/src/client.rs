@@ -1,3 +1,4 @@
+use fcp_prelude::log_redaction::redact_url;
 use std::time::Duration;
 
 use fcp_sdk::migration::{
@@ -806,7 +807,7 @@ impl PackageRegistryClient {
             let query = query.clone();
 
             async move {
-                debug!(attempt, provider = provider.as_str(), %url, "package registry GET");
+                debug!(attempt, provider = provider.as_str(), url = %redact_url(&url), "package registry GET");
 
                 let mut request = client.get(&url);
                 request = with_auth(request, token.as_deref());
@@ -879,7 +880,7 @@ impl PackageRegistryClient {
                         .unwrap_or(body)
                 };
 
-                warn!(provider = provider.as_str(), %url, status, "package registry request failed");
+                warn!(provider = provider.as_str(), url = %redact_url(&url), status, "package registry request failed");
                 let error = Error::Api { status, message };
                 if matches!(classify_http_status(status, retry_after), RetryDecision::Terminal) {
                     AttemptOutcome::Terminal(error)

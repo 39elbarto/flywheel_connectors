@@ -1,5 +1,6 @@
 //! `Reddit` API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -156,7 +157,7 @@ impl RedditClient {
         query: Option<&[(&str, String)]>,
     ) -> RedditResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET request");
+        debug!(url = %redact_url(&url), "GET request");
         let mut req = self.add_auth(self.client.get(&url));
         if let Some(q) = query {
             req = req.query(q);
@@ -172,7 +173,7 @@ impl RedditClient {
         body: &[(&str, &str)],
     ) -> RedditResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "POST form request");
+        debug!(url = %redact_url(&url), "POST form request");
         let encoded: String = body
             .iter()
             .map(|(k, v)| format!("{}={}", urlencoded(k), urlencoded(v)))

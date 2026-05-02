@@ -1,5 +1,6 @@
 //! `Roam Research` API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -170,7 +171,7 @@ impl RoamClient {
     #[instrument(skip(self, body), fields(url))]
     async fn post(&self, path: &str, body: &serde_json::Value) -> RoamResult<serde_json::Value> {
         let url = self.graph_url(path);
-        debug!(url = %url, "POST request");
+        debug!(url = %redact_url(&url), "POST request");
         let req = self
             .add_auth(self.client.post(&url))
             .header("Accept", "application/json")

@@ -1,5 +1,6 @@
 //! CircleCI API client with retry support.
 
+use fcp_prelude::log_redaction::redact_url;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
 };
@@ -222,7 +223,7 @@ impl CircleCiClient {
             let auth_material = self.api_token.clone();
             let query = query.clone();
             async move {
-                debug!(attempt, "GET {}", url);
+                debug!(attempt, "GET {}", redact_url(&url));
                 let mut req = client.get(&url).header("Circle-Token", &auth_material);
                 for (k, v) in &query {
                     req = req.query(&[(k, v)]);
@@ -304,7 +305,7 @@ impl CircleCiClient {
                 .map(|(k, v)| (k.to_string(), v.clone()))
                 .collect();
             async move {
-                debug!(attempt, "GET {}", url);
+                debug!(attempt, "GET {}", redact_url(&url));
                 let mut req = client.get(&url).header("Circle-Token", &auth_material);
                 for (k, v) in &query {
                     req = req.query(&[(k.as_str(), v.as_str())]);
@@ -341,7 +342,7 @@ impl CircleCiClient {
             let auth_material = self.api_token.clone();
             let body = body_clone.clone();
             async move {
-                debug!(attempt, "POST {}", url);
+                debug!(attempt, "POST {}", redact_url(&url));
                 let resp = match client
                     .post(&url)
                     .header("Circle-Token", &auth_material)

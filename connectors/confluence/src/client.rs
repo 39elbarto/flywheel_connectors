@@ -239,7 +239,7 @@ impl ConfluenceClient {
                 .map(|(k, v)| (k.to_string(), v.clone()))
                 .collect();
             async move {
-                debug!(attempt, "GET {}", url);
+                debug!(attempt, "GET {}", redact_url(&url));
                 let mut req = client.get(&url).header("Authorization", &auth);
                 for (k, v) in &query {
                     req = req.query(&[(k.as_str(), v.as_str())]);
@@ -277,7 +277,7 @@ impl ConfluenceClient {
             let auth = auth.clone();
             let body = body_clone.clone();
             async move {
-                debug!(attempt, "POST {}", url);
+                debug!(attempt, "POST {}", redact_url(&url));
                 let resp = match client
                     .post(&url)
                     .header("Authorization", &auth)
@@ -318,7 +318,7 @@ impl ConfluenceClient {
             let auth = auth.clone();
             let body = body_clone.clone();
             async move {
-                debug!(attempt, "PUT {}", url);
+                debug!(attempt, "PUT {}", redact_url(&url));
                 let resp = match client
                     .put(&url)
                     .header("Authorization", &auth)
@@ -352,7 +352,7 @@ impl ConfluenceClient {
             let client = self.client.clone();
             let auth = auth.clone();
             async move {
-                debug!(attempt, "DELETE {}", url);
+                debug!(attempt, "DELETE {}", redact_url(&url));
                 let resp = match client
                     .delete(&url)
                     .header("Authorization", &auth)

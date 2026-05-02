@@ -1,5 +1,6 @@
 //! Hacker News API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
 };
@@ -87,7 +88,7 @@ impl HackerNewsClient {
             let url = url.clone();
             let client = self.client.clone();
             async move {
-                debug!(attempt, url = %url, "HN GET request");
+                debug!(attempt, url = %redact_url(&url), "HN GET request");
                 let resp = match client.get(&url).send().await {
                     Ok(r) => r,
                     Err(e) => {
@@ -155,7 +156,7 @@ impl HackerNewsClient {
             let url = url.clone();
             let client = self.client.clone();
             async move {
-                debug!(attempt, url = %url, "HN GET item request");
+                debug!(attempt, url = %redact_url(&url), "HN GET item request");
                 let resp = match client.get(&url).send().await {
                     Ok(r) => r,
                     Err(e) => {

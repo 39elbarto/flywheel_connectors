@@ -373,7 +373,7 @@ impl SupabaseClient {
             let body = body.clone();
             let content_type = content_type.clone();
             async move {
-                debug!(attempt, %url, "Supabase storage upload");
+                debug!(attempt, url = %redact_url(&url), "Supabase storage upload");
                 let mut req = apply_auth(client.post(&url), &auth)
                     .header("Content-Type", content_type)
                     .header("x-upsert", if upsert { "true" } else { "false" });
@@ -489,7 +489,7 @@ impl SupabaseClient {
             let client = client.clone();
             let auth = auth.clone();
             async move {
-                debug!(attempt, %url, method = %method.as_str(), "Supabase JSON request");
+                debug!(attempt, url = %redact_url(&url), method = %method.as_str(), "Supabase JSON request");
                 let mut req = apply_auth(client.request(method.clone(), &url), &auth).header(
                     "Accept",
                     if accept_object {
@@ -532,7 +532,7 @@ impl SupabaseClient {
             let client = client.clone();
             let auth = auth.clone();
             async move {
-                debug!(attempt, %url, "Supabase binary request");
+                debug!(attempt, url = %redact_url(&url), "Supabase binary request");
                 let mut req = apply_auth(client.get(&url), &auth);
                 if !query.is_empty() {
                     req = req.query(&query);

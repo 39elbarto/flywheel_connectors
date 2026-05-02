@@ -3,6 +3,7 @@
 //! Handles connection to Twitter's filtered stream API (v2).
 //! Uses Server-Sent Events (SSE) style streaming.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -99,7 +100,7 @@ async fn run_stream_once(
         config.api_url.trim_end_matches('/')
     );
 
-    info!(url = %url, "Connecting to Twitter filtered stream");
+    info!(url = %redact_url(&url), "Connecting to Twitter filtered stream");
 
     let response = match connect_stream(&url, &bearer_token).await {
         Ok(response) => response,

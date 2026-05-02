@@ -5,6 +5,7 @@
 
 #![allow(clippy::doc_markdown)]
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -189,7 +190,7 @@ impl DropboxClient {
         body: &serde_json::Value,
     ) -> DropboxResult<serde_json::Value> {
         let url = format!("{}{endpoint}", self.base_url);
-        debug!(url = %url, "POST request");
+        debug!(url = %redact_url(&url), "POST request");
         let req = self
             .add_auth(self.client.post(&url))
             .header("Content-Type", "application/json")

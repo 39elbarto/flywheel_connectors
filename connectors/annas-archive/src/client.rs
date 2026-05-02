@@ -1,3 +1,4 @@
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -103,7 +104,7 @@ impl AnnasArchiveClient {
         query: Option<&[(&str, String)]>,
     ) -> AnnasArchiveResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET request");
+        debug!(url = %redact_url(&url), "GET request");
         let mut req = self.client.get(&url).header("Accept", "application/json");
         if let Some(q) = query {
             req = req.query(q);

@@ -2,6 +2,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 
+use fcp_prelude::log_redaction::redact_url;
 use std::time::Duration;
 
 use fcp_sdk::migration::{
@@ -541,7 +542,7 @@ impl NextcloudTalkClient {
             let form = form.clone();
             let method_for_log = method_for_log.clone();
             async move {
-                debug!(attempt, method = %method_for_log, path = %url, "Nextcloud Talk request");
+                debug!(attempt, method = %method_for_log, path = %redact_url(&url), "Nextcloud Talk request");
 
                 let mut request = client.request(method, &url).query(&query);
                 request = apply_auth(request, &auth);

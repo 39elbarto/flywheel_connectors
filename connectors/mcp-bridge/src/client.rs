@@ -1,5 +1,6 @@
 //! MCP JSON-RPC client over HTTP (Streamable HTTP transport).
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -147,7 +148,7 @@ impl McpClient {
         };
 
         let url = format!("{}/mcp", self.base_url);
-        debug!(url = %url, method = %mcp_method, id, "MCP JSON-RPC request");
+        debug!(url = %redact_url(&url), method = %mcp_method, id, "MCP JSON-RPC request");
 
         let req = self
             .add_auth(self.client.post(&url))

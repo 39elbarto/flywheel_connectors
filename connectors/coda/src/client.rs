@@ -1,5 +1,6 @@
 //! Coda API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::{Client, RequestBuilder};
@@ -417,7 +418,7 @@ impl CodaClient {
             let client = self.client.clone();
             let token = self.api_token.clone();
             async move {
-                debug!(attempt, url = %url, "Coda GET");
+                debug!(attempt, url = %redact_url(&url), "Coda GET");
                 let request = if token.is_empty() {
                     client.get(&url)
                 } else {
@@ -458,7 +459,7 @@ impl CodaClient {
             let token = self.api_token.clone();
             let body = body.clone();
             async move {
-                debug!(attempt, url = %url, "Coda POST");
+                debug!(attempt, url = %redact_url(&url), "Coda POST");
                 let request = if token.is_empty() {
                     client.post(&url)
                 } else {
@@ -500,7 +501,7 @@ impl CodaClient {
             let token = self.api_token.clone();
             let body = body.clone();
             async move {
-                debug!(attempt, url = %url, "Coda DELETE");
+                debug!(attempt, url = %redact_url(&url), "Coda DELETE");
                 let request = if token.is_empty() {
                     client.delete(&url)
                 } else {

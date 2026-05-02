@@ -1,5 +1,6 @@
 //! Semantic Scholar API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -209,7 +210,7 @@ impl SemanticScholarClient {
         query: Option<&[(&str, String)]>,
     ) -> SemanticScholarResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET request");
+        debug!(url = %redact_url(&url), "GET request");
         let mut req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");

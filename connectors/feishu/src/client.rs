@@ -1,5 +1,6 @@
 //! Feishu/Lark API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
 };
@@ -387,7 +388,7 @@ impl FeishuClient {
             let body = body_clone.clone();
             let token_cache = Arc::clone(&token_cache);
             async move {
-                debug!(attempt, url = %url, "Feishu API POST");
+                debug!(attempt, url = %redact_url(&url), "Feishu API POST");
                 let request = client.post(&url).header("Authorization", &auth).json(&body);
 
                 let resp = match request.send().await {
@@ -494,7 +495,7 @@ impl FeishuClient {
             let auth = auth.clone();
             let token_cache = Arc::clone(&token_cache);
             async move {
-                debug!(attempt, url = %url, "Feishu API GET");
+                debug!(attempt, url = %redact_url(&url), "Feishu API GET");
                 let request = client.get(&url).header("Authorization", &auth);
 
                 let resp = match request.send().await {

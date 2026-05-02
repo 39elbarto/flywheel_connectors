@@ -1,5 +1,6 @@
 //! `Metabase` API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -157,7 +158,7 @@ impl MetabaseClient {
     #[instrument(skip(self), fields(url))]
     async fn get(&self, path: &str) -> MetabaseResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET request");
+        debug!(url = %redact_url(&url), "GET request");
         let req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
@@ -168,7 +169,7 @@ impl MetabaseClient {
     #[instrument(skip(self), fields(url))]
     async fn post_empty(&self, path: &str) -> MetabaseResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "POST request (empty body)");
+        debug!(url = %redact_url(&url), "POST request (empty body)");
         let req = self
             .add_auth(self.client.post(&url))
             .header("Accept", "application/json");

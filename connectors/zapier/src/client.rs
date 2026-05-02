@@ -1,5 +1,6 @@
 //! Zapier API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
 use std::time::Duration;
 
@@ -160,7 +161,7 @@ impl ZapierClient {
     #[instrument(skip(self), fields(url))]
     async fn get(&self, path: &str) -> ZapierResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "GET request");
+        debug!(url = %redact_url(&url), "GET request");
         let req = self
             .add_auth(self.client.get(&url))
             .header("Accept", "application/json");
@@ -171,7 +172,7 @@ impl ZapierClient {
     #[instrument(skip(self, body), fields(url))]
     async fn post(&self, path: &str, body: &serde_json::Value) -> ZapierResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
-        debug!(url = %url, "POST request");
+        debug!(url = %redact_url(&url), "POST request");
         let req = self
             .add_auth(self.client.post(&url))
             .header("Accept", "application/json")

@@ -13,7 +13,7 @@ use fcp_streaming::{
 };
 
 use crate::error::{GraphqlClientError, GraphqlError};
-use crate::operation::{GraphqlOperation, GraphqlResponse};
+use crate::operation::{GraphqlOperation, GraphqlQueryLimits, GraphqlResponse};
 
 /// GraphQL WebSocket message types (graphql-transport-ws).
 #[derive(Debug, Serialize, Deserialize)]
@@ -37,6 +37,8 @@ pub struct GraphqlSubscriptionConfig {
     pub init_payload: Option<serde_json::Value>,
     /// Time to wait for connection_ack.
     pub ack_timeout: Duration,
+    /// Query resource limits enforced before WebSocket connection setup.
+    pub query_limits: GraphqlQueryLimits,
 }
 
 impl Default for GraphqlSubscriptionConfig {
@@ -45,6 +47,7 @@ impl Default for GraphqlSubscriptionConfig {
             ws: WsConfig::default(),
             init_payload: None,
             ack_timeout: Duration::from_secs(10),
+            query_limits: GraphqlQueryLimits::default(),
         }
     }
 }
@@ -96,6 +99,8 @@ impl GraphqlSubscriptionClient {
     where
         O::ResponseData: 'static,
     {
+        self.config.query_limits.validate(O::QUERY)?;
+
         let mut ws_config = self.config.ws.clone();
         for (key, value) in &self.headers {
             ws_config.headers.insert(key.clone(), value.clone());
@@ -1478,6 +1483,7 @@ mod tests {
             },
             init_payload: Some(serde_json::json!({"token": "xyz"})),
             ack_timeout: Duration::from_secs(15),
+            query_limits: GraphqlQueryLimits::default(),
         };
         let cloned = config.clone();
         assert_eq!(cloned.ack_timeout, Duration::from_secs(15));

@@ -2,7 +2,326 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::GraphqlError;
+use crate::error::{GraphqlError, GraphqlLimitExceeded};
+
+/// Default maximum GraphQL query text size in bytes.
+pub const DEFAULT_MAX_QUERY_BYTES: usize = 64 * 1024;
+/// Default maximum GraphQL selection-set depth.
+pub const DEFAULT_MAX_QUERY_DEPTH: usize = 10;
+/// Default maximum alias count in a single GraphQL request.
+pub const DEFAULT_MAX_QUERY_ALIASES: usize = 50;
+/// Default maximum root field count in a single GraphQL operation.
+pub const DEFAULT_MAX_QUERY_ROOT_FIELDS: usize = 50;
+
+/// Default GraphQL query limits used by clients and subscriptions.
+pub const DEFAULT_GRAPHQL_QUERY_LIMITS: GraphqlQueryLimits = GraphqlQueryLimits {
+    max_query_bytes: DEFAULT_MAX_QUERY_BYTES,
+    max_depth: DEFAULT_MAX_QUERY_DEPTH,
+    max_aliases: DEFAULT_MAX_QUERY_ALIASES,
+    max_root_fields: DEFAULT_MAX_QUERY_ROOT_FIELDS,
+};
+
+/// Resource guardrails applied before GraphQL requests reach transport or resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphqlQueryLimits {
+    /// Maximum query text size in bytes.
+    pub max_query_bytes: usize,
+    /// Maximum selection-set nesting depth.
+    pub max_depth: usize,
+    /// Maximum number of aliases in a request.
+    pub max_aliases: usize,
+    /// Maximum number of root fields in a request.
+    pub max_root_fields: usize,
+}
+
+impl GraphqlQueryLimits {
+    /// Construct explicit query limits.
+    #[must_use]
+    pub const fn new(
+        max_query_bytes: usize,
+        max_depth: usize,
+        max_aliases: usize,
+        max_root_fields: usize,
+    ) -> Self {
+        Self {
+            max_query_bytes,
+            max_depth,
+            max_aliases,
+            max_root_fields,
+        }
+    }
+
+    /// Validate a query against this limit set.
+    pub fn validate(self, query: &str) -> Result<(), GraphqlLimitExceeded> {
+        validate_query_limits(query, self)
+    }
+}
+
+impl Default for GraphqlQueryLimits {
+    fn default() -> Self {
+        DEFAULT_GRAPHQL_QUERY_LIMITS
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GraphqlToken<'a> {
+    Name(&'a str),
+    LBrace,
+    RBrace,
+    LParen,
+    RParen,
+    LBracket,
+    RBracket,
+    Colon,
+    At,
+    Ellipsis,
+}
+
+fn validate_query_limits(
+    query: &str,
+    limits: GraphqlQueryLimits,
+) -> Result<(), GraphqlLimitExceeded> {
+    if query.len() > limits.max_query_bytes {
+        return Err(GraphqlLimitExceeded::QueryTooLarge {
+            actual_bytes: query.len(),
+            max_bytes: limits.max_query_bytes,
+        });
+    }
+
+    let tokens = tokenize_query(query);
+    let mut selection_depth = 0usize;
+    let mut max_depth_seen = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut alias_count = 0usize;
+    let mut root_field_count = 0usize;
+    let mut alias_target_pending = false;
+    let mut skip_directive_name = false;
+    let mut inline_fragment_type_pending = false;
+
+    for (index, token) in tokens.iter().enumerate() {
+        match *token {
+            GraphqlToken::LParen => {
+                paren_depth = paren_depth.saturating_add(1);
+            }
+            GraphqlToken::RParen => {
+                paren_depth = paren_depth.saturating_sub(1);
+            }
+            GraphqlToken::LBracket => {
+                bracket_depth = bracket_depth.saturating_add(1);
+            }
+            GraphqlToken::RBracket => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+            }
+            GraphqlToken::LBrace if paren_depth == 0 && bracket_depth == 0 => {
+                selection_depth = selection_depth.saturating_add(1);
+                max_depth_seen = max_depth_seen.max(selection_depth);
+                if max_depth_seen > limits.max_depth {
+                    return Err(GraphqlLimitExceeded::DepthExceeded {
+                        actual_depth: max_depth_seen,
+                        max_depth: limits.max_depth,
+                    });
+                }
+                alias_target_pending = false;
+                skip_directive_name = false;
+                inline_fragment_type_pending = false;
+            }
+            GraphqlToken::RBrace if paren_depth == 0 && bracket_depth == 0 => {
+                selection_depth = selection_depth.saturating_sub(1);
+                alias_target_pending = false;
+                skip_directive_name = false;
+                inline_fragment_type_pending = false;
+            }
+            GraphqlToken::At if in_selection_level(selection_depth, paren_depth, bracket_depth) => {
+                skip_directive_name = true;
+            }
+            GraphqlToken::Ellipsis
+                if in_selection_level(selection_depth, paren_depth, bracket_depth) =>
+            {
+                alias_target_pending = false;
+                inline_fragment_type_pending = true;
+            }
+            GraphqlToken::Name(name)
+                if in_selection_level(selection_depth, paren_depth, bracket_depth) =>
+            {
+                if skip_directive_name {
+                    skip_directive_name = false;
+                    continue;
+                }
+                if inline_fragment_type_pending {
+                    if name != "on" {
+                        inline_fragment_type_pending = false;
+                    }
+                    continue;
+                }
+                if alias_target_pending {
+                    alias_target_pending = false;
+                    root_field_count = validate_root_field_count(
+                        selection_depth,
+                        root_field_count,
+                        limits.max_root_fields,
+                    )?;
+                    continue;
+                }
+                if matches!(tokens.get(index + 1), Some(GraphqlToken::Colon)) {
+                    alias_count = alias_count.saturating_add(1);
+                    if alias_count > limits.max_aliases {
+                        return Err(GraphqlLimitExceeded::AliasLimitExceeded {
+                            actual_aliases: alias_count,
+                            max_aliases: limits.max_aliases,
+                        });
+                    }
+                    alias_target_pending = true;
+                    continue;
+                }
+                root_field_count = validate_root_field_count(
+                    selection_depth,
+                    root_field_count,
+                    limits.max_root_fields,
+                )?;
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_root_field_count(
+    selection_depth: usize,
+    root_field_count: usize,
+    max_root_fields: usize,
+) -> Result<usize, GraphqlLimitExceeded> {
+    if selection_depth != 1 {
+        return Ok(root_field_count);
+    }
+    let actual_root_fields = root_field_count.saturating_add(1);
+    if actual_root_fields > max_root_fields {
+        return Err(GraphqlLimitExceeded::RootFieldLimitExceeded {
+            actual_root_fields,
+            max_root_fields,
+        });
+    }
+    Ok(actual_root_fields)
+}
+
+const fn in_selection_level(
+    selection_depth: usize,
+    paren_depth: usize,
+    bracket_depth: usize,
+) -> bool {
+    selection_depth > 0 && paren_depth == 0 && bracket_depth == 0
+}
+
+fn tokenize_query(query: &str) -> Vec<GraphqlToken<'_>> {
+    let bytes = query.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0usize;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' => {
+                tokens.push(GraphqlToken::LBrace);
+                index += 1;
+            }
+            b'}' => {
+                tokens.push(GraphqlToken::RBrace);
+                index += 1;
+            }
+            b'(' => {
+                tokens.push(GraphqlToken::LParen);
+                index += 1;
+            }
+            b')' => {
+                tokens.push(GraphqlToken::RParen);
+                index += 1;
+            }
+            b'[' => {
+                tokens.push(GraphqlToken::LBracket);
+                index += 1;
+            }
+            b']' => {
+                tokens.push(GraphqlToken::RBracket);
+                index += 1;
+            }
+            b':' => {
+                tokens.push(GraphqlToken::Colon);
+                index += 1;
+            }
+            b'@' => {
+                tokens.push(GraphqlToken::At);
+                index += 1;
+            }
+            b'.' if bytes.get(index..index + 3) == Some(b"...") => {
+                tokens.push(GraphqlToken::Ellipsis);
+                index += 3;
+            }
+            b'#' => {
+                index = skip_comment(bytes, index);
+            }
+            b'"' if bytes.get(index..index + 3) == Some(b"\"\"\"") => {
+                index = skip_block_string(bytes, index + 3);
+            }
+            b'"' => {
+                index = skip_string(bytes, index + 1);
+            }
+            byte if is_name_start(byte) => {
+                let start = index;
+                index += 1;
+                while index < bytes.len() && is_name_continue(bytes[index]) {
+                    index += 1;
+                }
+                tokens.push(GraphqlToken::Name(&query[start..index]));
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+
+    tokens
+}
+
+fn skip_comment(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() && bytes[index] != b'\n' && bytes[index] != b'\r' {
+        index += 1;
+    }
+    index
+}
+
+fn skip_block_string(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() {
+        if bytes.get(index..index + 3) == Some(b"\"\"\"") {
+            return index + 3;
+        }
+        index += 1;
+    }
+    index
+}
+
+fn skip_string(bytes: &[u8], mut index: usize) -> usize {
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if escaped {
+            escaped = false;
+        } else if byte == b'\\' {
+            escaped = true;
+        } else if byte == b'"' {
+            return index + 1;
+        }
+        index += 1;
+    }
+    index
+}
+
+const fn is_name_start(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphabetic()
+}
+
+const fn is_name_continue(byte: u8) -> bool {
+    is_name_start(byte) || byte.is_ascii_digit()
+}
 
 /// GraphQL query wrapper.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +501,74 @@ mod tests {
         let q = GraphqlQuery::new("{ x }");
         let q2 = q.clone();
         assert_eq!(q, q2);
+    }
+
+    #[test]
+    fn query_limits_accept_default_query() {
+        GraphqlQueryLimits::default()
+            .validate("query Viewer { viewer { id } }")
+            .unwrap();
+    }
+
+    #[test]
+    fn query_limits_reject_depth_over_limit() {
+        let err = GraphqlQueryLimits::new(1024, 2, 50, 50)
+            .validate("query Deep { a { b { c } } }")
+            .unwrap_err();
+        assert_eq!(
+            err,
+            GraphqlLimitExceeded::DepthExceeded {
+                actual_depth: 3,
+                max_depth: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn query_limits_reject_alias_bomb() {
+        let err = GraphqlQueryLimits::new(1024, 10, 1, 50)
+            .validate("query AliasBomb { a1: viewer { id } a2: viewer { id } }")
+            .unwrap_err();
+        assert_eq!(
+            err,
+            GraphqlLimitExceeded::AliasLimitExceeded {
+                actual_aliases: 2,
+                max_aliases: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn query_limits_reject_root_field_bomb() {
+        let err = GraphqlQueryLimits::new(1024, 10, 50, 1)
+            .validate("query RootBomb { viewer { id } node { id } }")
+            .unwrap_err();
+        assert_eq!(
+            err,
+            GraphqlLimitExceeded::RootFieldLimitExceeded {
+                actual_root_fields: 2,
+                max_root_fields: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn query_limits_ignore_strings_comments_arguments_and_fragments() {
+        GraphqlQueryLimits::new(2048, 3, 1, 2)
+            .validate(
+                r#"
+                query Safe($filter: Filter = { nested: { ignored: true } }) {
+                    viewer(arg: "{ braces { inside } string }") {
+                        id
+                    }
+                    ... on Query {
+                        node
+                    }
+                    # aliasLike: ignored { too { deep } }
+                }
+                "#,
+            )
+            .unwrap();
     }
 
     // ---- GraphqlRequest ----

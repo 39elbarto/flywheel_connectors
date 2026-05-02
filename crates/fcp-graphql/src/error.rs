@@ -176,6 +176,46 @@ pub struct GraphqlError {
     pub extensions: Option<serde_json::Value>,
 }
 
+/// Query resource limit violation detected before request dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum GraphqlLimitExceeded {
+    /// Query text exceeded the configured byte limit.
+    #[error("query is {actual_bytes} bytes, exceeding limit {max_bytes}")]
+    QueryTooLarge {
+        /// Actual query size in bytes.
+        actual_bytes: usize,
+        /// Maximum allowed query size in bytes.
+        max_bytes: usize,
+    },
+
+    /// Selection-set nesting exceeded the configured depth limit.
+    #[error("query depth {actual_depth} exceeds limit {max_depth}")]
+    DepthExceeded {
+        /// Deepest observed selection depth.
+        actual_depth: usize,
+        /// Maximum allowed selection depth.
+        max_depth: usize,
+    },
+
+    /// Alias count exceeded the configured limit.
+    #[error("query alias count {actual_aliases} exceeds limit {max_aliases}")]
+    AliasLimitExceeded {
+        /// Actual alias count.
+        actual_aliases: usize,
+        /// Maximum allowed alias count.
+        max_aliases: usize,
+    },
+
+    /// Root field count exceeded the configured limit.
+    #[error("query root field count {actual_root_fields} exceeds limit {max_root_fields}")]
+    RootFieldLimitExceeded {
+        /// Actual root field count.
+        actual_root_fields: usize,
+        /// Maximum allowed root field count.
+        max_root_fields: usize,
+    },
+}
+
 /// Error type for GraphQL client operations.
 #[derive(Debug, Clone, Error)]
 pub enum GraphqlClientError {
@@ -220,6 +260,10 @@ pub enum GraphqlClientError {
         /// Individual validation errors.
         errors: Vec<String>,
     },
+
+    /// Query resource limit violation.
+    #[error("GraphQL query limit exceeded: {0}")]
+    LimitExceeded(#[from] GraphqlLimitExceeded),
 
     /// Retry policy exhausted.
     #[error("Retry policy exhausted after {attempts} attempts")]
@@ -321,6 +365,10 @@ impl GraphqlClientError {
             Self::SchemaValidation { message, .. } => FcpError::InvalidRequest {
                 code: 1003,
                 message: message.clone(),
+            },
+            Self::LimitExceeded(limit) => FcpError::InvalidRequest {
+                code: 1004,
+                message: limit.to_string(),
             },
             Self::RetriesExhausted { attempts } => FcpError::External {
                 service: service.into(),

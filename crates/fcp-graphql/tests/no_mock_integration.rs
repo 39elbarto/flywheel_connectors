@@ -7,7 +7,6 @@
 use std::time::Duration;
 
 use fcp_async_core::http::StatusCode;
-use fcp_prelude::FcpError;
 use fcp_graphql::{
     CursorPage, CursorPageInfo, GraphqlBatchItem, GraphqlClient, GraphqlClientBuilder,
     GraphqlClientError, GraphqlError, GraphqlErrorLocation, GraphqlOperation, GraphqlPathSegment,
@@ -15,6 +14,7 @@ use fcp_graphql::{
     GraphqlSubscriptionConfig, OffsetPage, PageLimit, PaginationError, RetryDecision, RetryPolicy,
     RetryStrategy, SchemaValidationMode,
 };
+use fcp_prelude::FcpError;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 

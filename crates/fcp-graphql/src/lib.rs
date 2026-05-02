@@ -28,9 +28,14 @@ pub use client::{
     GraphqlClient, GraphqlClientBuilder, GraphqlClientConfig, GraphqlClientMetrics,
     SchemaValidationMode,
 };
-pub use error::{GraphqlClientError, GraphqlError, GraphqlErrorLocation, GraphqlPathSegment};
+pub use error::{
+    GraphqlClientError, GraphqlError, GraphqlErrorLocation, GraphqlLimitExceeded,
+    GraphqlPathSegment,
+};
 pub use operation::{
-    GraphqlBatchItem, GraphqlOperation, GraphqlQuery, GraphqlRequest, GraphqlResponse,
+    DEFAULT_GRAPHQL_QUERY_LIMITS, DEFAULT_MAX_QUERY_ALIASES, DEFAULT_MAX_QUERY_BYTES,
+    DEFAULT_MAX_QUERY_DEPTH, DEFAULT_MAX_QUERY_ROOT_FIELDS, GraphqlBatchItem, GraphqlOperation,
+    GraphqlQuery, GraphqlQueryLimits, GraphqlRequest, GraphqlResponse,
 };
 pub use pagination::{
     CursorPage, CursorPageInfo, OffsetPage, PageLimit, PaginationError, paginate_cursor,

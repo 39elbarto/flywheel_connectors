@@ -23,9 +23,10 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use fcp_graphql::{
     CursorPage, CursorPageInfo, GraphqlClientBuilder, GraphqlClientError, GraphqlErrorLocation,
-    GraphqlOperation, GraphqlPathSegment, GraphqlQuery, GraphqlRequest, GraphqlSubscriptionClient,
-    GraphqlSubscriptionConfig, OffsetPage, PageLimit, PaginationError, RetryDecision, RetryPolicy,
-    RetryStrategy, SchemaValidationMode, paginate_cursor, paginate_offset,
+    GraphqlLimitExceeded, GraphqlOperation, GraphqlPathSegment, GraphqlQuery, GraphqlQueryLimits,
+    GraphqlRequest, GraphqlSubscriptionClient, GraphqlSubscriptionConfig, OffsetPage, PageLimit,
+    PaginationError, RetryDecision, RetryPolicy, RetryStrategy, SchemaValidationMode,
+    paginate_cursor, paginate_offset,
 };
 use fcp_streaming::WsConfig;
 
@@ -156,6 +157,17 @@ impl GraphqlOperation for ViewerSchemaQuery {
     }
 }
 
+struct TooDeepSubscription;
+
+impl GraphqlOperation for TooDeepSubscription {
+    type Variables = EmptyVars;
+    type ResponseData = ViewerResponse;
+
+    const QUERY: &'static str =
+        "subscription TooDeep { a { b { c { d { e { f { g { h { i { j { k } } } } } } } } } } }";
+    const OPERATION_NAME: &'static str = "TooDeep";
+}
+
 struct SequenceResponder {
     counter: Arc<AtomicUsize>,
 }
@@ -257,6 +269,38 @@ impl TestContext {
             .expect("structured test log entry");
         self.capture.assert_valid();
     }
+}
+
+fn limit_exceeded_kind(error: &GraphqlClientError) -> &GraphqlLimitExceeded {
+    match error {
+        GraphqlClientError::LimitExceeded(limit) => limit,
+        other => panic!("expected query limit error, got {other:?}"),
+    }
+}
+
+async fn assert_no_graphql_http_requests(server: &MockServer) {
+    let requests = server.received_requests().await.expect("received requests");
+    assert!(
+        requests.is_empty(),
+        "limit guard should reject before dispatch, got {} HTTP requests",
+        requests.len()
+    );
+}
+
+fn alias_bomb_query(alias_count: usize) -> String {
+    let fields = (0..alias_count)
+        .map(|index| format!("alias{index}: viewer {{ id }}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("query AliasBomb {{ {fields} }}")
+}
+
+fn root_field_bomb_query(root_field_count: usize) -> String {
+    let fields = (0..root_field_count)
+        .map(|index| format!("rootField{index}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("query RootFieldBomb {{ {fields} }}")
 }
 
 type TestServerWebSocket = ServerWebSocket<TcpStream>;
@@ -429,6 +473,153 @@ async fn subscription_rejects_wrong_id_complete_frame() {
         }
         other => panic!("expected Protocol error, got {other:?}"),
     }
+}
+
+#[fcp_async_core::runtime::test]
+async fn rejects_deep_nested_introspection_before_http_dispatch() {
+    let server = MockServer::start().await;
+    let client = GraphqlClientBuilder::new(server.uri())
+        .build()
+        .expect("client");
+    let query = "query DeepIntrospection { __schema { types { fields { type { ofType { ofType { ofType { ofType { ofType { ofType { ofType { name } } } } } } } } } } } }";
+    let request = GraphqlRequest::new(GraphqlQuery::new(query), serde_json::json!({}));
+
+    let err = client
+        .execute_request::<_, serde_json::Value>(request, None, None, true)
+        .await
+        .expect_err("deep query should be rejected before dispatch");
+
+    assert!(matches!(
+        limit_exceeded_kind(&err),
+        GraphqlLimitExceeded::DepthExceeded {
+            actual_depth,
+            max_depth: 10
+        } if *actual_depth > 10
+    ));
+    assert_no_graphql_http_requests(&server).await;
+}
+
+#[fcp_async_core::runtime::test]
+async fn rejects_alias_bomb_before_http_dispatch() {
+    let server = MockServer::start().await;
+    let client = GraphqlClientBuilder::new(server.uri())
+        .build()
+        .expect("client");
+    let query = alias_bomb_query(GraphqlQueryLimits::default().max_aliases + 1);
+    let request = GraphqlRequest::new(GraphqlQuery::new(query), serde_json::json!({}));
+
+    let err = client
+        .execute_request::<_, serde_json::Value>(request, None, None, true)
+        .await
+        .expect_err("alias bomb should be rejected before dispatch");
+
+    assert_eq!(
+        limit_exceeded_kind(&err),
+        &GraphqlLimitExceeded::AliasLimitExceeded {
+            actual_aliases: GraphqlQueryLimits::default().max_aliases + 1,
+            max_aliases: GraphqlQueryLimits::default().max_aliases,
+        }
+    );
+    assert_no_graphql_http_requests(&server).await;
+}
+
+#[fcp_async_core::runtime::test]
+async fn rejects_oversized_payload_before_http_dispatch() {
+    let server = MockServer::start().await;
+    let client = GraphqlClientBuilder::new(server.uri())
+        .build()
+        .expect("client");
+    let max_bytes = GraphqlQueryLimits::default().max_query_bytes;
+    let request = GraphqlRequest::new(
+        GraphqlQuery::new("x".repeat(max_bytes + 1)),
+        serde_json::json!({}),
+    );
+
+    let err = client
+        .execute_request::<_, serde_json::Value>(request, None, None, true)
+        .await
+        .expect_err("oversized query should be rejected before dispatch");
+
+    assert_eq!(
+        limit_exceeded_kind(&err),
+        &GraphqlLimitExceeded::QueryTooLarge {
+            actual_bytes: max_bytes + 1,
+            max_bytes,
+        }
+    );
+    assert_no_graphql_http_requests(&server).await;
+}
+
+#[fcp_async_core::runtime::test]
+async fn rejects_root_field_bomb_before_http_dispatch() {
+    let server = MockServer::start().await;
+    let client = GraphqlClientBuilder::new(server.uri())
+        .build()
+        .expect("client");
+    let query = root_field_bomb_query(GraphqlQueryLimits::default().max_root_fields + 1);
+    let request = GraphqlRequest::new(GraphqlQuery::new(query), serde_json::json!({}));
+
+    let err = client
+        .execute_request::<_, serde_json::Value>(request, None, None, true)
+        .await
+        .expect_err("root-field bomb should be rejected before dispatch");
+
+    assert_eq!(
+        limit_exceeded_kind(&err),
+        &GraphqlLimitExceeded::RootFieldLimitExceeded {
+            actual_root_fields: GraphqlQueryLimits::default().max_root_fields + 1,
+            max_root_fields: GraphqlQueryLimits::default().max_root_fields,
+        }
+    );
+    assert_no_graphql_http_requests(&server).await;
+}
+
+#[fcp_async_core::runtime::test]
+async fn rejects_batch_query_limit_violation_before_http_dispatch() {
+    let server = MockServer::start().await;
+    let client = GraphqlClientBuilder::new(server.uri())
+        .build()
+        .expect("client");
+    let items = vec![
+        fcp_graphql::GraphqlBatchItem::new(
+            GraphqlQuery::new(ViewerQuery::QUERY),
+            serde_json::json!({}),
+        ),
+        fcp_graphql::GraphqlBatchItem::new(
+            GraphqlQuery::new(alias_bomb_query(
+                GraphqlQueryLimits::default().max_aliases + 1,
+            )),
+            serde_json::json!({}),
+        ),
+    ];
+
+    let err = client
+        .execute_batch_request::<_, serde_json::Value>(items, None, None, true)
+        .await
+        .expect_err("batch limit violation should be rejected before dispatch");
+
+    assert!(matches!(
+        limit_exceeded_kind(&err),
+        GraphqlLimitExceeded::AliasLimitExceeded { .. }
+    ));
+    assert_no_graphql_http_requests(&server).await;
+}
+
+#[fcp_async_core::runtime::test]
+async fn rejects_subscription_query_limit_violation_before_connect() {
+    let client = GraphqlSubscriptionClient::new("ws://127.0.0.1:9/graphql", "test");
+    let err = match client.subscribe::<TooDeepSubscription>(EmptyVars {}).await {
+        Ok(_) => panic!("deep subscription should be rejected before connect"),
+        Err(err) => err,
+    };
+
+    assert!(matches!(
+        limit_exceeded_kind(&err),
+        GraphqlLimitExceeded::DepthExceeded {
+            actual_depth,
+            max_depth: 10
+        } if *actual_depth > 10
+    ));
 }
 
 #[fcp_async_core::runtime::test]
@@ -1477,6 +1668,7 @@ async fn subscription_reconnects_after_disconnect() {
             ws,
             init_payload: None,
             ack_timeout: Duration::from_secs(2),
+            query_limits: GraphqlQueryLimits::default(),
         });
 
     let mut stream = client
@@ -1530,6 +1722,7 @@ async fn subscription_disconnect_without_reconnect_emits_error() {
             ws,
             init_payload: None,
             ack_timeout: Duration::from_secs(2),
+            query_limits: GraphqlQueryLimits::default(),
         });
 
     let mut stream = client
@@ -1596,6 +1789,7 @@ async fn subscription_drop_sends_complete_frame() {
             ws,
             init_payload: None,
             ack_timeout: Duration::from_secs(2),
+            query_limits: GraphqlQueryLimits::default(),
         });
 
     let stream = client
@@ -2253,6 +2447,7 @@ async fn subscription_with_init_payload() {
         ws: WsConfig::new().with_connect_timeout(Duration::from_secs(2)),
         init_payload: Some(serde_json::json!({"token": "my-auth-token"})),
         ack_timeout: Duration::from_secs(2),
+        query_limits: GraphqlQueryLimits::default(),
     };
     let client = GraphqlSubscriptionClient::new(url, "test").with_config(config);
 

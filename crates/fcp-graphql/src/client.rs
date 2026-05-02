@@ -17,7 +17,8 @@ use tracing::debug;
 
 use crate::error::{GraphqlClientError, GraphqlError};
 use crate::operation::{
-    GraphqlBatchItem, GraphqlOperation, GraphqlQuery, GraphqlRequest, GraphqlResponse,
+    GraphqlBatchItem, GraphqlOperation, GraphqlQuery, GraphqlQueryLimits, GraphqlRequest,
+    GraphqlResponse,
 };
 use crate::retry::{RetryDecision, RetryPolicy};
 use crate::schema::SchemaCache;
@@ -322,6 +323,8 @@ pub struct GraphqlClientConfig {
     pub retry: RetryPolicy,
     /// Schema validation mode.
     pub validation: SchemaValidationMode,
+    /// Query resource limits enforced before transport dispatch.
+    pub query_limits: GraphqlQueryLimits,
     /// Deduplicate in-flight requests.
     pub dedup_in_flight: bool,
 }
@@ -346,6 +349,7 @@ impl fmt::Debug for GraphqlClientConfig {
             .field("timeout", &self.timeout)
             .field("retry", &self.retry)
             .field("validation", &self.validation)
+            .field("query_limits", &self.query_limits)
             .field("dedup_in_flight", &self.dedup_in_flight)
             .finish()
     }
@@ -361,6 +365,7 @@ impl Default for GraphqlClientConfig {
             timeout: Duration::from_secs(30),
             retry: RetryPolicy::default(),
             validation: SchemaValidationMode::Off,
+            query_limits: GraphqlQueryLimits::default(),
             dedup_in_flight: false,
         }
     }
@@ -466,6 +471,13 @@ impl GraphqlClientBuilder {
     #[must_use]
     pub const fn with_validation_mode(mut self, mode: SchemaValidationMode) -> Self {
         self.config.validation = mode;
+        self
+    }
+
+    /// Set query resource limits.
+    #[must_use]
+    pub const fn with_query_limits(mut self, limits: GraphqlQueryLimits) -> Self {
+        self.config.query_limits = limits;
         self
     }
 
@@ -638,6 +650,8 @@ impl GraphqlClient {
         V: Serialize,
         R: DeserializeOwned + Serialize,
     {
+        self.config.query_limits.validate(request.query.as_str())?;
+
         if let (SchemaValidationMode::VariablesAndResponse, Some(schema)) =
             (self.config.validation, variables_schema)
         {
@@ -728,6 +742,10 @@ impl GraphqlClient {
     {
         if items.is_empty() {
             return Ok(Vec::new());
+        }
+
+        for item in &items {
+            self.config.query_limits.validate(item.query.as_str())?;
         }
 
         if let (SchemaValidationMode::VariablesAndResponse, Some(schema)) =
@@ -1198,19 +1216,32 @@ mod tests {
     }
 
     #[test]
+    fn builder_with_query_limits() {
+        let limits = GraphqlQueryLimits::new(1024, 4, 8, 12);
+        let builder =
+            GraphqlClientBuilder::new("https://api.test.com/graphql").with_query_limits(limits);
+        assert_eq!(builder.config.query_limits, limits);
+    }
+
+    #[test]
     fn builder_chaining() {
         let builder = GraphqlClientBuilder::new("https://api.test.com/graphql")
             .with_service_name("github")
             .with_bearer_token("token")
             .with_timeout(Duration::from_secs(10))
             .with_dedup_in_flight(true)
-            .with_validation_mode(SchemaValidationMode::ResponseOnly);
+            .with_validation_mode(SchemaValidationMode::ResponseOnly)
+            .with_query_limits(GraphqlQueryLimits::new(1024, 4, 8, 12));
         assert_eq!(builder.config.service_name, "github");
         assert_eq!(builder.config.timeout, Duration::from_secs(10));
         assert!(builder.config.dedup_in_flight);
         assert_eq!(
             builder.config.validation,
             SchemaValidationMode::ResponseOnly
+        );
+        assert_eq!(
+            builder.config.query_limits,
+            GraphqlQueryLimits::new(1024, 4, 8, 12)
         );
     }
 
@@ -2193,6 +2224,7 @@ mod tests {
         let config = GraphqlClientConfig::default();
         assert_eq!(config.retry.max_attempts, 3);
         assert_eq!(config.retry.strategy, RetryStrategy::IdempotentOnly);
+        assert_eq!(config.query_limits, GraphqlQueryLimits::default());
     }
 
     // ---- GraphqlClientBuilder: endpoint edge cases ----

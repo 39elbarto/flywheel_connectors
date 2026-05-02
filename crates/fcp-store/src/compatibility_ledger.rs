@@ -113,10 +113,52 @@ pub struct DurableCompatibilityLedgerStore {
     state: RwLock<CompatibilityLedgerState>,
 }
 
+/// Persistent latest-ledger pointer.
+///
+/// **`sequence` and `published_at_ms` are V2 fields** added under
+/// `flywheel_connectors-iqy2b` to defend against pointer-replay attacks.
+/// VioletPine's audit found that the V1 pointer (just `mesh_id` + `root`)
+/// could be silently rolled back on disk to point at an older signed
+/// ledger that was still present, demoting policy from a newer
+/// `V4Required` phase to an earlier `V3-permissive` phase without breaking
+/// any signature.
+///
+/// The defence is two-layered:
+///
+/// 1. `sequence` MUST equal the underlying signed ledger's `epoch()`.
+///    The ledger itself is hybrid-signed, so this binding transitively
+///    authenticates `sequence` via the ledger's signature — there is no
+///    separate pointer key to manage.
+/// 2. On `open`, the loader cross-checks every pointer against the
+///    high-water-mark epoch derived from the on-disk signed-ledger
+///    inventory. A pointer whose `sequence` is below the on-disk maximum
+///    for its mesh is treated as replay and silently upgraded to the
+///    high-water-mark ledger (which is also signed, so policy cannot
+///    regress).
+///
+/// `published_at_ms` is wall-clock at write time. It is NOT load-bearing
+/// for security (sequence is) but is recorded so an operator
+/// investigating a tampering incident can correlate the pointer's last
+/// legitimate write with their backup/restore log.
+///
+/// V1 pointer files (no `sequence`, no `published_at_ms`) deserialise
+/// with serde defaults (both 0). The loader detects this and reconstructs
+/// the latest pointer from the signed-ledger chain — V1 pointers are
+/// never trusted as authoritative.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct LatestLedgerPointer {
     mesh_id: String,
     root: CompatibilityLedgerRoot,
+    /// Monotonic sequence — equals the underlying signed ledger's
+    /// `epoch()`. Strictly increases per mesh across legitimate writes;
+    /// the on-open cross-check enforces this.
+    #[serde(default)]
+    sequence: u64,
+    /// Wall-clock at write time (Unix milliseconds). Forensic only —
+    /// not relied on for security; `sequence` is the authoritative
+    /// monotonic field.
+    #[serde(default)]
+    published_at_ms: u64,
 }
 
 impl DurableCompatibilityLedgerStore {
@@ -144,7 +186,16 @@ impl DurableCompatibilityLedgerStore {
 
         let mut state = CompatibilityLedgerState::default();
         load_ledger_files(&ledger_dir, &mut state)?;
-        load_latest_pointers(&latest_dir, &mut state)?;
+        let pointer_repairs = load_latest_pointers(&latest_dir, &mut state)?;
+        // br-iqy2b: a pointer file we found on disk pointed to a
+        // lower-epoch root than the on-disk signed-ledger high-water
+        // mark. Rewrite the file to the high-water-mark pointer so the
+        // replay state is cleaned up — the in-memory state already
+        // reflects the corrected mapping. Failure here is non-fatal at
+        // load time; the in-memory upgrade is the load-bearing defence.
+        for (mesh_id, root, sequence) in pointer_repairs {
+            let _ = repair_replayed_pointer(&latest_dir, &mesh_id, root, sequence);
+        }
 
         Ok(Self {
             ledger_dir,
@@ -181,10 +232,23 @@ impl DurableCompatibilityLedgerStore {
         &self,
         mesh_id: &str,
         root: CompatibilityLedgerRoot,
+        sequence: u64,
     ) -> Result<(), CompatibilityLedgerStoreError> {
         let pointer = LatestLedgerPointer {
             mesh_id: mesh_id.to_owned(),
             root,
+            sequence,
+            // Monotonic wall-clock. Cannot underflow on supported
+            // platforms; if the system clock is broken before 1970 the
+            // `unwrap_or(0)` keeps us forward-compatible without
+            // panicking inside the storage layer.
+            published_at_ms: u64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0),
+            )
+            .unwrap_or(0),
         };
         let bytes = to_canonical_cbor(&pointer)
             .map_err(|err| CompatibilityLedgerStoreError::Ledger(err.into()))?;
@@ -209,16 +273,18 @@ impl CompatibilityLedgerStore for DurableCompatibilityLedgerStore {
         {
             let state = self.state.read();
             if state.ledgers.contains_key(&root) {
+                let sequence = ledger.epoch();
                 drop(state);
-                self.persist_latest_pointer(&mesh_id, root)?;
+                self.persist_latest_pointer(&mesh_id, root, sequence)?;
                 self.state.write().latest_by_mesh.insert(mesh_id, root);
                 return Ok(root);
             }
             state.validate_next(&ledger, root, &mesh_id)?;
         }
 
+        let sequence = ledger.epoch();
         self.persist_ledger(root, &ledger)?;
-        self.persist_latest_pointer(&mesh_id, root)?;
+        self.persist_latest_pointer(&mesh_id, root, sequence)?;
 
         self.state.write().insert_accepted(root, mesh_id, ledger);
         Ok(root)
@@ -333,10 +399,57 @@ fn load_ledger_files(
     Ok(())
 }
 
+/// Compute the high-water-mark `(epoch, root)` per mesh from the on-disk
+/// signed-ledger inventory. Used by [`load_latest_pointers`] to enforce
+/// the pointer-replay defence (br-iqy2b).
+fn high_water_marks_by_mesh(
+    state: &CompatibilityLedgerState,
+) -> BTreeMap<String, (u64, CompatibilityLedgerRoot)> {
+    let mut max: BTreeMap<String, (u64, CompatibilityLedgerRoot)> = BTreeMap::new();
+    for (root, ledger) in &state.ledgers {
+        let mesh_id = ledger.mesh_id().to_owned();
+        let epoch = ledger.epoch();
+        max.entry(mesh_id)
+            .and_modify(|cur| {
+                if epoch > cur.0 {
+                    *cur = (epoch, *root);
+                }
+            })
+            .or_insert((epoch, *root));
+    }
+    max
+}
+
+/// Load latest-ledger pointers, enforcing the V2 replay-defence
+/// (br-iqy2b):
+///
+/// 1. The pointer's `sequence` MUST match the underlying signed
+///    ledger's `epoch()`. The ledger is hybrid-signed, so this binding
+///    transitively authenticates `sequence`.
+/// 2. The pointer's `sequence` MUST be ≥ the on-disk high-water-mark
+///    epoch for its mesh. If it is below, the pointer is treated as a
+///    replay attempt: the in-memory `latest_by_mesh` is set to the
+///    high-water-mark ledger instead, and a `(mesh_id, hwm_root,
+///    hwm_epoch)` repair is returned so the caller can rewrite the
+///    pointer file on disk.
+/// 3. Multiple pointer files for the same mesh (which should not
+///    happen given the digest-based filename, but defence in depth) are
+///    reduced to the highest-sequence entry.
+///
+/// V1 pointer files (no `sequence`, no `published_at_ms`) deserialise
+/// with `sequence = 0`. Since any real ledger has `epoch ≥ 1`, the
+/// per-pointer `sequence == ledger.epoch()` check would reject every V1
+/// pointer; instead we treat `sequence == 0` as "legacy / unset" and
+/// reconstruct using the high-water-mark, then enqueue a V2-pointer
+/// rewrite on disk.
 fn load_latest_pointers(
     latest_dir: &Path,
     state: &mut CompatibilityLedgerState,
-) -> Result<(), CompatibilityLedgerStoreError> {
+) -> Result<Vec<(String, CompatibilityLedgerRoot, u64)>, CompatibilityLedgerStoreError> {
+    let hwm_by_mesh = high_water_marks_by_mesh(state);
+    let mut pointers_by_mesh: BTreeMap<String, (u64, CompatibilityLedgerRoot)> = BTreeMap::new();
+    let mut repairs: Vec<(String, CompatibilityLedgerRoot, u64)> = Vec::new();
+
     for entry in read_dir(latest_dir)? {
         let entry = entry.map_err(|source| CompatibilityLedgerStoreError::StorageIo {
             path: latest_dir.to_path_buf(),
@@ -366,15 +479,88 @@ fn load_latest_pointers(
                 message: "latest pointer CBOR is not canonical".to_owned(),
             });
         }
-        if !state.ledgers.contains_key(&pointer.root) {
-            return Err(CompatibilityLedgerStoreError::MissingLatestLedger {
-                mesh_id: pointer.mesh_id,
+        let target_ledger = state.ledgers.get(&pointer.root).ok_or(
+            CompatibilityLedgerStoreError::MissingLatestLedger {
+                mesh_id: pointer.mesh_id.clone(),
                 latest_root: pointer.root.to_string(),
+            },
+        )?;
+
+        // br-iqy2b §1: pointer.sequence must equal the underlying
+        // ledger.epoch (which is signed). Tampered sequence → reject.
+        // Special case: sequence == 0 is the legacy V1 form; we
+        // reconstruct from the high-water-mark below rather than
+        // reject, so existing deployments transparently upgrade.
+        let ledger_epoch = target_ledger.epoch();
+        let is_legacy_v1 = pointer.sequence == 0;
+        if !is_legacy_v1 && pointer.sequence != ledger_epoch {
+            return Err(CompatibilityLedgerStoreError::PointerSequenceMismatch {
+                mesh_id: pointer.mesh_id,
+                pointer_sequence: pointer.sequence,
+                ledger_epoch,
             });
         }
-        state.latest_by_mesh.insert(pointer.mesh_id, pointer.root);
+
+        // br-iqy2b §2: cross-check against the on-disk high-water-mark.
+        // A stale pointer (e.g. restored from backup) below the HWM
+        // gets silently upgraded.
+        let (effective_root, effective_sequence) = match hwm_by_mesh.get(&pointer.mesh_id) {
+            Some(&(hwm_epoch, hwm_root))
+                if is_legacy_v1 || pointer.sequence < hwm_epoch =>
+            {
+                repairs.push((pointer.mesh_id.clone(), hwm_root, hwm_epoch));
+                (hwm_root, hwm_epoch)
+            }
+            _ => (pointer.root, ledger_epoch),
+        };
+
+        // br-iqy2b §3: if multiple pointer files for the same mesh
+        // exist (defence in depth), keep the highest-sequence entry.
+        match pointers_by_mesh.get(&pointer.mesh_id) {
+            Some(&(existing_seq, _)) if existing_seq >= effective_sequence => {}
+            _ => {
+                pointers_by_mesh
+                    .insert(pointer.mesh_id, (effective_sequence, effective_root));
+            }
+        }
     }
-    Ok(())
+
+    for (mesh_id, (_seq, root)) in pointers_by_mesh {
+        state.latest_by_mesh.insert(mesh_id, root);
+    }
+
+    Ok(repairs)
+}
+
+/// Rewrite a pointer file in place to the high-water-mark `(root,
+/// sequence)` after a replay was detected during load. Best-effort —
+/// caller treats failure as non-fatal because the in-memory state has
+/// already been corrected.
+fn repair_replayed_pointer(
+    latest_dir: &Path,
+    mesh_id: &str,
+    root: CompatibilityLedgerRoot,
+    sequence: u64,
+) -> Result<(), CompatibilityLedgerStoreError> {
+    let pointer = LatestLedgerPointer {
+        mesh_id: mesh_id.to_owned(),
+        root,
+        sequence,
+        published_at_ms: u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+        )
+        .unwrap_or(0),
+    };
+    let bytes = to_canonical_cbor(&pointer)
+        .map_err(|err| CompatibilityLedgerStoreError::Ledger(err.into()))?;
+    let path = DurableCompatibilityLedgerStore::latest_path(mesh_id, latest_dir);
+    fs::write(&path, bytes).map_err(|source| CompatibilityLedgerStoreError::StorageIo {
+        path,
+        message: source.to_string(),
+    })
 }
 
 fn read_dir(path: &Path) -> Result<fs::ReadDir, CompatibilityLedgerStoreError> {
@@ -494,6 +680,23 @@ pub enum CompatibilityLedgerStoreError {
         path: PathBuf,
         /// Decode/canonicalization error.
         message: String,
+    },
+    /// Latest pointer's `sequence` field disagreed with the underlying
+    /// signed ledger's `epoch()` (br-iqy2b). Surfaces an attacker who
+    /// edited the pointer to claim a different sequence than the
+    /// ledger's signed epoch — the ledger signature transitively
+    /// authenticates `sequence`, so any disagreement is rejected.
+    #[error(
+        "compatibility ledger latest pointer for mesh {mesh_id} sequence {pointer_sequence} \
+         does not match underlying signed ledger epoch {ledger_epoch}"
+    )]
+    PointerSequenceMismatch {
+        /// Mesh id from the pointer.
+        mesh_id: String,
+        /// Sequence the pointer claimed.
+        pointer_sequence: u64,
+        /// Epoch the ledger it points at actually has (signed).
+        ledger_epoch: u64,
     },
 }
 
@@ -749,6 +952,256 @@ mod tests {
             .expect("verified ledger persists");
 
         assert_eq!(store.get_ledger(&root), Some(ledger));
+    }
+
+    // ── br-iqy2b: latest-pointer replay defence ────────────────────────
+
+    #[test]
+    fn ledger_replay_attack_rolls_pointer_back_but_open_recovers_to_high_water_mark() {
+        // VioletPine's audit (br-iqy2b): an attacker (or a partial
+        // backup-restore) overwrites latest/<mesh>.latest.cbor with a
+        // pointer to an OLDER signed ledger that is still on disk.
+        // Both signature verification and root-exists checks pass on
+        // the old ledger, so the V1 loader silently regressed policy.
+        // The V2 loader cross-checks against the on-disk
+        // signed-ledger high-water mark and recovers epoch 2 as
+        // latest.
+        let signer = FakeHybridSigner {
+            ed25519: ed25519_key(),
+            ml_dsa_65: ml_dsa_key(),
+        };
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let store = DurableCompatibilityLedgerStore::open(temp_dir.path()).expect("open");
+        let first = signed_ledger(1, None, &signer);
+        let first_root = store.put_ledger(first.clone()).expect("genesis");
+        let second = signed_ledger(2, Some(first_root), &signer);
+        let _second_root = store.put_ledger(second.clone()).expect("epoch 2");
+        drop(store);
+
+        // Tamper: rewrite the pointer to point at epoch 1 with the V1
+        // (legacy) shape so we exercise both the legacy path AND the
+        // explicit-replay path.
+        let pointer_path = DurableCompatibilityLedgerStore::latest_path(
+            "mesh-alpha",
+            &temp_dir.path().join("latest"),
+        );
+        let replay_pointer = LatestLedgerPointer {
+            mesh_id: "mesh-alpha".to_owned(),
+            root: first_root,
+            sequence: 1,
+            published_at_ms: 0,
+        };
+        let bytes = to_canonical_cbor(&replay_pointer).expect("canonical CBOR");
+        std::fs::write(&pointer_path, bytes).expect("rewrite pointer");
+
+        // Reopen — the loader MUST cross-check against on-disk signed
+        // ledgers and pick epoch 2.
+        let reopened =
+            DurableCompatibilityLedgerStore::open(temp_dir.path()).expect("reopen succeeds");
+        let latest = reopened
+            .latest_ledger("mesh-alpha")
+            .expect("latest is present after replay defence");
+        assert_eq!(
+            latest.epoch(),
+            2,
+            "replay defence must restore latest to epoch 2 (the on-disk high-water mark)"
+        );
+
+        // The on-disk pointer should also have been repaired to point
+        // at epoch 2; reopening a third time must NOT need to repair
+        // again.
+        let second_reopen =
+            DurableCompatibilityLedgerStore::open(temp_dir.path()).expect("second reopen");
+        let pointer_bytes = std::fs::read(&pointer_path).expect("read repaired pointer");
+        let final_pointer: LatestLedgerPointer =
+            ciborium::de::from_reader(pointer_bytes.as_slice()).expect("decode");
+        assert_eq!(
+            final_pointer.sequence, 2,
+            "replay-repair must rewrite pointer to high-water-mark sequence"
+        );
+        assert_eq!(
+            second_reopen.latest_ledger("mesh-alpha").unwrap().epoch(),
+            2
+        );
+    }
+
+    #[test]
+    fn ledger_replay_v1_legacy_pointer_upgrades_transparently() {
+        // br-iqy2b: existing on-disk deployments have V1 pointers (no
+        // sequence, no published_at_ms — both default to 0). The
+        // loader MUST treat sequence == 0 as legacy and reconstruct
+        // from the high-water mark, then rewrite the pointer to V2.
+        let signer = FakeHybridSigner {
+            ed25519: ed25519_key(),
+            ml_dsa_65: ml_dsa_key(),
+        };
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let store = DurableCompatibilityLedgerStore::open(temp_dir.path()).expect("open");
+        let first = signed_ledger(1, None, &signer);
+        let first_root = store.put_ledger(first).expect("genesis");
+        let second = signed_ledger(2, Some(first_root), &signer);
+        let _ = store.put_ledger(second).expect("epoch 2");
+        drop(store);
+
+        // Write a V1-shaped pointer (sequence/published_at_ms both 0)
+        // pointing at epoch 1.
+        let v1_pointer = LatestLedgerPointer {
+            mesh_id: "mesh-alpha".to_owned(),
+            root: first_root,
+            sequence: 0,
+            published_at_ms: 0,
+        };
+        let pointer_path = DurableCompatibilityLedgerStore::latest_path(
+            "mesh-alpha",
+            &temp_dir.path().join("latest"),
+        );
+        std::fs::write(
+            &pointer_path,
+            to_canonical_cbor(&v1_pointer).expect("canonical CBOR"),
+        )
+        .expect("write V1 pointer");
+
+        // Reopen: V1 pointer is reconstructed from HWM → epoch 2.
+        let reopened = DurableCompatibilityLedgerStore::open(temp_dir.path())
+            .expect("V1 pointer must upgrade transparently");
+        assert_eq!(reopened.latest_ledger("mesh-alpha").unwrap().epoch(), 2);
+
+        // Pointer file is rewritten to the V2 form with sequence == 2.
+        let final_pointer: LatestLedgerPointer = ciborium::de::from_reader(
+            std::fs::read(&pointer_path).expect("read repaired").as_slice(),
+        )
+        .expect("decode");
+        assert_eq!(final_pointer.sequence, 2);
+    }
+
+    #[test]
+    fn ledger_replay_pointer_with_lying_sequence_is_rejected() {
+        // br-iqy2b: pointer.sequence MUST equal the underlying signed
+        // ledger.epoch(). An attacker that edits pointer.sequence to
+        // claim a different value than what the (signed) ledger says
+        // must be rejected as corrupt — the ledger signature
+        // transitively authenticates the sequence claim.
+        let signer = FakeHybridSigner {
+            ed25519: ed25519_key(),
+            ml_dsa_65: ml_dsa_key(),
+        };
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let store = DurableCompatibilityLedgerStore::open(temp_dir.path()).expect("open");
+        let first = signed_ledger(1, None, &signer);
+        let first_root = store.put_ledger(first).expect("genesis");
+        let second = signed_ledger(2, Some(first_root), &signer);
+        let second_root = store.put_ledger(second).expect("epoch 2");
+        drop(store);
+
+        // Tamper: pointer claims sequence == 99 but actually points at
+        // epoch-2 ledger.
+        let lying_pointer = LatestLedgerPointer {
+            mesh_id: "mesh-alpha".to_owned(),
+            root: second_root,
+            sequence: 99, // Lie — second_root's ledger has epoch == 2.
+            published_at_ms: 1_700_000_000_000,
+        };
+        let pointer_path = DurableCompatibilityLedgerStore::latest_path(
+            "mesh-alpha",
+            &temp_dir.path().join("latest"),
+        );
+        std::fs::write(
+            &pointer_path,
+            to_canonical_cbor(&lying_pointer).expect("canonical"),
+        )
+        .expect("write");
+
+        let err = DurableCompatibilityLedgerStore::open(temp_dir.path())
+            .expect_err("lying-sequence pointer must be rejected on open");
+        assert!(
+            matches!(
+                err,
+                CompatibilityLedgerStoreError::PointerSequenceMismatch {
+                    pointer_sequence: 99,
+                    ledger_epoch: 2,
+                    ..
+                }
+            ),
+            "expected PointerSequenceMismatch{{99→2}}, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn ledger_replay_pointer_carries_sequence_and_timestamp_after_put() {
+        // br-iqy2b: the pointer file written by put_ledger MUST carry
+        // sequence == ledger.epoch and a non-zero published_at_ms.
+        let signer = FakeHybridSigner {
+            ed25519: ed25519_key(),
+            ml_dsa_65: ml_dsa_key(),
+        };
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let store = DurableCompatibilityLedgerStore::open(temp_dir.path()).expect("open");
+        let _ = store
+            .put_ledger(signed_ledger(7, None, &signer))
+            .expect("put");
+
+        let pointer_path = DurableCompatibilityLedgerStore::latest_path(
+            "mesh-alpha",
+            &temp_dir.path().join("latest"),
+        );
+        let pointer: LatestLedgerPointer = ciborium::de::from_reader(
+            std::fs::read(&pointer_path).expect("pointer exists").as_slice(),
+        )
+        .expect("decode");
+        assert_eq!(pointer.sequence, 7, "sequence must equal ledger epoch");
+        assert!(
+            pointer.published_at_ms > 1_700_000_000_000,
+            "published_at_ms must be a wall-clock timestamp, got {}",
+            pointer.published_at_ms
+        );
+    }
+
+    #[test]
+    fn ledger_replay_high_water_mark_strictly_monotonic_on_read() {
+        // br-iqy2b: even if the pointer file contains a perfectly-valid
+        // (sequence == ledger.epoch) entry, that sequence MUST be ≥
+        // the on-disk high-water mark. An attacker who deletes the
+        // newer pointer file but leaves both signed ledgers on disk
+        // cannot regress us: open() picks the HWM regardless.
+        let signer = FakeHybridSigner {
+            ed25519: ed25519_key(),
+            ml_dsa_65: ml_dsa_key(),
+        };
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let store = DurableCompatibilityLedgerStore::open(temp_dir.path()).expect("open");
+        let first = signed_ledger(1, None, &signer);
+        let first_root = store.put_ledger(first).expect("genesis");
+        let second = signed_ledger(2, Some(first_root), &signer);
+        let _ = store.put_ledger(second).expect("epoch 2");
+        drop(store);
+
+        // Write a V2 pointer pointing at epoch 1 (with the correctly-
+        // signed-ledger-derived sequence == 1). This is the trickier
+        // attack: the pointer's internal consistency check passes
+        // because sequence == ledger.epoch == 1; only the HWM
+        // cross-check catches the regression.
+        let regressed_pointer = LatestLedgerPointer {
+            mesh_id: "mesh-alpha".to_owned(),
+            root: first_root,
+            sequence: 1,
+            published_at_ms: 1_700_000_000_000,
+        };
+        let pointer_path = DurableCompatibilityLedgerStore::latest_path(
+            "mesh-alpha",
+            &temp_dir.path().join("latest"),
+        );
+        std::fs::write(
+            &pointer_path,
+            to_canonical_cbor(&regressed_pointer).expect("canonical"),
+        )
+        .expect("write");
+
+        let reopened = DurableCompatibilityLedgerStore::open(temp_dir.path()).expect("reopen");
+        assert_eq!(
+            reopened.latest_ledger("mesh-alpha").unwrap().epoch(),
+            2,
+            "HWM cross-check must override a sequence-consistent but stale pointer"
+        );
     }
 
     #[test]

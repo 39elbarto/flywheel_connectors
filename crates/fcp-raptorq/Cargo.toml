@@ -28,7 +28,12 @@ fcp-tailscale = { path = "../fcp-tailscale" }
 
 [dev-dependencies]
 chrono.workspace = true
+criterion.workspace = true
 jsonschema.workspace = true
 rand.workspace = true
 rand_chacha = "0.3"
 serde_json.workspace = true
+
+[[bench]]
+name = "decode_repair_tail"
+harness = false

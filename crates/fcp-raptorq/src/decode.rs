@@ -38,8 +38,7 @@ pub struct RaptorQDecoder {
     last_attempted_at_count: u32,
     /// How many additional symbols must arrive before the next scheduled
     /// decode attempt. Starts at 1 (try at K, K+1, ...) and doubles on
-    /// failure up to `MAX_POST_K_RETRY_STEP`. Any repair-symbol
-    /// arrival also forces an immediate attempt and resets the schedule.
+    /// failure up to `MAX_POST_K_RETRY_STEP`.
     post_k_retry_step: u32,
 }
 
@@ -180,16 +179,49 @@ impl RaptorQDecoder {
         // K turns a lossy tail into sum_{i=K}^{K+R} O(i * symbol_size)
         // work instead of one decode plus bounded retries. Use an
         // exponential-backoff schedule — attempt at K, K+1, K+2, K+4,
-        // K+8, K+16, K+32, … (cap MAX_POST_K_RETRY_STEP) — plus an
-        // immediate attempt whenever a repair symbol (ESI >= K)
-        // arrives, since repair equations add strictly new independent
-        // information to the decoding matrix.
+        // K+8, K+16, K+32, … (cap MAX_POST_K_RETRY_STEP). The first
+        // repair symbol after the initial K-symbol attempt gets one
+        // grace retry, but subsequent repair-tail symbols follow the
+        // same schedule so lossy repair retries do not rebuild the full
+        // decoder state on every arrival.
         if self.received_count() < self.k {
             return Ok(None);
         }
         if !self.should_attempt_decode(esi) {
             return Ok(None);
         }
+        self.attempt_reconstruct()
+    }
+
+    /// Decide whether to run a full `try_reconstruct` for the newly
+    /// inserted ESI. Returns `true` at the first K-symbol crossover,
+    /// for one repair-symbol grace attempt immediately after that
+    /// crossover, and on the exponential-backoff schedule driven by
+    /// [`Self::post_k_retry_step`] after failures. Returns `false` to
+    /// let the caller buffer more symbols before paying the full decode
+    /// cost again. See br-yu0l5 and flywheel_connectors-qmepq.
+    fn should_attempt_decode(&self, just_added_esi: u32) -> bool {
+        let count = self.received_count();
+        if count < self.k {
+            return false;
+        }
+        // First crossover: always try.
+        if self.last_attempted_at_count == 0 {
+            return true;
+        }
+        // Preserve the common K+1 repair completion case after the
+        // initial K-symbol attempt fails, then coalesce the remaining
+        // repair tail with the normal retry schedule.
+        if just_added_esi >= self.k && self.last_attempted_at_count == self.k {
+            return true;
+        }
+        count
+            >= self
+                .last_attempted_at_count
+                .saturating_add(self.post_k_retry_step)
+    }
+
+    fn attempt_reconstruct(&mut self) -> Result<Option<Vec<u8>>, DecodeError> {
         self.last_attempted_at_count = self.received_count();
         match self.try_reconstruct() {
             Ok(payload) => Ok(Some(payload)),
@@ -202,32 +234,6 @@ impl RaptorQDecoder {
             }
             Err(err) => Err(err),
         }
-    }
-
-    /// Decide whether to run a full `try_reconstruct` for the newly
-    /// inserted ESI. Returns `true` at the first K-symbol crossover,
-    /// on every repair-symbol arrival, and on the exponential-backoff
-    /// schedule driven by [`Self::post_k_retry_step`] after failures.
-    /// Returns `false` to let the caller buffer more symbols before
-    /// paying the full decode cost again. See br-yu0l5.
-    fn should_attempt_decode(&self, just_added_esi: u32) -> bool {
-        let count = self.received_count();
-        if count < self.k {
-            return false;
-        }
-        // First crossover: always try.
-        if self.last_attempted_at_count == 0 {
-            return true;
-        }
-        // Repair symbol: always try — adds a fresh LT equation.
-        if just_added_esi >= self.k {
-            return true;
-        }
-        // Otherwise honor the backoff schedule.
-        count
-            >= self
-                .last_attempted_at_count
-                .saturating_add(self.post_k_retry_step)
     }
 
     /// Attempt to reconstruct the payload from buffered symbols.
@@ -1008,6 +1014,13 @@ impl DecodeAdmissionController {
                 fcp_async_core::task::yield_now().await;
                 if loop_context.is_cancelled() {
                     return Err(DecodeError::Cancelled);
+                }
+
+                if decoder.received_count() >= decoder.k
+                    && decoder.received_count() > decoder.last_attempted_at_count
+                    && let Some(payload) = decoder.attempt_reconstruct()?
+                {
+                    return Ok(payload);
                 }
 
                 Err(DecodeError::InsufficientSymbols {
@@ -2770,26 +2783,29 @@ mod tests {
         let config = test_config();
         let oti = ObjectTransmissionInformation::new(640, 64, 1, 1, 8);
         let mut decoder = RaptorQDecoder::new(oti, &config);
-        // Simulate a post-K state: K symbols buffered, one attempt
-        // already made, backoff step doubled.
-        for esi in 0..decoder.k {
+        // Simulate a post-K state with one missing source symbol and
+        // one repair row: K symbols buffered, one attempt already made,
+        // and the backoff step doubled.
+        for esi in 0..decoder.k - 1 {
             decoder.received.insert(esi, vec![0u8; 64]);
         }
+        decoder.received.insert(decoder.k + 10_000, vec![0u8; 64]);
         decoder.last_attempted_at_count = decoder.k;
         decoder.post_k_retry_step = 4;
         // New source-like arrival (ESI < K); count only reached K+1,
         // but schedule wants K+4 — must skip.
-        decoder.received.insert(0, vec![1u8; 64]); // duplicate slot won't matter
+        decoder.received.insert(decoder.k - 1, vec![1u8; 64]);
         assert!(
-            !decoder.should_attempt_decode(0),
+            !decoder.should_attempt_decode(decoder.k - 1),
             "source-ESI between backoff ticks must not fire"
         );
     }
 
     #[test]
-    fn should_attempt_decode_repair_symbol_always_fires() {
-        // Repair arrivals (ESI >= K) must always trigger an attempt
-        // since they introduce a fresh LT equation.
+    fn should_attempt_decode_first_repair_after_k_gets_grace_retry() {
+        // Preserve the common K+1 repair case: after the initial
+        // K-symbol attempt fails, the first repair symbol gets one
+        // immediate retry before the repair tail is coalesced.
         let config = test_config();
         let oti = ObjectTransmissionInformation::new(640, 64, 1, 1, 8);
         let mut decoder = RaptorQDecoder::new(oti, &config);
@@ -2797,10 +2813,32 @@ mod tests {
             decoder.received.insert(esi, vec![0u8; 64]);
         }
         decoder.last_attempted_at_count = decoder.k;
-        decoder.post_k_retry_step = 32; // far into backoff
+        decoder.post_k_retry_step = 4;
+        decoder.received.insert(decoder.k + 10_000, vec![0u8; 64]);
         assert!(
             decoder.should_attempt_decode(decoder.k + 10_000),
-            "repair symbols must bypass the backoff schedule"
+            "first repair after K must get one grace retry"
+        );
+    }
+
+    #[test]
+    fn should_attempt_decode_repair_tail_respects_backoff() {
+        // After the grace retry, repair arrivals must not bypass the
+        // schedule; otherwise every lossy repair-tail symbol rebuilds
+        // the full decoder state.
+        let config = test_config();
+        let oti = ObjectTransmissionInformation::new(640, 64, 1, 1, 8);
+        let mut decoder = RaptorQDecoder::new(oti, &config);
+        for esi in 0..decoder.k {
+            decoder.received.insert(esi, vec![0u8; 64]);
+        }
+        decoder.received.insert(decoder.k + 10_000, vec![0u8; 64]);
+        decoder.last_attempted_at_count = decoder.k + 1;
+        decoder.post_k_retry_step = 4;
+        decoder.received.insert(decoder.k + 10_001, vec![0u8; 64]);
+        assert!(
+            !decoder.should_attempt_decode(decoder.k + 10_001),
+            "repair tail must coalesce between scheduled retries"
         );
     }
 

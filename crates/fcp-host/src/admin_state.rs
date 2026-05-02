@@ -91,6 +91,26 @@ pub struct ManagedConnectorConfig {
     /// `allowed_zones`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_operations: Vec<String>,
+    /// br-v2kt4: explicit fail-closed flag for empty `allowed_zones`
+    /// / `allowed_operations` lists. The pre-v2kt4 semantics treated
+    /// `Some(empty)` as "no restriction" (back-compat permissive)
+    /// — same end-state as None. That made the security ergonomics
+    /// inverted: an operator who forgot to populate either list got
+    /// the LEAST restrictive behaviour. There was no way to express
+    /// "deny everything for this connector."
+    ///
+    /// When `enforce_empty_allow_lists = true`, an empty
+    /// `allowed_zones` rejects EVERY zone and an empty
+    /// `allowed_operations` rejects EVERY operation. When the flag
+    /// is `false` (default for back-compat), empty lists preserve
+    /// the legacy permissive path.
+    ///
+    /// New deployments should set this to `true` and explicitly
+    /// populate the allowlists. Existing deployments deserialize
+    /// with the flag absent and continue to behave as before. See
+    /// docs/audit/security-audit-saas-alpha-2026-05-02.md §b.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enforce_empty_allow_lists: bool,
 }
 
 /// Live connector inventory mutation kind handled by the host admin plane.
@@ -10431,6 +10451,7 @@ mod tests {
             version: Some("1.0.0".to_string()),
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
+            enforce_empty_allow_lists: false,
         };
         let json = serde_json::to_string(&config).unwrap();
         let back: ManagedConnectorConfig = serde_json::from_str(&json).unwrap();
@@ -10468,6 +10489,7 @@ mod tests {
                 version: Some("1.2.3".to_string()),
                 allowed_zones: Vec::new(),
                 allowed_operations: Vec::new(),
+                enforce_empty_allow_lists: false,
             },
         };
 

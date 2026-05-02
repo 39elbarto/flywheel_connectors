@@ -826,6 +826,17 @@ impl SubprocessRegistry {
             .map(|entry| entry.config.allowed_operations.clone())
     }
 
+    /// br-v2kt4: whether this connector's empty allow-lists should be
+    /// treated as fail-closed (deny-all) instead of the legacy permissive
+    /// back-compat path. Returns `None` when the connector is unknown.
+    async fn enforce_empty_allow_lists(&self, connector_id: &ConnectorId) -> Option<bool> {
+        let state = self.state.read().await;
+        state
+            .connectors
+            .get(connector_id)
+            .map(|entry| entry.config.enforce_empty_allow_lists)
+    }
+
     async fn connector_requires_singleton_writer(&self, connector_id: &ConnectorId) -> bool {
         let state = self.state.read().await;
         state
@@ -2933,16 +2944,32 @@ async fn verify_live_request(
     // unintended zones. The error path emits a distinct rejection message
     // so receipts and logs distinguish zone-binding violations from
     // generic preflight failures.
-    if let Some(allowed) = state.registry.allowed_zones(&request.connector_id).await
-        && !allowed.is_empty()
-        && !allowed.iter().any(|zone| zone == request.zone_id.as_str())
-    {
-        return Err(HostError::PreflightFailed(format!(
-            "connector `{}` is not bound to zone `{}` (allowed: [{}])",
-            request.connector_id,
-            request.zone_id.as_str(),
-            allowed.join(", ")
-        )));
+    // br-v2kt4: explicit fail-closed semantics for empty allowed_zones
+    // when the operator opted in via enforce_empty_allow_lists. Default
+    // (false) preserves the back-compat permissive path.
+    if let Some(allowed) = state.registry.allowed_zones(&request.connector_id).await {
+        let enforce_empty = state
+            .registry
+            .enforce_empty_allow_lists(&request.connector_id)
+            .await
+            .unwrap_or(false);
+        if allowed.is_empty() {
+            if enforce_empty {
+                return Err(HostError::PreflightFailed(format!(
+                    "connector `{}` has no `allowed_zones` and is configured \
+                     enforce_empty_allow_lists=true; deny-all (br-v2kt4)",
+                    request.connector_id
+                )));
+            }
+            // empty + !enforce_empty -> back-compat permissive path
+        } else if !allowed.iter().any(|zone| zone == request.zone_id.as_str()) {
+            return Err(HostError::PreflightFailed(format!(
+                "connector `{}` is not bound to zone `{}` (allowed: [{}])",
+                request.connector_id,
+                request.zone_id.as_str(),
+                allowed.join(", ")
+            )));
+        }
     }
 
     // br-ike8x: operator-pinned operation gate. The pre-existing
@@ -2958,21 +2985,37 @@ async fn verify_live_request(
     // `allowed_operations` set on the ManagedConnectorConfig, the
     // host gateway rejects requests whose `operation` is not in it.
     // Empty preserves pre-pinning behavior for back-compat.
+    // br-v2kt4: same explicit fail-closed shape for empty allowed_operations.
     if let Some(allowed_ops) = state
         .registry
         .allowed_operations(&request.connector_id)
         .await
-        && !allowed_ops.is_empty()
-        && !allowed_ops
+    {
+        let enforce_empty = state
+            .registry
+            .enforce_empty_allow_lists(&request.connector_id)
+            .await
+            .unwrap_or(false);
+        if allowed_ops.is_empty() {
+            if enforce_empty {
+                return Err(HostError::PreflightFailed(format!(
+                    "connector `{}` has no `allowed_operations` and is configured \
+                     enforce_empty_allow_lists=true; deny-all (br-v2kt4)",
+                    request.connector_id
+                )));
+            }
+            // empty + !enforce_empty -> back-compat permissive path
+        } else if !allowed_ops
             .iter()
             .any(|op| op == request.operation.as_str())
-    {
-        return Err(HostError::PreflightFailed(format!(
-            "connector `{}` does not allow operation `{}` (allowed: [{}])",
-            request.connector_id,
-            request.operation.as_str(),
-            allowed_ops.join(", ")
-        )));
+        {
+            return Err(HostError::PreflightFailed(format!(
+                "connector `{}` does not allow operation `{}` (allowed: [{}])",
+                request.connector_id,
+                request.operation.as_str(),
+                allowed_ops.join(", ")
+            )));
+        }
     }
 
     let introspection = state.discovery.introspect(&request.connector_id).await?;
@@ -7115,6 +7158,7 @@ mod tests {
             version: None,
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
+            enforce_empty_allow_lists: false,
         }
     }
 
@@ -7132,6 +7176,7 @@ mod tests {
             version: Some("1.0.0".to_string()),
             allowed_zones: vec!["z:work".to_string()],
             allowed_operations: Vec::new(),
+            enforce_empty_allow_lists: false,
         };
         let incoming = ConnectorConfig {
             id: existing.id.clone(),
@@ -7145,6 +7190,7 @@ mod tests {
             version: None,
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
+            enforce_empty_allow_lists: false,
         };
 
         let updated = replace_connector_update(&existing, &incoming);
@@ -7973,6 +8019,218 @@ mod tests {
         }
     }
 
+    /// br-v2kt4: explicit fail-closed for empty allowed_zones when
+    /// the operator opts in. Pre-fix, an empty allowed_zones list was
+    /// always treated as permissive ("no restriction"), so the
+    /// security ergonomics were inverted: a misconfigured operator
+    /// got the LEAST restrictive behaviour. With
+    /// enforce_empty_allow_lists=true, an empty list now means
+    /// deny-all.
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn verify_live_request_v2kt4_empty_allowed_zones_with_enforce_flag_denies_all() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping v2kt4 zone deny-all test");
+            return;
+        }
+
+        let connector_id = "fcp.test.v2kt4-empty-zones-deny:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+
+        let mut config = subprocess_test_connector_config(connector_id);
+        // Empty allowed_zones + enforce flag = deny-all.
+        assert!(config.allowed_zones.is_empty(), "test fixture starts empty");
+        config.enforce_empty_allow_lists = true;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![config],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            ..(*base_state).clone()
+        });
+
+        let token = test_capability_token(
+            &signing_key,
+            "cap.test.echo",
+            "test.echo",
+            ZoneId::work().as_str(),
+        );
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "v2kt4 deny-all attempt" }),
+            capability_token: token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let error = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("v2kt4: empty allowed_zones + enforce flag must deny-all");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("no `allowed_zones`")
+                && msg.contains("enforce_empty_allow_lists=true")
+                && msg.contains("br-v2kt4"),
+            "expected v2kt4 zone deny-all rejection naming the flag, got: {msg}"
+        );
+    }
+
+    /// br-v2kt4: same fail-closed shape for empty allowed_operations.
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn verify_live_request_v2kt4_empty_allowed_operations_with_enforce_flag_denies_all() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping v2kt4 op deny-all test");
+            return;
+        }
+
+        let connector_id = "fcp.test.v2kt4-empty-ops-deny:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+
+        let mut config = subprocess_test_connector_config(connector_id);
+        // allowed_zones populated so we don't hit the zone gate first.
+        config.allowed_zones = vec![ZoneId::work().as_str().to_string()];
+        assert!(config.allowed_operations.is_empty(), "test fixture starts empty");
+        config.enforce_empty_allow_lists = true;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![config],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            ..(*base_state).clone()
+        });
+
+        let token = test_capability_token(
+            &signing_key,
+            "cap.test.echo",
+            "test.echo",
+            ZoneId::work().as_str(),
+        );
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "v2kt4 op deny-all attempt" }),
+            capability_token: token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let error = verify_live_request(state.as_ref(), &request, None)
+            .await
+            .expect_err("v2kt4: empty allowed_operations + enforce flag must deny-all");
+        let msg = error.to_string();
+        assert!(
+            msg.contains("no `allowed_operations`")
+                && msg.contains("enforce_empty_allow_lists=true")
+                && msg.contains("br-v2kt4"),
+            "expected v2kt4 op deny-all rejection naming the flag, got: {msg}"
+        );
+    }
+
+    /// br-v2kt4 back-compat: with the flag at its default `false`,
+    /// empty allowed_zones / allowed_operations preserve the legacy
+    /// permissive path. Ensures the explicit-deny mechanism is opt-in
+    /// only — existing deployments that don't set the flag see no
+    /// behaviour change.
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn verify_live_request_v2kt4_default_flag_preserves_legacy_permissive_path() {
+        if maybe_compiled_test_connector_binary().is_none() {
+            eprintln!("compiled fcp-test-connector missing; skipping v2kt4 back-compat test");
+            return;
+        }
+
+        let connector_id = "fcp.test.v2kt4-default-permissive:utility:1.0.0";
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+
+        let config = subprocess_test_connector_config(connector_id);
+        // Default config: empty allow-lists, enforce_empty_allow_lists=false.
+        assert!(config.allowed_zones.is_empty());
+        assert!(config.allowed_operations.is_empty());
+        assert!(!config.enforce_empty_allow_lists, "default must be false");
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let connectors_file = tempdir.path().join("connectors.json");
+        let base_state = test_app_state_with_connectors_file(
+            vec![config],
+            connectors_file,
+            Arc::clone(&lifecycle),
+        )
+        .await;
+        let state = Arc::new(AppState {
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            ..(*base_state).clone()
+        });
+
+        let token = test_capability_token(
+            &signing_key,
+            "cap.test.echo",
+            "test.echo",
+            ZoneId::work().as_str(),
+        );
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_id.parse().expect("connector id"),
+            operation: OperationId::from_static("test.echo"),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "v2kt4 back-compat permissive" }),
+            capability_token: token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let outcome = verify_live_request(state.as_ref(), &request, None).await;
+        // Either succeeds OR fails for some OTHER reason — just must NOT
+        // fail with the v2kt4 deny-all message (the back-compat permissive
+        // path must keep flowing through to the downstream introspection
+        // check, same as pre-v2kt4 behaviour).
+        if let Err(err) = outcome {
+            let msg = err.to_string();
+            assert!(
+                !msg.contains("br-v2kt4"),
+                "v2kt4 deny-all must NOT fire when flag is at default false: {msg}"
+            );
+        }
+    }
+
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]
     async fn invoke_handler_hrw_lease_refuses_non_holder_and_admits_elected_holder() {
         let connector_id = "fcp.test.hrw-lease-refuse:utility:1.0.0";
@@ -8047,6 +8305,7 @@ mod tests {
                 version: None,
                 allowed_zones: Vec::new(),
                 allowed_operations: Vec::new(),
+                enforce_empty_allow_lists: false,
             },
         );
         let state = dispatcher_app_state(
@@ -8203,6 +8462,7 @@ mod tests {
                     version: None,
                     allowed_zones: Vec::new(),
                     allowed_operations: Vec::new(),
+                    enforce_empty_allow_lists: false,
                 },
                 connector,
             },
@@ -8394,6 +8654,7 @@ mod tests {
                 version: None,
                 allowed_zones: Vec::new(),
                 allowed_operations: Vec::new(),
+                enforce_empty_allow_lists: false,
             },
         );
         let mut policies = HashMap::new();
@@ -8583,6 +8844,7 @@ mod tests {
                     version: None,
                     allowed_zones: Vec::new(),
                     allowed_operations: Vec::new(),
+                    enforce_empty_allow_lists: false,
                 },
                 connector,
             },
@@ -8725,6 +8987,7 @@ mod tests {
                 version: None,
                 allowed_zones: Vec::new(),
                 allowed_operations: Vec::new(),
+                enforce_empty_allow_lists: false,
             },
         );
         let lifecycle = Arc::new(HostAdminStateStore::new());
@@ -12001,6 +12264,7 @@ done"#;
             version: None,
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
+            enforce_empty_allow_lists: false,
         };
         let dbg = format!("{config:?}");
         assert!(dbg.contains("ConnectorConfig"));

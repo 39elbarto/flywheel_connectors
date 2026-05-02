@@ -1095,7 +1095,10 @@ impl GcpConnector {
                     });
                 }
             };
-            verifier.verify(req.capability_token, &cap, &req.operation, &[])?;
+            // dja9u.1.a: verify_bound returns CapabilityToken<BoundVerified>;
+            // discarded here because invoke has no downstream that consumes
+            // the typestate yet, but the call enforces the typestate handoff.
+            let _bound = verifier.verify_bound(req.capability_token, &cap, &req.operation, &[])?;
         } else {
             return Err(FcpError::Internal {
                 message: "connector ready state missing capability verifier".into(),

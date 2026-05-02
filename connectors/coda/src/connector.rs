@@ -1246,7 +1246,11 @@ impl CodaConnector {
                 code: 1004,
                 message: format!("Unknown operation: {operation}"),
             })?;
-        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
+        // dja9u.1.a: verify_bound returns CapabilityToken<BoundVerified>;
+        // discarded here because invoke has no downstream that consumes
+        // the typestate yet, but the call enforces the typestate handoff.
+        let _bound =
+            verifier.verify_bound(req.capability_token, &required_cap, &req.operation, &[])?;
 
         let config = self.config.as_ref().ok_or(FcpError::Internal {
             message: "Connector config missing after configure".into(),

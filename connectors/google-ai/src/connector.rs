@@ -1045,7 +1045,10 @@ impl GoogleAiConnector {
         })?;
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
+            // dja9u.1.a: verify_bound returns CapabilityToken<BoundVerified>;
+            // discarded here because invoke has no downstream that consumes
+            // the typestate yet, but the call enforces the typestate handoff.
+            let _bound = verifier.verify_bound(token, &cap_id, &op_id, &[])?;
         } else {
             return Err(FcpError::NotConfigured);
         }

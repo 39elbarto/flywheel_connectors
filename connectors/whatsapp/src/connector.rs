@@ -640,7 +640,8 @@ impl WhatsAppConnector {
                 });
             }
         };
-        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
+        let _bound =
+            verifier.verify_bound(req.capability_token, &required_cap, &req.operation, &[])?;
 
         let runtime = self.runtime.as_ref().ok_or(FcpError::Internal {
             message: "Connector runtime missing after configure".into(),
@@ -854,9 +855,9 @@ impl WhatsAppConnector {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_prelude::CapabilityConstraints;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_prelude::CapabilityConstraints;
 
     fn base_handshake() -> HandshakeRequest {
         let signing_key = Ed25519SigningKey::generate();

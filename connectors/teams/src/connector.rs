@@ -2140,7 +2140,7 @@ impl TeamsConnector {
         let verifier = self.verifier.as_ref().ok_or_else(|| FcpError::Internal {
             message: "connector ready state missing capability verifier".into(),
         })?;
-        verifier.verify(
+        let _bound = verifier.verify_bound(
             req.capability_token.clone(),
             &required_cap,
             &req.operation,

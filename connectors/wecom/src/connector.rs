@@ -649,7 +649,8 @@ impl WeComConnector {
         let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         let capability = required_capability(req.operation.as_str())?;
-        verifier.verify(req.capability_token, &capability, &req.operation, &[])?;
+        let _bound =
+            verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])?;
 
         let (output, resource_uris) = match req.operation.as_str() {
             OP_SEND_TEXT => {
@@ -983,7 +984,8 @@ impl FcpConnector for WeComConnector {
                 FcpError::NotHandshaken.error_code(),
             ));
         };
-        if let Err(error) = verifier.verify(req.capability_token, &capability, &req.operation, &[])
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])
         {
             let mut response =
                 SimulateResponse::denied(req.id, error.to_string(), error.error_code());
@@ -1419,8 +1421,8 @@ mod tests {
 
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use chrono::{Duration as ChronoDuration, Utc};
-    use fcp_prelude::{CapabilityConstraints, CapabilityToken, OrderingPolicy, RequestId, ZoneId};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+    use fcp_prelude::{CapabilityConstraints, CapabilityToken, OrderingPolicy, RequestId, ZoneId};
     use serde_json::Value;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,

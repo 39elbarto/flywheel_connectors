@@ -13,8 +13,8 @@
 //!
 //! Live tree adoption (per the dja9u bead's evidence scan):
 //!
-//! - 69 connectors USE_TYPESTATE (verify_bound / promote_with_*).
-//! - 9 connectors USE_LEGACY_VERIFY (deprecated `verifier.verify(...)`
+//! - 78 connectors USE_TYPESTATE (verify_bound / promote_with_*).
+//! - 0 connectors USE_LEGACY_VERIFY (deprecated `verifier.verify(...)`
 //!   alias — same code path as `verify_bound` but discards the
 //!   `BoundVerified` token, so the connector can no longer prove to
 //!   downstream code that the token was structurally verified).
@@ -68,17 +68,7 @@ const LEGACY_VERIFY_MARKER: &str = "verifier.verify(";
 /// Captured by:
 /// `grep -lE "verifier\\.verify\\(" connectors/*/src/connector.rs`
 /// at the time the dja9u commit landed.
-const LEGACY_VERIFY_ALLOWLIST: &[&str] = &[
-    "supabase",
-    "teams",
-    "twitch",
-    "vercel",
-    "wecom",
-    "whatsapp",
-    "wolfram",
-    "zendesk",
-    "zoom",
-];
+const LEGACY_VERIFY_ALLOWLIST: &[&str] = &[];
 
 /// Connectors known to currently use the typestate ladder correctly
 /// (verify_bound / promote_with_instance / promote_with_constraints).
@@ -155,11 +145,20 @@ const TYPESTATE_ENFORCED_ALLOWLIST: &[&str] = &[
     "sonos",
     "square",
     "stripe",
+    "supabase",
     "synology-chat",
+    "teams",
     "telegram",
     "twilio",
+    "twitch",
     "twitter",
+    "vercel",
+    "wecom",
+    "whatsapp",
+    "wolfram",
     "youtube",
+    "zendesk",
+    "zoom",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,13 +289,13 @@ fn dja9u_allowlists_match_pinned_baseline_counts() {
     // typestate size in this assertion.
     assert_eq!(
         LEGACY_VERIFY_ALLOWLIST.len(),
-        9,
+        0,
         "LEGACY_VERIFY_ALLOWLIST size drifted; update this assertion to \
          match"
     );
     assert_eq!(
         TYPESTATE_ENFORCED_ALLOWLIST.len(),
-        69,
+        78,
         "TYPESTATE_ENFORCED_ALLOWLIST size drifted; update this assertion \
          to match"
     );

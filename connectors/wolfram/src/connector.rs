@@ -419,7 +419,7 @@ impl WolframConnector {
                     });
                 }
             });
-            verifier.verify(cap_token, &required_cap, &op_id, &[])?;
+            let _bound = verifier.verify_bound(cap_token, &required_cap, &op_id, &[])?;
         }
 
         let query = input
@@ -623,9 +623,9 @@ mod tests {
     use super::*;
     use chrono::{Duration, Utc};
     use ciborium::into_writer;
-    use fcp_prelude::{CapabilityConstraints, InstanceId, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_prelude::{CapabilityConstraints, InstanceId, ZoneId};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

@@ -964,7 +964,7 @@ impl SlackConnector {
         let resource_uris = resource_uris_for_operation(operation, &input)?;
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &resource_uris)?;
+            let _bound = verifier.verify_bound(token, &cap_id, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -1812,9 +1812,9 @@ fn op_info(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_prelude::CapabilityConstraints;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_prelude::CapabilityConstraints;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

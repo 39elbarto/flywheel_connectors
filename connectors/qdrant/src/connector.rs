@@ -984,7 +984,7 @@ impl QdrantConnector {
         })?;
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
+            let _bound = verifier.verify_bound(token, &cap_id, &op_id, &[])?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -1587,10 +1587,10 @@ fn op_info(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_prelude::{CapabilityConstraints, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
+    use fcp_prelude::{CapabilityConstraints, ZoneId};
     use std::path::PathBuf;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,

@@ -2,10 +2,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use fcp_async_core::channel::watch;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 
@@ -356,9 +356,30 @@ struct StoredToken {
     metadata: HashMap<String, String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RefreshGateSnapshot {
+    refresh_generation: u64,
+    completed_generation: u64,
+}
+
+#[derive(Debug)]
 struct RefreshGate {
-    refreshing: AtomicBool,
+    state: Mutex<RefreshGateState>,
+}
+
+#[derive(Debug)]
+struct RefreshGateState {
+    refreshing: bool,
+    refresh_generation: u64,
+    completed_generation: u64,
+    sender: watch::Sender<RefreshGateSnapshot>,
+    _keepalive: watch::Receiver<RefreshGateSnapshot>,
+}
+
+#[derive(Debug)]
+struct RefreshGateWaiter {
+    target_generation: u64,
+    receiver: watch::Receiver<RefreshGateSnapshot>,
 }
 
 #[derive(Debug)]
@@ -366,20 +387,89 @@ struct RefreshGateLease {
     gate: Arc<RefreshGate>,
 }
 
+impl Default for RefreshGate {
+    fn default() -> Self {
+        let snapshot = RefreshGateSnapshot {
+            refresh_generation: 0,
+            completed_generation: 0,
+        };
+        let (sender, keepalive) = watch::channel(snapshot);
+        Self {
+            state: Mutex::new(RefreshGateState {
+                refreshing: false,
+                refresh_generation: 0,
+                completed_generation: 0,
+                sender,
+                _keepalive: keepalive,
+            }),
+        }
+    }
+}
+
+impl RefreshGateState {
+    const fn snapshot(&self) -> RefreshGateSnapshot {
+        RefreshGateSnapshot {
+            refresh_generation: self.refresh_generation,
+            completed_generation: self.completed_generation,
+        }
+    }
+
+    fn publish(&self) {
+        let _ = self.sender.send(self.snapshot());
+    }
+}
+
+impl RefreshGateWaiter {
+    async fn wait_until_refresh_completes(mut self) {
+        loop {
+            let snapshot = *self.receiver.borrow_and_update();
+            if snapshot.completed_generation >= self.target_generation {
+                return;
+            }
+            if self.receiver.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
 impl RefreshGateLease {
+    fn claim_or_subscribe(gate: &Arc<RefreshGate>) -> Result<Self, RefreshGateWaiter> {
+        let mut state = gate.state.lock();
+        if state.refreshing {
+            return Err(RefreshGateWaiter {
+                target_generation: state.refresh_generation,
+                receiver: state.sender.subscribe(),
+            });
+        }
+
+        state.refreshing = true;
+        state.refresh_generation = state.refresh_generation.saturating_add(1);
+        state.publish();
+        Ok(Self {
+            gate: Arc::clone(gate),
+        })
+    }
+
+    #[cfg(test)]
     fn try_acquire(gate: &Arc<RefreshGate>) -> Option<Self> {
-        gate.refreshing
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
-            .map(|_| Self {
-                gate: Arc::clone(gate),
-            })
+        Self::claim_or_subscribe(gate).ok()
+    }
+}
+
+impl RefreshGate {
+    #[cfg(test)]
+    fn is_refreshing(&self) -> bool {
+        self.state.lock().refreshing
     }
 }
 
 impl Drop for RefreshGateLease {
     fn drop(&mut self) {
-        self.gate.refreshing.store(false, Ordering::Release);
+        let mut state = self.gate.state.lock();
+        state.refreshing = false;
+        state.completed_generation = state.refresh_generation;
+        state.publish();
     }
 }
 
@@ -559,11 +649,12 @@ impl TokenStore {
             let expected_refresh_token = snapshot.refresh_token().map(str::to_string);
             let gate = self.refresh_gate(key);
 
-            let Some(refresh_lease) = RefreshGateLease::try_acquire(&gate) else {
-                while gate.refreshing.load(Ordering::Acquire) {
-                    fcp_async_core::task::yield_now().await;
+            let refresh_lease = match RefreshGateLease::claim_or_subscribe(&gate) {
+                Ok(refresh_lease) => refresh_lease,
+                Err(waiter) => {
+                    waiter.wait_until_refresh_completes().await;
+                    continue;
                 }
-                continue;
             };
 
             let refresh_outcome = match client.refresh_tokens(&refresh_token).await {
@@ -2322,7 +2413,7 @@ mod tests {
 
         let lease = RefreshGateLease::try_acquire(&gate)
             .expect("first acquire should claim the refresh gate");
-        assert!(gate.refreshing.load(Ordering::Acquire));
+        assert!(gate.is_refreshing());
         assert!(
             RefreshGateLease::try_acquire(&gate).is_none(),
             "second acquire must observe the active single-flight refresh"
@@ -2330,13 +2421,39 @@ mod tests {
 
         drop(lease);
         assert!(
-            !gate.refreshing.load(Ordering::Acquire),
+            !gate.is_refreshing(),
             "dropping the lease must release the gate even if the refresh future is cancelled"
         );
 
         let reacquired = RefreshGateLease::try_acquire(&gate)
             .expect("gate should be reusable after the previous lease drops");
         drop(reacquired);
+    }
+
+    #[test]
+    fn test_refresh_gate_waiter_wakes_on_completion() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let store = TokenStore::new();
+            let gate = store.refresh_gate("k");
+            let lease = RefreshGateLease::try_acquire(&gate)
+                .expect("first acquire should claim the refresh gate");
+
+            let waiter = RefreshGateLease::claim_or_subscribe(&gate)
+                .err()
+                .expect("second claim must subscribe while refresh is active");
+
+            let join = fcp_async_core::task::spawn(waiter.wait_until_refresh_completes());
+            fcp_async_core::task::yield_now().await;
+            assert!(
+                !join.is_finished(),
+                "waiter should park while the refresh lease is active"
+            );
+
+            drop(lease);
+            join.await.expect("waiter task should complete");
+            assert!(!gate.is_refreshing());
+        })
+        .expect("build sync test runtime");
     }
 
     #[test]

@@ -4885,6 +4885,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
+ "criterion",
  "fcp-async-core",
  "fcp-core",
  "hmac 0.12.1",

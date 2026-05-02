@@ -45,5 +45,10 @@ serde_urlencoded = "0.7"
 parking_lot = "0.12"
 
 [dev-dependencies]
+criterion.workspace = true
 insta = { workspace = true, features = ["filters"] }
 wiremock.workspace = true
+
+[[bench]]
+name = "refresh_singleflight"
+harness = false

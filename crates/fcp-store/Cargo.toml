@@ -17,6 +17,7 @@ thiserror.workspace = true
 tracing.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+ciborium.workspace = true
 parking_lot.workspace = true
 async-trait.workspace = true
 blake3.workspace = true
@@ -27,6 +28,7 @@ tokio.workspace = true
 fcp-async-core = { path = "../fcp-async-core" }
 fcp-cbor = { path = "../fcp-cbor" }
 fcp-core = { path = "../fcp-core" }
+fcp-evidence = { path = "../fcp-evidence" }
 fcp-prelude = { path = "../fcp-prelude" }
 fcp-crypto = { path = "../fcp-crypto" }
 fcp-raptorq = { path = "../fcp-raptorq" }

@@ -81,6 +81,19 @@ pub use constraint_receipt::{
     ReceiptVerificationContext, RequestDescriptorHash,
 };
 
+// ── V3/V4 Compatibility Ledger (kyopb.1.4.1) ──────────────────────
+
+pub mod compatibility_ledger;
+
+pub use compatibility_ledger::{
+    COMPATIBILITY_LEDGER_ROOT_DOMAIN, COMPATIBILITY_LEDGER_SIGNATURE_DOMAIN,
+    COMPATIBILITY_LEDGER_VERSION, CompatibilityLedgerBody, CompatibilityLedgerError,
+    CompatibilityLedgerRoot, CompatibilityLedgerSignatures, CompatibilityLedgerTrustAnchors,
+    CompatibilityPolicy, EntryEvidence, EntryState, KemSuite, LedgerEd25519Signature,
+    LedgerMlDsa65Signature, MeshCompatibilityLedger, MigrationPhase, MlDsa65LedgerVerifier,
+    NodeCompatibilityEntry, NodeFallbackPolicy, NodeTombstone, ProtocolVersion, SignatureSuite,
+};
+
 // ── Revocation Cascade (m8j0q.A.9) ─────────────────────────────────
 
 pub mod revocation_cascade;
@@ -100,6 +113,17 @@ pub use owner_migration_verifier::{
     OWNER_KEY_MIGRATION_DOMAIN, OwnerKeyMigrationAttestation, OwnerKeyMigrationTranscript,
     OwnerMigrationResult, OwnerMigrationVerificationContext, OwnerMigrationVerificationError,
     OwnerMigrationVerificationReceipt, TrustedV3OwnerMap, verify_owner_key_migration_attestation,
+};
+
+// ── Hybrid Owner-Governed Objects (kyopb.1.1.4) ───────────────────
+
+pub mod hybrid_owner_objects;
+
+pub use hybrid_owner_objects::{
+    FcpCryptoMlDsa65Verifier, HYBRID_OWNER_OBJECT_DOMAIN, HYBRID_OWNER_OBJECT_SCHEMA,
+    HybridOwnerObjectKind, HybridOwnerObjectSignatures, HybridOwnerObjectTranscript,
+    HybridOwnerObjectVerificationError, HybridOwnerObjectVerificationReceipt,
+    verify_hybrid_owner_object,
 };
 
 #[cfg(test)]

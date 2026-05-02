@@ -49,7 +49,7 @@ block the final mesh-first cutover.
 
 | Holdout | Current Owner | Target Owner | Impact | Status |
 |---------|--------------|-------------|--------|--------|
-| Enforcement pipeline ordering | fcp-host (enforcement.rs) | fcp-core (canonical order) | SDKs can't replicate enforcement | PENDING |
+| Enforcement pipeline ordering | fcp-host (enforcement.rs) | fcp-core (canonical order) | SDKs can't replicate enforcement | RESOLVED (01eebe074: EnforcementCheckOrder) |
 | Health aggregation model | fcp-host (health.rs) | fcp-core (HealthAggregation) | SDKs can't aggregate health | PENDING |
 | Rollout decision logic | fcp-host (rollout.rs) | fcp-kernel (RolloutDecision) | Non-host platforms can't evaluate rollouts | MIGRATED (fcp-kernel/src/execution_control.rs) |
 | Progress emission | fcp-host (progress.rs) | fcp-kernel (ProgressUpdate) | Agents can't consume progress generically | MIGRATED (fcp-kernel/src/execution_control.rs) |
@@ -66,7 +66,7 @@ block the final mesh-first cutover.
 |----|---------|---------------------|--------|
 | F1 | Health aggregation (fcp-core vs fcp-host) | fcp-core owns aggregation model | PENDING |
 | F2 | Rollout decisions (fcp-core vs fcp-host) | Move to fcp-kernel | RESOLVED (RolloutDecision in fcp-kernel) |
-| F3 | Enforcement ordering (fcp-host only) | Declare in fcp-core | PENDING |
+| F3 | Enforcement ordering (fcp-host only) | Declare in fcp-core | RESOLVED (01eebe074: EnforcementCheckOrder) |
 | F4 | Progress/cancellation (fcp-host only) | Move to fcp-kernel | RESOLVED (CancelReason, ProgressUpdate in fcp-kernel) |
 | F5 | Readiness duplication (fcp-core vs fwc) | fwc truth.rs owns contract | RESOLVED (KnowledgeState taxonomy) |
 | F6 | CLI policy manipulation (fwc direct crypto) | Route through fcp-host RPC | RESOLVED (fwc uses --host for policy) |
@@ -84,7 +84,7 @@ block the final mesh-first cutover.
 | RolloutDecision | fcp-host::rollout | fcp-kernel | P2.1 | MIGRATED |
 | RolloutEvidence | fcp-host::rollout | fcp-kernel | P2.1 | MIGRATED |
 | RolloutObservation | fcp-host::rollout | fcp-kernel | P2.1 | MIGRATED |
-| EnforcementCheckOrder | (new) | fcp-core | P2.1 | PENDING |
+| EnforcementCheckOrder | (new) | fcp-core | P2.1 | RESOLVED (01eebe074) |
 | ReadinessContract | (new) | fcp-core | P2.2 | PENDING (fwc truth.rs has KnowledgeState taxonomy) |
 | CredentialStore trait | (new) | fcp-core | P2.3 | PENDING |
 

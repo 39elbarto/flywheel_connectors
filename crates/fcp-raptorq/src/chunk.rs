@@ -18,7 +18,7 @@ use crate::error::ChunkError;
 /// - Targeted repair (repair one chunk, not whole object)
 /// - Bounded memory reconstruction
 /// - Chunk-level deduplication
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkedObjectManifest {
     /// Total byte length of the original payload.
     pub total_len: u64,
@@ -195,7 +195,7 @@ impl ChunkedObjectManifest {
 /// A chunk is a raw bytes container (NORMATIVE).
 ///
 /// Chunks are stored as normal objects and referenced by their content-addressed ID.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawChunk {
     /// The raw bytes of this chunk.
     pub bytes: Vec<u8>,

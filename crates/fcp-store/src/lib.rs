@@ -39,6 +39,7 @@ mod gc;
 mod object_id_verifier;
 mod object_store;
 mod offline;
+mod process_snapshot;
 mod quarantine;
 mod repair;
 mod symbol_store;
@@ -79,4 +80,8 @@ pub use symbol_store::{
 
 pub use offline::{
     AccessPatternTracker, OfflineAccess, OfflineCapability, OfflineStatus, OfflineSummary,
+};
+pub use process_snapshot::{
+    ProcessSnapshotError, ProcessSnapshotFormat, ProcessSnapshotManifest,
+    ProcessSnapshotTrustAnchors, pin_capability_token,
 };

@@ -20,17 +20,18 @@ serde_json.workspace = true
 parking_lot.workspace = true
 async-trait.workspace = true
 blake3.workspace = true
+semver.workspace = true
 
 # Internal crates
 fcp-async-core = { path = "../fcp-async-core" }
+fcp-cbor = { path = "../fcp-cbor" }
 fcp-core = { path = "../fcp-core" }
+fcp-crypto = { path = "../fcp-crypto" }
 fcp-raptorq = { path = "../fcp-raptorq" }
 fcp-telemetry = { path = "../fcp-telemetry" }
 
 [dev-dependencies]
 jsonschema.workspace = true
-semver.workspace = true
-fcp-cbor = { path = "../fcp-cbor" }
 serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true

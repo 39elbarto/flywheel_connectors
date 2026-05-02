@@ -16,9 +16,13 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::{OwnedSemaphorePermit, Semaphore};
 use fcp_async_core::time;
+use fcp_core::ZoneId;
 use fcp_kernel::{ConnectorHealth, ConnectorId};
+use serde::{Deserialize, Serialize};
 
 const MAX_PER_MILLE: u32 = 1_000;
+const DEFAULT_CONFORMAL_COVERAGE_PER_MILLE: u16 = 990;
+const DEFAULT_MIN_CONFORMAL_CALIBRATION_SAMPLES: usize = 3;
 
 /// Request priority used by load shedding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -264,6 +268,304 @@ pub enum RoutingDecision {
     AllowProbe,
     /// Reject due to unhealthy state.
     Reject { reason: String },
+}
+
+/// Configuration for per-zone conformal SLO route prediction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConformalSloConfig {
+    /// Target coverage for the conformal latency bound, in per-mille units.
+    pub target_coverage_per_mille: u16,
+    /// Minimum per-zone calibration samples required before a route is eligible.
+    pub min_calibration_samples: usize,
+}
+
+impl Default for ConformalSloConfig {
+    fn default() -> Self {
+        Self {
+            target_coverage_per_mille: DEFAULT_CONFORMAL_COVERAGE_PER_MILLE,
+            min_calibration_samples: DEFAULT_MIN_CONFORMAL_CALIBRATION_SAMPLES,
+        }
+    }
+}
+
+impl ConformalSloConfig {
+    /// Create a predictor config, clamping coverage to the valid range.
+    #[must_use]
+    pub fn new(target_coverage_per_mille: u16, min_calibration_samples: usize) -> Self {
+        Self {
+            target_coverage_per_mille: target_coverage_per_mille.min(to_u16(MAX_PER_MILLE)),
+            min_calibration_samples,
+        }
+    }
+
+    fn conformal_rank(self, sample_count: usize) -> usize {
+        if sample_count == 0 {
+            return 0;
+        }
+
+        let coverage = u64::from(self.target_coverage_per_mille).min(u64::from(MAX_PER_MILLE));
+        let sample_count_u64 = u64::try_from(sample_count).unwrap_or(u64::MAX - 1);
+        let rank_one_based = sample_count_u64
+            .saturating_add(1)
+            .saturating_mul(coverage)
+            .div_ceil(u64::from(MAX_PER_MILLE))
+            .max(1);
+        usize::try_from(rank_one_based.saturating_sub(1))
+            .unwrap_or(sample_count.saturating_sub(1))
+            .min(sample_count.saturating_sub(1))
+    }
+}
+
+/// One observed route outcome used to calibrate per-zone SLO predictions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConformalSloCalibrationSample {
+    /// Zone the route served.
+    pub zone_id: ZoneId,
+    /// Mesh path label, such as `direct` or `derp`.
+    pub path_id: String,
+    /// Observed end-to-end route latency.
+    pub observed_latency_ms: u64,
+    /// SLO budget that was in effect for this route.
+    pub slo_budget_ms: u64,
+    /// Whether the connector invocation succeeded.
+    pub success: bool,
+    /// Remaining host budget at routing time, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_remaining: Option<u64>,
+    /// Observation timestamp in Unix milliseconds.
+    pub observed_at_ms: u64,
+}
+
+impl ConformalSloCalibrationSample {
+    /// Create a calibration sample from an observed route outcome.
+    #[must_use]
+    pub fn new(
+        zone_id: ZoneId,
+        path_id: impl Into<String>,
+        observed_latency_ms: u64,
+        slo_budget_ms: u64,
+        success: bool,
+        budget_remaining: Option<u64>,
+        observed_at_ms: u64,
+    ) -> Self {
+        Self {
+            zone_id,
+            path_id: path_id.into(),
+            observed_latency_ms,
+            slo_budget_ms,
+            success,
+            budget_remaining,
+            observed_at_ms,
+        }
+    }
+
+    fn met_slo(&self) -> bool {
+        self.success
+            && self.observed_latency_ms <= self.slo_budget_ms
+            && self.budget_remaining != Some(0)
+    }
+
+    fn latency_for_bound(&self) -> u64 {
+        if self.success {
+            self.observed_latency_ms
+        } else {
+            self.slo_budget_ms.saturating_add(1)
+        }
+    }
+}
+
+/// A route candidate the host can choose before invoking a connector.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConformalSloRouteCandidate {
+    /// Zone the request will execute in.
+    pub zone_id: ZoneId,
+    /// Mesh path label, such as `direct` or `derp`.
+    pub path_id: String,
+    /// Current route latency estimate before conformal calibration.
+    pub estimated_latency_ms: u64,
+    /// Per-call SLO budget allocated to this zone.
+    pub slo_budget_ms: u64,
+    /// Remaining host budget for the zone, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_remaining: Option<u64>,
+}
+
+impl ConformalSloRouteCandidate {
+    /// Create a route candidate.
+    #[must_use]
+    pub fn new(
+        zone_id: ZoneId,
+        path_id: impl Into<String>,
+        estimated_latency_ms: u64,
+        slo_budget_ms: u64,
+        budget_remaining: Option<u64>,
+    ) -> Self {
+        Self {
+            zone_id,
+            path_id: path_id.into(),
+            estimated_latency_ms,
+            slo_budget_ms,
+            budget_remaining,
+        }
+    }
+}
+
+/// Prediction for one route candidate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConformalSloRoutePrediction {
+    /// Zone the request would execute in.
+    pub zone_id: ZoneId,
+    /// Mesh path label.
+    pub path_id: String,
+    /// Predicted p99-ish latency bound from the per-zone conformal set.
+    pub predicted_p99_ms: u64,
+    /// Probability of meeting the SLO, in per-mille units.
+    pub coverage_probability_per_mille: u16,
+    /// Number of per-zone calibration samples used.
+    pub calibration_samples: usize,
+    /// Whether the current budget signal says this route is exhausted.
+    pub budget_exhausted: bool,
+    /// Whether this route satisfies the SLO and budget constraints.
+    pub meets_slo_budget: bool,
+    /// Operator-facing explanation for the verdict.
+    pub reason: String,
+}
+
+/// Host routing decision after evaluating conformal SLO predictions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdaptiveSloRoutingDecision {
+    /// Selected route, or `None` when every route is predicted to miss budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected: Option<ConformalSloRoutePrediction>,
+    /// Predictions for every candidate, sorted in route preference order.
+    pub predictions: Vec<ConformalSloRoutePrediction>,
+    /// Operator-facing summary.
+    pub reason: String,
+}
+
+/// Per-zone conformal predictor for pre-routing connector traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConformalSloPredictor {
+    config: ConformalSloConfig,
+}
+
+impl Default for ConformalSloPredictor {
+    fn default() -> Self {
+        Self::new(ConformalSloConfig::default())
+    }
+}
+
+impl ConformalSloPredictor {
+    /// Create a predictor with explicit configuration.
+    #[must_use]
+    pub const fn new(config: ConformalSloConfig) -> Self {
+        Self { config }
+    }
+
+    /// Return predictions for every candidate, sorted in route preference order.
+    #[must_use]
+    pub fn predict(
+        &self,
+        candidates: &[ConformalSloRouteCandidate],
+        calibration: &[ConformalSloCalibrationSample],
+    ) -> Vec<ConformalSloRoutePrediction> {
+        let mut predictions = candidates
+            .iter()
+            .map(|candidate| self.predict_one(candidate, calibration))
+            .collect::<Vec<_>>();
+        predictions.sort_by(preferred_prediction_order);
+        predictions
+    }
+
+    /// Select the best route subject to conformal SLO and host-budget checks.
+    #[must_use]
+    pub fn choose_route(
+        &self,
+        candidates: &[ConformalSloRouteCandidate],
+        calibration: &[ConformalSloCalibrationSample],
+    ) -> AdaptiveSloRoutingDecision {
+        let predictions = self.predict(candidates, calibration);
+        let selected = predictions
+            .iter()
+            .find(|prediction| prediction.meets_slo_budget)
+            .cloned();
+        let reason = selected.as_ref().map_or_else(
+            || "no route predicted to meet the per-zone SLO budget".to_string(),
+            |prediction| {
+                format!(
+                    "selected {} for {}: predicted p99 {}ms with {}‰ coverage",
+                    prediction.path_id,
+                    prediction.zone_id,
+                    prediction.predicted_p99_ms,
+                    prediction.coverage_probability_per_mille
+                )
+            },
+        );
+
+        AdaptiveSloRoutingDecision {
+            selected,
+            predictions,
+            reason,
+        }
+    }
+
+    fn predict_one(
+        &self,
+        candidate: &ConformalSloRouteCandidate,
+        calibration: &[ConformalSloCalibrationSample],
+    ) -> ConformalSloRoutePrediction {
+        let exact_samples = calibration
+            .iter()
+            .filter(|sample| {
+                sample.zone_id == candidate.zone_id && sample.path_id == candidate.path_id
+            })
+            .collect::<Vec<_>>();
+        let zone_samples = if exact_samples.len() >= self.config.min_calibration_samples {
+            exact_samples
+        } else {
+            calibration
+                .iter()
+                .filter(|sample| sample.zone_id == candidate.zone_id)
+                .collect::<Vec<_>>()
+        };
+
+        let calibration_samples = zone_samples.len();
+        let predicted_p99_ms = predicted_latency_bound_ms(
+            &zone_samples,
+            candidate.estimated_latency_ms,
+            self.config.conformal_rank(calibration_samples),
+        );
+        let coverage_probability_per_mille = to_u16(ratio_per_mille(
+            zone_samples
+                .iter()
+                .filter(|sample| sample.met_slo())
+                .count()
+                .saturating_add(1),
+            calibration_samples.saturating_add(2),
+        ));
+        let budget_exhausted = candidate.budget_remaining == Some(0);
+        let enough_calibration = calibration_samples >= self.config.min_calibration_samples;
+        let meets_slo_budget =
+            !budget_exhausted && enough_calibration && predicted_p99_ms <= candidate.slo_budget_ms;
+
+        ConformalSloRoutePrediction {
+            zone_id: candidate.zone_id.clone(),
+            path_id: candidate.path_id.clone(),
+            predicted_p99_ms,
+            coverage_probability_per_mille,
+            calibration_samples,
+            budget_exhausted,
+            meets_slo_budget,
+            reason: conformal_prediction_reason(
+                budget_exhausted,
+                enough_calibration,
+                calibration_samples,
+                self.config.min_calibration_samples,
+                predicted_p99_ms,
+                candidate.slo_budget_ms,
+            ),
+        }
+    }
 }
 
 /// Per-connector resilience counters.
@@ -1418,6 +1720,62 @@ fn ratio_per_mille(numerator: usize, denominator: usize) -> u32 {
         .min(MAX_PER_MILLE)
 }
 
+fn predicted_latency_bound_ms(
+    samples: &[&ConformalSloCalibrationSample],
+    estimated_latency_ms: u64,
+    rank: usize,
+) -> u64 {
+    if samples.is_empty() {
+        return estimated_latency_ms;
+    }
+
+    let mut latencies = samples
+        .iter()
+        .map(|sample| sample.latency_for_bound())
+        .collect::<Vec<_>>();
+    latencies.sort_unstable();
+    estimated_latency_ms.max(latencies[rank.min(latencies.len().saturating_sub(1))])
+}
+
+fn conformal_prediction_reason(
+    budget_exhausted: bool,
+    enough_calibration: bool,
+    calibration_samples: usize,
+    min_calibration_samples: usize,
+    predicted_p99_ms: u64,
+    slo_budget_ms: u64,
+) -> String {
+    if budget_exhausted {
+        return "zone budget exhausted".to_string();
+    }
+    if !enough_calibration {
+        return format!(
+            "insufficient per-zone calibration: {calibration_samples} < {min_calibration_samples}"
+        );
+    }
+    if predicted_p99_ms > slo_budget_ms {
+        return format!("predicted p99 {predicted_p99_ms}ms exceeds SLO budget {slo_budget_ms}ms");
+    }
+    format!("predicted p99 {predicted_p99_ms}ms fits SLO budget {slo_budget_ms}ms")
+}
+
+fn preferred_prediction_order(
+    left: &ConformalSloRoutePrediction,
+    right: &ConformalSloRoutePrediction,
+) -> std::cmp::Ordering {
+    right
+        .meets_slo_budget
+        .cmp(&left.meets_slo_budget)
+        .then_with(|| {
+            right
+                .coverage_probability_per_mille
+                .cmp(&left.coverage_probability_per_mille)
+        })
+        .then_with(|| left.predicted_p99_ms.cmp(&right.predicted_p99_ms))
+        .then_with(|| left.zone_id.as_str().cmp(right.zone_id.as_str()))
+        .then_with(|| left.path_id.cmp(&right.path_id))
+}
+
 fn to_u16(value: u32) -> u16 {
     u16::try_from(value.min(u32::from(u16::MAX))).unwrap_or(u16::MAX)
 }
@@ -2455,7 +2813,65 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
-    // 8. LoadShedder
+    // 8. ConformalSloPredictor
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn conformal_slo_predictor_routes_highest_budget_fitting_path() {
+        let predictor = ConformalSloPredictor::new(ConformalSloConfig::new(990, 3));
+        let zone = ZoneId::work();
+        let calibration = vec![
+            ConformalSloCalibrationSample::new(zone.clone(), "direct", 120, 100, true, Some(10), 1),
+            ConformalSloCalibrationSample::new(zone.clone(), "direct", 130, 100, true, Some(10), 2),
+            ConformalSloCalibrationSample::new(zone.clone(), "direct", 125, 100, true, Some(10), 3),
+            ConformalSloCalibrationSample::new(zone.clone(), "derp", 80, 100, true, Some(10), 4),
+            ConformalSloCalibrationSample::new(zone.clone(), "derp", 90, 100, true, Some(10), 5),
+            ConformalSloCalibrationSample::new(zone.clone(), "derp", 85, 100, true, Some(10), 6),
+        ];
+        let candidates = vec![
+            ConformalSloRouteCandidate::new(zone.clone(), "direct", 70, 100, Some(10)),
+            ConformalSloRouteCandidate::new(zone, "derp", 80, 100, Some(10)),
+        ];
+
+        let decision = predictor.choose_route(&candidates, &calibration);
+
+        let selected = decision.selected.expect("route selected");
+        assert_eq!(selected.path_id, "derp");
+        assert!(selected.meets_slo_budget);
+        assert!(
+            decision
+                .predictions
+                .iter()
+                .any(|prediction| prediction.path_id == "direct" && !prediction.meets_slo_budget)
+        );
+    }
+
+    #[test]
+    fn conformal_slo_predictor_refuses_budget_exhausted_route() {
+        let predictor = ConformalSloPredictor::new(ConformalSloConfig::new(990, 3));
+        let zone = ZoneId::work();
+        let calibration = vec![
+            ConformalSloCalibrationSample::new(zone.clone(), "direct", 20, 100, true, Some(10), 1),
+            ConformalSloCalibrationSample::new(zone.clone(), "direct", 25, 100, true, Some(10), 2),
+            ConformalSloCalibrationSample::new(zone.clone(), "direct", 30, 100, true, Some(10), 3),
+        ];
+        let candidates = vec![ConformalSloRouteCandidate::new(
+            zone,
+            "direct",
+            25,
+            100,
+            Some(0),
+        )];
+
+        let decision = predictor.choose_route(&candidates, &calibration);
+
+        assert!(decision.selected.is_none());
+        assert!(decision.predictions[0].budget_exhausted);
+        assert_eq!(decision.predictions[0].reason, "zone budget exhausted");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // 9. LoadShedder
     // ─────────────────────────────────────────────────────────────────────────────
 
     #[test]

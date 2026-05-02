@@ -63,6 +63,9 @@ const ACTIVE_LEASE_LOAD_PENALTY: f64 = 5.0;
 /// Maximum candidates to return in ranked list.
 const MAX_CANDIDATES: usize = 10;
 
+/// Default per-zone telemetry window retained for adaptive routing.
+const DEFAULT_ZONE_SLO_TELEMETRY_WINDOW: usize = 256;
+
 // ============================================================================
 // Core Types
 // ============================================================================
@@ -439,6 +442,162 @@ impl PlannerInput {
     pub fn with_singleton_holder(mut self, holder: impl Into<String>) -> Self {
         self.singleton_lease_holder = Some(holder.into());
         self
+    }
+}
+
+// ============================================================================
+// Per-Zone SLO Telemetry
+// ============================================================================
+
+/// One observed route outcome emitted by mesh planning for host-side SLO prediction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZoneSloTelemetrySample {
+    /// Zone this route served.
+    pub zone_id: ZoneId,
+    /// Node that handled the route.
+    pub node_id: NodeId,
+    /// Mesh path label, such as `direct` or `derp`.
+    pub path_id: String,
+    /// Observed end-to-end route latency.
+    pub observed_latency_ms: u64,
+    /// SLO budget that was allocated for this call.
+    pub slo_budget_ms: u64,
+    /// Whether the connector invocation succeeded.
+    pub success: bool,
+    /// Remaining host budget for the zone, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_remaining: Option<u64>,
+    /// Observation timestamp in Unix milliseconds.
+    pub observed_at_ms: u64,
+}
+
+impl ZoneSloTelemetrySample {
+    /// Create a telemetry sample.
+    #[must_use]
+    pub fn new(
+        zone_id: ZoneId,
+        node_id: NodeId,
+        path_id: impl Into<String>,
+        observed_latency_ms: u64,
+        slo_budget_ms: u64,
+        success: bool,
+        budget_remaining: Option<u64>,
+        observed_at_ms: u64,
+    ) -> Self {
+        Self {
+            zone_id,
+            node_id,
+            path_id: path_id.into(),
+            observed_latency_ms,
+            slo_budget_ms,
+            success,
+            budget_remaining,
+            observed_at_ms,
+        }
+    }
+
+    /// Whether this sample met both latency and budget constraints.
+    #[must_use]
+    pub const fn met_slo(&self) -> bool {
+        self.success
+            && self.observed_latency_ms <= self.slo_budget_ms
+            && !matches!(self.budget_remaining, Some(0))
+    }
+}
+
+/// Rolling per-zone telemetry feed used to calibrate host adaptive routing.
+#[derive(Debug, Clone)]
+pub struct ZoneSloTelemetryFeed {
+    max_samples_per_zone: usize,
+    samples: Vec<ZoneSloTelemetrySample>,
+}
+
+impl Default for ZoneSloTelemetryFeed {
+    fn default() -> Self {
+        Self::new(DEFAULT_ZONE_SLO_TELEMETRY_WINDOW)
+    }
+}
+
+impl ZoneSloTelemetryFeed {
+    /// Create a rolling telemetry feed.
+    #[must_use]
+    pub fn new(max_samples_per_zone: usize) -> Self {
+        Self {
+            max_samples_per_zone: max_samples_per_zone.max(1),
+            samples: Vec::new(),
+        }
+    }
+
+    /// Record one route outcome and retain only the latest samples for its zone.
+    pub fn record(&mut self, sample: ZoneSloTelemetrySample) {
+        let zone_id = sample.zone_id.clone();
+        self.samples.push(sample);
+        self.trim_zone(&zone_id);
+    }
+
+    /// Record the same candidate route outcome for every zone on the candidate.
+    pub fn record_candidate_route(
+        &mut self,
+        candidate: &CandidateNode,
+        path_id: impl Into<String>,
+        observed_latency_ms: u64,
+        slo_budget_ms: u64,
+        success: bool,
+        budget_remaining: Option<u64>,
+        observed_at_ms: u64,
+    ) -> usize {
+        let path_id = path_id.into();
+        let mut recorded = 0;
+        for zone_id in &candidate.zones {
+            self.record(ZoneSloTelemetrySample::new(
+                zone_id.clone(),
+                candidate.node_id.clone(),
+                path_id.clone(),
+                observed_latency_ms,
+                slo_budget_ms,
+                success,
+                budget_remaining,
+                observed_at_ms,
+            ));
+            recorded += 1;
+        }
+        recorded
+    }
+
+    /// Return every retained sample in observation order.
+    #[must_use]
+    pub fn samples(&self) -> &[ZoneSloTelemetrySample] {
+        &self.samples
+    }
+
+    /// Return retained samples for one zone in observation order.
+    #[must_use]
+    pub fn samples_for_zone(&self, zone_id: &ZoneId) -> Vec<&ZoneSloTelemetrySample> {
+        self.samples
+            .iter()
+            .filter(|sample| &sample.zone_id == zone_id)
+            .collect()
+    }
+
+    fn trim_zone(&mut self, zone_id: &ZoneId) {
+        let zone_count = self
+            .samples
+            .iter()
+            .filter(|sample| &sample.zone_id == zone_id)
+            .count();
+        let mut to_remove = zone_count.saturating_sub(self.max_samples_per_zone);
+        if to_remove == 0 {
+            return;
+        }
+
+        self.samples.retain(|sample| {
+            if &sample.zone_id == zone_id && to_remove > 0 {
+                to_remove -= 1;
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 
@@ -1372,6 +1531,61 @@ mod tests {
             held_leases: Vec::new(),
             zones: Vec::new(),
         }
+    }
+
+    #[test]
+    fn zone_slo_telemetry_feed_records_candidate_for_each_zone() {
+        let mut candidate = CandidateNode::new(test_node_id("route"), 42.0);
+        candidate.zones = vec![ZoneId::work(), ZoneId::public()];
+
+        let mut feed = ZoneSloTelemetryFeed::new(8);
+        let recorded =
+            feed.record_candidate_route(&candidate, "direct", 42, 100, true, Some(5), 1_000);
+
+        assert_eq!(recorded, 2);
+        assert_eq!(feed.samples().len(), 2);
+        assert!(feed.samples().iter().all(ZoneSloTelemetrySample::met_slo));
+        assert_eq!(feed.samples_for_zone(&ZoneId::work()).len(), 1);
+        assert_eq!(feed.samples_for_zone(&ZoneId::public()).len(), 1);
+    }
+
+    #[test]
+    fn zone_slo_telemetry_feed_keeps_latest_samples_per_zone() {
+        let zone = ZoneId::work();
+        let mut feed = ZoneSloTelemetryFeed::new(2);
+        for observed_at_ms in 1..=3 {
+            feed.record(ZoneSloTelemetrySample::new(
+                zone.clone(),
+                test_node_id("route"),
+                "direct",
+                10 + observed_at_ms,
+                100,
+                true,
+                Some(5),
+                observed_at_ms,
+            ));
+        }
+
+        let samples = feed.samples_for_zone(&zone);
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0].observed_at_ms, 2);
+        assert_eq!(samples[1].observed_at_ms, 3);
+    }
+
+    #[test]
+    fn zone_slo_telemetry_sample_flags_exhausted_budget_as_miss() {
+        let sample = ZoneSloTelemetrySample::new(
+            ZoneId::work(),
+            test_node_id("route"),
+            "direct",
+            20,
+            100,
+            true,
+            Some(0),
+            1_000,
+        );
+
+        assert!(!sample.met_slo());
     }
 
     #[test]

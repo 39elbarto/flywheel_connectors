@@ -76,6 +76,22 @@ pub struct BudgetBackpressureSignal {
     pub retry_after_seconds: u64,
 }
 
+/// Return the tightest remaining budget from a zone snapshot.
+#[must_use]
+pub fn budget_remaining_floor(snapshot: &UsageBudgetSnapshot) -> Option<u64> {
+    snapshot.budgets.iter().map(|budget| budget.remaining).min()
+}
+
+/// Whether a zone snapshot should prevent new work from being routed there.
+#[must_use]
+pub fn budget_snapshot_blocks_routing(snapshot: &UsageBudgetSnapshot) -> bool {
+    snapshot.enforcement == BudgetEnforcement::Deny
+        && snapshot
+            .budgets
+            .iter()
+            .any(|budget| budget.status == BudgetStatus::Exceeded || budget.remaining == 0)
+}
+
 impl BudgetEvaluation {
     /// Convert a denial into an FCP error.
     #[must_use]
@@ -555,6 +571,48 @@ mod tests {
         let snapshot = response.budget_status.expect("budget status");
         assert_eq!(snapshot.zone_id, zone);
         assert_eq!(snapshot.budgets[0].status, BudgetStatus::Exceeded);
+    }
+
+    #[test]
+    fn budget_snapshot_blocks_routing_when_deny_budget_is_exhausted() {
+        let snapshot = UsageBudgetSnapshot {
+            zone_id: ZoneId::work(),
+            enforcement: BudgetEnforcement::Deny,
+            budgets: vec![UsageBudgetUsage {
+                metric: UsageMetricKind::Requests,
+                used: 10,
+                limit: 10,
+                remaining: 0,
+                window_started_at: 100,
+                window_resets_at: 200,
+                status: BudgetStatus::Ok,
+            }],
+            updated_at: 150,
+        };
+
+        assert!(budget_snapshot_blocks_routing(&snapshot));
+        assert_eq!(budget_remaining_floor(&snapshot), Some(0));
+    }
+
+    #[test]
+    fn budget_snapshot_warn_exhaustion_does_not_block_routing() {
+        let snapshot = UsageBudgetSnapshot {
+            zone_id: ZoneId::work(),
+            enforcement: BudgetEnforcement::Warn,
+            budgets: vec![UsageBudgetUsage {
+                metric: UsageMetricKind::Requests,
+                used: 11,
+                limit: 10,
+                remaining: 0,
+                window_started_at: 100,
+                window_resets_at: 200,
+                status: BudgetStatus::Exceeded,
+            }],
+            updated_at: 150,
+        };
+
+        assert!(!budget_snapshot_blocks_routing(&snapshot));
+        assert_eq!(budget_remaining_floor(&snapshot), Some(0));
     }
 
     #[test]

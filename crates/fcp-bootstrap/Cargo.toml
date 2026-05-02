@@ -78,3 +78,7 @@ time = "0.3"
 [[bench]]
 name = "certificate_selection"
 harness = false
+
+[[bench]]
+name = "hardware_token"
+harness = false

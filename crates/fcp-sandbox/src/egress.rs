@@ -874,9 +874,10 @@ pub trait CredentialInjector: Send + Sync {
 
     /// Check if a credential is allowed for the given destination host.
     ///
-    /// Default: allow all hosts. Override when credentials are host-bound.
+    /// Default: deny all hosts. Wrap a backend in [`AllowAllHosts`] when an
+    /// operator explicitly wants credentials to be host-unbound.
     fn is_host_allowed(&self, _credential_id: &str, _host: &str) -> Result<bool, EgressError> {
-        Ok(true)
+        Ok(false)
     }
 
     /// Inject a credential into an HTTP request.
@@ -901,6 +902,69 @@ pub trait CredentialInjector: Send + Sync {
     ///
     /// Returns an error if the credential cannot be retrieved.
     fn get_tcp_auth(&self, credential_id: &str) -> Result<Option<Vec<u8>>, EgressError>;
+}
+
+/// Explicit opt-in wrapper for host-unbound credential backends.
+///
+/// Credential injectors fail closed by default when they do not implement
+/// host binding. This adapter makes the exceptional "allow every destination
+/// host" policy visible at the construction site.
+#[derive(Debug, Clone, Default)]
+pub struct AllowAllHosts<I> {
+    inner: I,
+}
+
+impl<I> AllowAllHosts<I> {
+    /// Create a host-unbound credential injector wrapper.
+    pub const fn new(inner: I) -> Self {
+        Self { inner }
+    }
+
+    /// Return the wrapped injector by reference.
+    #[must_use]
+    pub const fn inner(&self) -> &I {
+        &self.inner
+    }
+
+    /// Return the wrapped injector by mutable reference.
+    #[must_use]
+    pub const fn inner_mut(&mut self) -> &mut I {
+        &mut self.inner
+    }
+
+    /// Consume the wrapper and return the wrapped injector.
+    #[must_use]
+    pub fn into_inner(self) -> I {
+        self.inner
+    }
+}
+
+impl<I: CredentialInjector> CredentialInjector for AllowAllHosts<I> {
+    fn is_authorized(
+        &self,
+        credential_id: &str,
+        operation_id: &str,
+        credential_allow: &[String],
+    ) -> Result<bool, EgressError> {
+        self.inner
+            .is_authorized(credential_id, operation_id, credential_allow)
+    }
+
+    fn is_host_allowed(&self, _credential_id: &str, _host: &str) -> Result<bool, EgressError> {
+        Ok(true)
+    }
+
+    fn inject_http(
+        &self,
+        credential_id: &str,
+        headers: &mut Vec<HttpHeader>,
+    ) -> Result<(), EgressError> {
+        self.inner.inject_http(credential_id, headers)
+    }
+
+    fn get_tcp_auth(&self, credential_id: &str) -> Result<Option<Vec<u8>>, EgressError> {
+        self.inner.get_tcp_auth(credential_id)
+    }
 }
 
 /// No-op credential injector for testing or when credentials are disabled.
@@ -2050,6 +2114,35 @@ mod tests {
         }
     }
 
+    struct HostlessInjector;
+
+    impl CredentialInjector for HostlessInjector {
+        fn is_authorized(
+            &self,
+            _cred: &str,
+            _op: &str,
+            _allow: &[String],
+        ) -> Result<bool, EgressError> {
+            Ok(true)
+        }
+
+        fn inject_http(
+            &self,
+            _cred: &str,
+            headers: &mut Vec<HttpHeader>,
+        ) -> Result<(), EgressError> {
+            headers.push(HttpHeader {
+                name: "Authorization".into(),
+                value: "Bearer hostless-token".into(),
+            });
+            Ok(())
+        }
+
+        fn get_tcp_auth(&self, _cred: &str) -> Result<Option<Vec<u8>>, EgressError> {
+            Ok(Some(b"hostless-auth".to_vec()))
+        }
+    }
+
     #[test]
     fn test_authorize_http_no_credential() {
         let guard = EgressGuard::new();
@@ -2093,6 +2186,57 @@ mod tests {
         let decision = guard
             .authorize_http(&mut req, &constraints, &injector, "op", &["cred-1".into()])
             .unwrap();
+        assert!(decision.credential_injected);
+        assert!(req.headers.iter().any(|h| h.name == "Authorization"));
+    }
+
+    #[test]
+    fn test_authorize_http_hostless_credential_injector_denies_all_hosts_by_default() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.host_allow = vec!["*".into()];
+        let injector = HostlessInjector;
+
+        for host in ["api.example.com", "service.test.com", "other.example.net"] {
+            let mut req = EgressHttpRequest {
+                url: format!("https://{host}/"),
+                method: "GET".into(),
+                headers: vec![],
+                body: None,
+                credential_id: Some("cred-1".into()),
+            };
+
+            let result =
+                guard.authorize_http(&mut req, &constraints, &injector, "op", &["cred-1".into()]);
+            assert!(result.is_err(), "hostless injector must reject {host}");
+            if let Err(EgressError::Denied { code, .. }) = result {
+                assert_eq!(code, DenyReason::CredentialHostNotAllowed);
+            }
+            assert!(
+                req.headers.is_empty(),
+                "credential headers must not be injected after host denial for {host}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_authorize_http_allow_all_hosts_wrapper_is_explicit_opt_in() {
+        let guard = EgressGuard::new();
+        let mut constraints = test_constraints();
+        constraints.host_allow = vec!["*".into()];
+        let injector = AllowAllHosts::new(HostlessInjector);
+
+        let mut req = EgressHttpRequest {
+            url: "https://other.example.net/".into(),
+            method: "GET".into(),
+            headers: vec![],
+            body: None,
+            credential_id: Some("cred-1".into()),
+        };
+
+        let decision = guard
+            .authorize_http(&mut req, &constraints, &injector, "op", &["cred-1".into()])
+            .expect("AllowAllHosts wrapper must opt into host-unbound credentials");
         assert!(decision.credential_injected);
         assert!(req.headers.iter().any(|h| h.name == "Authorization"));
     }
@@ -3192,7 +3336,7 @@ mod tests {
         // When get_tcp_auth returns None, credential_injected should be false
         let guard = EgressGuard::new();
         let constraints = test_constraints();
-        let injector = NullTcpAuthInjector;
+        let injector = AllowAllHosts::new(NullTcpAuthInjector);
 
         let req = EgressTcpConnectRequest {
             host: "api.example.com".into(),
@@ -3891,12 +4035,12 @@ mod tests {
     // -- NoOp credential injector default trait --
 
     #[test]
-    fn test_noop_credential_injector_default_host_allowed() {
-        // The default impl of is_host_allowed should return Ok(true)
+    fn test_noop_credential_injector_default_host_denied() {
+        // The default impl of is_host_allowed should fail closed.
         let injector = NoOpCredentialInjector;
         let result = injector.is_host_allowed("any-cred", "any-host");
         assert!(result.is_ok());
-        assert!(result.unwrap());
+        assert!(!result.unwrap());
     }
 
     #[test]
@@ -4443,10 +4587,10 @@ mod tests {
     }
 
     #[test]
-    fn test_noop_credential_injector_host_allowed_default() {
+    fn test_noop_credential_injector_host_denied_default() {
         let injector = NoOpCredentialInjector;
-        // Default trait impl returns Ok(true)
-        assert!(injector.is_host_allowed("any-cred", "any-host").unwrap());
+        // Default trait impl returns Ok(false).
+        assert!(!injector.is_host_allowed("any-cred", "any-host").unwrap());
     }
 
     // ── New tests: DefaultTlsVerifier ──

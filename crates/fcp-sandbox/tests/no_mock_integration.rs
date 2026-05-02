@@ -670,11 +670,11 @@ fn noop_credential_injector_allows_nothing() {
 }
 
 #[test]
-fn noop_credential_injector_host_allowed_uses_default() {
+fn noop_credential_injector_host_denied_by_default() {
     let injector = NoOpCredentialInjector;
-    // Default trait impl returns Ok(true) — NoOp doesn't override it
+    // Default trait impl returns Ok(false) — NoOp doesn't override it.
     assert!(
-        injector
+        !injector
             .is_host_allowed("cred-1", "api.example.com")
             .unwrap()
     );

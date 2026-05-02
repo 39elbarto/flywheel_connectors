@@ -1676,15 +1676,76 @@ async fn subscription_full_result_buffer_handles_ping_then_closes_on_overflow() 
 
     let url = format!("ws://{}", addr);
     let client = GraphqlSubscriptionClient::new(url, "test");
-    let _stream = client
+    let mut stream = client
         .subscribe::<ViewerQuery>(EmptyVars {})
         .await
         .expect("subscribe");
 
+    // Wait for the server to finish its scripted send sequence
+    // BEFORE the consumer starts draining. The script (16 queued
+    // next frames + ping/pong + 1 overflow next) deliberately
+    // exceeds the 16-item buffer; the producer task will
+    // `try_send` the 17th frame, hit `TrySendError::Full`, stage
+    // the terminal `SubscriptionBufferOverflow` error, and send
+    // `complete` upstream. server_task completes once it recv's
+    // that complete frame.
     server_task.await.expect("server task");
+
+    // br-xnroh: drain the consumer stream end-to-end and assert that
+    // backpressure overflow surfaces as a TERMINAL Err item, not as
+    // a clean stream end. Pre-fix the consumer would observe only
+    // the queued Ok items followed by `None` — indistinguishable
+    // from a server-initiated `complete`. Post-fix the consumer
+    // observes the queued Ok items, then a
+    // `SubscriptionBufferOverflow` Err, then `None`.
+    let mut ok_items = 0_usize;
+    let mut overflow_err_observed = false;
+    let mut other_err_count = 0_usize;
+    while let Some(item) =
+        fcp_async_core::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("subscription stream did not yield in time")
+    {
+        match item {
+            Ok(_) => {
+                ok_items += 1;
+            }
+            Err(GraphqlClientError::SubscriptionBufferOverflow { capacity }) => {
+                assert_eq!(
+                    capacity, 16,
+                    "br-xnroh: BufferOverflow capacity must report the producer-side \
+                     channel buffer capacity"
+                );
+                assert!(
+                    !overflow_err_observed,
+                    "br-xnroh: terminal overflow Err must yield exactly once"
+                );
+                overflow_err_observed = true;
+            }
+            Err(other) => {
+                other_err_count += 1;
+                eprintln!("unexpected non-overflow err during drain: {other:?}");
+            }
+        }
+    }
+    assert!(
+        ok_items > 0,
+        "br-xnroh: drain must observe at least one queued Ok item before the overflow Err — got 0"
+    );
+    assert!(
+        overflow_err_observed,
+        "br-xnroh: drain MUST yield SubscriptionBufferOverflow as the terminal item; pre-fix \
+         the stream ended cleanly and consumers could not distinguish overflow from a \
+         server-initiated `complete` (got {ok_items} Ok items, {other_err_count} other Err items)"
+    );
+
     ctx.finalize(
         "pass",
-        Some(serde_json::json!({"overflow_policy": "close"})),
+        Some(serde_json::json!({
+            "overflow_policy": "terminal_err",
+            "ok_items_before_overflow": ok_items,
+            "overflow_err_observed": overflow_err_observed,
+        })),
     );
 }
 

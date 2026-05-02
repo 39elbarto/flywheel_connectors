@@ -271,6 +271,25 @@ pub enum GraphqlClientError {
         /// Attempt count.
         attempts: usize,
     },
+
+    /// Subscription terminated by the client because the result buffer
+    /// filled and a server `next` frame had nowhere to land (br-xnroh
+    /// follow-up to VioletPine's br-0q8eh fail-closed work). Surfaces
+    /// as the LAST item the consumer stream yields, before stream end.
+    /// Callers/automation observing only stream end (without
+    /// inspecting the last item) would previously have mistaken this
+    /// for a clean server-initiated `complete` and silently dropped
+    /// post-buffer events; the terminal Err makes the overflow
+    /// distinguishable fail-closed.
+    #[error(
+        "GraphQL subscription aborted: result buffer overflow (capacity {capacity}) — \
+         consumer was not draining fast enough; events after this point were dropped"
+    )]
+    SubscriptionBufferOverflow {
+        /// The fixed buffer capacity that was exceeded. Operators
+        /// sizing the consumer-side throughput floor want this number.
+        capacity: usize,
+    },
 }
 
 impl From<HttpClientError> for GraphqlClientError {
@@ -375,6 +394,15 @@ impl GraphqlClientError {
                 message: format!("Retry policy exhausted after {attempts} attempts"),
                 status_code: None,
                 retryable: false,
+                retry_after: None,
+            },
+            Self::SubscriptionBufferOverflow { capacity } => FcpError::External {
+                service: service.into(),
+                message: format!(
+                    "GraphQL subscription aborted: result buffer overflow (capacity {capacity})"
+                ),
+                status_code: None,
+                retryable: true,
                 retry_after: None,
             },
         }

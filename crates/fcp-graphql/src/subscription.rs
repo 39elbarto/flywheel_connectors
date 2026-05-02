@@ -1,6 +1,7 @@
 //! GraphQL over WebSocket subscriptions.
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fcp_async_core::{
@@ -130,6 +131,17 @@ impl GraphqlSubscriptionClient {
         let ack_timeout = self.config.ack_timeout;
         let reconnect_config = reconnect_config_from_ws(client.config());
 
+        // br-xnroh: terminal-error slot, set by the producer task on
+        // backpressure overflow (or any other fail-closed exit) and
+        // observed by the consumer's stream after the channel
+        // drains. This makes overflow distinguishable from a clean
+        // server-initiated `complete`: instead of the consumer
+        // observing only the queued Ok items followed by stream end,
+        // it observes the queued Ok items, then a terminal Err,
+        // then stream end.
+        let terminal_error: Arc<Mutex<Option<GraphqlClientError>>> = Arc::new(Mutex::new(None));
+        let producer_terminal = Arc::clone(&terminal_error);
+
         task::spawn_detached(async move {
             let mut conn = connection;
             let mut reconnect_handler = ReconnectHandler::new(reconnect_config);
@@ -160,7 +172,12 @@ impl GraphqlSubscriptionClient {
                                     }
                                     Err(err) => {
                                         let _ =
-                                            deliver_subscription_item(&tx, &mut conn, Err(err))
+                                            deliver_subscription_item(
+                                                &tx,
+                                                &mut conn,
+                                                &producer_terminal,
+                                                Err(err),
+                                            )
                                                 .await;
                                         break;
                                     }
@@ -186,6 +203,7 @@ impl GraphqlSubscriptionClient {
                                         let _ = deliver_subscription_item(
                                             &tx,
                                             &mut conn,
+                                            &producer_terminal,
                                             Err(reconnect_err),
                                         )
                                         .await;
@@ -222,7 +240,13 @@ impl GraphqlSubscriptionClient {
                                 continue;
                             }
                             Err(err) => {
-                                let _ = deliver_subscription_item(&tx, &mut conn, Err(err)).await;
+                                let _ = deliver_subscription_item(
+                                    &tx,
+                                    &mut conn,
+                                    &producer_terminal,
+                                    Err(err),
+                                )
+                                .await;
                                 break;
                             }
                         }
@@ -234,7 +258,13 @@ impl GraphqlSubscriptionClient {
                     Ok(ws_msg) => match ws_msg.message_type.as_str() {
                         "next" => {
                             if let Err(err) = validate_subscription_message_id(&ws_msg) {
-                                let _ = deliver_subscription_item(&tx, &mut conn, Err(err)).await;
+                                let _ = deliver_subscription_item(
+                                    &tx,
+                                    &mut conn,
+                                    &producer_terminal,
+                                    Err(err),
+                                )
+                                .await;
                                 break;
                             }
                             if let Some(payload) = ws_msg.payload {
@@ -242,8 +272,13 @@ impl GraphqlSubscriptionClient {
                                     serde_json::from_value(payload);
                                 match parsed {
                                     Ok(response) => {
-                                        if !deliver_subscription_item(&tx, &mut conn, Ok(response))
-                                            .await
+                                        if !deliver_subscription_item(
+                                            &tx,
+                                            &mut conn,
+                                            &producer_terminal,
+                                            Ok(response),
+                                        )
+                                        .await
                                         {
                                             break;
                                         }
@@ -252,6 +287,7 @@ impl GraphqlSubscriptionClient {
                                         if !deliver_subscription_item(
                                             &tx,
                                             &mut conn,
+                                            &producer_terminal,
                                             Err(GraphqlClientError::Json(err.to_string())),
                                         )
                                             .await
@@ -265,7 +301,13 @@ impl GraphqlSubscriptionClient {
                         }
                         "error" => {
                             if let Err(err) = validate_subscription_message_id(&ws_msg) {
-                                let _ = deliver_subscription_item(&tx, &mut conn, Err(err)).await;
+                                let _ = deliver_subscription_item(
+                                    &tx,
+                                    &mut conn,
+                                    &producer_terminal,
+                                    Err(err),
+                                )
+                                .await;
                                 break;
                             }
                             let errors = ws_msg
@@ -283,6 +325,7 @@ impl GraphqlSubscriptionClient {
                             let _ = deliver_subscription_item(
                                 &tx,
                                 &mut conn,
+                                &producer_terminal,
                                 Err(GraphqlClientError::GraphqlErrors { errors }),
                             )
                             .await;
@@ -290,7 +333,13 @@ impl GraphqlSubscriptionClient {
                         }
                         "complete" => {
                             if let Err(err) = validate_subscription_message_id(&ws_msg) {
-                                let _ = deliver_subscription_item(&tx, &mut conn, Err(err)).await;
+                                let _ = deliver_subscription_item(
+                                    &tx,
+                                    &mut conn,
+                                    &producer_terminal,
+                                    Err(err),
+                                )
+                                .await;
                             }
                             break;
                         }
@@ -306,6 +355,7 @@ impl GraphqlSubscriptionClient {
                             let _ = deliver_subscription_item(
                                 &tx,
                                 &mut conn,
+                                &producer_terminal,
                                 Err(GraphqlClientError::Protocol {
                                     message: format!(
                                         "unexpected websocket message: {}",
@@ -321,6 +371,7 @@ impl GraphqlSubscriptionClient {
                         let _ = deliver_subscription_item(
                             &tx,
                             &mut conn,
+                            &producer_terminal,
                             Err(GraphqlClientError::Protocol {
                                 message: format!("decode failed: {err}"),
                             }),
@@ -334,9 +385,29 @@ impl GraphqlSubscriptionClient {
             }
         });
 
+        // br-xnroh: the consumer's stream FIRST drains the channel
+        // (yielding the queued Ok / Err items in arrival order),
+        // THEN observes the terminal-error slot exactly once if the
+        // producer set one (typically `SubscriptionBufferOverflow`),
+        // THEN yields None to signal end-of-stream. This makes
+        // backpressure overflow distinguishable from a clean
+        // server-initiated `complete` for any consumer that drains
+        // to the last item.
         Ok(Box::pin(futures_util::stream::unfold(
-            rx,
-            |mut receiver| async move { receiver.recv().await.map(|item| (item, receiver)) },
+            (rx, terminal_error),
+            |(mut receiver, terminal)| async move {
+                if let Some(item) = receiver.recv().await {
+                    return Some((item, (receiver, terminal)));
+                }
+                let pending_terminal = terminal
+                    .lock()
+                    .expect("subscription terminal-error mutex poisoned")
+                    .take();
+                if let Some(err) = pending_terminal {
+                    return Some((Err(err), (receiver, terminal)));
+                }
+                None
+            },
         )))
     }
 }
@@ -344,19 +415,45 @@ impl GraphqlSubscriptionClient {
 async fn deliver_subscription_item<T>(
     tx: &mpsc::Sender<Result<GraphqlResponse<T>, GraphqlClientError>>,
     connection: &mut WsConnection,
+    terminal_error: &Mutex<Option<GraphqlClientError>>,
     item: Result<GraphqlResponse<T>, GraphqlClientError>,
 ) -> bool {
     match tx.try_send(item) {
         Ok(()) => true,
         Err(TrySendError::Closed(_)) => {
+            // Consumer dropped its receiver — no point publishing a
+            // terminal error nobody will observe. Just close cleanly.
             send_complete_and_close(connection).await;
             false
         }
         Err(TrySendError::Full(_)) => {
+            // br-xnroh: backpressure overflow MUST be observable to
+            // the consumer as a terminal Err, not as a silent clean
+            // EOF. Stage the error in the terminal slot BEFORE
+            // closing the channel so the consumer's stream wrapper
+            // (in `subscribe`) can yield it after draining the
+            // already-queued Ok items.
+            //
+            // First-writer-wins: if multiple fail-closed paths race
+            // we keep the FIRST cause for diagnostics; subsequent
+            // attempts no-op via `get_or_insert`.
             debug!(
                 capacity = SUBSCRIPTION_RESULT_BUFFER_CAPACITY,
-                "graphql subscription result buffer full; closing subscription"
+                "graphql subscription result buffer full; closing subscription with \
+                 terminal SubscriptionBufferOverflow error"
             );
+            // Scope the MutexGuard tightly so it is dropped strictly
+            // before the upcoming await — `std::sync::MutexGuard`
+            // is `!Send` and the producer task's future must be
+            // `Send` for `task::spawn_detached`.
+            {
+                let mut slot = terminal_error
+                    .lock()
+                    .expect("subscription terminal-error mutex poisoned");
+                slot.get_or_insert(GraphqlClientError::SubscriptionBufferOverflow {
+                    capacity: SUBSCRIPTION_RESULT_BUFFER_CAPACITY,
+                });
+            }
             send_complete_and_close(connection).await;
             false
         }

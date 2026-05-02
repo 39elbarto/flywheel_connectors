@@ -380,7 +380,24 @@ impl SubprocessConnector {
         // first real operation was queued. Keep the lock through the
         // zone-bound RPC so the handshake and first invoke/simulate form
         // one critical section.
+        //
+        // INVARIANT (br-utiw3): no code path called from this function
+        // (self.rpc → connector subprocess RPC → response) is permitted
+        // to recursively call rpc_in_handshaken_zone() for THIS connector.
+        // The async Mutex backing handshaken_zone is non-reentrant, so a
+        // recursive call would deadlock the calling task on its own
+        // outer guard. The function body below is a closed system over
+        // self.rpc only, but if a future change introduces a callback
+        // path (e.g. a connector triggering a meta-RPC back into the
+        // host), THAT path MUST NOT terminate at rpc_in_handshaken_zone
+        // for the same connector id. The trace-span warn at exit makes
+        // long lock-hold times observable in production.
         let mut handshaken_zone = self.handshaken_zone.lock().await;
+        let _lock_hold_monitor = HandshakenZoneLockHoldMonitor {
+            connector_id: self.summary.id.as_str(),
+            acquired_at: Instant::now(),
+            threshold: HANDSHAKEN_ZONE_LOCK_HOLD_WARN_THRESHOLD,
+        };
         if handshaken_zone.as_ref() != Some(zone) {
             let nonce = *blake3::hash(RequestId::random().0.as_bytes()).as_bytes();
             let request = HandshakeRequest {
@@ -1279,6 +1296,50 @@ const CONNECTOR_RPC_QUEUE_CAPACITY: usize = 64;
 const CONNECTOR_RPC_IO_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECTOR_RPC_MAX_STDOUT_LINE_BYTES: usize = 64 * 1024;
 const CONNECTOR_RPC_MAX_STDERR_LINE_BYTES: usize = 64 * 1024;
+
+/// Threshold above which `rpc_in_handshaken_zone` emits a warn-level
+/// log when releasing the per-connector handshaken-zone Mutex
+/// (br-utiw3). Set to ~3× the worst-case lock-hold time given two
+/// `CONNECTOR_RPC_IO_TIMEOUT` awaits inside the critical section, so
+/// the warn only fires on genuinely pathological contention or a
+/// hung connector — not on a normal slow-path handshake.
+const HANDSHAKEN_ZONE_LOCK_HOLD_WARN_THRESHOLD: Duration = Duration::from_secs(30);
+
+/// RAII observability guard for the per-connector handshaken-zone
+/// Mutex critical section in `rpc_in_handshaken_zone` (br-utiw3).
+///
+/// The async Mutex backing `handshaken_zone` is held across two awaits
+/// (handshake RPC + first invoke/simulate RPC) by intentional design —
+/// it keeps the handshake and first real call as one critical section
+/// so a cross-zone caller cannot re-handshake the connector between
+/// them. Both awaits are bounded by `CONNECTOR_RPC_IO_TIMEOUT`, so the
+/// worst-case hold time is ~2× that timeout.
+///
+/// This guard records the lock acquisition time and emits a warn-level
+/// structured log when dropped if the hold exceeded
+/// `HANDSHAKEN_ZONE_LOCK_HOLD_WARN_THRESHOLD`. It runs on every return
+/// path (including `?` early returns) because it lives on the stack
+/// above the lock guard. No production behaviour change — observability
+/// only.
+struct HandshakenZoneLockHoldMonitor<'a> {
+    connector_id: &'a str,
+    acquired_at: Instant,
+    threshold: Duration,
+}
+
+impl Drop for HandshakenZoneLockHoldMonitor<'_> {
+    fn drop(&mut self) {
+        let elapsed = self.acquired_at.elapsed();
+        if elapsed > self.threshold {
+            tracing::warn!(
+                connector_id = self.connector_id,
+                hold_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                threshold_ms = u64::try_from(self.threshold.as_millis()).unwrap_or(u64::MAX),
+                "rpc_in_handshaken_zone held handshaken_zone Mutex past warn threshold (br-utiw3)",
+            );
+        }
+    }
+}
 
 fn connector_io_timeout_error(phase: &'static str, timeout: Duration) -> std::io::Error {
     std::io::Error::new(

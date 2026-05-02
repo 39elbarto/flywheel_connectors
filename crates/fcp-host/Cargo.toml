@@ -23,6 +23,7 @@ fcp-policy = { path = "../fcp-policy" }
 fcp-async-core = { path = "../fcp-async-core" }
 fcp-cbor = { path = "../fcp-cbor" }
 fcp-crypto = { path = "../fcp-crypto" }
+fcp-ratelimit = { path = "../fcp-ratelimit" }
 fcp-store = { path = "../fcp-store" }
 
 # Async runtime

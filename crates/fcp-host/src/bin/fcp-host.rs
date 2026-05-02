@@ -7,8 +7,8 @@ use std::net::SocketAddr;
 use std::path::Path as FsPath;
 use std::path::PathBuf;
 use std::pin::pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use axum::{
@@ -77,8 +77,9 @@ use fcp_host::{DeploymentClassification, DeploymentTierRefusal, HostError, HostR
 use fcp_kernel::{
     ApprovalMode, ConnectorHealth, ConnectorId, HandshakeRequest, HandshakeResponse,
     HealthSnapshot, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, LifecycleError,
-    LifecycleManager, LifecycleState, LifecycleStatus, RateLimitDeclarations, RequestId,
-    SelfCheckReport, SimulateRequest, SimulateResponse,
+    LifecycleManager, LifecycleState, LifecycleStatus, LimitType, RateLimitDeclarations,
+    RateLimitEnforcement, RateLimitPool, RateLimitScope, RateLimitUnit, RequestId, SelfCheckReport,
+    SimulateRequest, SimulateResponse,
 };
 use fcp_policy::{
     CapabilityConstraintEnforcer, ConstraintEvaluation, DefaultConstraintEnforcer,
@@ -94,6 +95,7 @@ use fcp_prelude::{
 };
 #[cfg(test)]
 use fcp_prelude::{DecisionReceiptPolicy, ObjectHeader, Provenance, ZoneTransportPolicy};
+use fcp_ratelimit::{BackpressureThresholds, TokenBucket};
 use futures_util::future::join_all;
 use hyper::body::Incoming;
 use hyper_util::{
@@ -382,6 +384,7 @@ struct SubprocessRegistry {
     resilience: Arc<ResilienceLayer>,
     version: Arc<AtomicU64>,
     capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+    rate_limiters: Arc<HostRateLimiterStore>,
 }
 
 struct RegistryEntry {
@@ -419,6 +422,74 @@ impl PreparedRegistryApply {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HostRateLimitBucketKey {
+    connector_id: String,
+    zone_id: String,
+    pool_id: String,
+    scope: String,
+    principal_id: Option<String>,
+    window_nanos: u128,
+    requests: u32,
+    burst: Option<u32>,
+}
+
+#[derive(Default)]
+struct HostRateLimiterStore {
+    buckets: StdMutex<HashMap<HostRateLimitBucketKey, Arc<TokenBucket>>>,
+}
+
+impl HostRateLimiterStore {
+    fn bucket_for(
+        &self,
+        key: HostRateLimitBucketKey,
+        pool: &RateLimitPool,
+    ) -> HostResult<Arc<TokenBucket>> {
+        let mut buckets = self.buckets.lock().map_err(|_| {
+            HostError::Internal("host rate-limit bucket store mutex poisoned".to_string())
+        })?;
+        if let Some(bucket) = buckets.get(&key) {
+            return Ok(Arc::clone(bucket));
+        }
+
+        let config = rate_limiter_config_from_pool(pool)?;
+        let bucket = Arc::new(TokenBucket::from_config(&config));
+        buckets.insert(key, Arc::clone(&bucket));
+        Ok(bucket)
+    }
+}
+
+fn rate_limiter_config_from_pool(
+    pool: &RateLimitPool,
+) -> HostResult<fcp_ratelimit::RateLimitConfig> {
+    let mut config = fcp_ratelimit::RateLimitConfig::new(pool.config.requests, pool.config.window);
+    if let Some(burst) = pool.config.burst {
+        let capacity = pool.config.requests.checked_add(burst).ok_or_else(|| {
+            HostError::PreflightFailed(format!(
+                "rate limit pool `{}` has overflowed burst capacity",
+                pool.id
+            ))
+        })?;
+        config = config.with_burst(capacity);
+    }
+    Ok(config)
+}
+
+fn limit_type_for_unit(unit: RateLimitUnit) -> LimitType {
+    match unit {
+        RateLimitUnit::Requests => LimitType::Rpm,
+        RateLimitUnit::Tokens | RateLimitUnit::Bytes | RateLimitUnit::Custom => LimitType::Quota,
+    }
+}
+
+fn rate_limit_scope_label(scope: RateLimitScope) -> &'static str {
+    match scope {
+        RateLimitScope::Instance => "instance",
+        RateLimitScope::Credential => "credential",
+        RateLimitScope::Global => "global",
+    }
+}
+
 impl SubprocessRegistry {
     async fn from_configs(
         configs: Vec<ConnectorConfig>,
@@ -450,6 +521,7 @@ impl SubprocessRegistry {
             resilience,
             version: Arc::new(AtomicU64::new(1)),
             capability_verifying_key,
+            rate_limiters: Arc::new(HostRateLimiterStore::default()),
         })
     }
 
@@ -647,6 +719,177 @@ impl SubprocessRegistry {
             .is_some_and(|entry| connector_config_declares_singleton_writer(&entry.config))
     }
 
+    async fn enforce_invoke_rate_limits(
+        &self,
+        request: &InvokeRequest,
+        introspection: &IntrospectionResponse,
+        principal: &str,
+    ) -> HostResult<()> {
+        let operation = introspection
+            .introspection
+            .operations
+            .iter()
+            .find(|operation| operation.id == request.operation);
+        let mut enforced_declared_pool = false;
+
+        if let Some(declarations) = introspection.rate_limits.as_ref()
+            && let Some(pool_ids) = declarations.tool_pool_map.get(request.operation.as_str())
+        {
+            for pool_id in pool_ids {
+                let pool = declarations
+                    .limits
+                    .iter()
+                    .find(|pool| pool.id == *pool_id)
+                    .ok_or_else(|| {
+                        HostError::PreflightFailed(format!(
+                            "rate limit declarations for connector `{}` map operation `{}` to unknown pool `{pool_id}`",
+                            request.connector_id,
+                            request.operation.as_str()
+                        ))
+                    })?;
+                self.enforce_declared_rate_limit_pool(request, principal, pool)
+                    .await?;
+                enforced_declared_pool = true;
+            }
+        }
+
+        if !enforced_declared_pool
+            && let Some(rate_limit) = operation.and_then(|operation| operation.rate_limit.as_ref())
+        {
+            self.enforce_inline_operation_rate_limit(request, principal, rate_limit)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn enforce_declared_rate_limit_pool(
+        &self,
+        request: &InvokeRequest,
+        principal: &str,
+        pool: &RateLimitPool,
+    ) -> HostResult<()> {
+        if matches!(pool.enforcement, RateLimitEnforcement::Advisory) {
+            return Ok(());
+        }
+        pool.validate().map_err(|error| {
+            HostError::PreflightFailed(format!(
+                "invalid rate limit pool `{}` for connector `{}`: {error}",
+                pool.id, request.connector_id
+            ))
+        })?;
+        self.enforce_rate_limit_pool(request, principal, pool).await
+    }
+
+    async fn enforce_inline_operation_rate_limit(
+        &self,
+        request: &InvokeRequest,
+        principal: &str,
+        rate_limit: &fcp_core::RateLimit,
+    ) -> HostResult<()> {
+        rate_limit.validate().map_err(|error| {
+            HostError::PreflightFailed(format!(
+                "invalid rate limit for connector `{}` operation `{}`: {error}",
+                request.connector_id,
+                request.operation.as_str()
+            ))
+        })?;
+        let scope = match rate_limit.parsed_scope() {
+            fcp_core::OperationRateLimitScope::PerConnector
+            | fcp_core::OperationRateLimitScope::PerZone => RateLimitScope::Instance,
+            fcp_core::OperationRateLimitScope::PerPrincipal => RateLimitScope::Credential,
+        };
+        let pool = RateLimitPool {
+            id: rate_limit
+                .pool_name
+                .clone()
+                .unwrap_or_else(|| format!("operation:{}", request.operation.as_str())),
+            description: format!(
+                "Inline rate limit for connector `{}` operation `{}`",
+                request.connector_id,
+                request.operation.as_str()
+            ),
+            config: fcp_kernel::RateLimitConfig {
+                requests: rate_limit.max,
+                window: Duration::from_millis(rate_limit.per_ms),
+                burst: rate_limit.burst,
+                unit: RateLimitUnit::Requests,
+            },
+            enforcement: RateLimitEnforcement::Hard,
+            scope,
+        };
+        self.enforce_rate_limit_pool(request, principal, &pool)
+            .await
+    }
+
+    async fn enforce_rate_limit_pool(
+        &self,
+        request: &InvokeRequest,
+        principal: &str,
+        pool: &RateLimitPool,
+    ) -> HostResult<()> {
+        let principal_id =
+            matches!(pool.scope, RateLimitScope::Credential).then(|| principal.to_string());
+        let key = HostRateLimitBucketKey {
+            connector_id: request.connector_id.to_string(),
+            zone_id: request.zone_id.to_string(),
+            pool_id: pool.id.clone(),
+            scope: rate_limit_scope_label(pool.scope).to_string(),
+            principal_id,
+            window_nanos: pool.config.window.as_nanos(),
+            requests: pool.config.requests,
+            burst: pool.config.burst,
+        };
+        let bucket = self.rate_limiters.bucket_for(key, pool)?;
+        let context = fcp_ratelimit::ThrottleContext {
+            zone_id: request.zone_id.clone(),
+            connector_id: Some(request.connector_id.clone()),
+            operation_id: Some(request.operation.clone()),
+            limit_type: limit_type_for_unit(pool.config.unit),
+        };
+        let outcome = fcp_ratelimit::enforce(
+            bucket.as_ref(),
+            1,
+            &context,
+            BackpressureThresholds::standard(),
+        )
+        .await;
+
+        if outcome.allowed {
+            return Ok(());
+        }
+        if matches!(pool.enforcement, RateLimitEnforcement::Soft) {
+            tracing::warn!(
+                event = "invoke_rate_limit_soft_exceeded",
+                connector_id = %request.connector_id,
+                operation = %request.operation,
+                zone_id = %request.zone_id,
+                pool_id = %pool.id,
+                retry_after_ms = outcome.backpressure.retry_after_ms,
+                "soft host invoke rate limit exceeded; allowing request"
+            );
+            return Ok(());
+        }
+
+        let retry_after_ms = outcome
+            .backpressure
+            .retry_after_ms
+            .or_else(|| {
+                outcome
+                    .violation
+                    .as_ref()
+                    .map(|violation| violation.retry_after_ms)
+            })
+            .unwrap_or(0);
+        Err(HostError::PreflightFailed(format!(
+            "rate limit pool `{}` exceeded for connector `{}` operation `{}` in zone `{}`; retry after {retry_after_ms} ms",
+            pool.id,
+            request.connector_id,
+            request.operation.as_str(),
+            request.zone_id.as_str()
+        )))
+    }
+
     async fn simulate(&self, request: SimulateRequest) -> HostResult<SimulateResponse> {
         let connector_id = request.connector_id.clone();
         let connector = {
@@ -756,8 +999,145 @@ fn configured_subprocess_archetype(config: &ConnectorConfig) -> ConnectorArchety
     }
 }
 
-fn configured_subprocess_rate_limits(_config: &ConnectorConfig) -> Option<RateLimitDeclarations> {
-    None
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfiguredRateLimitsSection {
+    #[serde(default)]
+    pools: Vec<ConfiguredRateLimitPool>,
+    #[serde(default)]
+    operation_pools: HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfiguredRateLimitPool {
+    id: String,
+    #[serde(default)]
+    description: Option<String>,
+    requests: u32,
+    window_ms: u64,
+    #[serde(default)]
+    burst: Option<u32>,
+    #[serde(default)]
+    unit: Option<String>,
+    #[serde(default)]
+    enforcement: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+impl ConfiguredRateLimitsSection {
+    fn into_declarations(self) -> HostResult<RateLimitDeclarations> {
+        let limits = self
+            .pools
+            .into_iter()
+            .map(ConfiguredRateLimitPool::into_pool)
+            .collect::<HostResult<Vec<_>>>()?;
+        let declarations = RateLimitDeclarations {
+            limits,
+            tool_pool_map: self.operation_pools,
+        };
+        declarations.validate().map_err(|error| {
+            HostError::InvalidFilter(format!("invalid configured rate_limits section: {error}"))
+        })?;
+        Ok(declarations)
+    }
+}
+
+impl ConfiguredRateLimitPool {
+    fn into_pool(self) -> HostResult<RateLimitPool> {
+        let unit = match self.unit.as_deref().unwrap_or("requests") {
+            "requests" => RateLimitUnit::Requests,
+            "tokens" => RateLimitUnit::Tokens,
+            "bytes" => RateLimitUnit::Bytes,
+            "custom" => RateLimitUnit::Custom,
+            other => {
+                return Err(HostError::InvalidFilter(format!(
+                    "invalid configured rate limit unit `{other}` for pool `{}`",
+                    self.id
+                )));
+            }
+        };
+        let enforcement = match self.enforcement.as_deref().unwrap_or("hard") {
+            "hard" => RateLimitEnforcement::Hard,
+            "soft" => RateLimitEnforcement::Soft,
+            "advisory" => RateLimitEnforcement::Advisory,
+            other => {
+                return Err(HostError::InvalidFilter(format!(
+                    "invalid configured rate limit enforcement `{other}` for pool `{}`",
+                    self.id
+                )));
+            }
+        };
+        let scope = match self.scope.as_deref().unwrap_or("instance") {
+            "instance" => RateLimitScope::Instance,
+            "credential" => RateLimitScope::Credential,
+            "global" => RateLimitScope::Global,
+            other => {
+                return Err(HostError::InvalidFilter(format!(
+                    "invalid configured rate limit scope `{other}` for pool `{}`",
+                    self.id
+                )));
+            }
+        };
+        let pool = RateLimitPool {
+            id: self.id,
+            description: self.description.unwrap_or_default(),
+            config: fcp_kernel::RateLimitConfig {
+                requests: self.requests,
+                window: Duration::from_millis(self.window_ms),
+                burst: self.burst,
+                unit,
+            },
+            enforcement,
+            scope,
+        };
+        pool.validate().map_err(|error| {
+            HostError::InvalidFilter(format!(
+                "invalid configured rate limit pool `{}`: {error}",
+                pool.id
+            ))
+        })?;
+        Ok(pool)
+    }
+}
+
+fn parse_configured_rate_limits(value: &Value) -> HostResult<RateLimitDeclarations> {
+    if let Ok(declarations) = serde_json::from_value::<RateLimitDeclarations>(value.clone()) {
+        declarations.validate().map_err(|error| {
+            HostError::InvalidFilter(format!(
+                "invalid configured canonical rate_limits declaration: {error}"
+            ))
+        })?;
+        return Ok(declarations);
+    }
+
+    let section: ConfiguredRateLimitsSection =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            HostError::InvalidFilter(format!("invalid configured rate_limits section: {error}"))
+        })?;
+    section.into_declarations()
+}
+
+fn configured_subprocess_rate_limits(config: &ConnectorConfig) -> Option<RateLimitDeclarations> {
+    let payload = config.config.as_ref()?;
+    let value = payload
+        .pointer("/rate_limits")
+        .or_else(|| payload.pointer("/rateLimits"))
+        .or_else(|| payload.pointer("/budget/rate_limits"))?;
+    match parse_configured_rate_limits(value) {
+        Ok(declarations) if declarations.is_empty() => None,
+        Ok(declarations) => Some(declarations),
+        Err(error) => {
+            tracing::warn!(
+                event = "connector_rate_limits_invalid",
+                connector_id = %config.id,
+                error = %error,
+                "ignoring invalid connector rate-limit declarations"
+            );
+            None
+        }
+    }
 }
 
 fn connector_config_declares_singleton_writer(config: &ConnectorConfig) -> bool {
@@ -2531,6 +2911,10 @@ async fn verify_live_request(
         principal,
         constraint_resource_uri.as_deref(),
     )?;
+    state
+        .registry
+        .enforce_invoke_rate_limits(request, &introspection, principal)
+        .await?;
 
     Ok(VerifiedLiveRequest {
         principal: principal.to_owned(),
@@ -6490,6 +6874,7 @@ mod tests {
             resilience: Arc::new(ResilienceLayer::default()),
             version: Arc::new(AtomicU64::new(1)),
             capability_verifying_key: None,
+            rate_limiters: Arc::new(HostRateLimiterStore::default()),
         })
     }
 
@@ -7344,6 +7729,7 @@ mod tests {
             resilience: Arc::new(ResilienceLayer::default()),
             version: Arc::new(AtomicU64::new(1)),
             capability_verifying_key: None,
+            rate_limiters: Arc::new(HostRateLimiterStore::default()),
         });
         let budget = Arc::new(BudgetPolicyEngine::new());
         let discovery = Arc::new(DiscoveryEndpoint::new(
@@ -7407,6 +7793,232 @@ mod tests {
             invoke_count.load(Ordering::SeqCst),
             0,
             "DeploymentTier denial must happen before connector dispatch"
+        );
+    }
+
+    fn invoke_token_bucket_config(operation_id: &str) -> Value {
+        let mut operation_pools = serde_json::Map::new();
+        operation_pools.insert(operation_id.to_string(), json!(["host.invoke"]));
+        json!({
+            "rate_limits": {
+                "pools": [{
+                    "id": "host.invoke",
+                    "description": "one invoke per zone",
+                    "requests": 1,
+                    "window_ms": 60_000,
+                    "enforcement": "hard",
+                    "scope": "instance"
+                }],
+                "operation_pools": Value::Object(operation_pools)
+            }
+        })
+    }
+
+    fn invoke_token_bucket_request(
+        connector_id: &'static str,
+        operation_id: &'static str,
+        capability_id: &'static str,
+        zone_id: ZoneId,
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+    ) -> InvokeRequest {
+        InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: ConnectorId::from_static(connector_id),
+            operation: OperationId::from_static(operation_id),
+            zone_id: zone_id.clone(),
+            input: json!({ "message": "rate limited invoke" }),
+            capability_token: test_capability_token(
+                signing_key,
+                capability_id,
+                operation_id,
+                zone_id.as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }
+    }
+
+    fn invoke_token_bucket_state(
+        connector_id: &'static str,
+        operation_id: &'static str,
+        capability_id: &'static str,
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+        invoke_count: Arc<AtomicU64>,
+    ) -> Arc<AppState> {
+        let introspection = serde_json::to_value(dispatcher_introspection(
+            operation_id,
+            capability_id,
+            SafetyTier::Safe,
+        ))
+        .expect("test introspection should serialize");
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(8);
+        let runner_invoke_count = Arc::clone(&invoke_count);
+        let runner_task = task::spawn(async move {
+            while let Some(request) = runner_rx.recv().await {
+                match request.method.as_str() {
+                    "introspect" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": introspection.clone(),
+                        })));
+                    }
+                    "health" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": dispatcher_health_result(),
+                        })));
+                    }
+                    "invoke" => {
+                        runner_invoke_count.fetch_add(1, Ordering::SeqCst);
+                        let invoke_request: InvokeRequest =
+                            serde_json::from_value(request.params.clone())
+                                .expect("invoke params decode");
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": InvokeResponse::ok(
+                                invoke_request.id,
+                                json!({ "accepted": true }),
+                            ),
+                        })));
+                    }
+                    method => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": { "message": format!("unexpected method {method}") },
+                        })));
+                    }
+                }
+            }
+        });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let registry = dispatcher_registry_with_connector(
+            connector_id,
+            connector,
+            ConnectorConfig {
+                id: connector_id.to_string(),
+                binary: "dispatcher-test".to_string(),
+                name: Some("Invoke Token Bucket Test Connector".to_string()),
+                description: None,
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                config: Some(invoke_token_bucket_config(operation_id)),
+                categories: vec!["test".to_string()],
+                version: None,
+                allowed_zones: Vec::new(),
+                allowed_operations: Vec::new(),
+            },
+        );
+        let mut policies = HashMap::new();
+        policies.insert(ZoneId::work(), host_runtime_policy(ZoneId::work()));
+        let private_zone = ZoneId::try_from("z:private".to_string()).expect("private zone");
+        policies.insert(private_zone.clone(), host_runtime_policy(private_zone));
+        dispatcher_app_state(
+            registry,
+            Arc::new(HostAdminStateStore::new()),
+            Some(signing_key.verifying_key()),
+            policies,
+        )
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn invoke_token_bucket_denies_second_invoke_before_dispatch() {
+        let connector_id = "fcp.test.invoke-rate-limit:utility:1.0.0";
+        let operation_id = "test.echo";
+        let capability_id = "cap.test.echo";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let invoke_count = Arc::new(AtomicU64::new(0));
+        let state = invoke_token_bucket_state(
+            connector_id,
+            operation_id,
+            capability_id,
+            &signing_key,
+            Arc::clone(&invoke_count),
+        );
+
+        let first = invoke_token_bucket_request(
+            connector_id,
+            operation_id,
+            capability_id,
+            ZoneId::work(),
+            &signing_key,
+        );
+        let _ = invoke_handler(State(Arc::clone(&state)), HeaderMap::new(), Json(first))
+            .await
+            .expect("first invoke should spend the zone bucket token");
+
+        let second = invoke_token_bucket_request(
+            connector_id,
+            operation_id,
+            capability_id,
+            ZoneId::work(),
+            &signing_key,
+        );
+        let (status, message) = invoke_handler(State(state), HeaderMap::new(), Json(second))
+            .await
+            .expect_err("second same-zone invoke must be rate limited before dispatch");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(
+            message.contains("rate limit pool `host.invoke` exceeded")
+                && message.contains("z:work"),
+            "expected host invoke token-bucket denial, got: {message}"
+        );
+        assert_eq!(
+            invoke_count.load(Ordering::SeqCst),
+            1,
+            "rate-limit denial must happen before connector invoke dispatch"
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn invoke_token_bucket_is_partitioned_per_zone() {
+        let connector_id = "fcp.test.invoke-rate-limit-zones:utility:1.0.0";
+        let operation_id = "test.echo";
+        let capability_id = "cap.test.echo";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let invoke_count = Arc::new(AtomicU64::new(0));
+        let state = invoke_token_bucket_state(
+            connector_id,
+            operation_id,
+            capability_id,
+            &signing_key,
+            Arc::clone(&invoke_count),
+        );
+
+        let work_request = invoke_token_bucket_request(
+            connector_id,
+            operation_id,
+            capability_id,
+            ZoneId::work(),
+            &signing_key,
+        );
+        let _ = invoke_handler(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Json(work_request),
+        )
+        .await
+        .expect("first work-zone invoke should spend only the work bucket");
+
+        let private_zone = ZoneId::try_from("z:private".to_string()).expect("private zone");
+        let private_request = invoke_token_bucket_request(
+            connector_id,
+            operation_id,
+            capability_id,
+            private_zone,
+            &signing_key,
+        );
+        let _ = invoke_handler(State(state), HeaderMap::new(), Json(private_request))
+            .await
+            .expect("same pool in another zone should have an independent bucket");
+
+        assert_eq!(
+            invoke_count.load(Ordering::SeqCst),
+            2,
+            "per-zone buckets must not let one zone consume another zone's token"
         );
     }
 
@@ -7495,6 +8107,7 @@ mod tests {
             resilience: Arc::new(ResilienceLayer::default()),
             version: Arc::new(AtomicU64::new(1)),
             capability_verifying_key: None,
+            rate_limiters: Arc::new(HostRateLimiterStore::default()),
         });
         let budget = Arc::new(BudgetPolicyEngine::new());
         let discovery = Arc::new(DiscoveryEndpoint::new(
@@ -10316,6 +10929,7 @@ done"#;
             resilience: Arc::new(ResilienceLayer::default()),
             version: Arc::new(AtomicU64::new(version)),
             capability_verifying_key: None,
+            rate_limiters: Arc::new(HostRateLimiterStore::default()),
         }
     }
 

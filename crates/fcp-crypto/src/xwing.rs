@@ -57,7 +57,7 @@ use chacha20poly1305::{
     aead::{Aead, Payload},
 };
 use rand_core_pq::{TryCryptoRng, TryRng};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use x_wing::{
     Decapsulate, DecapsulationKey as RealDecapKey, Decapsulator, Encapsulate,
     EncapsulationKey as RealEncapKey, KeyExport,
@@ -124,12 +124,25 @@ pub const FCP4_AAD_VERSION: u8 = 4;
 /// opaque and round-trip through [`XWingPublicKey::from_bytes`] /
 /// [`XWingPublicKey::to_bytes`].
 ///
-/// CBOR/serde encoding: a single 1216-byte `bstr`. Decoding does NOT
-/// validate length here — call [`XWingPublicKey::from_bytes`] for the
-/// length-checked entry point.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// CBOR/serde encoding: a single 1216-byte `bstr`. **Length is
+/// invariant-enforced on BOTH construction and deserialisation**
+/// (br-kfr9j). The custom [`Deserialize`] impl below mirrors the
+/// length check in [`XWingPublicKey::from_bytes`] so an attacker-
+/// supplied envelope with a mis-sized payload fails fast at decode
+/// time.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct XWingPublicKey(#[serde(with = "serde_bytes")] Vec<u8>);
+
+impl<'de> Deserialize<'de> for XWingPublicKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: serde_bytes::ByteBuf = serde_bytes::ByteBuf::deserialize(deserializer)?;
+        Self::from_bytes(&bytes).map_err(serde::de::Error::custom)
+    }
+}
 
 impl XWingPublicKey {
     /// Wrap raw public-key bytes.

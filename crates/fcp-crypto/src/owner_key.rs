@@ -4,7 +4,7 @@
 //! FCP-facing trait and byte-envelope types that future provider work must
 //! satisfy when wiring FIPS 204 ML-DSA-65 into owner-key ceremonies.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::ed25519::Ed25519Signature;
 use crate::error::{CryptoError, CryptoResult};
@@ -38,9 +38,32 @@ pub enum OwnerKeyAlgorithm {
 }
 
 /// Opaque ML-DSA-65 verifying key bytes.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// **Length is invariant-enforced on BOTH construction and
+/// deserialisation** (br-kfr9j). The `try_from_bytes` constructor
+/// rejects wrong-length inputs with [`CryptoError::InvalidKeyLength`];
+/// the custom [`Deserialize`] impl below enforces the same invariant
+/// at decode time so an attacker-supplied CBOR/JSON envelope with a
+/// mis-sized payload fails fast (before any verifier code can hit a
+/// downstream `<[u8; N]>::try_from` panic vector).
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct MlDsa65VerifyingKeyBytes(#[serde(with = "serde_bytes")] Vec<u8>);
+
+impl<'de> Deserialize<'de> for MlDsa65VerifyingKeyBytes {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Decode the inner Vec<u8> via serde_bytes (matches the
+        // Serialize side) and then run the same length check that
+        // try_from_bytes enforces. Surfaces InvalidKeyLength as a
+        // serde error so the typed length information is preserved
+        // through the deserialiser boundary.
+        let bytes: serde_bytes::ByteBuf = serde_bytes::ByteBuf::deserialize(deserializer)?;
+        Self::try_from_bytes(bytes.into_vec()).map_err(serde::de::Error::custom)
+    }
+}
 
 impl MlDsa65VerifyingKeyBytes {
     /// Construct a public-key wrapper after enforcing the FIPS 204 byte length.
@@ -89,9 +112,23 @@ impl std::fmt::Debug for MlDsa65VerifyingKeyBytes {
 }
 
 /// Opaque ML-DSA-65 signature bytes.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// **Length is invariant-enforced on BOTH construction and
+/// deserialisation** (br-kfr9j). See [`MlDsa65VerifyingKeyBytes`] for
+/// the full rationale.
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct MlDsa65SignatureBytes(#[serde(with = "serde_bytes")] Vec<u8>);
+
+impl<'de> Deserialize<'de> for MlDsa65SignatureBytes {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: serde_bytes::ByteBuf = serde_bytes::ByteBuf::deserialize(deserializer)?;
+        Self::try_from_bytes(bytes.into_vec()).map_err(serde::de::Error::custom)
+    }
+}
 
 impl MlDsa65SignatureBytes {
     /// Construct a signature wrapper after enforcing the FIPS 204 byte length.

@@ -24,12 +24,20 @@ const fn test_object_id(n: u8) -> ObjectId {
 }
 
 fn test_object_meta(object_id: ObjectId, source_symbols: u32) -> ObjectSymbolMeta {
+    test_object_meta_with_symbol_size(object_id, source_symbols, 256)
+}
+
+fn test_object_meta_with_symbol_size(
+    object_id: ObjectId,
+    source_symbols: u32,
+    symbol_size: usize,
+) -> ObjectSymbolMeta {
     ObjectSymbolMeta {
         object_id,
         zone_id: test_zone(),
         oti: ObjectTransmissionInfo {
             transfer_length: 65536,
-            symbol_size: 256,
+            symbol_size: u16::try_from(symbol_size).unwrap(),
             source_blocks: 1,
             sub_blocks: 1,
             alignment: 8,
@@ -69,7 +77,7 @@ fn bench_put_symbol(c: &mut Criterion) {
                         let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
                         let obj_id = test_object_id(1);
                         store
-                            .put_object_meta(test_object_meta(obj_id, 100))
+                            .put_object_meta(test_object_meta_with_symbol_size(obj_id, 100, size))
                             .await
                             .unwrap();
 

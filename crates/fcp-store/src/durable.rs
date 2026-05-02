@@ -20,9 +20,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use async_trait::async_trait;
 use bytes::Bytes;
 use fcp_prelude::{ObjectId, ObjectPlacementPolicy, RetentionClass, StoredObject, ZoneId};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Mutex as ParkingMutex, RwLock as ParkingRwLock};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 use crate::coverage::SymbolDistribution;
 use crate::error::{ObjectStoreError, SymbolStoreError};
@@ -147,7 +148,7 @@ enum ObjectWalOp {
 }
 
 pub struct DurableObjectStore {
-    state: RwLock<DurableObjectState>,
+    state: Mutex<DurableObjectState>,
     config: DurableObjectStoreConfig,
     write_guard: Mutex<()>,
     next_seq: AtomicU64,
@@ -200,9 +201,9 @@ enum SymbolWalOp {
 }
 
 pub struct DurableSymbolStore {
-    state: RwLock<DurableSymbolState>,
+    state: ParkingRwLock<DurableSymbolState>,
     config: DurableSymbolStoreConfig,
-    write_guard: Mutex<()>,
+    write_guard: ParkingMutex<()>,
     next_seq: AtomicU64,
     ops_since_checkpoint: AtomicU64,
     snapshot_path: PathBuf,
@@ -688,7 +689,7 @@ impl DurableObjectStore {
             load_durable_object_state(&snapshot_path, &wal_path, verifier.as_deref())?;
 
         Ok(Self {
-            state: RwLock::new(state),
+            state: Mutex::new(state),
             config,
             write_guard: Mutex::new(()),
             next_seq: AtomicU64::new(last_seq.saturating_add(1)),
@@ -703,25 +704,28 @@ impl DurableObjectStore {
     ///
     /// # Errors
     /// Returns an error if the snapshot cannot be durably written.
-    pub fn checkpoint(&self) -> Result<(), ObjectStoreError> {
-        let _guard = self.write_guard.lock();
+    pub async fn checkpoint(&self) -> Result<(), ObjectStoreError> {
+        let _guard = self.write_guard.lock().await;
         let last_seq = self.next_seq.load(Ordering::SeqCst).saturating_sub(1);
-        self.checkpoint_locked(last_seq)?;
+        self.checkpoint_locked(last_seq).await?;
         self.ops_since_checkpoint.store(0, Ordering::SeqCst);
         Ok(())
     }
 
-    fn checkpoint_locked(&self, last_seq: u64) -> Result<(), ObjectStoreError> {
-        let snapshot = self.state.read().to_snapshot();
-        write_snapshot(&self.snapshot_path, last_seq, &snapshot).map_err(object_io)?;
-        clear_wal(&self.wal_path).map_err(object_io)?;
+    async fn checkpoint_locked(&self, last_seq: u64) -> Result<(), ObjectStoreError> {
+        let snapshot = self.state.lock().await.to_snapshot();
+        write_snapshot_blocking(self.snapshot_path.clone(), last_seq, snapshot)
+            .await
+            .map_err(object_io)?;
+        clear_wal_blocking(self.wal_path.clone())
+            .await
+            .map_err(object_io)?;
         Ok(())
     }
 
-    fn record_mutation(&self, op: ObjectWalOp) -> Result<(), ObjectStoreError> {
-        let _guard = self.write_guard.lock();
+    async fn record_mutation(&self, op: ObjectWalOp) -> Result<(), ObjectStoreError> {
+        let _guard = self.write_guard.lock().await;
         {
-            let mut state = self.state.write();
             // When a verifier is installed, enforce the content-id
             // binding at the runtime write boundary BEFORE structural
             // or duplicate-id checks. A forged `object_id` from an
@@ -731,20 +735,24 @@ impl DurableObjectStore {
             if let (Some(verifier), ObjectWalOp::Put(object)) = (self.verifier.as_ref(), &op) {
                 verifier.verify(object)?;
             }
-            state.validate_mutation(&op, self.config.max_bytes)?;
+            self.state
+                .lock()
+                .await
+                .validate_mutation(&op, self.config.max_bytes)?;
             // Reserve the seq but do not publish until the WAL append succeeds.
             // Advancing next_seq on a failed append leaves an irrecoverable gap
             // in the WAL sequence (load_wal_records rejects the gap at startup).
             let seq = self.next_seq.load(Ordering::SeqCst);
-            append_wal_record(&self.wal_path, seq, &op).map_err(object_io)?;
+            append_wal_record_blocking(self.wal_path.clone(), seq, op.clone())
+                .await
+                .map_err(object_io)?;
             self.next_seq.store(seq.saturating_add(1), Ordering::SeqCst);
-            state.apply_loaded_mutation(op)?;
+            self.state.lock().await.apply_loaded_mutation(op)?;
 
             if self.config.checkpoint_after_ops > 0 {
                 let ops = self.ops_since_checkpoint.fetch_add(1, Ordering::SeqCst) + 1;
                 if ops >= self.config.checkpoint_after_ops {
-                    drop(state);
-                    if let Err(error) = self.checkpoint_locked(seq) {
+                    if let Err(error) = self.checkpoint_locked(seq).await {
                         tracing::warn!(error = %error, "durable object checkpoint failed after WAL sync");
                     } else {
                         self.ops_since_checkpoint.store(0, Ordering::SeqCst);
@@ -760,11 +768,13 @@ impl DurableObjectStore {
 impl ObjectStore for DurableObjectStore {
     async fn put(&self, object: StoredObject) -> Result<(), ObjectStoreError> {
         self.record_mutation(ObjectWalOp::Put(Box::new(object)))
+            .await
     }
 
     async fn get(&self, id: &ObjectId) -> Result<StoredObject, ObjectStoreError> {
         self.state
-            .read()
+            .lock()
+            .await
             .objects
             .get(id)
             .cloned()
@@ -772,16 +782,18 @@ impl ObjectStore for DurableObjectStore {
     }
 
     async fn exists(&self, id: &ObjectId) -> bool {
-        self.state.read().objects.contains_key(id)
+        self.state.lock().await.objects.contains_key(id)
     }
 
     async fn delete(&self, id: &ObjectId) -> Result<(), ObjectStoreError> {
         self.record_mutation(ObjectWalOp::Delete { object_id: *id })
+            .await
     }
 
     async fn get_header(&self, id: &ObjectId) -> Result<fcp_core::ObjectHeader, ObjectStoreError> {
         self.state
-            .read()
+            .lock()
+            .await
             .objects
             .get(id)
             .map(|object| object.header.clone())
@@ -793,7 +805,8 @@ impl ObjectStore for DurableObjectStore {
         id: &ObjectId,
     ) -> Result<fcp_core::StorageMeta, ObjectStoreError> {
         self.state
-            .read()
+            .lock()
+            .await
             .objects
             .get(id)
             .map(|object| object.storage.clone())
@@ -809,11 +822,13 @@ impl ObjectStore for DurableObjectStore {
             object_id: *id,
             retention,
         })
+        .await
     }
 
     async fn list_zone(&self, zone_id: &ZoneId) -> Vec<ObjectId> {
         self.state
-            .read()
+            .lock()
+            .await
             .zone_index
             .get(zone_id)
             .cloned()
@@ -821,7 +836,7 @@ impl ObjectStore for DurableObjectStore {
     }
 
     async fn storage_used(&self) -> u64 {
-        self.state.read().used_bytes
+        self.state.lock().await.used_bytes
     }
 
     async fn storage_quota(&self) -> u64 {
@@ -843,9 +858,9 @@ impl DurableSymbolStore {
         let (state, last_seq) = load_durable_symbol_state(&snapshot_path, &wal_path)?;
 
         Ok(Self {
-            state: RwLock::new(state),
+            state: ParkingRwLock::new(state),
             config,
-            write_guard: Mutex::new(()),
+            write_guard: ParkingMutex::new(()),
             next_seq: AtomicU64::new(last_seq.saturating_add(1)),
             ops_since_checkpoint: AtomicU64::new(0),
             snapshot_path,
@@ -1325,6 +1340,16 @@ where
     Ok(())
 }
 
+async fn append_wal_record_blocking<T>(path: PathBuf, seq: u64, op: T) -> Result<(), String>
+where
+    T: Serialize + Send + 'static,
+{
+    run_blocking_io("append durable object WAL record", move || {
+        append_wal_record(&path, seq, &op)
+    })
+    .await
+}
+
 fn write_snapshot<T>(path: &Path, last_seq: u64, payload: &T) -> Result<(), String>
 where
     T: Serialize + Clone,
@@ -1362,6 +1387,16 @@ where
     sync_parent_dir(path)
         .map_err(|error| format!("sync snapshot dir {}: {error}", path.display()))?;
     Ok(())
+}
+
+async fn write_snapshot_blocking<T>(path: PathBuf, last_seq: u64, payload: T) -> Result<(), String>
+where
+    T: Serialize + Clone + Send + 'static,
+{
+    run_blocking_io("write durable object snapshot", move || {
+        write_snapshot(&path, last_seq, &payload)
+    })
+    .await
 }
 
 fn open_unique_snapshot_temp_file(path: &Path, base_name: &str) -> Result<(PathBuf, File), String> {
@@ -1403,6 +1438,20 @@ fn clear_wal(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("sync cleared wal {}: {error}", path.display()))?;
     sync_parent_dir(path).map_err(|error| format!("sync wal dir {}: {error}", path.display()))?;
     Ok(())
+}
+
+async fn clear_wal_blocking(path: PathBuf) -> Result<(), String> {
+    run_blocking_io("clear durable object WAL", move || clear_wal(&path)).await
+}
+
+async fn run_blocking_io<T, F>(operation: &'static str, f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|error| format!("{operation} task failed: {error}"))?
 }
 
 fn checksum_json<T: Serialize>(value: &T) -> Result<[u8; 32], serde_json::Error> {
@@ -1918,6 +1967,7 @@ mod tests {
 
         store
             .checkpoint()
+            .await
             .expect("checkpoint should ignore orphaned temp file names");
         assert!(
             snapshot_path.exists(),

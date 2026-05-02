@@ -238,11 +238,11 @@ impl MeshIdentity {
 
     /// Get the FCP tags (zone memberships) for this node.
     ///
-    /// This method only returns tags if the attestation is present and valid
-    /// (not expired). Unverified tags are ignored to prevent spoofing.
+    /// This method only returns tags if the attestation is present and fully
+    /// verifies. Unverified tags are ignored to prevent spoofing.
     #[must_use]
     pub fn fcp_tags(&self) -> Vec<&TailscaleTag> {
-        if !self.is_attestation_valid() {
+        if self.verify_attestation().is_err() {
             return Vec::new();
         }
         self.tags.iter().filter(|t| t.is_fcp_tag()).collect()
@@ -2294,6 +2294,38 @@ mod tests {
 
         // verify_attestation should fail because tags don't match
         assert!(identity.verify_attestation().is_err());
+        assert!(
+            identity.fcp_tags().is_empty(),
+            "convenience tag accessor must fail closed when attestation tag binding is invalid"
+        );
+    }
+
+    #[test]
+    fn test_mesh_identity_fcp_tags_rejects_wrong_owner_attestation() {
+        let (owner_key, node_keys) = create_test_keys();
+        let wrong_owner_key = Ed25519SigningKey::generate();
+        let node_id = NodeId::new("wrong-owner-tags");
+        let tags = vec![TailscaleTag::fcp_tag("owner")];
+
+        let attestation =
+            NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 24).unwrap();
+        let identity = MeshIdentity::new(
+            node_id,
+            "host".to_string(),
+            vec![],
+            tags,
+            wrong_owner_key.verifying_key(),
+            node_keys,
+        )
+        .with_attestation(attestation);
+
+        assert!(identity.is_attestation_valid());
+        assert!(identity.verify_attestation().is_err());
+        assert!(
+            identity.fcp_tags().is_empty(),
+            "fresh but unverified attestation must not surface FCP zone tags"
+        );
+        assert!(identity.verified_fcp_tags().is_err());
     }
 
     // --- NodeKeys: serde roundtrip with clone ---

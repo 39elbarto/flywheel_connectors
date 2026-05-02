@@ -76,6 +76,15 @@ pub enum CryptoError {
     #[error("serialization error: {0}")]
     SerializationError(String),
 
+    /// Untrusted encoded payload exceeded the pre-decode size bound.
+    #[error("payload too large: observed {observed} bytes > max {max} bytes")]
+    PayloadTooLarge {
+        /// Observed payload length in bytes.
+        observed: usize,
+        /// Maximum accepted payload length in bytes.
+        max: usize,
+    },
+
     /// Token validation error.
     #[error("token validation error: {0}")]
     TokenValidationError(String),
@@ -239,6 +248,18 @@ mod tests {
     fn error_display_serialization_error() {
         let err = CryptoError::SerializationError("bad cbor".to_string());
         assert_eq!(err.to_string(), "serialization error: bad cbor");
+    }
+
+    #[test]
+    fn error_display_payload_too_large() {
+        let err = CryptoError::PayloadTooLarge {
+            observed: 65_537,
+            max: 65_536,
+        };
+        assert_eq!(
+            err.to_string(),
+            "payload too large: observed 65537 bytes > max 65536 bytes"
+        );
     }
 
     #[test]

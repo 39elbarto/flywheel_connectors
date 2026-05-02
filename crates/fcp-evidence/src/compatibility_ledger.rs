@@ -8,11 +8,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use fcp_cbor::{SerializationError, to_canonical_cbor};
+use fcp_cbor::{MAX_DESERIALIZATION_RECURSION_LIMIT, SerializationError, to_canonical_cbor};
 use fcp_core::SafetyTier;
 use fcp_crypto::{
     Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, HybridOwnerSigner, KeyId,
-    MlDsa65SignatureBytes, MlDsa65VerifyingKeyBytes,
+    MAX_V4_PAYLOAD_BYTES, MlDsa65SignatureBytes, MlDsa65VerifyingKeyBytes,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -468,8 +468,23 @@ impl MeshCompatibilityLedger {
     /// # Errors
     /// Returns [`CompatibilityLedgerError`] if decoding fails or the input was not canonical.
     pub fn from_canonical_cbor(bytes: &[u8]) -> Result<Self, CompatibilityLedgerError> {
-        let ledger: Self = ciborium::de::from_reader(bytes)
-            .map_err(|err| CompatibilityLedgerError::Encoding(err.to_string()))?;
+        if bytes.len() > MAX_V4_PAYLOAD_BYTES {
+            return Err(CompatibilityLedgerError::PayloadTooLarge {
+                observed: bytes.len(),
+                max: MAX_V4_PAYLOAD_BYTES,
+            });
+        }
+        let mut reader = bytes;
+        let ledger: Self = ciborium::de::from_reader_with_recursion_limit(
+            &mut reader,
+            MAX_DESERIALIZATION_RECURSION_LIMIT,
+        )
+        .map_err(|err| CompatibilityLedgerError::Encoding(err.to_string()))?;
+        if !reader.is_empty() {
+            return Err(CompatibilityLedgerError::Encoding(
+                "trailing bytes after compatibility ledger CBOR".to_owned(),
+            ));
+        }
         let recoded = ledger.to_canonical_cbor()?;
         if recoded != bytes {
             return Err(CompatibilityLedgerError::NonCanonicalCbor);
@@ -583,6 +598,14 @@ pub enum CompatibilityLedgerError {
     /// Decoded ledger did not round-trip to the original canonical bytes.
     #[error("compatibility ledger CBOR is not canonical")]
     NonCanonicalCbor,
+    /// Encoded ledger exceeded the pre-decode size bound.
+    #[error("compatibility ledger payload too large: observed {observed} bytes > max {max} bytes")]
+    PayloadTooLarge {
+        /// Observed payload length in bytes.
+        observed: usize,
+        /// Maximum accepted payload length in bytes.
+        max: usize,
+    },
     /// Ed25519 signature half is missing.
     #[error("compatibility ledger missing Ed25519 owner signature")]
     MissingEd25519Signature,
@@ -636,6 +659,7 @@ fn signing_bytes_for_root(
 #[cfg(test)]
 mod tests {
     use fcp_crypto::{CryptoResult, HybridOwnerKeyIds, HybridOwnerSignature};
+    use proptest::prelude::*;
 
     use super::*;
 
@@ -733,6 +757,37 @@ mod tests {
         body
     }
 
+    fn deep_unknown_field_cbor(depth: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(9 + (depth * 3) + 1);
+        bytes.push(0xA1);
+        bytes.push(0x67);
+        bytes.extend_from_slice(b"unknown");
+        for _ in 0..depth {
+            bytes.push(0xA1);
+            bytes.push(0x61);
+            bytes.push(b'x');
+        }
+        bytes.push(0xF6);
+        bytes
+    }
+
+    fn length_prefix_lie_cbor() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.push(0xA1);
+        bytes.push(0x67);
+        bytes.extend_from_slice(b"unknown");
+        bytes.extend_from_slice(&[0x5A, 0xFF, 0xFF, 0xFF, 0xFF]);
+        bytes
+    }
+
+    fn adversarial_cbor_prefix() -> impl Strategy<Value = Vec<u8>> {
+        prop_oneof![
+            Just(vec![0xBF]),
+            Just(deep_unknown_field_cbor(200)),
+            Just(length_prefix_lie_cbor()),
+        ]
+    }
+
     #[test]
     fn compatibility_ledger_canonical_cbor_is_stable_and_signature_free_for_root() {
         let signer = FakeHybridSigner {
@@ -772,6 +827,55 @@ mod tests {
 
         assert_eq!(decoded, ledger);
         assert_eq!(decoded.to_canonical_cbor().unwrap(), bytes);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 64,
+            ..ProptestConfig::default()
+        })]
+
+        #[test]
+        fn compatibility_ledger_oversized_adversarial_cbor_hits_length_guard(
+            prefix in adversarial_cbor_prefix(),
+            extra in 0usize..=256,
+        ) {
+            let mut bytes = prefix;
+            bytes.resize(MAX_V4_PAYLOAD_BYTES + 1 + extra, 0);
+            let observed_len = bytes.len();
+            let err = MeshCompatibilityLedger::from_canonical_cbor(&bytes)
+                .expect_err("oversized ledger CBOR must reject");
+            let hit_length_guard = matches!(
+                err,
+                CompatibilityLedgerError::PayloadTooLarge { observed, max }
+                    if observed == observed_len && max == MAX_V4_PAYLOAD_BYTES
+            );
+            prop_assert!(hit_length_guard);
+        }
+    }
+
+    #[test]
+    fn compatibility_ledger_deep_unknown_field_hits_recursion_limit() {
+        let bytes = deep_unknown_field_cbor(MAX_DESERIALIZATION_RECURSION_LIMIT + 80);
+        assert!(bytes.len() <= MAX_V4_PAYLOAD_BYTES);
+
+        let err = MeshCompatibilityLedger::from_canonical_cbor(&bytes)
+            .expect_err("deep ledger CBOR must reject");
+        assert!(
+            matches!(err, CompatibilityLedgerError::Encoding(ref message) if message.to_ascii_lowercase().contains("recursion")),
+            "expected recursion-limit decode error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn compatibility_ledger_length_prefix_lie_rejects_without_panic() {
+        let bytes = length_prefix_lie_cbor();
+        assert!(bytes.len() <= MAX_V4_PAYLOAD_BYTES);
+
+        let result =
+            std::panic::catch_unwind(|| MeshCompatibilityLedger::from_canonical_cbor(&bytes));
+        assert!(result.is_ok(), "length-prefix lie must not panic");
+        assert!(result.unwrap().is_err(), "length-prefix lie must reject");
     }
 
     #[test]

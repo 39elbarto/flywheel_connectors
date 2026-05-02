@@ -5,7 +5,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use fcp_cbor::to_canonical_cbor;
+use fcp_cbor::{MAX_DESERIALIZATION_RECURSION_LIMIT, to_canonical_cbor};
+use fcp_crypto::MAX_V4_PAYLOAD_BYTES;
 use fcp_evidence::{
     CompatibilityLedgerError, CompatibilityLedgerRoot, CompatibilityLedgerTrustAnchors,
     MeshCompatibilityLedger, MlDsa65LedgerVerifier,
@@ -463,13 +464,30 @@ fn load_latest_pointers(
             path: path.clone(),
             message: source.to_string(),
         })?;
-        let pointer: LatestLedgerPointer =
-            ciborium::de::from_reader(bytes.as_slice()).map_err(|source| {
-                CompatibilityLedgerStoreError::CorruptLatestPointer {
-                    path: path.clone(),
-                    message: source.to_string(),
-                }
-            })?;
+        if bytes.len() > MAX_V4_PAYLOAD_BYTES {
+            return Err(CompatibilityLedgerStoreError::LatestPointerTooLarge {
+                path,
+                observed: bytes.len(),
+                max: MAX_V4_PAYLOAD_BYTES,
+            });
+        }
+        let mut reader = bytes.as_slice();
+        let pointer: LatestLedgerPointer = ciborium::de::from_reader_with_recursion_limit(
+            &mut reader,
+            MAX_DESERIALIZATION_RECURSION_LIMIT,
+        )
+        .map_err(
+            |source| CompatibilityLedgerStoreError::CorruptLatestPointer {
+                path: path.clone(),
+                message: source.to_string(),
+            },
+        )?;
+        if !reader.is_empty() {
+            return Err(CompatibilityLedgerStoreError::CorruptLatestPointer {
+                path,
+                message: "trailing bytes after latest pointer CBOR".to_owned(),
+            });
+        }
         let recoded = to_canonical_cbor(&pointer).map_err(|err| {
             CompatibilityLedgerStoreError::Ledger(CompatibilityLedgerError::from(err))
         })?;
@@ -505,9 +523,7 @@ fn load_latest_pointers(
         // A stale pointer (e.g. restored from backup) below the HWM
         // gets silently upgraded.
         let (effective_root, effective_sequence) = match hwm_by_mesh.get(&pointer.mesh_id) {
-            Some(&(hwm_epoch, hwm_root))
-                if is_legacy_v1 || pointer.sequence < hwm_epoch =>
-            {
+            Some(&(hwm_epoch, hwm_root)) if is_legacy_v1 || pointer.sequence < hwm_epoch => {
                 repairs.push((pointer.mesh_id.clone(), hwm_root, hwm_epoch));
                 (hwm_root, hwm_epoch)
             }
@@ -519,8 +535,7 @@ fn load_latest_pointers(
         match pointers_by_mesh.get(&pointer.mesh_id) {
             Some(&(existing_seq, _)) if existing_seq >= effective_sequence => {}
             _ => {
-                pointers_by_mesh
-                    .insert(pointer.mesh_id, (effective_sequence, effective_root));
+                pointers_by_mesh.insert(pointer.mesh_id, (effective_sequence, effective_root));
             }
         }
     }
@@ -681,6 +696,19 @@ pub enum CompatibilityLedgerStoreError {
         /// Decode/canonicalization error.
         message: String,
     },
+    /// Latest pointer file exceeded the pre-decode size bound.
+    #[error(
+        "compatibility ledger latest pointer {} is too large: observed {observed} bytes > max {max} bytes",
+        path.display()
+    )]
+    LatestPointerTooLarge {
+        /// Path being decoded.
+        path: PathBuf,
+        /// Observed payload length in bytes.
+        observed: usize,
+        /// Maximum accepted payload length in bytes.
+        max: usize,
+    },
     /// Latest pointer's `sequence` field disagreed with the underlying
     /// signed ledger's `epoch()` (br-iqy2b). Surfaces an attacker who
     /// edited the pointer to claim a different sequence than the
@@ -824,6 +852,20 @@ mod tests {
             .expect("ledger signs")
     }
 
+    fn deep_unknown_field_cbor(depth: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(9 + (depth * 3) + 1);
+        bytes.push(0xA1);
+        bytes.push(0x67);
+        bytes.extend_from_slice(b"unknown");
+        for _ in 0..depth {
+            bytes.push(0xA1);
+            bytes.push(0x61);
+            bytes.push(b'x');
+        }
+        bytes.push(0xF6);
+        bytes
+    }
+
     #[test]
     fn compatibility_ledger_store_persists_and_returns_latest() {
         let signer = FakeHybridSigner {
@@ -883,6 +925,51 @@ mod tests {
             MeshCompatibilityLedger::from_canonical_cbor(&stored_bytes)
                 .expect("stored ledger is canonical"),
             second
+        );
+    }
+
+    #[test]
+    fn durable_store_rejects_oversized_latest_pointer_before_decode() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let latest_dir = temp_dir.path().join("latest");
+        std::fs::create_dir_all(&latest_dir).expect("latest dir");
+        let pointer_path = latest_dir.join("oversized.latest.cbor");
+        let bytes = vec![0xA1; MAX_V4_PAYLOAD_BYTES + 1];
+        std::fs::write(&pointer_path, &bytes).expect("write oversized pointer");
+
+        let err = DurableCompatibilityLedgerStore::open(temp_dir.path())
+            .expect_err("oversized pointer must fail before decode");
+
+        assert!(matches!(
+            err,
+            CompatibilityLedgerStoreError::LatestPointerTooLarge {
+                path,
+                observed,
+                max: MAX_V4_PAYLOAD_BYTES
+            } if path == pointer_path && observed == bytes.len()
+        ));
+    }
+
+    #[test]
+    fn durable_store_rejects_deep_latest_pointer_with_recursion_limit() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let latest_dir = temp_dir.path().join("latest");
+        std::fs::create_dir_all(&latest_dir).expect("latest dir");
+        let pointer_path = latest_dir.join("deep.latest.cbor");
+        let bytes = deep_unknown_field_cbor(MAX_DESERIALIZATION_RECURSION_LIMIT + 80);
+        assert!(bytes.len() <= MAX_V4_PAYLOAD_BYTES);
+        std::fs::write(&pointer_path, bytes).expect("write deep pointer");
+
+        let err = DurableCompatibilityLedgerStore::open(temp_dir.path())
+            .expect_err("deep pointer must fail before full decode");
+
+        assert!(
+            matches!(
+                err,
+                CompatibilityLedgerStoreError::CorruptLatestPointer { ref path, ref message }
+                    if *path == pointer_path && message.to_ascii_lowercase().contains("recursion")
+            ),
+            "expected recursion-limit latest-pointer error, got {err:?}"
         );
     }
 
@@ -1068,7 +1155,9 @@ mod tests {
 
         // Pointer file is rewritten to the V2 form with sequence == 2.
         let final_pointer: LatestLedgerPointer = ciborium::de::from_reader(
-            std::fs::read(&pointer_path).expect("read repaired").as_slice(),
+            std::fs::read(&pointer_path)
+                .expect("read repaired")
+                .as_slice(),
         )
         .expect("decode");
         assert_eq!(final_pointer.sequence, 2);
@@ -1145,7 +1234,9 @@ mod tests {
             &temp_dir.path().join("latest"),
         );
         let pointer: LatestLedgerPointer = ciborium::de::from_reader(
-            std::fs::read(&pointer_path).expect("pointer exists").as_slice(),
+            std::fs::read(&pointer_path)
+                .expect("pointer exists")
+                .as_slice(),
         )
         .expect("decode");
         assert_eq!(pointer.sequence, 7, "sequence must equal ledger epoch");

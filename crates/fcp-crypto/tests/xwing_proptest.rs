@@ -13,14 +13,13 @@
 use core::convert::Infallible;
 
 use fcp_crypto::{
-    CryptoError, Fcp4Aad, XWING_ENC_SIZE, XWING_MAX_CIPHERTEXT, XWING_PUBLIC_KEY_SIZE,
-    XWING_SECRET_KEY_SIZE, XWingKem, XWingProvider, XWingSealedBox, XWingSecretKey,
+    CryptoError, Fcp4Aad, MAX_V4_PAYLOAD_BYTES, XWING_ENC_SIZE, XWING_MAX_CIPHERTEXT,
+    XWING_PUBLIC_KEY_SIZE, XWING_SECRET_KEY_SIZE, XWingKem, XWingProvider, XWingSealedBox,
+    XWingSecretKey,
 };
 use proptest::prelude::*;
 use rand_core_pq::{TryCryptoRng, TryRng};
-use x_wing::{
-    DecapsulationKey as XWingDecapKey, Decapsulator, KeyExport, kem::Generate,
-};
+use x_wing::{DecapsulationKey as XWingDecapKey, Decapsulator, KeyExport, kem::Generate};
 
 struct DeterministicSeedRng(Vec<u8>);
 
@@ -64,6 +63,37 @@ fn deterministic_keypair(seed: u64) -> (fcp_crypto::XWingPublicKey, XWingSecretK
         fcp_crypto::XWingPublicKey::from_bytes(&pk_bytes).expect("pk wraps"),
         XWingSecretKey::from_bytes(&sk_arr).expect("sk wraps"),
     )
+}
+
+fn deep_unknown_field_cbor(depth: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(9 + (depth * 3) + 1);
+    bytes.push(0xA1); // map(1)
+    bytes.push(0x67); // text(7)
+    bytes.extend_from_slice(b"unknown");
+    for _ in 0..depth {
+        bytes.push(0xA1); // map(1)
+        bytes.push(0x61); // text(1)
+        bytes.push(b'x');
+    }
+    bytes.push(0xF6); // null leaf
+    bytes
+}
+
+fn length_prefix_lie_cbor() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.push(0xA1); // map(1)
+    bytes.push(0x67); // text(7)
+    bytes.extend_from_slice(b"unknown");
+    bytes.extend_from_slice(&[0x5A, 0xFF, 0xFF, 0xFF, 0xFF]); // bstr len(u32::MAX), no body
+    bytes
+}
+
+fn adversarial_cbor_prefix() -> impl Strategy<Value = Vec<u8>> {
+    prop_oneof![
+        Just(vec![0xBF]),                   // indefinite map start
+        Just(deep_unknown_field_cbor(200)), // deeply nested ignored field
+        Just(length_prefix_lie_cbor()),     // declared length larger than provided body
+    ]
 }
 
 proptest! {
@@ -195,4 +225,49 @@ proptest! {
             bytes.len()
         );
     }
+
+    /// Oversized adversarial CBOR must hit the pre-decode length gate
+    /// regardless of map shape. This keeps malicious map bodies from
+    /// reaching ciborium allocation/recursion paths at all.
+    #[test]
+    fn xwing_sealed_box_oversized_adversarial_cbor_hits_length_guard(
+        prefix in adversarial_cbor_prefix(),
+        extra in 0usize..=256,
+    ) {
+        let mut bytes = prefix;
+        bytes.resize(MAX_V4_PAYLOAD_BYTES + 1 + extra, 0);
+        let observed_len = bytes.len();
+        let result = XWingSealedBox::from_canonical_cbor(&bytes);
+        let hit_length_guard = matches!(
+            result,
+            Err(CryptoError::PayloadTooLarge { observed, max })
+                if observed == observed_len && max == MAX_V4_PAYLOAD_BYTES
+        );
+        prop_assert!(hit_length_guard);
+    }
+}
+
+#[test]
+fn xwing_sealed_box_deep_unknown_field_hits_recursion_limit() {
+    let bytes = deep_unknown_field_cbor(fcp_cbor::MAX_DESERIALIZATION_RECURSION_LIMIT + 80);
+    assert!(
+        bytes.len() <= MAX_V4_PAYLOAD_BYTES,
+        "fixture should exercise recursion limit before the length guard"
+    );
+
+    let err = XWingSealedBox::from_canonical_cbor(&bytes).expect_err("deep CBOR must reject");
+    assert!(
+        matches!(err, CryptoError::SerializationError(ref message) if message.to_ascii_lowercase().contains("recursion")),
+        "expected recursion-limit decode error, got {err:?}"
+    );
+}
+
+#[test]
+fn xwing_sealed_box_length_prefix_lie_rejects_without_panic() {
+    let bytes = length_prefix_lie_cbor();
+    assert!(bytes.len() <= MAX_V4_PAYLOAD_BYTES);
+
+    let result = std::panic::catch_unwind(|| XWingSealedBox::from_canonical_cbor(&bytes));
+    assert!(result.is_ok(), "length-prefix lie must not panic");
+    assert!(result.unwrap().is_err(), "length-prefix lie must reject");
 }

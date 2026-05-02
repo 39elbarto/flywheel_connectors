@@ -133,9 +133,9 @@ fn assert_encode_deterministic(key_seed: u8, claims_fn: impl Fn() -> CwtClaims) 
 //  COSE_Sign1 goldens
 // ─────────────────────────────────────────────────────────────────────
 
-/// Case A: empty-payload CWT — no claims set at all. This is the
-/// minimum-surface Sign1: protected header with {alg, kid}, empty CBOR
-/// map as payload, Ed25519 signature.
+/// Case A: minimum-payload CWT. User-supplied claims are empty, but
+/// `CoseToken::sign` stamps the current schema version before signing
+/// so verifiers never accept an unstamped production token.
 #[test]
 fn cose_sign1_empty_claims_golden() {
     assert_encode_deterministic(0x01, CwtClaims::new);
@@ -150,9 +150,13 @@ fn cose_sign1_empty_claims_golden() {
     let recovered = decoded
         .verify(&key.verifying_key())
         .expect("verify empty-claims token");
+    let expected = CwtClaims::new().custom(
+        fcp_crypto::cose::fcp2_claims::SCHEMA_VERSION,
+        ciborium::Value::Integer(i64::from(fcp_auth_schema::claims::CURRENT_SCHEMA_VERSION).into()),
+    );
     assert_eq!(
         recovered.to_cbor().expect("recovered claims re-encode"),
-        claims.to_cbor().expect("original claims encode"),
+        expected.to_cbor().expect("schema-stamped claims encode"),
     );
 
     assert_golden_hex("sign1_empty_claims", &hex::encode(&bytes));

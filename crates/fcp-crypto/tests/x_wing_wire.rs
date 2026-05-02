@@ -15,9 +15,9 @@
 
 use ciborium::Value;
 use fcp_crypto::{
-    FCP4_AAD_VERSION, Fcp2Aad, Fcp4Aad, XWING_ENC_SIZE, XWING_PUBLIC_KEY_SIZE,
-    XWING_SECRET_KEY_SIZE, XWingKem, XWingProvider, XWingPublicKey, XWingSealedBox,
-    XWingSecretKey,
+    CryptoError, FCP4_AAD_VERSION, Fcp2Aad, Fcp4Aad, MAX_V4_PAYLOAD_BYTES, XWING_ENC_SIZE,
+    XWING_PUBLIC_KEY_SIZE, XWING_SECRET_KEY_SIZE, XWingKem, XWingProvider, XWingPublicKey,
+    XWingSealedBox, XWingSecretKey,
     xwing::{XWING_AEAD_INFO, purpose as v4_purpose},
 };
 
@@ -112,11 +112,13 @@ fn x_wing_wire_sealed_box_cbor_rejects_oversized_input() {
     };
     let cbor = too_big.to_canonical_cbor().unwrap();
     let err = XWingSealedBox::from_canonical_cbor(&cbor).unwrap_err();
-    assert!(
-        format!("{err:?}").to_lowercase().contains("too large")
-            || format!("{err:?}").to_lowercase().contains("exceeds"),
-        "expected size cap failure, got {err:?}"
-    );
+    assert!(matches!(
+        err,
+        CryptoError::PayloadTooLarge {
+            observed,
+            max: MAX_V4_PAYLOAD_BYTES
+        } if observed == cbor.len()
+    ));
 }
 
 #[test]
@@ -198,8 +200,12 @@ fn x_wing_wire_fcp4_aad_cbor_diverges_from_fcp2_for_same_logical_inputs() {
 
 #[test]
 fn x_wing_wire_fcp4_aad_encode_is_deterministic() {
-    let a = Fcp4Aad::for_zone_key(b"z:home", b"node-3", 42).encode().unwrap();
-    let b = Fcp4Aad::for_zone_key(b"z:home", b"node-3", 42).encode().unwrap();
+    let a = Fcp4Aad::for_zone_key(b"z:home", b"node-3", 42)
+        .encode()
+        .unwrap();
+    let b = Fcp4Aad::for_zone_key(b"z:home", b"node-3", 42)
+        .encode()
+        .unwrap();
     assert_eq!(a, b);
 }
 
@@ -251,7 +257,9 @@ fn x_wing_wire_aad_field_flip_breaks_open() {
     let plaintext = b"payload";
 
     let base = Fcp4Aad::for_zone_key(b"z:work", b"node-7", 1_700_000_000);
-    let sealed = provider.seal(&pk, plaintext, &base.encode().unwrap()).unwrap();
+    let sealed = provider
+        .seal(&pk, plaintext, &base.encode().unwrap())
+        .unwrap();
 
     let mut changed_zone = base.clone();
     changed_zone.zone_id = b"z:home".to_vec();
@@ -303,7 +311,11 @@ fn x_wing_wire_seal_does_not_leak_plaintext_in_ciphertext() {
     let (pk, _sk) = provider.generate().unwrap();
     let plaintext = b"unique-plaintext-marker-xyzzy-kyopb-1-2-2";
     let sealed = provider
-        .seal(&pk, plaintext, &Fcp4Aad::for_zone_key(b"z", b"n", 0).encode().unwrap())
+        .seal(
+            &pk,
+            plaintext,
+            &Fcp4Aad::for_zone_key(b"z", b"n", 0).encode().unwrap(),
+        )
         .unwrap();
     let needle = plaintext.as_slice();
     assert!(

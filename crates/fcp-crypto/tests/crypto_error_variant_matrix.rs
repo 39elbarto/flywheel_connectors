@@ -1,4 +1,4 @@
-//! Pin the full 23-variant Display surface of [`CryptoError`].
+//! Pin the full 24-variant Display surface of [`CryptoError`].
 //!
 //! The inline `mod tests` block at `crates/fcp-crypto/src/error.rs:138`
 //! has 18-variant exhaustion lists that pre-date the COSE-era additions:
@@ -79,6 +79,13 @@ fn variant_display_matrix() -> Vec<(CryptoError, &'static str)> {
             "serialization error: bad cbor",
         ),
         (
+            CryptoError::PayloadTooLarge {
+                observed: 65_537,
+                max: 65_536,
+            },
+            "payload too large: observed 65537 bytes > max 65536 bytes",
+        ),
+        (
             CryptoError::TokenValidationError(String::from("missing field")),
             "token validation error: missing field",
         ),
@@ -122,8 +129,8 @@ fn crypto_error_full_variant_matrix_pins_display_per_variant() {
     let matrix = variant_display_matrix();
     assert_eq!(
         matrix.len(),
-        23,
-        "CryptoError variant matrix length drift: expected 23, got {}",
+        24,
+        "CryptoError variant matrix length drift: expected 24, got {}",
         matrix.len()
     );
     for (variant, expected) in &matrix {
@@ -155,6 +162,7 @@ fn crypto_error_exhaustive_match_sentinel() {
         | CryptoError::InvalidSecretKey
         | CryptoError::FrostFailed(_)
         | CryptoError::SerializationError(_)
+        | CryptoError::PayloadTooLarge { .. }
         | CryptoError::TokenValidationError(_)
         | CryptoError::TokenExpired
         | CryptoError::TokenNotYetValid
@@ -187,5 +195,8 @@ fn crypto_error_algorithm_mismatch_static_str_expected_field() {
         expected: "EdDSA",
         got: String::from("ES256"),
     };
-    assert_eq!(err.to_string(), "algorithm mismatch: expected EdDSA, got ES256");
+    assert_eq!(
+        err.to_string(),
+        "algorithm mismatch: expected EdDSA, got ES256"
+    );
 }

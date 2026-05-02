@@ -1,0 +1,31 @@
+[package]
+name = "fcp-crypto-pq"
+description = "FCP post-quantum cryptographic primitives — lattice-trapdoor capability delegation (br-kyopb.1.3.1 stub)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Hashing for the per-op binding hash (h ← H(zone | period | op | principal)).
+# Real implementation will use SHAKE256 to expand into Z_q^n; this stub
+# uses BLAKE3 as a placeholder for the API surface.
+blake3 = { workspace = true }
+
+# Wire-format support — DelegationCertificate / LatticeSubToken serialize via
+# CBOR for cross-version dispatch (matches the rest of FCP3).
+serde = { workspace = true }
+
+# Error type
+thiserror = { workspace = true }
+
+# Hex rendering for stub debug output
+hex = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

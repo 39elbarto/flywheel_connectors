@@ -11,6 +11,7 @@ members = [
     "crates/fcp-core",
     "crates/fcp-conformance",
     "crates/fcp-crypto",
+    "crates/fcp-crypto-pq",
     "crates/fcp-e2e",
     "crates/fcp-google-discovery",
     "crates/fcp-graphql",

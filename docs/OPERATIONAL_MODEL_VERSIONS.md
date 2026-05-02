@@ -1,19 +1,23 @@
 # Operational Model Versions
 
 > This document defines the two operational model versions for FCP, what each
-> provides, and which fwc commands require which version. V1 is the current
-> transitional provisioning boundary; V2 is the converging steady-state target.
-> The truth hierarchy already classifies answers as mesh-backed > host-backed >
-> node-local > offline regardless of which version the operator is using.
+> provides, and which fwc commands require which version. V1 is the legacy
+> host-first rollback/evaluation boundary; V2 is the current operational
+> truth-precedence default. The truth hierarchy classifies answers as
+> mesh-backed > host-backed > node-local > offline under V2 by default, while
+> individual commands may still execute through host-backed provisioning until
+> mesh-routed execution has production evidence.
 >
 > This is a cutover-audit reference, not the preferred onboarding story. Use it
 > to see which operator workflows still depend on the transitional host-backed
 > boundary and which ones already have a mesh-backed destination.
 
-## V1: Host-First (Current Provisioning Boundary, Transitional)
+## V1: Host-First (Legacy Rollback / Evaluation Boundary)
 
-V1 is the current provisioning and operational boundary. Operators use V1
-semantics today while the mesh-native cutover (V2) converges to steady state.
+V1 is the legacy host-first provisioning boundary. It remains available for
+explicit rollback and compatibility testing through
+`FCP_TRUTH_PRECEDENCE_DEFAULT=v1`, but it is no longer the default
+truth-precedence policy.
 
 ### What V1 Provides
 
@@ -53,32 +57,42 @@ today, not as the architecture contributors should optimize around long term.
 
 ---
 
-## V2: Mesh-Native (Steady-State Target, Converging)
+## V2: Mesh-Native Truth Precedence (Operational Default, Hybrid Execution)
 
-V2 is the intended steady-state architecture. The mesh infrastructure (gossip,
-IBLT, XOR filters, LiveTruthResolver, KnowledgeState taxonomy, symbol-first
-object distribution) is built and tested. The remaining work is production
-evidence and cutover gating — see `docs/FCP3_Transition_Scorecard.md`.
+V2 is operational for truth precedence and answer classification. In
+`crates/fwc/src/truth.rs`, `TruthPrecedencePolicy::default()` returns
+`TruthPrecedencePolicy::v2_default()` unless the explicit
+`FCP_TRUTH_PRECEDENCE_DEFAULT=v1` rollback override is set. The V2 source
+ordering is `MeshBacked > HostBacked > NodeLocal > Offline`, with fallback
+allowed by policy.
 
-### What V2 Will Provide (When Operational)
+This does not mean every command is already mesh-routed. Execution remains
+hybrid: commands classify answers under the V2 policy today, but many live
+operations still materialize through the host-backed provisioning path until
+the scorecard cutover gates are satisfied.
+
+### What V2 Provides Today
 
 | Capability | Current Status | Notes |
 |------------|---------------|-------|
-| Mesh-backed answers (highest confidence) | Designed | `LiveTruthResolver` with mesh strategy exists but not production-proven |
-| Multi-node device mesh (Tailscale peers) | Designed | MeshNode, gossip, IBLT, XOR filters implemented but not operational default |
+| V2 truth precedence default | Operational | `TruthPrecedencePolicy::default()` resolves to `V2MeshNative` unless `FCP_TRUTH_PRECEDENCE_DEFAULT=v1` is set |
+| Mesh-backed answers (highest confidence) | Operational when mesh evidence exists | `LiveTruthResolver` classifies mesh-backed answers highest and falls back under policy |
+| Host-backed fallback under V2 | Operational | V2 keeps `HostBacked` below `MeshBacked` and above `NodeLocal` / `Offline` |
+| Multi-node device mesh (Tailscale peers) | Implemented, cutover-gated | MeshNode, gossip, IBLT, XOR filters exist; production default routing still depends on scorecard gates |
 | Symbol-first object distribution | Implemented | RaptorQ codec, object-symbol framing, repair machinery in-tree |
-| Automatic computation migration | Designed | Migration state machines exist, not operational |
+| Automatic computation migration | Designed | Migration state machines exist, not operational default |
 | Cross-device secret reconstruction | Implemented | Shamir sharing + FROST threshold signing exist |
-| Mesh-native gossip sync | Implemented | Gossip protocol with consistency checks, not production default |
+| Mesh-native gossip sync | Implemented, cutover-gated | Gossip protocol with consistency checks exists; not yet the only production state source |
 | Automatic failover / placement | Designed | ObjectPlacementPolicy and RepairController exist |
 | Offline resilience via symbol locality | Designed | Probabilistic availability model, not yet E2E proven |
 
 ### V2 Cutover Gates
 
-The transition from V1 to V2 requires completing these gates:
+The transition from V2 truth-precedence default to fully mesh-routed execution
+requires completing these gates:
 
 1. Production evidence that mesh-backed answers are correct and consistent.
-2. Zone-wide TruthPrecedencePolicy enforcement (all operators in a zone see the same answer).
+2. Zone-wide TruthPrecedencePolicy enforcement beyond the current `fwc` policy surface (all operators in a zone see the same answer).
 3. Proven multi-node placement and failover for at least one real workload.
 4. Mesh-native gossip as the default state sync mechanism (not just available, but default).
 5. Operator documentation that teaches V2 as the primary path (this document is part of that rewrite).
@@ -91,12 +105,11 @@ rewrite (bead z1nkz.1).
 
 ## FWC Command Truth-Source Matrix
 
-Every `fwc` command still executes against the current provisioning boundary
-today, but the truth hierarchy (mesh-backed > host-backed > node-local >
-offline) already classifies answers regardless of version. The table below is a
+Every `fwc` command is classified under the V2 truth hierarchy by default
+(mesh-backed > host-backed > node-local > offline). The table below is a
 cutover map: it shows which commands still depend on host-backed execution,
 which ones are already honest offline artifact workflows, and where mesh-backed
-truth is expected to replace the transitional path.
+execution is expected to replace the transitional path.
 
 | Command | V1 (Host-First) | V2 (Mesh-Native) | Notes |
 |---------|-----------------|-------------------|-------|
@@ -159,8 +172,9 @@ truth is expected to replace the transitional path.
 
 ```bash
 # The answer classification tells you what version you're operating under.
-# If you see "host-backed" or "node-local", you are on V1.
-# If you see "mesh-backed", the specific answer has V2-level evidence.
+# V2 truth precedence is the default. If an answer reports "host-backed" or
+# "node-local", that answer fell back under V2 policy. If it reports
+# "mesh-backed", that answer has the highest-confidence V2 evidence.
 fwc --host http://127.0.0.1:8787 mesh explain-availability <connector>
 ```
 

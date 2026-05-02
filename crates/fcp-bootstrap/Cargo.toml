@@ -67,9 +67,14 @@ windows = { version = "0.62", features = ["Win32_System_Time"] }
 
 [dev-dependencies]
 # Testing
+criterion.workspace = true
 ed25519-dalek = { workspace = true, features = ["pkcs8"] }
 pretty_assertions.workspace = true
 rand_chacha = "0.3"
 tempfile = "3.15"
 rcgen = "0.14.7"
 time = "0.3"
+
+[[bench]]
+name = "certificate_selection"
+harness = false

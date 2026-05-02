@@ -1026,6 +1026,17 @@ pub struct ProvisioningMaterial {
     pub selection_reason: String,
 }
 
+/// Result of selecting a certificate/key pair from token object metadata.
+#[derive(Debug, Clone)]
+pub struct CertificateSelection {
+    /// The selected certificate/key pair.
+    pub pair: CertificateKeyPair,
+    /// Number of compatible candidates considered after policy filters.
+    pub candidates_considered: usize,
+    /// Human-readable reason for selecting the pair.
+    pub selection_reason: String,
+}
+
 impl fmt::Display for ProvisioningMaterial {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -1165,19 +1176,21 @@ pub fn match_certificate_key_pairs(
     certs: &[TokenCertificate],
     keys: &[TokenKeyInfo],
 ) -> Vec<CertificateKeyPair> {
+    let mut key_by_id: HashMap<&[u8], &TokenKeyInfo> = HashMap::with_capacity(keys.len());
+    for key in keys {
+        key_by_id.entry(key.id.as_slice()).or_insert(key);
+    }
+
     let mut pairs = Vec::new();
     for cert in certs {
         if cert.is_ca || cert.id.is_empty() {
             continue;
         }
-        for key in keys {
-            if key.id == cert.id {
-                pairs.push(CertificateKeyPair {
-                    certificate: cert.clone(),
-                    key: key.clone(),
-                });
-                break; // one key per cert
-            }
+        if let Some(key) = key_by_id.get(cert.id.as_slice()) {
+            pairs.push(CertificateKeyPair {
+                certificate: cert.clone(),
+                key: (*key).clone(),
+            });
         }
     }
     pairs
@@ -1187,80 +1200,266 @@ const fn is_owner_signing_key(key: &TokenKeyInfo) -> bool {
     matches!(key.key_type, TokenKeyType::Ed25519) && key.can_sign
 }
 
-fn certificate_has_verified_issuer_chain(
-    certificate: &TokenCertificate,
-    certificates: &[TokenCertificate],
-) -> bool {
-    let mut visited = HashSet::new();
-    certificate_has_verified_issuer_chain_inner(certificate, certificates, &mut visited)
+struct ParsedTokenCertificate<'a> {
+    parsed: X509Certificate<'a>,
+    der_declares_ca: Option<bool>,
+    valid_for_bootstrap: bool,
+    signing_allowed: Option<bool>,
+    subject_raw: Vec<u8>,
+    issuer_raw: Vec<u8>,
 }
 
-fn certificate_has_verified_issuer_chain_inner(
-    certificate: &TokenCertificate,
-    certificates: &[TokenCertificate],
-    visited: &mut HashSet<Vec<u8>>,
-) -> bool {
-    if !visited.insert(certificate.id.clone()) {
-        return false;
-    }
-
-    let verified = certificate_has_x509_issuer_chain(certificate, certificates, visited);
-    visited.remove(&certificate.id);
-    verified
+/// Precomputed certificate-selection index for hardware-token provisioning.
+///
+/// The index is built once from enumerated token objects and then used for
+/// O(1) key lookup by `CKA_ID`, cached DER metadata, and issuer lookup by
+/// X.509 subject. This keeps policy matching from repeatedly scanning every
+/// certificate/key object for each candidate.
+pub struct CertificateSelectionIndex<'a> {
+    certs: &'a [TokenCertificate],
+    keys: &'a [TokenKeyInfo],
+    key_by_id: HashMap<&'a [u8], usize>,
+    parsed_by_cert: Vec<Option<usize>>,
+    parsed_certs: Vec<ParsedTokenCertificate<'a>>,
+    issuers_by_subject: HashMap<Vec<u8>, Vec<usize>>,
+    verified_chain_cache: Vec<Option<bool>>,
+    cached_selection: Result<CertificateSelection, CertificateSelectionRefusal>,
 }
 
-fn certificate_has_x509_issuer_chain(
-    certificate: &TokenCertificate,
-    certificates: &[TokenCertificate],
-    visited: &mut HashSet<Vec<u8>>,
-) -> bool {
-    let Ok((remaining, parsed)) = parse_x509_certificate(&certificate.der_bytes) else {
-        return false;
-    };
-    if !remaining.is_empty() {
-        return false;
-    }
-    if !x509_certificate_valid_for_bootstrap(&parsed) {
-        return false;
+impl<'a> CertificateSelectionIndex<'a> {
+    /// Build an index over enumerated certificate and key objects.
+    #[must_use]
+    pub fn new(certs: &'a [TokenCertificate], keys: &'a [TokenKeyInfo]) -> Self {
+        let mut key_by_id = HashMap::with_capacity(keys.len());
+        for (index, key) in keys.iter().enumerate() {
+            key_by_id.entry(key.id.as_slice()).or_insert(index);
+        }
+
+        let mut parsed_by_cert = vec![None; certs.len()];
+        let mut parsed_certs = Vec::with_capacity(certs.len());
+        let mut issuers_by_subject: HashMap<Vec<u8>, Vec<usize>> =
+            HashMap::with_capacity(certs.len());
+
+        for (cert_index, cert) in certs.iter().enumerate() {
+            let Ok((remaining, parsed)) = parse_x509_certificate(&cert.der_bytes) else {
+                continue;
+            };
+            if !remaining.is_empty() {
+                continue;
+            }
+
+            let der_declares_ca = x509_basic_constraints_ca(&parsed);
+            let valid_for_bootstrap = x509_certificate_valid_for_bootstrap(&parsed);
+            let signing_allowed = x509_cert_signing_allowed(&parsed);
+            let subject_raw = parsed.subject().as_raw().to_vec();
+            let issuer_raw = parsed.issuer().as_raw().to_vec();
+
+            parsed_by_cert[cert_index] = Some(parsed_certs.len());
+            issuers_by_subject
+                .entry(subject_raw.clone())
+                .or_default()
+                .push(cert_index);
+            parsed_certs.push(ParsedTokenCertificate {
+                parsed,
+                der_declares_ca,
+                valid_for_bootstrap,
+                signing_allowed,
+                subject_raw,
+                issuer_raw,
+            });
+        }
+
+        let mut index = Self {
+            certs,
+            keys,
+            key_by_id,
+            parsed_by_cert,
+            parsed_certs,
+            issuers_by_subject,
+            verified_chain_cache: vec![None; certs.len()],
+            cached_selection: Err(CertificateSelectionRefusal::NoMatchingKeyPair),
+        };
+        index.cached_selection = index.compute_selection();
+        index
     }
 
-    let Some(parsed_is_ca) = x509_basic_constraints_ca(&parsed) else {
-        return false;
-    };
+    /// Select the best provisioning certificate/key pair from the indexed data.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed [`CertificateSelectionRefusal`] if no suitable pair
+    /// exists or the deterministic tie-break remains ambiguous.
+    pub fn select_for_provisioning(
+        &self,
+    ) -> Result<CertificateSelection, CertificateSelectionRefusal> {
+        self.cached_selection.clone()
+    }
 
-    if parsed_is_ca && parsed.subject() == parsed.issuer() {
-        if x509_cert_signing_allowed(&parsed) != Some(true) {
+    fn compute_selection(&mut self) -> Result<CertificateSelection, CertificateSelectionRefusal> {
+        let mut pair_count = 0_usize;
+        let mut has_owner_signing_key = false;
+        let mut found = Vec::new();
+        let mut candidates_considered = 0_usize;
+        let mut best: Option<(usize, usize)> = None;
+
+        for cert_index in 0..self.certs.len() {
+            let cert = &self.certs[cert_index];
+            if cert.is_ca || cert.id.is_empty() {
+                continue;
+            }
+
+            let Some(key_index) = self.key_index_for_cert(cert) else {
+                continue;
+            };
+            pair_count += 1;
+
+            let key = &self.keys[key_index];
+            found.push(key.key_type);
+            if !is_owner_signing_key(key) {
+                continue;
+            }
+            has_owner_signing_key = true;
+
+            if self.certificate_der_declares_ca(cert_index) != Some(false) {
+                continue;
+            }
+            if !self.has_verified_issuer_chain(cert_index) {
+                continue;
+            }
+
+            candidates_considered += 1;
+            if best.is_none_or(|(best_cert, best_key)| {
+                let best_cert = &self.certs[best_cert];
+                let best_key = &self.keys[best_key];
+                cert.label
+                    .cmp(&best_cert.label)
+                    .then_with(|| key.id.cmp(&best_key.id))
+                    .is_lt()
+            }) {
+                best = Some((cert_index, key_index));
+            }
+        }
+
+        let Some((cert_index, key_index)) = best else {
+            return Err(if pair_count == 0 {
+                CertificateSelectionRefusal::NoMatchingKeyPair
+            } else if has_owner_signing_key {
+                CertificateSelectionRefusal::NoVerifiedIssuerChain
+            } else {
+                CertificateSelectionRefusal::NoCompatibleKeyType { found }
+            });
+        };
+
+        let selection_reason = format!(
+            "Ed25519 signing certificate with verified issuer chain selected among {} compatible pair(s)",
+            candidates_considered
+        );
+
+        Ok(CertificateSelection {
+            pair: CertificateKeyPair {
+                certificate: self.certs[cert_index].clone(),
+                key: self.keys[key_index].clone(),
+            },
+            candidates_considered,
+            selection_reason,
+        })
+    }
+
+    fn key_index_for_cert(&self, cert: &TokenCertificate) -> Option<usize> {
+        self.key_by_id.get(cert.id.as_slice()).copied()
+    }
+
+    fn certificate_der_declares_ca(&self, cert_index: usize) -> Option<bool> {
+        self.parsed_by_cert
+            .get(cert_index)
+            .and_then(|parsed_index| {
+                parsed_index.map(|index| self.parsed_certs[index].der_declares_ca)
+            })
+            .flatten()
+    }
+
+    fn has_verified_issuer_chain(&mut self, cert_index: usize) -> bool {
+        let mut visited = HashSet::new();
+        self.has_verified_issuer_chain_inner(cert_index, &mut visited)
+    }
+
+    fn has_verified_issuer_chain_inner(
+        &mut self,
+        cert_index: usize,
+        visited: &mut HashSet<usize>,
+    ) -> bool {
+        if let Some(cached) = self.verified_chain_cache[cert_index] {
+            return cached;
+        }
+        if !visited.insert(cert_index) {
             return false;
         }
-        return parsed.verify_signature(None).is_ok();
+
+        let result = self.verify_chain_for_cert_index(cert_index, visited);
+        visited.remove(&cert_index);
+        self.verified_chain_cache[cert_index] = Some(result);
+        result
     }
 
-    certificates
-        .iter()
-        .filter(|issuer| issuer.id != certificate.id)
-        .any(|issuer| {
-            let Ok((issuer_remaining, issuer_parsed)) = parse_x509_certificate(&issuer.der_bytes)
-            else {
-                return false;
-            };
-            if !issuer_remaining.is_empty() {
-                return false;
-            }
-            if !x509_certificate_valid_for_bootstrap(&issuer_parsed) {
-                return false;
-            }
-            if x509_cert_signing_allowed(&issuer_parsed) != Some(true) {
-                return false;
-            }
-            if issuer_parsed.subject() != parsed.issuer() {
-                return false;
-            }
+    fn verify_chain_for_cert_index(
+        &mut self,
+        cert_index: usize,
+        visited: &mut HashSet<usize>,
+    ) -> bool {
+        let Some(parsed_index) = self.parsed_by_cert[cert_index] else {
+            return false;
+        };
+        let parsed = &self.parsed_certs[parsed_index];
+        if !parsed.valid_for_bootstrap {
+            return false;
+        }
+        let Some(parsed_is_ca) = parsed.der_declares_ca else {
+            return false;
+        };
 
-            parsed
-                .verify_signature(Some(&issuer_parsed.tbs_certificate.subject_pki))
+        if parsed_is_ca && parsed.subject_raw == parsed.issuer_raw {
+            return parsed.signing_allowed == Some(true)
+                && parsed.parsed.verify_signature(None).is_ok();
+        }
+
+        let issuer_candidates = self
+            .issuers_by_subject
+            .get(&parsed.issuer_raw)
+            .cloned()
+            .unwrap_or_default();
+
+        for issuer_cert_index in issuer_candidates {
+            if self.certs[issuer_cert_index].id == self.certs[cert_index].id {
+                continue;
+            }
+            if self.issuer_verifies_certificate(cert_index, issuer_cert_index)
+                && self.has_verified_issuer_chain_inner(issuer_cert_index, visited)
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn issuer_verifies_certificate(&self, cert_index: usize, issuer_cert_index: usize) -> bool {
+        let Some(parsed_index) = self.parsed_by_cert[cert_index] else {
+            return false;
+        };
+        let Some(issuer_parsed_index) = self.parsed_by_cert[issuer_cert_index] else {
+            return false;
+        };
+        let parsed = &self.parsed_certs[parsed_index];
+        let issuer = &self.parsed_certs[issuer_parsed_index];
+
+        issuer.valid_for_bootstrap
+            && issuer.signing_allowed == Some(true)
+            && parsed.issuer_raw == issuer.subject_raw
+            && parsed
+                .parsed
+                .verify_signature(Some(&issuer.parsed.tbs_certificate.subject_pki))
                 .is_ok()
-                && certificate_has_verified_issuer_chain_inner(issuer, certificates, visited)
-        })
+    }
 }
 
 const BOOTSTRAP_CERT_NOT_BEFORE_SKEW_SECS: i64 = 60;
@@ -1278,16 +1477,6 @@ fn x509_certificate_valid_for_bootstrap(certificate: &X509Certificate<'_>) -> bo
     validity.not_before <= validity.not_after
         && validity.not_before <= not_before_skew_limit
         && now <= validity.not_after
-}
-
-fn certificate_der_declares_ca(certificate: &TokenCertificate) -> Option<bool> {
-    let Ok((remaining, parsed)) = parse_x509_certificate(&certificate.der_bytes) else {
-        return None;
-    };
-    if !remaining.is_empty() {
-        return None;
-    }
-    x509_basic_constraints_ca(&parsed)
 }
 
 fn x509_basic_constraints_ca(certificate: &X509Certificate<'_>) -> Option<bool> {
@@ -1349,63 +1538,24 @@ pub(crate) fn select_certificate_for_provisioning<D: HardwareTokenSessionDriver>
         "Enumerating certificate-key pairs for provisioning"
     );
 
-    let pairs = match_certificate_key_pairs(&certs, &keys);
-    if pairs.is_empty() {
-        return Err(TokenError::CertificateSelectionFailed(
-            CertificateSelectionRefusal::NoMatchingKeyPair,
-        ));
-    }
-
-    // Owner bootstrap requires an Ed25519 signing identity whose certificate
-    // chains to a verifiable issuer on the token.
-    let mut compatible: Vec<_> = pairs
-        .iter()
-        .filter(|p| certificate_der_declares_ca(&p.certificate) == Some(false))
-        .filter(|p| is_owner_signing_key(&p.key))
-        .filter(|p| certificate_has_verified_issuer_chain(&p.certificate, &certs))
-        .collect();
-
-    if compatible.is_empty() {
-        let found: Vec<_> = pairs.iter().map(|p| p.key.key_type).collect();
-        let has_owner_signing_key = pairs.iter().any(|p| is_owner_signing_key(&p.key));
-        return Err(TokenError::CertificateSelectionFailed(
-            if has_owner_signing_key {
-                CertificateSelectionRefusal::NoVerifiedIssuerChain
-            } else {
-                CertificateSelectionRefusal::NoCompatibleKeyType { found }
-            },
-        ));
-    }
-
-    // Sort deterministically after security requirements are satisfied.
-    compatible.sort_by(|a, b| {
-        a.certificate
-            .label
-            .cmp(&b.certificate.label)
-            .then_with(|| a.key.id.cmp(&b.key.id))
-    });
-
-    let best = compatible[0];
-    let candidates_considered = compatible.len();
-
-    let selection_reason = format!(
-        "Ed25519 signing certificate with verified issuer chain selected among {} compatible pair(s)",
-        candidates_considered
-    );
+    let selection_index = CertificateSelectionIndex::new(&certs, &keys);
+    let selection = selection_index
+        .select_for_provisioning()
+        .map_err(TokenError::CertificateSelectionFailed)?;
 
     tracing::info!(
-        selected_cert = %best.certificate,
-        selected_key = %best.key,
-        candidates = candidates_considered,
-        reason = %selection_reason,
+        selected_cert = %selection.pair.certificate,
+        selected_key = %selection.pair.key,
+        candidates = selection.candidates_considered,
+        reason = %selection.selection_reason,
         "Certificate selected for provisioning"
     );
 
     Ok(ProvisioningMaterial {
-        pair: best.clone(),
+        pair: selection.pair,
         token: token.clone(),
-        candidates_considered,
-        selection_reason,
+        candidates_considered: selection.candidates_considered,
+        selection_reason: selection.selection_reason,
     })
 }
 
@@ -3659,6 +3809,49 @@ mod tests {
         assert_eq!(material.pair.key.key_type, TokenKeyType::Ed25519);
         assert_eq!(material.candidates_considered, 1);
         assert_eq!(material.token, token);
+    }
+
+    #[test]
+    fn certificate_selection_index_bounds_lookup_for_large_token_configs() {
+        let now = OffsetDateTime::now_utc();
+        let (selected_leaf, ca) = test_x509_leaf_signed_by_ca(
+            "selected-leaf",
+            &[1],
+            &[9],
+            "Indexed Test CA",
+            now - TimeDuration::days(7),
+            now + TimeDuration::days(7),
+            now - TimeDuration::days(60),
+            now + TimeDuration::days(60),
+        );
+
+        let mut certs = Vec::with_capacity(1_000);
+        certs.push(selected_leaf.clone());
+        certs.push(ca);
+        for index in 2_usize..1_000 {
+            let mut noise = selected_leaf.clone();
+            noise.label = format!("noise-cert-{index:04}");
+            noise.id = u32::try_from(index)
+                .expect("test index fits u32")
+                .to_be_bytes()
+                .to_vec();
+            certs.push(noise);
+        }
+        let keys = vec![test_key("selected-key", &[1], TokenKeyType::Ed25519)];
+
+        let index = CertificateSelectionIndex::new(&certs, &keys);
+        let started = Instant::now();
+        let selection = index
+            .select_for_provisioning()
+            .expect("indexed selection succeeds");
+        let elapsed = started.elapsed();
+
+        assert_eq!(selection.pair.certificate.label, "selected-leaf");
+        assert_eq!(selection.candidates_considered, 1);
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "cached selection lookup should be bounded for 1000 certs, took {elapsed:?}"
+        );
     }
 
     #[test]

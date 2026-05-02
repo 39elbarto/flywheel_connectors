@@ -39,6 +39,17 @@ pub enum EnforcementCheckId {
     ZoneMembership,
     /// Validates capability claims include the required capability.
     CapabilityVerify,
+    /// Validates the request's `SafetyTier` is admissible under the host's
+    /// current `DeploymentClassification` (br-nsrx3 / hr0rr.A).
+    ///
+    /// Refuses `Risky` and `Dangerous` tiers when the host is in
+    /// `DeploymentMode::Evaluation` (insufficient mesh quorum). Always
+    /// refuses `Forbidden`. Always allows `Safe` and `Critical`
+    /// (Critical carries its own quorum/elevation gating downstream).
+    /// Slotted right after `CapabilityVerify` because the deployment
+    /// posture is a request-routing decision (no point holder-proving
+    /// or budgeting a request that's about to be refused on tier).
+    DeploymentTier,
     /// Validates holder-bound tokens present a verified holder proof.
     HolderProof,
     /// Validates checkpoint age is within window.
@@ -67,6 +78,7 @@ impl EnforcementCheckId {
             Self::CanonicalDecode => "canonical_decode",
             Self::ZoneMembership => "zone_membership",
             Self::CapabilityVerify => "capability_verify",
+            Self::DeploymentTier => "deployment_tier",
             Self::HolderProof => "holder_proof",
             Self::CheckpointFreshness => "checkpoint_freshness",
             Self::RevocationFreshness => "revocation_freshness",
@@ -96,7 +108,7 @@ pub struct EnforcementCheckOrder;
 
 impl EnforcementCheckOrder {
     /// Total number of checks in the canonical pipeline.
-    pub const COUNT: usize = 12;
+    pub const COUNT: usize = 13;
 
     /// Returns the canonical check ordering.
     ///
@@ -108,6 +120,7 @@ impl EnforcementCheckOrder {
             EnforcementCheckId::CanonicalDecode,
             EnforcementCheckId::ZoneMembership,
             EnforcementCheckId::CapabilityVerify,
+            EnforcementCheckId::DeploymentTier,
             EnforcementCheckId::HolderProof,
             EnforcementCheckId::CheckpointFreshness,
             EnforcementCheckId::RevocationFreshness,
@@ -127,15 +140,16 @@ impl EnforcementCheckOrder {
             EnforcementCheckId::CanonicalDecode => 0,
             EnforcementCheckId::ZoneMembership => 1,
             EnforcementCheckId::CapabilityVerify => 2,
-            EnforcementCheckId::HolderProof => 3,
-            EnforcementCheckId::CheckpointFreshness => 4,
-            EnforcementCheckId::RevocationFreshness => 5,
-            EnforcementCheckId::TaintApproval => 6,
-            EnforcementCheckId::PolicyCeiling => 7,
-            EnforcementCheckId::CapabilityConstraints => 8,
-            EnforcementCheckId::ConnectorManifest => 9,
-            EnforcementCheckId::Budget => 10,
-            EnforcementCheckId::RateLimit => 11,
+            EnforcementCheckId::DeploymentTier => 3,
+            EnforcementCheckId::HolderProof => 4,
+            EnforcementCheckId::CheckpointFreshness => 5,
+            EnforcementCheckId::RevocationFreshness => 6,
+            EnforcementCheckId::TaintApproval => 7,
+            EnforcementCheckId::PolicyCeiling => 8,
+            EnforcementCheckId::CapabilityConstraints => 9,
+            EnforcementCheckId::ConnectorManifest => 10,
+            EnforcementCheckId::Budget => 11,
+            EnforcementCheckId::RateLimit => 12,
         }
     }
 
@@ -227,16 +241,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_order_has_12_checks() {
-        assert_eq!(EnforcementCheckOrder::canonical_order().len(), 12);
-        assert_eq!(EnforcementCheckOrder::COUNT, 12);
+    fn canonical_order_has_13_checks() {
+        // br-nsrx3: count grew from 12 to 13 with the addition of
+        // EnforcementCheckId::DeploymentTier (slotted right after
+        // CapabilityVerify so deployment-mode tier admission runs
+        // before the expensive HolderProof / freshness / budget
+        // checks).
+        assert_eq!(EnforcementCheckOrder::canonical_order().len(), 13);
+        assert_eq!(EnforcementCheckOrder::COUNT, 13);
     }
 
     #[test]
     fn canonical_order_starts_with_decode_ends_with_rate_limit() {
         let order = EnforcementCheckOrder::canonical_order();
         assert_eq!(order[0], EnforcementCheckId::CanonicalDecode);
-        assert_eq!(order[11], EnforcementCheckId::RateLimit);
+        // Last index = COUNT - 1 = 12 after br-nsrx3.
+        assert_eq!(order[EnforcementCheckOrder::COUNT - 1], EnforcementCheckId::RateLimit);
+    }
+
+    #[test]
+    fn canonical_order_places_deployment_tier_after_capability_verify() {
+        // br-nsrx3 invariant: DeploymentTier MUST sit at index 3
+        // (right after CapabilityVerify at index 2). A future
+        // refactor that re-orders these checks breaks the
+        // "tier-admission before expensive crypto/budget checks"
+        // efficiency property.
+        let order = EnforcementCheckOrder::canonical_order();
+        assert_eq!(order[2], EnforcementCheckId::CapabilityVerify);
+        assert_eq!(order[3], EnforcementCheckId::DeploymentTier);
+        assert_eq!(order[4], EnforcementCheckId::HolderProof);
     }
 
     #[test]

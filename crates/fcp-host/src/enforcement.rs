@@ -27,12 +27,16 @@ use std::time::Instant;
 
 use fcp_prelude::{
     CapabilityConstraints, EnforcementCheckId, EnforcementCheckOrder, IdValidationError, ObjectId,
-    PrincipalId, RevocationRegistry, ZoneIdError,
+    PrincipalId, RevocationRegistry, SafetyTier, ZoneIdError,
 };
 use fcp_kernel::{ConnectorId, OperationId};
 use fcp_policy::{
     CapabilityConstraintEnforcer, ConstraintDenialKind, DefaultConstraintEnforcer,
     RequestDescriptor, ZoneId,
+};
+
+use crate::deployment_mode::{
+    DeploymentClassification, DeploymentTierRefusal, admit_safety_tier,
 };
 use serde::Serialize;
 
@@ -292,6 +296,17 @@ pub struct EnforcementContext {
     pub rate_limit: Option<u32>,
     /// Operations the connector manifest declares as supported.
     pub manifest_allowed_operations: Vec<String>,
+    /// Safety tier for this request (br-nsrx3). Drives the
+    /// `DeploymentTier` admission check via
+    /// [`admit_safety_tier`]. `None` means tier-based admission is
+    /// skipped (back-compat: pre-nsrx3 callers leave this field
+    /// unset).
+    pub safety_tier: Option<SafetyTier>,
+    /// Current deployment classification (br-nsrx3). Held by the host
+    /// and shared across requests so the `DeploymentTier` check can
+    /// admit/refuse without re-classifying. `None` means tier-based
+    /// admission is skipped (back-compat).
+    pub deployment_classification: Option<Arc<DeploymentClassification>>,
 }
 
 /// Builder for constructing an [`EnforcementContext`].
@@ -326,6 +341,8 @@ pub struct EnforcementContextBuilder {
     rate_count: Option<u32>,
     rate_limit: Option<u32>,
     manifest_allowed_operations: Vec<String>,
+    safety_tier: Option<SafetyTier>,
+    deployment_classification: Option<Arc<DeploymentClassification>>,
 }
 
 impl EnforcementContextBuilder {
@@ -504,6 +521,29 @@ impl EnforcementContextBuilder {
         self
     }
 
+    /// Set the request's safety tier (br-nsrx3). Drives the
+    /// `DeploymentTier` admission check via [`admit_safety_tier`].
+    /// Without this, `DeploymentTier` is skipped (back-compat for
+    /// pre-nsrx3 callers).
+    #[must_use]
+    pub const fn safety_tier(mut self, tier: SafetyTier) -> Self {
+        self.safety_tier = Some(tier);
+        self
+    }
+
+    /// Set the active deployment classification (br-nsrx3). Held by
+    /// the host and shared across requests so the `DeploymentTier`
+    /// check can admit/refuse without re-classifying. Without this,
+    /// `DeploymentTier` is skipped.
+    #[must_use]
+    pub fn deployment_classification(
+        mut self,
+        classification: Arc<DeploymentClassification>,
+    ) -> Self {
+        self.deployment_classification = Some(classification);
+        self
+    }
+
     /// Build the enforcement context.
     ///
     /// Returns `None` if any of the required fields (`request_id`, `connector_id`,
@@ -540,6 +580,8 @@ impl EnforcementContextBuilder {
             rate_count: self.rate_count,
             rate_limit: self.rate_limit,
             manifest_allowed_operations: self.manifest_allowed_operations,
+            safety_tier: self.safety_tier,
+            deployment_classification: self.deployment_classification,
         })
     }
 }
@@ -967,6 +1009,64 @@ impl EnforcementCheck for CapabilityVerifyCheck {
                     required_capability, ctx.operation
                 ),
             }
+        }
+    }
+}
+
+/// Validates the request's [`SafetyTier`] is admissible under the
+/// host's current [`DeploymentClassification`] (br-nsrx3 / hr0rr.A).
+///
+/// Composes the [`admit_safety_tier`] predicate hr0rr.1 (CrimsonWolf,
+/// commit 26d7919dd) shipped but never wired. Refuses `Risky` and
+/// `Dangerous` tiers when the host is in `DeploymentMode::Evaluation`
+/// (insufficient mesh quorum). Always refuses `Forbidden`. Always
+/// allows `Safe` and `Critical` (Critical's own quorum/elevation
+/// gating handles it).
+///
+/// Skips with `Skip` when either the request's `safety_tier` or the
+/// host's `deployment_classification` is missing on the context — this
+/// preserves back-compat for pre-nsrx3 callers that don't yet wire
+/// the new fields. Hosts that want strict enforcement MUST populate
+/// both fields on every `EnforcementContextBuilder`.
+pub struct DeploymentTierCheck;
+
+impl EnforcementCheck for DeploymentTierCheck {
+    fn name(&self) -> &'static str {
+        "deployment_tier"
+    }
+
+    fn check(&self, ctx: &EnforcementContext, _config: &EnforcementConfig) -> CheckOutcome {
+        let Some(tier) = ctx.safety_tier else {
+            return CheckOutcome::Skip {
+                reason: "request has no safety_tier — pre-nsrx3 caller; tier admission deferred"
+                    .into(),
+            };
+        };
+        let Some(classification) = ctx.deployment_classification.as_deref() else {
+            return CheckOutcome::Skip {
+                reason:
+                    "host has no deployment_classification on context — admission deferred".into(),
+            };
+        };
+
+        match admit_safety_tier(classification, tier) {
+            Ok(()) => CheckOutcome::Allow,
+            Err(refusal) => match refusal {
+                DeploymentTierRefusal::TierRequiresMeshActive { tier, mode, reason } => {
+                    CheckOutcome::Deny {
+                        reason_code: "TIER_REQUIRES_MESH_ACTIVE".into(),
+                        explanation: format!(
+                            "safety tier {tier:?} not admissible in deployment mode {mode:?}: {reason:?}"
+                        ),
+                    }
+                }
+                DeploymentTierRefusal::TierForbidden { tier } => CheckOutcome::Deny {
+                    reason_code: "TIER_FORBIDDEN".into(),
+                    explanation: format!(
+                        "safety tier {tier:?} is never admissible in any deployment mode"
+                    ),
+                },
+            },
         }
     }
 }
@@ -1488,6 +1588,7 @@ impl EnforcementPipeline {
             EnforcementCheckId::CanonicalDecode => Box::new(CanonicalDecodeCheck),
             EnforcementCheckId::ZoneMembership => Box::new(ZoneMembershipCheck),
             EnforcementCheckId::CapabilityVerify => Box::new(CapabilityVerifyCheck),
+            EnforcementCheckId::DeploymentTier => Box::new(DeploymentTierCheck),
             EnforcementCheckId::HolderProof => Box::new(HolderProofCheck),
             EnforcementCheckId::CheckpointFreshness => Box::new(CheckpointFreshnessCheck),
             EnforcementCheckId::RevocationFreshness => Box::new(RevocationCheck),
@@ -1554,6 +1655,12 @@ fn test_context() -> EnforcementContext {
         rate_count: Some(5),
         rate_limit: Some(100),
         manifest_allowed_operations: vec!["send_message".into(), "list_channels".into()],
+        // br-nsrx3: pre-existing test fixture left as Skip (None) so
+        // the new DeploymentTier check is non-disruptive to the legacy
+        // test suite. nsrx3-specific tests below construct contexts
+        // with these fields populated to exercise the gate.
+        safety_tier: None,
+        deployment_classification: None,
     }
 }
 
@@ -4809,5 +4916,231 @@ mod tests {
         if let PipelineOutcome::Deny { check_name, .. } = &decision.outcome {
             assert_eq!(check_name, "zone_membership");
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // br-nsrx3 — DeploymentTier admission gate wired into pipeline
+    //
+    // Pin the per-(mode × tier) admission matrix at the pipeline-check
+    // boundary. CrimsonWolf's hr0rr.1 (commit 26d7919dd) shipped the
+    // admit_safety_tier predicate; nsrx3 wires it in as
+    // EnforcementCheckId::DeploymentTier so a Risky/Dangerous request
+    // arriving while the host is in Evaluation mode is REFUSED before
+    // dispatch. Slot is canonical: right after CapabilityVerify.
+    //
+    // Back-compat: contexts with safety_tier=None or
+    // deployment_classification=None Skip the check (pre-nsrx3 callers
+    // unaffected).
+    // ─────────────────────────────────────────────────────────────────
+
+    use crate::deployment_mode::{
+        DeploymentClassification, DeploymentClassificationReason, DeploymentMode,
+        MeshQuorumSignals,
+    };
+
+    fn evaluation_classification() -> Arc<DeploymentClassification> {
+        Arc::new(DeploymentClassification {
+            mode: DeploymentMode::Evaluation,
+            signals: MeshQuorumSignals::single_host_evaluation(),
+            reason: DeploymentClassificationReason::InsufficientMeshQuorum {
+                observed: 0,
+                required: 2,
+            },
+        })
+    }
+
+    fn mesh_active_classification() -> Arc<DeploymentClassification> {
+        Arc::new(DeploymentClassification {
+            mode: DeploymentMode::MeshActive,
+            signals: MeshQuorumSignals::fully_active(3),
+            reason: DeploymentClassificationReason::MeshQuorumActive,
+        })
+    }
+
+    fn ctx_with_tier_and_mode(
+        tier: SafetyTier,
+        classification: Arc<DeploymentClassification>,
+    ) -> EnforcementContext {
+        let mut ctx = test_context();
+        ctx.safety_tier = Some(tier);
+        ctx.deployment_classification = Some(classification);
+        ctx
+    }
+
+    // ── Per-tier admission in Evaluation mode ──
+
+    #[test]
+    fn deployment_tier_check_allows_safe_in_evaluation() {
+        let check = DeploymentTierCheck;
+        let ctx = ctx_with_tier_and_mode(SafetyTier::Safe, evaluation_classification());
+        let outcome = check.check(&ctx, &EnforcementConfig::default());
+        assert!(matches!(outcome, CheckOutcome::Allow));
+    }
+
+    #[test]
+    fn deployment_tier_check_refuses_risky_in_evaluation() {
+        let check = DeploymentTierCheck;
+        let ctx = ctx_with_tier_and_mode(SafetyTier::Risky, evaluation_classification());
+        let outcome = check.check(&ctx, &EnforcementConfig::default());
+        match outcome {
+            CheckOutcome::Deny { reason_code, .. } => {
+                assert_eq!(reason_code, "TIER_REQUIRES_MESH_ACTIVE");
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deployment_tier_check_refuses_dangerous_in_evaluation() {
+        let check = DeploymentTierCheck;
+        let ctx = ctx_with_tier_and_mode(SafetyTier::Dangerous, evaluation_classification());
+        let outcome = check.check(&ctx, &EnforcementConfig::default());
+        match outcome {
+            CheckOutcome::Deny { reason_code, .. } => {
+                assert_eq!(reason_code, "TIER_REQUIRES_MESH_ACTIVE");
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deployment_tier_check_allows_critical_in_evaluation() {
+        // Critical carries its own quorum/elevation gating downstream;
+        // DeploymentTier MUST NOT block it.
+        let check = DeploymentTierCheck;
+        let ctx = ctx_with_tier_and_mode(SafetyTier::Critical, evaluation_classification());
+        let outcome = check.check(&ctx, &EnforcementConfig::default());
+        assert!(matches!(outcome, CheckOutcome::Allow));
+    }
+
+    #[test]
+    fn deployment_tier_check_refuses_forbidden_in_any_mode() {
+        let check = DeploymentTierCheck;
+        for classification in [evaluation_classification(), mesh_active_classification()] {
+            let ctx = ctx_with_tier_and_mode(SafetyTier::Forbidden, classification);
+            let outcome = check.check(&ctx, &EnforcementConfig::default());
+            match outcome {
+                CheckOutcome::Deny { reason_code, .. } => {
+                    assert_eq!(reason_code, "TIER_FORBIDDEN");
+                }
+                other => panic!("expected Deny, got {other:?}"),
+            }
+        }
+    }
+
+    // ── Per-tier admission in MeshActive mode ──
+
+    #[test]
+    fn deployment_tier_check_allows_all_non_forbidden_tiers_in_mesh_active() {
+        let check = DeploymentTierCheck;
+        for tier in [
+            SafetyTier::Safe,
+            SafetyTier::Risky,
+            SafetyTier::Dangerous,
+            SafetyTier::Critical,
+        ] {
+            let ctx = ctx_with_tier_and_mode(tier, mesh_active_classification());
+            let outcome = check.check(&ctx, &EnforcementConfig::default());
+            assert!(
+                matches!(outcome, CheckOutcome::Allow),
+                "tier {tier:?} MUST be admitted in MeshActive mode (got {outcome:?})"
+            );
+        }
+    }
+
+    // ── Back-compat: missing fields skip the check ──
+
+    #[test]
+    fn deployment_tier_check_skips_when_safety_tier_missing() {
+        let check = DeploymentTierCheck;
+        let mut ctx = test_context();
+        ctx.deployment_classification = Some(evaluation_classification());
+        // safety_tier left as None — pre-nsrx3 caller.
+        let outcome = check.check(&ctx, &EnforcementConfig::default());
+        assert!(
+            matches!(outcome, CheckOutcome::Skip { .. }),
+            "missing safety_tier MUST skip (back-compat for pre-nsrx3 callers)"
+        );
+    }
+
+    #[test]
+    fn deployment_tier_check_skips_when_classification_missing() {
+        let check = DeploymentTierCheck;
+        let mut ctx = test_context();
+        ctx.safety_tier = Some(SafetyTier::Risky);
+        // deployment_classification left as None — host hasn't wired it.
+        let outcome = check.check(&ctx, &EnforcementConfig::default());
+        assert!(
+            matches!(outcome, CheckOutcome::Skip { .. }),
+            "missing deployment_classification MUST skip (back-compat)"
+        );
+    }
+
+    // ── Wired into the canonical EnforcementPipeline ──
+
+    #[test]
+    fn pipeline_includes_deployment_tier_check_in_canonical_position() {
+        // The canonical order from fcp-core MUST place DeploymentTier
+        // right after CapabilityVerify (index 3 of 13). Pin both the
+        // count AND the slot.
+        let pipeline = EnforcementPipeline::default();
+        let names = pipeline.check_names();
+        assert_eq!(names.len(), EnforcementCheckOrder::COUNT);
+        let pos = names.iter().position(|n| *n == "deployment_tier");
+        assert_eq!(
+            pos,
+            Some(3),
+            "deployment_tier MUST be at canonical index 3 (right after capability_verify); got {pos:?}"
+        );
+        // Sanity: capability_verify is index 2, holder_proof is 4.
+        assert_eq!(names[2], "capability_verify");
+        assert_eq!(names[4], "holder_proof");
+    }
+
+    #[test]
+    fn pipeline_denies_risky_request_in_evaluation_mode_via_deployment_tier() {
+        // End-to-end through the pipeline: a Risky request with a
+        // valid capability claim arriving while the host is in
+        // Evaluation mode MUST be denied at the deployment_tier check
+        // (not at any earlier check). This is the bead's marquee
+        // assertion.
+        let pipeline = EnforcementPipeline::default();
+        let ctx = ctx_with_tier_and_mode(SafetyTier::Risky, evaluation_classification());
+        let decision = pipeline.evaluate(&ctx);
+        match decision.outcome {
+            PipelineOutcome::Deny {
+                check_name,
+                reason_code,
+                ..
+            } => {
+                assert_eq!(check_name, "deployment_tier");
+                assert_eq!(reason_code, "TIER_REQUIRES_MESH_ACTIVE");
+            }
+            other => panic!(
+                "expected Deny at deployment_tier for Risky-in-Evaluation, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn pipeline_admits_risky_request_in_mesh_active_mode() {
+        // The same Risky request MUST proceed past deployment_tier
+        // when the host is in MeshActive mode. Other downstream checks
+        // may still deny (holder_proof, budget, etc.), but the
+        // deployment_tier check itself MUST allow.
+        let pipeline = EnforcementPipeline::default();
+        let ctx = ctx_with_tier_and_mode(SafetyTier::Risky, mesh_active_classification());
+        let decision = pipeline.evaluate(&ctx);
+        // Find the deployment_tier check record specifically.
+        let record = decision
+            .checks_run
+            .iter()
+            .find(|r| r.name == "deployment_tier")
+            .expect("deployment_tier check ran");
+        assert!(
+            matches!(record.outcome, CheckOutcome::Allow),
+            "deployment_tier MUST allow Risky in MeshActive (got {:?})",
+            record.outcome
+        );
     }
 }

@@ -57,6 +57,160 @@ pub use fcp_core::{AnyVerified, BoundVerified, ConstraintsEnforced, UnboundVerif
 
 pub use fcp_core::{Principal, PrincipalId, SafetyTier, TailscaleNodeId, TaintLevel, TrustLevel};
 
+// ── Operational Model Selection ───────────────────────────────────
+
+/// Operational model version requested by truth-resolution policy.
+///
+/// This is the policy-side mirror of fcp-host's runtime
+/// `DeploymentMode`: the policy says what model an operator requested,
+/// while the host deployment classifier says what the current topology
+/// can safely support.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum OperationalModelVersion {
+    /// V1 host-first operation. Safe fallback for single-host deployments.
+    V1HostFirst,
+    /// V2 mesh-native operation. Requires an active mesh unless explicitly
+    /// accepted as degraded single-host mode.
+    V2MeshNative,
+}
+
+impl OperationalModelVersion {
+    /// Stable label for logs and policy diagnostics.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::V1HostFirst => "V1-host-first",
+            Self::V2MeshNative => "V2-mesh-native",
+        }
+    }
+}
+
+/// Environment variable controlling the default truth-precedence model.
+pub const TRUTH_PRECEDENCE_DEFAULT_ENV: &str = "FCP_TRUTH_PRECEDENCE_DEFAULT";
+
+/// Environment variable that explicitly accepts degraded V2 on single-host
+/// deployments. It is only honored when `FCP_TRUTH_PRECEDENCE_DEFAULT`
+/// explicitly requests V2.
+pub const TRUTH_PRECEDENCE_ACCEPT_DEGRADED_SINGLE_HOST_ENV: &str =
+    "FCP_TRUTH_PRECEDENCE_ACCEPT_DEGRADED_SINGLE_HOST";
+
+/// Stable operator warning emitted when V2 defaults are detected on a
+/// single-host deployment without the explicit degraded-mode opt-in.
+pub const SINGLE_HOST_V2_FALLBACK_WARNING: &str = "WARN: V2MeshNative requested on a single-host deployment without explicit degraded-mode opt-in; falling back to V1HostFirst.";
+
+/// Resolved operational model after deployment-topology guardrails are applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OperationalModelSelection {
+    /// Model requested by env/config/defaults before topology guardrails.
+    pub requested: OperationalModelVersion,
+    /// Model that callers should actually use.
+    pub effective: OperationalModelVersion,
+    /// Whether the topology check detected a single-host deployment.
+    pub single_host_detected: bool,
+    /// Whether degraded V2 was explicitly accepted.
+    pub degraded_v2_opt_in: bool,
+    /// Operator-visible warning to log, if a fallback was applied.
+    pub warning: Option<&'static str>,
+}
+
+/// Return true when the raw env value requests legacy V1 host-first mode.
+#[must_use]
+pub fn truth_precedence_env_requests_v1(raw: Option<&str>) -> bool {
+    match raw {
+        Some(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "v1" | "v1-host-first" | "v1_host_first" | "host-first" | "host_first"
+        ),
+        None => false,
+    }
+}
+
+/// Return true when the raw env value explicitly requests V2 mesh-native mode.
+#[must_use]
+pub fn truth_precedence_env_requests_v2(raw: Option<&str>) -> bool {
+    match raw {
+        Some(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "v2" | "v2-mesh-native" | "v2_mesh_native" | "mesh-native" | "mesh_native"
+        ),
+        None => false,
+    }
+}
+
+/// Return true when the raw env value accepts degraded V2 single-host mode.
+#[must_use]
+pub fn truth_precedence_accepts_degraded_single_host(raw: Option<&str>) -> bool {
+    match raw {
+        Some(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on" | "accept" | "accept-degraded" | "accept_degraded"
+        ),
+        None => false,
+    }
+}
+
+/// Resolve the requested operational model from a raw env value.
+///
+/// Unset or unknown values retain the post-cutover V2 request, matching the
+/// br-4la3k default before topology guardrails are applied.
+#[must_use]
+pub fn requested_operational_model_from_env(raw: Option<&str>) -> OperationalModelVersion {
+    if truth_precedence_env_requests_v1(raw) {
+        OperationalModelVersion::V1HostFirst
+    } else {
+        OperationalModelVersion::V2MeshNative
+    }
+}
+
+/// Apply single-host topology guardrails to the requested operational model.
+///
+/// V2 remains available on a single-host deployment only when the operator both
+/// explicitly requests V2 and explicitly accepts degraded single-host mode. The
+/// default V2 request, or an explicit V2 request without the accept flag, falls
+/// back to V1 with a stable warning.
+#[must_use]
+pub fn select_operational_model_for_deployment(
+    requested: OperationalModelVersion,
+    explicit_v2_requested: bool,
+    degraded_v2_accepted: bool,
+    single_host_detected: bool,
+) -> OperationalModelSelection {
+    let degraded_v2_opt_in = single_host_detected
+        && requested == OperationalModelVersion::V2MeshNative
+        && explicit_v2_requested
+        && degraded_v2_accepted;
+    let should_fallback = single_host_detected
+        && requested == OperationalModelVersion::V2MeshNative
+        && !degraded_v2_opt_in;
+
+    OperationalModelSelection {
+        requested,
+        effective: if should_fallback {
+            OperationalModelVersion::V1HostFirst
+        } else {
+            requested
+        },
+        single_host_detected,
+        degraded_v2_opt_in,
+        warning: should_fallback.then_some(SINGLE_HOST_V2_FALLBACK_WARNING),
+    }
+}
+
+/// Resolve the effective operational model from raw env values plus topology.
+#[must_use]
+pub fn select_operational_model_from_env_for_deployment(
+    default_env: Option<&str>,
+    accept_degraded_env: Option<&str>,
+    single_host_detected: bool,
+) -> OperationalModelSelection {
+    select_operational_model_for_deployment(
+        requested_operational_model_from_env(default_env),
+        truth_precedence_env_requests_v2(default_env),
+        truth_precedence_accepts_degraded_single_host(accept_degraded_env),
+        single_host_detected,
+    )
+}
+
 // ── Provenance & Taint Tracking ────────────────────────────────────
 
 pub use fcp_core::{
@@ -178,6 +332,60 @@ mod tests {
         let _: SafetyTier = SafetyTier::Safe;
         let _: SafetyTier = SafetyTier::Risky;
         let _: SafetyTier = SafetyTier::Dangerous;
+    }
+
+    #[test]
+    fn single_host_v2_default_falls_back_to_v1_without_opt_in() {
+        let selection = select_operational_model_from_env_for_deployment(None, None, true);
+
+        assert_eq!(selection.requested, OperationalModelVersion::V2MeshNative);
+        assert_eq!(selection.effective, OperationalModelVersion::V1HostFirst);
+        assert!(selection.single_host_detected);
+        assert!(!selection.degraded_v2_opt_in);
+        assert_eq!(selection.warning, Some(SINGLE_HOST_V2_FALLBACK_WARNING));
+    }
+
+    #[test]
+    fn single_host_v2_explicit_request_still_falls_back_without_accept_flag() {
+        let selection = select_operational_model_from_env_for_deployment(Some("v2"), None, true);
+
+        assert_eq!(selection.requested, OperationalModelVersion::V2MeshNative);
+        assert_eq!(selection.effective, OperationalModelVersion::V1HostFirst);
+        assert_eq!(selection.warning, Some(SINGLE_HOST_V2_FALLBACK_WARNING));
+    }
+
+    #[test]
+    fn single_host_v2_explicit_request_with_accept_flag_keeps_v2() {
+        let selection = select_operational_model_from_env_for_deployment(
+            Some("v2-mesh-native"),
+            Some("accept-degraded"),
+            true,
+        );
+
+        assert_eq!(selection.requested, OperationalModelVersion::V2MeshNative);
+        assert_eq!(selection.effective, OperationalModelVersion::V2MeshNative);
+        assert!(selection.degraded_v2_opt_in);
+        assert_eq!(selection.warning, None);
+    }
+
+    #[test]
+    fn single_host_v2_non_single_host_keeps_default_v2() {
+        let selection = select_operational_model_from_env_for_deployment(None, None, false);
+
+        assert_eq!(selection.requested, OperationalModelVersion::V2MeshNative);
+        assert_eq!(selection.effective, OperationalModelVersion::V2MeshNative);
+        assert!(!selection.single_host_detected);
+        assert_eq!(selection.warning, None);
+    }
+
+    #[test]
+    fn single_host_v2_v1_env_stays_v1() {
+        let selection =
+            select_operational_model_from_env_for_deployment(Some("host-first"), None, true);
+
+        assert_eq!(selection.requested, OperationalModelVersion::V1HostFirst);
+        assert_eq!(selection.effective, OperationalModelVersion::V1HostFirst);
+        assert_eq!(selection.warning, None);
     }
 
     #[test]

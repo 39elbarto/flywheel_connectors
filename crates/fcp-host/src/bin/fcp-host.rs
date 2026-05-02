@@ -78,8 +78,10 @@ use fcp_kernel::{
     SelfCheckReport, SimulateRequest, SimulateResponse,
 };
 use fcp_policy::{
-    CapabilityConstraintEnforcer, ConstraintEvaluation, DefaultConstraintEnforcer, PrincipalId,
-    RequestDescriptor,
+    CapabilityConstraintEnforcer, ConstraintEvaluation, DefaultConstraintEnforcer,
+    OperationalModelSelection, PrincipalId, RequestDescriptor,
+    TRUTH_PRECEDENCE_ACCEPT_DEGRADED_SINGLE_HOST_ENV, TRUTH_PRECEDENCE_DEFAULT_ENV,
+    select_operational_model_from_env_for_deployment,
 };
 use fcp_prelude::{
     ApprovalToken, CapabilityConstraints, CapabilityVerifier, CostEstimateConfidence, Decision,
@@ -1843,6 +1845,65 @@ fn current_deployment_classification() -> DeploymentClassification {
     classify_deployment_mode(MeshQuorumSignals::single_host_evaluation())
 }
 
+fn select_host_operational_model_from_env_values(
+    classification: &DeploymentClassification,
+    default_env: Option<&str>,
+    accept_degraded_env: Option<&str>,
+) -> OperationalModelSelection {
+    select_operational_model_from_env_for_deployment(
+        default_env,
+        accept_degraded_env,
+        classification.signals.healthy_peer_count == 0,
+    )
+}
+
+fn current_operational_model_selection(
+    classification: &DeploymentClassification,
+) -> HostResult<OperationalModelSelection> {
+    let default_env = read_optional_trimmed_env_string(TRUTH_PRECEDENCE_DEFAULT_ENV)?;
+    let accept_degraded_env =
+        read_optional_trimmed_env_string(TRUTH_PRECEDENCE_ACCEPT_DEGRADED_SINGLE_HOST_ENV)?;
+    Ok(select_host_operational_model_from_env_values(
+        classification,
+        default_env.as_deref(),
+        accept_degraded_env.as_deref(),
+    ))
+}
+
+fn emit_operational_model_selection_log(selection: &OperationalModelSelection) {
+    if let Some(warning) = selection.warning {
+        tracing::warn!(
+            target: "fcp_host::deployment_mode",
+            event = "single_host_v2_fallback",
+            requested_model = selection.requested.label(),
+            effective_model = selection.effective.label(),
+            single_host_detected = selection.single_host_detected,
+            degraded_v2_opt_in = selection.degraded_v2_opt_in,
+            "{warning}"
+        );
+    } else if selection.degraded_v2_opt_in {
+        tracing::warn!(
+            target: "fcp_host::deployment_mode",
+            event = "single_host_v2_degraded_opt_in",
+            requested_model = selection.requested.label(),
+            effective_model = selection.effective.label(),
+            single_host_detected = selection.single_host_detected,
+            degraded_v2_opt_in = selection.degraded_v2_opt_in,
+            "V2MeshNative degraded single-host mode accepted by explicit operator opt-in"
+        );
+    } else {
+        tracing::info!(
+            target: "fcp_host::deployment_mode",
+            event = "operational_model_selection",
+            requested_model = selection.requested.label(),
+            effective_model = selection.effective.label(),
+            single_host_detected = selection.single_host_detected,
+            degraded_v2_opt_in = selection.degraded_v2_opt_in,
+            "fcp-host operational model selected"
+        );
+    }
+}
+
 fn deployment_tier_refusal_reason_code(refusal: &DeploymentTierRefusal) -> &'static str {
     match refusal {
         DeploymentTierRefusal::TierRequiresMeshActive { .. } => "TIER_REQUIRES_MESH_ACTIVE",
@@ -2974,6 +3035,8 @@ async fn async_main() -> HostResult<()> {
     }
     let deployment_classification = current_deployment_classification();
     emit_boot_log(&deployment_classification);
+    let operational_model = current_operational_model_selection(&deployment_classification)?;
+    emit_operational_model_selection_log(&operational_model);
     let zone_policies = load_zone_policies()?;
 
     let registry = Arc::new(
@@ -5938,6 +6001,7 @@ mod tests {
         OperationInfo, SelfCheckStatus, TransitionReason, UsageBudgetLimit, UsageBudgetPolicy,
         UsageMetric, UsageMetricKind,
     };
+    use fcp_policy::OperationalModelVersion;
     use fcp_prelude::{CapabilityId, RiskLevel};
 
     fn maybe_compiled_test_connector_binary() -> Option<std::path::PathBuf> {
@@ -6783,6 +6847,38 @@ mod tests {
             0,
             "DeploymentTier denial must happen before connector dispatch"
         );
+    }
+
+    #[test]
+    fn single_host_v2_default_falls_back_to_v1_with_warning() {
+        let classification = classify_deployment_mode(MeshQuorumSignals::single_host_evaluation());
+        let selection = select_host_operational_model_from_env_values(&classification, None, None);
+
+        assert_eq!(selection.requested, OperationalModelVersion::V2MeshNative);
+        assert_eq!(selection.effective, OperationalModelVersion::V1HostFirst);
+        assert!(selection.single_host_detected);
+        assert!(!selection.degraded_v2_opt_in);
+        assert!(
+            selection
+                .warning
+                .is_some_and(|warning| warning.contains("falling back to V1HostFirst"))
+        );
+    }
+
+    #[test]
+    fn single_host_v2_explicit_accept_degraded_keeps_v2() {
+        let classification = classify_deployment_mode(MeshQuorumSignals::single_host_evaluation());
+        let selection = select_host_operational_model_from_env_values(
+            &classification,
+            Some("v2"),
+            Some("true"),
+        );
+
+        assert_eq!(selection.requested, OperationalModelVersion::V2MeshNative);
+        assert_eq!(selection.effective, OperationalModelVersion::V2MeshNative);
+        assert!(selection.single_host_detected);
+        assert!(selection.degraded_v2_opt_in);
+        assert_eq!(selection.warning, None);
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

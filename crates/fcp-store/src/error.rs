@@ -42,6 +42,19 @@ pub enum ObjectStoreError {
     /// zone-id for which no key is registered and bypass verification.
     #[error("verifier has no ObjectIdKey for zone `{zone}`")]
     VerifierKeyMissing { zone: ZoneId },
+
+    /// Durable WAL or snapshot envelope failed keyed-MAC authentication.
+    /// Surfaced when the keyed BLAKE3 MAC over `(version, seq, op)` —
+    /// equivalent to HMAC-SHA256 in cryptographic strength but native to
+    /// the workspace — does not match the recorded MAC (V2 envelopes),
+    /// or when a V1 unkeyed envelope is loaded while
+    /// `allow_legacy_unauth = false`. Defends against an on-disk tamperer
+    /// who could otherwise recompute the unkeyed checksum to forge
+    /// `Delete` / `SetRetention` records or rewrite a snapshot to omit
+    /// objects, even when an `ObjectIdVerifier` is installed
+    /// (bead flywheel_connectors-dgbtx).
+    #[error("tampered audit envelope at {path}: {reason}")]
+    TamperedAuditEnvelope { path: String, reason: String },
 }
 
 /// Errors for symbol store operations.
@@ -61,6 +74,15 @@ pub enum SymbolStoreError {
 
     #[error("I/O error: {0}")]
     Io(String),
+
+    /// Durable symbol-store WAL or snapshot envelope failed keyed-MAC
+    /// authentication. See [`ObjectStoreError::TamperedAuditEnvelope`]
+    /// for the full threat model — symbol-store WAL `DeleteObject` /
+    /// `DeleteSymbol` records pose the same forgery risk as object-store
+    /// `Delete` / `SetRetention`, so the same V2-envelope MAC defence
+    /// applies (bead flywheel_connectors-dgbtx).
+    #[error("tampered audit envelope at {path}: {reason}")]
+    TamperedAuditEnvelope { path: String, reason: String },
 }
 
 /// Errors for quarantine operations.

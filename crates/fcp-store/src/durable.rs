@@ -34,8 +34,22 @@ use crate::symbol_store::{
     validate_source_symbols,
 };
 
-const SNAPSHOT_VERSION: u32 = 1;
-const WAL_VERSION: u32 = 1;
+/// Legacy unkeyed envelope version. Reads accept it only when
+/// `allow_legacy_unauth = true`. Writes use V1 only when no
+/// `mac_key` is installed (preserving the pre-dgbtx call sites that
+/// did not yet thread a per-store secret).
+const SNAPSHOT_VERSION_V1: u32 = 1;
+const WAL_VERSION_V1: u32 = 1;
+
+/// Authenticated envelope version (bead flywheel_connectors-dgbtx).
+/// V2 envelopes carry a keyed BLAKE3 MAC over `(version, seq, op)`
+/// (or `(version, last_seq, payload)` for snapshots) instead of a
+/// plain unkeyed BLAKE3 hash. A tamperer who can rewrite the on-disk
+/// WAL/snapshot file can no longer forge a Delete/SetRetention record
+/// without the per-store secret.
+const SNAPSHOT_VERSION_V2: u32 = 2;
+const WAL_VERSION_V2: u32 = 2;
+
 const DEFAULT_CHECKPOINT_AFTER_OPS: u64 = 64;
 
 /// Maximum bytes the WAL recovery loop will buffer for a single record.
@@ -69,6 +83,30 @@ pub struct DurableObjectStoreConfig {
     pub max_bytes: u64,
     /// Number of durable mutations between automatic checkpoints.
     pub checkpoint_after_ops: u64,
+    /// Per-store MAC key for authenticated WAL / snapshot envelopes
+    /// (bead flywheel_connectors-dgbtx). When set, every appended WAL
+    /// record and every checkpointed snapshot is written with a V2
+    /// envelope carrying a keyed BLAKE3 MAC (cryptographically
+    /// equivalent to HMAC-SHA256) over `(version, seq, op)` or
+    /// `(version, last_seq, payload)`. When absent, writes fall back
+    /// to the legacy V1 unkeyed-checksum envelope (preserved so
+    /// existing call sites keep working without code change).
+    ///
+    /// Operators should derive this key from the zone owner key —
+    /// typically `HKDF(owner_key, info = b"fcp-store/durable/v2")` —
+    /// so a process with file-system access cannot forge entries
+    /// without also compromising the owner key.
+    pub mac_key: Option<[u8; 32]>,
+    /// Whether legacy V1 unkeyed envelopes are accepted on read when
+    /// a `mac_key` is installed (bead flywheel_connectors-dgbtx). This
+    /// is a one-shot migration knob: setting `true` lets a node load
+    /// pre-dgbtx data, after which a `checkpoint()` rewrites everything
+    /// as V2. Default `false` — any V1 envelope encountered with a
+    /// `mac_key` set is treated as a tampering signal.
+    ///
+    /// When `mac_key` is `None`, this flag has no effect (all envelopes
+    /// are V1 by definition).
+    pub allow_legacy_unauth: bool,
 }
 
 impl DurableObjectStoreConfig {
@@ -78,6 +116,8 @@ impl DurableObjectStoreConfig {
             root_dir: root_dir.into(),
             max_bytes: MemoryObjectStoreConfig::default().max_bytes,
             checkpoint_after_ops: DEFAULT_CHECKPOINT_AFTER_OPS,
+            mac_key: None,
+            allow_legacy_unauth: false,
         }
     }
 }
@@ -92,6 +132,16 @@ pub struct DurableSymbolStoreConfig {
     pub local_node_id: u64,
     /// Number of durable mutations between automatic checkpoints.
     pub checkpoint_after_ops: u64,
+    /// Per-store MAC key for authenticated WAL / snapshot envelopes.
+    /// See [`DurableObjectStoreConfig::mac_key`] for the threat model
+    /// and key-derivation guidance — symbol-store WAL `DeleteObject` /
+    /// `DeleteSymbol` records pose the same forgery risk as object-store
+    /// `Delete` / `SetRetention` and inherit the same defence.
+    pub mac_key: Option<[u8; 32]>,
+    /// Whether legacy V1 unkeyed envelopes are accepted on read when
+    /// `mac_key` is installed. See
+    /// [`DurableObjectStoreConfig::allow_legacy_unauth`].
+    pub allow_legacy_unauth: bool,
 }
 
 impl DurableSymbolStoreConfig {
@@ -103,6 +153,8 @@ impl DurableSymbolStoreConfig {
             max_bytes: defaults.max_bytes,
             local_node_id: defaults.local_node_id,
             checkpoint_after_ops: DEFAULT_CHECKPOINT_AFTER_OPS,
+            mac_key: None,
+            allow_legacy_unauth: false,
         }
     }
 }
@@ -685,8 +737,13 @@ impl DurableObjectStore {
 
         let snapshot_path = config.root_dir.join("objects.snapshot.json");
         let wal_path = config.root_dir.join("objects.wal.jsonl");
-        let (state, last_seq) =
-            load_durable_object_state(&snapshot_path, &wal_path, verifier.as_deref())?;
+        let (state, last_seq) = load_durable_object_state(
+            &snapshot_path,
+            &wal_path,
+            verifier.as_deref(),
+            config.mac_key.as_ref(),
+            config.allow_legacy_unauth,
+        )?;
 
         Ok(Self {
             state: Mutex::new(state),
@@ -714,12 +771,17 @@ impl DurableObjectStore {
 
     async fn checkpoint_locked(&self, last_seq: u64) -> Result<(), ObjectStoreError> {
         let snapshot = self.state.lock().await.to_snapshot();
-        write_snapshot_blocking(self.snapshot_path.clone(), last_seq, snapshot)
-            .await
-            .map_err(object_io)?;
+        write_snapshot_blocking(
+            self.snapshot_path.clone(),
+            last_seq,
+            snapshot,
+            self.config.mac_key,
+        )
+        .await
+        .map_err(object_io_durable)?;
         clear_wal_blocking(self.wal_path.clone())
             .await
-            .map_err(object_io)?;
+            .map_err(object_io_durable)?;
         Ok(())
     }
 
@@ -743,9 +805,9 @@ impl DurableObjectStore {
             // Advancing next_seq on a failed append leaves an irrecoverable gap
             // in the WAL sequence (load_wal_records rejects the gap at startup).
             let seq = self.next_seq.load(Ordering::SeqCst);
-            append_wal_record_blocking(self.wal_path.clone(), seq, op.clone())
+            append_wal_record_blocking(self.wal_path.clone(), seq, op.clone(), self.config.mac_key)
                 .await
-                .map_err(object_io)?;
+                .map_err(object_io_durable)?;
             self.next_seq.store(seq.saturating_add(1), Ordering::SeqCst);
             self.state.lock().await.apply_loaded_mutation(op)?;
 
@@ -855,7 +917,12 @@ impl DurableSymbolStore {
 
         let snapshot_path = config.root_dir.join("symbols.snapshot.json");
         let wal_path = config.root_dir.join("symbols.wal.jsonl");
-        let (state, last_seq) = load_durable_symbol_state(&snapshot_path, &wal_path)?;
+        let (state, last_seq) = load_durable_symbol_state(
+            &snapshot_path,
+            &wal_path,
+            config.mac_key.as_ref(),
+            config.allow_legacy_unauth,
+        )?;
 
         Ok(Self {
             state: ParkingRwLock::new(state),
@@ -882,7 +949,13 @@ impl DurableSymbolStore {
 
     fn checkpoint_locked(&self, last_seq: u64) -> Result<(), SymbolStoreError> {
         let snapshot = self.state.read().to_snapshot();
-        write_snapshot(&self.snapshot_path, last_seq, &snapshot).map_err(symbol_io)?;
+        write_snapshot(
+            &self.snapshot_path,
+            last_seq,
+            &snapshot,
+            self.config.mac_key.as_ref(),
+        )
+        .map_err(symbol_io_durable)?;
         clear_wal(&self.wal_path).map_err(symbol_io)?;
         Ok(())
     }
@@ -896,7 +969,8 @@ impl DurableSymbolStore {
             // Advancing next_seq on a failed append leaves an irrecoverable gap
             // in the WAL sequence (load_wal_records rejects the gap at startup).
             let seq = self.next_seq.load(Ordering::SeqCst);
-            append_wal_record(&self.wal_path, seq, &op).map_err(symbol_io)?;
+            append_wal_record(&self.wal_path, seq, &op, self.config.mac_key.as_ref())
+                .map_err(symbol_io_durable)?;
             self.next_seq.store(seq.saturating_add(1), Ordering::SeqCst);
             state.apply_loaded_mutation(op)?;
 
@@ -1078,15 +1152,20 @@ fn load_durable_object_state(
     snapshot_path: &Path,
     wal_path: &Path,
     verifier: Option<&dyn ObjectIdVerifier>,
+    mac_key: Option<&[u8; 32]>,
+    allow_legacy_unauth: bool,
 ) -> Result<(DurableObjectState, u64), ObjectStoreError> {
     let (mut state, last_snapshot_seq) =
-        match read_snapshot::<ObjectSnapshot>(snapshot_path).map_err(object_io)? {
+        match read_snapshot::<ObjectSnapshot>(snapshot_path, mac_key, allow_legacy_unauth)
+            .map_err(object_io_durable)?
+        {
             Some((snapshot, seq)) => (DurableObjectState::from_snapshot(snapshot, verifier)?, seq),
             None => (DurableObjectState::default(), 0),
         };
 
     let records =
-        read_wal_records::<ObjectWalOp>(wal_path, last_snapshot_seq).map_err(object_io)?;
+        read_wal_records::<ObjectWalOp>(wal_path, last_snapshot_seq, mac_key, allow_legacy_unauth)
+            .map_err(object_io_durable)?;
     let mut last_seq = last_snapshot_seq;
     for record in records {
         last_seq = record.seq;
@@ -1117,15 +1196,20 @@ fn load_durable_object_state(
 fn load_durable_symbol_state(
     snapshot_path: &Path,
     wal_path: &Path,
+    mac_key: Option<&[u8; 32]>,
+    allow_legacy_unauth: bool,
 ) -> Result<(DurableSymbolState, u64), SymbolStoreError> {
     let (mut state, last_snapshot_seq) =
-        match read_snapshot::<SymbolSnapshot>(snapshot_path).map_err(symbol_io)? {
+        match read_snapshot::<SymbolSnapshot>(snapshot_path, mac_key, allow_legacy_unauth)
+            .map_err(symbol_io_durable)?
+        {
             Some((snapshot, seq)) => (DurableSymbolState::from_snapshot(snapshot)?, seq),
             None => (DurableSymbolState::default(), 0),
         };
 
     let records =
-        read_wal_records::<SymbolWalOp>(wal_path, last_snapshot_seq).map_err(symbol_io)?;
+        read_wal_records::<SymbolWalOp>(wal_path, last_snapshot_seq, mac_key, allow_legacy_unauth)
+            .map_err(symbol_io_durable)?;
     let mut last_seq = last_snapshot_seq;
     for record in records {
         last_seq = record.seq;
@@ -1185,7 +1269,49 @@ fn read_until_bounded<R: BufRead>(
     }
 }
 
-fn read_snapshot<T>(path: &Path) -> Result<Option<(T, u64)>, String>
+/// Internal IO error type for the durable WAL/snapshot layer.
+///
+/// Distinguishes a tampering signal (`TamperedAuditEnvelope`-shaped)
+/// from a generic IO error so the surrounding store-error mappers
+/// can preserve the typed `TamperedAuditEnvelope` variant
+/// (bead flywheel_connectors-dgbtx).
+#[derive(Debug)]
+enum DurableIoError {
+    Tampered { path: String, reason: String },
+    Other(String),
+}
+
+impl From<String> for DurableIoError {
+    fn from(value: String) -> Self {
+        Self::Other(value)
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn object_io_durable(error: DurableIoError) -> ObjectStoreError {
+    match error {
+        DurableIoError::Tampered { path, reason } => {
+            ObjectStoreError::TamperedAuditEnvelope { path, reason }
+        }
+        DurableIoError::Other(s) => ObjectStoreError::Io(s),
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn symbol_io_durable(error: DurableIoError) -> SymbolStoreError {
+    match error {
+        DurableIoError::Tampered { path, reason } => {
+            SymbolStoreError::TamperedAuditEnvelope { path, reason }
+        }
+        DurableIoError::Other(s) => SymbolStoreError::Io(s),
+    }
+}
+
+fn read_snapshot<T>(
+    path: &Path,
+    mac_key: Option<&[u8; 32]>,
+    allow_legacy_unauth: bool,
+) -> Result<Option<(T, u64)>, DurableIoError>
 where
     T: Serialize + DeserializeOwned,
 {
@@ -1198,35 +1324,80 @@ where
     let metadata =
         fs::metadata(path).map_err(|error| format!("stat snapshot {}: {error}", path.display()))?;
     if metadata.len() > MAX_SNAPSHOT_BYTES {
-        return Err(format!(
+        return Err(DurableIoError::Other(format!(
             "snapshot {} exceeds {} bytes (got {})",
             path.display(),
             MAX_SNAPSHOT_BYTES,
             metadata.len()
-        ));
+        )));
     }
 
     let bytes =
         fs::read(path).map_err(|error| format!("read snapshot {}: {error}", path.display()))?;
     let envelope: SnapshotEnvelope<T> = serde_json::from_slice(&bytes)
         .map_err(|error| format!("parse snapshot {}: {error}", path.display()))?;
-    if envelope.version != SNAPSHOT_VERSION {
-        return Err(format!(
-            "unsupported snapshot version {} for {}",
-            envelope.version,
-            path.display()
-        ));
-    }
-    let expected = checksum_json(&(envelope.version, envelope.last_seq, &envelope.payload))
-        .map_err(|error| format!("checksum snapshot {}: {error}", path.display()))?;
-    if expected != envelope.checksum {
-        return Err(format!("snapshot checksum mismatch for {}", path.display()));
-    }
 
-    Ok(Some((envelope.payload, envelope.last_seq)))
+    match envelope.version {
+        v if v == SNAPSHOT_VERSION_V2 => {
+            // V2 envelope. Authenticate via keyed MAC. A V2 envelope
+            // without an installed `mac_key` cannot be verified — fail
+            // closed with TamperedAuditEnvelope rather than silently
+            // accept an unverifiable record.
+            let Some(key) = mac_key else {
+                return Err(DurableIoError::Tampered {
+                    path: path.display().to_string(),
+                    reason: "snapshot has V2 envelope but no mac_key configured".to_owned(),
+                });
+            };
+            let expected = keyed_mac_json(
+                key,
+                &(envelope.version, envelope.last_seq, &envelope.payload),
+            )
+            .map_err(|error| format!("compute snapshot mac {}: {error}", path.display()))?;
+            if !macs_equal(&expected, &envelope.checksum) {
+                return Err(DurableIoError::Tampered {
+                    path: path.display().to_string(),
+                    reason: "snapshot V2 keyed MAC mismatch".to_owned(),
+                });
+            }
+            Ok(Some((envelope.payload, envelope.last_seq)))
+        }
+        v if v == SNAPSHOT_VERSION_V1 => {
+            // V1 unkeyed envelope. Reject when a `mac_key` is installed
+            // unless `allow_legacy_unauth` is set — otherwise an
+            // attacker who can write to the directory could downgrade
+            // a V2 envelope to a forged V1 with a recomputed checksum.
+            if mac_key.is_some() && !allow_legacy_unauth {
+                return Err(DurableIoError::Tampered {
+                    path: path.display().to_string(),
+                    reason: "snapshot V1 unkeyed envelope present with mac_key set \
+                             and allow_legacy_unauth=false"
+                        .to_owned(),
+                });
+            }
+            let expected = checksum_json(&(envelope.version, envelope.last_seq, &envelope.payload))
+                .map_err(|error| format!("checksum snapshot {}: {error}", path.display()))?;
+            if expected != envelope.checksum {
+                return Err(DurableIoError::Tampered {
+                    path: path.display().to_string(),
+                    reason: "snapshot V1 checksum mismatch".to_owned(),
+                });
+            }
+            Ok(Some((envelope.payload, envelope.last_seq)))
+        }
+        other => Err(DurableIoError::Other(format!(
+            "unsupported snapshot version {other} for {}",
+            path.display()
+        ))),
+    }
 }
 
-fn read_wal_records<T>(path: &Path, min_seq: u64) -> Result<Vec<WalEnvelope<T>>, String>
+fn read_wal_records<T>(
+    path: &Path,
+    min_seq: u64,
+    mac_key: Option<&[u8; 32]>,
+    allow_legacy_unauth: bool,
+) -> Result<Vec<WalEnvelope<T>>, DurableIoError>
 where
     T: Serialize + DeserializeOwned,
 {
@@ -1266,14 +1437,104 @@ where
             break;
         };
 
-        if envelope.version != WAL_VERSION {
-            truncated = true;
-            break;
-        }
+        // Version-aware authentication. Mismatches (V1 with mac_key
+        // set + legacy not allowed; V2 without mac_key; bad MAC; bad
+        // checksum) are tampering signals — surface them as a typed
+        // error rather than silently truncating. Truncating tampered
+        // tails would let an attacker DoS later writes by cutting the
+        // WAL after their own forged record.
+        let auth_result: Result<(), DurableIoError> = match envelope.version {
+            v if v == WAL_VERSION_V2 => match mac_key {
+                Some(key) => {
+                    let expected =
+                        keyed_mac_json(key, &(envelope.version, envelope.seq, &envelope.op))
+                            .map_err(|error| {
+                                format!("compute wal mac {}: {error}", path.display())
+                            })?;
+                    if macs_equal(&expected, &envelope.checksum) {
+                        Ok(())
+                    } else {
+                        Err(DurableIoError::Tampered {
+                            path: path.display().to_string(),
+                            reason: format!("wal V2 keyed MAC mismatch at seq {}", envelope.seq),
+                        })
+                    }
+                }
+                None => Err(DurableIoError::Tampered {
+                    path: path.display().to_string(),
+                    reason: format!(
+                        "wal V2 envelope at seq {} but no mac_key configured",
+                        envelope.seq
+                    ),
+                }),
+            },
+            v if v == WAL_VERSION_V1 => {
+                if mac_key.is_some() && !allow_legacy_unauth {
+                    Err(DurableIoError::Tampered {
+                        path: path.display().to_string(),
+                        reason: format!(
+                            "wal V1 unkeyed envelope at seq {} with mac_key set \
+                             and allow_legacy_unauth=false",
+                            envelope.seq
+                        ),
+                    })
+                } else {
+                    let expected =
+                        checksum_json(&(envelope.version, envelope.seq, &envelope.op))
+                            .map_err(|error| format!("checksum wal {}: {error}", path.display()))?;
+                    if expected == envelope.checksum {
+                        Ok(())
+                    } else {
+                        // V1 mismatch is treated as a torn-tail signal
+                        // (legacy behaviour) only when no mac_key is set
+                        // — otherwise it is a tampering signal.
+                        if mac_key.is_some() {
+                            Err(DurableIoError::Tampered {
+                                path: path.display().to_string(),
+                                reason: format!("wal V1 checksum mismatch at seq {}", envelope.seq),
+                            })
+                        } else {
+                            // Fall through to torn-tail truncation below.
+                            truncated = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            _ => {
+                // Unknown version: torn or adversarial. Treat as
+                // torn-tail under the legacy-unauth rules; under V2
+                // surface as tampering.
+                if mac_key.is_some() {
+                    Err(DurableIoError::Tampered {
+                        path: path.display().to_string(),
+                        reason: format!(
+                            "wal unknown envelope version {} at seq {}",
+                            envelope.version, envelope.seq
+                        ),
+                    })
+                } else {
+                    truncated = true;
+                    break;
+                }
+            }
+        };
+        auth_result?;
 
-        let expected = checksum_json(&(envelope.version, envelope.seq, &envelope.op))
-            .map_err(|error| format!("checksum wal {}: {error}", path.display()))?;
-        if expected != envelope.checksum || envelope.seq <= last_seq_in_file {
+        if envelope.seq <= last_seq_in_file {
+            // Out-of-order seq with valid MAC: treat as tampering when
+            // V2/keyed; treat as torn-tail when V1/unkeyed. An attacker
+            // replaying an old keyed record at a lower seq fails this
+            // check.
+            if mac_key.is_some() {
+                return Err(DurableIoError::Tampered {
+                    path: path.display().to_string(),
+                    reason: format!(
+                        "wal seq regression: {} <= last seen {}",
+                        envelope.seq, last_seq_in_file
+                    ),
+                });
+            }
             truncated = true;
             break;
         }
@@ -1283,12 +1544,12 @@ where
 
         if envelope.seq > min_seq {
             if envelope.seq != expected_next_seq {
-                return Err(format!(
+                return Err(DurableIoError::Other(format!(
                     "wal sequence gap in {}: expected {}, found {}",
                     path.display(),
                     expected_next_seq,
                     envelope.seq
-                ));
+                )));
             }
             records.push(envelope);
             expected_next_seq = expected_next_seq.saturating_add(1);
@@ -1311,14 +1572,26 @@ where
     Ok(records)
 }
 
-fn append_wal_record<T>(path: &Path, seq: u64, op: &T) -> Result<(), String>
+fn append_wal_record<T>(
+    path: &Path,
+    seq: u64,
+    op: &T,
+    mac_key: Option<&[u8; 32]>,
+) -> Result<(), DurableIoError>
 where
     T: Serialize,
 {
-    let checksum = checksum_json(&(WAL_VERSION, seq, op))
-        .map_err(|error| format!("serialize wal checksum {}: {error}", path.display()))?;
+    let (version, checksum) = if let Some(key) = mac_key {
+        let mac = keyed_mac_json(key, &(WAL_VERSION_V2, seq, op))
+            .map_err(|error| format!("serialize wal mac {}: {error}", path.display()))?;
+        (WAL_VERSION_V2, mac)
+    } else {
+        let cs = checksum_json(&(WAL_VERSION_V1, seq, op))
+            .map_err(|error| format!("serialize wal checksum {}: {error}", path.display()))?;
+        (WAL_VERSION_V1, cs)
+    };
     let envelope = WalEnvelope {
-        version: WAL_VERSION,
+        version,
         seq,
         checksum,
         op,
@@ -1340,24 +1613,41 @@ where
     Ok(())
 }
 
-async fn append_wal_record_blocking<T>(path: PathBuf, seq: u64, op: T) -> Result<(), String>
+async fn append_wal_record_blocking<T>(
+    path: PathBuf,
+    seq: u64,
+    op: T,
+    mac_key: Option<[u8; 32]>,
+) -> Result<(), DurableIoError>
 where
     T: Serialize + Send + 'static,
 {
     run_blocking_io("append durable object WAL record", move || {
-        append_wal_record(&path, seq, &op)
+        append_wal_record(&path, seq, &op, mac_key.as_ref())
     })
     .await
 }
 
-fn write_snapshot<T>(path: &Path, last_seq: u64, payload: &T) -> Result<(), String>
+fn write_snapshot<T>(
+    path: &Path,
+    last_seq: u64,
+    payload: &T,
+    mac_key: Option<&[u8; 32]>,
+) -> Result<(), DurableIoError>
 where
     T: Serialize + Clone,
 {
-    let checksum = checksum_json(&(SNAPSHOT_VERSION, last_seq, payload))
-        .map_err(|error| format!("serialize snapshot checksum {}: {error}", path.display()))?;
+    let (version, checksum) = if let Some(key) = mac_key {
+        let mac = keyed_mac_json(key, &(SNAPSHOT_VERSION_V2, last_seq, payload))
+            .map_err(|error| format!("serialize snapshot mac {}: {error}", path.display()))?;
+        (SNAPSHOT_VERSION_V2, mac)
+    } else {
+        let cs = checksum_json(&(SNAPSHOT_VERSION_V1, last_seq, payload))
+            .map_err(|error| format!("serialize snapshot checksum {}: {error}", path.display()))?;
+        (SNAPSHOT_VERSION_V1, cs)
+    };
     let envelope = SnapshotEnvelope {
-        version: SNAPSHOT_VERSION,
+        version,
         last_seq,
         checksum,
         payload: payload.clone(),
@@ -1370,7 +1660,8 @@ where
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("invalid snapshot path {}", path.display()))?;
     let temp_file_name = format!("{file_name}.tmp.{}.{}", std::process::id(), last_seq);
-    let (temp_path, mut file) = open_unique_snapshot_temp_file(path, &temp_file_name)?;
+    let (temp_path, mut file) =
+        open_unique_snapshot_temp_file(path, &temp_file_name).map_err(DurableIoError::Other)?;
     file.write_all(&bytes)
         .map_err(|error| format!("write temp snapshot {}: {error}", temp_path.display()))?;
     file.sync_all()
@@ -1389,12 +1680,17 @@ where
     Ok(())
 }
 
-async fn write_snapshot_blocking<T>(path: PathBuf, last_seq: u64, payload: T) -> Result<(), String>
+async fn write_snapshot_blocking<T>(
+    path: PathBuf,
+    last_seq: u64,
+    payload: T,
+    mac_key: Option<[u8; 32]>,
+) -> Result<(), DurableIoError>
 where
     T: Serialize + Clone + Send + 'static,
 {
     run_blocking_io("write durable object snapshot", move || {
-        write_snapshot(&path, last_seq, &payload)
+        write_snapshot(&path, last_seq, &payload, mac_key.as_ref())
     })
     .await
 }
@@ -1440,23 +1736,54 @@ fn clear_wal(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-async fn clear_wal_blocking(path: PathBuf) -> Result<(), String> {
-    run_blocking_io("clear durable object WAL", move || clear_wal(&path)).await
+async fn clear_wal_blocking(path: PathBuf) -> Result<(), DurableIoError> {
+    run_blocking_io("clear durable object WAL", move || {
+        clear_wal(&path).map_err(DurableIoError::Other)
+    })
+    .await
 }
 
-async fn run_blocking_io<T, F>(operation: &'static str, f: F) -> Result<T, String>
+async fn run_blocking_io<T, E, F>(operation: &'static str, f: F) -> Result<T, E>
 where
     T: Send + 'static,
-    F: FnOnce() -> Result<T, String> + Send + 'static,
+    E: From<String> + Send + 'static,
+    F: FnOnce() -> Result<T, E> + Send + 'static,
 {
     tokio::task::spawn_blocking(f)
         .await
-        .map_err(|error| format!("{operation} task failed: {error}"))?
+        .map_err(|error| E::from(format!("{operation} task failed: {error}")))?
 }
 
 fn checksum_json<T: Serialize>(value: &T) -> Result<[u8; 32], serde_json::Error> {
     let bytes = serde_json::to_vec(value)?;
     Ok(*blake3::hash(&bytes).as_bytes())
+}
+
+/// Compute a keyed BLAKE3 MAC over the JSON serialization of `value`
+/// using `mac_key` as the secret. This is the V2 envelope authenticator
+/// for `(version, seq, op)` (WAL) and `(version, last_seq, payload)`
+/// (snapshot) tuples. BLAKE3's keyed mode is a PRF with the same
+/// security properties as HMAC-SHA256 (32-byte key, 32-byte tag,
+/// pseudo-random under the standard model) but is the workspace's
+/// existing primitive — no new dependency required.
+///
+/// Bead: flywheel_connectors-dgbtx.
+fn keyed_mac_json<T: Serialize>(
+    mac_key: &[u8; 32],
+    value: &T,
+) -> Result<[u8; 32], serde_json::Error> {
+    let bytes = serde_json::to_vec(value)?;
+    Ok(*blake3::keyed_hash(mac_key, &bytes).as_bytes())
+}
+
+/// Constant-time MAC comparison. Prevents an attacker who can observe
+/// timing on the verification path from learning the MAC byte-by-byte.
+fn macs_equal(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    let mut diff = 0u8;
+    for i in 0..32 {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
 }
 
 #[cfg(not(windows))]
@@ -1667,9 +1994,10 @@ mod tests {
         //    checksum so the bytes-on-disk look authentic.
         let wal_path = temp_dir.path().join("objects.wal.jsonl");
         let op = ObjectWalOp::Put(Box::new(forged));
-        let checksum = checksum_json(&(WAL_VERSION, 2u64, &op)).expect("compute forged checksum");
+        let checksum =
+            checksum_json(&(WAL_VERSION_V1, 2u64, &op)).expect("compute forged checksum");
         let envelope = WalEnvelope {
-            version: WAL_VERSION,
+            version: WAL_VERSION_V1,
             seq: 2u64,
             checksum,
             op: &op,
@@ -1776,9 +2104,10 @@ mod tests {
 
         let wal_path = temp_dir.path().join("objects.wal.jsonl");
         let op = ObjectWalOp::Put(Box::new(forged));
-        let checksum = checksum_json(&(WAL_VERSION, 2u64, &op)).expect("compute forged checksum");
+        let checksum =
+            checksum_json(&(WAL_VERSION_V1, 2u64, &op)).expect("compute forged checksum");
         let envelope = WalEnvelope {
-            version: WAL_VERSION,
+            version: WAL_VERSION_V1,
             seq: 2u64,
             checksum,
             op: &op,
@@ -2062,7 +2391,7 @@ mod tests {
                 symbols: Vec::new(),
             }],
         };
-        write_snapshot(&snapshot_path, 1, &snapshot).expect("write invalid snapshot");
+        write_snapshot(&snapshot_path, 1, &snapshot, None).expect("write invalid snapshot");
 
         match DurableSymbolStore::open(config) {
             Err(SymbolStoreError::InvalidSymbol { .. }) => {}
@@ -2091,7 +2420,7 @@ mod tests {
             meta: test_symbol(10, 0, 5).meta,
             data: vec![0xAB; 7],
         };
-        append_wal_record(&wal_path, 2, &SymbolWalOp::PutSymbol(forged)).expect("append wal");
+        append_wal_record(&wal_path, 2, &SymbolWalOp::PutSymbol(forged), None).expect("append wal");
 
         match DurableSymbolStore::open(config) {
             Err(SymbolStoreError::InvalidSymbol { reason }) => {
@@ -2134,7 +2463,7 @@ mod tests {
                 symbols: vec![invalid_symbol],
             }],
         };
-        write_snapshot(&snapshot_path, 0, &snapshot).expect("write snapshot");
+        write_snapshot(&snapshot_path, 0, &snapshot, None).expect("write snapshot");
 
         let reopened = DurableSymbolStore::open(config).expect("open symbol store");
         assert_eq!(
@@ -2284,5 +2613,460 @@ mod tests {
             .expect("wal metadata after reopen")
             .len();
         assert_eq!(truncated_len, valid_len, "corrupt tail should be truncated");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // dgbtx: V2 keyed-MAC envelope regression tests.
+    //
+    // SilverFox's gamma audit observed that the pre-dgbtx WAL/snapshot
+    // checksums were unkeyed BLAKE3, so a tamperer with file-system
+    // access could:
+    //   - forge `Delete` / `SetRetention` / `DeleteSymbol` records by
+    //     recomputing the unkeyed checksum,
+    //   - rewrite a snapshot to omit objects (advancing `last_seq` past
+    //     them) and then reattach a forged WAL prefix,
+    //   - replay an old keyed record at a lower seq.
+    // The V2 envelope authenticates `(version, seq, op)` with a per-
+    // store secret key; these tests pin the verifier behaviour.
+    // ─────────────────────────────────────────────────────────────────
+
+    const TEST_MAC_KEY: [u8; 32] = [0xA5; 32];
+    const OTHER_MAC_KEY: [u8; 32] = [0x5A; 32];
+
+    fn dgbtx_object_config(
+        path: &Path,
+        mac_key: Option<[u8; 32]>,
+        allow_legacy_unauth: bool,
+    ) -> DurableObjectStoreConfig {
+        let mut config = DurableObjectStoreConfig::new(path);
+        config.checkpoint_after_ops = 0;
+        config.mac_key = mac_key;
+        config.allow_legacy_unauth = allow_legacy_unauth;
+        config
+    }
+
+    fn dgbtx_symbol_config(
+        path: &Path,
+        mac_key: Option<[u8; 32]>,
+        allow_legacy_unauth: bool,
+    ) -> DurableSymbolStoreConfig {
+        let mut config = DurableSymbolStoreConfig::new(path);
+        config.checkpoint_after_ops = 0;
+        config.mac_key = mac_key;
+        config.allow_legacy_unauth = allow_legacy_unauth;
+        config
+    }
+
+    /// Forge a Delete record with a recomputed unkeyed checksum. Without
+    /// dgbtx, the V1 checksum collapses to `BLAKE3(serde_json(op))` and
+    /// the attacker only needs the on-disk seq position. With dgbtx, the
+    /// MAC key is required and the forgery fails.
+    #[fcp_async_core::runtime::test]
+    async fn dgbtx_forged_delete_record_with_recomputed_checksum_rejected_under_v2() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        // Open with V2 enabled (mac_key set).
+        let config =
+            dgbtx_object_config(&temp_dir.path().join("objects"), Some(TEST_MAC_KEY), false);
+        let store = DurableObjectStore::open(config.clone()).expect("open V2 store");
+        store.put(test_object(1)).await.expect("put legit");
+        // Force a checkpoint so the WAL is empty and the legit record is
+        // inside the snapshot. The forged WAL append below thus targets
+        // seq=2 cleanly.
+        store.checkpoint().await.expect("checkpoint");
+        drop(store);
+
+        // Attacker recomputes a V1 unkeyed checksum and appends a Delete.
+        let wal_path = config.root_dir.join("objects.wal.jsonl");
+        let op = ObjectWalOp::Delete {
+            object_id: test_object_id(1),
+        };
+        let checksum = checksum_json(&(WAL_VERSION_V1, 2u64, &op)).expect("compute checksum");
+        let envelope = WalEnvelope {
+            version: WAL_VERSION_V1,
+            seq: 2u64,
+            checksum,
+            op: &op,
+        };
+        let mut bytes = serde_json::to_vec(&envelope).expect("serialize");
+        bytes.push(b'\n');
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&wal_path)
+            .expect("open wal");
+        file.write_all(&bytes).expect("append forged");
+        drop(file);
+
+        // Reopen MUST refuse the V1 envelope when V2 is configured and
+        // legacy is disallowed.
+        match DurableObjectStore::open(config) {
+            Err(ObjectStoreError::TamperedAuditEnvelope { reason, .. }) => {
+                assert!(
+                    reason.contains("V1 unkeyed envelope"),
+                    "expected V1-rejection reason, got: {reason}"
+                );
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+            Ok(_) => panic!("forged V1 Delete must not be accepted under V2 mode"),
+        }
+    }
+
+    /// A V2 envelope written under one MAC key MUST be rejected when
+    /// a different (or no) MAC key is presented at read time.
+    #[fcp_async_core::runtime::test]
+    async fn dgbtx_v2_envelope_with_wrong_mac_key_rejected() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let write_config =
+            dgbtx_object_config(&temp_dir.path().join("objects"), Some(TEST_MAC_KEY), false);
+        let store = DurableObjectStore::open(write_config.clone()).expect("open store");
+        store.put(test_object(2)).await.expect("put legit");
+        drop(store);
+
+        // Same root dir, different mac_key: the V2 MAC will not verify.
+        let read_config = dgbtx_object_config(&write_config.root_dir, Some(OTHER_MAC_KEY), false);
+        match DurableObjectStore::open(read_config) {
+            Err(ObjectStoreError::TamperedAuditEnvelope { reason, .. }) => {
+                assert!(
+                    reason.contains("V2 keyed MAC mismatch"),
+                    "expected V2 MAC mismatch, got: {reason}"
+                );
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+            Ok(_) => panic!("wrong mac_key MUST NOT decrypt a V2 envelope"),
+        }
+    }
+
+    /// Tampering the `op` field of a V2 WAL envelope (without
+    /// recomputing the MAC, which the attacker can't do) MUST be
+    /// rejected as a tampered envelope.
+    #[fcp_async_core::runtime::test]
+    async fn dgbtx_v2_wal_byte_flip_in_op_rejected() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config =
+            dgbtx_object_config(&temp_dir.path().join("objects"), Some(TEST_MAC_KEY), false);
+        let store = DurableObjectStore::open(config.clone()).expect("open store");
+        store.put(test_object(3)).await.expect("put legit");
+        drop(store);
+
+        // Read the WAL, flip a byte in the body of the op, write back.
+        let wal_path = config.root_dir.join("objects.wal.jsonl");
+        let mut bytes = fs::read(&wal_path).expect("read wal");
+        // Find a likely body byte (the seed byte 3 repeats 96 times in
+        // the body; the JSON body field is `[3,3,3,...]`).
+        let needle: &[u8] = b"\"body\":[";
+        let pos = bytes
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("body field present");
+        // Flip the first body integer's high bit by appending a digit.
+        // Specifically replace the leading "3" with "4" to corrupt the
+        // first body byte's value without changing structure.
+        bytes[pos + needle.len()] = b'4';
+        fs::write(&wal_path, &bytes).expect("write tampered wal");
+
+        match DurableObjectStore::open(config) {
+            Err(ObjectStoreError::TamperedAuditEnvelope { reason, .. }) => {
+                assert!(
+                    reason.contains("V2 keyed MAC mismatch"),
+                    "expected MAC mismatch on body tampering, got: {reason}"
+                );
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+            Ok(_) => panic!("byte-flipped V2 WAL envelope MUST NOT be accepted"),
+        }
+    }
+
+    /// Tampering the snapshot `payload` field of a V2 envelope (e.g.
+    /// omitting an object to silently drop it) MUST be rejected.
+    #[fcp_async_core::runtime::test]
+    async fn dgbtx_v2_snapshot_byte_flip_in_payload_rejected() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config =
+            dgbtx_object_config(&temp_dir.path().join("objects"), Some(TEST_MAC_KEY), false);
+        let store = DurableObjectStore::open(config.clone()).expect("open store");
+        store.put(test_object(4)).await.expect("put legit");
+        store.checkpoint().await.expect("checkpoint");
+        drop(store);
+
+        let snapshot_path = config.root_dir.join("objects.snapshot.json");
+        let mut bytes = fs::read(&snapshot_path).expect("read snapshot");
+        // Flip a byte inside the payload. Find the body array marker.
+        // test_object(4) has body = vec![4; 96] → JSON `[4,4,...]`. Replace
+        // the first body byte's digit with `9` so the post-deserialize
+        // payload differs from the MAC-covered original.
+        let needle: &[u8] = b"\"body\":[";
+        let pos = bytes
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("body present");
+        bytes[pos + needle.len()] = b'9';
+        fs::write(&snapshot_path, &bytes).expect("write tampered snapshot");
+
+        match DurableObjectStore::open(config) {
+            Err(ObjectStoreError::TamperedAuditEnvelope { reason, .. }) => {
+                assert!(
+                    reason.contains("V2 keyed MAC mismatch"),
+                    "expected snapshot MAC mismatch, got: {reason}"
+                );
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+            Ok(_) => panic!("tampered V2 snapshot MUST NOT be accepted"),
+        }
+    }
+
+    /// `allow_legacy_unauth = true` is the migration knob — V1
+    /// envelopes load successfully when set, so a node can ingest
+    /// pre-dgbtx data and rewrite it as V2 on the next checkpoint.
+    #[fcp_async_core::runtime::test]
+    async fn dgbtx_v1_envelope_loads_under_legacy_flag() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        // First, write data with no mac_key (V1 envelopes on disk).
+        let v1_config = dgbtx_object_config(&temp_dir.path().join("objects"), None, false);
+        let store = DurableObjectStore::open(v1_config.clone()).expect("open V1 store");
+        store.put(test_object(5)).await.expect("put");
+        drop(store);
+
+        // Reopen with V2 mac_key set + allow_legacy_unauth=true. The V1
+        // tail must load.
+        let migration_config = dgbtx_object_config(&v1_config.root_dir, Some(TEST_MAC_KEY), true);
+        let migrated =
+            DurableObjectStore::open(migration_config.clone()).expect("migration must load V1");
+        assert!(migrated.exists(&test_object_id(5)).await);
+
+        // After a checkpoint, the snapshot is written as V2 — reopening
+        // without the legacy flag now succeeds (V1 WAL was cleared by
+        // checkpoint, V2 snapshot verifies under mac_key).
+        migrated.checkpoint().await.expect("checkpoint to V2");
+        drop(migrated);
+
+        let strict_config = dgbtx_object_config(&v1_config.root_dir, Some(TEST_MAC_KEY), false);
+        let strict = DurableObjectStore::open(strict_config).expect("V2 reopen after checkpoint");
+        assert!(strict.exists(&test_object_id(5)).await);
+    }
+
+    /// Snapshot-omission attack: rewrite the snapshot to drop an object
+    /// (advancing `last_seq` so WAL replay starts after the dropped
+    /// record). Under V1 unkeyed mode, an attacker who recomputes the
+    /// checksum can do this; under V2 the MAC is unforgeable.
+    #[fcp_async_core::runtime::test]
+    async fn dgbtx_v2_snapshot_omission_rejected() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config =
+            dgbtx_object_config(&temp_dir.path().join("objects"), Some(TEST_MAC_KEY), false);
+        let store = DurableObjectStore::open(config.clone()).expect("open store");
+        store.put(test_object(6)).await.expect("put 6");
+        store.put(test_object(7)).await.expect("put 7");
+        store.checkpoint().await.expect("checkpoint");
+        drop(store);
+
+        // Read the V2 snapshot, drop one of the objects from the
+        // payload, and write back. The MAC over the original payload
+        // is left untouched — but it no longer matches the modified
+        // payload so verification fails.
+        let snapshot_path = config.root_dir.join("objects.snapshot.json");
+        let mut bytes = fs::read(&snapshot_path).expect("read snapshot");
+        // Locate the second object's body (a run of 7s) and overwrite
+        // a digit. (Easier than parsing JSON to delete the object.)
+        let needle: &[u8] = b"7,7,7,7,7,7,7,7,7,7";
+        let pos = bytes
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("seed-7 body present");
+        bytes[pos] = b'9';
+        fs::write(&snapshot_path, &bytes).expect("write tampered snapshot");
+
+        match DurableObjectStore::open(config) {
+            Err(ObjectStoreError::TamperedAuditEnvelope { reason, .. }) => {
+                assert!(
+                    reason.contains("V2 keyed MAC mismatch"),
+                    "expected MAC mismatch on snapshot omission, got: {reason}"
+                );
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+            Ok(_) => panic!("snapshot omission MUST NOT survive V2 verification"),
+        }
+    }
+
+    /// Symbol-store equivalent: forged `DeleteSymbol` with recomputed
+    /// V1 checksum is rejected under V2.
+    #[fcp_async_core::runtime::test]
+    async fn dgbtx_symbol_forged_delete_with_recomputed_checksum_rejected_under_v2() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config =
+            dgbtx_symbol_config(&temp_dir.path().join("symbols"), Some(TEST_MAC_KEY), false);
+        let store = DurableSymbolStore::open(config.clone()).expect("open V2 symbol store");
+        store
+            .put_object_meta(test_symbol_meta(8))
+            .await
+            .expect("put meta");
+        store
+            .put_symbol(test_symbol(8, 0, 1))
+            .await
+            .expect("put sym");
+        store.checkpoint().expect("checkpoint");
+        drop(store);
+
+        let wal_path = config.root_dir.join("symbols.wal.jsonl");
+        let op = SymbolWalOp::DeleteSymbol {
+            object_id: test_object_id(8),
+            esi: 0,
+        };
+        let checksum = checksum_json(&(WAL_VERSION_V1, 3u64, &op)).expect("compute checksum");
+        let envelope = WalEnvelope {
+            version: WAL_VERSION_V1,
+            seq: 3u64,
+            checksum,
+            op: &op,
+        };
+        let mut bytes = serde_json::to_vec(&envelope).expect("serialize");
+        bytes.push(b'\n');
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&wal_path)
+            .expect("open wal");
+        file.write_all(&bytes).expect("append forged");
+        drop(file);
+
+        match DurableSymbolStore::open(config) {
+            Err(SymbolStoreError::TamperedAuditEnvelope { reason, .. }) => {
+                assert!(
+                    reason.contains("V1 unkeyed envelope"),
+                    "expected V1-rejection reason, got: {reason}"
+                );
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+            Ok(_) => panic!("forged V1 DeleteSymbol must not be accepted under V2 mode"),
+        }
+    }
+
+    /// Replay attack: take a legitimate V2 record from the WAL and
+    /// re-append it at the same seq (or lower). The seq-regression check
+    /// fires before MAC verification can be tricked.
+    #[fcp_async_core::runtime::test]
+    async fn dgbtx_v2_seq_regression_rejected() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config =
+            dgbtx_object_config(&temp_dir.path().join("objects"), Some(TEST_MAC_KEY), false);
+        let store = DurableObjectStore::open(config.clone()).expect("open store");
+        store.put(test_object(9)).await.expect("put 9");
+        store.put(test_object(10)).await.expect("put 10");
+        drop(store);
+
+        // Read the WAL — duplicate the first record (seq=1) by appending
+        // it after the seq=2 record. Both lines carry valid V2 MACs but
+        // the seq sequence regresses (3 -> 1 if we replay).
+        let wal_path = config.root_dir.join("objects.wal.jsonl");
+        let original = fs::read(&wal_path).expect("read wal");
+        // The WAL is two newline-terminated lines. Find the first.
+        let first_newline = original
+            .iter()
+            .position(|&b| b == b'\n')
+            .expect("first newline");
+        let first_line = &original[..=first_newline];
+        let mut tampered = original.clone();
+        tampered.extend_from_slice(first_line);
+        fs::write(&wal_path, &tampered).expect("write replay tail");
+
+        match DurableObjectStore::open(config) {
+            Err(ObjectStoreError::TamperedAuditEnvelope { reason, .. }) => {
+                assert!(
+                    reason.contains("seq regression"),
+                    "expected seq regression diagnosis, got: {reason}"
+                );
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+            Ok(_) => panic!("seq replay MUST be rejected under V2"),
+        }
+    }
+
+    /// Snapshot written under V2 cannot be downgraded to a forged V1
+    /// snapshot — a tamperer who replaces the snapshot envelope's
+    /// `version` field (and recomputes the V1 checksum) is rejected
+    /// when V2 is configured and legacy is disallowed.
+    #[fcp_async_core::runtime::test]
+    async fn dgbtx_v2_snapshot_downgrade_to_v1_rejected() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config =
+            dgbtx_object_config(&temp_dir.path().join("objects"), Some(TEST_MAC_KEY), false);
+        let store = DurableObjectStore::open(config.clone()).expect("open store");
+        store.put(test_object(11)).await.expect("put 11");
+        store.checkpoint().await.expect("checkpoint");
+        drop(store);
+
+        // Build a forged V1 snapshot with an unkeyed checksum that
+        // covers a different payload (omitting object 11).
+        let snapshot_path = config.root_dir.join("objects.snapshot.json");
+        let empty_snapshot = ObjectSnapshot { objects: vec![] };
+        write_snapshot(&snapshot_path, 1, &empty_snapshot, None).expect("write forged V1 snapshot");
+
+        match DurableObjectStore::open(config) {
+            Err(ObjectStoreError::TamperedAuditEnvelope { reason, .. }) => {
+                assert!(
+                    reason.contains("V1 unkeyed envelope"),
+                    "expected V1-downgrade rejection, got: {reason}"
+                );
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+            Ok(_) => panic!("V2-to-V1 snapshot downgrade MUST be rejected"),
+        }
+    }
+
+    /// Sanity check: V2 round-trip works end-to-end. Write V2, reopen
+    /// with the same key, verify state survives.
+    #[fcp_async_core::runtime::test]
+    async fn dgbtx_v2_round_trip_preserves_state() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config =
+            dgbtx_object_config(&temp_dir.path().join("objects"), Some(TEST_MAC_KEY), false);
+        let store = DurableObjectStore::open(config.clone()).expect("open V2 store");
+        store.put(test_object(12)).await.expect("put 12");
+        store
+            .set_retention(
+                &test_object_id(12),
+                RetentionClass::Lease { expires_at: 99 },
+            )
+            .await
+            .expect("set retention");
+        store.put(test_object(13)).await.expect("put 13");
+        store.checkpoint().await.expect("checkpoint");
+        store.put(test_object(14)).await.expect("put 14");
+        drop(store);
+
+        let reopened = DurableObjectStore::open(config).expect("reopen V2");
+        assert!(reopened.exists(&test_object_id(12)).await);
+        assert!(reopened.exists(&test_object_id(13)).await);
+        assert!(reopened.exists(&test_object_id(14)).await);
+        let recovered = reopened.get(&test_object_id(12)).await.expect("get 12");
+        assert!(matches!(
+            recovered.storage.retention,
+            RetentionClass::Lease { expires_at: 99 }
+        ));
+    }
+
+    /// Symbol-store V2 round-trip sanity check.
+    #[fcp_async_core::runtime::test]
+    async fn dgbtx_symbol_v2_round_trip_preserves_state() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config =
+            dgbtx_symbol_config(&temp_dir.path().join("symbols"), Some(TEST_MAC_KEY), false);
+        let store = DurableSymbolStore::open(config.clone()).expect("open V2 symbol store");
+        store
+            .put_object_meta(test_symbol_meta(15))
+            .await
+            .expect("put meta");
+        store
+            .put_symbol(test_symbol(15, 0, 1))
+            .await
+            .expect("put sym 0");
+        store.checkpoint().expect("checkpoint");
+        store
+            .put_symbol(test_symbol(15, 1, 2))
+            .await
+            .expect("put sym 1");
+        drop(store);
+
+        let reopened = DurableSymbolStore::open(config).expect("reopen V2 symbol store");
+        assert_eq!(reopened.symbol_count(&test_object_id(15)).await, 2);
     }
 }

@@ -298,7 +298,8 @@ impl MattermostConnector {
         let verifier = self.verifier.as_ref().ok_or_else(|| FcpError::Internal {
             message: "connector ready state missing capability verifier".into(),
         })?;
-        verifier.verify(
+        // dja9u.1.c: typestate handoff via verify_bound.
+        let _bound = verifier.verify_bound(
             req.capability_token.clone(),
             &required_capability,
             &req.operation,
@@ -2701,8 +2702,8 @@ fn decode_embedded_json<T: DeserializeOwned>(value: Option<&Value>) -> Option<T>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_prelude::{CapabilityToken, RequestId};
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_prelude::{CapabilityToken, RequestId};
 
     fn invoke_request(
         connector: &MattermostConnector,

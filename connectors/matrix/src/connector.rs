@@ -1442,7 +1442,8 @@ impl MatrixConnector {
             message: "connector ready state missing capability verifier".into(),
         })?;
         let resource_uris = resource_uris_for_operation(operation, &req.input)?;
-        verifier.verify(
+        // dja9u.1.c: typestate handoff via verify_bound.
+        let _bound = verifier.verify_bound(
             req.capability_token,
             &required_cap,
             &req.operation,

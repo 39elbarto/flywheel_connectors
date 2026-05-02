@@ -769,7 +769,8 @@ impl NetlifyConnector {
                     });
                 }
             };
-            verifier.verify(req.capability_token, &cap, &req.operation, &[])?;
+            // dja9u.1.c: typestate handoff via verify_bound.
+            let _bound = verifier.verify_bound(req.capability_token, &cap, &req.operation, &[])?;
         } else {
             return Err(FcpError::Internal {
                 message: "connector ready state missing capability verifier".into(),

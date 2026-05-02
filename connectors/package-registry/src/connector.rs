@@ -808,7 +808,8 @@ impl PackageRegistryConnector {
                 });
             }
         };
-        verifier.verify(
+        // dja9u.1.c: typestate handoff via verify_bound.
+        let _bound = verifier.verify_bound(
             req.capability_token.clone(),
             &required_capability,
             &req.operation,

@@ -9,7 +9,7 @@
 //! Based on FCP Specification Section 10 (Gateway Architecture) and
 //! bead `flywheel_connectors-oip0`.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
 #![allow(clippy::module_name_repetitions)]
 
@@ -42,6 +42,8 @@ mod error;
 #[allow(dead_code)]
 mod health;
 mod migration_linux;
+#[cfg(target_os = "macos")]
+mod migration_macos;
 mod output_capture;
 mod progress;
 mod redaction;
@@ -63,6 +65,8 @@ pub use emergency_revocation::*;
 pub use enforcement::*;
 pub use error::*;
 pub use migration_linux::*;
+#[cfg(target_os = "macos")]
+pub use migration_macos::*;
 pub use output_capture::*;
 pub use progress::*;
 pub use redaction::*;

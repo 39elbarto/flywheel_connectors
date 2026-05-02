@@ -75,9 +75,10 @@ pub use fcp_core::{FcpError, FcpResult};
 pub mod constraint_receipt;
 
 pub use constraint_receipt::{
-    ConstraintEnforcementReceipt, ConstraintsEvaluatedSummary, EvaluationOutcomeRecord,
-    RECEIPT_ID_DOMAIN, RECEIPT_SIGNING_DOMAIN, ReceiptBody, ReceiptError, ReceiptId,
-    RequestDescriptorHash,
+    ConstraintEnforcementReceipt, ConstraintReceiptVerifier, ConstraintsEvaluatedSummary,
+    DEFAULT_RECEIPT_FRESHNESS_WINDOW_MS, EvaluationOutcomeRecord, RECEIPT_ID_DOMAIN,
+    RECEIPT_SIGNING_DOMAIN, ReceiptBody, ReceiptError, ReceiptId, ReceiptNonce,
+    ReceiptVerificationContext, RequestDescriptorHash,
 };
 
 // ── Revocation Cascade (m8j0q.A.9) ─────────────────────────────────

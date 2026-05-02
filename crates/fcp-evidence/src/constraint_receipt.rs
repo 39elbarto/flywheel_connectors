@@ -9,7 +9,8 @@
 //!
 //! - **Content-addressed.** The receipt's `receipt_id` is
 //!   `blake3(canonical CBOR of the unsigned receipt)`. Two receipts that
-//!   carry the same observation produce the same id deterministically.
+//!   carry the same token, zone, request nonce, observation, and freshness
+//!   bounds produce the same id deterministically.
 //! - **Sealed in one signed atom.** Both observations — "constraints were
 //!   evaluated" and "the evaluation produced this outcome" — are bound into
 //!   a single Ed25519 signature over `signing_bytes()`. There is no
@@ -17,22 +18,30 @@
 //!   dispatched": the receipt seals both into a single witnessable byte
 //!   range, mirroring the `RevocationSeal` pattern proven in MOR/C1.1.
 //! - **Replayable offline.** [`ConstraintEnforcementReceipt::verify_offline`]
-//!   re-verifies the signature without network or registry access. Owners
-//!   can replay any receipt against any trusted-anchor set.
+//!   re-verifies the signature and freshness without network or registry
+//!   access. Owners can replay any receipt against any trusted-anchor set.
+//! - **Not an authorization token.** A receipt is evidence that a check
+//!   happened once. A stale receipt MUST NOT be trusted to authorize a
+//!   downstream operation; consumers must re-verify token validity, freshness,
+//!   revocation state, and replay state at use time.
 //! - **Forgery-resistant.** Mutating any signed field — observed outcome,
-//!   request-descriptor hash, sealed-at, constraints summary, enforcing
-//!   node id — invalidates the signature. Verified by proptest.
+//!   token id, zone id, request nonce, request-descriptor hash, freshness
+//!   bounds, constraints summary, revocation head sequence, or enforcing node
+//!   id — invalidates the signature. Verified by proptest.
 //! - **CBOR canonical round-trip.** [`ConstraintEnforcementReceipt::to_canonical_cbor`] and
 //!   [`ConstraintEnforcementReceipt::from_canonical_cbor`] are byte-for-byte
 //!   inverses for any well-formed receipt.
 //!
 //! See bead `flywheel_connectors-m8j0q.7` for goal and acceptance criteria.
 
+use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use fcp_cbor::{SerializationError, to_canonical_cbor};
-use fcp_core::TailscaleNodeId;
+use fcp_core::{ObjectId, RequestId, TailscaleNodeId, ZoneId};
 use fcp_crypto::ed25519::{Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey};
 
 /// Domain-separation tag for receipt signing.
@@ -48,6 +57,13 @@ pub const RECEIPT_SIGNING_DOMAIN: &[u8] = b"FCP3-CONSTRAINT-RECEIPT-V1";
 /// can never be confused with bytes that would verify against the receipt's
 /// signature.
 pub const RECEIPT_ID_DOMAIN: &[u8] = b"FCP3-CONSTRAINT-RECEIPT-ID-V1";
+
+/// Default upper bound for receipt freshness.
+///
+/// Constraint receipts are short-lived evidence. A longer downstream cache
+/// window must still reject a receipt whose explicit expiry exceeds this
+/// envelope unless policy deliberately constructs a different verifier.
+pub const DEFAULT_RECEIPT_FRESHNESS_WINDOW_MS: u64 = 60_000;
 
 /// Opaque content hash of the request descriptor that was evaluated.
 ///
@@ -92,6 +108,54 @@ impl RequestDescriptorHash {
 }
 
 impl std::fmt::Display for RequestDescriptorHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_hex())
+    }
+}
+
+/// Per-request nonce committed into a constraint-enforcement receipt.
+///
+/// This is a compact binding for the request identity, not secret material.
+/// Callers can derive it from `InvokeRequest.id` with
+/// [`Self::from_request_id`] or pass an already-generated nonce with
+/// [`Self::from_bytes`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ReceiptNonce(#[serde(with = "fcp_core::util::hex_or_bytes")] pub [u8; 16]);
+
+impl ReceiptNonce {
+    /// Construct from raw bytes.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    /// Derive a stable 128-bit receipt nonce from a wire request id.
+    #[must_use]
+    pub fn from_request_id(request_id: &RequestId) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"FCP3-CONSTRAINT-RECEIPT-NONCE-V1");
+        hasher.update(request_id.0.as_bytes());
+        let digest = hasher.finalize();
+        let mut bytes = [0_u8; 16];
+        bytes.copy_from_slice(&digest.as_bytes()[..16]);
+        Self(bytes)
+    }
+
+    /// Borrow the raw bytes.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+
+    /// Lowercase-hex rendering for log lines and replay errors.
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+}
+
+impl std::fmt::Display for ReceiptNonce {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.to_hex())
     }
@@ -196,6 +260,12 @@ pub struct ConstraintEnforcementReceipt {
     /// Content-addressed identifier (BLAKE3-keyed digest of the unsigned
     /// receipt body). Computed by [`Self::compute_id`] at seal time.
     pub receipt_id: ReceiptId,
+    /// Content-addressed id of the capability token that was checked.
+    pub token_id: ObjectId,
+    /// Zone in which the request was evaluated.
+    pub zone_id: ZoneId,
+    /// Per-request nonce binding this receipt to one request instance.
+    pub request_nonce: ReceiptNonce,
     /// Hash of the request descriptor that was evaluated.
     pub request_descriptor_hash: RequestDescriptorHash,
     /// Compact summary of which constraints were checked.
@@ -204,6 +274,10 @@ pub struct ConstraintEnforcementReceipt {
     pub evaluation_outcome: EvaluationOutcomeRecord,
     /// Wall-clock time the receipt was sealed (Unix milliseconds).
     pub sealed_at_unix_ms: u64,
+    /// Wall-clock time after which the receipt is stale (Unix milliseconds).
+    pub expires_at_unix_ms: u64,
+    /// Revocation registry head sequence observed by the enforcer.
+    pub revocation_head_seq_observed: u64,
     /// Identifier of the node that enforced this evaluation.
     pub enforcing_node_id: TailscaleNodeId,
     /// Ed25519 signature over [`Self::signing_bytes`] using
@@ -219,10 +293,15 @@ pub struct ConstraintEnforcementReceipt {
 /// circular through `signature`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReceiptBody {
+    pub token_id: ObjectId,
+    pub zone_id: ZoneId,
+    pub request_nonce: ReceiptNonce,
     pub request_descriptor_hash: RequestDescriptorHash,
     pub constraints_evaluated: ConstraintsEvaluatedSummary,
     pub evaluation_outcome: EvaluationOutcomeRecord,
     pub sealed_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+    pub revocation_head_seq_observed: u64,
     pub enforcing_node_id: TailscaleNodeId,
 }
 
@@ -289,11 +368,141 @@ pub enum ReceiptError {
     /// Verifying-key resolver did not return a key for the enforcing node id.
     #[error("no verifying key registered for enforcing node {enforcing_node_id}")]
     UnknownEnforcingNode { enforcing_node_id: String },
+    /// The receipt expires before or exactly when it was sealed.
+    #[error(
+        "invalid receipt freshness window: sealed_at={sealed_at_unix_ms}, expires_at={expires_at_unix_ms}"
+    )]
+    InvalidFreshnessWindow {
+        sealed_at_unix_ms: u64,
+        expires_at_unix_ms: u64,
+    },
+    /// The receipt's explicit freshness window exceeds verifier policy.
+    #[error(
+        "receipt freshness window {window_millis}ms exceeds verifier maximum {max_window_millis}ms"
+    )]
+    FreshnessWindowTooLong {
+        window_millis: u64,
+        max_window_millis: u64,
+    },
+    /// The receipt is stale at the verification timestamp.
+    #[error("receipt expired at {expires_at_unix_ms}, verification time was {now_unix_ms}")]
+    ReceiptExpired {
+        expires_at_unix_ms: u64,
+        now_unix_ms: u64,
+    },
+    /// System clock is before Unix epoch.
+    #[error("system clock is before Unix epoch")]
+    SystemClockBeforeUnixEpoch,
+    /// Receipt was presented for a different token than the one it sealed.
+    #[error("receipt token mismatch: expected {expected}, observed {observed}")]
+    TokenIdMismatch { expected: String, observed: String },
+    /// Receipt was presented for a different zone than the one it sealed.
+    #[error("receipt zone mismatch: expected {expected}, observed {observed}")]
+    ZoneIdMismatch { expected: String, observed: String },
+    /// Receipt observed an older revocation head than the verifier requires.
+    #[error(
+        "receipt revocation head is stale: observed {observed}, current verifier floor {current}"
+    )]
+    RevocationHeadStale { observed: u64, current: u64 },
+    /// The verifier already accepted this nonce inside the sliding window.
+    #[error("receipt nonce replay detected for nonce {nonce}")]
+    ReceiptReplayDetected { nonce: String },
 }
 
 impl From<SerializationError> for ReceiptError {
     fn from(value: SerializationError) -> Self {
         Self::Encoding(value.to_string())
+    }
+}
+
+/// Context a consumer must provide when treating a receipt as live evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptVerificationContext {
+    /// Expected capability-token object id for this operation.
+    pub token_id: ObjectId,
+    /// Expected zone for this operation.
+    pub zone_id: ZoneId,
+    /// Current revocation-head sequence floor known to the verifier.
+    pub current_revocation_head_seq: u64,
+    /// Verification wall-clock time in Unix milliseconds.
+    pub now_unix_ms: u64,
+}
+
+impl ReceiptVerificationContext {
+    /// Build a verification context.
+    #[must_use]
+    pub fn new(
+        token_id: ObjectId,
+        zone_id: ZoneId,
+        current_revocation_head_seq: u64,
+        now_unix_ms: u64,
+    ) -> Self {
+        Self {
+            token_id,
+            zone_id,
+            current_revocation_head_seq,
+            now_unix_ms,
+        }
+    }
+}
+
+/// Stateful verifier that rejects nonce replay inside a sliding window.
+#[derive(Debug, Clone)]
+pub struct ConstraintReceiptVerifier {
+    max_freshness_window_ms: u64,
+    seen_nonces: HashMap<ReceiptNonce, u64>,
+}
+
+impl Default for ConstraintReceiptVerifier {
+    fn default() -> Self {
+        Self::new(DEFAULT_RECEIPT_FRESHNESS_WINDOW_MS)
+    }
+}
+
+impl ConstraintReceiptVerifier {
+    /// Construct a verifier with the maximum accepted freshness window.
+    #[must_use]
+    pub fn new(max_freshness_window_ms: u64) -> Self {
+        Self {
+            max_freshness_window_ms,
+            seen_nonces: HashMap::new(),
+        }
+    }
+
+    /// Verify signature, receipt bindings, freshness, revocation floor, and nonce uniqueness.
+    ///
+    /// # Errors
+    /// Returns [`ReceiptError`] when any structural, cryptographic, freshness,
+    /// binding, revocation, or replay check fails.
+    pub fn verify(
+        &mut self,
+        receipt: &ConstraintEnforcementReceipt,
+        verifying_key: &Ed25519VerifyingKey,
+        context: &ReceiptVerificationContext,
+    ) -> Result<EvaluationOutcomeRecord, ReceiptError> {
+        let outcome = receipt.verify_offline_against(verifying_key, context)?;
+        let freshness_window = receipt.freshness_window_ms()?;
+        if freshness_window > self.max_freshness_window_ms {
+            return Err(ReceiptError::FreshnessWindowTooLong {
+                window_millis: freshness_window,
+                max_window_millis: self.max_freshness_window_ms,
+            });
+        }
+
+        self.prune_expired(context.now_unix_ms);
+        if self.seen_nonces.contains_key(&receipt.request_nonce) {
+            return Err(ReceiptError::ReceiptReplayDetected {
+                nonce: receipt.request_nonce.to_hex(),
+            });
+        }
+        self.seen_nonces
+            .insert(receipt.request_nonce, receipt.expires_at_unix_ms);
+        Ok(outcome)
+    }
+
+    fn prune_expired(&mut self, now_unix_ms: u64) {
+        self.seen_nonces
+            .retain(|_, expires_at_unix_ms| *expires_at_unix_ms >= now_unix_ms);
     }
 }
 
@@ -304,19 +513,21 @@ impl ConstraintEnforcementReceipt {
     /// # Errors
     /// Returns [`ReceiptError::Encoding`] if the body fails canonical CBOR
     /// encoding.
-    pub fn seal(
-        body: ReceiptBody,
-        signing_key: &Ed25519SigningKey,
-    ) -> Result<Self, ReceiptError> {
+    pub fn seal(body: ReceiptBody, signing_key: &Ed25519SigningKey) -> Result<Self, ReceiptError> {
         let receipt_id = body.compute_id()?;
         let signing_bytes = body.signing_bytes()?;
         let signature = signing_key.sign(&signing_bytes);
         Ok(Self {
             receipt_id,
+            token_id: body.token_id,
+            zone_id: body.zone_id,
+            request_nonce: body.request_nonce,
             request_descriptor_hash: body.request_descriptor_hash,
             constraints_evaluated: body.constraints_evaluated,
             evaluation_outcome: body.evaluation_outcome,
             sealed_at_unix_ms: body.sealed_at_unix_ms,
+            expires_at_unix_ms: body.expires_at_unix_ms,
+            revocation_head_seq_observed: body.revocation_head_seq_observed,
             enforcing_node_id: body.enforcing_node_id,
             signature,
         })
@@ -326,12 +537,32 @@ impl ConstraintEnforcementReceipt {
     #[must_use]
     pub fn body(&self) -> ReceiptBody {
         ReceiptBody {
+            token_id: self.token_id,
+            zone_id: self.zone_id.clone(),
+            request_nonce: self.request_nonce,
             request_descriptor_hash: self.request_descriptor_hash,
             constraints_evaluated: self.constraints_evaluated.clone(),
             evaluation_outcome: self.evaluation_outcome.clone(),
             sealed_at_unix_ms: self.sealed_at_unix_ms,
+            expires_at_unix_ms: self.expires_at_unix_ms,
+            revocation_head_seq_observed: self.revocation_head_seq_observed,
             enforcing_node_id: self.enforcing_node_id.clone(),
         }
+    }
+
+    /// Freshness duration sealed into this receipt.
+    ///
+    /// # Errors
+    /// Returns [`ReceiptError::InvalidFreshnessWindow`] when the expiry is not
+    /// strictly after the seal time.
+    pub const fn freshness_window_ms(&self) -> Result<u64, ReceiptError> {
+        if self.expires_at_unix_ms <= self.sealed_at_unix_ms {
+            return Err(ReceiptError::InvalidFreshnessWindow {
+                sealed_at_unix_ms: self.sealed_at_unix_ms,
+                expires_at_unix_ms: self.expires_at_unix_ms,
+            });
+        }
+        Ok(self.expires_at_unix_ms - self.sealed_at_unix_ms)
     }
 
     /// Canonical CBOR encoding of the full (signed) receipt.
@@ -367,6 +598,34 @@ impl ConstraintEnforcementReceipt {
         &self,
         verifying_key: &Ed25519VerifyingKey,
     ) -> Result<EvaluationOutcomeRecord, ReceiptError> {
+        self.verify_offline_at(verifying_key, unix_now_ms()?)
+    }
+
+    /// Verify the receipt's signature, content-addressed id, and freshness at a caller-supplied time.
+    ///
+    /// # Errors
+    /// - [`ReceiptError::Encoding`] if the body fails canonical CBOR
+    ///   encoding (would indicate tampering or a bug in this crate).
+    /// - [`ReceiptError::InvalidFreshnessWindow`] if `expires_at_unix_ms` is
+    ///   not strictly after `sealed_at_unix_ms`.
+    /// - [`ReceiptError::ReceiptExpired`] if `now_unix_ms` is past the
+    ///   receipt's explicit expiry.
+    /// - [`ReceiptError::ReceiptIdMismatch`] if the receipt's
+    ///   `receipt_id` does not match the recomputed body hash.
+    /// - [`ReceiptError::SignatureVerificationFailed`] if the Ed25519
+    ///   signature does not verify under `verifying_key`.
+    pub fn verify_offline_at(
+        &self,
+        verifying_key: &Ed25519VerifyingKey,
+        now_unix_ms: u64,
+    ) -> Result<EvaluationOutcomeRecord, ReceiptError> {
+        self.freshness_window_ms()?;
+        if now_unix_ms > self.expires_at_unix_ms {
+            return Err(ReceiptError::ReceiptExpired {
+                expires_at_unix_ms: self.expires_at_unix_ms,
+                now_unix_ms,
+            });
+        }
         let body = self.body();
         let recomputed = body.compute_id()?;
         if recomputed != self.receipt_id {
@@ -382,6 +641,42 @@ impl ConstraintEnforcementReceipt {
                 enforcing_node_id: self.enforcing_node_id.as_str().to_string(),
             })?;
         Ok(self.evaluation_outcome.clone())
+    }
+
+    /// Verify the receipt against live-token context.
+    ///
+    /// This is the API consumers should use when a receipt is presented as
+    /// evidence for a current operation. It binds verification to the token id,
+    /// zone, revocation-head floor, and caller-supplied wall clock.
+    ///
+    /// # Errors
+    /// Returns [`ReceiptError`] for any signature, freshness, binding, or
+    /// revocation-floor failure.
+    pub fn verify_offline_against(
+        &self,
+        verifying_key: &Ed25519VerifyingKey,
+        context: &ReceiptVerificationContext,
+    ) -> Result<EvaluationOutcomeRecord, ReceiptError> {
+        let outcome = self.verify_offline_at(verifying_key, context.now_unix_ms)?;
+        if self.token_id != context.token_id {
+            return Err(ReceiptError::TokenIdMismatch {
+                expected: context.token_id.to_string(),
+                observed: self.token_id.to_string(),
+            });
+        }
+        if self.zone_id != context.zone_id {
+            return Err(ReceiptError::ZoneIdMismatch {
+                expected: context.zone_id.to_string(),
+                observed: self.zone_id.to_string(),
+            });
+        }
+        if self.revocation_head_seq_observed < context.current_revocation_head_seq {
+            return Err(ReceiptError::RevocationHeadStale {
+                observed: self.revocation_head_seq_observed,
+                current: context.current_revocation_head_seq,
+            });
+        }
+        Ok(outcome)
     }
 
     /// Verify offline using a key resolver. Useful when the audit consumer
@@ -407,14 +702,46 @@ impl ConstraintEnforcementReceipt {
     }
 }
 
+fn unix_now_ms() -> Result<u64, ReceiptError> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ReceiptError::SystemClockBeforeUnixEpoch)?;
+    Ok(duration.as_millis().try_into().unwrap_or(u64::MAX))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    const SEALED_AT_MS: u64 = 4_000_000_000_000;
+    const EXPIRES_AT_MS: u64 = SEALED_AT_MS + DEFAULT_RECEIPT_FRESHNESS_WINDOW_MS;
+    const VERIFY_AT_MS: u64 = SEALED_AT_MS + 1_000;
+    const REVOCATION_HEAD_SEQ: u64 = 10;
+
     fn signing_key() -> Ed25519SigningKey {
         // Deterministic key for golden-vector tests.
         Ed25519SigningKey::from_bytes(&[7_u8; 32]).expect("valid signing key")
+    }
+
+    fn token_a() -> ObjectId {
+        ObjectId::from_unscoped_bytes(b"token-a")
+    }
+
+    fn token_b() -> ObjectId {
+        ObjectId::from_unscoped_bytes(b"token-b")
+    }
+
+    fn zone() -> ZoneId {
+        ZoneId::work()
+    }
+
+    fn nonce_a() -> ReceiptNonce {
+        ReceiptNonce::from_bytes([0xA1_u8; 16])
+    }
+
+    fn nonce_b() -> ReceiptNonce {
+        ReceiptNonce::from_bytes([0xB2_u8; 16])
     }
 
     fn node() -> TailscaleNodeId {
@@ -423,12 +750,12 @@ mod tests {
 
     fn allow_body() -> ReceiptBody {
         ReceiptBody {
+            token_id: token_a(),
+            zone_id: zone(),
+            request_nonce: nonce_a(),
             request_descriptor_hash: RequestDescriptorHash::from_bytes([1_u8; 32]),
             constraints_evaluated: ConstraintsEvaluatedSummary {
-                evaluated_kinds: vec![
-                    "host_allowlist".to_string(),
-                    "scope_ceiling".to_string(),
-                ],
+                evaluated_kinds: vec!["host_allowlist".to_string(), "scope_ceiling".to_string()],
                 resource_allow_count: 1,
                 resource_deny_count: 0,
                 max_calls_set: true,
@@ -436,13 +763,18 @@ mod tests {
                 credential_allow_count: 0,
             },
             evaluation_outcome: EvaluationOutcomeRecord::Allow,
-            sealed_at_unix_ms: 1_700_000_000_000,
+            sealed_at_unix_ms: SEALED_AT_MS,
+            expires_at_unix_ms: EXPIRES_AT_MS,
+            revocation_head_seq_observed: REVOCATION_HEAD_SEQ,
             enforcing_node_id: node(),
         }
     }
 
     fn deny_body() -> ReceiptBody {
         ReceiptBody {
+            token_id: token_a(),
+            zone_id: zone(),
+            request_nonce: nonce_b(),
             request_descriptor_hash: RequestDescriptorHash::from_bytes([2_u8; 32]),
             constraints_evaluated: ConstraintsEvaluatedSummary {
                 evaluated_kinds: vec!["host_allowlist".to_string()],
@@ -456,9 +788,15 @@ mod tests {
                 denial_kind: "host_not_in_allowlist".to_string(),
                 observed_value: "host=evil.example.com".to_string(),
             },
-            sealed_at_unix_ms: 1_700_000_000_000,
+            sealed_at_unix_ms: SEALED_AT_MS,
+            expires_at_unix_ms: EXPIRES_AT_MS,
+            revocation_head_seq_observed: REVOCATION_HEAD_SEQ,
             enforcing_node_id: node(),
         }
+    }
+
+    fn context() -> ReceiptVerificationContext {
+        ReceiptVerificationContext::new(token_a(), zone(), REVOCATION_HEAD_SEQ, VERIFY_AT_MS)
     }
 
     // ── Sealing + verification happy paths ───────────────────────────────
@@ -470,6 +808,16 @@ mod tests {
         let outcome = receipt
             .verify_offline(&key.verifying_key())
             .expect("verifies");
+        assert!(outcome.is_allow());
+    }
+
+    #[test]
+    fn seal_then_verify_offline_against_context_round_trip_allow() {
+        let key = signing_key();
+        let receipt = ConstraintEnforcementReceipt::seal(allow_body(), &key).unwrap();
+        let outcome = receipt
+            .verify_offline_against(&key.verifying_key(), &context())
+            .expect("verifies with live context");
         assert!(outcome.is_allow());
     }
 
@@ -502,6 +850,19 @@ mod tests {
     }
 
     #[test]
+    fn request_nonce_changes_receipt_id_for_otherwise_identical_requests() {
+        let key = signing_key();
+        let mut body_a = allow_body();
+        let mut body_b = allow_body();
+        body_a.request_nonce = nonce_a();
+        body_b.request_nonce = nonce_b();
+        let r_a = ConstraintEnforcementReceipt::seal(body_a, &key).unwrap();
+        let r_b = ConstraintEnforcementReceipt::seal(body_b, &key).unwrap();
+        assert_ne!(r_a.receipt_id, r_b.receipt_id);
+        assert_ne!(r_a.request_nonce, r_b.request_nonce);
+    }
+
+    #[test]
     fn receipt_id_mismatch_after_body_mutation_is_caught_offline() {
         let key = signing_key();
         let mut receipt = ConstraintEnforcementReceipt::seal(allow_body(), &key).unwrap();
@@ -518,6 +879,86 @@ mod tests {
         // The id-domain prefix must not equal the signing-domain prefix, so a
         // receipt_id can never collide with a signing transcript.
         assert_ne!(RECEIPT_ID_DOMAIN, RECEIPT_SIGNING_DOMAIN);
+    }
+
+    // ── Freshness + replay resistance ───────────────────────────────────
+
+    #[test]
+    fn receipt_replay_with_expired_window_rejected_by_verify_offline() {
+        let key = signing_key();
+        let mut body = allow_body();
+        body.sealed_at_unix_ms = 1_000;
+        body.expires_at_unix_ms = 2_000;
+        let receipt = ConstraintEnforcementReceipt::seal(body, &key).unwrap();
+        let err = receipt
+            .verify_offline_at(&key.verifying_key(), 2_001)
+            .expect_err("expired receipt must be rejected");
+        assert!(matches!(err, ReceiptError::ReceiptExpired { .. }));
+    }
+
+    #[test]
+    fn receipt_replay_for_token_a_does_not_authorize_token_b_replay() {
+        let key = signing_key();
+        let receipt = ConstraintEnforcementReceipt::seal(allow_body(), &key).unwrap();
+        let mut context = context();
+        context.token_id = token_b();
+        let err = receipt
+            .verify_offline_against(&key.verifying_key(), &context)
+            .expect_err("token mismatch must be rejected");
+        assert!(matches!(err, ReceiptError::TokenIdMismatch { .. }));
+    }
+
+    #[test]
+    fn receipt_replay_for_wrong_zone_is_rejected() {
+        let key = signing_key();
+        let receipt = ConstraintEnforcementReceipt::seal(allow_body(), &key).unwrap();
+        let mut context = context();
+        context.zone_id = ZoneId::public();
+        let err = receipt
+            .verify_offline_against(&key.verifying_key(), &context)
+            .expect_err("zone mismatch must be rejected");
+        assert!(matches!(err, ReceiptError::ZoneIdMismatch { .. }));
+    }
+
+    #[test]
+    fn receipt_replay_committed_to_old_revocation_seq_flagged_when_seq_advances() {
+        let key = signing_key();
+        let receipt = ConstraintEnforcementReceipt::seal(allow_body(), &key).unwrap();
+        let mut context = context();
+        context.current_revocation_head_seq = REVOCATION_HEAD_SEQ + 1;
+        let err = receipt
+            .verify_offline_against(&key.verifying_key(), &context)
+            .expect_err("old revocation sequence must be rejected");
+        assert!(matches!(err, ReceiptError::RevocationHeadStale { .. }));
+    }
+
+    #[test]
+    fn receipt_replay_verifier_rejects_replayed_nonce_inside_sliding_window() {
+        let key = signing_key();
+        let receipt = ConstraintEnforcementReceipt::seal(allow_body(), &key).unwrap();
+        let mut verifier = ConstraintReceiptVerifier::default();
+        let outcome = verifier
+            .verify(&receipt, &key.verifying_key(), &context())
+            .expect("first receipt accepted");
+        assert!(outcome.is_allow());
+
+        let err = verifier
+            .verify(&receipt, &key.verifying_key(), &context())
+            .expect_err("same nonce inside the window is replay");
+        assert!(matches!(err, ReceiptError::ReceiptReplayDetected { .. }));
+    }
+
+    #[test]
+    fn receipt_replay_verifier_rejects_oversized_freshness_window() {
+        let key = signing_key();
+        let mut body = allow_body();
+        body.expires_at_unix_ms = body.sealed_at_unix_ms + DEFAULT_RECEIPT_FRESHNESS_WINDOW_MS + 1;
+        let receipt = ConstraintEnforcementReceipt::seal(body, &key).unwrap();
+        let mut verifier = ConstraintReceiptVerifier::default();
+        let err = verifier
+            .verify(&receipt, &key.verifying_key(), &context())
+            .expect_err("oversized receipt window must be rejected");
+        assert!(matches!(err, ReceiptError::FreshnessWindowTooLong { .. }));
     }
 
     // ── CBOR canonical round-trip ────────────────────────────────────────
@@ -585,6 +1026,51 @@ mod tests {
     }
 
     #[test]
+    fn forgery_mutating_token_id_fails_signature() {
+        let key = signing_key();
+        let mut receipt = ConstraintEnforcementReceipt::seal(allow_body(), &key).unwrap();
+        receipt.token_id = token_b();
+        receipt.receipt_id = receipt.body().compute_id().unwrap();
+        let err = receipt
+            .verify_offline_at(&key.verifying_key(), VERIFY_AT_MS)
+            .expect_err("signature must reject mutated token id");
+        assert!(matches!(
+            err,
+            ReceiptError::SignatureVerificationFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn forgery_mutating_zone_id_fails_signature() {
+        let key = signing_key();
+        let mut receipt = ConstraintEnforcementReceipt::seal(allow_body(), &key).unwrap();
+        receipt.zone_id = ZoneId::public();
+        receipt.receipt_id = receipt.body().compute_id().unwrap();
+        let err = receipt
+            .verify_offline_at(&key.verifying_key(), VERIFY_AT_MS)
+            .expect_err("signature must reject mutated zone id");
+        assert!(matches!(
+            err,
+            ReceiptError::SignatureVerificationFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn forgery_mutating_request_nonce_fails_signature() {
+        let key = signing_key();
+        let mut receipt = ConstraintEnforcementReceipt::seal(allow_body(), &key).unwrap();
+        receipt.request_nonce = nonce_b();
+        receipt.receipt_id = receipt.body().compute_id().unwrap();
+        let err = receipt
+            .verify_offline_at(&key.verifying_key(), VERIFY_AT_MS)
+            .expect_err("signature must reject mutated nonce");
+        assert!(matches!(
+            err,
+            ReceiptError::SignatureVerificationFailed { .. }
+        ));
+    }
+
+    #[test]
     fn forgery_mutating_sealed_at_fails_signature() {
         let key = signing_key();
         let mut receipt = ConstraintEnforcementReceipt::seal(allow_body(), &key).unwrap();
@@ -593,6 +1079,36 @@ mod tests {
         let err = receipt
             .verify_offline(&key.verifying_key())
             .expect_err("signature must reject mutated sealed_at");
+        assert!(matches!(
+            err,
+            ReceiptError::SignatureVerificationFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn forgery_mutating_expires_at_fails_signature() {
+        let key = signing_key();
+        let mut receipt = ConstraintEnforcementReceipt::seal(allow_body(), &key).unwrap();
+        receipt.expires_at_unix_ms = receipt.expires_at_unix_ms.wrapping_add(1);
+        receipt.receipt_id = receipt.body().compute_id().unwrap();
+        let err = receipt
+            .verify_offline_at(&key.verifying_key(), VERIFY_AT_MS)
+            .expect_err("signature must reject mutated expiry");
+        assert!(matches!(
+            err,
+            ReceiptError::SignatureVerificationFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn forgery_mutating_revocation_head_seq_fails_signature() {
+        let key = signing_key();
+        let mut receipt = ConstraintEnforcementReceipt::seal(allow_body(), &key).unwrap();
+        receipt.revocation_head_seq_observed = receipt.revocation_head_seq_observed.wrapping_add(1);
+        receipt.receipt_id = receipt.body().compute_id().unwrap();
+        let err = receipt
+            .verify_offline_at(&key.verifying_key(), VERIFY_AT_MS)
+            .expect_err("signature must reject mutated revocation sequence");
         assert!(matches!(
             err,
             ReceiptError::SignatureVerificationFailed { .. }
@@ -671,12 +1187,14 @@ mod tests {
         let err = receipt
             .verify_offline_with_resolver(|_| None)
             .expect_err("resolver returns None");
-        match err {
-            ReceiptError::UnknownEnforcingNode { enforcing_node_id } => {
-                assert_eq!(enforcing_node_id, receipt.enforcing_node_id.as_str());
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+        assert!(
+            matches!(
+                &err,
+                ReceiptError::UnknownEnforcingNode { enforcing_node_id }
+                    if enforcing_node_id == receipt.enforcing_node_id.as_str()
+            ),
+            "unexpected error: {err:?}"
+        );
     }
 
     // ── EvaluationOutcomeRecord accessors ────────────────────────────────
@@ -737,7 +1255,7 @@ mod tests {
         fn proptest_forgery_resistance_under_signed_field_mutation(
             mutation_seed in 0u32..1024,
             xor_byte in 1u8..=255,
-            field_pick in 0u8..5,
+            field_pick in 0u8..10,
         ) {
             let key = signing_key();
             let receipt_orig = ConstraintEnforcementReceipt::seal(allow_body(), &key).unwrap();
@@ -745,24 +1263,41 @@ mod tests {
 
             match field_pick {
                 0 => {
+                    receipt.token_id = token_b();
+                }
+                1 => {
+                    receipt.zone_id = ZoneId::public();
+                }
+                2 => {
+                    receipt.request_nonce = nonce_b();
+                }
+                3 => {
                     // Mutate request_descriptor_hash deterministically.
                     let mut bytes = *receipt.request_descriptor_hash.as_bytes();
                     let idx = (mutation_seed as usize) % bytes.len();
                     bytes[idx] ^= xor_byte;
                     receipt.request_descriptor_hash = RequestDescriptorHash::from_bytes(bytes);
                 }
-                1 => {
+                4 => {
                     // Mutate sealed_at.
                     receipt.sealed_at_unix_ms = receipt.sealed_at_unix_ms
                         .wrapping_add(u64::from(mutation_seed) + 1);
                 }
-                2 => {
+                5 => {
+                    receipt.expires_at_unix_ms = receipt.expires_at_unix_ms
+                        .wrapping_add(u64::from(mutation_seed) + 1);
+                }
+                6 => {
+                    receipt.revocation_head_seq_observed = receipt.revocation_head_seq_observed
+                        .wrapping_add(u64::from(mutation_seed) + 1);
+                }
+                7 => {
                     // Mutate enforcing_node_id.
                     receipt.enforcing_node_id = TailscaleNodeId::new(
                         format!("attacker-{mutation_seed}")
                     );
                 }
-                3 => {
+                8 => {
                     // Mutate evaluation_outcome.
                     receipt.evaluation_outcome = EvaluationOutcomeRecord::Deny {
                         denial_kind: format!("fabricated-{mutation_seed}"),

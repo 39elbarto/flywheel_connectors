@@ -34,14 +34,6 @@ use fcp_async_core::net::UnixListener;
 use fcp_async_core::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_async_core::task::{self, JoinHandle};
-use fcp_prelude::{
-    ApprovalToken, CapabilityConstraints, CapabilityVerifier, CostEstimateConfidence, Decision,
-    ObjectId, PolicySimulationInput, ResourceAvailability, RolloutPolicy, SafetyTier,
-    TransportMode, UsageMetric, UsageMetricKind, ZoneId, ZonePolicyObject,
-    simulate_policy_decision,
-};
-#[cfg(test)]
-use fcp_prelude::{DecisionReceiptPolicy, ObjectHeader, Provenance, ZoneTransportPolicy};
 use fcp_crypto::{
     canonicalize::to_deterministic_cbor,
     cose::fcp2_claims,
@@ -67,17 +59,18 @@ use fcp_host::{
     GateOutcome, HostAdminStateStore, HostHealthResponse, HostHealthStatus, HostPreflightRequest,
     HostSimulateRequest, HostSimulateResponse, IntrospectionResponse, JournalQueryRequest,
     JournalQueryResponse, LifecycleTransitionRequest, LifecycleTransitionResponse, LogQueryRequest,
-    LogQueryResponse, ManagedConnectorConfig, OperationResult, OperationResultStatus,
-    PreflightRequest, PreflightResponse, ReceiptQueryRequest, ReceiptQueryResponse, ReceiptSummary,
-    RequestPriority, ResilienceError, ResilienceLayer, RolloutController, RolloutDecision,
-    RolloutObservation, RolloutOutcome, SafetyTierExt, SanitizedConnectorConfig,
-    SimulateCostConfidence, SimulateCostEstimate, SimulatePhase, SimulateReceipt,
-    SimulateReceiptQueryRequest, SimulateReceiptQueryResponse, SimulateResourceAvailability,
-    StartupReconciliationReport, SupplyChainGate, SupplyChainGateConfig,
-    capability_constraint_audit_descriptor, diff_sanitized_config_values,
+    LogQueryResponse, ManagedConnectorConfig, MeshQuorumSignals, OperationResult,
+    OperationResultStatus, PreflightRequest, PreflightResponse, ReceiptQueryRequest,
+    ReceiptQueryResponse, ReceiptSummary, RequestPriority, ResilienceError, ResilienceLayer,
+    RolloutController, RolloutDecision, RolloutObservation, RolloutOutcome, SafetyTierExt,
+    SanitizedConnectorConfig, SimulateCostConfidence, SimulateCostEstimate, SimulatePhase,
+    SimulateReceipt, SimulateReceiptQueryRequest, SimulateReceiptQueryResponse,
+    SimulateResourceAvailability, StartupReconciliationReport, SupplyChainGate,
+    SupplyChainGateConfig, admit_safety_tier, capability_constraint_audit_descriptor,
+    classify_deployment_mode, diff_sanitized_config_values, emit_boot_log,
     emit_capability_constraint_denial_audit_event, merge_connector_health,
 };
-use fcp_host::{HostError, HostResult};
+use fcp_host::{DeploymentClassification, DeploymentTierRefusal, HostError, HostResult};
 use fcp_kernel::{
     ApprovalMode, ConnectorHealth, ConnectorId, HandshakeRequest, HandshakeResponse,
     HealthSnapshot, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, LifecycleError,
@@ -88,6 +81,14 @@ use fcp_policy::{
     CapabilityConstraintEnforcer, ConstraintEvaluation, DefaultConstraintEnforcer, PrincipalId,
     RequestDescriptor,
 };
+use fcp_prelude::{
+    ApprovalToken, CapabilityConstraints, CapabilityVerifier, CostEstimateConfidence, Decision,
+    ObjectId, PolicySimulationInput, ResourceAvailability, RolloutPolicy, SafetyTier,
+    TransportMode, UsageMetric, UsageMetricKind, ZoneId, ZonePolicyObject,
+    simulate_policy_decision,
+};
+#[cfg(test)]
+use fcp_prelude::{DecisionReceiptPolicy, ObjectHeader, Provenance, ZoneTransportPolicy};
 use futures_util::future::join_all;
 use hyper::body::Incoming;
 use hyper_util::{
@@ -1833,6 +1834,78 @@ fn enforce_live_capability_constraints(
     }
 }
 
+const DEPLOYMENT_TIER_DENIED_AUDIT_EVENT_TYPE: &str = "deployment_tier.denied";
+
+fn current_deployment_classification() -> DeploymentClassification {
+    // The host binary does not yet have live mesh quorum signals wired into
+    // AppState. Classify the production boundary as single-host Evaluation so
+    // Risky/Dangerous dispatch fails closed until those signals exist.
+    classify_deployment_mode(MeshQuorumSignals::single_host_evaluation())
+}
+
+fn deployment_tier_refusal_reason_code(refusal: &DeploymentTierRefusal) -> &'static str {
+    match refusal {
+        DeploymentTierRefusal::TierRequiresMeshActive { .. } => "TIER_REQUIRES_MESH_ACTIVE",
+        DeploymentTierRefusal::TierForbidden { .. } => "TIER_FORBIDDEN",
+    }
+}
+
+fn deployment_tier_refusal_payload(refusal: &DeploymentTierRefusal) -> String {
+    serde_json::to_string(refusal).unwrap_or_else(|error| {
+        format!("{{\"kind\":\"serialization_error\",\"message\":\"{error}\"}}")
+    })
+}
+
+fn deployment_tier_refusal_message(refusal: &DeploymentTierRefusal) -> String {
+    format!(
+        "deployment tier admission denied: {}",
+        deployment_tier_refusal_payload(refusal)
+    )
+}
+
+fn emit_deployment_tier_denial_audit_event(
+    request: &InvokeRequest,
+    tier: SafetyTier,
+    classification: &DeploymentClassification,
+    refusal: &DeploymentTierRefusal,
+) {
+    let lease_coordinator = match classification.signals.lease_coordinator_reachable {
+        None => "n/a",
+        Some(true) => "reachable",
+        Some(false) => "unreachable",
+    };
+    let refusal_payload = deployment_tier_refusal_payload(refusal);
+    tracing::warn!(
+        audit_event_type = DEPLOYMENT_TIER_DENIED_AUDIT_EVENT_TYPE,
+        reason_code = deployment_tier_refusal_reason_code(refusal),
+        refusal = %refusal_payload,
+        safety_tier = ?tier,
+        deployment_mode = classification.mode.label(),
+        deployment_reason = classification.reason.label(),
+        healthy_peer_count = classification.signals.healthy_peer_count,
+        lease_coordinator,
+        revocation_fresh = classification.signals.revocation_snapshot_fresh,
+        request_id = request.id.0.as_str(),
+        connector_id = request.connector_id.as_str(),
+        operation = request.operation.as_str(),
+        zone_id = request.zone_id.as_str(),
+        "deployment_tier_denied_audit_event"
+    );
+}
+
+fn enforce_live_deployment_tier(request: &InvokeRequest, tier: SafetyTier) -> HostResult<()> {
+    let classification = current_deployment_classification();
+    match admit_safety_tier(&classification, tier) {
+        Ok(()) => Ok(()),
+        Err(refusal) => {
+            emit_deployment_tier_denial_audit_event(request, tier, &classification, &refusal);
+            Err(HostError::PreflightFailed(deployment_tier_refusal_message(
+                &refusal,
+            )))
+        }
+    }
+}
+
 const HOST_STATE_MISSING_VERIFYING_KEY_REASON_PREFIX: &str =
     "No verifying key found for token key ID ";
 
@@ -1968,6 +2041,8 @@ async fn verify_live_request(
             HostError::PreflightFailed(format!("capability token rejected: {error}"))
         })?;
     let verified_claims = verified_token.claims();
+
+    enforce_live_deployment_tier(request, tool.safety_tier)?;
 
     // SECURITY: holder-bound tokens (`holder_node` claim present) must never
     // silently degrade to bearer tokens. Until fcp-host wires live holder-proof
@@ -2897,6 +2972,8 @@ async fn async_main() -> HostResult<()> {
     if loaded_configs.configs.is_empty() {
         tracing::warn!("no connectors configured; doctor self-checks will fail");
     }
+    let deployment_classification = current_deployment_classification();
+    emit_boot_log(&deployment_classification);
     let zone_policies = load_zone_policies()?;
 
     let registry = Arc::new(
@@ -5857,9 +5934,11 @@ mod tests {
     use chrono::TimeZone;
     use fcp_host::{CancelReason, CleanupBehavior};
     use fcp_kernel::{
-        BudgetEnforcement, HealthState, LifecycleRecord, OperationId, SelfCheckStatus,
-        TransitionReason, UsageBudgetLimit, UsageBudgetPolicy, UsageMetric, UsageMetricKind,
+        AgentHint, BudgetEnforcement, HealthState, IdempotencyClass, LifecycleRecord, OperationId,
+        OperationInfo, SelfCheckStatus, TransitionReason, UsageBudgetLimit, UsageBudgetPolicy,
+        UsageMetric, UsageMetricKind,
     };
+    use fcp_prelude::{CapabilityId, RiskLevel};
 
     fn maybe_compiled_test_connector_binary() -> Option<std::path::PathBuf> {
         if let Some(path) = option_env!("CARGO_BIN_EXE_fcp-test-connector") {
@@ -6003,6 +6082,38 @@ mod tests {
             "status": { "state": "ready" },
             "uptime_ms": 0,
         })
+    }
+
+    fn dispatcher_introspection(
+        operation_id: &'static str,
+        capability_id: &str,
+        safety_tier: SafetyTier,
+    ) -> Introspection {
+        Introspection {
+            operations: vec![OperationInfo {
+                id: OperationId::from_static(operation_id),
+                summary: format!("{operation_id} summary"),
+                description: Some(format!("{operation_id} description")),
+                input_schema: json!({ "type": "object" }),
+                output_schema: json!({ "type": "object" }),
+                capability: CapabilityId::new(capability_id).expect("valid capability id"),
+                risk_level: RiskLevel::High,
+                safety_tier,
+                idempotency: IdempotencyClass::Strict,
+                ai_hints: AgentHint {
+                    when_to_use: "test operation".to_string(),
+                    common_mistakes: Vec::new(),
+                    examples: Vec::new(),
+                    related: Vec::new(),
+                },
+                rate_limit: None,
+                requires_approval: Some(ApprovalMode::None),
+            }],
+            events: Vec::new(),
+            resource_types: Vec::new(),
+            auth_caps: None,
+            event_caps: None,
+        }
     }
 
     fn constraints_cbor(constraints: &fcp_core::CapabilityConstraints) -> Vec<u8> {
@@ -6535,6 +6646,143 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn invoke_handler_admit_safety_denies_risky_evaluation_before_dispatch() {
+        let connector_id = "fcp.test.admit-safety:utility:1.0.0";
+        let operation_id = "test.risky";
+        let capability_id = "cap.test.risky";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let invoke_count = Arc::new(AtomicU64::new(0));
+
+        let introspection = serde_json::to_value(dispatcher_introspection(
+            operation_id,
+            capability_id,
+            SafetyTier::Risky,
+        ))
+        .expect("test introspection should serialize");
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(8);
+        let runner_invoke_count = Arc::clone(&invoke_count);
+        let runner_task = task::spawn(async move {
+            while let Some(request) = runner_rx.recv().await {
+                match request.method.as_str() {
+                    "introspect" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": introspection.clone(),
+                        })));
+                    }
+                    "health" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": dispatcher_health_result(),
+                        })));
+                    }
+                    "invoke" => {
+                        runner_invoke_count.fetch_add(1, Ordering::SeqCst);
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": {
+                                "message": "admit_safety_tier should deny before dispatch"
+                            },
+                        })));
+                    }
+                    method => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": { "message": format!("unexpected method {method}") },
+                        })));
+                    }
+                }
+            }
+        });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let connector_key = ConnectorId::from_static(connector_id);
+        let mut connectors = HashMap::new();
+        connectors.insert(
+            connector_key.clone(),
+            RegistryEntry {
+                config: ConnectorConfig {
+                    id: connector_id.to_string(),
+                    binary: "dispatcher-test".to_string(),
+                    name: Some("Admit Safety Test Connector".to_string()),
+                    description: None,
+                    args: Vec::new(),
+                    env: BTreeMap::new(),
+                    config: None,
+                    categories: vec!["test".to_string()],
+                    version: None,
+                    allowed_zones: Vec::new(),
+                    allowed_operations: Vec::new(),
+                },
+                connector,
+            },
+        );
+        let registry = Arc::new(SubprocessRegistry {
+            state: Arc::new(RwLock::new(RegistryState { connectors })),
+            resilience: Arc::new(ResilienceLayer::default()),
+            version: Arc::new(AtomicU64::new(1)),
+            capability_verifying_key: None,
+        });
+        let budget = Arc::new(BudgetPolicyEngine::new());
+        let discovery = Arc::new(DiscoveryEndpoint::new(
+            Arc::clone(&registry),
+            Arc::clone(&budget),
+        ));
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        let state = Arc::new(AppState {
+            registry: Arc::clone(&registry),
+            doctor: DoctorService::new(Arc::clone(&registry)),
+            budget,
+            discovery,
+            cancellation: Arc::new(CancellationController::new()),
+            lifecycle: Arc::clone(&lifecycle),
+            rollout: Arc::new(RolloutController::new(
+                Arc::clone(&registry),
+                Arc::clone(&lifecycle),
+            )),
+            supply_chain: Arc::new(SupplyChainGate::default()),
+            capability_verifying_key: Some(signing_key.verifying_key()),
+            approval_verifying_key: None,
+            admin_bearer_token: None,
+            connectors_file: None,
+            zone_policies: Arc::new(RwLock::new(HashMap::new())),
+            started_at: Instant::now(),
+        });
+
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: connector_key,
+            operation: OperationId::from_static(operation_id),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "risky operation should be blocked in evaluation" }),
+            capability_token: test_capability_token(
+                &signing_key,
+                capability_id,
+                operation_id,
+                ZoneId::work().as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let (status, message) = invoke_handler(State(state), HeaderMap::new(), Json(request))
+            .await
+            .expect_err("Risky invoke must be denied in Evaluation before dispatch");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(message.contains("deployment tier admission denied"));
+        assert!(message.contains("tier_requires_mesh_active"));
+        assert!(message.contains("insufficient_mesh_quorum"));
+        assert_eq!(
+            invoke_count.load(Ordering::SeqCst),
+            0,
+            "DeploymentTier denial must happen before connector dispatch"
+        );
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

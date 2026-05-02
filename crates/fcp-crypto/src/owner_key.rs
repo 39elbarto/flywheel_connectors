@@ -5,6 +5,7 @@
 //! satisfy when wiring FIPS 204 ML-DSA-65 into owner-key ceremonies.
 
 use serde::{Deserialize, Deserializer, Serialize};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::ed25519::Ed25519Signature;
 use crate::error::{CryptoError, CryptoResult};
@@ -13,8 +14,18 @@ use crate::kid::KeyId;
 /// ML-DSA-65 public key length in bytes (FIPS 204).
 pub const ML_DSA_65_PUBLIC_KEY_SIZE: usize = 1_952;
 
-/// ML-DSA-65 secret key length in bytes (FIPS 204).
+/// ML-DSA-65 secret key length in bytes (FIPS 204) — the EXPANDED in-memory
+/// form. The on-the-wire / on-disk canonical form is the seed (see
+/// [`ML_DSA_65_SEED_BYTES`]); this constant is retained for documentation and
+/// for any caller that round-trips the expanded form.
 pub const ML_DSA_65_SECRET_KEY_SIZE: usize = 4_032;
+
+/// ML-DSA-65 ξ-seed length in bytes (FIPS 204 §3.7) — the canonical wire form
+/// of an ML-DSA-65 secret key per [`MlDsa65SecretKeyBytes`] (br-6bz52). Same
+/// numeric value as [`crate::ml_dsa::ML_DSA_65_SEED_SIZE`]; mirrored here so
+/// the byte-envelope module is self-contained and the kfr9j length-invariant
+/// pattern stays inside `owner_key.rs` for all three ML-DSA roles.
+pub const ML_DSA_65_SEED_BYTES: usize = 32;
 
 /// ML-DSA-65 signature length in bytes (FIPS 204).
 pub const ML_DSA_65_SIGNATURE_SIZE: usize = 3_309;
@@ -118,6 +129,137 @@ impl std::fmt::Debug for MlDsa65VerifyingKeyBytes {
         f.debug_struct("MlDsa65VerifyingKeyBytes")
             .field("len", &self.0.len())
             .field("kid", &self.key_id())
+            .finish()
+    }
+}
+
+/// Opaque ML-DSA-65 secret key bytes — canonical wire form.
+///
+/// Wraps the FIPS 204 §3.7 ξ-seed (32 bytes), NOT the expanded
+/// secret-key form (`ML_DSA_65_SECRET_KEY_SIZE` = 4032). The seed is
+/// the canonical persistence + transport shape because the expanded
+/// key is deterministically re-derivable from it via `KeyGen_internal`.
+/// Storing only the seed cuts on-disk + on-the-wire size by ~125× and
+/// matches the way [`crate::ml_dsa::MlDsa65SigningKey`] holds its
+/// material in memory.
+///
+/// # Invariants
+///
+/// - **Length is invariant-enforced on BOTH construction and
+///   deserialisation** (br-kfr9j pattern). The custom [`Deserialize`]
+///   below mirrors `try_from_bytes`'s length check, so an
+///   attacker-supplied envelope with a mis-sized payload fails fast at
+///   decode time and cannot reach the FIPS 204 KeyGen_internal panic
+///   surface.
+/// - **`PartialEq` is constant-time** (br-1zlht pattern) via
+///   [`subtle::ConstantTimeEq`] — the seed is the load-bearing
+///   keying material; a future caller comparing two seeds on a hot
+///   path must not leak prefix-match information via wall-clock timing.
+/// - **`Zeroize + ZeroizeOnDrop`** wipe the seed on drop so a
+///   forgotten clone cannot leave keying material in freed memory.
+/// - **`Debug` is redacted** — the seed bytes never appear in logs.
+///
+/// # Why this lives next to `MlDsa65VerifyingKeyBytes` and
+/// `MlDsa65SignatureBytes`
+///
+/// Closes the modes-of-reasoning audit finding (br-6bz52): the
+/// byte-envelope pattern was partial — verifying-key + signature
+/// envelopes existed but the secret-key envelope did not, leaving a
+/// caller persisting a signing key with no canonical wrapper to reach
+/// for. With this type the kfr9j length-invariant + 1zlht
+/// constant-time + zeroize hygiene apply symmetrically to all three
+/// ML-DSA roles.
+#[derive(Clone, Eq, Zeroize, ZeroizeOnDrop)]
+pub struct MlDsa65SecretKeyBytes(Vec<u8>);
+
+impl MlDsa65SecretKeyBytes {
+    /// Construct a secret-key wrapper after enforcing the FIPS 204
+    /// ξ-seed byte length (32 bytes).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::InvalidKeyLength`] when the provided byte
+    /// string is not exactly [`ML_DSA_65_SEED_BYTES`] bytes long.
+    pub fn try_from_bytes(bytes: impl Into<Vec<u8>>) -> CryptoResult<Self> {
+        let bytes = bytes.into();
+        if bytes.len() != ML_DSA_65_SEED_BYTES {
+            return Err(CryptoError::InvalidKeyLength {
+                expected: ML_DSA_65_SEED_BYTES,
+                actual: bytes.len(),
+            });
+        }
+        Ok(Self(bytes))
+    }
+
+    /// Borrow the encoded ML-DSA-65 ξ-seed bytes.
+    ///
+    /// **Caller is responsible for treating the returned slice as
+    /// secret material** — do not copy into ordinary `Vec<u8>`
+    /// containers without a Zeroize-aware wrapper, do not log,
+    /// do not transmit unencrypted.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// Consume the wrapper and return the encoded seed bytes.
+    ///
+    /// **Caller assumes responsibility** for zeroising the returned
+    /// `Vec<u8>` — once the bytes leave the wrapper the
+    /// [`ZeroizeOnDrop`] guarantee no longer holds. The wrapper's own
+    /// Drop will still run on the (now-emptied) inner Vec, so any
+    /// transient allocation under `self` gets wiped.
+    #[must_use]
+    pub fn into_bytes(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+impl PartialEq for MlDsa65SecretKeyBytes {
+    /// Constant-time byte comparison (br-1zlht). The seed IS the
+    /// load-bearing keying material for ML-DSA-65; a short-circuit
+    /// `Vec<u8>::eq` would give a recovery oracle for the 32-byte
+    /// seed.
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        self.0.ct_eq(&other.0).into()
+    }
+}
+
+impl<'de> Deserialize<'de> for MlDsa65SecretKeyBytes {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Decode the inner Vec<u8> via serde_bytes (matches the
+        // Serialize side) and then run the same length check that
+        // try_from_bytes enforces. Surfaces InvalidKeyLength as a
+        // serde error so the typed length information is preserved
+        // through the deserialiser boundary (br-kfr9j pattern).
+        let bytes: serde_bytes::ByteBuf = serde_bytes::ByteBuf::deserialize(deserializer)?;
+        Self::try_from_bytes(bytes.into_vec()).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for MlDsa65SecretKeyBytes {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Mirrors the transparent serialisation that `MlDsa65VerifyingKeyBytes`
+        // and `MlDsa65SignatureBytes` use. Cannot derive(Serialize) +
+        // serde(transparent) here because the custom Deserialize +
+        // PartialEq impls collide with the derive macro's expectations.
+        serde_bytes::Bytes::new(&self.0).serialize(serializer)
+    }
+}
+
+impl std::fmt::Debug for MlDsa65SecretKeyBytes {
+    /// Redacted Debug — the seed bytes are NEVER printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MlDsa65SecretKeyBytes")
+            .field("len", &self.0.len())
+            .field("seed", &"[redacted; 32-byte ml-dsa-65 ξ-seed]")
             .finish()
     }
 }

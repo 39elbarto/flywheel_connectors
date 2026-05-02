@@ -129,9 +129,10 @@ pub use mac::{Blake3Mac, MacKey, blake3_mac, blake3_mac_full, blake3_mac_verify}
 pub use ml_dsa::{ML_DSA_65_SEED_SIZE, MlDsa65SigningKey, MlDsa65VerifyingKey};
 pub use owner_key::{
     HybridOwnerKeyIds, HybridOwnerSignature, HybridOwnerSigner, ML_DSA_65_PUBLIC_KEY_SIZE,
-    ML_DSA_65_SECRET_KEY_SIZE, ML_DSA_65_SIGNATURE_SIZE, MlDsa65SignatureBytes,
-    MlDsa65VerifyingKeyBytes, OWNER_KEY_MIGRATION_ATTESTATION_SCHEMA, OWNER_KEY_MIGRATION_DOMAIN,
-    OwnerKeyAlgorithm, OwnerKeyMigrationAttestation, OwnerKeyMigrationTranscript,
+    ML_DSA_65_SECRET_KEY_SIZE, ML_DSA_65_SEED_BYTES, ML_DSA_65_SIGNATURE_SIZE,
+    MlDsa65SecretKeyBytes, MlDsa65SignatureBytes, MlDsa65VerifyingKeyBytes,
+    OWNER_KEY_MIGRATION_ATTESTATION_SCHEMA, OWNER_KEY_MIGRATION_DOMAIN, OwnerKeyAlgorithm,
+    OwnerKeyMigrationAttestation, OwnerKeyMigrationTranscript,
 };
 pub use shamir::{
     SealedShamirShare, ShamirError, ShamirResult, ShamirShare, ZeroizingSecret, open_share,

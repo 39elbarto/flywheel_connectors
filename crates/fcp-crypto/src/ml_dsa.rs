@@ -21,7 +21,9 @@
 
 use core::convert::Infallible;
 
-use ml_dsa::{B32, KeyGen, MlDsa65, Signature as MlDsaSignature, VerifyingKey as MlDsaVerifyingKey};
+use ml_dsa::{
+    B32, KeyGen, MlDsa65, Signature as MlDsaSignature, VerifyingKey as MlDsaVerifyingKey,
+};
 use rand_core_pq::{TryCryptoRng, TryRng};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -71,9 +73,8 @@ impl MlDsa65SigningKey {
     /// unavailable (extremely rare on supported platforms).
     pub fn generate() -> CryptoResult<Self> {
         let mut seed = Zeroizing::new([0u8; ML_DSA_65_SEED_SIZE]);
-        getrandom::fill(seed.as_mut_slice()).map_err(|e| {
-            CryptoError::KeyDerivationFailed(format!("OS RNG unavailable: {e}"))
-        })?;
+        getrandom::fill(seed.as_mut_slice())
+            .map_err(|e| CryptoError::KeyDerivationFailed(format!("OS RNG unavailable: {e}")))?;
         Ok(Self::from_seed_inner(seed))
     }
 
@@ -133,6 +134,38 @@ impl MlDsa65SigningKey {
         &self.seed
     }
 
+    /// Export the seed as a length-validated, constant-time-comparing,
+    /// zeroize-on-drop byte envelope (br-6bz52).
+    ///
+    /// This is the canonical persistence + transport surface for an
+    /// ML-DSA-65 signing key: pair with [`Self::from_envelope`] for
+    /// the inverse direction. The envelope wraps the FIPS 204 §3.7
+    /// ξ-seed; the expanded secret-key form is recomputable on demand
+    /// via [`Self::from_envelope`] → [`<MlDsa65 as KeyGen>::from_seed`].
+    ///
+    /// Closes the modes-of-reasoning audit gap that
+    /// `MlDsa65VerifyingKeyBytes` + `MlDsa65SignatureBytes` had typed
+    /// envelopes but the secret-key role did not.
+    #[must_use]
+    pub fn to_envelope(&self) -> crate::owner_key::MlDsa65SecretKeyBytes {
+        crate::owner_key::MlDsa65SecretKeyBytes::try_from_bytes(self.seed.as_slice().to_vec())
+            .expect("seed is exactly ML_DSA_65_SEED_SIZE = ML_DSA_65_SEED_BYTES bytes")
+    }
+
+    /// Reconstruct a signing key from a [`crate::owner_key::MlDsa65SecretKeyBytes`]
+    /// envelope (br-6bz52).
+    ///
+    /// # Errors
+    ///
+    /// Cannot fail under current invariants — the envelope's
+    /// length-validating constructor guarantees the seed is exactly
+    /// 32 bytes — but the result is `CryptoResult` to keep the API
+    /// future-proof for envelope variants that might add structural
+    /// validation.
+    pub fn from_envelope(envelope: &crate::owner_key::MlDsa65SecretKeyBytes) -> CryptoResult<Self> {
+        Self::from_seed(envelope.as_bytes())
+    }
+
     /// Sign `message` with FIPS 204's randomized variant.
     ///
     /// `context` is the FIPS 204 §5.4 context string; pass an empty slice
@@ -172,9 +205,7 @@ impl MlDsa65SigningKey {
             .expanded
             .sign_deterministic(message, context)
             .map_err(|e| {
-                CryptoError::SerializationError(format!(
-                    "ml-dsa-65 deterministic sign failed: {e}"
-                ))
+                CryptoError::SerializationError(format!("ml-dsa-65 deterministic sign failed: {e}"))
             })?;
         sig_to_bytes(&sig)
     }
@@ -451,11 +482,8 @@ mod tests {
     #[test]
     fn verify_rejects_signature_of_wrong_length() {
         let sk = MlDsa65SigningKey::from_seed(&[0x04u8; 32]).unwrap();
-        let too_short_envelope = MlDsa65SignatureBytes::try_from_bytes(vec![
-            0u8;
-            ML_DSA_65_SIGNATURE_SIZE
-                - 1
-        ]);
+        let too_short_envelope =
+            MlDsa65SignatureBytes::try_from_bytes(vec![0u8; ML_DSA_65_SIGNATURE_SIZE - 1]);
         // The byte envelope itself rejects wrong lengths up-front.
         assert!(too_short_envelope.is_err());
 
@@ -498,9 +526,7 @@ mod tests {
         let vk_decoded = MlDsa65VerifyingKey::from_bytes(&bytes).unwrap();
         assert_eq!(vk_decoded, *sk.verifying_key());
         let sig = sk.sign_deterministic(b"after round-trip", b"").unwrap();
-        vk_decoded
-            .verify(b"after round-trip", b"", &sig)
-            .unwrap();
+        vk_decoded.verify(b"after round-trip", b"", &sig).unwrap();
     }
 
     #[test]

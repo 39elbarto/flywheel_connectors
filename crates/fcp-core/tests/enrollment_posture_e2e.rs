@@ -15,7 +15,7 @@ use fcp_core::{
     DecisionReasonCode, DeviceEnrollmentApproval, DeviceEnrollmentRequest, DeviceMetadata, NodeId,
     NodeSignature, ObjectHeader, ObjectIdKeyId, PostureAttestation, PostureAttributeKey,
     PostureAttributeValue, PostureCheckResult, PostureRequirements, Provenance, ZoneId,
-    ZoneKeyAlgorithm, ZoneKeyId, ZoneKeyManifest,
+    ZoneKemAlgorithm, ZoneKeyAlgorithm, ZoneKeyId, ZoneKeyManifest,
 };
 use fcp_crypto::{Ed25519SigningKey, X25519SecretKey};
 use serde_json::json;
@@ -275,6 +275,8 @@ fn create_test_manifest_for_zone(zone_id: ZoneId) -> ZoneKeyManifest {
         wrapped_object_id_keys: vec![],
         rekey_policy: None,
         signature,
+        kem: ZoneKemAlgorithm::HpkeX25519,
+        wrapped_keys_v4: vec![],
     }
 }
 

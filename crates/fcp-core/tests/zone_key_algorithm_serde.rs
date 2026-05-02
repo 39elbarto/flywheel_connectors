@@ -32,7 +32,7 @@ use ciborium::Value as CborValue;
 use fcp_cbor::SchemaId;
 use fcp_core::{
     NodeId, NodeSignature, ObjectHeader, ObjectIdKeyId, Provenance, WrappedObjectIdKey,
-    WrappedZoneKey, ZoneId, ZoneKeyAlgorithm, ZoneKeyId, ZoneKeyManifest,
+    WrappedZoneKey, ZoneId, ZoneKemAlgorithm, ZoneKeyAlgorithm, ZoneKeyId, ZoneKeyManifest,
 };
 use semver::Version;
 use serde_json::json;
@@ -127,9 +127,7 @@ fn cbor_form_uses_text_scalar_not_integer() {
         let value: CborValue = ciborium::de::from_reader(&bytes[..]).unwrap();
         match value {
             CborValue::Text(t) => assert_eq!(t, expected),
-            other => panic!(
-                "ZoneKeyAlgorithm must encode as CBOR Text scalar, got {other:?}"
-            ),
+            other => panic!("ZoneKeyAlgorithm must encode as CBOR Text scalar, got {other:?}"),
         }
     }
 }
@@ -162,6 +160,8 @@ fn make_manifest(algorithm: ZoneKeyAlgorithm) -> ZoneKeyManifest {
         wrapped_object_id_keys: vec![],
         rekey_policy: None,
         signature: make_signature(),
+        kem: ZoneKemAlgorithm::HpkeX25519,
+        wrapped_keys_v4: vec![],
     }
 }
 
@@ -245,8 +245,7 @@ fn distinct_algorithms_produce_distinct_manifest_serializations() {
 
 #[test]
 fn unknown_zone_key_algorithm_variant_rejects() {
-    let result: Result<ZoneKeyAlgorithm, _> =
-        serde_json::from_value(json!("aes_256_gcm"));
+    let result: Result<ZoneKeyAlgorithm, _> = serde_json::from_value(json!("aes_256_gcm"));
     assert!(
         result.is_err(),
         "unknown algorithm `aes_256_gcm` must reject — pin the closed vocabulary"

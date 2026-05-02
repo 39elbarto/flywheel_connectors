@@ -11,8 +11,8 @@
 
 use fcp_core::{
     NodeId, NodeSignature, ObjectHeader, ObjectIdKeyId, Provenance, TailscaleNodeId, WrappedKey,
-    WrappedZoneKey, WrappedZoneKeyV4, ZoneId, ZoneKemAlgorithm, ZoneKey, ZoneKeyAlgorithm,
-    ZoneKeyError, ZoneKeyId, ZoneKeyManifest, wrap_zone_key,
+    WrappedZoneKeyV4, ZoneId, ZoneKemAlgorithm, ZoneKey, ZoneKeyAlgorithm, ZoneKeyError, ZoneKeyId,
+    ZoneKeyManifest, wrap_zone_key,
 };
 use fcp_crypto::{Fcp4Aad, X25519SecretKey, XWingKem, XWingProvider};
 
@@ -69,7 +69,8 @@ fn empty_v4_manifest() -> ZoneKeyManifest {
 fn split_view_validate_passes_on_empty_manifest() {
     let m = empty_v4_manifest();
     assert!(m.split_view_recipients().is_empty());
-    m.validate_no_recipient_split_view().expect("empty manifest is safe");
+    m.validate_no_recipient_split_view()
+        .expect("empty manifest is safe");
 }
 
 #[test]
@@ -113,7 +114,9 @@ fn split_view_validate_passes_on_promoted_v3_via_migrated_to_v4() {
         migrated.split_view_recipients().is_empty(),
         "promoted V3→V4 wraps must be treated as safe (byte-equal HpkeX25519)"
     );
-    migrated.validate_no_recipient_split_view().expect("promoted wraps safe");
+    migrated
+        .validate_no_recipient_split_view()
+        .expect("promoted wraps safe");
 }
 
 #[test]
@@ -142,7 +145,9 @@ fn split_view_validate_detects_v3_plus_xwing_v4_for_same_recipient() {
     let aad = Fcp4Aad::for_zone_key(z.as_bytes(), alice.as_str().as_bytes(), 1_700_000_000)
         .encode()
         .unwrap();
-    let v4_xwing_sealed = provider.seal(&alice_xwing_pk, zone_key_v4.as_bytes(), &aad).unwrap();
+    let v4_xwing_sealed = provider
+        .seal(&alice_xwing_pk, zone_key_v4.as_bytes(), &aad)
+        .unwrap();
 
     let mut m = empty_v4_manifest();
     m.wrapped_keys = vec![v3_wrap];
@@ -208,7 +213,11 @@ fn split_view_validate_detects_byte_diverging_hpke_v4_for_same_recipient() {
     m.wrapped_keys_v4 = vec![v4_wrap_diverging];
 
     let split = m.split_view_recipients();
-    assert_eq!(split.len(), 1, "byte-diverging HpkeX25519 V4 wrap must be flagged");
+    assert_eq!(
+        split.len(),
+        1,
+        "byte-diverging HpkeX25519 V4 wrap must be flagged"
+    );
     assert!(m.validate_no_recipient_split_view().is_err());
 }
 
@@ -221,8 +230,8 @@ fn split_view_validate_passes_on_two_independent_recipients() {
 
     let alice_sk = X25519SecretKey::generate();
     let alice = node("alice");
-    let alice_v3 = wrap_zone_key(&alice_sk.public_key(), &z, &alice, 1_700_000_000, &zone_key)
-        .unwrap();
+    let alice_v3 =
+        wrap_zone_key(&alice_sk.public_key(), &z, &alice, 1_700_000_000, &zone_key).unwrap();
 
     let provider = XWingProvider::new();
     let (bob_pk, _bob_sk) = provider.generate().unwrap();
@@ -230,12 +239,15 @@ fn split_view_validate_passes_on_two_independent_recipients() {
     let bob_aad = Fcp4Aad::for_zone_key(z.as_bytes(), bob.as_str().as_bytes(), 1_700_000_001)
         .encode()
         .unwrap();
-    let bob_v4 = provider.seal(&bob_pk, zone_key.as_bytes(), &bob_aad).unwrap();
+    let bob_v4 = provider
+        .seal(&bob_pk, zone_key.as_bytes(), &bob_aad)
+        .unwrap();
 
     let mut m = empty_v4_manifest();
     m.wrapped_keys = vec![alice_v3];
     m.add_xwing_wrap(bob.clone(), 1_700_000_001, bob_v4);
 
     assert!(m.split_view_recipients().is_empty());
-    m.validate_no_recipient_split_view().expect("disjoint recipients are safe");
+    m.validate_no_recipient_split_view()
+        .expect("disjoint recipients are safe");
 }

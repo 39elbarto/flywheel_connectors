@@ -306,6 +306,21 @@ pub use fcp_evidence::{
     RevocationRecord, check_revocation_chain,
 };
 
+// ── Lattice-Trapdoor Capability Delegation (kyopb.1.3, V4 PQ) ─────
+//
+// Stub trait surface for post-quantum-safe capability delegation via
+// lattice trapdoors. The full design is documented in
+// `docs/post-quantum/lattice_trapdoor_delegation.md`. The cryptographic
+// primitives live in a future `fcp-crypto-pq` crate (kyopb.1.3.1).
+
+pub mod lattice_delegation;
+
+pub use lattice_delegation::{
+    DelegationCertificate, DelegationCertificateId, DelegationPeriod, LatticeDelegationError,
+    LatticeDelegationVerifier, LatticeSubToken, LatticeVerificationReceipt,
+    UnimplementedLatticeDelegationVerifier,
+};
+
 // ── Error Types ────────────────────────────────────────────────────
 
 pub use fcp_core::{FcpError, FcpResult};

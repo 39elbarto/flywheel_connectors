@@ -223,6 +223,7 @@ fn main() -> BenchResult<()> {
     }
     let median = median_sample(&mut samples)?;
     let per_connector_bytes = median.per_connector_bytes();
+    let within_target = per_connector_bytes <= TARGET_PER_CONNECTOR_BYTES;
 
     if median.empty_host_rss_bytes == 0 {
         return Err(bench_error("empty host RSS measurement must be non-zero").into());
@@ -247,9 +248,18 @@ fn main() -> BenchResult<()> {
             "per_connector_mib": mib(per_connector_bytes),
             "target_per_connector_bytes": TARGET_PER_CONNECTOR_BYTES,
             "target_per_connector_mib": mib(TARGET_PER_CONNECTOR_BYTES),
-            "within_target": per_connector_bytes <= TARGET_PER_CONNECTOR_BYTES,
+            "within_target": within_target,
+            "slo_status": if within_target { "PASS" } else { "FAIL" },
         })
     );
+    if !within_target {
+        return Err(bench_error(format!(
+            "host-backed memory overhead {:.2} MiB per connector exceeded README SLO < {:.2} MiB",
+            mib(per_connector_bytes),
+            mib(TARGET_PER_CONNECTOR_BYTES),
+        ))
+        .into());
+    }
     Ok(())
 }
 

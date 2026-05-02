@@ -48,3 +48,8 @@ pub use subscription::{
 
 #[doc(hidden)]
 pub use subscription::__fuzz;
+
+#[doc(hidden)]
+pub mod __bench {
+    pub use crate::schema::SchemaCache;
+}

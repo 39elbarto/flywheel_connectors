@@ -24,7 +24,12 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 asupersync = { version = "0.3.1", default-features = false }
+criterion = { workspace = true }
 fcp-testkit = { workspace = true }
 pretty_assertions = { workspace = true }
 wiremock = { workspace = true }
 insta.workspace = true
+
+[[bench]]
+name = "graphql_hot_paths"
+harness = false

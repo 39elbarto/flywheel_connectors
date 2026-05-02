@@ -2415,7 +2415,29 @@ fn verify_live_hybrid_owner_capability(
     state: &AppState,
     request: &InvokeRequest,
 ) -> HostResult<()> {
+    // br-jhbk1: when the host is NOT configured with a hybrid-owner
+    // verifier (FCP_HOST_HYBRID_OWNER_CONTEXT_FILE unset) AND the
+    // request carries the hybrid-owner evidence tag, the caller is
+    // explicitly asking for V4 hybrid-owner verification. The host
+    // cannot honor that intent without a verifier, so fail CLOSED
+    // rather than silently letting the request through. The pre-fix
+    // behavior of returning Ok(()) here regardless of whether the
+    // request claimed hybrid-owner governance was an auth-bypass-via-
+    // missing-config: an operator who forgot to set the env var
+    // silently accepted ALL invokes — including ones that should
+    // require post-quantum V3-to-V4 migration verification. See
+    // docs/audit/security-audit-saas-alpha-2026-05-02.md §a.
+    //
+    // Tokens that do NOT carry the evidence tag continue to take the
+    // legacy V3-only path (no verifier needed) for back-compat.
     let Some(verifier) = state.hybrid_owner_verifier.as_deref() else {
+        if hybrid_owner_invoke_evidence(request)?.is_some() {
+            return Err(HostError::PreflightFailed(format!(
+                "request carries hybrid-owner evidence tag `{HYBRID_OWNER_EVIDENCE_TAG}` \
+                 but this host is not configured for hybrid-owner verification \
+                 (set {HYBRID_OWNER_CONTEXT_FILE_ENV} to enable; br-jhbk1)"
+            )));
+        }
         return Ok(());
     };
     let evidence = hybrid_owner_invoke_evidence(request)?.ok_or_else(|| {
@@ -3732,6 +3754,19 @@ fn parse_zone_policies_json(raw: &str) -> HostResult<HashMap<ZoneId, ZonePolicyO
 fn resolve_hybrid_owner_production_verifier()
 -> HostResult<Option<Arc<HybridOwnerProductionVerifier>>> {
     let Some(path) = read_optional_trimmed_env_string(HYBRID_OWNER_CONTEXT_FILE_ENV)? else {
+        // br-jhbk1: surface the unconfigured-verifier state at startup
+        // so operators see WHEN the V4 hybrid-owner check is disabled.
+        // The runtime path now fail-closes on requests carrying the
+        // hybrid-owner evidence tag (see verify_live_hybrid_owner_capability),
+        // but the warn here makes the deployment-time misconfiguration
+        // visible BEFORE the first failed request arrives.
+        tracing::warn!(
+            env_var = HYBRID_OWNER_CONTEXT_FILE_ENV,
+            "FCP host is starting without a hybrid-owner verifier; \
+             requests carrying hybrid-owner evidence tags will be rejected \
+             at preflight (br-jhbk1). Set the env var to enable V4 \
+             hybrid-owner capability verification."
+        );
         return Ok(None);
     };
     let raw = std::fs::read_to_string(&path).map_err(|err| {
@@ -8798,6 +8833,110 @@ mod tests {
             message.contains("missing hybrid owner evidence"),
             "expected missing hybrid evidence rejection, got: {message}"
         );
+    }
+
+    /// br-jhbk1: adversarial regression. A request that carries the
+    /// hybrid-owner evidence tag MUST be rejected when the host is not
+    /// configured with a hybrid-owner verifier
+    /// (FCP_HOST_HYBRID_OWNER_CONTEXT_FILE unset). Pre-fix, the silent
+    /// `Ok(())` path at verify_live_hybrid_owner_capability allowed the
+    /// request through without inspecting the evidence tag — a config-
+    /// time auth bypass.
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn hybrid_owner_production_rejects_evidence_tag_when_verifier_unconfigured_jhbk1() {
+        let connector_id = "fcp.test.hybrid-owner-no-verifier:utility:1.0.0";
+        let operation_id = "test.echo";
+        let capability_id = "cap.test.echo";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let fixture = HybridOwnerProductionFixture::new();
+        // Build the configured-state, then OVERRIDE hybrid_owner_verifier
+        // to None to simulate FCP_HOST_HYBRID_OWNER_CONTEXT_FILE being
+        // unset at deployment time.
+        let (configured_state, connector_key) = hybrid_owner_production_state(
+            connector_id,
+            capability_id,
+            operation_id,
+            &signing_key,
+            fixture.verifier(),
+        );
+        let unconfigured_state = Arc::new(AppState {
+            hybrid_owner_verifier: None,
+            ..(*configured_state).clone()
+        });
+
+        let zone_id = ZoneId::work();
+        let token =
+            test_capability_token(&signing_key, capability_id, operation_id, zone_id.as_str());
+        // Caller asks for hybrid-owner verification by attaching the
+        // evidence tag. Pre-fix, the host silently accepted this.
+        let evidence = fixture.evidence_for_token(&zone_id, &token);
+        let request = hybrid_owner_production_request(
+            connector_key,
+            operation_id,
+            zone_id,
+            token,
+            Some(hybrid_owner_context(&evidence)),
+        );
+
+        let error = verify_live_request(unconfigured_state.as_ref(), &request, None)
+            .await
+            .expect_err(
+                "br-jhbk1: hybrid-owner evidence tag MUST be rejected when verifier is unconfigured",
+            );
+        let message = error.to_string();
+        assert!(
+            message.contains("hybrid-owner evidence tag")
+                && message.contains("not configured for hybrid-owner verification"),
+            "expected jhbk1 unconfigured-verifier rejection naming \
+             FCP_HOST_HYBRID_OWNER_CONTEXT_FILE, got: {message}"
+        );
+        assert!(
+            message.contains(HYBRID_OWNER_CONTEXT_FILE_ENV),
+            "rejection message must name the env var so operators can fix the config; got: {message}"
+        );
+    }
+
+    /// br-jhbk1 back-compat: a request that does NOT carry the evidence
+    /// tag must still pass the hybrid-owner check when the verifier is
+    /// unconfigured (legacy V3-only path). This test pins that the
+    /// fail-closed change above does not break the V3 path.
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn hybrid_owner_production_unconfigured_verifier_allows_v3_only_requests_jhbk1() {
+        let connector_id = "fcp.test.hybrid-owner-v3-only:utility:1.0.0";
+        let operation_id = "test.echo";
+        let capability_id = "cap.test.echo";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let fixture = HybridOwnerProductionFixture::new();
+        let (configured_state, connector_key) = hybrid_owner_production_state(
+            connector_id,
+            capability_id,
+            operation_id,
+            &signing_key,
+            fixture.verifier(),
+        );
+        let unconfigured_state = Arc::new(AppState {
+            hybrid_owner_verifier: None,
+            ..(*configured_state).clone()
+        });
+
+        let zone_id = ZoneId::work();
+        let token =
+            test_capability_token(&signing_key, capability_id, operation_id, zone_id.as_str());
+        // No evidence tag attached → legacy V3-only request shape.
+        let request = hybrid_owner_production_request(
+            connector_key,
+            operation_id,
+            zone_id,
+            token,
+            None,
+        );
+
+        let verified = verify_live_request(unconfigured_state.as_ref(), &request, None)
+            .await
+            .expect(
+                "br-jhbk1: V3-only request (no evidence tag) must still pass when verifier is unconfigured",
+            );
+        assert_eq!(verified.principal, "user:test");
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

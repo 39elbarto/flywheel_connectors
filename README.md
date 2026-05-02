@@ -1394,12 +1394,12 @@ Delivers the core safety story ("zones + explicit authority + auditable operatio
 - FCPC over QUIC for control plane
 - CapabilityToken (COSE/CWT) + grant_object_ids verification — typestate
   enforcement (Unverified → UnboundVerified → BoundVerified → ConstraintsEnforced)
-  is **partially adopted across connector boundaries** as of 2026-05-02:
-  49 connectors already use `verify_bound` / `promote_with_*`, 29 still use
-  the deprecated `verifier.verify(...)` alias. Forward-only ratchet enforced
+  is **fully adopted across connector boundaries** as of 2026-05-02:
+  `LEGACY_VERIFY_ALLOWLIST.len() == 0` and
+  `TYPESTATE_ENFORCED_ALLOWLIST.len() == 78`. Forward-only ratchet enforced
   by `crates/fcp-conformance/tests/capability_typestate_connector_boundary_dja9u.rs`
-  (br-dja9u) — new connectors must use the typestate path; existing
-  enforced connectors cannot regress.
+  (br-dja9u) — new connectors must use the typestate path; enforced
+  connectors cannot regress.
 - ZoneKeyManifest (HPKE sealing) + per-zone encryption
 - Egress proxy with NetworkConstraints + CIDR deny defaults
 - OperationIntent + OperationReceipt for Risky/Dangerous

@@ -1,0 +1,30 @@
+[package]
+name = "fcp-prelude"
+description = "Canonical FCP type-import surface — replaces direct fcp-core imports with semantic-owner-rooted re-exports (y1daf.B.6)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Intermediate state: types still physically live in fcp-core during the
+# FCP3 carve-out. As semantic owners (fcp-kernel, fcp-policy,
+# fcp-evidence) take custody of their slices, individual sections in
+# `lib.rs` will switch from `fcp_core::*` to the owner crate without
+# changing what consumers see.
+fcp-core = { path = "../fcp-core" }
+
+# External re-exports the legacy `fcp-core` barrel exposed. Carrying
+# them here lets consumers migrate to fcp-prelude without losing access
+# to the same symbols.
+async-trait.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+# (none — tests use only std + the re-exported surface)

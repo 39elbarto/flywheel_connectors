@@ -19,6 +19,7 @@ members = [
     "crates/fcp-manifest",
     "crates/fcp-mesh",
     "crates/fcp-policy",
+    "crates/fcp-prelude",
     "crates/fcp-evidence",
     "crates/fcp-oauth",
     "crates/fcp-protocol",
@@ -314,6 +315,7 @@ fcp-manifest = { path = "crates/fcp-manifest" }
 fcp-mesh = { path = "crates/fcp-mesh" }
 fcp-oauth = { path = "crates/fcp-oauth" }
 fcp-policy = { path = "crates/fcp-policy" }
+fcp-prelude = { path = "crates/fcp-prelude" }
 fcp-evidence = { path = "crates/fcp-evidence" }
 fcp-protocol = { path = "crates/fcp-protocol" }
 fcp-raptorq = { path = "crates/fcp-raptorq" }
